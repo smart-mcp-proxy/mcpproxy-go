@@ -1,0 +1,26 @@
+[Unit]
+Description=Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers
+After=network.target
+Documentation=https://github.com/smart-mcp-proxy/mcpproxy-go
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/local/bin/mcpproxy --config %h/.mcpproxy/mcp_config.json
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=HOME=%h
+Environment=XDG_RUNTIME_DIR=/run/user/%i
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=%h/.mcpproxy
+
+[Install]
+WantedBy=default.target 

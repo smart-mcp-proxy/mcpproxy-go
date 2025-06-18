@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="30" fill="#2563eb" stroke="#1e40af" stroke-width="2"/>
+  
+  <!-- Inner circles representing MCP servers -->
+  <circle cx="20" cy="24" r="6" fill="#60a5fa" opacity="0.8"/>
+  <circle cx="44" cy="24" r="6" fill="#60a5fa" opacity="0.8"/>
+  <circle cx="20" cy="44" r="6" fill="#60a5fa" opacity="0.8"/>
+  <circle cx="44" cy="44" r="6" fill="#60a5fa" opacity="0.8"/>
+  
+  <!-- Central proxy node -->
+  <circle cx="32" cy="32" r="8" fill="#f8fafc" stroke="#1e40af" stroke-width="2"/>
+  
+  <!-- Connection lines -->
+  <line x1="26" y1="26" x2="26" y2="30" stroke="#93c5fd" stroke-width="2"/>
+  <line x1="38" y1="26" x2="38" y2="30" stroke="#93c5fd" stroke-width="2"/>
+  <line x1="26" y1="42" x2="26" y2="38" stroke="#93c5fd" stroke-width="2"/>
+  <line x1="38" y1="42" x2="38" y2="38" stroke="#93c5fd" stroke-width="2"/>
+  
+  <!-- Small text/indicator in center -->
+  <text x="32" y="36" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#1e40af">P</text>
+</svg> 
