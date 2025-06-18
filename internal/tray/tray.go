@@ -3,10 +3,12 @@
 package tray
 
 import (
+	"archive/zip"
 	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -616,6 +618,17 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 		archName = "x86_64"
 	}
 
+	// Special handling for macOS - look for universal binary first
+	if osName == "darwin" {
+		for _, asset := range release.Assets {
+			name := strings.ToLower(asset.Name)
+			// Look for macOS universal binary first (from our DMG creation workflow)
+			if strings.Contains(name, "macos") && strings.Contains(name, "universal") {
+				return asset.BrowserDownloadURL, nil
+			}
+		}
+	}
+
 	// Look for assets that match our OS and architecture
 	for _, asset := range release.Assets {
 		name := strings.ToLower(asset.Name)
@@ -638,8 +651,71 @@ func (a *App) downloadAndApplyUpdate(url string) error {
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
 
-	// Apply the update
+	// Check if this is a ZIP file (macOS universal binary)
+	if strings.Contains(url, ".zip") {
+		return a.applyZipUpdate(resp.Body)
+	}
+
+	// Apply the update for regular archives
 	err = update.Apply(resp.Body, update.Options{})
+	if err != nil {
+		// If update fails, try to rollback
+		if rollbackErr := update.RollbackError(err); rollbackErr != nil {
+			return fmt.Errorf("update failed and rollback failed: %v (rollback: %v)", err, rollbackErr)
+		}
+		return err
+	}
+
+	return nil
+}
+
+// applyZipUpdate handles ZIP file updates (for macOS universal binaries)
+func (a *App) applyZipUpdate(body io.Reader) error {
+	// Create temporary file for ZIP
+	tmpFile, err := os.CreateTemp("", "mcpproxy-update-*.zip")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// Copy ZIP content to temp file
+	if _, err := io.Copy(tmpFile, body); err != nil {
+		return fmt.Errorf("failed to write temp file: %v", err)
+	}
+
+	// Close temp file before reading
+	tmpFile.Close()
+
+	// Open ZIP file
+	zipReader, err := zip.OpenReader(tmpFile.Name())
+	if err != nil {
+		return fmt.Errorf("failed to open ZIP: %v", err)
+	}
+	defer zipReader.Close()
+
+	// Find the binary in the ZIP
+	var binaryFile *zip.File
+	for _, file := range zipReader.File {
+		if strings.Contains(file.Name, "mcpproxy") && !strings.Contains(file.Name, "/") {
+			binaryFile = file
+			break
+		}
+	}
+
+	if binaryFile == nil {
+		return fmt.Errorf("binary not found in ZIP")
+	}
+
+	// Extract and apply the binary
+	reader, err := binaryFile.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open binary in ZIP: %v", err)
+	}
+	defer reader.Close()
+
+	// Apply the update
+	err = update.Apply(reader, update.Options{})
 	if err != nil {
 		// If update fails, try to rollback
 		if rollbackErr := update.RollbackError(err); rollbackErr != nil {

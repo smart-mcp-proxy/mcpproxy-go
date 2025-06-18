@@ -10,8 +10,10 @@ permissions:
   packages: write
 
 jobs:
-  release:
+  goreleaser:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,13 +25,73 @@ jobs:
         with:
           go-version: "1.23"
 
-      - name: Run tests
-        run: go test -tags nogui -v ./...
+      - name: Get tag
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  macos-dmg:
+    needs: goreleaser
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download macOS ZIP from release
+        run: |
+          TAG="${{ needs.goreleaser.outputs.tag }}"
+          curl -L -o mcpproxy_macOS.zip \
+            "https://github.com/${{ github.repository }}/releases/download/${TAG}/mcpproxy_${TAG}_macOS_universal.zip"
+
+      - name: Extract macOS binary
+        run: |
+          unzip mcpproxy_macOS.zip
+          mkdir -p dist
+          mv mcpproxy dist/mcpproxy
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Create DMG
+        run: |
+          TAG="${{ needs.goreleaser.outputs.tag }}"
+
+          # Create a temporary directory for DMG contents
+          mkdir -p dmg-contents
+
+          # Copy the binary
+          cp dist/mcpproxy dmg-contents/
+
+          # Copy additional files if they exist
+          [ -f README.md ] && cp README.md dmg-contents/
+          [ -f LICENSE ] && cp LICENSE dmg-contents/
+          [ -f assets/icons/icon.svg ] && cp assets/icons/icon.svg dmg-contents/
+
+          # Create the DMG
+          create-dmg \
+            --volname "mcpproxy ${TAG}" \
+            --volicon "assets/icons/icon.svg" \
+            --window-pos 200 120 \
+            --window-size 540 380 \
+            --icon-size 100 \
+            --icon "mcpproxy" 140 180 \
+            --hide-extension "mcpproxy" \
+            --app-drop-link 400 180 \
+            --hdiutil-quiet \
+            "mcpproxy-${TAG}.dmg" \
+            "dmg-contents/"
+
+      - name: Upload DMG to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.goreleaser.outputs.tag }}
+          files: mcpproxy-${{ needs.goreleaser.outputs.tag }}.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

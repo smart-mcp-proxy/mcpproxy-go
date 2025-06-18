@@ -7,7 +7,24 @@ before:
     - go generate ./...
 
 builds:
-  # GUI builds with tray support (CGO enabled)
+  # macOS universal binary for GUI/tray support (CGO enabled)
+  - id: mac
+    env:
+      - CGO_ENABLED=1
+      - GOFLAGS=-trimpath
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/mcpproxy
+    binary: mcpproxy
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -H=darwin
+    
+  # GUI builds with tray support (CGO enabled) - Linux/Windows
   - id: gui
     env:
       - CGO_ENABLED=1
@@ -15,7 +32,6 @@ builds:
     goos:
       - linux
       - windows
-      - darwin
     goarch:
       - amd64
       - arm64
@@ -50,7 +66,23 @@ builds:
       - -X main.version={{.Version}}
 
 archives:
-  - format: tar.gz
+  # macOS-specific archive for DMG creation
+  - id: maczip
+    builds: [mac]
+    format: zip
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      macOS_universal
+    files:
+      - README.md
+      - LICENSE*
+      - assets/icons/icon.svg
+      
+  # Regular archives for other platforms
+  - id: default
+    builds: [gui, headless]
+    format: tar.gz
     # Use zip for Windows archives
     format_overrides:
       - goos: windows
@@ -89,7 +121,14 @@ release:
     
     Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
 
-    ### Auto-update
+    ### Installation
+
+    #### macOS
+    - **DMG**: Download `mcpproxy-{{ .Tag }}.dmg` for drag-and-drop installation
+    - **Homebrew**: `brew install smart-mcp-proxy/tap/mcpproxy`
+    - **First Launch**: Right-click → Open to bypass Gatekeeper (unsigned app)
+
+    #### Auto-update
     If you have a previous version installed with system tray enabled, you can update directly from the tray menu by clicking "Check for Updates...".
 
   footer: |
