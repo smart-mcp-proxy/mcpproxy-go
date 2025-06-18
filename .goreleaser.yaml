@@ -163,25 +163,12 @@ nfpms:
       postinstall: ./scripts/postinstall.sh
       preremove: ./scripts/preremove.sh
 
-# macOS .dmg package - moved inside the dmgs section
-dmgs:
+# macOS .dmg package - using dmg (singular) format for GoReleaser v2
+dmg:
   - id: mcpproxy-dmg
-    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-    icon: "assets/icons/icon.svg"
-    background: "assets/icons/icon.svg"
-    window:
-      width: 540
-      height: 380
-    contents:
-      - from: "{{ .ProjectName }}"
-        to: "{{ .ProjectName }}"
-        x: 140
-        y: 150
-      - from: "/Applications"
-        to: "Applications"
-        x: 400
-        y: 150
-        type: link
+    name: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    extra_files:
+      - "assets/icons/icon.svg"
 
 # Docker images (optional)
 dockers:
