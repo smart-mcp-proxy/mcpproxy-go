@@ -47,26 +47,21 @@ builds:
 
 
 archives:
-  # macOS-specific archive
-  - id: maczip
-    builds: 
-      - mac
-    format: zip
-    name_template: "{{ .ProjectName }}-headless_{{ .Version }}_macOS_universal"
-    files:
-      - README.md
-      - assets/icons/icon.svg
-      
-  # Regular archives for other platforms
   - id: default
     builds: 
+      - mac
       - gui
     format: tar.gz
-    # Use zip for Windows archives
+    # Use zip for all archives for consistency
     format_overrides:
+      - goos: darwin
+        format: zip
       - goos: windows
         format: zip
     name_template: "{{ .ProjectName }}-headless_{{ .Version }}_{{ .Os }}_{{ if eq .Arch \"amd64\" }}x86_64{{ else if eq .Arch \"386\" }}i386{{ else }}{{ .Arch }}{{ end }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+    files:
+      - README.md
+      - assets/icons/icon.svg
 
 checksum:
   name_template: 'checksums.txt'
