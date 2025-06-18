@@ -83,7 +83,8 @@ jobs:
           mkdir -p build
           go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }} ${{ matrix.ldflags }}" -o build/mcpproxy${{ matrix.ext }} ./cmd/mcpproxy
 
-      - name: Package artifacts
+      - name: Package artifacts (Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
           cd build
           cp ../README.md .
@@ -91,15 +92,18 @@ jobs:
             mkdir -p assets/icons
             cp ../assets/icons/icon.svg assets/icons/
           fi
+          ${{ matrix.package_cmd }}
 
-          # Package based on OS
-          if [[ "${{ matrix.goos }}" == "darwin" ]]; then
-            ${{ matrix.package_cmd }}
-          elif [[ "${{ matrix.goos }}" == "windows" ]]; then
-            ${{ matrix.package_cmd }}
-          else
-            ${{ matrix.package_cmd }}
-          fi
+      - name: Package artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd build
+          Copy-Item ../README.md .
+          if (Test-Path ../assets/icons/icon.svg) {
+            New-Item -ItemType Directory -Force -Path assets/icons
+            Copy-Item ../assets/icons/icon.svg assets/icons/
+          }
+          ${{ matrix.package_cmd }}
 
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
