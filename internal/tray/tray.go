@@ -1,3 +1,5 @@
+//go:build !nogui && !headless
+
 package tray
 
 import (

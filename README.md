@@ -119,7 +119,12 @@ Smart MCP Proxy
 ```bash
 git clone https://github.com/your-org/mcpproxy-go
 cd mcpproxy-go
+
+# Build with GUI/tray support (default)
 go build ./cmd/mcpproxy
+
+# Build for headless/server environments (no GUI dependencies)
+go build -tags nogui ./cmd/mcpproxy
 ```
 
 ### Using Go Install

@@ -24,7 +24,7 @@ jobs:
           go-version: "1.23"
 
       - name: Run tests
-        run: go test -v ./...
+        run: go test -tags nogui -v ./...
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v5

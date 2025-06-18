@@ -7,8 +7,10 @@ before:
     - go generate ./...
 
 builds:
-  - env:
-      - CGO_ENABLED=0
+  # GUI builds with tray support (CGO enabled)
+  - id: gui
+    env:
+      - CGO_ENABLED=1
       - GOFLAGS=-trimpath
     goos:
       - linux
@@ -19,6 +21,30 @@ builds:
       - arm64
     main: ./cmd/mcpproxy
     binary: mcpproxy
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+    ignore:
+      # Skip some problematic combinations for GUI builds
+      - goos: linux
+        goarch: arm64
+  
+  # Headless builds without tray support (CGO disabled)
+  - id: headless
+    env:
+      - CGO_ENABLED=0
+      - GOFLAGS=-trimpath
+    tags:
+      - nogui
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/mcpproxy
+    binary: mcpproxy-headless
     ldflags:
       - -s -w
       - -X main.version={{.Version}}

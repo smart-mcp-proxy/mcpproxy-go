@@ -34,12 +34,12 @@ jobs:
         run: go mod download
 
       - name: Run tests
-        run: go test -v ./...
+        run: go test -tags nogui -v ./...
 
       - name: Build binary
         run: |
           VERSION=pr-${{ github.event.number }}-${{ github.sha }}
-          go build -ldflags "-X main.version=${VERSION}" -o mcpproxy ./cmd/mcpproxy
+          go build -tags nogui -ldflags "-X main.version=${VERSION}" -o mcpproxy ./cmd/mcpproxy
 
       - name: Test version output
         shell: bash
