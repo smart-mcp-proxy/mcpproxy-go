@@ -106,19 +106,22 @@ release:
     ## What's Changed
   name_template: "{{.ProjectName}}-{{.Version}}"
 
-# Optional: Package managers
-brews:
+# Use homebrew_casks instead of brews for v2 (brews is deprecated)
+homebrew_casks:
   - name: mcpproxy
     repository:
       owner: smart-mcp-proxy
       name: homebrew-tap
-    folder: Formula
+    directory: Casks  # Changed from 'folder' to 'directory'
     homepage: https://github.com/smart-mcp-proxy/mcpproxy-go
     description: Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers
-    license: MIT
-    dependencies:
-      - name: go
-        type: build
+    # Add post-install hook to remove quarantine for unsigned binaries
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mcpproxy"]
+          end
 
 # Optional: Windows package manager
 winget:
@@ -135,7 +138,6 @@ winget:
         enabled: true
         base:
           branch: master
-        title: "Add mcpproxy version {{.Version}}"
 
 # Optional: Linux packages
 nfpms:
@@ -161,8 +163,8 @@ nfpms:
       postinstall: ./scripts/postinstall.sh
       preremove: ./scripts/preremove.sh
 
-# macOS .dmg package
-dmg:
+# macOS .dmg package - moved inside the dmgs section
+dmgs:
   - id: mcpproxy-dmg
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     icon: "assets/icons/icon.svg"
