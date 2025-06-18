@@ -135,6 +135,26 @@ nfpms:
       postinstall: ./scripts/postinstall.sh
       preremove: ./scripts/preremove.sh
 
+# macOS .dmg package
+dmg:
+  - id: mcpproxy-dmg
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    icon: "assets/icons/icon.svg"
+    background: "assets/icons/icon.svg"
+    window:
+      width: 540
+      height: 380
+    contents:
+      - from: "{{ .ProjectName }}"
+        to: "{{ .ProjectName }}"
+        x: 140
+        y: 150
+      - from: "/Applications"
+        to: "Applications"
+        x: 400
+        y: 150
+        type: link
+
 # Docker images (optional)
 dockers:
   - image_templates:

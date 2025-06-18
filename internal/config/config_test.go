@@ -60,8 +60,8 @@ func TestConfigJSONMarshaling(t *testing.T) {
 		EnableTray: false,
 		TopK:       10,
 		ToolsLimit: 20,
-		Servers: map[string]*ServerConfig{
-			"test": {
+		Servers: []*ServerConfig{
+			{
 				Name:    "test",
 				URL:     "http://localhost:8000",
 				Enabled: true,
@@ -96,11 +96,13 @@ func TestConfigJSONMarshaling(t *testing.T) {
 		t.Errorf("Expected 1 server, got %d", len(unmarshaled.Servers))
 	}
 
-	if server, ok := unmarshaled.Servers["test"]; !ok {
-		t.Error("Expected test server to exist")
-	} else {
+	if len(unmarshaled.Servers) > 0 {
+		server := unmarshaled.Servers[0]
 		if server.URL != "http://localhost:8000" {
 			t.Errorf("Expected server URL http://localhost:8000, got %s", server.URL)
+		}
+		if server.Name != "test" {
+			t.Errorf("Expected server name test, got %s", server.Name)
 		}
 	}
 }
@@ -121,8 +123,8 @@ func TestSaveAndLoadConfig(t *testing.T) {
 		EnableTray: false,
 		TopK:       3,
 		ToolsLimit: 7,
-		Servers: map[string]*ServerConfig{
-			"example": {
+		Servers: []*ServerConfig{
+			{
 				Name:    "example",
 				URL:     "http://example.com",
 				Enabled: true,
@@ -196,12 +198,17 @@ func TestCreateSampleConfig(t *testing.T) {
 		t.Errorf("Expected sample config to have 2 servers, got %d", len(loaded.Servers))
 	}
 
-	// Check for expected servers
-	if _, ok := loaded.Servers["example"]; !ok {
+	// Check for expected servers by name
+	found := make(map[string]bool)
+	for _, server := range loaded.Servers {
+		found[server.Name] = true
+	}
+
+	if !found["example"] {
 		t.Error("Expected sample config to have 'example' server")
 	}
 
-	if _, ok := loaded.Servers["local-command"]; !ok {
+	if !found["local-command"] {
 		t.Error("Expected sample config to have 'local-command' server")
 	}
 }
