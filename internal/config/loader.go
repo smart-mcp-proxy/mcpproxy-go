@@ -199,11 +199,57 @@ func SaveConfig(cfg *Config, path string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
+	// Ensure directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	return nil
+}
+
+// SaveConfigToDataDir saves configuration to the data directory
+func SaveConfigToDataDir(cfg *Config) error {
+	if cfg.DataDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("failed to get user home directory: %w", err)
+		}
+		cfg.DataDir = filepath.Join(homeDir, DefaultDataDir)
+	}
+
+	configPath := filepath.Join(cfg.DataDir, ConfigFileName)
+	return SaveConfig(cfg, configPath)
+}
+
+// GetConfigPath returns the path to the configuration file in the data directory
+func GetConfigPath(dataDir string) string {
+	if dataDir == "" {
+		homeDir, _ := os.UserHomeDir()
+		dataDir = filepath.Join(homeDir, DefaultDataDir)
+	}
+	return filepath.Join(dataDir, ConfigFileName)
+}
+
+// LoadOrCreateConfig loads configuration from the data directory or creates a new one
+func LoadOrCreateConfig(dataDir string) (*Config, error) {
+	configPath := GetConfigPath(dataDir)
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// Config doesn't exist, create a new one
+		cfg := DefaultConfig()
+		cfg.DataDir = dataDir
+		if err := SaveConfig(cfg, configPath); err != nil {
+			return nil, fmt.Errorf("failed to create initial config: %w", err)
+		}
+		return cfg, nil
+	}
+
+	return LoadFromFile(configPath)
 }
 
 // CreateSampleConfig creates a sample configuration file

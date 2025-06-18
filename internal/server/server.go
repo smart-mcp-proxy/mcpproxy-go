@@ -65,16 +65,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	// Initialize upstream manager
 	upstreamManager := upstream.NewManager(logger)
 
-	// Create MCP proxy server
-	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, logger)
-
 	server := &Server{
 		config:          cfg,
 		logger:          logger,
 		storageManager:  storageManager,
 		indexManager:    indexManager,
 		upstreamManager: upstreamManager,
-		mcpProxy:        mcpProxy,
 		statusCh:        make(chan ServerStatus, 10), // Buffered channel for status updates
 		status: ServerStatus{
 			Phase:       "Initializing",
@@ -82,6 +78,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 			LastUpdated: time.Now(),
 		},
 	}
+
+	// Create MCP proxy server
+	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, logger, server)
+
+	server.mcpProxy = mcpProxy
 
 	// Start background initialization immediately
 	go server.backgroundInitialization()
@@ -554,4 +555,71 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	}
 
 	return nil
+}
+
+// SaveConfiguration saves the current configuration to the persistent config file
+func (s *Server) SaveConfiguration() error {
+	// Get current servers from storage
+	servers, err := s.storageManager.ListUpstreamServers()
+	if err != nil {
+		return fmt.Errorf("failed to list upstream servers: %w", err)
+	}
+
+	// Update config with current servers
+	s.config.Servers = servers
+
+	// Save to persistent config file
+	configPath := config.GetConfigPath(s.config.DataDir)
+	if err := config.SaveConfig(s.config, configPath); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	s.logger.Info("Configuration saved",
+		zap.String("path", configPath),
+		zap.Int("servers", len(servers)))
+
+	return nil
+}
+
+// ReloadConfiguration reloads the configuration and updates running servers
+func (s *Server) ReloadConfiguration() error {
+	// Load configuration from file
+	configPath := config.GetConfigPath(s.config.DataDir)
+	newConfig, err := config.LoadFromFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to reload config: %w", err)
+	}
+
+	// Update internal config
+	s.config = newConfig
+
+	// Reload configured servers
+	if err := s.loadConfiguredServers(); err != nil {
+		return fmt.Errorf("failed to reload servers: %w", err)
+	}
+
+	s.logger.Info("Configuration reloaded",
+		zap.String("path", configPath),
+		zap.Int("servers", len(newConfig.Servers)))
+
+	return nil
+}
+
+// OnUpstreamServerChange should be called when upstream servers are modified
+func (s *Server) OnUpstreamServerChange() {
+	// Save configuration to persist changes
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after upstream change", zap.Error(err))
+	}
+
+	// Trigger background tool discovery to update index
+	go func() {
+		ctx := context.Background()
+		if err := s.discoverAndIndexTools(ctx); err != nil {
+			s.logger.Error("Failed to update tool index after upstream change", zap.Error(err))
+		}
+	}()
+
+	// Update status
+	s.updateStatus(s.status.Phase, "Upstream servers updated")
 }

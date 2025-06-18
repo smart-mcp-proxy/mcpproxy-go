@@ -373,4 +373,201 @@ MIT License - see LICENSE file for details.
    - Verify network connectivity
    - Check firewall settings
 
-For more detailed troubleshooting, see [TRAY_ICON_GUIDE.md](TRAY_ICON_GUIDE.md). 
+For more detailed troubleshooting, see [TRAY_ICON_GUIDE.md](TRAY_ICON_GUIDE.md).
+
+## MCP Tools
+
+The Smart MCP Proxy provides several MCP tools for managing servers and discovering tools:
+
+### `upstream_servers` - Server Management
+
+Comprehensive tool for managing upstream MCP servers with support for multiple operations:
+
+#### Operations
+
+- **`list`** - List all configured upstream servers
+- **`add`** - Add a single upstream server
+- **`add_batch`** - Add multiple servers at once
+- **`remove`** - Remove an upstream server
+- **`update`** - Update an existing server
+- **`patch`** - Partially update server configuration
+- **`import_cursor`** - Import servers from Cursor IDE format
+
+#### Adding Single Server
+
+```json
+{
+  "operation": "add",
+  "name": "github-tools",
+  "url": "http://localhost:3001",
+  "headers": {
+    "Authorization": "Bearer your-token-here"
+  },
+  "enabled": true
+}
+```
+
+```json
+{
+  "operation": "add",
+  "name": "sqlite-tools",
+  "command": "uvx",
+  "args": ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
+  "env": {
+    "MCP_SQLITE_PATH": "/path/to/db.sqlite"
+  },
+  "enabled": true
+}
+```
+
+#### Batch Adding Servers
+
+```json
+{
+  "operation": "add_batch",
+  "servers": [
+    {
+      "name": "github-tools",
+      "url": "http://localhost:3001",
+      "headers": {
+        "Authorization": "Bearer token123"
+      },
+      "enabled": true
+    },
+    {
+      "name": "sqlite-tools", 
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "/tmp/test.db"],
+      "env": {
+        "MCP_SQLITE_PATH": "/tmp/test.db"
+      },
+      "enabled": true
+    }
+  ]
+}
+```
+
+#### Import from Cursor IDE
+
+You can directly import your Cursor IDE MCP configuration:
+
+```json
+{
+  "operation": "import_cursor",
+  "cursor_config": {
+    "mcp-server-sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
+      "env": {
+        "MCP_SQLITE_PATH": "/path/to/db.sqlite"
+      }
+    },
+    "mcp-server-github": {
+      "url": "http://localhost:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer github-token"
+      }
+    }
+  }
+}
+```
+
+#### Patch/Update Server
+
+```json
+{
+  "operation": "patch",
+  "name": "github-tools",
+  "enabled": false,
+  "headers": {
+    "Authorization": "Bearer new-token"
+  }
+}
+```
+
+### `retrieve_tools` - Tool Discovery
+
+Search for tools across all upstream servers:
+
+```json
+{
+  "query": "github repository",
+  "limit": 10
+}
+```
+
+### `call_tool` - Tool Execution
+
+Execute tools on upstream servers:
+
+```json
+{
+  "name": "github:create_repository",
+  "args": {
+    "name": "my-new-repo",
+    "private": false
+  }
+}
+```
+
+### `tools_stats` - Usage Statistics
+
+Get tool usage statistics:
+
+```json
+{
+  "top_n": 10
+}
+```
+
+## Configuration Persistence
+
+The proxy automatically saves configuration changes to `~/.mcpproxy/mcp_config.json`. This includes:
+
+- All upstream server configurations
+- Server states (enabled/disabled)
+- Connection parameters (URLs, commands, environment variables)
+- Authentication headers
+
+### Configuration File Location
+
+The configuration file location can be customized:
+
+```bash
+# Via environment variable
+export MCPPROXY_DATA_DIR=/custom/path
+./mcpproxy
+
+# Via command line flag
+./mcpproxy --data-dir /custom/path
+```
+
+### Hot Reloading
+
+The proxy automatically:
+- Saves configuration after any server changes
+- Attempts to connect to newly added servers
+- Updates the tool index when servers are modified
+- Reflects changes in the system tray (if enabled)
+
+## Basic Usage Scenarios
+
+### Scenario 1: Import from Cursor IDE
+
+1. Copy your Cursor IDE `mcp.json` configuration
+2. Use the `import_cursor` operation with the `upstream_servers` tool
+3. All servers will be automatically added and connected
+4. Configuration is persisted to `~/.mcpproxy/mcp_config.json`
+
+### Scenario 2: Add Individual Servers
+
+1. Use `upstream_servers` with `add` operation
+2. Specify either `url` (for HTTP) or `command`/`args` (for stdio)
+3. Include authentication headers if needed
+4. Server is immediately connected and tools indexed
+
+### Scenario 3: Batch Server Management
+
+1. Use `add_batch` operation with array of server configurations
+2. Mix HTTP and stdio servers in the same request
+3. All servers processed and connected simultaneously 

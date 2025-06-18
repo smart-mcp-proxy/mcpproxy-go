@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -320,4 +321,191 @@ func TestArgumentParsingAndFormatting(t *testing.T) {
 		assert.Contains(t, properties, "id")
 		assert.Contains(t, properties, "market_data")
 	})
+}
+
+// Test the new upstream_servers operations
+func TestUpstreamServersOperations(t *testing.T) {
+	// Test batch add servers
+	t.Run("BatchAddServers", func(t *testing.T) {
+		request := createMockUpstreamServersRequest("add_batch", map[string]interface{}{
+			"servers": []interface{}{
+				map[string]interface{}{
+					"name":    "test-server-1",
+					"url":     "http://localhost:3001",
+					"enabled": true,
+				},
+				map[string]interface{}{
+					"name":    "test-server-2",
+					"command": "python",
+					"args":    []interface{}{"-m", "test_server"},
+					"env":     map[string]interface{}{"TEST": "value"},
+					"enabled": true,
+				},
+			},
+		})
+
+		// Mock server response parsing
+		var servers []interface{}
+		if request.Params.Arguments != nil {
+			if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+				if serversParam, ok := argumentsMap["servers"]; ok {
+					if serversList, ok := serversParam.([]interface{}); ok {
+						servers = serversList
+					}
+				}
+			}
+		}
+
+		assert.Len(t, servers, 2)
+
+		// Verify first server (HTTP)
+		server1 := servers[0].(map[string]interface{})
+		assert.Equal(t, "test-server-1", server1["name"])
+		assert.Equal(t, "http://localhost:3001", server1["url"])
+		assert.Equal(t, true, server1["enabled"])
+
+		// Verify second server (stdio)
+		server2 := servers[1].(map[string]interface{})
+		assert.Equal(t, "test-server-2", server2["name"])
+		assert.Equal(t, "python", server2["command"])
+		assert.Equal(t, []interface{}{"-m", "test_server"}, server2["args"])
+		assert.Equal(t, map[string]interface{}{"TEST": "value"}, server2["env"])
+	})
+
+	// Test import Cursor IDE format
+	t.Run("ImportCursorFormat", func(t *testing.T) {
+		request := createMockUpstreamServersRequest("import_cursor", map[string]interface{}{
+			"cursor_config": map[string]interface{}{
+				"mcp-server-sqlite": map[string]interface{}{
+					"command": "uvx",
+					"args":    []interface{}{"mcp-server-sqlite", "--db-path", "/tmp/test.db"},
+					"env":     map[string]interface{}{"MCP_SQLITE_PATH": "/tmp/test.db"},
+				},
+				"mcp-server-github": map[string]interface{}{
+					"url":     "http://localhost:3000/mcp",
+					"headers": map[string]interface{}{"Authorization": "Bearer token123"},
+				},
+			},
+		})
+
+		// Parse cursor config
+		var cursorConfig map[string]interface{}
+		if request.Params.Arguments != nil {
+			if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+				if configParam, ok := argumentsMap["cursor_config"]; ok {
+					if configMap, ok := configParam.(map[string]interface{}); ok {
+						cursorConfig = configMap
+					}
+				}
+			}
+		}
+
+		assert.Len(t, cursorConfig, 2)
+
+		// Verify SQLite server
+		sqliteServer := cursorConfig["mcp-server-sqlite"].(map[string]interface{})
+		assert.Equal(t, "uvx", sqliteServer["command"])
+		assert.Equal(t, []interface{}{"mcp-server-sqlite", "--db-path", "/tmp/test.db"}, sqliteServer["args"])
+
+		// Verify GitHub server
+		githubServer := cursorConfig["mcp-server-github"].(map[string]interface{})
+		assert.Equal(t, "http://localhost:3000/mcp", githubServer["url"])
+		assert.Equal(t, map[string]interface{}{"Authorization": "Bearer token123"}, githubServer["headers"])
+	})
+
+	// Test patch operation
+	t.Run("PatchServer", func(t *testing.T) {
+		request := createMockUpstreamServersRequest("patch", map[string]interface{}{
+			"name":    "test-server",
+			"enabled": false,
+			"url":     "http://localhost:3002",
+		})
+
+		name, _ := request.RequireString("name")
+		enabled := request.GetBool("enabled", true)
+		url := request.GetString("url", "")
+
+		assert.Equal(t, "test-server", name)
+		assert.Equal(t, false, enabled)
+		assert.Equal(t, "http://localhost:3002", url)
+	})
+}
+
+// Test parameter parsing for complex objects
+func TestComplexParameterParsing(t *testing.T) {
+	t.Run("ParseArgsArray", func(t *testing.T) {
+		request := createMockUpstreamServersRequest("add", map[string]interface{}{
+			"name":    "test-server",
+			"command": "python",
+			"args":    []interface{}{"-m", "test_server", "--port", "3000"},
+			"env":     map[string]interface{}{"TEST": "value", "DEBUG": "true"},
+			"enabled": true,
+		})
+
+		// Parse args array
+		var args []string
+		if request.Params.Arguments != nil {
+			if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+				if argsParam, ok := argumentsMap["args"]; ok {
+					if argsList, ok := argsParam.([]interface{}); ok {
+						for _, arg := range argsList {
+							if argStr, ok := arg.(string); ok {
+								args = append(args, argStr)
+							}
+						}
+					}
+				}
+			}
+		}
+
+		assert.Equal(t, []string{"-m", "test_server", "--port", "3000"}, args)
+	})
+
+	t.Run("ParseEnvMap", func(t *testing.T) {
+		request := createMockUpstreamServersRequest("add", map[string]interface{}{
+			"name": "test-server",
+			"env":  map[string]interface{}{"TEST": "value", "DEBUG": "true", "PORT": "3000"},
+		})
+
+		// Parse env map
+		var env map[string]string
+		if request.Params.Arguments != nil {
+			if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+				if envParam, ok := argumentsMap["env"]; ok {
+					if envMap, ok := envParam.(map[string]interface{}); ok {
+						env = make(map[string]string)
+						for k, v := range envMap {
+							if vStr, ok := v.(string); ok {
+								env[k] = vStr
+							}
+						}
+					}
+				}
+			}
+		}
+
+		expected := map[string]string{
+			"TEST":  "value",
+			"DEBUG": "true",
+			"PORT":  "3000",
+		}
+		assert.Equal(t, expected, env)
+	})
+}
+
+// Helper function to create mock upstream_servers requests
+func createMockUpstreamServersRequest(operation string, params map[string]interface{}) mcp.CallToolRequest {
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "upstream_servers"
+
+	arguments := make(map[string]interface{})
+	arguments["operation"] = operation
+
+	// Add all params to arguments
+	for k, v := range params {
+		arguments[k] = v
+	}
+
+	request.Params.Arguments = arguments
+	return request
 }

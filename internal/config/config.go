@@ -17,14 +17,58 @@ type Config struct {
 
 // ServerConfig represents upstream MCP server configuration
 type ServerConfig struct {
-	Name    string            `json:"name,omitempty" mapstructure:"name"`
-	URL     string            `json:"url,omitempty" mapstructure:"url"`
-	Type    string            `json:"type,omitempty" mapstructure:"type"` // http, stdio, auto
-	Command string            `json:"command,omitempty" mapstructure:"command"`
-	Args    []string          `json:"args,omitempty" mapstructure:"args"`
-	Env     map[string]string `json:"env,omitempty" mapstructure:"env"`
-	Enabled bool              `json:"enabled" mapstructure:"enabled"`
-	Created time.Time         `json:"created" mapstructure:"created"`
+	Name     string            `json:"name,omitempty" mapstructure:"name"`
+	URL      string            `json:"url,omitempty" mapstructure:"url"`
+	Protocol string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
+	Command  string            `json:"command,omitempty" mapstructure:"command"`
+	Args     []string          `json:"args,omitempty" mapstructure:"args"`
+	Env      map[string]string `json:"env,omitempty" mapstructure:"env"`
+	Headers  map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
+	Enabled  bool              `json:"enabled" mapstructure:"enabled"`
+	Created  time.Time         `json:"created" mapstructure:"created"`
+	Updated  time.Time         `json:"updated,omitempty" mapstructure:"updated"`
+}
+
+// CursorMCPConfig represents the structure for Cursor IDE MCP configuration
+type CursorMCPConfig struct {
+	MCPServers map[string]CursorServerConfig `json:"mcpServers"`
+}
+
+// CursorServerConfig represents a single server configuration in Cursor format
+type CursorServerConfig struct {
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// ConvertFromCursorFormat converts Cursor IDE format to our internal format
+func ConvertFromCursorFormat(cursorConfig *CursorMCPConfig) []*ServerConfig {
+	var servers []*ServerConfig
+
+	for name, serverConfig := range cursorConfig.MCPServers {
+		server := &ServerConfig{
+			Name:    name,
+			Enabled: true,
+			Created: time.Now(),
+		}
+
+		if serverConfig.Command != "" {
+			server.Command = serverConfig.Command
+			server.Args = serverConfig.Args
+			server.Env = serverConfig.Env
+			server.Protocol = "stdio"
+		} else if serverConfig.URL != "" {
+			server.URL = serverConfig.URL
+			server.Headers = serverConfig.Headers
+			server.Protocol = "http"
+		}
+
+		servers = append(servers, server)
+	}
+
+	return servers
 }
 
 // ToolMetadata represents tool information stored in the index

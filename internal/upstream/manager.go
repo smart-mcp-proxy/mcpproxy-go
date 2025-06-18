@@ -233,7 +233,7 @@ func (m *Manager) GetStats() map[string]interface{} {
 			"should_retry": connectionStatus["should_retry"],
 			"name":         client.config.Name,
 			"url":          client.config.URL,
-			"type":         client.config.Type,
+			"protocol":     client.config.Protocol,
 		}
 
 		if connected, ok := connectionStatus["connected"].(bool); ok && connected {

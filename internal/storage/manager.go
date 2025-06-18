@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"mcpproxy-go/internal/config"
 
@@ -55,8 +56,10 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		Command: serverConfig.Command,
 		Args:    serverConfig.Args,
 		Env:     serverConfig.Env,
+		Headers: serverConfig.Headers,
 		Enabled: serverConfig.Enabled,
 		Created: serverConfig.Created,
+		Updated: time.Now(),
 	}
 
 	return m.db.SaveUpstream(record)
@@ -78,8 +81,10 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		Command: record.Command,
 		Args:    record.Args,
 		Env:     record.Env,
+		Headers: record.Headers,
 		Enabled: record.Enabled,
 		Created: record.Created,
+		Updated: record.Updated,
 	}, nil
 }
 
@@ -101,8 +106,10 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			Command: record.Command,
 			Args:    record.Args,
 			Env:     record.Env,
+			Headers: record.Headers,
 			Enabled: record.Enabled,
 			Created: record.Created,
+			Updated: record.Updated,
 		})
 	}
 

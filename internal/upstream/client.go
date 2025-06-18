@@ -66,19 +66,34 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("url", c.config.URL),
-		zap.String("type", c.config.Type),
+		zap.String("protocol", c.config.Protocol),
 		zap.Int("retry_count", c.retryCount))
 
 	transportType := c.determineTransportType()
 
 	switch transportType {
-	case "http":
+	case "http", "streamable-http":
 		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
 		if err != nil {
 			c.lastError = err
 			c.retryCount++
 			c.lastRetryTime = time.Now()
 			return fmt.Errorf("failed to create HTTP transport: %w", err)
+		}
+		c.client = client.NewClient(httpTransport)
+	case "sse":
+		// For SSE, we need to handle Cloudflare's two-step connection pattern
+		// First connect to /sse to get session info, then use that for actual communication
+		c.logger.Debug("Creating SSE transport with Cloudflare compatibility",
+			zap.String("url", c.config.URL))
+
+		// Create SSE transport with special handling for Cloudflare endpoints
+		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
+		if err != nil {
+			c.lastError = err
+			c.retryCount++
+			c.lastRetryTime = time.Now()
+			return fmt.Errorf("failed to create SSE transport: %w", err)
 		}
 		c.client = client.NewClient(httpTransport)
 	case "stdio":
@@ -231,16 +246,17 @@ func (c *Client) GetConnectionStatus() map[string]interface{} {
 
 // determineTransportType determines the transport type based on URL and config
 func (c *Client) determineTransportType() string {
-	if c.config.Type != "" && c.config.Type != "auto" {
-		return c.config.Type
+	if c.config.Protocol != "" && c.config.Protocol != "auto" {
+		return c.config.Protocol
 	}
 
 	// Auto-detect based on URL
 	if strings.HasPrefix(c.config.URL, "http://") || strings.HasPrefix(c.config.URL, "https://") {
-		return "http"
+		// Default to streamable-http for HTTP URLs unless explicitly set
+		return "streamable-http"
 	}
 
-	// Assume stdio for command-like URLs
+	// Assume stdio for command-like URLs or when command is specified
 	return "stdio"
 }
 

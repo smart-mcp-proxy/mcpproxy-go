@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -22,6 +23,7 @@ type MCPProxyServer struct {
 	index           *index.Manager
 	upstreamManager *upstream.Manager
 	logger          *zap.Logger
+	mainServer      *Server // Reference to main server for config persistence
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -30,6 +32,7 @@ func NewMCPProxyServer(
 	index *index.Manager,
 	upstreamManager *upstream.Manager,
 	logger *zap.Logger,
+	mainServer *Server,
 ) *MCPProxyServer {
 	// Create MCP server with tool capabilities
 	mcpServer := mcpserver.NewMCPServer(
@@ -45,6 +48,7 @@ func NewMCPProxyServer(
 		index:           index,
 		upstreamManager: upstreamManager,
 		logger:          logger,
+		mainServer:      mainServer,
 	}
 
 	// Register proxy tools
@@ -83,24 +87,45 @@ func (p *MCPProxyServer) registerTools() {
 
 	// upstream_servers - manage upstream MCP servers
 	upstreamServersTool := mcp.NewTool("upstream_servers",
-		mcp.WithDescription("Manage upstream MCP servers (list, add, remove, update)"),
+		mcp.WithDescription("Manage upstream MCP servers - supports adding single/multiple servers, updating, removing, and importing from Cursor IDE format"),
 		mcp.WithString("operation",
 			mcp.Required(),
-			mcp.Description("Operation to perform: list, add, remove, update"),
-			mcp.Enum("list", "add", "remove", "update"),
+			mcp.Description("Operation: list, add, add_batch, remove, update, patch, import_cursor"),
+			mcp.Enum("list", "add", "add_batch", "remove", "update", "patch", "import_cursor"),
 		),
 		mcp.WithString("name",
-			mcp.Description("Server name (required for add/remove/update)"),
+			mcp.Description("Server name (required for add/remove/update/patch)"),
+		),
+		mcp.WithString("command",
+			mcp.Description("Command to run (for stdio servers)"),
+		),
+		mcp.WithArray("args",
+			mcp.Description("Command arguments (for stdio servers)"),
+		),
+		mcp.WithObject("env",
+			mcp.Description("Environment variables (for stdio servers)"),
 		),
 		mcp.WithString("url",
-			mcp.Description("Server URL or command (required for add/update)"),
+			mcp.Description("Server URL (for HTTP/SSE servers)"),
 		),
-		mcp.WithString("type",
-			mcp.Description("Transport type: http or stdio (default: auto-detect)"),
-			mcp.Enum("http", "stdio", "auto"),
+		mcp.WithString("protocol",
+			mcp.Description("Transport protocol: stdio (for commands), http, sse, streamable-http (default: auto-detect)"),
+			mcp.Enum("stdio", "http", "sse", "streamable-http", "auto"),
+		),
+		mcp.WithObject("headers",
+			mcp.Description("HTTP headers for authentication (for HTTP/SSE servers)"),
 		),
 		mcp.WithBoolean("enabled",
-			mcp.Description("Whether server is enabled (for add/update)"),
+			mcp.Description("Whether server is enabled (default: true)"),
+		),
+		mcp.WithArray("servers",
+			mcp.Description("Array of server configurations for batch operations"),
+		),
+		mcp.WithObject("cursor_config",
+			mcp.Description("Cursor IDE mcpServers configuration to import"),
+		),
+		mcp.WithObject("patch",
+			mcp.Description("Fields to patch/update for existing server"),
 		),
 	)
 	p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
@@ -234,10 +259,16 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		return p.handleListUpstreams(ctx)
 	case "add":
 		return p.handleAddUpstream(ctx, request)
+	case "add_batch":
+		return p.handleAddBatchUpstreams(ctx, request)
 	case "remove":
 		return p.handleRemoveUpstream(ctx, request)
 	case "update":
 		return p.handleUpdateUpstream(ctx, request)
+	case "patch":
+		return p.handlePatchUpstream(ctx, request)
+	case "import_cursor":
+		return p.handleImportCursor(ctx, request)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
 	}
@@ -266,38 +297,226 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
 	}
 
-	url, err := request.RequireString("url")
-	if err != nil {
-		return mcp.NewToolResultError("Missing required parameter 'url'"), nil
-	}
-
-	transportType := request.GetString("type", "auto")
-
+	url := request.GetString("url", "")
+	command := request.GetString("command", "")
 	enabled := request.GetBool("enabled", true)
 
-	serverConfig := &config.ServerConfig{
-		Name:    name,
-		URL:     url,
-		Type:    transportType,
-		Enabled: enabled,
+	// Must have either URL or command
+	if url == "" && command == "" {
+		return mcp.NewToolResultError("Either 'url' or 'command' parameter is required"), nil
 	}
 
-	id, err := p.storage.AddUpstream(serverConfig)
-	if err != nil {
+	// Handle args array
+	var args []string
+	if request.Params.Arguments != nil {
+		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			if argsParam, ok := argumentsMap["args"]; ok {
+				if argsList, ok := argsParam.([]interface{}); ok {
+					for _, arg := range argsList {
+						if argStr, ok := arg.(string); ok {
+							args = append(args, argStr)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Handle env map
+	var env map[string]string
+	if request.Params.Arguments != nil {
+		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			if envParam, ok := argumentsMap["env"]; ok {
+				if envMap, ok := envParam.(map[string]interface{}); ok {
+					env = make(map[string]string)
+					for k, v := range envMap {
+						if vStr, ok := v.(string); ok {
+							env[k] = vStr
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Handle headers map
+	var headers map[string]string
+	if request.Params.Arguments != nil {
+		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			if headersParam, ok := argumentsMap["headers"]; ok {
+				if headersMap, ok := headersParam.(map[string]interface{}); ok {
+					headers = make(map[string]string)
+					for k, v := range headersMap {
+						if vStr, ok := v.(string); ok {
+							headers[k] = vStr
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Auto-detect protocol
+	protocol := request.GetString("protocol", "")
+	if protocol == "" {
+		if command != "" {
+			protocol = "stdio"
+		} else if url != "" {
+			protocol = "streamable-http"
+		} else {
+			protocol = "auto"
+		}
+	}
+
+	serverConfig := &config.ServerConfig{
+		Name:     name,
+		URL:      url,
+		Command:  command,
+		Args:     args,
+		Env:      env,
+		Headers:  headers,
+		Protocol: protocol,
+		Enabled:  enabled,
+		Created:  time.Now(),
+	}
+
+	// Save to storage
+	if err := p.storage.SaveUpstreamServer(serverConfig); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
 	}
 
 	// Add to upstream manager if enabled
 	if enabled {
-		if err := p.upstreamManager.AddServer(id, serverConfig); err != nil {
-			p.logger.Warn("Failed to connect to upstream", zap.String("id", id), zap.Error(err))
+		if err := p.upstreamManager.AddServer(name, serverConfig); err != nil {
+			p.logger.Warn("Failed to connect to upstream", zap.String("name", name), zap.Error(err))
+		}
+	}
+
+	// Trigger configuration save and update
+	if p.mainServer != nil {
+		p.mainServer.OnUpstreamServerChange()
+	}
+
+	jsonResult, err := json.Marshal(map[string]interface{}{
+		"name":     name,
+		"protocol": protocol,
+		"enabled":  enabled,
+		"added":    true,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+func (p *MCPProxyServer) handleAddBatchUpstreams(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var servers []interface{}
+	if request.Params.Arguments != nil {
+		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			if serversParam, ok := argumentsMap["servers"]; ok {
+				if serversList, ok := serversParam.([]interface{}); ok {
+					servers = serversList
+				}
+			}
+		}
+	}
+
+	if len(servers) == 0 {
+		return mcp.NewToolResultError("Missing required parameter 'servers'"), nil
+	}
+
+	var serverConfigs []*config.ServerConfig
+	for _, server := range servers {
+		if serverMap, ok := server.(map[string]interface{}); ok {
+			name, _ := serverMap["name"].(string)
+			url, _ := serverMap["url"].(string)
+			command, _ := serverMap["command"].(string)
+			transportType, _ := serverMap["type"].(string)
+			enabled, _ := serverMap["enabled"].(bool)
+
+			// Handle args array
+			var args []string
+			if argsParam, ok := serverMap["args"].([]interface{}); ok {
+				for _, arg := range argsParam {
+					if argStr, ok := arg.(string); ok {
+						args = append(args, argStr)
+					}
+				}
+			}
+
+			// Handle env map
+			var env map[string]string
+			if envParam, ok := serverMap["env"].(map[string]interface{}); ok {
+				env = make(map[string]string)
+				for k, v := range envParam {
+					if vStr, ok := v.(string); ok {
+						env[k] = vStr
+					}
+				}
+			}
+
+			// Handle headers map
+			var headers map[string]string
+			if headersParam, ok := serverMap["headers"].(map[string]interface{}); ok {
+				headers = make(map[string]string)
+				for k, v := range headersParam {
+					if vStr, ok := v.(string); ok {
+						headers[k] = vStr
+					}
+				}
+			}
+
+			// Auto-detect protocol if not specified
+			if transportType == "" {
+				if command != "" {
+					transportType = "stdio"
+				} else if url != "" {
+					transportType = "streamable-http"
+				} else {
+					transportType = "auto"
+				}
+			}
+
+			// Default enabled to true
+			if !enabled && url != "" || command != "" {
+				enabled = true
+			}
+
+			serverConfig := &config.ServerConfig{
+				Name:     name,
+				URL:      url,
+				Command:  command,
+				Args:     args,
+				Env:      env,
+				Headers:  headers,
+				Protocol: transportType,
+				Enabled:  enabled,
+				Created:  time.Now(),
+			}
+			serverConfigs = append(serverConfigs, serverConfig)
+		}
+	}
+
+	// Add servers individually using existing method
+	var ids []string
+	for _, serverConfig := range serverConfigs {
+		if err := p.storage.SaveUpstreamServer(serverConfig); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream %s: %v", serverConfig.Name, err)), nil
+		}
+		ids = append(ids, serverConfig.Name)
+
+		// Add to upstream manager if enabled
+		if serverConfig.Enabled {
+			if err := p.upstreamManager.AddServer(serverConfig.Name, serverConfig); err != nil {
+				p.logger.Warn("Failed to connect to upstream", zap.String("id", serverConfig.Name), zap.Error(err))
+			}
 		}
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"id":      id,
-		"name":    name,
-		"enabled": enabled,
+		"ids":   ids,
+		"total": len(ids),
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
@@ -337,6 +556,11 @@ func (p *MCPProxyServer) handleRemoveUpstream(ctx context.Context, request mcp.C
 
 	// Remove from upstream manager
 	p.upstreamManager.RemoveServer(serverID)
+
+	// Trigger configuration save and update
+	if p.mainServer != nil {
+		p.mainServer.OnUpstreamServerChange()
+	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
 		"id":      serverID,
@@ -381,8 +605,8 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	if url := request.GetString("url", ""); url != "" {
 		updatedServer.URL = url
 	}
-	if transportType := request.GetString("type", ""); transportType != "" {
-		updatedServer.Type = transportType
+	if protocol := request.GetString("protocol", ""); protocol != "" {
+		updatedServer.Protocol = protocol
 	}
 	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
 
@@ -399,11 +623,202 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		}
 	}
 
+	// Trigger configuration save and update
+	if p.mainServer != nil {
+		p.mainServer.OnUpstreamServerChange()
+	}
+
 	jsonResult, err := json.Marshal(map[string]interface{}{
 		"id":      serverID,
 		"name":    name,
 		"updated": true,
 		"enabled": updatedServer.Enabled,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+func (p *MCPProxyServer) handlePatchUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	name, err := request.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
+	}
+
+	// Find server by name first
+	servers, err := p.storage.ListUpstreams()
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
+	}
+
+	var serverID string
+	var existingServer *config.ServerConfig
+	for _, server := range servers {
+		if server.Name == name {
+			serverID = server.Name
+			existingServer = server
+			break
+		}
+	}
+
+	if serverID == "" {
+		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
+	}
+
+	// Update fields if provided
+	updatedServer := *existingServer
+	if url := request.GetString("url", ""); url != "" {
+		updatedServer.URL = url
+	}
+	if protocol := request.GetString("protocol", ""); protocol != "" {
+		updatedServer.Protocol = protocol
+	}
+	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
+
+	// Update in storage
+	if err := p.storage.UpdateUpstream(serverID, &updatedServer); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil
+	}
+
+	// Update in upstream manager
+	p.upstreamManager.RemoveServer(serverID)
+	if updatedServer.Enabled {
+		if err := p.upstreamManager.AddServer(serverID, &updatedServer); err != nil {
+			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
+		}
+	}
+
+	// Trigger configuration save and update
+	if p.mainServer != nil {
+		p.mainServer.OnUpstreamServerChange()
+	}
+
+	jsonResult, err := json.Marshal(map[string]interface{}{
+		"id":      serverID,
+		"name":    name,
+		"updated": true,
+		"enabled": updatedServer.Enabled,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+func (p *MCPProxyServer) handleImportCursor(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var cursorConfig map[string]interface{}
+	if request.Params.Arguments != nil {
+		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			if configParam, ok := argumentsMap["cursor_config"]; ok {
+				if configMap, ok := configParam.(map[string]interface{}); ok {
+					cursorConfig = configMap
+				}
+			}
+		}
+	}
+
+	if len(cursorConfig) == 0 {
+		return mcp.NewToolResultError("Missing required parameter 'cursor_config'"), nil
+	}
+
+	var serverConfigs []*config.ServerConfig
+	for name, serverConfig := range cursorConfig {
+		if configMap, ok := serverConfig.(map[string]interface{}); ok {
+			url, _ := configMap["url"].(string)
+			command, _ := configMap["command"].(string)
+			transportType, _ := configMap["type"].(string)
+			enabled, _ := configMap["enabled"].(bool)
+
+			// Handle args array
+			var args []string
+			if argsParam, ok := configMap["args"].([]interface{}); ok {
+				for _, arg := range argsParam {
+					if argStr, ok := arg.(string); ok {
+						args = append(args, argStr)
+					}
+				}
+			}
+
+			// Handle env map
+			var env map[string]string
+			if envParam, ok := configMap["env"].(map[string]interface{}); ok {
+				env = make(map[string]string)
+				for k, v := range envParam {
+					if vStr, ok := v.(string); ok {
+						env[k] = vStr
+					}
+				}
+			}
+
+			// Handle headers map
+			var headers map[string]string
+			if headersParam, ok := configMap["headers"].(map[string]interface{}); ok {
+				headers = make(map[string]string)
+				for k, v := range headersParam {
+					if vStr, ok := v.(string); ok {
+						headers[k] = vStr
+					}
+				}
+			}
+
+			// Auto-detect protocol if not specified
+			if transportType == "" {
+				if command != "" {
+					transportType = "stdio"
+				} else if url != "" {
+					transportType = "streamable-http"
+				} else {
+					transportType = "auto"
+				}
+			}
+
+			// Default enabled to true
+			if !enabled && (url != "" || command != "") {
+				enabled = true
+			}
+
+			serverConfig := &config.ServerConfig{
+				Name:     name,
+				URL:      url,
+				Command:  command,
+				Args:     args,
+				Env:      env,
+				Headers:  headers,
+				Protocol: transportType,
+				Enabled:  enabled,
+				Created:  time.Now(),
+			}
+			serverConfigs = append(serverConfigs, serverConfig)
+		}
+	}
+
+	// Add servers individually using existing method
+	var ids []string
+	for _, serverConfig := range serverConfigs {
+		if err := p.storage.SaveUpstreamServer(serverConfig); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to import server %s: %v", serverConfig.Name, err)), nil
+		}
+		ids = append(ids, serverConfig.Name)
+
+		// Add to upstream manager if enabled
+		if serverConfig.Enabled {
+			if err := p.upstreamManager.AddServer(serverConfig.Name, serverConfig); err != nil {
+				p.logger.Warn("Failed to connect to upstream", zap.String("id", serverConfig.Name), zap.Error(err))
+			}
+		}
+	}
+
+	// Trigger configuration save and update
+	if p.mainServer != nil {
+		p.mainServer.OnUpstreamServerChange()
+	}
+
+	jsonResult, err := json.Marshal(map[string]interface{}{
+		"imported_servers": ids,
+		"total":            len(ids),
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil

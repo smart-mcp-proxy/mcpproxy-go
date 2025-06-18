@@ -151,3 +151,76 @@ Returns `{total_tools, top:[{tool_name,count}]}`.
 * Hybrid BM25 + vector search.
 * Auto‑update channel.
 * GUI front‑end built with Wails.
+
+## Upstream Server Management
+
+### Dynamic Server Configuration
+
+The proxy supports dynamic management of upstream MCP servers through the `upstream_servers` MCP tool. This enables:
+
+- **Runtime Configuration**: Add, remove, and modify servers without restart
+- **Batch Operations**: Import multiple servers simultaneously
+- **Hot Reloading**: Immediate connection attempts and tool index updates
+- **Persistent Storage**: Configuration automatically saved to disk
+
+### Configuration Persistence
+
+#### Storage Architecture
+
+```
+~/.mcpproxy/
+├── mcp_config.json          # Main configuration file
+├── data.bolt                # BoltDB storage (tool stats, metadata)
+└── index.bleve/             # Search index directory
+```
+
+#### Configuration Flow
+
+1. **Runtime Changes**: MCP tool calls modify server configurations
+2. **Storage Update**: Changes written to BoltDB for immediate persistence
+3. **Config Sync**: Configuration file updated with current state
+4. **Connection Management**: Upstream manager connects/disconnects servers
+5. **Index Update**: Tool discovery runs to update search index
+
+### Server Types
+
+#### HTTP Servers
+- **Transport**: HTTP/HTTPS requests
+- **Authentication**: Headers-based (API keys, tokens)
+- **Configuration**: URL + optional headers
+- **Example**: REST-based MCP servers
+
+#### Stdio Servers  
+- **Transport**: Standard input/output communication
+- **Process Management**: Command execution with arguments
+- **Environment**: Custom environment variables
+- **Example**: Python/Node.js MCP server scripts
+
+### Import Mechanisms
+
+#### Cursor IDE Compatibility
+- **Format**: Direct import of Cursor `mcp.json` configuration
+- **Conversion**: Automatic mapping to internal server configuration
+- **Validation**: Type detection and parameter validation
+
+#### Batch Import
+- **Multiple Servers**: Array of server configurations
+- **Mixed Types**: HTTP and stdio servers in single operation
+- **Error Handling**: Individual server failures don't block others
+
+### Real-time Updates
+
+#### Connection Management
+- **Background Connections**: Non-blocking server connection attempts
+- **Retry Logic**: Exponential backoff for failed connections
+- **Status Tracking**: Real-time connection status updates
+
+#### Tool Discovery
+- **Automatic Indexing**: New servers trigger tool discovery
+- **Search Updates**: BM25 index updated with new tools
+- **Statistics**: Tool usage tracking across servers
+
+#### UI Integration
+- **Tray Updates**: System tray reflects server changes
+- **Status Broadcasting**: Real-time status updates to UI components
+- **Configuration Sync**: UI displays current server state

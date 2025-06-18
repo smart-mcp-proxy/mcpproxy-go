@@ -3,6 +3,8 @@ package storage
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -20,11 +22,42 @@ type BoltDB struct {
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	dbPath := filepath.Join(dataDir, "config.db")
 
+	// Try to open with timeout, if it fails, attempt recovery
 	db, err := bbolt.Open(dbPath, 0644, &bbolt.Options{
-		Timeout: 5 * time.Second,
+		Timeout: 10 * time.Second,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to open bolt database: %w", err)
+		logger.Warnf("Failed to open database on first attempt: %v", err)
+
+		// Check if it's a timeout or lock issue
+		if err == bbolt.ErrTimeout {
+			logger.Info("Database timeout detected, attempting recovery...")
+
+			// Try to backup and recreate if file exists
+			if _, statErr := filepath.Glob(dbPath); statErr == nil {
+				backupPath := dbPath + ".backup." + time.Now().Format("20060102-150405")
+				logger.Infof("Creating backup at %s", backupPath)
+
+				// Attempt to copy the file
+				if cpErr := copyFile(dbPath, backupPath); cpErr != nil {
+					logger.Warnf("Failed to create backup: %v", cpErr)
+				}
+
+				// Remove the original file to clear any locks
+				if rmErr := removeFile(dbPath); rmErr != nil {
+					logger.Warnf("Failed to remove locked database file: %v", rmErr)
+				}
+			}
+
+			// Try to open again
+			db, err = bbolt.Open(dbPath, 0644, &bbolt.Options{
+				Timeout: 5 * time.Second,
+			})
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to open bolt database after recovery attempt: %w", err)
+		}
 	}
 
 	boltDB := &BoltDB{
@@ -287,4 +320,27 @@ func (b *BoltDB) Backup(destPath string) error {
 func (b *BoltDB) Stats() (*bbolt.Stats, error) {
 	stats := b.db.Stats()
 	return &stats, nil
+}
+
+// copyFile copies a file from src to dst
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
+}
+
+// removeFile safely removes a file
+func removeFile(path string) error {
+	return os.Remove(path)
 }

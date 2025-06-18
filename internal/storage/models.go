@@ -29,6 +29,7 @@ type UpstreamRecord struct {
 	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"` // For HTTP authentication
 	Enabled bool              `json:"enabled"`
 	Created time.Time         `json:"created"`
 	Updated time.Time         `json:"updated"`
