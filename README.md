@@ -1,315 +1,371 @@
-# mcpproxy-go
+# Smart MCP Proxy
 
-A high-performance Go implementation of the Smart MCP Proxy - an intelligent tool discovery and proxying server for Model Context Protocol (MCP) servers.
+A smart proxy server for the Model Context Protocol (MCP) that provides intelligent tool discovery, indexing, and routing capabilities with an enhanced system tray interface.
+
+## ⚡ Fast Startup & Background Operations
+
+The Smart MCP Proxy features optimized startup with immediate tray appearance and background connection handling:
+
+### 🚀 **Instant Startup**
+- **Immediate Tray**: Appears within 1-2 seconds, no waiting for upstream connections
+- **Non-blocking**: Connections happen in background while proxy is fully functional
+- **Quick Access**: Users can quit, check status, or interact immediately after launch
+
+### 🔄 **Smart Connection Management** 
+- **Exponential Backoff**: Retry failed connections with 1s, 2s, 4s, 8s... intervals up to 5 minutes
+- **Background Retries**: Connection attempts don't block user interface
+- **Resilient**: Proxy remains functional even with failed upstream connections
+- **Status Updates**: Real-time feedback on connection progress and retry attempts
+
+### 📈 **Real-time Status System**
+- **Live Updates**: Status changes broadcast immediately to tray and interfaces
+- **Connection Phases**: Shows progression through Initializing → Loading → Connecting → Ready
+- **Detailed Feedback**: Connection counts, retry attempts, and error information
+- **Transparent Operations**: Users always know what's happening in the background
+
+## Enhanced System Tray Features
+
+The Smart MCP Proxy includes a comprehensive system tray interface with real-time monitoring and control capabilities:
+
+### 🔍 **Real-time Status Display**
+- **Dynamic Tooltip**: Shows current proxy status, connection URL, and statistics
+- **Live Updates**: Status refreshes every 5 seconds automatically
+- **Connection Info**: Displays server URL (e.g., `http://localhost:8080/mcp`)
+- **Server Statistics**: Shows connected servers count and total available tools
+
+### 🎛️ **Server Control**
+- **Start/Stop Server**: Toggle proxy server directly from the tray menu
+- **Instant Feedback**: Status updates immediately after control actions
+- **Background Operation**: Server runs in background while tray provides control interface
+
+### 📊 **Upstream Server Monitoring**
+- **Server Status Overview**: View connection status of all configured upstream servers
+- **Tool Count Display**: See number of tools available from each server
+- **Detailed Information**: Hover over menu items for comprehensive server details
+- **Connection Health**: Monitor which servers are online/offline
+
+### 🖥️ **System Integration**
+- **Native Look**: Adapts to system theme (light/dark mode)
+- **Template Icons**: Uses macOS template icons for better integration
+- **Menu Bar Presence**: Persistent access from system menu bar
+- **Cross-platform**: Works on macOS, Windows, and Linux
+
+## Quick Start with Tray
+
+1. **Build the application**:
+   ```bash
+   go build -ldflags "-X main.version=v0.3.0-enhanced" ./cmd/mcpproxy
+   ```
+
+2. **Create configuration**:
+   ```json
+   {
+     "listen": ":8080",
+     "enable_tray": true,
+     "mcpServers": [
+       {
+         "name": "GitHub Tools",
+         "url": "http://localhost:3001",
+         "type": "http",
+         "enabled": true
+       }
+     ]
+   }
+   ```
+
+3. **Run with tray enabled**:
+   ```bash
+   ./mcpproxy --tray=true --config=config.json
+   ```
+
+4. **Access the tray**:
+   - Look for the MCP Proxy icon in your system tray
+   - Click to see the control menu
+   - Hover over the icon for detailed status information
+
+## Tray Menu Structure
+
+```
+Smart MCP Proxy
+├── Status: Running (localhost:8080)     ← Current server status
+├── ─────────────────────────────
+├── Start/Stop Server                   ← Server control
+├── ─────────────────────────────
+├── Upstream Servers (2/3)              ← Server monitoring
+│   └── [Hover for server details]      ← Individual server status
+├── ─────────────────────────────
+├── Check for Updates…                  ← Auto-update feature
+├── Open Config                         ← Quick config access
+├── ─────────────────────────────
+└── Quit                               ← Clean shutdown
+```
 
 ## Features
 
-- **Single Binary**: Self-contained executable with no external dependencies
-- **Concurrent Performance**: Built with Go's excellent concurrency primitives
-- **Local BM25 Search**: Fast full-text search using Bleve v2 for tool discovery
-- **Persistent Storage**: BoltDB for configuration, statistics, and change detection
-- **System Tray UI**: Cross-platform system tray integration (planned)
-- **HTTP REST API**: RESTful endpoints for integration
-- **Tool Discovery**: Automatic tool indexing from upstream MCP servers
-- **Change Detection**: SHA-256 based tool change detection for efficient re-indexing
-
-## Architecture
-
-The proxy acts as an intelligent gateway between AI agents and multiple MCP servers:
-
-```
-┌────────────┐ HTTP/JSON   ┌──────────────────────────────┐ HTTP/MCP    ┌──────────────┐
-│  AI Agent  │ ⇆ :8080 ⇆  │        mcpproxy-go           │ ⇆  Multiple ⇆ │  MCP Servers │
-└────────────┘             │                              │             └──────────────┘
-                          │  ┌───────────────┐           │
-                          │  │ Bleve Index   │───────────┘
-                          └──→ BoltDB (cfg, stats, hashes)
-```
+- **Intelligent Tool Discovery**: Automatically discover and index tools from multiple MCP servers
+- **Semantic Search**: Find relevant tools using natural language queries
+- **Tool Aggregation**: Combine tools from multiple upstream servers into a single interface
+- **HTTP & Stdio Support**: Connect to MCP servers via HTTP or stdio protocols
+- **Persistent Storage**: Cache tool metadata and connection information
+- **Configuration Management**: Flexible JSON-based configuration with environment variable support
+- **System Tray Integration**: Native system tray with real-time monitoring and control
+- **Auto-updates**: Built-in update checking and installation
+- **Cross-platform**: Works on macOS, Windows, and Linux
 
 ## Installation
 
-### Build from Source
+### From Source
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/your-org/mcpproxy-go
 cd mcpproxy-go
 go build ./cmd/mcpproxy
 ```
 
-### Dependencies
+### Using Go Install
 
-The project uses Go modules and will automatically download required dependencies:
-
-- `github.com/spf13/cobra` - CLI framework
-- `github.com/spf13/viper` - Configuration management
-- `go.uber.org/zap` - Structured logging
-- `go.etcd.io/bbolt` - Embedded key/value database
-- `github.com/blevesearch/bleve/v2` - Full-text search engine
-- `github.com/getlantern/systray` - System tray integration (future)
+```bash
+go install github.com/your-org/mcpproxy-go/cmd/mcpproxy@latest
+```
 
 ## Configuration
 
-### Configuration File
+### Basic Configuration
 
-Create a `mcp_config.json` file:
+Create a `config.json` file:
 
 ```json
 {
   "listen": ":8080",
-  "data_dir": "",
+  "data_dir": "~/.mcpproxy",
   "enable_tray": true,
   "top_k": 5,
   "tools_limit": 15,
-  "mcpServers": {
-    "spoonacular": {
-      "name": "spoonacular",
-      "url": "http://localhost:8091/mcp/",
-      "enabled": true,
-      "created": "2024-01-01T00:00:00Z"
+  "mcpServers": [
+    {
+      "name": "Local Python Server",
+      "command": "python",
+      "args": ["-m", "your_mcp_server"],
+      "type": "stdio",
+      "enabled": true
     },
-    "sqlite": {
-      "name": "sqlite",
-      "command": "uvx",
-      "args": ["mcp-server-sqlite", "--db-path", "/path/to/demo.db"],
-      "env": {},
-      "enabled": true,
-      "created": "2024-01-01T00:00:00Z"
+    {
+      "name": "Remote HTTP Server",
+      "url": "http://localhost:3001",
+      "type": "http",
+      "enabled": true
     }
-  }
+  ]
 }
 ```
 
 ### Environment Variables
 
-All configuration options can be overridden with environment variables using the `MCPP_` prefix:
+You can override configuration with environment variables:
 
-- `MCPP_LISTEN` - Listen address (default: ":8080")
-- `MCPP_DATA_DIR` - Data directory (default: "~/.mcpproxy")
-- `MCPP_TRAY` - Enable system tray (default: true)
-- `MCPP_TOP_K` - Number of tools to return in search (default: 5)
-- `MCPP_TOOLS_LIMIT` - Maximum tools in active pool (default: 15)
+```bash
+export MCPPROXY_LISTEN=:8080
+export MCPPROXY_TRAY=true
+export MCPPROXY_DATA_DIR=~/.mcpproxy
+./mcpproxy
+```
+
+### Command Line Options
+
+```bash
+./mcpproxy --help
+```
+
+Options:
+- `--config, -c`: Configuration file path
+- `--listen, -l`: Listen address (default: ":8080")
+- `--data-dir, -d`: Data directory path
+- `--tray`: Enable system tray (default: true)
+- `--log-level`: Log level (debug, info, warn, error)
 
 ## Usage
 
-### Starting the Server
+### Running the Proxy
 
 ```bash
-# Using configuration file
-./mcpproxy --config mcp_config.json
+# With tray interface (recommended)
+./mcpproxy --tray=true
 
-# Using command line flags
-./mcpproxy --listen :8080 --data-dir ~/.mcpproxy
+# Command line only
+./mcpproxy --tray=false
 
-# Using environment variables
-MCPP_LISTEN=:9090 ./mcpproxy
-
-# Adding upstream servers via CLI
-./mcpproxy --upstream spoonacular=http://localhost:8091/mcp/
+# With custom config
+./mcpproxy --config=my-config.json
 ```
 
-### API Endpoints
+### Connecting Clients
 
-#### MCP Endpoints
-
-- `GET /` - Server information
-- `GET /tools/list` - List available proxy tools
-- `POST /tools/call` - Call a tool (MCP format)
-
-#### Proxy Endpoints
-
-- `POST /proxy/retrieve_tools` - Search for tools
-- `POST /proxy/call_tool` - Execute a tool on upstream server
-- `GET /proxy/upstream_servers` - List upstream servers
-- `GET /proxy/tools_stats` - Tool usage statistics
-
-#### Management Endpoints
-
-- `GET /health` - Health check
-- `GET /status` - Comprehensive server status
-
-### Example Usage
-
-#### Tool Discovery
+Once running, clients can connect to the proxy:
 
 ```bash
-curl -X POST http://localhost:8080/proxy/retrieve_tools \
+# HTTP clients
+curl -X POST http://localhost:8080/mcp/ \
   -H "Content-Type: application/json" \
-  -d '{"query": "database sql"}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"test","version":"1.0.0"},"capabilities":{}}}'
 ```
 
-Response:
+### Tool Discovery
+
+The proxy automatically discovers and indexes tools from configured upstream servers. Tools are available through the unified interface with semantic search capabilities.
+
+## System Tray Usage
+
+### Status Information
+
+The tray tooltip shows:
+- **Proxy Status**: Running/Stopped
+- **Connection URL**: Where clients can connect
+- **Server Statistics**: Connected servers and available tools
+
+Example tooltip:
+```
+Smart MCP Proxy - Running
+URL: http://localhost:8080/mcp
+Servers: 2/3 connected
+Tools: 15 available
+```
+
+### Server Control
+
+- **Start Server**: Starts the proxy server if stopped
+- **Stop Server**: Gracefully stops the proxy server
+- **Status Updates**: Menu items update in real-time
+
+### Upstream Monitoring
+
+Hover over "Upstream Servers" to see detailed status:
+```
+• GitHub Tools: Connected (8 tools)
+• Weather API: Disconnected (0 tools)  
+• File Manager: Connected (5 tools)
+```
+
+## API
+
+### Initialize
+
 ```json
 {
-  "message": "Found 3 tools matching query",
-  "tools": [
-    {
-      "name": "sqlite:execute_query",
-      "original_name": "execute_query",
-      "server": "sqlite", 
-      "description": "Execute SQL query on database",
-      "score": 0.95,
-      "input_schema": {...}
-    }
-  ],
-  "query": "database sql",
-  "total_indexed_tools": 12
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "clientInfo": {
+      "name": "your-client",
+      "version": "1.0.0"
+    },
+    "capabilities": {}
+  }
 }
 ```
 
-#### Tool Execution
+### List Tools
 
-```bash
-curl -X POST http://localhost:8080/proxy/call_tool \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "sqlite:execute_query",
-    "args": {
-      "query": "SELECT * FROM users LIMIT 5"
-    }
-  }'
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list",
+  "params": {}
+}
 ```
 
-## Data Storage
+### Call Tool
 
-The proxy stores data in the configured data directory (default: `~/.mcpproxy/`):
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "server_name:tool_name",
+    "arguments": {
+      "param1": "value1"
+    }
+  }
+}
+```
 
-- `config.db` - BoltDB database containing:
-  - `upstreams` - Server configurations
-  - `toolstats` - Tool usage statistics
-  - `toolhash` - SHA-256 hashes for change detection
-  - `meta` - Schema version and metadata
-- `index.bleve/` - Bleve search index directory
+## Architecture
+
+The Smart MCP Proxy consists of several key components:
+
+- **Server**: HTTP server handling MCP protocol requests
+- **Upstream Manager**: Manages connections to upstream MCP servers
+- **Index Manager**: Handles tool discovery and semantic search indexing
+- **Storage Manager**: Persistent storage for configuration and metadata
+- **Tray Manager**: System tray interface for monitoring and control
 
 ## Development
 
-### Running Tests
+### Building
 
 ```bash
-# Run all tests
+go build -ldflags "-X main.version=$(git describe --tags)" ./cmd/mcpproxy
+```
+
+### Testing
+
+```bash
 go test ./...
-
-# Run specific package tests
-go test ./internal/config
-go test ./internal/storage
-go test ./internal/index
-
-# Run tests with coverage
-go test -cover ./...
 ```
 
-### Project Structure
+### Running in Development
 
+```bash
+go run ./cmd/mcpproxy --config=config-test.json --log-level=debug
 ```
-mcpproxy-go/
-├── cmd/mcpproxy/          # Main application entry point
-├── internal/              # Internal packages
-│   ├── config/           # Configuration management
-│   ├── storage/          # BoltDB storage layer
-│   ├── index/            # Bleve search indexing
-│   ├── server/           # HTTP server implementation
-│   ├── upstream/         # Upstream MCP client management
-│   ├── tray/             # System tray integration
-│   └── hash/             # SHA-256 utilities
-├── testdata/             # Test fixtures
-└── mcp_config.json       # Sample configuration
-```
-
-### Adding New Features
-
-1. **Storage**: Add new bucket types in `internal/storage/models.go`
-2. **Indexing**: Extend search capabilities in `internal/index/`
-3. **Endpoints**: Add new HTTP handlers in `internal/server/mcp.go`
-4. **Upstream**: Extend client capabilities in `internal/upstream/`
-
-## Built-in MCP Tools
-
-The proxy exposes these tools to MCP clients:
-
-### `retrieve_tools`
-
-Search and discover tools from upstream servers.
-
-**Input Schema:**
-```json
-{
-  "type": "object",
-  "properties": {
-    "query": {
-      "type": "string",
-      "description": "Search query for finding relevant tools"
-    }
-  },
-  "required": ["query"]
-}
-```
-
-### `call_tool`
-
-Execute a discovered tool on its upstream server.
-
-**Input Schema:**
-```json
-{
-  "type": "object", 
-  "properties": {
-    "name": {
-      "type": "string",
-      "description": "Name of the tool to execute (server:tool format)"
-    },
-    "args": {
-      "type": "object",
-      "description": "Arguments to pass to the tool"
-    }
-  },
-  "required": ["name", "args"]
-}
-```
-
-## Performance
-
-- **Concurrent**: Goroutine-based architecture handles multiple requests concurrently
-- **Fast Search**: BM25 search typically returns results in <10ms
-- **Efficient Storage**: BoltDB provides fast key-value operations
-- **Memory Efficient**: Streaming JSON parsing, bounded tool pools
-- **Change Detection**: Only re-indexes tools when they actually change
-
-## Troubleshooting
-
-### Server Won't Start
-
-1. Check if port is already in use: `lsof -i :8080`
-2. Verify configuration file syntax: `cat mcp_config.json | jq .`
-3. Check data directory permissions
-4. Review server logs for specific errors
-
-### No Tools Found
-
-1. Verify upstream servers are running and accessible
-2. Check server connection status: `curl http://localhost:8080/status`
-3. Review upstream server configurations
-4. Check if tools were indexed: look for `document_count` in status
-
-### Search Not Working
-
-1. Verify Bleve index exists in data directory
-2. Check for indexing errors in logs
-3. Try rebuilding index (restart server)
-4. Verify search query format
-
-## License
-
-[License information]
 
 ## Contributing
 
-[Contributing guidelines]
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
-## Roadmap
+## License
 
-- [ ] WebSocket transport support
-- [ ] Vector similarity search
-- [ ] Distributed indexing
-- [ ] Web UI dashboard
-- [ ] Auto-update mechanism
-- [ ] Docker support
-- [ ] Kubernetes operator 
+MIT License - see LICENSE file for details.
+
+## Troubleshooting
+
+### Tray Icon Not Showing
+
+1. **Check icon files exist**:
+   ```bash
+   ls -la internal/tray/*.png
+   ```
+
+2. **Rebuild with embedded icons**:
+   ```bash
+   go build ./cmd/mcpproxy
+   ```
+
+3. **Check system permissions** (macOS):
+   - System Settings → Privacy & Security → Accessibility
+
+### Server Not Starting
+
+1. **Check port availability**:
+   ```bash
+   lsof -i :8080
+   ```
+
+2. **Verify configuration**:
+   ```bash
+   ./mcpproxy --config=config.json --log-level=debug
+   ```
+
+3. **Check upstream server connectivity**:
+   - Ensure upstream servers are running
+   - Verify network connectivity
+   - Check firewall settings
+
+For more detailed troubleshooting, see [TRAY_ICON_GUIDE.md](TRAY_ICON_GUIDE.md). 

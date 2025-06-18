@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -26,8 +27,8 @@ func NewManager(logger *zap.Logger) *Manager {
 	}
 }
 
-// AddServer adds a new upstream server and connects to it
-func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error {
+// AddServerConfig adds a server configuration without connecting
+func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -37,22 +38,33 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		delete(m.clients, id)
 	}
 
-	// Create new client
+	// Create new client but don't connect yet
 	client, err := NewClient(id, serverConfig, m.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
 
-	// Connect to server
-	ctx := context.Background()
-	if err := client.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
-	}
-
 	m.clients[id] = client
-	m.logger.Info("Added upstream server",
+	m.logger.Info("Added upstream server configuration",
 		zap.String("id", id),
 		zap.String("name", serverConfig.Name))
+
+	return nil
+}
+
+// AddServer adds a new upstream server and connects to it (legacy method)
+func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error {
+	if err := m.AddServerConfig(id, serverConfig); err != nil {
+		return err
+	}
+
+	// Connect to server
+	ctx := context.Background()
+	if client, exists := m.GetClient(id); exists {
+		if err := client.Connect(ctx); err != nil {
+			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
+		}
+	}
 
 	return nil
 }
@@ -157,7 +169,7 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	return targetClient.CallTool(ctx, actualToolName, args)
 }
 
-// ConnectAll connects to all configured servers
+// ConnectAll connects to all configured servers that should retry
 func (m *Manager) ConnectAll(ctx context.Context) error {
 	m.mu.RLock()
 	clients := make(map[string]*Client)
@@ -168,9 +180,9 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 	var lastError error
 	for id, client := range clients {
-		if !client.IsConnected() {
+		if !client.IsConnected() && client.ShouldRetry() {
 			if err := client.Connect(ctx); err != nil {
-				m.logger.Error("Failed to connect to upstream server",
+				m.logger.Warn("Failed to connect to upstream server (will retry with backoff)",
 					zap.String("id", id),
 					zap.Error(err))
 				lastError = err
@@ -206,33 +218,62 @@ func (m *Manager) GetStats() map[string]interface{} {
 	defer m.mu.RUnlock()
 
 	connectedCount := 0
+	connectingCount := 0
 	totalCount := len(m.clients)
 
 	serverStatus := make(map[string]interface{})
 	for id, client := range m.clients {
+		// Get detailed connection status
+		connectionStatus := client.GetConnectionStatus()
+
 		status := map[string]interface{}{
-			"connected": client.IsConnected(),
-			"name":      client.config.Name,
-			"url":       client.config.URL,
+			"connected":    connectionStatus["connected"],
+			"connecting":   connectionStatus["connecting"],
+			"retry_count":  connectionStatus["retry_count"],
+			"should_retry": connectionStatus["should_retry"],
+			"name":         client.config.Name,
+			"url":          client.config.URL,
+			"type":         client.config.Type,
 		}
 
-		if client.IsConnected() {
+		if connected, ok := connectionStatus["connected"].(bool); ok && connected {
 			connectedCount++
-			if serverInfo := client.GetServerInfo(); serverInfo != nil {
-				status["server_name"] = serverInfo.ServerInfo.Name
-				status["server_version"] = serverInfo.ServerInfo.Version
-			}
-		} else if lastError := client.GetLastError(); lastError != nil {
-			status["last_error"] = lastError.Error()
+		}
+
+		if connecting, ok := connectionStatus["connecting"].(bool); ok && connecting {
+			connectingCount++
+		}
+
+		if lastRetryTime, ok := connectionStatus["last_retry_time"].(time.Time); ok && !lastRetryTime.IsZero() {
+			status["last_retry_time"] = lastRetryTime
+		}
+
+		if lastError, ok := connectionStatus["last_error"].(string); ok {
+			status["last_error"] = lastError
+		}
+
+		if serverName, ok := connectionStatus["server_name"].(string); ok {
+			status["server_name"] = serverName
+		}
+
+		if serverVersion, ok := connectionStatus["server_version"].(string); ok {
+			status["server_version"] = serverVersion
+		}
+
+		if client.GetServerInfo() != nil {
+			info := client.GetServerInfo()
+			status["protocol_version"] = info.ProtocolVersion
 		}
 
 		serverStatus[id] = status
 	}
 
 	return map[string]interface{}{
-		"connected_servers": connectedCount,
-		"total_servers":     totalCount,
-		"servers":           serverStatus,
+		"connected_servers":  connectedCount,
+		"connecting_servers": connectingCount,
+		"total_servers":      totalCount,
+		"servers":            serverStatus,
+		"total_tools":        m.GetTotalToolCount(),
 	}
 }
 

@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -26,8 +27,11 @@ type Client struct {
 	serverInfo *mcp.InitializeResult
 
 	// Connection state
-	connected bool
-	lastError error
+	connected     bool
+	lastError     error
+	retryCount    int
+	lastRetryTime time.Time
+	connecting    bool
 }
 
 // Tool represents a tool from an upstream server
@@ -53,9 +57,17 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger)
 
 // Connect establishes a connection to the upstream MCP server
 func (c *Client) Connect(ctx context.Context) error {
+	if c.connecting {
+		return fmt.Errorf("connection already in progress")
+	}
+
+	c.connecting = true
+	defer func() { c.connecting = false }()
+
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("url", c.config.URL),
-		zap.String("type", c.config.Type))
+		zap.String("type", c.config.Type),
+		zap.Int("retry_count", c.retryCount))
 
 	transportType := c.determineTransportType()
 
@@ -63,6 +75,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	case "http":
 		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
 		if err != nil {
+			c.lastError = err
+			c.retryCount++
+			c.lastRetryTime = time.Now()
 			return fmt.Errorf("failed to create HTTP transport: %w", err)
 		}
 		c.client = client.NewClient(httpTransport)
@@ -78,14 +93,20 @@ func (c *Client) Connect(ctx context.Context) error {
 			// Fallback to parsing from URL
 			args := c.parseCommand(c.config.URL)
 			if len(args) == 0 {
-				return fmt.Errorf("invalid stdio command: %s", c.config.URL)
+				c.lastError = fmt.Errorf("invalid stdio command: %s", c.config.URL)
+				c.retryCount++
+				c.lastRetryTime = time.Now()
+				return c.lastError
 			}
 			command = args[0]
 			cmdArgs = args[1:]
 		}
 
 		if command == "" {
-			return fmt.Errorf("no command specified for stdio transport")
+			c.lastError = fmt.Errorf("no command specified for stdio transport")
+			c.retryCount++
+			c.lastRetryTime = time.Now()
+			return c.lastError
 		}
 
 		// Convert env map to format needed for the process
@@ -97,16 +118,22 @@ func (c *Client) Connect(ctx context.Context) error {
 		stdioTransport := transport.NewStdio(command, envVars, cmdArgs...)
 		c.client = client.NewClient(stdioTransport)
 	default:
-		return fmt.Errorf("unsupported transport type: %s", transportType)
+		c.lastError = fmt.Errorf("unsupported transport type: %s", transportType)
+		c.retryCount++
+		c.lastRetryTime = time.Now()
+		return c.lastError
 	}
 
-	// Set connection timeout
-	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Set connection timeout with exponential backoff consideration
+	timeout := c.getConnectionTimeout()
+	connectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Start the client
 	if err := c.client.Start(connectCtx); err != nil {
 		c.lastError = err
+		c.retryCount++
+		c.lastRetryTime = time.Now()
 		return fmt.Errorf("failed to start MCP client: %w", err)
 	}
 
@@ -122,6 +149,8 @@ func (c *Client) Connect(ctx context.Context) error {
 	serverInfo, err := c.client.Initialize(connectCtx, initRequest)
 	if err != nil {
 		c.lastError = err
+		c.retryCount++
+		c.lastRetryTime = time.Now()
 		c.client.Close()
 		return fmt.Errorf("failed to initialize MCP client: %w", err)
 	}
@@ -129,12 +158,75 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.serverInfo = serverInfo
 	c.connected = true
 	c.lastError = nil
+	c.retryCount = 0 // Reset retry count on successful connection
 
 	c.logger.Info("Successfully connected to upstream MCP server",
 		zap.String("server_name", serverInfo.ServerInfo.Name),
 		zap.String("server_version", serverInfo.ServerInfo.Version))
 
 	return nil
+}
+
+// getConnectionTimeout returns the connection timeout with exponential backoff
+func (c *Client) getConnectionTimeout() time.Duration {
+	baseTimeout := 30 * time.Second
+	if c.retryCount == 0 {
+		return baseTimeout
+	}
+
+	// Exponential backoff: min(base * 2^retry, max)
+	backoffMultiplier := math.Pow(2, float64(c.retryCount))
+	maxTimeout := 5 * time.Minute
+	timeout := time.Duration(float64(baseTimeout) * backoffMultiplier)
+
+	if timeout > maxTimeout {
+		timeout = maxTimeout
+	}
+
+	return timeout
+}
+
+// ShouldRetry returns true if the client should retry connecting based on exponential backoff
+func (c *Client) ShouldRetry() bool {
+	if c.connected || c.connecting {
+		return false
+	}
+
+	if c.retryCount == 0 {
+		return true
+	}
+
+	// Calculate next retry time using exponential backoff
+	backoffDuration := time.Duration(math.Pow(2, float64(c.retryCount-1))) * time.Second
+	maxBackoff := 5 * time.Minute
+	if backoffDuration > maxBackoff {
+		backoffDuration = maxBackoff
+	}
+
+	nextRetryTime := c.lastRetryTime.Add(backoffDuration)
+	return time.Now().After(nextRetryTime)
+}
+
+// GetConnectionStatus returns detailed connection status information
+func (c *Client) GetConnectionStatus() map[string]interface{} {
+	status := map[string]interface{}{
+		"connected":       c.connected,
+		"connecting":      c.connecting,
+		"retry_count":     c.retryCount,
+		"last_retry_time": c.lastRetryTime,
+		"should_retry":    c.ShouldRetry(),
+	}
+
+	if c.lastError != nil {
+		status["last_error"] = c.lastError.Error()
+	}
+
+	if c.serverInfo != nil {
+		status["server_name"] = c.serverInfo.ServerInfo.Name
+		status["server_version"] = c.serverInfo.ServerInfo.Version
+	}
+
+	return status
 }
 
 // determineTransportType determines the transport type based on URL and config
