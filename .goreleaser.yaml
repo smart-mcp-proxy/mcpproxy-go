@@ -7,54 +7,14 @@ before:
     - go generate ./...
 
 builds:
-  # macOS universal binary for GUI/tray support (CGO enabled)
+  # macOS builds - headless only for cross-compilation
   - id: mac
-    env:
-      - CGO_ENABLED=1
-      - GOFLAGS=-trimpath
-    goos:
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    main: ./cmd/mcpproxy
-    binary: mcpproxy
-    ldflags:
-      - -s -w
-      - -X main.version={{.Version}}
-      - -H=darwin
-    
-  # GUI builds with tray support (CGO enabled) - Linux/Windows
-  - id: gui
-    env:
-      - CGO_ENABLED=1
-      - GOFLAGS=-trimpath
-    goos:
-      - linux
-      - windows
-    goarch:
-      - amd64
-      - arm64
-    main: ./cmd/mcpproxy
-    binary: mcpproxy
-    ldflags:
-      - -s -w
-      - -X main.version={{.Version}}
-    ignore:
-      # Skip some problematic combinations for GUI builds
-      - goos: linux
-        goarch: arm64
-  
-  # Headless builds without tray support (CGO disabled)
-  - id: headless
     env:
       - CGO_ENABLED=0
       - GOFLAGS=-trimpath
     tags:
       - nogui
     goos:
-      - linux
-      - windows
       - darwin
     goarch:
       - amd64
@@ -64,14 +24,35 @@ builds:
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
+    
+  # Linux/Windows builds - headless only for cross-compilation
+  - id: gui
+    env:
+      - CGO_ENABLED=0
+      - GOFLAGS=-trimpath
+    tags:
+      - nogui
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/mcpproxy
+    binary: mcpproxy-headless
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+  
+
 
 archives:
-  # macOS-specific archive for DMG creation
+  # macOS-specific archive
   - id: maczip
     builds: [mac]
     format: zip
     name_template: >-
-      {{ .ProjectName }}_
+      {{ .ProjectName }}-headless_
       {{- .Version }}_
       macOS_universal
     files:
@@ -81,14 +62,14 @@ archives:
       
   # Regular archives for other platforms
   - id: default
-    builds: [gui, headless]
+    builds: [gui]
     format: tar.gz
     # Use zip for Windows archives
     format_overrides:
       - goos: windows
         format: zip
     name_template: >-
-      {{ .ProjectName }}_
+      {{ .ProjectName }}-headless_
       {{- .Version }}_
       {{- .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
