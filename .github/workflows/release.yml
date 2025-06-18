@@ -1,97 +1,149 @@
-name: Release
+name: Build and Release
 
 on:
   push:
-    tags:
-      - "v*.*.*" # Triggers on semver tags like v1.0.0
+    tags: ["v*"]
 
 permissions:
   contents: write
   packages: write
 
 jobs:
-  goreleaser:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            ext: ""
+            artifact_name: "mcpproxy-linux-amd64"
+            package_cmd: "tar -czf mcpproxy-${{ github.ref_name }}-linux-amd64.tar.gz mcpproxy"
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+            artifact_name: "mcpproxy-windows-amd64"
+            ldflags: "-H windowsgui"
+            package_cmd: "7z a mcpproxy-${{ github.ref_name }}-windows-amd64.zip mcpproxy.exe"
+          - os: macos-14
+            goos: darwin
+            goarch: "amd64 arm64" # Universal binary
+            ext: ""
+            artifact_name: "mcpproxy-macos-universal"
+            package_cmd: "ditto -ck --rsrc --sequesterRsrc mcpproxy mcpproxy-${{ github.ref_name }}-macos-universal.zip"
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      CGO_ENABLED: "1"
+      GO111MODULE: "on"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # Linux-only: install GUI headers
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.23"
 
-      - name: Get tag
-        id: tag
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          version: latest
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  macos-dmg:
-    needs: goreleaser
-    runs-on: macos-14
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download macOS ZIP from release
+      - name: Build for macOS Universal
+        if: matrix.goos == 'darwin'
         run: |
-          TAG="${{ needs.goreleaser.outputs.tag }}"
-          curl -L -o mcpproxy_macOS.zip \
-            "https://github.com/${{ github.repository }}/releases/download/${TAG}/mcpproxy_${TAG}_macOS_universal.zip"
+          mkdir -p build
+          # Build for both architectures separately
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" -o build/mcpproxy_amd64 ./cmd/mcpproxy
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" -o build/mcpproxy_arm64 ./cmd/mcpproxy
+          # Combine into universal binary
+          lipo -create -output build/mcpproxy build/mcpproxy_amd64 build/mcpproxy_arm64
+          # Clean up individual binaries
+          rm build/mcpproxy_amd64 build/mcpproxy_arm64
 
-      - name: Extract macOS binary
+      - name: Build for Linux/Windows
+        if: matrix.goos != 'darwin'
         run: |
-          unzip mcpproxy_macOS.zip
-          mkdir -p dist
-          mv mcpproxy dist/mcpproxy
+          mkdir -p build
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=1 \
+            go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }} ${{ matrix.ldflags }}" \
+            -o build/mcpproxy${{ matrix.ext }} ./cmd/mcpproxy
 
-      - name: Install create-dmg
-        run: brew install create-dmg
-
-      - name: Create DMG
+      - name: Package artifacts
         run: |
-          TAG="${{ needs.goreleaser.outputs.tag }}"
+          cd build
+          cp ../README.md .
+          if [ -f ../assets/icons/icon.svg ]; then
+            mkdir -p assets/icons
+            cp ../assets/icons/icon.svg assets/icons/
+          fi
 
-          # Create a temporary directory for DMG contents
-          mkdir -p dmg-contents
+          # Package based on OS
+          if [[ "${{ matrix.goos }}" == "darwin" ]]; then
+            ${{ matrix.package_cmd }}
+          elif [[ "${{ matrix.goos }}" == "windows" ]]; then
+            ${{ matrix.package_cmd }}
+          else
+            ${{ matrix.package_cmd }}
+          fi
 
-          # Copy the binary
-          cp dist/mcpproxy dmg-contents/
-
-          # Copy additional files if they exist
-          [ -f README.md ] && cp README.md dmg-contents/
-          [ -f LICENSE ] && cp LICENSE dmg-contents/
-          [ -f assets/icons/icon.svg ] && cp assets/icons/icon.svg dmg-contents/
-
-          # Create the DMG
-          create-dmg \
-            --volname "mcpproxy ${TAG}" \
-            --volicon "assets/icons/icon.svg" \
-            --window-pos 200 120 \
-            --window-size 540 380 \
-            --icon-size 100 \
-            --icon "mcpproxy" 140 180 \
-            --hide-extension "mcpproxy" \
-            --app-drop-link 400 180 \
-            --hdiutil-quiet \
-            "mcpproxy-${TAG}.dmg" \
-            "dmg-contents/"
-
-      - name: Upload DMG to release
+      - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.goreleaser.outputs.tag }}
-          files: mcpproxy-${{ needs.goreleaser.outputs.tag }}.dmg
+          files: build/mcpproxy-*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## mcpproxy ${{ steps.version.outputs.version }}
+
+            Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
+
+            ### Changes in this release
+            - Full GUI/System Tray support on all platforms
+            - Native builds with CGO support for optimal performance
+            - Cross-platform compatibility (Linux, Windows, macOS)
+
+            ### Installation
+
+            #### Download and Run
+            1. Download the appropriate archive for your platform
+            2. Extract the binary
+            3. Run `mcpproxy` to start with system tray, or `mcpproxy --tray=false` for headless mode
+
+            #### macOS
+            - Download `mcpproxy-*-macos-universal.zip`
+            - Right-click → Open to bypass Gatekeeper (unsigned app)
+
+            #### Windows  
+            - Download `mcpproxy-*-windows-amd64.zip`
+            - Extract and run `mcpproxy.exe`
+
+            #### Linux
+            - Download `mcpproxy-*-linux-amd64.tar.gz`
+            - Extract: `tar -xzf mcpproxy-*-linux-amd64.tar.gz`
+            - Run: `./mcpproxy`
+            - Requires GTK3 and AppIndicator libraries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Create macOS DMG (can be added later)
+  # macos-dmg:
+  #   needs: build
+  #   runs-on: macos-14
+  #   if: github.event.repository.default_branch == 'main'
+  #   steps:
+  #     - name: Create DMG
+  #       run: echo "DMG creation can be added here later"
