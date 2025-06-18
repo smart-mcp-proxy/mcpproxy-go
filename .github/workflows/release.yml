@@ -75,11 +75,13 @@ jobs:
 
       - name: Build for Linux/Windows
         if: matrix.goos != 'darwin'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
         run: |
           mkdir -p build
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=1 \
-            go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }} ${{ matrix.ldflags }}" \
-            -o build/mcpproxy${{ matrix.ext }} ./cmd/mcpproxy
+          go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }} ${{ matrix.ldflags }}" -o build/mcpproxy${{ matrix.ext }} ./cmd/mcpproxy
 
       - name: Package artifacts
         run: |
