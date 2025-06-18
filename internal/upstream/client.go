@@ -1,0 +1,330 @@
+package upstream
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
+	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/hash"
+)
+
+// Client represents an MCP client connection to an upstream server
+type Client struct {
+	id     string
+	config *config.ServerConfig
+	client *client.Client
+	logger *zap.Logger
+
+	// Server information received during initialization
+	serverInfo *mcp.InitializeResult
+
+	// Connection state
+	connected bool
+	lastError error
+}
+
+// Tool represents a tool from an upstream server
+type Tool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"inputSchema"`
+}
+
+// NewClient creates a new MCP client for connecting to an upstream server
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger) (*Client, error) {
+	c := &Client{
+		id:     id,
+		config: serverConfig,
+		logger: logger.With(
+			zap.String("upstream_id", id),
+			zap.String("upstream_name", serverConfig.Name),
+		),
+	}
+
+	return c, nil
+}
+
+// Connect establishes a connection to the upstream MCP server
+func (c *Client) Connect(ctx context.Context) error {
+	c.logger.Info("Connecting to upstream MCP server",
+		zap.String("url", c.config.URL),
+		zap.String("type", c.config.Type))
+
+	transportType := c.determineTransportType()
+
+	switch transportType {
+	case "http":
+		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
+		if err != nil {
+			return fmt.Errorf("failed to create HTTP transport: %w", err)
+		}
+		c.client = client.NewClient(httpTransport)
+	case "stdio":
+		var command string
+		var cmdArgs []string
+
+		// Check if command is specified separately (preferred)
+		if c.config.Command != "" {
+			command = c.config.Command
+			cmdArgs = c.config.Args
+		} else {
+			// Fallback to parsing from URL
+			args := c.parseCommand(c.config.URL)
+			if len(args) == 0 {
+				return fmt.Errorf("invalid stdio command: %s", c.config.URL)
+			}
+			command = args[0]
+			cmdArgs = args[1:]
+		}
+
+		if command == "" {
+			return fmt.Errorf("no command specified for stdio transport")
+		}
+
+		// Convert env map to format needed for the process
+		var envVars []string
+		for k, v := range c.config.Env {
+			envVars = append(envVars, k+"="+v)
+		}
+
+		stdioTransport := transport.NewStdio(command, envVars, cmdArgs...)
+		c.client = client.NewClient(stdioTransport)
+	default:
+		return fmt.Errorf("unsupported transport type: %s", transportType)
+	}
+
+	// Set connection timeout
+	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Start the client
+	if err := c.client.Start(connectCtx); err != nil {
+		c.lastError = err
+		return fmt.Errorf("failed to start MCP client: %w", err)
+	}
+
+	// Initialize the client
+	initRequest := mcp.InitializeRequest{}
+	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initRequest.Params.ClientInfo = mcp.Implementation{
+		Name:    "mcpproxy-go",
+		Version: "1.0.0",
+	}
+	initRequest.Params.Capabilities = mcp.ClientCapabilities{}
+
+	serverInfo, err := c.client.Initialize(connectCtx, initRequest)
+	if err != nil {
+		c.lastError = err
+		c.client.Close()
+		return fmt.Errorf("failed to initialize MCP client: %w", err)
+	}
+
+	c.serverInfo = serverInfo
+	c.connected = true
+	c.lastError = nil
+
+	c.logger.Info("Successfully connected to upstream MCP server",
+		zap.String("server_name", serverInfo.ServerInfo.Name),
+		zap.String("server_version", serverInfo.ServerInfo.Version))
+
+	return nil
+}
+
+// determineTransportType determines the transport type based on URL and config
+func (c *Client) determineTransportType() string {
+	if c.config.Type != "" && c.config.Type != "auto" {
+		return c.config.Type
+	}
+
+	// Auto-detect based on URL
+	if strings.HasPrefix(c.config.URL, "http://") || strings.HasPrefix(c.config.URL, "https://") {
+		return "http"
+	}
+
+	// Assume stdio for command-like URLs
+	return "stdio"
+}
+
+// parseCommand parses a command string into command and arguments
+func (c *Client) parseCommand(cmd string) []string {
+	var result []string
+	var current string
+	var inQuote bool
+	var quoteChar rune
+
+	for _, r := range cmd {
+		switch {
+		case r == ' ' && !inQuote:
+			if current != "" {
+				result = append(result, current)
+				current = ""
+			}
+		case (r == '"' || r == '\''):
+			if inQuote && r == quoteChar {
+				inQuote = false
+				quoteChar = 0
+			} else if !inQuote {
+				inQuote = true
+				quoteChar = r
+			} else {
+				current += string(r)
+			}
+		default:
+			current += string(r)
+		}
+	}
+
+	if current != "" {
+		result = append(result, current)
+	}
+
+	return result
+}
+
+// Disconnect closes the connection to the upstream server
+func (c *Client) Disconnect() error {
+	if c.client != nil {
+		c.logger.Info("Disconnecting from upstream MCP server")
+		c.client.Close()
+		c.connected = false
+	}
+	return nil
+}
+
+// IsConnected returns whether the client is currently connected
+func (c *Client) IsConnected() bool {
+	return c.connected
+}
+
+// GetServerInfo returns the server information from initialization
+func (c *Client) GetServerInfo() *mcp.InitializeResult {
+	return c.serverInfo
+}
+
+// GetLastError returns the last error encountered
+func (c *Client) GetLastError() error {
+	return c.lastError
+}
+
+// ListTools retrieves available tools from the upstream server
+func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	if !c.connected || c.client == nil {
+		return nil, fmt.Errorf("client not connected")
+	}
+
+	// Check if server supports tools
+	if c.serverInfo.Capabilities.Tools == nil {
+		c.logger.Debug("Server does not support tools")
+		return nil, nil
+	}
+
+	toolsRequest := mcp.ListToolsRequest{}
+	toolsResult, err := c.client.ListTools(ctx, toolsRequest)
+	if err != nil {
+		c.lastError = err
+		return nil, fmt.Errorf("failed to list tools: %w", err)
+	}
+
+	// Convert MCP tools to our metadata format
+	var tools []*config.ToolMetadata
+	for _, tool := range toolsResult.Tools {
+		// Compute hash of tool definition
+		toolHash := hash.ComputeToolHash(c.config.Name, tool.Name, tool.InputSchema)
+
+		metadata := &config.ToolMetadata{
+			Name:        fmt.Sprintf("%s:%s", c.config.Name, tool.Name),
+			ServerName:  c.config.Name,
+			Description: tool.Description,
+			Hash:        toolHash,
+			ParamsJSON:  "", // Will be filled from InputSchema if needed
+		}
+
+		// Convert InputSchema to JSON string if present
+		if schemaBytes, err := tool.InputSchema.MarshalJSON(); err == nil {
+			metadata.ParamsJSON = string(schemaBytes)
+		}
+
+		tools = append(tools, metadata)
+	}
+
+	c.logger.Debug("Listed tools from upstream server", zap.Int("count", len(tools)))
+	return tools, nil
+}
+
+// CallTool calls a specific tool on the upstream server
+func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+	if !c.connected || c.client == nil {
+		return nil, fmt.Errorf("client not connected")
+	}
+
+	// Check if server supports tools
+	if c.serverInfo.Capabilities.Tools == nil {
+		return nil, fmt.Errorf("server does not support tools")
+	}
+
+	// Prepare the tool call request
+	request := mcp.CallToolRequest{}
+	request.Params.Name = toolName
+	if args != nil {
+		request.Params.Arguments = args
+	}
+
+	c.logger.Debug("Calling tool on upstream server",
+		zap.String("tool_name", toolName),
+		zap.Any("args", args))
+
+	result, err := c.client.CallTool(ctx, request)
+	if err != nil {
+		c.lastError = err
+		return nil, fmt.Errorf("failed to call tool %s: %w", toolName, err)
+	}
+
+	// Extract content from result
+	if result.Content != nil && len(result.Content) > 0 {
+		// Return the content array directly
+		return result.Content, nil
+	}
+
+	// If there's an error in the result, return it
+	if result.IsError {
+		return nil, fmt.Errorf("tool call failed: error indicated in result")
+	}
+
+	return result, nil
+}
+
+// ListResources retrieves available resources from the upstream server (if supported)
+func (c *Client) ListResources(ctx context.Context) ([]interface{}, error) {
+	if !c.connected || c.client == nil {
+		return nil, fmt.Errorf("client not connected")
+	}
+
+	// Check if server supports resources
+	if c.serverInfo.Capabilities.Resources == nil {
+		c.logger.Debug("Server does not support resources")
+		return nil, nil
+	}
+
+	resourcesRequest := mcp.ListResourcesRequest{}
+	resourcesResult, err := c.client.ListResources(ctx, resourcesRequest)
+	if err != nil {
+		c.lastError = err
+		return nil, fmt.Errorf("failed to list resources: %w", err)
+	}
+
+	// Convert to generic interface slice
+	var resources []interface{}
+	for _, resource := range resourcesResult.Resources {
+		resources = append(resources, resource)
+	}
+
+	c.logger.Debug("Listed resources from upstream server", zap.Int("count", len(resources)))
+	return resources, nil
+}
