@@ -163,12 +163,8 @@ nfpms:
       postinstall: ./scripts/postinstall.sh
       preremove: ./scripts/preremove.sh
 
-# macOS .dmg package - using dmg (singular) format for GoReleaser v2
-dmg:
-  - id: mcpproxy-dmg
-    name: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
-    extra_files:
-      - "assets/icons/icon.svg"
+# Note: DMG creation is only available in GoReleaser Pro
+# Removed dmg configuration as it's not supported in the free version
 
 # Docker images (optional)
 dockers:
