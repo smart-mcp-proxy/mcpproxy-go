@@ -1,0 +1,220 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+
+	"github.com/spf13/cobra"
+	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/server"
+	"mcpproxy-go/internal/tray"
+)
+
+var (
+	configFile string
+	dataDir    string
+	listen     string
+	logLevel   string
+	enableTray bool
+	version    = "v0.1.0" // This will be injected by -ldflags during build
+)
+
+func main() {
+	rootCmd := &cobra.Command{
+		Use:     "mcpproxy",
+		Short:   "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
+		Version: version,
+		RunE:    runServer,
+	}
+
+	// Add flags
+	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Configuration file path")
+	rootCmd.PersistentFlags().StringVarP(&dataDir, "data-dir", "d", "", "Data directory path (default: ~/.mcpproxy)")
+	rootCmd.PersistentFlags().StringVarP(&listen, "listen", "l", "", "Listen address (for HTTP mode, not used in stdio mode)")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
+	rootCmd.PersistentFlags().BoolVar(&enableTray, "tray", true, "Enable system tray")
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runServer(cmd *cobra.Command, args []string) error {
+	// Setup logger
+	logger, err := setupLogger(logLevel)
+	if err != nil {
+		return fmt.Errorf("failed to setup logger: %w", err)
+	}
+	defer logger.Sync()
+
+	logger.Info("Starting mcpproxy",
+		zap.String("version", version),
+		zap.String("log_level", logLevel),
+		zap.Bool("tray_enabled", enableTray))
+
+	// Load configuration
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Override tray setting from command line
+	cfg.EnableTray = enableTray
+
+	logger.Info("Configuration loaded",
+		zap.String("data_dir", cfg.DataDir),
+		zap.Int("servers_count", len(cfg.Servers)),
+		zap.Bool("tray_enabled", cfg.EnableTray))
+
+	// Create server
+	srv, err := server.NewServer(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create server: %w", err)
+	}
+
+	// Setup signal handling for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Shutdown function that can be called from tray
+	shutdownFunc := func() {
+		logger.Info("Shutdown requested")
+		cancel()
+	}
+
+	go func() {
+		sig := <-sigChan
+		logger.Info("Received signal, shutting down", zap.String("signal", sig.String()))
+		shutdownFunc()
+	}()
+
+	if cfg.EnableTray {
+		// When tray is enabled, start tray immediately and auto-start server
+		logger.Info("Starting system tray with auto-start server")
+
+		// Create and start tray on main thread (required for macOS)
+		trayApp := tray.New(srv, logger.Sugar(), version, shutdownFunc)
+
+		// Auto-start server in background
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("Auto-starting server for tray mode")
+			if err := srv.StartServer(ctx); err != nil {
+				logger.Error("Failed to auto-start server", zap.Error(err))
+				// Don't cancel context here - let tray handle manual start/stop
+			}
+		}()
+
+		// This is a blocking call that runs the tray event loop
+		if err := trayApp.Run(ctx); err != nil && err != context.Canceled {
+			logger.Error("Tray application error", zap.Error(err))
+		}
+
+		// Wait for server goroutine to finish
+		wg.Wait()
+	} else {
+		// Without tray, run server normally and wait
+		logger.Info("Starting server without tray")
+
+		wg.Add(1)
+		serverErr := make(chan error, 1)
+		go func() {
+			defer wg.Done()
+			serverErr <- srv.Start(ctx)
+		}()
+
+		// Wait for either server error or context cancellation
+		select {
+		case err := <-serverErr:
+			if err != nil {
+				logger.Error("Server error", zap.Error(err))
+				cancel()
+				wg.Wait()
+				return err
+			}
+		case <-ctx.Done():
+			logger.Info("Context cancelled, shutting down")
+		}
+
+		// Wait for all goroutines to finish
+		wg.Wait()
+	}
+
+	// Graceful shutdown
+	if err := srv.Shutdown(); err != nil {
+		logger.Error("Error during shutdown", zap.Error(err))
+		return err
+	}
+
+	logger.Info("mcpproxy shutdown complete")
+	return nil
+}
+
+func setupLogger(level string) (*zap.Logger, error) {
+	var zapLevel zap.AtomicLevel
+	switch level {
+	case "debug":
+		zapLevel = zap.NewAtomicLevelAt(zap.DebugLevel)
+	case "info":
+		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
+	case "warn":
+		zapLevel = zap.NewAtomicLevelAt(zap.WarnLevel)
+	case "error":
+		zapLevel = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	default:
+		return nil, fmt.Errorf("invalid log level: %s", level)
+	}
+
+	cfg := zap.Config{
+		Level:            zapLevel,
+		Development:      false,
+		Encoding:         "console",
+		EncoderConfig:    zap.NewDevelopmentEncoderConfig(),
+		OutputPaths:      []string{"stderr"},
+		ErrorOutputPaths: []string{"stderr"},
+	}
+
+	return cfg.Build()
+}
+
+func loadConfig() (*config.Config, error) {
+	var cfg *config.Config
+	var err error
+
+	// Load configuration - use LoadFromFile if config file specified, otherwise use Load
+	if configFile != "" {
+		cfg, err = config.LoadFromFile(configFile)
+	} else {
+		cfg, err = config.Load()
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Override with command line flags if provided
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+	if listen != "" {
+		cfg.Listen = listen
+	}
+
+	// Validate the configuration
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return cfg, nil
+}
