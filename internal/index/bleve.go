@@ -3,6 +3,7 @@ package index
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
@@ -20,12 +21,14 @@ type BleveIndex struct {
 
 // ToolDocument represents a tool document in the index
 type ToolDocument struct {
-	ToolName    string `json:"tool_name"`
-	ServerName  string `json:"server_name"`
-	Description string `json:"description"`
-	ParamsJSON  string `json:"params_json"`
-	Hash        string `json:"hash"`
-	Tags        string `json:"tags"`
+	ToolName       string `json:"tool_name"`      // Just the tool name (without server prefix)
+	FullToolName   string `json:"full_tool_name"` // Complete server:tool format
+	ServerName     string `json:"server_name"`
+	Description    string `json:"description"`
+	ParamsJSON     string `json:"params_json"`
+	Hash           string `json:"hash"`
+	Tags           string `json:"tags"`
+	SearchableText string `json:"searchable_text"` // Combined searchable content
 }
 
 // NewBleveIndex creates a new Bleve index
@@ -59,12 +62,19 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	// Create document mapping for tools
 	toolMapping := bleve.NewDocumentMapping()
 
-	// Tool name field (keyword analyzer - exact match)
-	toolNameField := bleve.NewTextFieldMapping()
-	toolNameField.Analyzer = keyword.Name
-	toolNameField.Store = true
-	toolNameField.Index = true
-	toolMapping.AddFieldMappingsAt("tool_name", toolNameField)
+	// Tool name field (both keyword and standard analyzers for different search types)
+	toolNameFieldKeyword := bleve.NewTextFieldMapping()
+	toolNameFieldKeyword.Analyzer = keyword.Name
+	toolNameFieldKeyword.Store = true
+	toolNameFieldKeyword.Index = true
+	toolMapping.AddFieldMappingsAt("tool_name", toolNameFieldKeyword)
+
+	// Full tool name field (keyword analyzer for exact matches)
+	fullToolNameField := bleve.NewTextFieldMapping()
+	fullToolNameField.Analyzer = keyword.Name
+	fullToolNameField.Store = true
+	fullToolNameField.Index = true
+	toolMapping.AddFieldMappingsAt("full_tool_name", fullToolNameField)
 
 	// Server name field (keyword analyzer)
 	serverNameField := bleve.NewTextFieldMapping()
@@ -101,6 +111,13 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	tagsField.Index = true
 	toolMapping.AddFieldMappingsAt("tags", tagsField)
 
+	// Searchable text field (standard analyzer) - combines all searchable content
+	searchableTextField := bleve.NewTextFieldMapping()
+	searchableTextField.Analyzer = standard.Name
+	searchableTextField.Store = false // Don't store, just index for search
+	searchableTextField.Index = true
+	toolMapping.AddFieldMappingsAt("searchable_text", searchableTextField)
+
 	// Add document mapping to index
 	indexMapping.AddDocumentMapping("tool", toolMapping)
 	indexMapping.DefaultMapping = toolMapping
@@ -116,19 +133,34 @@ func (b *BleveIndex) Close() error {
 
 // IndexTool indexes a tool document
 func (b *BleveIndex) IndexTool(toolMeta *config.ToolMetadata) error {
+	// Extract just the tool name (remove server prefix)
+	toolName := toolMeta.Name
+	if parts := strings.SplitN(toolMeta.Name, ":", 2); len(parts) == 2 {
+		toolName = parts[1]
+	}
+
+	// Create combined searchable text for better full-text search
+	searchableText := fmt.Sprintf("%s %s %s %s",
+		toolName,
+		toolMeta.Name,
+		toolMeta.Description,
+		toolMeta.ParamsJSON)
+
 	doc := &ToolDocument{
-		ToolName:    toolMeta.Name,
-		ServerName:  toolMeta.ServerName,
-		Description: toolMeta.Description,
-		ParamsJSON:  toolMeta.ParamsJSON,
-		Hash:        toolMeta.Hash,
-		Tags:        "", // Can be extended later
+		ToolName:       toolName,
+		FullToolName:   toolMeta.Name,
+		ServerName:     toolMeta.ServerName,
+		Description:    toolMeta.Description,
+		ParamsJSON:     toolMeta.ParamsJSON,
+		Hash:           toolMeta.Hash,
+		Tags:           "", // Can be extended later
+		SearchableText: searchableText,
 	}
 
 	// Use server:tool format as document ID for uniqueness
-	docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolMeta.Name)
+	docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolName)
 
-	b.logger.Debug("Indexing tool", zap.String("doc_id", docID))
+	b.logger.Debug("Indexing tool", zap.String("doc_id", docID), zap.String("tool_name", toolName))
 	return b.index.Index(docID, doc)
 }
 
@@ -168,22 +200,59 @@ func (b *BleveIndex) DeleteServerTools(serverName string) error {
 	return nil
 }
 
-// SearchTools searches for tools using BM25 scoring
-func (b *BleveIndex) SearchTools(query string, limit int) ([]*config.SearchResult, error) {
-	if query == "" {
+// SearchTools searches for tools using multiple query strategies for better results
+func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchResult, error) {
+	if queryStr == "" {
 		return nil, fmt.Errorf("search query cannot be empty")
 	}
 
-	// Create a match query for full-text search
-	matchQuery := bleve.NewMatchQuery(query)
+	// Create a boolean query to combine multiple search strategies
+	boolQuery := bleve.NewBooleanQuery()
+
+	// 1. Exact match on tool name (highest priority)
+	exactToolNameQuery := bleve.NewTermQuery(queryStr)
+	exactToolNameQuery.SetField("tool_name")
+	exactToolNameQuery.SetBoost(5.0)
+	boolQuery.AddShould(exactToolNameQuery)
+
+	// 2. Exact match on full tool name
+	exactFullToolNameQuery := bleve.NewTermQuery(queryStr)
+	exactFullToolNameQuery.SetField("full_tool_name")
+	exactFullToolNameQuery.SetBoost(4.0)
+	boolQuery.AddShould(exactFullToolNameQuery)
+
+	// 3. Prefix match on tool name for partial matches
+	prefixToolNameQuery := bleve.NewPrefixQuery(queryStr)
+	prefixToolNameQuery.SetField("tool_name")
+	prefixToolNameQuery.SetBoost(3.0)
+	boolQuery.AddShould(prefixToolNameQuery)
+
+	// 4. Wildcard search for underscore-separated terms
+	if strings.Contains(queryStr, "_") {
+		wildcardQuery := bleve.NewWildcardQuery("*" + queryStr + "*")
+		wildcardQuery.SetField("tool_name")
+		wildcardQuery.SetBoost(2.5)
+		boolQuery.AddShould(wildcardQuery)
+	}
+
+	// 5. Full-text search across all fields
+	matchQuery := bleve.NewMatchQuery(queryStr)
+	matchQuery.SetBoost(1.0)
+	boolQuery.AddShould(matchQuery)
+
+	// 6. Search in combined searchable text
+	searchableTextQuery := bleve.NewMatchQuery(queryStr)
+	searchableTextQuery.SetField("searchable_text")
+	searchableTextQuery.SetBoost(1.5)
+	boolQuery.AddShould(searchableTextQuery)
 
 	// Create search request
-	searchReq := bleve.NewSearchRequest(matchQuery)
+	searchReq := bleve.NewSearchRequest(boolQuery)
 	searchReq.Size = limit
-	searchReq.Fields = []string{"tool_name", "server_name", "description", "params_json", "hash"}
+	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "hash"}
 	searchReq.Highlight = bleve.NewHighlight()
 
-	b.logger.Debug("Searching tools", zap.String("query", query), zap.Int("limit", limit))
+	b.logger.Debug("Searching tools with enhanced query", zap.String("query", queryStr), zap.Int("limit", limit))
 
 	searchResult, err := b.index.Search(searchReq)
 	if err != nil {
@@ -194,7 +263,7 @@ func (b *BleveIndex) SearchTools(query string, limit int) ([]*config.SearchResul
 	var results []*config.SearchResult
 	for _, hit := range searchResult.Hits {
 		toolMeta := &config.ToolMetadata{
-			Name:        getStringField(hit.Fields, "tool_name"),
+			Name:        getStringField(hit.Fields, "full_tool_name"),
 			ServerName:  getStringField(hit.Fields, "server_name"),
 			Description: getStringField(hit.Fields, "description"),
 			ParamsJSON:  getStringField(hit.Fields, "params_json"),
@@ -207,7 +276,7 @@ func (b *BleveIndex) SearchTools(query string, limit int) ([]*config.SearchResul
 		})
 	}
 
-	b.logger.Debug("Found tools matching query", zap.Int("count", len(results)), zap.String("query", query))
+	b.logger.Debug("Found tools matching query", zap.Int("count", len(results)), zap.String("query", queryStr))
 	return results, nil
 }
 
@@ -223,16 +292,31 @@ func (b *BleveIndex) BatchIndex(tools []*config.ToolMetadata) error {
 	batch := b.index.NewBatch()
 
 	for _, toolMeta := range tools {
-		doc := &ToolDocument{
-			ToolName:    toolMeta.Name,
-			ServerName:  toolMeta.ServerName,
-			Description: toolMeta.Description,
-			ParamsJSON:  toolMeta.ParamsJSON,
-			Hash:        toolMeta.Hash,
-			Tags:        "",
+		// Extract just the tool name (remove server prefix)
+		toolName := toolMeta.Name
+		if parts := strings.SplitN(toolMeta.Name, ":", 2); len(parts) == 2 {
+			toolName = parts[1]
 		}
 
-		docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolMeta.Name)
+		// Create combined searchable text
+		searchableText := fmt.Sprintf("%s %s %s %s",
+			toolName,
+			toolMeta.Name,
+			toolMeta.Description,
+			toolMeta.ParamsJSON)
+
+		doc := &ToolDocument{
+			ToolName:       toolName,
+			FullToolName:   toolMeta.Name,
+			ServerName:     toolMeta.ServerName,
+			Description:    toolMeta.Description,
+			ParamsJSON:     toolMeta.ParamsJSON,
+			Hash:           toolMeta.Hash,
+			Tags:           "",
+			SearchableText: searchableText,
+		}
+
+		docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolName)
 		batch.Index(docID, doc)
 	}
 

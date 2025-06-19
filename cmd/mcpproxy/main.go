@@ -17,12 +17,13 @@ import (
 )
 
 var (
-	configFile string
-	dataDir    string
-	listen     string
-	logLevel   string
-	enableTray bool
-	version    = "v0.1.0" // This will be injected by -ldflags during build
+	configFile  string
+	dataDir     string
+	listen      string
+	logLevel    string
+	enableTray  bool
+	debugSearch bool
+	version     = "v0.1.0" // This will be injected by -ldflags during build
 )
 
 func main() {
@@ -39,6 +40,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&listen, "listen", "l", "", "Listen address (for HTTP mode, not used in stdio mode)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().BoolVar(&enableTray, "tray", true, "Enable system tray")
+	rootCmd.PersistentFlags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -67,6 +69,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Override tray setting from command line
 	cfg.EnableTray = enableTray
+
+	// Override debug search setting from command line
+	cfg.DebugSearch = debugSearch
 
 	logger.Info("Configuration loaded",
 		zap.String("data_dir", cfg.DataDir),

@@ -80,7 +80,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	}
 
 	// Create MCP proxy server
-	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, logger, server)
+	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, logger, server, cfg.DebugSearch)
 
 	server.mcpProxy = mcpProxy
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -33,6 +34,7 @@ func NewMCPProxyServer(
 	upstreamManager *upstream.Manager,
 	logger *zap.Logger,
 	mainServer *Server,
+	debugSearch bool,
 ) *MCPProxyServer {
 	// Create MCP server with tool capabilities
 	mcpServer := mcpserver.NewMCPServer(
@@ -52,13 +54,13 @@ func NewMCPProxyServer(
 	}
 
 	// Register proxy tools
-	proxy.registerTools()
+	proxy.registerTools(debugSearch)
 
 	return proxy
 }
 
 // registerTools registers all proxy tools with the MCP server
-func (p *MCPProxyServer) registerTools() {
+func (p *MCPProxyServer) registerTools(debugSearch bool) {
 	// retrieve_tools - search for tools across all upstream servers
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
 		mcp.WithDescription("Search for tools across all upstream MCP servers using BM25 full-text search"),
@@ -138,6 +140,27 @@ func (p *MCPProxyServer) registerTools() {
 		),
 	)
 	p.server.AddTool(toolsStatsTool, p.handleToolsStats)
+
+	// debug_search - debug search relevancy (only if enabled)
+	if debugSearch {
+		debugSearchTool := mcp.NewTool("debug_search",
+			mcp.WithDescription("Debug search relevancy - shows detailed scoring and why tools were/weren't ranked highly"),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("Search query to analyze"),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum number of results to return (default: 50)"),
+			),
+			mcp.WithString("explain_tool",
+				mcp.Description("Specific tool name to explain why it was ranked low (format: 'server:tool')"),
+			),
+			mcp.WithBoolean("verbose",
+				mcp.Description("Include detailed scoring explanation (default: false)"),
+			),
+		)
+		p.server.AddTool(debugSearchTool, p.handleDebugSearch)
+	}
 }
 
 // handleRetrieveTools implements the retrieve_tools functionality
@@ -850,6 +873,180 @@ func (p *MCPProxyServer) handleToolsStats(ctx context.Context, request mcp.CallT
 	}
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// handleDebugSearch implements the debug_search functionality
+func (p *MCPProxyServer) handleDebugSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query, err := request.RequireString("query")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'query': %v", err)), nil
+	}
+
+	// Get optional limit parameter
+	limit := request.GetFloat("limit", 50.0)
+
+	// Get optional explain_tool parameter
+	explainTool := request.GetString("explain_tool", "")
+
+	// Get optional verbose parameter
+	verbose := request.GetBool("verbose", false)
+
+	// Perform search using index manager
+	results, err := p.index.Search(query, int(limit))
+	if err != nil {
+		p.logger.Error("Search failed", zap.String("query", query), zap.Error(err))
+		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
+	}
+
+	// Convert results to MCP tool format for LLM compatibility
+	var mcpTools []map[string]interface{}
+	for _, result := range results {
+		// Parse the input schema from ParamsJSON
+		var inputSchema map[string]interface{}
+		if result.Tool.ParamsJSON != "" {
+			if err := json.Unmarshal([]byte(result.Tool.ParamsJSON), &inputSchema); err != nil {
+				p.logger.Warn("Failed to parse tool params JSON",
+					zap.String("tool_name", result.Tool.Name),
+					zap.Error(err))
+				inputSchema = map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				}
+			}
+		} else {
+			inputSchema = map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			}
+		}
+
+		// Create MCP-compatible tool representation
+		mcpTool := map[string]interface{}{
+			"name":        result.Tool.Name,
+			"description": result.Tool.Description,
+			"inputSchema": inputSchema,
+			"score":       result.Score,
+			"server":      result.Tool.ServerName,
+		}
+		mcpTools = append(mcpTools, mcpTool)
+	}
+
+	response := map[string]interface{}{
+		"tools": mcpTools,
+		"query": query,
+		"total": len(results),
+	}
+
+	// Add debug information
+	response["debug"] = map[string]interface{}{
+		"total_indexed_tools": p.getIndexedToolCount(),
+		"search_backend":      "BM25",
+		"query_analysis":      p.analyzeQuery(query),
+		"verbose":             verbose,
+	}
+
+	if explainTool != "" {
+		explanation := p.explainToolRanking(query, explainTool, results)
+		response["explanation"] = explanation
+	}
+
+	jsonResult, err := json.Marshal(response)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// getIndexedToolCount returns the total number of indexed tools
+func (p *MCPProxyServer) getIndexedToolCount() int {
+	count, err := p.index.GetDocumentCount()
+	if err != nil {
+		p.logger.Warn("Failed to get document count", zap.Error(err))
+		return 0
+	}
+	return int(count)
+}
+
+// analyzeQuery analyzes the search query and provides insights
+func (p *MCPProxyServer) analyzeQuery(query string) map[string]interface{} {
+	analysis := map[string]interface{}{
+		"original_query":  query,
+		"query_length":    len(query),
+		"word_count":      len(strings.Fields(query)),
+		"has_underscores": strings.Contains(query, "_"),
+		"has_colons":      strings.Contains(query, ":"),
+		"is_tool_name":    strings.Contains(query, ":"),
+	}
+
+	// Check if query looks like a tool name pattern
+	if strings.Contains(query, ":") {
+		parts := strings.SplitN(query, ":", 2)
+		if len(parts) == 2 {
+			analysis["server_part"] = parts[0]
+			analysis["tool_part"] = parts[1]
+		}
+	}
+
+	return analysis
+}
+
+// explainToolRanking explains why a specific tool was ranked as it was
+func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, results []*config.SearchResult) map[string]interface{} {
+	explanation := map[string]interface{}{
+		"target_tool":      targetTool,
+		"query":            query,
+		"found_in_results": false,
+		"rank":             -1,
+	}
+
+	// Find the tool in results
+	for i, result := range results {
+		if result.Tool.Name == targetTool {
+			explanation["found_in_results"] = true
+			explanation["rank"] = i + 1
+			explanation["score"] = result.Score
+			explanation["tool_details"] = map[string]interface{}{
+				"name":        result.Tool.Name,
+				"server":      result.Tool.ServerName,
+				"description": result.Tool.Description,
+				"has_params":  len(result.Tool.ParamsJSON) > 0,
+			}
+			break
+		}
+	}
+
+	// Analyze why tool might not rank well
+	reasons := []string{}
+	if !strings.Contains(targetTool, query) {
+		reasons = append(reasons, "Tool name doesn't contain query terms")
+	}
+	if strings.Contains(targetTool, "_") && !strings.Contains(query, "_") {
+		reasons = append(reasons, "Tool name has underscores but query doesn't - exact matching issues")
+	}
+	if len(query) < 3 {
+		reasons = append(reasons, "Query too short for effective BM25 scoring")
+	}
+
+	explanation["potential_issues"] = reasons
+
+	// Suggest improvements
+	suggestions := []string{}
+	if strings.Contains(targetTool, ":") {
+		parts := strings.SplitN(targetTool, ":", 2)
+		if len(parts) == 2 {
+			suggestions = append(suggestions, fmt.Sprintf("Try searching for server name: '%s'", parts[0]))
+			suggestions = append(suggestions, fmt.Sprintf("Try searching for tool name: '%s'", parts[1]))
+			if strings.Contains(parts[1], "_") {
+				words := strings.Split(parts[1], "_")
+				suggestions = append(suggestions, fmt.Sprintf("Try searching for individual words: '%s'", strings.Join(words, " ")))
+			}
+		}
+	}
+
+	explanation["suggestions"] = suggestions
+
+	return explanation
 }
 
 // GetMCPServer returns the underlying MCP server for serving
