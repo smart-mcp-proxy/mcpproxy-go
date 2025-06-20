@@ -10,9 +10,11 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
 )
 
@@ -32,6 +34,8 @@ type Server struct {
 	storageManager  *storage.Manager
 	indexManager    *index.Manager
 	upstreamManager *upstream.Manager
+	cacheManager    *cache.Manager
+	truncator       *truncate.Truncator
 	mcpProxy        *MCPProxyServer
 
 	// Server control
@@ -65,12 +69,25 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	// Initialize upstream manager
 	upstreamManager := upstream.NewManager(logger)
 
+	// Initialize cache manager
+	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
+	if err != nil {
+		storageManager.Close()
+		indexManager.Close()
+		return nil, fmt.Errorf("failed to initialize cache manager: %w", err)
+	}
+
+	// Initialize truncator
+	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
+
 	server := &Server{
 		config:          cfg,
 		logger:          logger,
 		storageManager:  storageManager,
 		indexManager:    indexManager,
 		upstreamManager: upstreamManager,
+		cacheManager:    cacheManager,
+		truncator:       truncator,
 		statusCh:        make(chan ServerStatus, 10), // Buffered channel for status updates
 		status: ServerStatus{
 			Phase:       "Initializing",
@@ -80,7 +97,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	}
 
 	// Create MCP proxy server
-	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, logger, server, cfg.DebugSearch)
+	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, cacheManager, truncator, logger, server, cfg.DebugSearch)
 
 	server.mcpProxy = mcpProxy
 
@@ -372,6 +389,10 @@ func (s *Server) Shutdown() error {
 	}
 
 	// Close managers
+	if s.cacheManager != nil {
+		s.cacheManager.Close()
+	}
+
 	if err := s.indexManager.Close(); err != nil {
 		s.logger.Error("Failed to close index manager", zap.Error(err))
 	}

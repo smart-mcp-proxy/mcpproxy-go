@@ -7,10 +7,12 @@ import (
 
 // Bucket names for bbolt database
 const (
-	UpstreamsBucket = "upstreams"
-	ToolStatsBucket = "toolstats"
-	ToolHashBucket  = "toolhash"
-	MetaBucket      = "meta"
+	UpstreamsBucket  = "upstreams"
+	ToolStatsBucket  = "toolstats"
+	ToolHashBucket   = "toolhash"
+	MetaBucket       = "meta"
+	CacheBucket      = "cache"
+	CacheStatsBucket = "cache_stats"
 )
 
 // Meta keys

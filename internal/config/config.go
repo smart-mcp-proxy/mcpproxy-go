@@ -7,13 +7,14 @@ import (
 
 // Config represents the main configuration structure
 type Config struct {
-	Listen      string          `json:"listen" mapstructure:"listen"`
-	DataDir     string          `json:"data_dir" mapstructure:"data-dir"`
-	EnableTray  bool            `json:"enable_tray" mapstructure:"tray"`
-	DebugSearch bool            `json:"debug_search" mapstructure:"debug-search"`
-	Servers     []*ServerConfig `json:"mcpServers" mapstructure:"servers"`
-	TopK        int             `json:"top_k" mapstructure:"top-k"`
-	ToolsLimit  int             `json:"tools_limit" mapstructure:"tools-limit"`
+	Listen            string          `json:"listen" mapstructure:"listen"`
+	DataDir           string          `json:"data_dir" mapstructure:"data-dir"`
+	EnableTray        bool            `json:"enable_tray" mapstructure:"tray"`
+	DebugSearch       bool            `json:"debug_search" mapstructure:"debug-search"`
+	Servers           []*ServerConfig `json:"mcpServers" mapstructure:"servers"`
+	TopK              int             `json:"top_k" mapstructure:"top-k"`
+	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
+	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
 }
 
 // ServerConfig represents upstream MCP server configuration
@@ -113,13 +114,14 @@ type ToolStatEntry struct {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Listen:      ":8080",
-		DataDir:     "", // Will be set to ~/.mcpproxy by loader
-		EnableTray:  true,
-		DebugSearch: false,
-		Servers:     []*ServerConfig{},
-		TopK:        5,
-		ToolsLimit:  15,
+		Listen:            ":8080",
+		DataDir:           "", // Will be set to ~/.mcpproxy by loader
+		EnableTray:        true,
+		DebugSearch:       false,
+		Servers:           []*ServerConfig{},
+		TopK:              5,
+		ToolsLimit:        15,
+		ToolResponseLimit: 20000, // Default 20000 characters
 	}
 }
 
@@ -133,6 +135,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ToolsLimit <= 0 {
 		c.ToolsLimit = 15
+	}
+	if c.ToolResponseLimit < 0 {
+		c.ToolResponseLimit = 0 // 0 means disabled
 	}
 	return nil
 }

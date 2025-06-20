@@ -8,6 +8,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 )
 
@@ -38,6 +39,17 @@ func (m *Manager) Close() error {
 
 	if m.db != nil {
 		return m.db.Close()
+	}
+	return nil
+}
+
+// GetDB returns the underlying BBolt database for direct access
+func (m *Manager) GetDB() *bbolt.DB {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.db != nil {
+		return m.db.db
 	}
 	return nil
 }

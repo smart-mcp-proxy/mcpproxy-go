@@ -105,6 +105,9 @@ Smart MCP Proxy
 - **Intelligent Tool Discovery**: Automatically discover and index tools from multiple MCP servers
 - **Semantic Search**: Find relevant tools using natural language queries
 - **Tool Aggregation**: Combine tools from multiple upstream servers into a single interface
+- **Response Truncation & Caching**: Automatically truncate large tool responses to prevent LLM context bloat
+- **Smart Pagination**: Access cached response data through pagination with the `read_cache` tool
+- **JSON Structure Analysis**: Intelligent splitting of JSON responses by record arrays
 - **HTTP & Stdio Support**: Connect to MCP servers via HTTP or stdio protocols
 - **Persistent Storage**: Cache tool metadata and connection information
 - **Configuration Management**: Flexible JSON-based configuration with environment variable support
@@ -146,6 +149,7 @@ Create a `config.json` file:
   "enable_tray": true,
   "top_k": 5,
   "tools_limit": 15,
+  "tool_response_limit": 20000,
   "mcpServers": [
     {
       "name": "Local Python Server",
@@ -217,6 +221,87 @@ curl -X POST http://localhost:8080/mcp/ \
 ### Tool Discovery
 
 The proxy automatically discovers and indexes tools from configured upstream servers. Tools are available through the unified interface with semantic search capabilities.
+
+## Response Truncation & Caching
+
+The Smart MCP Proxy includes intelligent response truncation to prevent LLM context bloat while maintaining access to complete data through caching and pagination.
+
+### How It Works
+
+1. **Automatic Truncation**: Tool responses exceeding the configured limit (default: 20,000 characters) are automatically truncated
+2. **JSON Analysis**: The proxy analyzes JSON responses to identify record arrays for intelligent splitting
+3. **Smart Caching**: Complete responses are cached with 2-hour TTL for pagination access
+4. **Fallback Handling**: Non-JSON or unstructured responses get simple truncation
+
+### Configuration
+
+```json
+{
+  "tool_response_limit": 20000  // Default: 20000 chars, 0 = disabled
+}
+```
+
+### Truncated Response Format
+
+When a response is truncated, you'll see:
+
+```json
+{
+  "data": [{"id": 1}, {"id": 2}]  // Partial data...
+}
+
+... [truncated by mcpproxy]
+
+Response truncated (limit: 20000 chars, actual: 45000 chars, records: 150)
+Use read_cache tool: key="abc123def...", offset=0, limit=50
+Returns: {"records": [...], "meta": {"total_records": 150, "total_size": 45000}}
+```
+
+### Accessing Complete Data
+
+Use the `read_cache` tool to access paginated data:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "read_cache",
+    "arguments": {
+      "key": "abc123def456...",
+      "offset": 0,
+      "limit": 50
+    }
+  }
+}
+```
+
+Response:
+```json
+{
+  "records": [
+    {"id": 1, "name": "item1"},
+    {"id": 2, "name": "item2"}
+    // ... up to 50 records
+  ],
+  "meta": {
+    "key": "abc123def456...",
+    "total_records": 150,
+    "limit": 50,
+    "offset": 0,
+    "total_size": 45000,
+    "record_path": "data"
+  }
+}
+```
+
+### Cache Management
+
+- **TTL**: Cached responses expire after 2 hours
+- **Cleanup**: Automatic cleanup runs every 10 minutes
+- **Storage**: Uses the same BBolt database as other proxy data
+- **Statistics**: Cache hit/miss rates available through tool stats
 
 ## System Tray Usage
 

@@ -17,13 +17,14 @@ import (
 )
 
 var (
-	configFile  string
-	dataDir     string
-	listen      string
-	logLevel    string
-	enableTray  bool
-	debugSearch bool
-	version     = "v0.1.0" // This will be injected by -ldflags during build
+	configFile        string
+	dataDir           string
+	listen            string
+	logLevel          string
+	enableTray        bool
+	debugSearch       bool
+	toolResponseLimit int
+	version           = "v0.1.0" // This will be injected by -ldflags during build
 )
 
 func main() {
@@ -41,6 +42,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().BoolVar(&enableTray, "tray", true, "Enable system tray")
 	rootCmd.PersistentFlags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
+	rootCmd.PersistentFlags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -72,6 +74,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Override debug search setting from command line
 	cfg.DebugSearch = debugSearch
+
+	// Override tool response limit from command line if provided
+	if toolResponseLimit != 0 {
+		cfg.ToolResponseLimit = toolResponseLimit
+	}
 
 	logger.Info("Configuration loaded",
 		zap.String("data_dir", cfg.DataDir),
@@ -214,6 +221,9 @@ func loadConfig() (*config.Config, error) {
 	}
 	if listen != "" {
 		cfg.Listen = listen
+	}
+	if toolResponseLimit != 0 {
+		cfg.ToolResponseLimit = toolResponseLimit
 	}
 
 	// Validate the configuration

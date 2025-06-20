@@ -11,9 +11,11 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
 )
 
@@ -23,6 +25,8 @@ type MCPProxyServer struct {
 	storage         *storage.Manager
 	index           *index.Manager
 	upstreamManager *upstream.Manager
+	cacheManager    *cache.Manager
+	truncator       *truncate.Truncator
 	logger          *zap.Logger
 	mainServer      *Server // Reference to main server for config persistence
 }
@@ -32,6 +36,8 @@ func NewMCPProxyServer(
 	storage *storage.Manager,
 	index *index.Manager,
 	upstreamManager *upstream.Manager,
+	cacheManager *cache.Manager,
+	truncator *truncate.Truncator,
 	logger *zap.Logger,
 	mainServer *Server,
 	debugSearch bool,
@@ -49,6 +55,8 @@ func NewMCPProxyServer(
 		storage:         storage,
 		index:           index,
 		upstreamManager: upstreamManager,
+		cacheManager:    cacheManager,
+		truncator:       truncator,
 		logger:          logger,
 		mainServer:      mainServer,
 	}
@@ -140,6 +148,22 @@ func (p *MCPProxyServer) registerTools(debugSearch bool) {
 		),
 	)
 	p.server.AddTool(toolsStatsTool, p.handleToolsStats)
+
+	// read_cache - retrieve cached tool response data with pagination
+	readCacheTool := mcp.NewTool("read_cache",
+		mcp.WithDescription("Retrieve cached tool response data with pagination - use this when mcpproxy indicates data was truncated"),
+		mcp.WithString("key",
+			mcp.Required(),
+			mcp.Description("Cache key provided by mcpproxy when response was truncated"),
+		),
+		mcp.WithNumber("offset",
+			mcp.Description("Starting record offset (default: 0)"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of records to return (default: 50)"),
+		),
+	)
+	p.server.AddTool(readCacheTool, p.handleReadCache)
 
 	// debug_search - debug search relevancy (only if enabled)
 	if debugSearch {
@@ -267,7 +291,36 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
 	}
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	response := string(jsonResult)
+
+	// Apply truncation if configured
+	if p.truncator.ShouldTruncate(response) {
+		truncResult := p.truncator.Truncate(response, toolName, args)
+
+		// If caching is available, store the full response
+		if truncResult.CacheAvailable {
+			if err := p.cacheManager.Store(
+				truncResult.CacheKey,
+				toolName,
+				args,
+				response,
+				truncResult.RecordPath,
+				truncResult.TotalRecords,
+			); err != nil {
+				p.logger.Error("Failed to cache response",
+					zap.String("tool_name", toolName),
+					zap.String("cache_key", truncResult.CacheKey),
+					zap.Error(err))
+				// Fall back to simple truncation if caching fails
+				truncResult.TruncatedContent = p.truncator.Truncate(response, toolName, args).TruncatedContent
+				truncResult.CacheAvailable = false
+			}
+		}
+
+		response = truncResult.TruncatedContent
+	}
+
+	return mcp.NewToolResultText(response), nil
 }
 
 // handleUpstreamServers implements upstream server management
@@ -1047,6 +1100,40 @@ func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, res
 	explanation["suggestions"] = suggestions
 
 	return explanation
+}
+
+// handleReadCache implements the read_cache functionality
+func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	key, err := request.RequireString("key")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'key': %v", err)), nil
+	}
+
+	// Get optional parameters
+	offset := int(request.GetFloat("offset", 0))
+	limit := int(request.GetFloat("limit", 50))
+
+	// Validate parameters
+	if offset < 0 {
+		return mcp.NewToolResultError("Offset must be non-negative"), nil
+	}
+	if limit <= 0 || limit > 1000 {
+		return mcp.NewToolResultError("Limit must be between 1 and 1000"), nil
+	}
+
+	// Retrieve cached data
+	response, err := p.cacheManager.GetRecords(key, offset, limit)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to retrieve cached data: %v", err)), nil
+	}
+
+	// Serialize response
+	jsonResult, err := json.Marshal(response)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
 // GetMCPServer returns the underlying MCP server for serving

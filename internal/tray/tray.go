@@ -451,7 +451,7 @@ func (a *App) updateServersMenu() {
 		return
 	}
 
-	// Clear existing submenu items (this is a limitation of systray - we can't dynamically remove items)
+	// Clear existing submenu items (this is a ·Æation of systray - we can't dynamically remove items)
 	// So we update the main menu title to include server count
 	stats := a.server.GetUpstreamStats()
 	if stats != nil {
