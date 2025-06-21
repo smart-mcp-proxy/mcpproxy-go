@@ -111,7 +111,21 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 func (s *Server) GetStatus() interface{} {
 	s.statusMu.RLock()
 	defer s.statusMu.RUnlock()
-	return s.status
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Create a map representation of the status for the tray
+	statusMap := map[string]interface{}{
+		"running":        s.running,
+		"listen_addr":    s.GetListenAddress(),
+		"phase":          s.status.Phase,
+		"message":        s.status.Message,
+		"upstream_stats": s.status.UpstreamStats,
+		"tools_indexed":  s.status.ToolsIndexed,
+		"last_updated":   s.status.LastUpdated,
+	}
+
+	return statusMap
 }
 
 // StatusChannel returns a channel that receives status updates
@@ -263,49 +277,45 @@ func (s *Server) backgroundToolIndexing() {
 	}
 }
 
-// loadConfiguredServers loads servers from config and storage, then adds them to upstream manager
+// loadConfiguredServers synchronizes the storage and upstream manager from the current config.
+// This is the source of truth when configuration is loaded from disk.
 func (s *Server) loadConfiguredServers() error {
-	// First load servers from config file
-	for _, serverConfig := range s.config.Servers {
-		if serverConfig.Enabled {
-			// Store in persistent storage
-			id, err := s.storageManager.AddUpstream(serverConfig)
-			if err != nil {
-				s.logger.Warn("Failed to store server config",
-					zap.String("name", serverConfig.Name),
-					zap.Error(err))
-				continue
-			}
+	s.logger.Info("Synchronizing servers from configuration")
 
-			// Add to upstream manager without connecting
-			if err := s.upstreamManager.AddServerConfig(id, serverConfig); err != nil {
-				s.logger.Warn("Failed to add upstream server config",
-					zap.String("name", serverConfig.Name),
-					zap.Error(err))
+	// Get all servers currently in the upstream manager to find which to remove
+	currentUpstreams := s.upstreamManager.GetAllServerNames()
+	configuredServers := make(map[string]bool)
+
+	// Add/update servers from config
+	for _, serverCfg := range s.config.Servers {
+		configuredServers[serverCfg.Name] = true
+
+		// Sync config to storage
+		if err := s.storageManager.SaveUpstreamServer(serverCfg); err != nil {
+			s.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
+			continue
+		}
+
+		// Sync to upstream manager
+		if serverCfg.Enabled {
+			if err := s.upstreamManager.AddServer(serverCfg.Name, serverCfg); err != nil {
+				s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", serverCfg.Name))
 			}
+		} else {
+			s.upstreamManager.RemoveServer(serverCfg.Name)
 		}
 	}
 
-	// Then load any additional servers from storage
-	storedServers, err := s.storageManager.ListUpstreams()
-	if err != nil {
-		return fmt.Errorf("failed to list stored upstreams: %w", err)
-	}
-
-	for _, serverConfig := range storedServers {
-		if serverConfig.Enabled {
-			// Check if already added from config
-			if !s.isServerInConfig(serverConfig.Name) {
-				if err := s.upstreamManager.AddServerConfig(serverConfig.Name, serverConfig); err != nil {
-					s.logger.Warn("Failed to add stored upstream server config",
-						zap.String("id", serverConfig.Name),
-						zap.String("name", serverConfig.Name),
-						zap.Error(err))
-				}
+	// Remove servers that are no longer in config
+	for _, serverName := range currentUpstreams {
+		if !configuredServers[serverName] {
+			s.logger.Info("Removing server no longer in config", zap.String("server", serverName))
+			s.upstreamManager.RemoveServer(serverName)
+			if err := s.storageManager.DeleteUpstreamServer(serverName); err != nil {
+				s.logger.Error("Failed to delete server from storage", zap.Error(err), zap.String("server", serverName))
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -460,49 +470,55 @@ func (s *Server) GetQuarantinedServers() ([]map[string]interface{}, error) {
 
 // UnquarantineServer removes a server from quarantine via tray UI
 func (s *Server) UnquarantineServer(serverName string) error {
-	return s.storageManager.QuarantineUpstreamServer(serverName, false)
+	return s.QuarantineServer(serverName, false)
 }
 
-// EnableServer enables/disables a server via tray UI
+// EnableServer enables/disables a server and ensures all state is synchronized.
+// It acts as the entry point for changes originating from the UI or API.
 func (s *Server) EnableServer(serverName string, enabled bool) error {
-	err := s.storageManager.EnableUpstreamServer(serverName, enabled)
-	if err != nil {
-		return err
+	s.logger.Info("Request to change server enabled state",
+		zap.String("server", serverName),
+		zap.Bool("enabled", enabled))
+
+	// First, update the authoritative record in storage.
+	if err := s.storageManager.EnableUpstreamServer(serverName, enabled); err != nil {
+		s.logger.Error("Failed to update server enabled state in storage", zap.Error(err))
+		return fmt.Errorf("failed to update server '%s' in storage: %w", serverName, err)
 	}
 
-	// Update upstream manager
-	if enabled {
-		// Get server config and add to upstream manager
-		serverConfig, err := s.storageManager.GetUpstreamServer(serverName)
-		if err != nil {
-			return fmt.Errorf("failed to get server config: %w", err)
-		}
-
-		if err := s.upstreamManager.AddServer(serverName, serverConfig); err != nil {
-			s.logger.Warn("Failed to connect to upstream server after enabling",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
-	} else {
-		// Remove from upstream manager
-		s.upstreamManager.RemoveServer(serverName)
+	// Now that storage is updated, save the configuration to disk.
+	// This ensures the file reflects the authoritative state.
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after state change", zap.Error(err))
+		// Don't return here; the primary state is updated. The file watcher will eventually sync.
 	}
 
-	// Trigger configuration save
-	s.OnUpstreamServerChange()
+	// The file watcher in the tray will detect the change to the config file and
+	// trigger ReloadConfiguration(), which calls loadConfiguredServers().
+	// This completes the loop by updating the running state (upstreamManager) from the new config.
+	s.logger.Info("Successfully persisted server state change. Relying on file watcher to sync running state.",
+		zap.String("server", serverName))
 
 	return nil
 }
 
-// QuarantineServer sets quarantine status via tray UI
+// QuarantineServer quarantines/unquarantines a server
 func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
-	err := s.storageManager.QuarantineUpstreamServer(serverName, quarantined)
-	if err != nil {
-		return err
+	s.logger.Info("Request to change server quarantine state",
+		zap.String("server", serverName),
+		zap.Bool("quarantined", quarantined))
+
+	if err := s.storageManager.QuarantineUpstreamServer(serverName, quarantined); err != nil {
+		s.logger.Error("Failed to update server quarantine state in storage", zap.Error(err))
+		return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)
 	}
 
-	// Trigger configuration save
-	s.OnUpstreamServerChange()
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))
+	}
+
+	s.logger.Info("Successfully persisted server quarantine state change. Relying on file watcher to sync running state.",
+		zap.String("server", serverName))
 
 	return nil
 }
@@ -663,38 +679,22 @@ func (s *Server) StopServer() error {
 // startCustomHTTPServer creates a custom HTTP server that handles both /mcp and /mcp/ routes
 func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPServer) error {
 	mux := http.NewServeMux()
+	mux.Handle("/v1/tool_code", streamableServer)
+	mux.Handle("/v1/tool-code", streamableServer) // Alias for python client
 
-	// Handle both /mcp and /mcp/ patterns
-	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		// Redirect /mcp to /mcp/ for consistency
-		if r.URL.Path == "/mcp" {
-			http.Redirect(w, r, "/mcp/", http.StatusMovedPermanently)
-			return
-		}
-		streamableServer.ServeHTTP(w, r)
-	})
-
-	mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
-		streamableServer.ServeHTTP(w, r)
-	})
-
-	// Create HTTP server with better defaults for restart scenarios
 	s.httpServer = &http.Server{
 		Addr:    s.config.Listen,
 		Handler: mux,
-		// Add timeouts to prevent hanging connections
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
 	}
 
-	s.logger.Info("Starting custom HTTP server with /mcp routing",
-		zap.String("addr", s.config.Listen))
-
-	// Listen and serve - this is a blocking call
-	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		s.updateStatus("Error", fmt.Sprintf("Failed to start HTTP server on %s: %v", s.config.Listen, err))
-		return fmt.Errorf("HTTP server failed: %w", err)
+	s.logger.Info("Starting HTTP server", zap.String("address", s.config.Listen))
+	if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+		s.logger.Error("HTTP server error", zap.Error(err))
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+		s.updateStatus("Error", fmt.Sprintf("Server failed: %v", err))
+		return err
 	}
 
 	return nil
@@ -702,29 +702,26 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 
 // SaveConfiguration saves the current configuration to the persistent config file
 func (s *Server) SaveConfiguration() error {
-	// Get current servers from storage
-	servers, err := s.storageManager.ListUpstreamServers()
+	configPath := s.GetConfigPath()
+	if configPath == "" {
+		s.logger.Warn("Configuration file path is not available, cannot save configuration")
+		return fmt.Errorf("configuration file path is not available")
+	}
+
+	s.logger.Info("Saving configuration to file", zap.String("path", configPath))
+
+	// Ensure we have the latest server list from the storage manager
+	latestServers, err := s.storageManager.ListUpstreamServers()
 	if err != nil {
-		return fmt.Errorf("failed to list upstream servers: %w", err)
+		s.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))
+		return err
 	}
+	s.config.Servers = latestServers
 
-	// Update config with current servers
-	s.config.Servers = servers
-
-	// Save to persistent config file
-	configPath := config.GetConfigPath(s.config.DataDir)
-	if err := config.SaveConfig(s.config, configPath); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
-	}
-
-	s.logger.Info("Configuration saved",
-		zap.String("path", configPath),
-		zap.Int("servers", len(servers)))
-
-	return nil
+	return config.SaveConfig(s.config, configPath)
 }
 
-// ReloadConfiguration reloads the configuration and updates running servers
+// ReloadConfiguration reloads the configuration from disk
 func (s *Server) ReloadConfiguration() error {
 	// Load configuration from file
 	configPath := config.GetConfigPath(s.config.DataDir)
@@ -750,12 +747,10 @@ func (s *Server) ReloadConfiguration() error {
 
 // OnUpstreamServerChange should be called when upstream servers are modified
 func (s *Server) OnUpstreamServerChange() {
-	// Save configuration to persist changes
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Error("Failed to save configuration after upstream change", zap.Error(err))
-	}
-
-	// Trigger background tool discovery to update index
+	// This function should primarily trigger re-discovery and re-indexing.
+	// It should NOT save the configuration, as that can cause loops.
+	// Saving should be done explicitly when the state change is initiated.
+	s.logger.Info("Upstream server configuration changed, triggering tool discovery")
 	go func() {
 		ctx := context.Background()
 		if err := s.discoverAndIndexTools(ctx); err != nil {
@@ -765,4 +760,9 @@ func (s *Server) OnUpstreamServerChange() {
 
 	// Update status
 	s.updateStatus(s.status.Phase, "Upstream servers updated")
+}
+
+// GetConfigPath returns the path to the configuration file for file watching
+func (s *Server) GetConfigPath() string {
+	return config.GetConfigPath(s.config.DataDir)
 }

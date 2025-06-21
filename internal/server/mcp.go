@@ -118,6 +118,7 @@ func (p *MCPProxyServer) registerTools(debugSearch bool) {
 		),
 		mcp.WithObject("args",
 			mcp.Description("Arguments to pass to the tool. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
+			mcp.AdditionalProperties(true),
 		),
 	)
 	p.server.AddTool(callToolTool, p.handleCallTool)
@@ -158,6 +159,7 @@ func (p *MCPProxyServer) registerTools(debugSearch bool) {
 			),
 			mcp.WithObject("env",
 				mcp.Description("Environment variables for stdio servers"),
+				mcp.AdditionalProperties(true),
 			),
 			mcp.WithString("url",
 				mcp.Description("Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')"),
@@ -168,6 +170,7 @@ func (p *MCPProxyServer) registerTools(debugSearch bool) {
 			),
 			mcp.WithObject("headers",
 				mcp.Description("HTTP headers for authentication (e.g., {'Authorization': 'Bearer token'})"),
+				mcp.AdditionalProperties(true),
 			),
 			mcp.WithBoolean("enabled",
 				mcp.Description("Whether server should be enabled (default: true)"),
@@ -177,9 +180,11 @@ func (p *MCPProxyServer) registerTools(debugSearch bool) {
 			),
 			mcp.WithObject("cursor_config",
 				mcp.Description("Cursor IDE mcpServers configuration object for direct import"),
+				mcp.AdditionalProperties(true),
 			),
 			mcp.WithObject("patch",
 				mcp.Description("Fields to update for patch operations"),
+				mcp.AdditionalProperties(true),
 			),
 		)
 		p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)

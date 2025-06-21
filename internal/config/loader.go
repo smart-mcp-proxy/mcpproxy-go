@@ -159,14 +159,11 @@ func loadConfigFile(path string, cfg *Config) error {
 		return fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Enable all servers by default if not specified
+	// Set created time if not specified
 	for _, server := range cfg.Servers {
 		if server.Created.IsZero() {
-			server.Created = now()
-		}
-		// Default to enabled if not explicitly set
-		if !server.Enabled && server.URL != "" || server.Command != "" {
-			server.Enabled = true
+			// Use a consistent time function if `now()` is not defined in this package
+			server.Created = time.Now()
 		}
 	}
 

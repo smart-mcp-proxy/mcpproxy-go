@@ -26,6 +26,10 @@ type ServerInterface interface {
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string, quarantined bool) error
 	GetAllServers() ([]map[string]interface{}, error)
+
+	// Config management for file watching
+	ReloadConfiguration() error
+	GetConfigPath() string
 }
 
 // App represents the system tray application (stub version)

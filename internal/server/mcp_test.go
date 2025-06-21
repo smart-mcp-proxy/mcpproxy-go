@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -812,3 +815,63 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 }
 
 // Test: Error handling and recovery
+func TestHandleV1ToolProxy(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		serverID string
+		wantErr  string
+		result   *mcp.CallToolResult
+		client   *mockToolClient
+	}{
+		{
+			name:     "disabled client",
+			toolName: "disabled-tool",
+			serverID: "disabled-server",
+			wantErr:  "client for server disabled-server is disabled",
+			result: &mcp.CallToolResult{
+				ToolName: "disabled-tool",
+			},
+			client: &mockToolClient{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &MCPProxyServer{
+				upstreamManager: upstream.NewManager(zap.NewNop()),
+				logger:          zap.NewNop(),
+			}
+
+			s.upstreamManager.AddServer(&config.ServerConfig{
+				ID:      tc.serverID,
+				Enabled: tc.name != "disabled client",
+			})
+
+			if tc.client != nil {
+				s.upstreamManager.AddClient(tc.serverID, tc.client)
+			}
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/tools", bytes.NewBufferString(`{"name": "`+tc.toolName+`"}`))
+			req.Header.Set("Content-Type", "application/json")
+
+			s.handleV1ToolProxy(rec, req)
+
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, rec.Code)
+
+			var result mcp.CallToolResult
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+
+			if tc.wantErr != "" {
+				require.Len(t, result.Outputs, 1)
+				var content map[string]string
+				require.NoError(t, json.Unmarshal([]byte(result.Outputs[0].Content), &content))
+				assert.Equal(t, tc.wantErr, content["error"])
+			} else {
+				assert.Equal(t, "test-output", result.Outputs[0].Content)
+			}
+		})
+	}
+}

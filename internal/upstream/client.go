@@ -316,6 +316,11 @@ func (c *Client) IsConnected() bool {
 	return c.connected
 }
 
+// IsConnecting returns whether the client is currently connecting
+func (c *Client) IsConnecting() bool {
+	return c.connecting
+}
+
 // GetServerInfo returns the server information from initialization
 func (c *Client) GetServerInfo() *mcp.InitializeResult {
 	return c.serverInfo

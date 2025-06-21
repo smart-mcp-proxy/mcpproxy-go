@@ -137,7 +137,7 @@ func (env *TestEnvironment) waitForServerReady() {
 		case <-ticker.C:
 			if env.proxyServer.IsRunning() {
 				// Give it a bit more time to fully initialize
-				time.Sleep(500 * time.Millisecond)
+				time.Sleep(2 * time.Second)
 				return
 			}
 		}

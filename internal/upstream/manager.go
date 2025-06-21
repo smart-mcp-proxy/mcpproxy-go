@@ -58,6 +58,11 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		return err
 	}
 
+	if !serverConfig.Enabled {
+		m.logger.Info("Skipping connection for disabled server", zap.String("id", id), zap.String("name", serverConfig.Name))
+		return nil
+	}
+
 	// Connect to server
 	ctx := context.Background()
 	if client, exists := m.GetClient(id); exists {
@@ -101,18 +106,35 @@ func (m *Manager) GetAllClients() map[string]*Client {
 	return result
 }
 
+// GetAllServerNames returns a slice of all configured server names
+func (m *Manager) GetAllServerNames() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	names := make([]string, 0, len(m.clients))
+	for name := range m.clients {
+		names = append(names, name)
+	}
+	return names
+}
+
 // DiscoverTools discovers all tools from all connected upstream servers
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var allTools []*config.ToolMetadata
+	connectedCount := 0
 
 	for id, client := range m.clients {
+		if !client.config.Enabled {
+			continue
+		}
 		if !client.IsConnected() {
 			m.logger.Warn("Skipping disconnected client", zap.String("id", id))
 			continue
 		}
+		connectedCount++
 
 		tools, err := client.ListTools(ctx)
 		if err != nil {
@@ -129,7 +151,7 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 
 	m.logger.Info("Discovered tools from upstream servers",
 		zap.Int("total_tools", len(allTools)),
-		zap.Int("connected_servers", len(m.clients)))
+		zap.Int("connected_servers", connectedCount))
 
 	return allTools, nil
 }
@@ -158,7 +180,11 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	}
 
 	if targetClient == nil {
-		return nil, fmt.Errorf("no connected client found for server: %s", serverName)
+		return nil, fmt.Errorf("no client found for server: %s", serverName)
+	}
+
+	if !targetClient.config.Enabled {
+		return nil, fmt.Errorf("client for server %s is disabled", serverName)
 	}
 
 	// Check connection status and provide detailed error information
@@ -189,19 +215,36 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	}
 	m.mu.RUnlock()
 
-	var lastError error
+	var wg sync.WaitGroup
 	for id, client := range clients {
-		if !client.IsConnected() && client.ShouldRetry() {
-			if err := client.Connect(ctx); err != nil {
-				m.logger.Warn("Failed to connect to upstream server (will retry with backoff)",
-					zap.String("id", id),
-					zap.Error(err))
-				lastError = err
+		if !client.config.Enabled {
+			if client.IsConnected() {
+				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.config.Name))
+				client.Disconnect()
 			}
+			continue
 		}
+
+		wg.Add(1)
+		go func(id string, c *Client) {
+			defer wg.Done()
+			// Only connect if not already connected or trying to connect
+			status := c.GetConnectionStatus()
+			if connected, ok := status["connected"].(bool); !ok || !connected {
+				if connecting, ok := status["connecting"].(bool); !ok || !connecting {
+					if err := c.Connect(ctx); err != nil {
+						m.logger.Error("Failed to connect to upstream server",
+							zap.String("id", id),
+							zap.String("name", c.config.Name),
+							zap.Error(err))
+					}
+				}
+			}
+		}(id, client)
 	}
 
-	return lastError
+	wg.Wait()
+	return nil
 }
 
 // DisconnectAll disconnects from all servers
