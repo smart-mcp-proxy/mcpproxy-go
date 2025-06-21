@@ -117,6 +117,13 @@ func setupViper() {
 	viper.SetDefault("top-k", 5)
 	viper.SetDefault("tools-limit", 15)
 	viper.SetDefault("config", "")
+
+	// Security defaults
+	viper.SetDefault("read-only-mode", false)
+	viper.SetDefault("disable-management", false)
+	viper.SetDefault("allow-server-add", true)
+	viper.SetDefault("allow-server-remove", true)
+	viper.SetDefault("enable-prompts", true)
 }
 
 // findAndLoadConfigFile tries to find config file in common locations

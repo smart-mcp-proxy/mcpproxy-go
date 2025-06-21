@@ -15,6 +15,15 @@ type Config struct {
 	TopK              int             `json:"top_k" mapstructure:"top-k"`
 	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
 	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
+
+	// Security settings
+	ReadOnlyMode      bool `json:"read_only_mode" mapstructure:"read-only-mode"`
+	DisableManagement bool `json:"disable_management" mapstructure:"disable-management"`
+	AllowServerAdd    bool `json:"allow_server_add" mapstructure:"allow-server-add"`
+	AllowServerRemove bool `json:"allow_server_remove" mapstructure:"allow-server-remove"`
+
+	// Prompts settings
+	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
 }
 
 // ServerConfig represents upstream MCP server configuration
@@ -122,6 +131,15 @@ func DefaultConfig() *Config {
 		TopK:              5,
 		ToolsLimit:        15,
 		ToolResponseLimit: 20000, // Default 20000 characters
+
+		// Security defaults - permissive by default for compatibility
+		ReadOnlyMode:      false,
+		DisableManagement: false,
+		AllowServerAdd:    true,
+		AllowServerRemove: true,
+
+		// Prompts enabled by default
+		EnablePrompts: true,
 	}
 }
 

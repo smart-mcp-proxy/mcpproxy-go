@@ -28,7 +28,8 @@ type MCPProxyServer struct {
 	cacheManager    *cache.Manager
 	truncator       *truncate.Truncator
 	logger          *zap.Logger
-	mainServer      *Server // Reference to main server for config persistence
+	mainServer      *Server        // Reference to main server for config persistence
+	config          *config.Config // Add config reference for security checks
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -41,13 +42,24 @@ func NewMCPProxyServer(
 	logger *zap.Logger,
 	mainServer *Server,
 	debugSearch bool,
+	config *config.Config,
 ) *MCPProxyServer {
-	// Create MCP server with tool capabilities
+	// Create MCP server with capabilities
+	capabilities := []mcpserver.ServerOption{
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithRecovery(),
+	}
+
+	// Add prompts capability if enabled
+	if config.EnablePrompts {
+		// Note: prompts capability would be added here when mcp-go supports it
+		// capabilities = append(capabilities, mcpserver.WithPromptCapabilities(true))
+	}
+
 	mcpServer := mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		"1.0.0",
-		mcpserver.WithToolCapabilities(true),
-		mcpserver.WithRecovery(),
+		capabilities...,
 	)
 
 	proxy := &MCPProxyServer{
@@ -59,132 +71,132 @@ func NewMCPProxyServer(
 		truncator:       truncator,
 		logger:          logger,
 		mainServer:      mainServer,
+		config:          config,
 	}
 
 	// Register proxy tools
 	proxy.registerTools(debugSearch)
+
+	// Register prompts if enabled
+	if config.EnablePrompts {
+		proxy.registerPrompts()
+	}
 
 	return proxy
 }
 
 // registerTools registers all proxy tools with the MCP server
 func (p *MCPProxyServer) registerTools(debugSearch bool) {
-	// retrieve_tools - search for tools across all upstream servers
+	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("Search for tools across all upstream MCP servers using BM25 full-text search"),
+		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Then use call_tool with the discovered tool names."),
 		mcp.WithString("query",
 			mcp.Required(),
-			mcp.Description("Search query to find relevant tools"),
+			mcp.Description("Natural language description of what you want to accomplish. Be specific about your task (e.g., 'create a new GitHub repository', 'get weather for London', 'query SQLite database for users'). The search will find the most relevant tools across all connected servers."),
 		),
 		mcp.WithNumber("limit",
-			mcp.Description("Maximum number of results to return (default: 20)"),
+			mcp.Description("Maximum number of tools to return (default: 20, max: 100)"),
+		),
+		mcp.WithBoolean("include_stats",
+			mcp.Description("Include usage statistics for returned tools (default: false)"),
+		),
+		mcp.WithBoolean("debug",
+			mcp.Description("Enable debug mode with detailed scoring and ranking explanations (default: false)"),
+		),
+		mcp.WithString("explain_tool",
+			mcp.Description("When debug=true, explain why a specific tool was ranked low (format: 'server:tool')"),
 		),
 	)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
 
-	// call_tool - call a tool on an upstream server
+	// call_tool - Execute discovered tools
 	callToolTool := mcp.NewTool("call_tool",
-		mcp.WithDescription("Call a tool on an upstream MCP server"),
+		mcp.WithDescription("Execute a tool discovered via retrieve_tools. Use the exact tool name from retrieve_tools results (format: 'server:tool'). Call retrieve_tools first if you haven't discovered tools yet."),
 		mcp.WithString("name",
 			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'sqlite:query')"),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_repository'). Get this from retrieve_tools results."),
 		),
 		mcp.WithObject("args",
-			mcp.Description("Arguments to pass to the tool"),
+			mcp.Description("Arguments to pass to the tool. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
 	)
 	p.server.AddTool(callToolTool, p.handleCallTool)
 
-	// upstream_servers - manage upstream MCP servers
-	upstreamServersTool := mcp.NewTool("upstream_servers",
-		mcp.WithDescription("Manage upstream MCP servers - supports adding single/multiple servers, updating, removing, and importing from Cursor IDE format"),
-		mcp.WithString("operation",
-			mcp.Required(),
-			mcp.Description("Operation: list, add, add_batch, remove, update, patch, import_cursor"),
-			mcp.Enum("list", "add", "add_batch", "remove", "update", "patch", "import_cursor"),
-		),
-		mcp.WithString("name",
-			mcp.Description("Server name (required for add/remove/update/patch)"),
-		),
-		mcp.WithString("command",
-			mcp.Description("Command to run (for stdio servers)"),
-		),
-		mcp.WithArray("args",
-			mcp.Description("Command arguments (for stdio servers)"),
-		),
-		mcp.WithObject("env",
-			mcp.Description("Environment variables (for stdio servers)"),
-		),
-		mcp.WithString("url",
-			mcp.Description("Server URL (for HTTP/SSE servers)"),
-		),
-		mcp.WithString("protocol",
-			mcp.Description("Transport protocol: stdio (for commands), http, sse, streamable-http (default: auto-detect)"),
-			mcp.Enum("stdio", "http", "sse", "streamable-http", "auto"),
-		),
-		mcp.WithObject("headers",
-			mcp.Description("HTTP headers for authentication (for HTTP/SSE servers)"),
-		),
-		mcp.WithBoolean("enabled",
-			mcp.Description("Whether server is enabled (default: true)"),
-		),
-		mcp.WithArray("servers",
-			mcp.Description("Array of server configurations for batch operations"),
-		),
-		mcp.WithObject("cursor_config",
-			mcp.Description("Cursor IDE mcpServers configuration to import"),
-		),
-		mcp.WithObject("patch",
-			mcp.Description("Fields to patch/update for existing server"),
-		),
-	)
-	p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
-
-	// tools_stats - get tool usage statistics
-	toolsStatsTool := mcp.NewTool("tools_stats",
-		mcp.WithDescription("Get tool usage statistics and metrics"),
-		mcp.WithNumber("top_n",
-			mcp.Description("Number of top tools to return (default: 10)"),
-		),
-	)
-	p.server.AddTool(toolsStatsTool, p.handleToolsStats)
-
-	// read_cache - retrieve cached tool response data with pagination
+	// read_cache - Access paginated data when responses are truncated
 	readCacheTool := mcp.NewTool("read_cache",
-		mcp.WithDescription("Retrieve cached tool response data with pagination - use this when mcpproxy indicates data was truncated"),
+		mcp.WithDescription("Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages to access the complete dataset with pagination."),
 		mcp.WithString("key",
 			mcp.Required(),
-			mcp.Description("Cache key provided by mcpproxy when response was truncated"),
+			mcp.Description("Cache key provided by mcpproxy when a response was truncated (e.g. 'Use read_cache tool: key=\"abc123def...\"')"),
 		),
 		mcp.WithNumber("offset",
-			mcp.Description("Starting record offset (default: 0)"),
+			mcp.Description("Starting record offset for pagination (default: 0)"),
 		),
 		mcp.WithNumber("limit",
-			mcp.Description("Maximum number of records to return (default: 50)"),
+			mcp.Description("Maximum number of records to return per page (default: 50, max: 1000)"),
 		),
 	)
 	p.server.AddTool(readCacheTool, p.handleReadCache)
 
-	// debug_search - debug search relevancy (only if enabled)
-	if debugSearch {
-		debugSearchTool := mcp.NewTool("debug_search",
-			mcp.WithDescription("Debug search relevancy - shows detailed scoring and why tools were/weren't ranked highly"),
-			mcp.WithString("query",
+	// upstream_servers - Server management (with security checks)
+	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
+		upstreamServersTool := mcp.NewTool("upstream_servers",
+			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, list servers, and import configurations. Supports batch operations and Cursor IDE format import."),
+			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Search query to analyze"),
+				mcp.Description("Operation: list, add, add_batch, remove, update, patch, import_cursor"),
+				mcp.Enum("list", "add", "add_batch", "remove", "update", "patch", "import_cursor"),
 			),
-			mcp.WithNumber("limit",
-				mcp.Description("Maximum number of results to return (default: 50)"),
+			mcp.WithString("name",
+				mcp.Description("Server name (required for add/remove/update/patch operations)"),
 			),
-			mcp.WithString("explain_tool",
-				mcp.Description("Specific tool name to explain why it was ranked low (format: 'server:tool')"),
+			mcp.WithString("command",
+				mcp.Description("Command to run for stdio servers (e.g., 'uvx', 'python')"),
 			),
-			mcp.WithBoolean("verbose",
-				mcp.Description("Include detailed scoring explanation (default: false)"),
+			mcp.WithArray("args",
+				mcp.Description("Command arguments for stdio servers (e.g., ['mcp-server-sqlite', '--db-path', '/path/to/db'])"),
+			),
+			mcp.WithObject("env",
+				mcp.Description("Environment variables for stdio servers"),
+			),
+			mcp.WithString("url",
+				mcp.Description("Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')"),
+			),
+			mcp.WithString("protocol",
+				mcp.Description("Transport protocol: stdio, http, sse, streamable-http, auto (default: auto-detect)"),
+				mcp.Enum("stdio", "http", "sse", "streamable-http", "auto"),
+			),
+			mcp.WithObject("headers",
+				mcp.Description("HTTP headers for authentication (e.g., {'Authorization': 'Bearer token'})"),
+			),
+			mcp.WithBoolean("enabled",
+				mcp.Description("Whether server should be enabled (default: true)"),
+			),
+			mcp.WithArray("servers",
+				mcp.Description("Array of server configurations for batch operations"),
+			),
+			mcp.WithObject("cursor_config",
+				mcp.Description("Cursor IDE mcpServers configuration object for direct import"),
+			),
+			mcp.WithObject("patch",
+				mcp.Description("Fields to update for patch operations"),
 			),
 		)
-		p.server.AddTool(debugSearchTool, p.handleDebugSearch)
+		p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
 	}
+}
+
+// registerPrompts registers prompt templates for common tasks
+func (p *MCPProxyServer) registerPrompts() {
+	// Note: This is a placeholder for when mcp-go supports prompts
+	// For now, we document the prompts that would be available
+	p.logger.Info("Prompts capability enabled - ready to provide workflow guidance")
+
+	// Future prompts would include:
+	// - "find-tools-for-task" - Guide users to use retrieve_tools first
+	// - "debug-search" - Help debug search results
+	// - "setup-new-server" - Guided workflow for adding servers
+	// - "troubleshoot-connection" - Help with connection issues
 }
 
 // handleRetrieveTools implements the retrieve_tools functionality
@@ -194,11 +206,19 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'query': %v", err)), nil
 	}
 
-	// Get optional limit parameter
-	limit := request.GetFloat("limit", 20.0)
+	// Get optional parameters
+	limit := int(request.GetFloat("limit", 20.0))
+	includeStats := request.GetBool("include_stats", false)
+	debugMode := request.GetBool("debug", false)
+	explainTool := request.GetString("explain_tool", "")
+
+	// Validate limit
+	if limit > 100 {
+		limit = 100
+	}
 
 	// Perform search using index manager
-	results, err := p.index.Search(query, int(limit))
+	results, err := p.index.Search(query, limit)
 	if err != nil {
 		p.logger.Error("Search failed", zap.String("query", query), zap.Error(err))
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
@@ -234,6 +254,15 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 			"score":       result.Score,
 			"server":      result.Tool.ServerName,
 		}
+
+		// Add usage statistics if requested
+		if includeStats {
+			if stats, err := p.storage.GetToolUsage(result.Tool.Name); err == nil {
+				mcpTool["usage_count"] = stats.Count
+				mcpTool["last_used"] = stats.LastUsed
+			}
+		}
+
 		mcpTools = append(mcpTools, mcpTool)
 	}
 
@@ -241,6 +270,31 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 		"tools": mcpTools,
 		"query": query,
 		"total": len(results),
+	}
+
+	// Add debug information if requested
+	if debugMode {
+		response["debug"] = map[string]interface{}{
+			"total_indexed_tools": p.getIndexedToolCount(),
+			"search_backend":      "BM25",
+			"query_analysis":      p.analyzeQuery(query),
+			"limit_applied":       limit,
+		}
+
+		if explainTool != "" {
+			explanation := p.explainToolRanking(query, explainTool, results)
+			response["explanation"] = explanation
+		}
+	}
+
+	// Add tool statistics summary if requested
+	if includeStats {
+		stats, err := p.storage.GetToolStats(10)
+		if err == nil {
+			response["usage_summary"] = map[string]interface{}{
+				"top_tools": stats,
+			}
+		}
 	}
 
 	jsonResult, err := json.Marshal(response)
@@ -253,6 +307,15 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 
 // handleCallTool implements the call_tool functionality
 func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Add panic recovery to ensure server resilience
+	defer func() {
+		if r := recover(); r != nil {
+			p.logger.Error("Recovered from panic in handleCallTool",
+				zap.Any("panic", r),
+				zap.Any("request", request))
+		}
+	}()
+
 	toolName, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
@@ -270,14 +333,74 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 	}
 
+	// Check if this is a proxy tool (doesn't contain ':' or is one of our known proxy tools)
+	proxyTools := map[string]bool{
+		"upstream_servers": true,
+		"retrieve_tools":   true,
+		"call_tool":        true,
+		"read_cache":       true,
+	}
+
+	if proxyTools[toolName] {
+		// Handle proxy tools directly by creating a new request with the args
+		proxyRequest := mcp.CallToolRequest{}
+		proxyRequest.Params.Name = toolName
+		proxyRequest.Params.Arguments = args
+
+		// Route to appropriate proxy tool handler
+		switch toolName {
+		case "upstream_servers":
+			return p.handleUpstreamServers(ctx, proxyRequest)
+		case "retrieve_tools":
+			return p.handleRetrieveTools(ctx, proxyRequest)
+		case "read_cache":
+			return p.handleReadCache(ctx, proxyRequest)
+		case "call_tool":
+			// Prevent infinite recursion
+			return mcp.NewToolResultError("call_tool cannot call itself"), nil
+		default:
+			return mcp.NewToolResultError(fmt.Sprintf("Unknown proxy tool: %s", toolName)), nil
+		}
+	}
+
+	// Handle upstream tools via upstream manager (requires server:tool format)
+	if !strings.Contains(toolName, ":") {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s (expected server:tool for upstream tools, or use proxy tool names like 'upstream_servers')", toolName)), nil
+	}
+
+	// Parse server and tool name
+	parts := strings.SplitN(toolName, ":", 2)
+	if len(parts) != 2 {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
+	}
+
+	serverName := parts[0]
+	actualToolName := parts[1]
+
 	// Call tool via upstream manager
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
 	if err != nil {
+		// Log error with additional context for debugging
 		p.logger.Error("Tool call failed",
 			zap.String("tool_name", toolName),
 			zap.Any("args", args),
-			zap.Error(err))
-		return mcp.NewToolResultError(fmt.Sprintf("Tool call failed: %v", err)), nil
+			zap.Error(err),
+			zap.String("server_name", serverName),
+			zap.String("actual_tool", actualToolName))
+
+		// Provide clear error messages based on error type
+		var errorMsg string
+		if strings.Contains(err.Error(), "no connected client found") {
+			errorMsg = fmt.Sprintf("Server '%s' does not exist or is not configured. Available proxy tools: upstream_servers, retrieve_tools, read_cache, call_tool. Use 'upstream_servers' with operation 'list' to see configured upstream servers.", serverName)
+		} else if strings.Contains(err.Error(), "client for server") && strings.Contains(err.Error(), "is not connected") {
+			errorMsg = fmt.Sprintf("Server '%s' is currently disconnected or in connecting state. Check server configuration and connectivity.", serverName)
+		} else if strings.Contains(err.Error(), "client not connected") {
+			errorMsg = fmt.Sprintf("Server '%s' is not connected. The server may be starting up, experiencing connection issues, or may be misconfigured.", serverName)
+		} else {
+			errorMsg = fmt.Sprintf("Tool call to '%s:%s' failed: %v", serverName, actualToolName, err)
+		}
+
+		return mcp.NewToolResultError(errorMsg), nil
 	}
 
 	// Increment usage stats
@@ -328,6 +451,29 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	operation, err := request.RequireString("operation")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'operation': %v", err)), nil
+	}
+
+	// Security checks
+	if p.config.ReadOnlyMode {
+		if operation != "list" {
+			return mcp.NewToolResultError("Operation not allowed in read-only mode"), nil
+		}
+	}
+
+	if p.config.DisableManagement {
+		return mcp.NewToolResultError("Server management is disabled for security"), nil
+	}
+
+	// Specific operation security checks
+	switch operation {
+	case "add", "add_batch", "import_cursor":
+		if !p.config.AllowServerAdd {
+			return mcp.NewToolResultError("Adding servers is not allowed"), nil
+		}
+	case "remove":
+		if !p.config.AllowServerRemove {
+			return mcp.NewToolResultError("Removing servers is not allowed"), nil
+		}
 	}
 
 	switch operation {
@@ -461,10 +607,14 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
 	}
 
-	// Add to upstream manager if enabled
+	// Add to upstream manager configuration without connecting (non-blocking)
 	if enabled {
-		if err := p.upstreamManager.AddServer(name, serverConfig); err != nil {
-			p.logger.Warn("Failed to connect to upstream", zap.String("name", name), zap.Error(err))
+		if err := p.upstreamManager.AddServerConfig(name, serverConfig); err != nil {
+			p.logger.Warn("Failed to add upstream server config", zap.String("name", name), zap.Error(err))
+			// Don't fail the whole operation, just log the warning
+		} else {
+			p.logger.Info("Added upstream server configuration", zap.String("name", name))
+			// The connection will be attempted asynchronously by the background connector
 		}
 	}
 
@@ -478,6 +628,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		"protocol": protocol,
 		"enabled":  enabled,
 		"added":    true,
+		"status":   "configured", // Connection will be attempted asynchronously
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil

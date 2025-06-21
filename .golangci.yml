@@ -1,0 +1,67 @@
+run:
+  timeout: 5m
+  go: '1.23'
+
+linters:
+  enable:
+    - gofmt
+    - goimports
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
+    - typecheck
+    - goconst
+    - misspell
+    - unparam
+    - unconvert
+    - gocritic
+    - revive
+    - gosec
+    - exportloopref
+
+linters-settings:
+  goconst:
+    min-len: 2
+    min-occurrences: 2
+  
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - experimental
+      - opinionated
+      - performance
+      - style
+    disabled-checks:
+      - dupImport
+      - ifElseChain
+      - octalLiteral
+      - whyNoLint
+  
+  revive:
+    min-confidence: 0
+  
+  gosec:
+    excludes:
+      - G204 # Subprocess launched with variable
+      - G304 # File path provided as taint input
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - goconst
+    
+    - path: internal/tray/
+      linters:
+        - unused
+    
+    - text: "weak cryptographic primitive"
+      linters:
+        - gosec
+  
+  max-issues-per-linter: 0
+  max-same-issues: 0 

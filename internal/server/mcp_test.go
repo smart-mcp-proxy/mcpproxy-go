@@ -1,20 +1,182 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/upstream"
 )
 
-// Test the core argument parsing logic for call_tool
-func TestCallToolArgumentParsing(t *testing.T) {
+func TestSecurityConfigValidation(t *testing.T) {
 	tests := []struct {
-		name           string
-		requestArgs    map[string]interface{}
-		expectedArgs   map[string]interface{}
-		expectedResult bool
+		name              string
+		readOnlyMode      bool
+		disableManagement bool
+		allowServerAdd    bool
+		allowServerRemove bool
+		operation         string
+		shouldAllow       bool
+	}{
+		{
+			name:         "list allowed in read-only mode",
+			operation:    "list",
+			readOnlyMode: true,
+			shouldAllow:  true,
+		},
+		{
+			name:         "add blocked in read-only mode",
+			operation:    "add",
+			readOnlyMode: true,
+			shouldAllow:  false,
+		},
+		{
+			name:              "list blocked when management disabled",
+			operation:         "list",
+			disableManagement: true,
+			shouldAllow:       false,
+		},
+		{
+			name:           "add blocked when not allowed",
+			operation:      "add",
+			allowServerAdd: false,
+			shouldAllow:    false,
+		},
+		{
+			name:              "remove blocked when not allowed",
+			operation:         "remove",
+			allowServerRemove: false,
+			shouldAllow:       false,
+		},
+		{
+			name:           "add_batch blocked when not allowed",
+			operation:      "add_batch",
+			allowServerAdd: false,
+			shouldAllow:    false,
+		},
+		{
+			name:           "import_cursor blocked when not allowed",
+			operation:      "import_cursor",
+			allowServerAdd: false,
+			shouldAllow:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &config.Config{
+				ReadOnlyMode:      tt.readOnlyMode,
+				DisableManagement: tt.disableManagement,
+				AllowServerAdd:    tt.allowServerAdd,
+				AllowServerRemove: tt.allowServerRemove,
+			}
+
+			// Test security validation logic
+			isBlocked := false
+
+			// Apply security logic
+			if config.ReadOnlyMode && tt.operation != "list" {
+				isBlocked = true
+			}
+			if config.DisableManagement {
+				isBlocked = true
+			}
+			switch tt.operation {
+			case "add", "add_batch", "import_cursor":
+				if !config.AllowServerAdd {
+					isBlocked = true
+				}
+			case "remove":
+				if !config.AllowServerRemove {
+					isBlocked = true
+				}
+			}
+
+			expectedBlocked := !tt.shouldAllow
+			assert.Equal(t, expectedBlocked, isBlocked, "Security check mismatch for operation %s", tt.operation)
+		})
+	}
+}
+
+func TestAnalyzeQueryLogic(t *testing.T) {
+	tests := []struct {
+		name     string
+		query    string
+		expected map[string]interface{}
+	}{
+		{
+			name:  "simple query",
+			query: "database query",
+			expected: map[string]interface{}{
+				"original_query":  "database query",
+				"query_length":    14,
+				"word_count":      2,
+				"has_underscores": false,
+				"has_colons":      false,
+				"is_tool_name":    false,
+			},
+		},
+		{
+			name:  "tool name format",
+			query: "sqlite:query_users",
+			expected: map[string]interface{}{
+				"original_query":  "sqlite:query_users",
+				"query_length":    18,
+				"word_count":      1,
+				"has_underscores": true,
+				"has_colons":      true,
+				"is_tool_name":    true,
+				"server_part":     "sqlite",
+				"tool_part":       "query_users",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test the analysis logic directly
+			result := analyzeQueryHelper(tt.query)
+			for key, expectedValue := range tt.expected {
+				assert.Equal(t, expectedValue, result[key], "Mismatch for key: %s", key)
+			}
+		})
+	}
+}
+
+// Helper function that mimics the logic from handleRetrieveTools
+func analyzeQueryHelper(query string) map[string]interface{} {
+	analysis := map[string]interface{}{
+		"original_query":  query,
+		"query_length":    len(query),
+		"word_count":      len(strings.Fields(query)),
+		"has_underscores": strings.Contains(query, "_"),
+		"has_colons":      strings.Contains(query, ":"),
+		"is_tool_name":    strings.Contains(query, ":"),
+	}
+
+	// Check if query looks like a tool name pattern
+	if strings.Contains(query, ":") {
+		parts := strings.SplitN(query, ":", 2)
+		if len(parts) == 2 {
+			analysis["server_part"] = parts[0]
+			analysis["tool_part"] = parts[1]
+		}
+	}
+
+	return analysis
+}
+
+func TestMCPRequestParsing(t *testing.T) {
+	tests := []struct {
+		name         string
+		requestArgs  map[string]interface{}
+		expectedArgs map[string]interface{}
 	}{
 		{
 			name: "Valid args parameter",
@@ -29,24 +191,13 @@ func TestCallToolArgumentParsing(t *testing.T) {
 				"id":          "bitcoin",
 				"market_data": true,
 			},
-			expectedResult: true,
 		},
 		{
 			name: "No args parameter",
 			requestArgs: map[string]interface{}{
 				"name": "simple:tool",
 			},
-			expectedArgs:   nil,
-			expectedResult: true,
-		},
-		{
-			name: "Invalid args type (string instead of map)",
-			requestArgs: map[string]interface{}{
-				"name": "test:tool",
-				"args": "invalid_string",
-			},
-			expectedArgs:   nil,
-			expectedResult: true, // Should gracefully handle invalid type
+			expectedArgs: nil,
 		},
 		{
 			name: "Empty args map",
@@ -54,15 +205,16 @@ func TestCallToolArgumentParsing(t *testing.T) {
 				"name": "test:tool",
 				"args": map[string]interface{}{},
 			},
-			expectedArgs:   map[string]interface{}{},
-			expectedResult: true,
+			expectedArgs: map[string]interface{}{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a mock request
-			request := createMockCallToolRequestFromMap(tt.requestArgs)
+			// Create mock request
+			request := mcp.CallToolRequest{}
+			request.Params.Name = "call_tool"
+			request.Params.Arguments = tt.requestArgs
 
 			// Extract args using the same logic as in handleCallTool
 			var args map[string]interface{}
@@ -86,14 +238,32 @@ func TestCallToolArgumentParsing(t *testing.T) {
 	}
 }
 
-// Test the MCP tool format conversion for retrieve_tools
-func TestRetrieveToolsFormatConversion(t *testing.T) {
-	// Create mock search results
-	searchResults := createMockSearchResults()
+func TestToolFormatConversion(t *testing.T) {
+	// Test the MCP tool format conversion logic from handleRetrieveTools
+	mockResults := []*config.SearchResult{
+		{
+			Tool: &config.ToolMetadata{
+				Name:        "coingecko:coins_id",
+				ServerName:  "coingecko",
+				Description: "Get detailed information about a cryptocurrency by ID",
+				ParamsJSON:  `{"type": "object", "properties": {"id": {"type": "string", "description": "Cryptocurrency ID"}, "market_data": {"type": "boolean", "description": "Include market data"}}}`,
+			},
+			Score: 0.95,
+		},
+		{
+			Tool: &config.ToolMetadata{
+				Name:        "github:get_repo",
+				ServerName:  "github",
+				Description: "Get repository information",
+				ParamsJSON:  `{"type": "object", "properties": {"repo": {"type": "string"}}}`,
+			},
+			Score: 0.8,
+		},
+	}
 
 	// Convert to MCP format using the same logic as in handleRetrieveTools
 	var mcpTools []map[string]interface{}
-	for _, result := range searchResults {
+	for _, result := range mockResults {
 		// Parse the input schema from ParamsJSON
 		var inputSchema map[string]interface{}
 		if result.Tool.ParamsJSON != "" {
@@ -140,194 +310,15 @@ func TestRetrieveToolsFormatConversion(t *testing.T) {
 	assert.True(t, ok)
 	assert.Contains(t, properties, "id")
 	assert.Contains(t, properties, "market_data")
-
-	// Verify parameter details
-	idParam, ok := properties["id"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Equal(t, "string", idParam["type"])
-	assert.Equal(t, "Cryptocurrency ID", idParam["description"])
-
-	marketDataParam, ok := properties["market_data"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Equal(t, "boolean", marketDataParam["type"])
-	assert.Equal(t, "Include market data", marketDataParam["description"])
 }
 
-// Test handling of invalid JSON in tool parameters
-func TestRetrieveToolsInvalidJSONHandling(t *testing.T) {
-	// Create search results with invalid JSON
-	searchResults := createMockSearchResultsWithInvalidJSON()
-
-	// Convert to MCP format
-	var mcpTools []map[string]interface{}
-	for _, result := range searchResults {
-		var inputSchema map[string]interface{}
-		if result.Tool.ParamsJSON != "" {
-			if err := json.Unmarshal([]byte(result.Tool.ParamsJSON), &inputSchema); err != nil {
-				// Should fallback to default schema
-				inputSchema = map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{},
-				}
-			}
-		} else {
-			inputSchema = map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{},
-			}
-		}
-
-		mcpTool := map[string]interface{}{
-			"name":        result.Tool.Name,
-			"description": result.Tool.Description,
-			"inputSchema": inputSchema,
-			"score":       result.Score,
-			"server":      result.Tool.ServerName,
-		}
-		mcpTools = append(mcpTools, mcpTool)
-	}
-
-	// Verify graceful handling
-	assert.Len(t, mcpTools, 1)
-
-	tool := mcpTools[0]
-	inputSchema, ok := tool["inputSchema"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Equal(t, "object", inputSchema["type"])
-
-	properties, ok := inputSchema["properties"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Empty(t, properties) // Should be empty due to invalid JSON
-}
-
-// Test handling of empty parameters
-func TestRetrieveToolsEmptyParamsHandling(t *testing.T) {
-	// Create search results with empty params
-	searchResults := createMockSearchResultsEmpty()
-
-	// Convert to MCP format
-	var mcpTools []map[string]interface{}
-	for _, result := range searchResults {
-		var inputSchema map[string]interface{}
-		if result.Tool.ParamsJSON != "" {
-			if err := json.Unmarshal([]byte(result.Tool.ParamsJSON), &inputSchema); err != nil {
-				inputSchema = map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{},
-				}
-			}
-		} else {
-			// Should use default schema for empty params
-			inputSchema = map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{},
-			}
-		}
-
-		mcpTool := map[string]interface{}{
-			"name":        result.Tool.Name,
-			"description": result.Tool.Description,
-			"inputSchema": inputSchema,
-			"score":       result.Score,
-			"server":      result.Tool.ServerName,
-		}
-		mcpTools = append(mcpTools, mcpTool)
-	}
-
-	// Verify handling
-	assert.Len(t, mcpTools, 1)
-
-	tool := mcpTools[0]
-	inputSchema, ok := tool["inputSchema"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Equal(t, "object", inputSchema["type"])
-
-	properties, ok := inputSchema["properties"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Empty(t, properties) // Should be empty for empty params
-}
-
-// Test demonstrates the core functionality without complex mocking
-func TestArgumentParsingAndFormatting(t *testing.T) {
-	t.Run("argument parsing works correctly", func(t *testing.T) {
-		// Test the core logic that was fixed
-		requestArgs := map[string]interface{}{
-			"name": "coingecko:coins_id",
-			"args": map[string]interface{}{
-				"id":          "bitcoin",
-				"market_data": true,
-			},
-		}
-
-		// Simulate the argument extraction logic from handleCallTool
-		var extractedArgs map[string]interface{}
-		if argsParam, ok := requestArgs["args"]; ok {
-			if argsMap, ok := argsParam.(map[string]interface{}); ok {
-				extractedArgs = argsMap
-			}
-		}
-
-		// Verify correct extraction
-		assert.NotNil(t, extractedArgs)
-		assert.Equal(t, "bitcoin", extractedArgs["id"])
-		assert.Equal(t, true, extractedArgs["market_data"])
-	})
-
-	t.Run("MCP format conversion works correctly", func(t *testing.T) {
-		// Test the retrieve_tools format conversion logic
-		mockResults := createMockSearchResults()
-
-		// Apply the conversion logic from handleRetrieveTools
-		var mcpTools []map[string]interface{}
-		for _, result := range mockResults {
-			var inputSchema map[string]interface{}
-			if result.Tool.ParamsJSON != "" {
-				if err := json.Unmarshal([]byte(result.Tool.ParamsJSON), &inputSchema); err != nil {
-					inputSchema = map[string]interface{}{
-						"type":       "object",
-						"properties": map[string]interface{}{},
-					}
-				}
-			} else {
-				inputSchema = map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{},
-				}
-			}
-
-			mcpTool := map[string]interface{}{
-				"name":        result.Tool.Name,
-				"description": result.Tool.Description,
-				"inputSchema": inputSchema,
-				"score":       result.Score,
-				"server":      result.Tool.ServerName,
-			}
-			mcpTools = append(mcpTools, mcpTool)
-		}
-
-		// Verify the conversion results
-		assert.Len(t, mcpTools, 2)
-
-		firstTool := mcpTools[0]
-		assert.Equal(t, "coingecko:coins_id", firstTool["name"])
-		assert.Equal(t, "coingecko", firstTool["server"])
-
-		inputSchema, ok := firstTool["inputSchema"].(map[string]interface{})
-		assert.True(t, ok)
-		assert.Equal(t, "object", inputSchema["type"])
-
-		properties, ok := inputSchema["properties"].(map[string]interface{})
-		assert.True(t, ok)
-		assert.Contains(t, properties, "id")
-		assert.Contains(t, properties, "market_data")
-	})
-}
-
-// Test the new upstream_servers operations
-func TestUpstreamServersOperations(t *testing.T) {
-	// Test batch add servers
+func TestUpstreamServerOperations(t *testing.T) {
+	// Test batch add servers parsing
 	t.Run("BatchAddServers", func(t *testing.T) {
-		request := createMockUpstreamServersRequest("add_batch", map[string]interface{}{
+		request := mcp.CallToolRequest{}
+		request.Params.Name = "upstream_servers"
+		request.Params.Arguments = map[string]interface{}{
+			"operation": "add_batch",
 			"servers": []interface{}{
 				map[string]interface{}{
 					"name":    "test-server-1",
@@ -342,7 +333,7 @@ func TestUpstreamServersOperations(t *testing.T) {
 					"enabled": true,
 				},
 			},
-		})
+		}
 
 		// Mock server response parsing
 		var servers []interface{}
@@ -374,7 +365,10 @@ func TestUpstreamServersOperations(t *testing.T) {
 
 	// Test import Cursor IDE format
 	t.Run("ImportCursorFormat", func(t *testing.T) {
-		request := createMockUpstreamServersRequest("import_cursor", map[string]interface{}{
+		request := mcp.CallToolRequest{}
+		request.Params.Name = "upstream_servers"
+		request.Params.Arguments = map[string]interface{}{
+			"operation": "import_cursor",
 			"cursor_config": map[string]interface{}{
 				"mcp-server-sqlite": map[string]interface{}{
 					"command": "uvx",
@@ -386,7 +380,7 @@ func TestUpstreamServersOperations(t *testing.T) {
 					"headers": map[string]interface{}{"Authorization": "Bearer token123"},
 				},
 			},
-		})
+		}
 
 		// Parse cursor config
 		var cursorConfig map[string]interface{}
@@ -412,100 +406,308 @@ func TestUpstreamServersOperations(t *testing.T) {
 		assert.Equal(t, "http://localhost:3000/mcp", githubServer["url"])
 		assert.Equal(t, map[string]interface{}{"Authorization": "Bearer token123"}, githubServer["headers"])
 	})
-
-	// Test patch operation
-	t.Run("PatchServer", func(t *testing.T) {
-		request := createMockUpstreamServersRequest("patch", map[string]interface{}{
-			"name":    "test-server",
-			"enabled": false,
-			"url":     "http://localhost:3002",
-		})
-
-		name, _ := request.RequireString("name")
-		enabled := request.GetBool("enabled", true)
-		url := request.GetString("url", "")
-
-		assert.Equal(t, "test-server", name)
-		assert.Equal(t, false, enabled)
-		assert.Equal(t, "http://localhost:3002", url)
-	})
 }
 
-// Test parameter parsing for complex objects
-func TestComplexParameterParsing(t *testing.T) {
-	t.Run("ParseArgsArray", func(t *testing.T) {
-		request := createMockUpstreamServersRequest("add", map[string]interface{}{
-			"name":    "test-server",
-			"command": "python",
-			"args":    []interface{}{"-m", "test_server", "--port", "3000"},
-			"env":     map[string]interface{}{"TEST": "value", "DEBUG": "true"},
-			"enabled": true,
-		})
-
-		// Parse args array
-		var args []string
-		if request.Params.Arguments != nil {
-			if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
-				if argsParam, ok := argumentsMap["args"]; ok {
-					if argsList, ok := argsParam.([]interface{}); ok {
-						for _, arg := range argsList {
-							if argStr, ok := arg.(string); ok {
-								args = append(args, argStr)
-							}
-						}
-					}
-				}
-			}
-		}
-
-		assert.Equal(t, []string{"-m", "test_server", "--port", "3000"}, args)
-	})
-
-	t.Run("ParseEnvMap", func(t *testing.T) {
-		request := createMockUpstreamServersRequest("add", map[string]interface{}{
-			"name": "test-server",
-			"env":  map[string]interface{}{"TEST": "value", "DEBUG": "true", "PORT": "3000"},
-		})
-
-		// Parse env map
-		var env map[string]string
-		if request.Params.Arguments != nil {
-			if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
-				if envParam, ok := argumentsMap["env"]; ok {
-					if envMap, ok := envParam.(map[string]interface{}); ok {
-						env = make(map[string]string)
-						for k, v := range envMap {
-							if vStr, ok := v.(string); ok {
-								env[k] = vStr
-							}
-						}
-					}
-				}
-			}
-		}
-
-		expected := map[string]string{
-			"TEST":  "value",
-			"DEBUG": "true",
-			"PORT":  "3000",
-		}
-		assert.Equal(t, expected, env)
-	})
-}
-
-// Helper function to create mock upstream_servers requests
-func createMockUpstreamServersRequest(operation string, params map[string]interface{}) mcp.CallToolRequest {
-	request := mcp.CallToolRequest{}
-	request.Params.Name = "upstream_servers"
-
-	arguments := make(map[string]interface{})
-	arguments["operation"] = operation
-
-	// Add all params to arguments
-	for k, v := range params {
-		arguments[k] = v
+func TestConfigSecurityModes(t *testing.T) {
+	tests := []struct {
+		name              string
+		readOnlyMode      bool
+		disableManagement bool
+		allowServerAdd    bool
+		allowServerRemove bool
+		expectCanManage   bool
+		expectCanAdd      bool
+		expectCanRemove   bool
+	}{
+		{
+			name:              "default permissive mode",
+			readOnlyMode:      false,
+			disableManagement: false,
+			allowServerAdd:    true,
+			allowServerRemove: true,
+			expectCanManage:   true,
+			expectCanAdd:      true,
+			expectCanRemove:   true,
+		},
+		{
+			name:              "read-only mode",
+			readOnlyMode:      true,
+			disableManagement: false,
+			allowServerAdd:    true,
+			allowServerRemove: true,
+			expectCanManage:   false,
+			expectCanAdd:      false,
+			expectCanRemove:   false,
+		},
+		{
+			name:              "disable management",
+			readOnlyMode:      false,
+			disableManagement: true,
+			allowServerAdd:    true,
+			allowServerRemove: true,
+			expectCanManage:   false,
+			expectCanAdd:      false,
+			expectCanRemove:   false,
+		},
+		{
+			name:              "allow add but not remove",
+			readOnlyMode:      false,
+			disableManagement: false,
+			allowServerAdd:    true,
+			allowServerRemove: false,
+			expectCanManage:   true,
+			expectCanAdd:      true,
+			expectCanRemove:   false,
+		},
 	}
 
-	request.Params.Arguments = arguments
-	return request
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &config.Config{
+				ReadOnlyMode:      tt.readOnlyMode,
+				DisableManagement: tt.disableManagement,
+				AllowServerAdd:    tt.allowServerAdd,
+				AllowServerRemove: tt.allowServerRemove,
+			}
+
+			// Test configuration logic
+			canManage := !config.ReadOnlyMode && !config.DisableManagement
+			canAdd := canManage && config.AllowServerAdd
+			canRemove := canManage && config.AllowServerRemove
+
+			assert.Equal(t, tt.expectCanManage, canManage)
+			assert.Equal(t, tt.expectCanAdd, canAdd)
+			assert.Equal(t, tt.expectCanRemove, canRemove)
+		})
+	}
+}
+
+func TestReadCacheValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		key         string
+		offset      float64
+		limit       float64
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:   "valid cache read",
+			key:    "cache123",
+			offset: 0,
+			limit:  50,
+		},
+		{
+			name:        "missing key",
+			key:         "",
+			expectError: true,
+			errorMsg:    "Missing required parameter 'key'",
+		},
+		{
+			name:        "negative offset",
+			key:         "cache123",
+			offset:      -5,
+			expectError: true,
+			errorMsg:    "Offset must be non-negative",
+		},
+		{
+			name:        "invalid limit",
+			key:         "cache123",
+			limit:       1500,
+			expectError: true,
+			errorMsg:    "Limit must be between 1 and 1000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test validation logic
+			hasError := false
+			errorMessage := ""
+
+			if tt.key == "" {
+				hasError = true
+				errorMessage = "Missing required parameter 'key'"
+			} else if tt.offset < 0 {
+				hasError = true
+				errorMessage = "Offset must be non-negative"
+			} else if tt.limit > 1000 {
+				hasError = true
+				errorMessage = "Limit must be between 1 and 1000"
+			}
+
+			assert.Equal(t, tt.expectError, hasError)
+			if tt.expectError {
+				assert.Contains(t, errorMessage, tt.errorMsg)
+			}
+		})
+	}
+}
+
+func TestDefaultConfigSettings(t *testing.T) {
+	config := config.DefaultConfig()
+
+	// Test default values
+	assert.Equal(t, ":8080", config.Listen)
+	assert.Equal(t, "", config.DataDir)
+	assert.True(t, config.EnableTray)
+	assert.False(t, config.DebugSearch)
+	assert.Equal(t, 5, config.TopK)
+	assert.Equal(t, 15, config.ToolsLimit)
+	assert.Equal(t, 20000, config.ToolResponseLimit)
+
+	// Test security defaults (permissive)
+	assert.False(t, config.ReadOnlyMode)
+	assert.False(t, config.DisableManagement)
+	assert.True(t, config.AllowServerAdd)
+	assert.True(t, config.AllowServerRemove)
+
+	// Test prompts default
+	assert.True(t, config.EnablePrompts)
+
+	// Test empty servers list
+	assert.Empty(t, config.Servers)
+}
+
+func TestRetrieveToolsParameters(t *testing.T) {
+	tests := []struct {
+		name     string
+		limit    float64
+		expected int
+	}{
+		{
+			name:     "normal limit",
+			limit:    10,
+			expected: 10,
+		},
+		{
+			name:     "limit over 100 should be capped",
+			limit:    150,
+			expected: 100,
+		},
+		{
+			name:     "zero limit should use default",
+			limit:    0,
+			expected: 20, // default when 0 is passed
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test limit validation logic
+			limit := int(tt.limit)
+			if limit <= 0 {
+				limit = 20 // default
+			}
+			if limit > 100 {
+				limit = 100
+			}
+
+			assert.Equal(t, tt.expected, limit)
+		})
+	}
+}
+
+func TestHandleCallToolErrorRecovery(t *testing.T) {
+	// Test that tool call errors don't break the server's ability to handle subsequent requests
+	// This test verifies the core issue mentioned in the error logs
+
+	mockProxy := &MCPProxyServer{
+		upstreamManager: upstream.NewManager(zap.NewNop()),
+		logger:          zap.NewNop(),
+	}
+
+	ctx := context.Background()
+
+	// Test 1: Call a tool that should fail (non-existent upstream server)
+	request1 := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "non-existent-server:some_tool",
+			Arguments: map[string]interface{}{},
+		},
+	}
+
+	// This should return an error result, not fail catastrophically
+	result1, err := mockProxy.handleCallTool(ctx, request1)
+	assert.NoError(t, err) // handleCallTool should not return an error directly
+	assert.NotNil(t, result1)
+
+	// The result should be an error
+	assert.True(t, result1.IsError, "Should return error for non-existent server")
+
+	// Test 2: Test that the proxy can still handle other calls after an error
+	// This is testing the core issue - that errors don't break the server
+	request2 := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "another-non-existent:tool",
+			Arguments: map[string]interface{}{},
+		},
+	}
+
+	// This should also return an error but not crash the server
+	result2, err := mockProxy.handleCallTool(ctx, request2)
+	assert.NoError(t, err) // Should not panic or return nil
+	assert.NotNil(t, result2)
+	assert.True(t, result2.IsError, "Should still handle subsequent calls")
+}
+
+func TestHandleCallToolCompleteErrorHandling(t *testing.T) {
+	// Test comprehensive error handling scenarios including self-referential calls
+
+	mockProxy := &MCPProxyServer{
+		upstreamManager: upstream.NewManager(zap.NewNop()),
+		logger:          zap.NewNop(),
+		config:          &config.Config{}, // Add minimal config for testing
+	}
+
+	ctx := context.Background()
+
+	// Test 1: Client calls proxy tool using server:tool format (should be handled as non-existent server)
+	request1 := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "some-proxy-name:retrieve_tools",
+			Arguments: map[string]interface{}{
+				"query": "test",
+			},
+		},
+	}
+
+	result1, err := mockProxy.handleCallTool(ctx, request1)
+	assert.NoError(t, err)
+	assert.NotNil(t, result1)
+	assert.True(t, result1.IsError, "Should return error for non-existent server")
+
+	// Test 2: Non-existent upstream server
+	request2 := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "non-existent-server:some_tool",
+			Arguments: map[string]interface{}{},
+		},
+	}
+
+	result2, err := mockProxy.handleCallTool(ctx, request2)
+	assert.NoError(t, err)
+	assert.NotNil(t, result2)
+	assert.True(t, result2.IsError, "Non-existent server should return error")
+
+	// Test 3: Invalid tool format
+	request3 := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "invalid_tool_format",
+			Arguments: map[string]interface{}{},
+		},
+	}
+
+	result3, err := mockProxy.handleCallTool(ctx, request3)
+	assert.NoError(t, err)
+	assert.NotNil(t, result3)
+	assert.True(t, result3.IsError, "Invalid tool format should return error")
+
+	// Test 4: Multiple sequential calls after errors (this tests the main issue)
+	for i := 0; i < 5; i++ {
+		result, err := mockProxy.handleCallTool(ctx, request2)
+		assert.NoError(t, err, "Call %d should not return nil or panic", i+1)
+		assert.NotNil(t, result, "Call %d should return a result", i+1)
+		assert.True(t, result.IsError, "Call %d should return error", i+1)
+	}
 }

@@ -24,7 +24,15 @@ var (
 	enableTray        bool
 	debugSearch       bool
 	toolResponseLimit int
-	version           = "v0.1.0" // This will be injected by -ldflags during build
+
+	// Security flags
+	readOnlyMode      bool
+	disableManagement bool
+	allowServerAdd    bool
+	allowServerRemove bool
+	enablePrompts     bool
+
+	version = "v0.1.0" // This will be injected by -ldflags during build
 )
 
 func main() {
@@ -43,6 +51,11 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&enableTray, "tray", true, "Enable system tray")
 	rootCmd.PersistentFlags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	rootCmd.PersistentFlags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
+	rootCmd.PersistentFlags().BoolVar(&readOnlyMode, "read-only", false, "Enable read-only mode")
+	rootCmd.PersistentFlags().BoolVar(&disableManagement, "disable-management", false, "Disable management features")
+	rootCmd.PersistentFlags().BoolVar(&allowServerAdd, "allow-server-add", true, "Allow adding new servers")
+	rootCmd.PersistentFlags().BoolVar(&allowServerRemove, "allow-server-remove", true, "Allow removing existing servers")
+	rootCmd.PersistentFlags().BoolVar(&enablePrompts, "enable-prompts", true, "Enable prompts for user input")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -80,10 +93,20 @@ func runServer(cmd *cobra.Command, args []string) error {
 		cfg.ToolResponseLimit = toolResponseLimit
 	}
 
+	// Apply security settings from command line
+	cfg.ReadOnlyMode = readOnlyMode
+	cfg.DisableManagement = disableManagement
+	cfg.AllowServerAdd = allowServerAdd
+	cfg.AllowServerRemove = allowServerRemove
+	cfg.EnablePrompts = enablePrompts
+
 	logger.Info("Configuration loaded",
 		zap.String("data_dir", cfg.DataDir),
 		zap.Int("servers_count", len(cfg.Servers)),
-		zap.Bool("tray_enabled", cfg.EnableTray))
+		zap.Bool("tray_enabled", cfg.EnableTray),
+		zap.Bool("read_only_mode", cfg.ReadOnlyMode),
+		zap.Bool("disable_management", cfg.DisableManagement),
+		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
 	// Create server
 	srv, err := server.NewServer(cfg, logger)

@@ -250,6 +250,11 @@ func (c *Client) determineTransportType() string {
 		return c.config.Protocol
 	}
 
+	// Auto-detect based on command first (highest priority)
+	if c.config.Command != "" {
+		return "stdio"
+	}
+
 	// Auto-detect based on URL
 	if strings.HasPrefix(c.config.URL, "http://") || strings.HasPrefix(c.config.URL, "https://") {
 		// Default to streamable-http for HTTP URLs unless explicitly set

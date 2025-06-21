@@ -1,0 +1,125 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: ["1.21", "1.22", "1.23"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run unit tests
+        run: go test -v -race -timeout 30s ./internal/...
+
+      - name: Run E2E tests
+        run: go test -v -race -timeout 5m ./internal/server -run TestE2E
+        env:
+          GO_TEST_TIMEOUT: 300s
+
+      - name: Run E2E tests with race detector
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23'
+        run: go test -v -race -timeout 10m ./internal/server -run TestE2E
+        env:
+          GO_TEST_TIMEOUT: 600s
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23"
+
+      - name: Build mcpproxy
+        run: go build -o mcpproxy ./cmd/mcpproxy
+
+      - name: Test mcpproxy binary
+        run: |
+          # Test version command
+          ./mcpproxy version
+
+          # Test help command
+          ./mcpproxy --help
+
+          # Test serve command with dry-run (if available)
+          timeout 10s ./mcpproxy serve --port 0 || true
+
+      - name: Run tests with coverage
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./internal/server -run TestE2E
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.out
+          flags: e2e-tests
+          name: e2e-coverage
+          fail_ci_if_error: false
+
+  stress-tests:
+    name: Stress Tests
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23"
+
+      - name: Run concurrent stress tests
+        run: |
+          # Run the concurrent test multiple times to catch race conditions
+          for i in {1..5}; do
+            echo "Stress test iteration $i"
+            go test -v -race -timeout 10m ./internal/server -run TestE2E_ConcurrentOperations
+          done
+
+      - name: Run memory stress test
+        run: |
+          # Run tests with memory limit
+          GOMAXPROCS=1 GOMEMLIMIT=100MiB go test -v -timeout 15m ./internal/server -run TestE2E

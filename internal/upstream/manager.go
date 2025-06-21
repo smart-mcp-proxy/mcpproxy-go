@@ -161,7 +161,18 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, fmt.Errorf("no connected client found for server: %s", serverName)
 	}
 
+	// Check connection status and provide detailed error information
+	connectionStatus := targetClient.GetConnectionStatus()
 	if !targetClient.IsConnected() {
+		if connecting, ok := connectionStatus["connecting"].(bool); ok && connecting {
+			return nil, fmt.Errorf("client for server %s is currently connecting", serverName)
+		}
+
+		// Include last error if available
+		if lastError, ok := connectionStatus["last_error"].(string); ok && lastError != "" {
+			return nil, fmt.Errorf("client for server %s is not connected (last error: %s)", serverName, lastError)
+		}
+
 		return nil, fmt.Errorf("client for server %s is not connected", serverName)
 	}
 

@@ -103,17 +103,20 @@ Smart MCP Proxy
 ## Features
 
 - **Intelligent Tool Discovery**: Automatically discover and index tools from multiple MCP servers
-- **Semantic Search**: Find relevant tools using natural language queries
+- **Enhanced Tool Search**: Consolidated `retrieve_tools` with optional statistics, debug mode, and tool ranking explanations  
+- **Semantic Search**: Find relevant tools using natural language queries with BM25 full-text search
 - **Tool Aggregation**: Combine tools from multiple upstream servers into a single interface
 - **Response Truncation & Caching**: Automatically truncate large tool responses to prevent LLM context bloat
 - **Smart Pagination**: Access cached response data through pagination with the `read_cache` tool
 - **JSON Structure Analysis**: Intelligent splitting of JSON responses by record arrays
 - **HTTP & Stdio Support**: Connect to MCP servers via HTTP or stdio protocols
+- **Security Controls**: Read-only mode, management disabling, granular server add/remove permissions
 - **Persistent Storage**: Cache tool metadata and connection information
 - **Configuration Management**: Flexible JSON-based configuration with environment variable support
 - **System Tray Integration**: Native system tray with real-time monitoring and control
 - **Auto-updates**: Built-in update checking and installation
 - **Cross-platform**: Works on macOS, Windows, and Linux
+- **MCP Prompts Support**: Ready for prompt templates and workflow guidance (when mcp-go supports it)
 
 ## Installation
 
@@ -179,6 +182,27 @@ export MCPPROXY_DATA_DIR=~/.mcpproxy
 ./mcpproxy
 ```
 
+### Security Configuration
+
+Configure security settings to control access in different environments:
+
+```json
+{
+  "read_only_mode": false,
+  "disable_management": false,
+  "allow_server_add": true,
+  "allow_server_remove": true,
+  "enable_prompts": true
+}
+```
+
+Security options:
+- `read_only_mode`: When true, only allows listing servers, blocks all modifications
+- `disable_management`: When true, completely disables the `upstream_servers` tool
+- `allow_server_add`: Controls whether new servers can be added (includes `add`, `add_batch`, `import_cursor`)
+- `allow_server_remove`: Controls whether servers can be removed
+- `enable_prompts`: Enable MCP prompts capability for workflow guidance
+
 ### Command Line Options
 
 ```bash
@@ -191,6 +215,11 @@ Options:
 - `--data-dir, -d`: Data directory path
 - `--tray`: Enable system tray (default: true)
 - `--log-level`: Log level (debug, info, warn, error)
+- `--read-only`: Enable read-only mode (security)
+- `--disable-management`: Disable server management (security)
+- `--allow-server-add`: Allow adding servers (default: true)
+- `--allow-server-remove`: Allow removing servers (default: true)
+- `--enable-prompts`: Enable prompts capability (default: true)
 
 ## Usage
 
