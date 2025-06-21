@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
@@ -711,3 +713,102 @@ func TestHandleCallToolCompleteErrorHandling(t *testing.T) {
 		assert.True(t, result.IsError, "Call %d should return error", i+1)
 	}
 }
+
+// Test: Quarantine functionality for security
+func TestE2E_QuarantineFunctionality(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Test 1: Add a server (should be quarantined by default)
+	mockServer := env.CreateMockUpstreamServer("quarantine-test", []mcp.Tool{
+		{
+			Name:        "test_tool",
+			Description: "A test tool",
+		},
+	})
+
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "quarantine-test",
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError)
+
+	// Test 2: List quarantined servers (should include our new server)
+	listQuarantinedRequest := mcp.CallToolRequest{}
+	listQuarantinedRequest.Params.Name = "upstream_servers"
+	listQuarantinedRequest.Params.Arguments = map[string]interface{}{
+		"operation": "list_quarantined",
+	}
+
+	listResult, err := mcpClient.CallTool(ctx, listQuarantinedRequest)
+	require.NoError(t, err)
+	assert.False(t, listResult.IsError)
+
+	// Parse the response to check if our server is quarantined
+	var listResponse map[string]interface{}
+	err = json.Unmarshal([]byte(listResult.Content[0].(mcp.TextContent).Text), &listResponse)
+	require.NoError(t, err)
+
+	servers, ok := listResponse["servers"].([]interface{})
+	require.True(t, ok)
+	assert.True(t, len(servers) > 0, "Expected at least one quarantined server")
+
+	// Test 3: Try to call a tool from the quarantined server (should be blocked)
+	toolCallRequest := mcp.CallToolRequest{}
+	toolCallRequest.Params.Name = "call_tool"
+	toolCallRequest.Params.Arguments = map[string]interface{}{
+		"name": "quarantine-test:test_tool",
+		"args": map[string]interface{}{},
+	}
+
+	toolCallResult, err := mcpClient.CallTool(ctx, toolCallRequest)
+	require.NoError(t, err)
+	assert.False(t, toolCallResult.IsError)
+
+	// Check that the response indicates the server is quarantined
+	var toolCallResponse map[string]interface{}
+	err = json.Unmarshal([]byte(toolCallResult.Content[0].(mcp.TextContent).Text), &toolCallResponse)
+	require.NoError(t, err)
+	assert.Equal(t, "QUARANTINED_SERVER_BLOCKED", toolCallResponse["status"])
+
+	// Test 4: Unquarantine the server
+	unquarantineRequest := mcp.CallToolRequest{}
+	unquarantineRequest.Params.Name = "upstream_servers"
+	unquarantineRequest.Params.Arguments = map[string]interface{}{
+		"operation": "unquarantine",
+		"name":      "quarantine-test",
+	}
+
+	unquarantineResult, err := mcpClient.CallTool(ctx, unquarantineRequest)
+	require.NoError(t, err)
+	assert.False(t, unquarantineResult.IsError)
+
+	// Test 5: Now tool calls should work (wait a moment for server to be available)
+	time.Sleep(2 * time.Second)
+
+	toolCallResult2, err := mcpClient.CallTool(ctx, toolCallRequest)
+	require.NoError(t, err)
+	assert.False(t, toolCallResult2.IsError)
+
+	// Parse response - should now be a successful tool call, not a quarantine block
+	var toolCallResponse2 map[string]interface{}
+	err = json.Unmarshal([]byte(toolCallResult2.Content[0].(mcp.TextContent).Text), &toolCallResponse2)
+	require.NoError(t, err)
+	assert.NotEqual(t, "QUARANTINED_SERVER_BLOCKED", toolCallResponse2["status"])
+}
+
+// Test: Error handling and recovery

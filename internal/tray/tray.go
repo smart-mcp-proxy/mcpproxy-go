@@ -47,6 +47,10 @@ type ServerInterface interface {
 	StopServer() error
 	GetStatus() interface{}            // Returns server status for display
 	StatusChannel() <-chan interface{} // Channel for status updates
+
+	// Quarantine management methods
+	GetQuarantinedServers() ([]map[string]interface{}, error)
+	UnquarantineServer(serverName string) error
 }
 
 // App represents the system tray application
@@ -180,6 +184,13 @@ func (a *App) onReady() {
 
 	systray.AddSeparator()
 
+	// Quarantine management submenu
+	qMenu := systray.AddMenuItem("Security Quarantine", "Manage quarantined servers (Tool Poisoning Attack protection)")
+	qListItem := qMenu.AddSubMenuItem("View Quarantined Servers", "List servers in security quarantine")
+	qUnquarantineItem := qMenu.AddSubMenuItem("Unquarantine Server...", "Remove server from quarantine (requires manual approval)")
+
+	systray.AddSeparator()
+
 	mUpdate := systray.AddMenuItem("Check for Updates…", "Check for application updates")
 	mConfig := systray.AddMenuItem("Open Config", "Open configuration file")
 
@@ -196,6 +207,10 @@ func (a *App) onReady() {
 			select {
 			case <-a.startStopItem.ClickedCh:
 				go a.handleStartStop()
+			case <-qListItem.ClickedCh:
+				go a.handleListQuarantined()
+			case <-qUnquarantineItem.ClickedCh:
+				go a.handleUnquarantinePrompt()
 			case <-mUpdate.ClickedCh:
 				go a.checkForUpdates()
 			case <-mConfig.ClickedCh:
@@ -526,6 +541,64 @@ func (a *App) handleStartStop() {
 
 	// Update status immediately
 	a.updateStatus()
+}
+
+// handleListQuarantined displays quarantined servers information
+func (a *App) handleListQuarantined() {
+	if a.server == nil {
+		return
+	}
+
+	quarantinedServers, err := a.server.GetQuarantinedServers()
+	if err != nil {
+		a.logger.Error("Failed to get quarantined servers", zap.Error(err))
+		return
+	}
+
+	if len(quarantinedServers) == 0 {
+		a.logger.Info("No servers are currently quarantined")
+		// Could show a system notification here if available
+		return
+	}
+
+	// Log quarantined servers (could be extended to show in UI dialog)
+	a.logger.Info("Quarantined servers:")
+	for _, server := range quarantinedServers {
+		name := "unknown"
+		if n, ok := server["name"].(string); ok {
+			name = n
+		}
+		a.logger.Info(fmt.Sprintf("- %s (quarantined for security)", name))
+	}
+}
+
+// handleUnquarantinePrompt prompts user to unquarantine a server
+func (a *App) handleUnquarantinePrompt() {
+	if a.server == nil {
+		return
+	}
+
+	quarantinedServers, err := a.server.GetQuarantinedServers()
+	if err != nil {
+		a.logger.Error("Failed to get quarantined servers", zap.Error(err))
+		return
+	}
+
+	if len(quarantinedServers) == 0 {
+		a.logger.Info("No servers are currently quarantined")
+		return
+	}
+
+	// For now, log available servers for unquarantine
+	// A full implementation would show a dialog or prompt
+	a.logger.Info("Servers available for unquarantine:")
+	for _, server := range quarantinedServers {
+		name := "unknown"
+		if n, ok := server["name"].(string); ok {
+			name = n
+		}
+		a.logger.Info(fmt.Sprintf("- %s (use 'upstream_servers' tool with operation 'unquarantine' to approve)", name))
+	}
 }
 
 func (a *App) onExit() {

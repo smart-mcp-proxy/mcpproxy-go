@@ -1,6 +1,6 @@
 # Smart MCP Proxy
 
-A smart proxy server for the Model Context Protocol (MCP) that provides intelligent tool discovery, indexing, and routing capabilities with an enhanced system tray interface.
+A smart proxy server for the Model Context Protocol (MCP) that provides intelligent tool discovery, indexing, and routing capabilities with an enhanced system tray interface and **advanced security quarantine protection against Tool Poisoning Attacks (TPAs)**.
 
 ## ⚡ Fast Startup & Background Operations
 
@@ -117,6 +117,7 @@ Smart MCP Proxy
 - **Auto-updates**: Built-in update checking and installation
 - **Cross-platform**: Works on macOS, Windows, and Linux
 - **MCP Prompts Support**: Ready for prompt templates and workflow guidance (when mcp-go supports it)
+- **Security Quarantine System**: Advanced protection against Tool Poisoning Attacks (TPAs)
 
 ## Installation
 
@@ -684,4 +685,44 @@ The proxy automatically:
 
 1. Use `add_batch` operation with array of server configurations
 2. Mix HTTP and stdio servers in the same request
-3. All servers processed and connected simultaneously 
+3. All servers processed and connected simultaneously
+
+## 🔒 Security Quarantine System
+
+The Smart MCP Proxy implements a comprehensive security model to protect against **Tool Poisoning Attacks (TPAs)** and other MCP security vulnerabilities:
+
+### 🛡️ **Automatic Quarantine Protection**
+- **Auto-quarantine**: All newly added servers are automatically quarantined for security review
+- **TPA Protection**: Prevents execution of potentially malicious tools until manual approval
+- **Security Analysis**: Provides detailed tool descriptions and security prompts for review
+- **Safe Defaults**: Security-first approach with manual unquarantining required
+
+### 🔍 **Security Review Tools**
+- **`list_quarantined`**: List all servers in security quarantine
+- **`inspect_quarantined`**: Analyze tool descriptions for security threats
+- **`quarantine`/`unquarantine`**: Manually manage server quarantine status
+- **Tray Menu Integration**: Security quarantine management via system tray
+
+### ⚠️ **Tool Poisoning Attack Prevention**
+Tool Poisoning Attacks embed malicious instructions in tool descriptions that are invisible to users but visible to AI models. Our protection includes:
+
+- **Hidden Instruction Detection**: Security prompts specifically look for malicious patterns
+- **Full Description Exposure**: Complete tool descriptions shown for security review
+- **Cross-Server Protection**: Quarantine prevents malicious servers from affecting trusted ones
+- **Rug Pull Prevention**: Auto-quarantine blocks post-approval server modifications
+
+### Common TPA Patterns Detected
+- Instructions to read sensitive files (SSH keys, configs, databases)
+- Commands to exfiltrate data while concealing actions  
+- Hidden prompts in `<IMPORTANT>` tags or similar markup
+- Requests to pass file contents as hidden parameters
+- Instructions to override behavior of other trusted tools
+
+### Enterprise Use Cases
+- **Compliance**: Meet regulatory requirements for security controls
+- **Development Protection**: Safe experimentation with untrusted servers
+- **Incident Response**: Immediate quarantine during security incidents
+- **Supply Chain Security**: Protection against compromised upstream servers
+- **Multi-User Environments**: Centralized security management
+
+See [SECURITY.md](SECURITY.md) for detailed security documentation and best practices. 

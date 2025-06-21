@@ -435,6 +435,34 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 	return stats
 }
 
+// GetQuarantinedServers returns information about quarantined servers for tray UI
+func (s *Server) GetQuarantinedServers() ([]map[string]interface{}, error) {
+	quarantinedServers, err := s.storageManager.ListQuarantinedUpstreamServers()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []map[string]interface{}
+	for _, server := range quarantinedServers {
+		result = append(result, map[string]interface{}{
+			"name":        server.Name,
+			"url":         server.URL,
+			"command":     server.Command,
+			"protocol":    server.Protocol,
+			"enabled":     server.Enabled,
+			"quarantined": server.Quarantined,
+			"created":     server.Created,
+		})
+	}
+
+	return result, nil
+}
+
+// UnquarantineServer removes a server from quarantine via tray UI
+func (s *Server) UnquarantineServer(serverName string) error {
+	return s.storageManager.QuarantineUpstreamServer(serverName, false)
+}
+
 // getServerToolCount returns the number of tools for a specific server
 func (s *Server) getServerToolCount(serverID string) int {
 	client, exists := s.upstreamManager.GetClient(serverID)

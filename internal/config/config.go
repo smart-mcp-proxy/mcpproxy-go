@@ -28,16 +28,17 @@ type Config struct {
 
 // ServerConfig represents upstream MCP server configuration
 type ServerConfig struct {
-	Name     string            `json:"name,omitempty" mapstructure:"name"`
-	URL      string            `json:"url,omitempty" mapstructure:"url"`
-	Protocol string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
-	Command  string            `json:"command,omitempty" mapstructure:"command"`
-	Args     []string          `json:"args,omitempty" mapstructure:"args"`
-	Env      map[string]string `json:"env,omitempty" mapstructure:"env"`
-	Headers  map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
-	Enabled  bool              `json:"enabled" mapstructure:"enabled"`
-	Created  time.Time         `json:"created" mapstructure:"created"`
-	Updated  time.Time         `json:"updated,omitempty" mapstructure:"updated"`
+	Name        string            `json:"name,omitempty" mapstructure:"name"`
+	URL         string            `json:"url,omitempty" mapstructure:"url"`
+	Protocol    string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
+	Command     string            `json:"command,omitempty" mapstructure:"command"`
+	Args        []string          `json:"args,omitempty" mapstructure:"args"`
+	Env         map[string]string `json:"env,omitempty" mapstructure:"env"`
+	Headers     map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
+	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
+	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
+	Created     time.Time         `json:"created" mapstructure:"created"`
+	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
 }
 
 // CursorMCPConfig represents the structure for Cursor IDE MCP configuration

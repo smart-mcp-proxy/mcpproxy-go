@@ -62,16 +62,17 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 	defer m.mu.Unlock()
 
 	record := &UpstreamRecord{
-		ID:      serverConfig.Name, // Use name as ID for simplicity
-		Name:    serverConfig.Name,
-		URL:     serverConfig.URL,
-		Command: serverConfig.Command,
-		Args:    serverConfig.Args,
-		Env:     serverConfig.Env,
-		Headers: serverConfig.Headers,
-		Enabled: serverConfig.Enabled,
-		Created: serverConfig.Created,
-		Updated: time.Now(),
+		ID:          serverConfig.Name, // Use name as ID for simplicity
+		Name:        serverConfig.Name,
+		URL:         serverConfig.URL,
+		Command:     serverConfig.Command,
+		Args:        serverConfig.Args,
+		Env:         serverConfig.Env,
+		Headers:     serverConfig.Headers,
+		Enabled:     serverConfig.Enabled,
+		Quarantined: serverConfig.Quarantined,
+		Created:     serverConfig.Created,
+		Updated:     time.Now(),
 	}
 
 	return m.db.SaveUpstream(record)
@@ -88,15 +89,16 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 	}
 
 	return &config.ServerConfig{
-		Name:    record.Name,
-		URL:     record.URL,
-		Command: record.Command,
-		Args:    record.Args,
-		Env:     record.Env,
-		Headers: record.Headers,
-		Enabled: record.Enabled,
-		Created: record.Created,
-		Updated: record.Updated,
+		Name:        record.Name,
+		URL:         record.URL,
+		Command:     record.Command,
+		Args:        record.Args,
+		Env:         record.Env,
+		Headers:     record.Headers,
+		Enabled:     record.Enabled,
+		Quarantined: record.Quarantined,
+		Created:     record.Created,
+		Updated:     record.Updated,
 	}, nil
 }
 
@@ -113,19 +115,79 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 	var servers []*config.ServerConfig
 	for _, record := range records {
 		servers = append(servers, &config.ServerConfig{
-			Name:    record.Name,
-			URL:     record.URL,
-			Command: record.Command,
-			Args:    record.Args,
-			Env:     record.Env,
-			Headers: record.Headers,
-			Enabled: record.Enabled,
-			Created: record.Created,
-			Updated: record.Updated,
+			Name:        record.Name,
+			URL:         record.URL,
+			Command:     record.Command,
+			Args:        record.Args,
+			Env:         record.Env,
+			Headers:     record.Headers,
+			Enabled:     record.Enabled,
+			Quarantined: record.Quarantined,
+			Created:     record.Created,
+			Updated:     record.Updated,
 		})
 	}
 
 	return servers, nil
+}
+
+// ListQuarantinedUpstreamServers returns all quarantined upstream servers
+func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	records, err := m.db.ListUpstreams()
+	if err != nil {
+		return nil, err
+	}
+
+	var quarantinedServers []*config.ServerConfig
+	for _, record := range records {
+		if record.Quarantined {
+			quarantinedServers = append(quarantinedServers, &config.ServerConfig{
+				Name:        record.Name,
+				URL:         record.URL,
+				Command:     record.Command,
+				Args:        record.Args,
+				Env:         record.Env,
+				Headers:     record.Headers,
+				Enabled:     record.Enabled,
+				Quarantined: record.Quarantined,
+				Created:     record.Created,
+				Updated:     record.Updated,
+			})
+		}
+	}
+
+	return quarantinedServers, nil
+}
+
+// ListQuarantinedTools returns tools from quarantined servers with full descriptions for security analysis
+func (m *Manager) ListQuarantinedTools(serverName string) ([]map[string]interface{}, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Check if server is quarantined
+	server, err := m.GetUpstreamServer(serverName)
+	if err != nil {
+		return nil, err
+	}
+
+	if !server.Quarantined {
+		return nil, fmt.Errorf("server '%s' is not quarantined", serverName)
+	}
+
+	// Return placeholder for now - actual implementation would need to connect to server
+	// and retrieve tools with full descriptions for security analysis
+	tools := []map[string]interface{}{
+		{
+			"message": fmt.Sprintf("Server '%s' is quarantined. Connect to inspect tools with full descriptions for security analysis.", serverName),
+			"server":  serverName,
+			"status":  "quarantined",
+		},
+	}
+
+	return tools, nil
 }
 
 // DeleteUpstreamServer deletes an upstream server
@@ -147,6 +209,21 @@ func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
 	}
 
 	record.Enabled = enabled
+	return m.db.SaveUpstream(record)
+}
+
+// QuarantineUpstreamServer sets the quarantine status of an upstream server
+func (m *Manager) QuarantineUpstreamServer(name string, quarantined bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	record, err := m.db.GetUpstream(name)
+	if err != nil {
+		return err
+	}
+
+	record.Quarantined = quarantined
+	record.Updated = time.Now()
 	return m.db.SaveUpstream(record)
 }
 
