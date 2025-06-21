@@ -75,3 +75,5 @@ coverage.txt
 # Cache directories
 .cache/
 *.cache 
+cmd/mcpproxy/mcpproxy
+data/
