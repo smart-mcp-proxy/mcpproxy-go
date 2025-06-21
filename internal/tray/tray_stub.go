@@ -17,6 +17,15 @@ type ServerInterface interface {
 	StopServer() error
 	GetStatus() interface{}
 	StatusChannel() <-chan interface{}
+
+	// Quarantine management methods
+	GetQuarantinedServers() ([]map[string]interface{}, error)
+	UnquarantineServer(serverName string) error
+
+	// Server management methods for tray menu
+	EnableServer(serverName string, enabled bool) error
+	QuarantineServer(serverName string, quarantined bool) error
+	GetAllServers() ([]map[string]interface{}, error)
 }
 
 // App represents the system tray application (stub version)

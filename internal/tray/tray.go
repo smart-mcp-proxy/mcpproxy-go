@@ -51,6 +51,11 @@ type ServerInterface interface {
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
+
+	// Server management methods for tray menu
+	EnableServer(serverName string, enabled bool) error
+	QuarantineServer(serverName string, quarantined bool) error
+	GetAllServers() ([]map[string]interface{}, error)
 }
 
 // App represents the system tray application
@@ -61,9 +66,23 @@ type App struct {
 	shutdown func()
 
 	// Menu items for dynamic updates
-	statusItem    *systray.MenuItem
-	startStopItem *systray.MenuItem
-	serversMenu   *systray.MenuItem
+	statusItem          *systray.MenuItem
+	startStopItem       *systray.MenuItem
+	upstreamServersMenu *systray.MenuItem
+	quarantineMenu      *systray.MenuItem
+
+	// Server submenus (dynamically created)
+	serverMenus           map[string]*systray.MenuItem
+	quarantineServerMenus map[string]*systray.MenuItem
+
+	// Server action menu items for updates
+	serverActionMenus map[string]*systray.MenuItem // Track enable/disable menu items
+
+	// Menu state tracking to prevent duplicates
+	lastServerList     []string // Track server names to detect changes
+	lastQuarantineList []string // Track quarantined server names
+	menusInitialized   bool     // Track if menus have been created
+	lastRunningState   bool     // Track last known server running state
 
 	// Context for background operations
 	ctx    context.Context
@@ -74,12 +93,15 @@ type App struct {
 func New(server ServerInterface, logger *zap.SugaredLogger, version string, shutdown func()) *App {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &App{
-		server:   server,
-		logger:   logger,
-		version:  version,
-		shutdown: shutdown,
-		ctx:      ctx,
-		cancel:   cancel,
+		server:                server,
+		logger:                logger,
+		version:               version,
+		shutdown:              shutdown,
+		ctx:                   ctx,
+		cancel:                cancel,
+		serverMenus:           make(map[string]*systray.MenuItem),
+		quarantineServerMenus: make(map[string]*systray.MenuItem),
+		serverActionMenus:     make(map[string]*systray.MenuItem),
 	}
 }
 
@@ -101,9 +123,9 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Start background status updater (every 5 seconds)
+	// Start background status updater (every 10 seconds instead of 5 to reduce menu churn)
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -178,16 +200,15 @@ func (a *App) onReady() {
 
 	systray.AddSeparator()
 
-	// Upstream servers submenu
-	a.serversMenu = systray.AddMenuItem("Upstream Servers", "View upstream server status")
-	a.updateServersMenu()
+	// Upstream servers submenu with dynamic server list
+	a.upstreamServersMenu = systray.AddMenuItem("Upstream Servers", "Manage upstream servers")
+	a.createUpstreamServersMenu()
 
 	systray.AddSeparator()
 
-	// Quarantine management submenu
-	qMenu := systray.AddMenuItem("Security Quarantine", "Manage quarantined servers (Tool Poisoning Attack protection)")
-	qListItem := qMenu.AddSubMenuItem("View Quarantined Servers", "List servers in security quarantine")
-	qUnquarantineItem := qMenu.AddSubMenuItem("Unquarantine Server...", "Remove server from quarantine (requires manual approval)")
+	// Quarantine management submenu with dynamic quarantined server list
+	a.quarantineMenu = systray.AddMenuItem("Security Quarantine", "Manage quarantined servers (Tool Poisoning Attack protection)")
+	a.createQuarantineMenu()
 
 	systray.AddSeparator()
 
@@ -198,25 +219,18 @@ func (a *App) onReady() {
 
 	mQuit := systray.AddMenuItem("Quit", "Quit mcpproxy")
 
-	// Initial status update
-	a.updateStatus()
-
 	// Handle menu clicks
 	go func() {
 		for {
 			select {
 			case <-a.startStopItem.ClickedCh:
 				go a.handleStartStop()
-			case <-qListItem.ClickedCh:
-				go a.handleListQuarantined()
-			case <-qUnquarantineItem.ClickedCh:
-				go a.handleUnquarantinePrompt()
 			case <-mUpdate.ClickedCh:
 				go a.checkForUpdates()
 			case <-mConfig.ClickedCh:
 				go a.openConfig()
 			case <-mQuit.ClickedCh:
-				a.logger.Info("Quit requested from tray menu")
+				a.logger.Info("Quit selected from tray menu")
 				if a.shutdown != nil {
 					a.shutdown()
 				}
@@ -227,6 +241,9 @@ func (a *App) onReady() {
 			}
 		}
 	}()
+
+	// Update initial status
+	a.updateStatus()
 }
 
 func (a *App) updateTooltip() {
@@ -376,7 +393,7 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 
 // updateServersMenuFromStatusData updates the servers menu with connection status
 func (a *App) updateServersMenuFromStatusData(status map[string]interface{}) {
-	if a.serversMenu == nil {
+	if a.upstreamServersMenu == nil {
 		return
 	}
 
@@ -385,7 +402,7 @@ func (a *App) updateServersMenuFromStatusData(status map[string]interface{}) {
 		if totalServers, ok := upstreamStats["total_servers"].(int); ok {
 			if connectedServers, ok := upstreamStats["connected_servers"].(int); ok {
 				menuTitle := fmt.Sprintf("Upstream Servers (%d/%d)", connectedServers, totalServers)
-				a.serversMenu.SetTitle(menuTitle)
+				a.upstreamServersMenu.SetTitle(menuTitle)
 
 				// Also update tooltip with detailed server info
 				if servers, ok := upstreamStats["servers"].(map[string]interface{}); ok {
@@ -431,7 +448,7 @@ func (a *App) updateServersMenuFromStatusData(status map[string]interface{}) {
 					}
 
 					if serverDetails.Len() > 0 {
-						a.serversMenu.SetTooltip(serverDetails.String())
+						a.upstreamServersMenu.SetTooltip(serverDetails.String())
 					}
 				}
 			}
@@ -444,8 +461,10 @@ func (a *App) updateStatus() {
 		return
 	}
 
+	isRunning := a.server.IsRunning()
+
 	var statusText string
-	if a.server.IsRunning() {
+	if isRunning {
 		statusText = "Status: Running"
 		if addr := a.server.GetListenAddress(); addr != "" {
 			statusText += fmt.Sprintf(" (%s)", addr)
@@ -458,68 +477,27 @@ func (a *App) updateStatus() {
 
 	a.statusItem.SetTitle(statusText)
 	a.updateTooltip()
-	a.updateServersMenu()
+
+	// Track if server running state changed
+	runningStateChanged := a.lastRunningState != isRunning
+	if runningStateChanged {
+		a.logger.Info("Server running state changed, refreshing menus",
+			zap.Bool("was_running", a.lastRunningState),
+			zap.Bool("is_running", isRunning))
+		a.lastRunningState = isRunning
+	}
+
+	// Always refresh menus when server is running to reflect connection status changes
+	// Only skip if server is stopped and state hasn't changed
+	if isRunning || runningStateChanged {
+		a.refreshMenus()
+	}
 }
 
 func (a *App) updateServersMenu() {
-	if a.server == nil || a.serversMenu == nil {
-		return
-	}
-
-	// Clear existing submenu items (this is a ·Æation of systray - we can't dynamically remove items)
-	// So we update the main menu title to include server count
-	stats := a.server.GetUpstreamStats()
-	if stats != nil {
-		totalServers := 0
-		connectedServers := 0
-		if total, ok := stats["total_servers"].(int); ok {
-			totalServers = total
-		}
-		if connected, ok := stats["connected_servers"].(int); ok {
-			connectedServers = connected
-		}
-
-		menuTitle := fmt.Sprintf("Upstream Servers (%d/%d)", connectedServers, totalServers)
-		a.serversMenu.SetTitle(menuTitle)
-
-		// Since we can't dynamically update submenus easily with systray,
-		// we'll update the tooltip to show server details
-		var serverDetails strings.Builder
-		if servers, ok := stats["servers"].(map[string]interface{}); ok {
-			for _, serverInfo := range servers {
-				if serverMap, ok := serverInfo.(map[string]interface{}); ok {
-					name := "Unknown"
-					if n, ok := serverMap["name"].(string); ok {
-						name = n
-					}
-
-					connected := false
-					if c, ok := serverMap["connected"].(bool); ok {
-						connected = c
-					}
-
-					toolCount := 0
-					if tc, ok := serverMap["tool_count"].(int); ok {
-						toolCount = tc
-					}
-
-					status := "Disconnected"
-					if connected {
-						status = "Connected"
-					}
-
-					if serverDetails.Len() > 0 {
-						serverDetails.WriteString("\n")
-					}
-					serverDetails.WriteString(fmt.Sprintf("• %s: %s (%d tools)", name, status, toolCount))
-				}
-			}
-		}
-
-		if serverDetails.Len() > 0 {
-			a.serversMenu.SetTooltip(serverDetails.String())
-		}
-	}
+	// This method is now handled by refreshMenus() which is called from updateStatus()
+	// Keeping it for compatibility but delegating to the new system
+	a.refreshMenus()
 }
 
 func (a *App) handleStartStop() {
@@ -543,63 +521,7 @@ func (a *App) handleStartStop() {
 	a.updateStatus()
 }
 
-// handleListQuarantined displays quarantined servers information
-func (a *App) handleListQuarantined() {
-	if a.server == nil {
-		return
-	}
-
-	quarantinedServers, err := a.server.GetQuarantinedServers()
-	if err != nil {
-		a.logger.Error("Failed to get quarantined servers", zap.Error(err))
-		return
-	}
-
-	if len(quarantinedServers) == 0 {
-		a.logger.Info("No servers are currently quarantined")
-		// Could show a system notification here if available
-		return
-	}
-
-	// Log quarantined servers (could be extended to show in UI dialog)
-	a.logger.Info("Quarantined servers:")
-	for _, server := range quarantinedServers {
-		name := "unknown"
-		if n, ok := server["name"].(string); ok {
-			name = n
-		}
-		a.logger.Info(fmt.Sprintf("- %s (quarantined for security)", name))
-	}
-}
-
-// handleUnquarantinePrompt prompts user to unquarantine a server
-func (a *App) handleUnquarantinePrompt() {
-	if a.server == nil {
-		return
-	}
-
-	quarantinedServers, err := a.server.GetQuarantinedServers()
-	if err != nil {
-		a.logger.Error("Failed to get quarantined servers", zap.Error(err))
-		return
-	}
-
-	if len(quarantinedServers) == 0 {
-		a.logger.Info("No servers are currently quarantined")
-		return
-	}
-
-	// For now, log available servers for unquarantine
-	// A full implementation would show a dialog or prompt
-	a.logger.Info("Servers available for unquarantine:")
-	for _, server := range quarantinedServers {
-		name := "unknown"
-		if n, ok := server["name"].(string); ok {
-			name = n
-		}
-		a.logger.Info(fmt.Sprintf("- %s (use 'upstream_servers' tool with operation 'unquarantine' to approve)", name))
-	}
-}
+// Legacy quarantine handlers removed - functionality moved to dynamic menu system
 
 func (a *App) onExit() {
 	a.logger.Info("System tray exiting")
@@ -820,4 +742,416 @@ func (a *App) openConfig() {
 	if err := cmd.Run(); err != nil {
 		a.logger.Error("Failed to open config file", zap.Error(err))
 	}
+}
+
+// createUpstreamServersMenu creates the upstream servers submenu with individual server entries
+func (a *App) createUpstreamServersMenu() {
+	if a.server == nil {
+		return
+	}
+
+	// Get all servers
+	servers, err := a.server.GetAllServers()
+	if err != nil {
+		a.logger.Error("Failed to get servers for menu", zap.Error(err))
+		return
+	}
+
+	// Extract server names for comparison
+	currentServerList := make([]string, len(servers))
+	for i, server := range servers {
+		if name, ok := server["name"].(string); ok {
+			currentServerList[i] = name
+		}
+	}
+
+	// Update main menu title with counts (always update this)
+	totalServers := len(servers)
+	connectedServers := 0
+	for _, server := range servers {
+		if connected, ok := server["connected"].(bool); ok && connected {
+			connectedServers++
+		}
+	}
+
+	menuTitle := fmt.Sprintf("Upstream Servers (%d/%d)", connectedServers, totalServers)
+	a.upstreamServersMenu.SetTitle(menuTitle)
+
+	// Check if server list has changed
+	hasChanged := !a.menusInitialized || !stringSlicesEqual(a.lastServerList, currentServerList)
+
+	// Always update existing menu items with current status
+	if a.menusInitialized && len(a.serverMenus) > 0 {
+		a.updateServerMenuTooltips(servers)
+
+		// If server list hasn't changed, we're done
+		if !hasChanged {
+			a.logger.Debug("Server list unchanged, updated existing menu items")
+			return
+		}
+	}
+
+	// Only recreate submenus if the server list has actually changed
+	if !hasChanged {
+		a.logger.Debug("Server list unchanged, skipping menu recreation")
+		return
+	}
+
+	a.logger.Info("Server list changed, recreating upstream servers menu",
+		zap.Strings("old", a.lastServerList),
+		zap.Strings("new", currentServerList))
+
+	// Since we can't remove systray menu items, we need to work around this limitation
+	if a.menusInitialized {
+		a.logger.Warn("Cannot remove existing menu items due to systray limitations - menu may show duplicates")
+		// We've already updated existing items above, so just update tracking and return
+		a.lastServerList = currentServerList
+		return
+	}
+
+	// Clear existing server menus tracking
+	a.serverMenus = make(map[string]*systray.MenuItem)
+	a.serverActionMenus = make(map[string]*systray.MenuItem)
+
+	// Create submenu for each server (only on first initialization)
+	for _, server := range servers {
+		serverName, _ := server["name"].(string)
+		if serverName == "" {
+			continue
+		}
+
+		// Create server status indicator
+		statusIcon, statusTooltip := a.getServerStatusDisplay(server)
+
+		// Create menu item for this server
+		serverMenuItem := a.upstreamServersMenu.AddSubMenuItem(
+			fmt.Sprintf("%s %s", statusIcon, serverName),
+			statusTooltip,
+		)
+		a.serverMenus[serverName] = serverMenuItem
+
+		// Create server action submenus
+		a.createServerActionMenu(serverMenuItem, server)
+	}
+
+	// Update tracking
+	a.lastServerList = currentServerList
+	a.menusInitialized = true
+}
+
+// getServerStatusDisplay returns the appropriate status icon and tooltip for a server
+func (a *App) getServerStatusDisplay(server map[string]interface{}) (string, string) {
+	var statusIcon string
+	var statusTooltip string
+
+	if quarantined, ok := server["quarantined"].(bool); ok && quarantined {
+		statusIcon = "🔒"
+		statusTooltip = "Quarantined for security"
+	} else if connected, ok := server["connected"].(bool); ok && connected {
+		toolCount, _ := server["tool_count"].(int)
+		statusIcon = "✅"
+		statusTooltip = fmt.Sprintf("Connected (%d tools)", toolCount)
+	} else if connecting, ok := server["connecting"].(bool); ok && connecting {
+		statusIcon = "🔄"
+		statusTooltip = "Connecting..."
+	} else if enabled, ok := server["enabled"].(bool); ok && enabled {
+		statusIcon = "❌"
+		statusTooltip = "Disconnected"
+		if lastError, ok := server["last_error"].(string); ok && lastError != "" {
+			statusTooltip += " - " + lastError
+		}
+	} else {
+		statusIcon = "⏸️"
+		statusTooltip = "Disabled"
+	}
+
+	return statusIcon, statusTooltip
+}
+
+// updateServerMenuTooltips updates existing menu items with current status (workaround for systray limitations)
+func (a *App) updateServerMenuTooltips(servers []map[string]interface{}) {
+	a.logger.Debug("Updating server menu tooltips", zap.Int("server_count", len(servers)))
+
+	for _, server := range servers {
+		serverName, _ := server["name"].(string)
+		if serverName == "" {
+			continue
+		}
+
+		// Update main server menu item
+		if menuItem, exists := a.serverMenus[serverName]; exists {
+			statusIcon, statusTooltip := a.getServerStatusDisplay(server)
+			newTitle := fmt.Sprintf("%s %s", statusIcon, serverName)
+
+			// Update both title and tooltip
+			menuItem.SetTitle(newTitle)
+			menuItem.SetTooltip(statusTooltip)
+
+			a.logger.Debug("Updated server menu item",
+				zap.String("server", serverName),
+				zap.String("title", newTitle),
+				zap.String("tooltip", statusTooltip))
+		} else {
+			a.logger.Debug("Server menu item not found", zap.String("server", serverName))
+		}
+
+		// Update action menu item (enable/disable)
+		if actionItem, exists := a.serverActionMenus[serverName]; exists {
+			enabled, _ := server["enabled"].(bool)
+			var enableText string
+			if enabled {
+				enableText = "Disable"
+			} else {
+				enableText = "Enable"
+			}
+
+			actionItem.SetTitle(enableText)
+			actionItem.SetTooltip(fmt.Sprintf("%s server %s", enableText, serverName))
+
+			a.logger.Debug("Updated server action menu item",
+				zap.String("server", serverName),
+				zap.String("action", enableText))
+		}
+	}
+}
+
+// stringSlicesEqual compares two string slices for equality
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// createServerActionMenu creates action submenu for a specific server
+func (a *App) createServerActionMenu(serverMenuItem *systray.MenuItem, server map[string]interface{}) {
+	serverName, _ := server["name"].(string)
+	enabled, _ := server["enabled"].(bool)
+	quarantined, _ := server["quarantined"].(bool)
+
+	// Enable/Disable action
+	var enableText string
+	if enabled {
+		enableText = "Disable"
+	} else {
+		enableText = "Enable"
+	}
+	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
+
+	// Track this action menu item for updates
+	a.serverActionMenus[serverName] = enableItem
+
+	// Quarantine action (only if not already quarantined)
+	var quarantineItem *systray.MenuItem
+	if !quarantined {
+		quarantineItem = serverMenuItem.AddSubMenuItem("Move to Quarantine", fmt.Sprintf("Quarantine server %s for security review", serverName))
+	}
+
+	// Handle clicks for this server
+	go func(name string, enabled bool, quarantined bool) {
+		for {
+			select {
+			case <-enableItem.ClickedCh:
+				go a.handleServerEnable(name, !enabled)
+			case <-a.ctx.Done():
+				return
+			}
+		}
+	}(serverName, enabled, quarantined)
+
+	if quarantineItem != nil {
+		go func(name string) {
+			for {
+				select {
+				case <-quarantineItem.ClickedCh:
+					go a.handleServerQuarantine(name, true)
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}(serverName)
+	}
+}
+
+// createQuarantineMenu creates the quarantine submenu with quarantined servers
+func (a *App) createQuarantineMenu() {
+	if a.server == nil {
+		return
+	}
+
+	// Get quarantined servers
+	quarantinedServers, err := a.server.GetQuarantinedServers()
+	if err != nil {
+		a.logger.Error("Failed to get quarantined servers for menu", zap.Error(err))
+		return
+	}
+
+	// Extract quarantined server names for comparison
+	currentQuarantineList := make([]string, len(quarantinedServers))
+	for i, server := range quarantinedServers {
+		if name, ok := server["name"].(string); ok {
+			currentQuarantineList[i] = name
+		}
+	}
+
+	// Update main menu title with count (always update this)
+	quarantineCount := len(quarantinedServers)
+	menuTitle := fmt.Sprintf("Security Quarantine (%d)", quarantineCount)
+	a.quarantineMenu.SetTitle(menuTitle)
+
+	// Check if quarantine list has changed
+	hasChanged := !a.menusInitialized || !stringSlicesEqual(a.lastQuarantineList, currentQuarantineList)
+
+	// Only recreate submenus if the quarantine list has actually changed
+	if !hasChanged {
+		a.logger.Debug("Quarantine list unchanged, skipping menu recreation")
+		return
+	}
+
+	a.logger.Info("Quarantine list changed, updating quarantine menu",
+		zap.Strings("old", a.lastQuarantineList),
+		zap.Strings("new", currentQuarantineList))
+
+	// Since we can't remove systray menu items, we need to work around this limitation
+	if a.menusInitialized && len(a.quarantineServerMenus) > 0 {
+		a.logger.Warn("Cannot remove existing quarantine menu items due to systray limitations")
+		// Update tracking and return to avoid duplicates
+		a.lastQuarantineList = currentQuarantineList
+		return
+	}
+
+	// Clear existing quarantine server menus tracking
+	a.quarantineServerMenus = make(map[string]*systray.MenuItem)
+
+	// Add general info item (only on first initialization or when empty)
+	if quarantineCount == 0 {
+		infoItem := a.quarantineMenu.AddSubMenuItem("No servers quarantined", "All servers are approved")
+		infoItem.Disable()
+	} else {
+		infoItem := a.quarantineMenu.AddSubMenuItem("ℹ️ Click server to unquarantine", "Click on a quarantined server to remove it from quarantine")
+		infoItem.Disable()
+
+		a.quarantineMenu.AddSubMenuItem("", "") // Separator-like empty item
+
+		// Create menu item for each quarantined server
+		for _, server := range quarantinedServers {
+			serverName, _ := server["name"].(string)
+			if serverName == "" {
+				continue
+			}
+
+			// Create quarantined server menu item
+			quarantineServerItem := a.quarantineMenu.AddSubMenuItem(
+				fmt.Sprintf("🔒 %s", serverName),
+				fmt.Sprintf("Click to unquarantine %s (requires manual approval)", serverName),
+			)
+			a.quarantineServerMenus[serverName] = quarantineServerItem
+
+			// Handle click to unquarantine
+			go func(name string) {
+				for {
+					select {
+					case <-quarantineServerItem.ClickedCh:
+						go a.handleServerUnquarantine(name)
+					case <-a.ctx.Done():
+						return
+					}
+				}
+			}(serverName)
+		}
+	}
+
+	// Update tracking
+	a.lastQuarantineList = currentQuarantineList
+}
+
+// Server action handlers
+func (a *App) handleServerEnable(serverName string, enabled bool) {
+	if a.server == nil {
+		return
+	}
+
+	action := "disable"
+	if enabled {
+		action = "enable"
+	}
+
+	a.logger.Info(fmt.Sprintf("Attempting to %s server %s", action, serverName))
+
+	if err := a.server.EnableServer(serverName, enabled); err != nil {
+		a.logger.Error(fmt.Sprintf("Failed to %s server", action),
+			zap.String("server", serverName),
+			zap.Error(err))
+		return
+	}
+
+	a.logger.Info(fmt.Sprintf("Successfully %sd server %s", action, serverName))
+
+	// Use delayed refresh to avoid excessive menu updates
+	a.refreshMenusDelayed()
+}
+
+func (a *App) handleServerQuarantine(serverName string, quarantined bool) {
+	if a.server == nil {
+		return
+	}
+
+	a.logger.Info(fmt.Sprintf("Quarantining server %s", serverName))
+
+	if err := a.server.QuarantineServer(serverName, quarantined); err != nil {
+		a.logger.Error("Failed to quarantine server",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return
+	}
+
+	a.logger.Info(fmt.Sprintf("Successfully quarantined server %s", serverName))
+
+	// Use delayed refresh to avoid excessive menu updates
+	a.refreshMenusDelayed()
+}
+
+func (a *App) handleServerUnquarantine(serverName string) {
+	if a.server == nil {
+		return
+	}
+
+	a.logger.Info(fmt.Sprintf("Unquarantining server %s", serverName))
+
+	if err := a.server.UnquarantineServer(serverName); err != nil {
+		a.logger.Error("Failed to unquarantine server",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return
+	}
+
+	a.logger.Info(fmt.Sprintf("Successfully unquarantined server %s", serverName))
+
+	// Use delayed refresh to avoid excessive menu updates
+	a.refreshMenusDelayed()
+}
+
+// refreshMenus refreshes the dynamic menus only when necessary
+func (a *App) refreshMenus() {
+	// Only refresh if we have a server interface
+	if a.server == nil {
+		return
+	}
+
+	// Update both menus - they will internally check if changes are needed
+	a.createUpstreamServersMenu()
+	a.createQuarantineMenu()
+}
+
+// refreshMenusDelayed refreshes menus after a delay to allow server state to settle
+func (a *App) refreshMenusDelayed() {
+	go func() {
+		time.Sleep(1 * time.Second) // Longer delay to allow server state to settle
+		a.refreshMenus()
+	}()
 }

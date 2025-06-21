@@ -463,6 +463,100 @@ func (s *Server) UnquarantineServer(serverName string) error {
 	return s.storageManager.QuarantineUpstreamServer(serverName, false)
 }
 
+// EnableServer enables/disables a server via tray UI
+func (s *Server) EnableServer(serverName string, enabled bool) error {
+	err := s.storageManager.EnableUpstreamServer(serverName, enabled)
+	if err != nil {
+		return err
+	}
+
+	// Update upstream manager
+	if enabled {
+		// Get server config and add to upstream manager
+		serverConfig, err := s.storageManager.GetUpstreamServer(serverName)
+		if err != nil {
+			return fmt.Errorf("failed to get server config: %w", err)
+		}
+
+		if err := s.upstreamManager.AddServer(serverName, serverConfig); err != nil {
+			s.logger.Warn("Failed to connect to upstream server after enabling",
+				zap.String("server", serverName),
+				zap.Error(err))
+		}
+	} else {
+		// Remove from upstream manager
+		s.upstreamManager.RemoveServer(serverName)
+	}
+
+	// Trigger configuration save
+	s.OnUpstreamServerChange()
+
+	return nil
+}
+
+// QuarantineServer sets quarantine status via tray UI
+func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
+	err := s.storageManager.QuarantineUpstreamServer(serverName, quarantined)
+	if err != nil {
+		return err
+	}
+
+	// Trigger configuration save
+	s.OnUpstreamServerChange()
+
+	return nil
+}
+
+// GetAllServers returns information about all servers for tray UI
+func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
+	servers, err := s.storageManager.ListUpstreamServers()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []map[string]interface{}
+	for _, server := range servers {
+		// Get connection status and tool count
+		toolCount := 0
+		connected := false
+		connecting := false
+		lastError := ""
+
+		if client, exists := s.upstreamManager.GetClient(server.Name); exists {
+			connectionStatus := client.GetConnectionStatus()
+			if c, ok := connectionStatus["connected"].(bool); ok {
+				connected = c
+			}
+			if c, ok := connectionStatus["connecting"].(bool); ok {
+				connecting = c
+			}
+			if e, ok := connectionStatus["last_error"].(string); ok {
+				lastError = e
+			}
+
+			if connected {
+				toolCount = s.getServerToolCount(server.Name)
+			}
+		}
+
+		result = append(result, map[string]interface{}{
+			"name":        server.Name,
+			"url":         server.URL,
+			"command":     server.Command,
+			"protocol":    server.Protocol,
+			"enabled":     server.Enabled,
+			"quarantined": server.Quarantined,
+			"connected":   connected,
+			"connecting":  connecting,
+			"tool_count":  toolCount,
+			"last_error":  lastError,
+			"created":     server.Created,
+		})
+	}
+
+	return result, nil
+}
+
 // getServerToolCount returns the number of tools for a specific server
 func (s *Server) getServerToolCount(serverID string) int {
 	client, exists := s.upstreamManager.GetClient(serverID)
