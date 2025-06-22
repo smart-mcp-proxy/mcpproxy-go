@@ -676,18 +676,40 @@ func (s *Server) StopServer() error {
 	return nil
 }
 
-// startCustomHTTPServer creates a custom HTTP server that handles both /mcp and /mcp/ routes
+// startCustomHTTPServer creates a custom HTTP server that handles MCP endpoints
 func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPServer) error {
 	mux := http.NewServeMux()
-	mux.Handle("/v1/tool_code", streamableServer)
-	mux.Handle("/v1/tool-code", streamableServer) // Alias for python client
+
+	// Create a logging wrapper for debugging
+	loggingHandler := func(handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.logger.Info("HTTP request received",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("user_agent", r.UserAgent()),
+			)
+			handler.ServeHTTP(w, r)
+		})
+	}
+
+	// Standard MCP endpoint according to the specification
+	mux.Handle("/mcp", loggingHandler(streamableServer))
+	mux.Handle("/mcp/", loggingHandler(streamableServer)) // Handle trailing slash
+
+	// Legacy endpoints for backward compatibility
+	mux.Handle("/v1/tool_code", loggingHandler(streamableServer))
+	mux.Handle("/v1/tool-code", loggingHandler(streamableServer)) // Alias for python client
 
 	s.httpServer = &http.Server{
 		Addr:    s.config.Listen,
 		Handler: mux,
 	}
 
-	s.logger.Info("Starting HTTP server", zap.String("address", s.config.Listen))
+	s.logger.Info("Starting HTTP server",
+		zap.String("address", s.config.Listen),
+		zap.Strings("endpoints", []string{"/mcp", "/mcp/", "/v1/tool_code", "/v1/tool-code"}),
+	)
 	if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		s.logger.Error("HTTP server error", zap.Error(err))
 		s.mu.Lock()
