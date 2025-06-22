@@ -328,16 +328,20 @@ func (s *Server) loadConfiguredServers() error {
 		}
 
 		// Sync to upstream manager based on enabled status
-		if serverCfg.Enabled && !serverCfg.Quarantined {
+		if serverCfg.Enabled {
+			// Add server to upstream manager regardless of quarantine status
+			// Quarantined servers are kept connected for inspection but blocked for execution
 			if err := s.upstreamManager.AddServer(serverCfg.Name, serverCfg); err != nil {
 				s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", serverCfg.Name))
 			}
-		} else {
-			// Remove from upstream manager if disabled or quarantined
-			s.upstreamManager.RemoveServer(serverCfg.Name)
+
 			if serverCfg.Quarantined {
-				s.logger.Info("Server is quarantined, removing from active connections", zap.String("server", serverCfg.Name))
+				s.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", serverCfg.Name))
 			}
+		} else {
+			// Remove from upstream manager only if disabled (not quarantined)
+			s.upstreamManager.RemoveServer(serverCfg.Name)
+			s.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
 		}
 	}
 

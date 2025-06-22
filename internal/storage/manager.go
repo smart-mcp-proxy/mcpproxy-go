@@ -179,11 +179,16 @@ func (m *Manager) ListQuarantinedTools(serverName string) ([]map[string]interfac
 
 	// Return placeholder for now - actual implementation would need to connect to server
 	// and retrieve tools with full descriptions for security analysis
+	// TODO: This should connect to the upstream server and return actual tool descriptions
+	// for security analysis, but currently we only return placeholder information
 	tools := []map[string]interface{}{
 		{
-			"message": fmt.Sprintf("Server '%s' is quarantined. Connect to inspect tools with full descriptions for security analysis.", serverName),
-			"server":  serverName,
-			"status":  "quarantined",
+			"message":        fmt.Sprintf("Server '%s' is quarantined. The actual tool descriptions should be retrieved from the upstream manager for security analysis.", serverName),
+			"server":         serverName,
+			"status":         "quarantined",
+			"implementation": "PLACEHOLDER",
+			"next_steps":     "The upstream manager should be used to connect to this server and retrieve actual tool descriptions with full schemas for LLM security analysis",
+			"security_note":  "Real implementation needs to: 1) Connect to quarantined server, 2) Retrieve all tools with descriptions, 3) Include input schemas, 4) Add security analysis prompts, 5) Return quoted tool descriptions for LLM inspection",
 		},
 	}
 
