@@ -62,11 +62,11 @@ If you're not seeing the tray icon on macOS, it's because the icon wasn't embedd
 
 1. **Added icon files** to `internal/tray/`:
    - `icon-32.png` - Color version (32x32 pixels)
-   - `icon-mono-32.png` - Monochrome version (often works better on macOS)
+   - `icon-mono-44.png` - Monochrome version (44x44 pixels, works better on macOS)
 
 2. **Updated tray code** to embed and use the icon:
    ```go
-   //go:embed icon-mono-32.png
+   //go:embed icon-mono-44.png
    var iconData []byte
    
    func (a *App) onReady() {
@@ -133,13 +133,15 @@ export MCPPROXY_LISTEN=:8080
 
 ## Icon Design Guidelines
 
-### macOS Specific Requirements
+### OS Specific Requirements
 
-- **Size**: 16x16 or 32x32 pixels (the system will scale as needed)
-- **Format**: PNG with transparency
-- **Color**: Monochrome icons often work better and adapt to system theme
-- **Style**: Simple, high contrast designs work best
-- **Template**: Consider using template images that adapt to dark/light modes
+- **macOS**: 44x44 pixels, transparent PNG. For dynamic adaptation to light/dark system themes, the icon should be black with only an alpha channel.
+- **Windows**: 32x32 pixels.
+- **Linux**: 24x24 pixels.
+- **Format**: PNG with transparency is generally recommended.
+- **Color**: Monochrome icons often work better and adapt to system theme on macOS.
+- **Style**: Simple, high contrast designs work best.
+- **Template**: Consider using template images that adapt to dark/light modes.
 
 ### Current Icons
 
@@ -150,7 +152,7 @@ The project includes two icon versions:
    - Represents the proxy concept visually
    - Good for branded applications
 
-2. **Monochrome Icon** (`icon-mono-32.png`):
+2. **Monochrome Icon** (`icon-mono-44.png`):
    - Black and white design
    - Better system integration on macOS
    - Adapts to system theme changes
@@ -159,15 +161,15 @@ The project includes two icon versions:
 
 ### Option 1: Replace Existing Icon
 
-1. **Create your icon** (32x32 PNG recommended):
+1. **Create your icon** (44x44 PNG recommended for macOS):
    ```bash
-   # Using your preferred graphics editor, create a 32x32 PNG
-   # Save it as icon-mono-32.png
+   # Using your preferred graphics editor, create a 44x44 PNG
+   # Save it as icon-mono-44.png
    ```
 
 2. **Replace the embedded icon**:
    ```bash
-   cp your-custom-icon.png internal/tray/icon-mono-32.png
+   cp your-custom-icon.png internal/tray/icon-mono-44.png
    ```
 
 3. **Rebuild**:
@@ -221,7 +223,7 @@ To use the color version instead:
 
 3. **Export to PNG**:
    ```bash
-   inkscape --export-filename=icon-mono-32.png --export-width=32 --export-height=32 your-icon.svg
+   inkscape --export-filename=icon-mono-44.png --export-width=44 --export-height=44 your-icon.svg
    ```
 
 ### Using ImageMagick
@@ -233,12 +235,12 @@ To use the color version instead:
 
 2. **Convert existing image**:
    ```bash
-   convert your-image.png -resize 32x32 icon-mono-32.png
+   convert your-image.png -resize 44x44 icon-mono-44.png
    ```
 
 3. **Create simple shape**:
    ```bash
-   convert -size 32x32 xc:transparent -fill black -draw "circle 16,16 16,8" icon-mono-32.png
+   convert -size 44x44 xc:transparent -fill black -draw "circle 22,22 22,11" icon-mono-44.png
    ```
 
 ## Advanced Configuration

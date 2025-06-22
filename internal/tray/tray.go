@@ -27,7 +27,7 @@ const (
 	repo = "smart-mcp-proxy/mcpproxy-go" // Actual repository
 )
 
-//go:embed icon-mono-32.png
+//go:embed icon-mono-44.png
 var iconData []byte
 
 // GitHubRelease represents a GitHub release
@@ -277,7 +277,11 @@ func (a *App) cleanup() {
 }
 
 func (a *App) onReady() {
-	systray.SetTemplateIcon(iconData, iconData)
+	systray.SetIcon(iconData)
+	// On macOS, also set as template icon for better system integration
+	if runtime.GOOS == "darwin" {
+		systray.SetTemplateIcon(iconData, iconData)
+	}
 	a.updateTooltip()
 
 	// --- Initialize Menu Items ---
