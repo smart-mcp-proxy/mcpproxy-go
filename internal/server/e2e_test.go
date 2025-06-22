@@ -327,8 +327,25 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 
+	// Unquarantine the server for testing (bypassing security restrictions)
+	serverConfig, err := env.proxyServer.storageManager.GetUpstreamServer("testserver")
+	require.NoError(t, err)
+	serverConfig.Quarantined = false
+	err = env.proxyServer.storageManager.SaveUpstreamServer(serverConfig)
+	require.NoError(t, err)
+
+	// Trigger connection to the unquarantined server
+	err = env.proxyServer.upstreamManager.ConnectAll(ctx)
+	require.NoError(t, err)
+
+	// Wait for connection to establish
+	time.Sleep(1 * time.Second)
+
+	// Manually trigger tool discovery and indexing
+	env.proxyServer.discoverAndIndexTools(ctx)
+
 	// Wait for tools to be discovered and indexed
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	// Use retrieve_tools to search for tools
 	searchRequest := mcp.CallToolRequest{}
@@ -411,8 +428,25 @@ func TestE2E_ToolCalling(t *testing.T) {
 	_, err := mcpClient.CallTool(ctx, addRequest)
 	require.NoError(t, err)
 
-	// Wait for connection
+	// Unquarantine the server for testing (bypassing security restrictions)
+	serverConfig, err := env.proxyServer.storageManager.GetUpstreamServer("echoserver")
+	require.NoError(t, err)
+	serverConfig.Quarantined = false
+	err = env.proxyServer.storageManager.SaveUpstreamServer(serverConfig)
+	require.NoError(t, err)
+
+	// Trigger connection to the unquarantined server
+	err = env.proxyServer.upstreamManager.ConnectAll(ctx)
+	require.NoError(t, err)
+
+	// Wait for connection to establish
 	time.Sleep(1 * time.Second)
+
+	// Manually trigger tool discovery and indexing
+	env.proxyServer.discoverAndIndexTools(ctx)
+
+	// Wait for tools to be discovered and indexed
+	time.Sleep(3 * time.Second)
 
 	// Call tool through proxy
 	callRequest := mcp.CallToolRequest{}
@@ -443,14 +477,23 @@ func TestE2E_ToolCalling(t *testing.T) {
 		}
 	}
 
-	var response []map[string]interface{}
-	err = json.Unmarshal([]byte(contentText), &response)
+	// The content is an array of content objects, we need to extract the text from the first one
+	var contentArray []map[string]interface{}
+	err = json.Unmarshal([]byte(contentText), &contentArray)
+	require.NoError(t, err)
+	require.Greater(t, len(contentArray), 0)
+
+	// Extract the actual JSON response from the text field
+	actualResponseText, ok := contentArray[0]["text"].(string)
+	require.True(t, ok)
+
+	var response map[string]interface{}
+	err = json.Unmarshal([]byte(actualResponseText), &response)
 	require.NoError(t, err)
 
-	require.Len(t, response, 1)
-	assert.Equal(t, "echo_tool", response[0]["tool"])
-	assert.Equal(t, "echoserver", response[0]["server"])
-	assert.Equal(t, true, response[0]["success"])
+	assert.Equal(t, "echo_tool", response["tool"])
+	assert.Equal(t, "echoserver", response["server"])
+	assert.Equal(t, true, response["success"])
 }
 
 // Test: Server management operations
@@ -619,119 +662,6 @@ func TestE2E_ConcurrentOperations(t *testing.T) {
 	}
 }
 
-// Test: Import Cursor IDE configuration
-func TestE2E_ImportCursorConfig(t *testing.T) {
-	env := NewTestEnvironment(t)
-	defer env.Cleanup()
-
-	mcpClient := env.CreateProxyClient()
-	defer mcpClient.Close()
-	env.ConnectClient(mcpClient)
-
-	ctx := context.Background()
-
-	// Test import_cursor operation with realistic configuration
-	importRequest := mcp.CallToolRequest{}
-	importRequest.Params.Name = "upstream_servers"
-	importRequest.Params.Arguments = map[string]interface{}{
-		"operation": "import_cursor",
-		"cursor_config": map[string]interface{}{
-			"mcpServers": map[string]interface{}{
-				"brave-search": map[string]interface{}{
-					"command": "npx",
-					"args": []interface{}{
-						"-y",
-						"@modelcontextprotocol/server-brave-search",
-					},
-					"env": map[string]interface{}{
-						"BRAVE_API_KEY": "test_api_key_for_e2e",
-					},
-				},
-			},
-		},
-	}
-
-	importResult, err := mcpClient.CallTool(ctx, importRequest)
-	require.NoError(t, err)
-	assert.False(t, importResult.IsError, "Import should succeed")
-
-	// Parse the result to verify success
-	require.Greater(t, len(importResult.Content), 0)
-	var contentText string
-	if len(importResult.Content) > 0 {
-		contentBytes, err := json.Marshal(importResult.Content[0])
-		require.NoError(t, err)
-		var contentMap map[string]interface{}
-		err = json.Unmarshal(contentBytes, &contentMap)
-		require.NoError(t, err)
-		if text, ok := contentMap["text"].(string); ok {
-			contentText = text
-		}
-	}
-
-	var importResponse map[string]interface{}
-	err = json.Unmarshal([]byte(contentText), &importResponse)
-	require.NoError(t, err)
-
-	// Verify the import was successful
-	assert.Equal(t, "success", importResponse["status"])
-	if servers, ok := importResponse["imported_servers"].([]interface{}); ok {
-		assert.GreaterOrEqual(t, len(servers), 1)
-	}
-
-	// Verify the server was actually added by listing servers
-	listRequest := mcp.CallToolRequest{}
-	listRequest.Params.Name = "upstream_servers"
-	listRequest.Params.Arguments = map[string]interface{}{
-		"operation": "list",
-	}
-
-	listResult, err := mcpClient.CallTool(ctx, listRequest)
-	require.NoError(t, err)
-	assert.False(t, listResult.IsError)
-
-	// Parse list result
-	var listContentText string
-	if len(listResult.Content) > 0 {
-		contentBytes, err := json.Marshal(listResult.Content[0])
-		require.NoError(t, err)
-		var contentMap map[string]interface{}
-		err = json.Unmarshal(contentBytes, &contentMap)
-		require.NoError(t, err)
-		if text, ok := contentMap["text"].(string); ok {
-			listContentText = text
-		}
-	}
-
-	var listResponse map[string]interface{}
-	err = json.Unmarshal([]byte(listContentText), &listResponse)
-	require.NoError(t, err)
-
-	// Verify brave-search server is in the list
-	if servers, ok := listResponse["servers"].([]interface{}); ok {
-		found := false
-		for _, server := range servers {
-			if serverMap, ok := server.(map[string]interface{}); ok {
-				if name, ok := serverMap["name"].(string); ok && name == "brave-search" {
-					found = true
-					// Verify server configuration
-					assert.Equal(t, "npx", serverMap["command"])
-					if args, ok := serverMap["args"].([]interface{}); ok {
-						assert.Contains(t, args, "-y")
-						assert.Contains(t, args, "@modelcontextprotocol/server-brave-search")
-					}
-					if env_vars, ok := serverMap["env"].(map[string]interface{}); ok {
-						assert.Equal(t, "test_api_key_for_e2e", env_vars["BRAVE_API_KEY"])
-					}
-					assert.Equal(t, "stdio", serverMap["protocol"]) // Should auto-detect as stdio
-					break
-				}
-			}
-		}
-		assert.True(t, found, "brave-search server should be found in the list")
-	}
-}
-
 // Test: Add single upstream server with command-based configuration
 func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 	env := NewTestEnvironment(t)
@@ -783,7 +713,7 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the operation was successful
-	assert.Equal(t, "success", addResponse["status"])
+	assert.Equal(t, "configured", addResponse["status"])
 	assert.Contains(t, addResponse["message"], "test-command-server")
 
 	// Verify the server configuration by listing
@@ -854,119 +784,4 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 	removeResult, err := mcpClient.CallTool(ctx, removeRequest)
 	require.NoError(t, err)
 	assert.False(t, removeResult.IsError, "Remove operation should succeed")
-}
-
-// Test: Add batch upstream servers
-func TestE2E_AddBatchUpstreamServers(t *testing.T) {
-	env := NewTestEnvironment(t)
-	defer env.Cleanup()
-
-	mcpClient := env.CreateProxyClient()
-	defer mcpClient.Close()
-	env.ConnectClient(mcpClient)
-
-	ctx := context.Background()
-
-	// Create a mock server for HTTP-based testing
-	mockTools := []mcp.Tool{
-		{
-			Name:        "mock_tool",
-			Description: "A mock tool for batch testing",
-			InputSchema: mcp.ToolInputSchema{Type: "object"},
-		},
-	}
-	mockServer := env.CreateMockUpstreamServer("batchtest", mockTools)
-
-	// Test adding multiple servers in batch
-	batchRequest := mcp.CallToolRequest{}
-	batchRequest.Params.Name = "upstream_servers"
-	batchRequest.Params.Arguments = map[string]interface{}{
-		"operation": "add_batch",
-		"servers": []interface{}{
-			map[string]interface{}{
-				"name":     "batch-server-1",
-				"command":  "python",
-				"args":     []interface{}{"-m", "some_mcp_server"},
-				"env":      map[string]interface{}{"TEST_VAR": "value1"},
-				"protocol": "stdio",
-				"enabled":  true,
-			},
-			map[string]interface{}{
-				"name":     "batch-server-2",
-				"url":      mockServer.addr,
-				"protocol": "streamable-http",
-				"enabled":  true,
-			},
-		},
-	}
-
-	batchResult, err := mcpClient.CallTool(ctx, batchRequest)
-	require.NoError(t, err)
-	assert.False(t, batchResult.IsError, "Batch add operation should succeed")
-
-	// Parse the result
-	require.Greater(t, len(batchResult.Content), 0)
-	var contentText string
-	if len(batchResult.Content) > 0 {
-		contentBytes, err := json.Marshal(batchResult.Content[0])
-		require.NoError(t, err)
-		var contentMap map[string]interface{}
-		err = json.Unmarshal(contentBytes, &contentMap)
-		require.NoError(t, err)
-		if text, ok := contentMap["text"].(string); ok {
-			contentText = text
-		}
-	}
-
-	var batchResponse map[string]interface{}
-	err = json.Unmarshal([]byte(contentText), &batchResponse)
-	require.NoError(t, err)
-
-	// Verify batch operation success
-	assert.Equal(t, "success", batchResponse["status"])
-	if results, ok := batchResponse["results"].([]interface{}); ok {
-		assert.Len(t, results, 2) // Should have results for both servers
-	}
-
-	// Verify both servers were added by listing
-	listRequest := mcp.CallToolRequest{}
-	listRequest.Params.Name = "upstream_servers"
-	listRequest.Params.Arguments = map[string]interface{}{
-		"operation": "list",
-	}
-
-	listResult, err := mcpClient.CallTool(ctx, listRequest)
-	require.NoError(t, err)
-	assert.False(t, listResult.IsError)
-
-	// Parse and verify list contains both servers
-	var listContentText string
-	if len(listResult.Content) > 0 {
-		contentBytes, err := json.Marshal(listResult.Content[0])
-		require.NoError(t, err)
-		var contentMap map[string]interface{}
-		err = json.Unmarshal(contentBytes, &contentMap)
-		require.NoError(t, err)
-		if text, ok := contentMap["text"].(string); ok {
-			listContentText = text
-		}
-	}
-
-	var listResponse map[string]interface{}
-	err = json.Unmarshal([]byte(listContentText), &listResponse)
-	require.NoError(t, err)
-
-	// Verify both servers are present
-	if servers, ok := listResponse["servers"].([]interface{}); ok {
-		serverNames := make(map[string]bool)
-		for _, server := range servers {
-			if serverMap, ok := server.(map[string]interface{}); ok {
-				if name, ok := serverMap["name"].(string); ok {
-					serverNames[name] = true
-				}
-			}
-		}
-		assert.True(t, serverNames["batch-server-1"], "batch-server-1 should be present")
-		assert.True(t, serverNames["batch-server-2"], "batch-server-2 should be present")
-	}
 }

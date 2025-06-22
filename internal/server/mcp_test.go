@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -56,52 +55,49 @@ func TestSecurityConfigValidation(t *testing.T) {
 			allowServerRemove: false,
 			shouldAllow:       false,
 		},
-		{
-			name:           "add_batch blocked when not allowed",
-			operation:      "add_batch",
-			allowServerAdd: false,
-			shouldAllow:    false,
-		},
-		{
-			name:           "import_cursor blocked when not allowed",
-			operation:      "import_cursor",
-			allowServerAdd: false,
-			shouldAllow:    false,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := &config.Config{
+			cfg := &config.Config{
 				ReadOnlyMode:      tt.readOnlyMode,
 				DisableManagement: tt.disableManagement,
 				AllowServerAdd:    tt.allowServerAdd,
 				AllowServerRemove: tt.allowServerRemove,
 			}
 
-			// Test security validation logic
-			isBlocked := false
+			// Test logic for security checks
+			allowed := true
 
-			// Apply security logic
-			if config.ReadOnlyMode && tt.operation != "list" {
-				isBlocked = true
-			}
-			if config.DisableManagement {
-				isBlocked = true
-			}
-			switch tt.operation {
-			case "add", "add_batch", "import_cursor":
-				if !config.AllowServerAdd {
-					isBlocked = true
-				}
-			case "remove":
-				if !config.AllowServerRemove {
-					isBlocked = true
-				}
+			if tt.readOnlyMode && tt.operation != "list" {
+				allowed = false
 			}
 
-			expectedBlocked := !tt.shouldAllow
-			assert.Equal(t, expectedBlocked, isBlocked, "Security check mismatch for operation %s", tt.operation)
+			if tt.disableManagement {
+				allowed = false
+			}
+
+			if tt.operation == "add" && !tt.allowServerAdd {
+				allowed = false
+			}
+
+			if tt.operation == "remove" && !tt.allowServerRemove {
+				allowed = false
+			}
+
+			assert.Equal(t, tt.shouldAllow, allowed, "Security check failed for %s", tt.name)
+
+			// Additional check for configuration consistency
+			if !cfg.ReadOnlyMode && !cfg.DisableManagement {
+				// When not in read-only mode and management is enabled,
+				// operations should be controlled by specific flags
+				if tt.operation == "add" {
+					assert.Equal(t, tt.allowServerAdd, allowed)
+				}
+				if tt.operation == "remove" {
+					assert.Equal(t, tt.allowServerRemove, allowed)
+				}
+			}
 		})
 	}
 }
@@ -315,98 +311,32 @@ func TestToolFormatConversion(t *testing.T) {
 }
 
 func TestUpstreamServerOperations(t *testing.T) {
-	// Test batch add servers parsing
-	t.Run("BatchAddServers", func(t *testing.T) {
-		request := mcp.CallToolRequest{}
-		request.Params.Name = "upstream_servers"
-		request.Params.Arguments = map[string]interface{}{
-			"operation": "add_batch",
-			"servers": []interface{}{
-				map[string]interface{}{
-					"name":    "test-server-1",
-					"url":     "http://localhost:3001",
-					"enabled": true,
-				},
-				map[string]interface{}{
-					"name":    "test-server-2",
-					"command": "python",
-					"args":    []interface{}{"-m", "test_server"},
-					"env":     map[string]interface{}{"TEST": "value"},
-					"enabled": true,
-				},
-			},
-		}
+	// Test basic server operations parsing
+	t.Run("BasicServerOperations", func(t *testing.T) {
+		// Test that basic operations like add, remove, update are properly structured
+		operations := []string{"add", "remove", "update", "patch", "list"}
 
-		// Mock server response parsing
-		var servers []interface{}
-		if request.Params.Arguments != nil {
-			if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
-				if serversParam, ok := argumentsMap["servers"]; ok {
-					if serversList, ok := serversParam.([]interface{}); ok {
-						servers = serversList
+		for _, op := range operations {
+			request := mcp.CallToolRequest{}
+			request.Params.Name = "upstream_servers"
+			request.Params.Arguments = map[string]interface{}{
+				"operation": op,
+			}
+
+			// Verify operation is properly extracted
+			var operation string
+			if request.Params.Arguments != nil {
+				if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+					if opParam, ok := argumentsMap["operation"]; ok {
+						if opStr, ok := opParam.(string); ok {
+							operation = opStr
+						}
 					}
 				}
 			}
+
+			assert.Equal(t, op, operation, "Operation extraction failed for %s", op)
 		}
-
-		assert.Len(t, servers, 2)
-
-		// Verify first server (HTTP)
-		server1 := servers[0].(map[string]interface{})
-		assert.Equal(t, "test-server-1", server1["name"])
-		assert.Equal(t, "http://localhost:3001", server1["url"])
-		assert.Equal(t, true, server1["enabled"])
-
-		// Verify second server (stdio)
-		server2 := servers[1].(map[string]interface{})
-		assert.Equal(t, "test-server-2", server2["name"])
-		assert.Equal(t, "python", server2["command"])
-		assert.Equal(t, []interface{}{"-m", "test_server"}, server2["args"])
-		assert.Equal(t, map[string]interface{}{"TEST": "value"}, server2["env"])
-	})
-
-	// Test import Cursor IDE format
-	t.Run("ImportCursorFormat", func(t *testing.T) {
-		request := mcp.CallToolRequest{}
-		request.Params.Name = "upstream_servers"
-		request.Params.Arguments = map[string]interface{}{
-			"operation": "import_cursor",
-			"cursor_config": map[string]interface{}{
-				"mcp-server-sqlite": map[string]interface{}{
-					"command": "uvx",
-					"args":    []interface{}{"mcp-server-sqlite", "--db-path", "/tmp/test.db"},
-					"env":     map[string]interface{}{"MCP_SQLITE_PATH": "/tmp/test.db"},
-				},
-				"mcp-server-github": map[string]interface{}{
-					"url":     "http://localhost:3000/mcp",
-					"headers": map[string]interface{}{"Authorization": "Bearer token123"},
-				},
-			},
-		}
-
-		// Parse cursor config
-		var cursorConfig map[string]interface{}
-		if request.Params.Arguments != nil {
-			if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
-				if configParam, ok := argumentsMap["cursor_config"]; ok {
-					if configMap, ok := configParam.(map[string]interface{}); ok {
-						cursorConfig = configMap
-					}
-				}
-			}
-		}
-
-		assert.Len(t, cursorConfig, 2)
-
-		// Verify SQLite server
-		sqliteServer := cursorConfig["mcp-server-sqlite"].(map[string]interface{})
-		assert.Equal(t, "uvx", sqliteServer["command"])
-		assert.Equal(t, []interface{}{"mcp-server-sqlite", "--db-path", "/tmp/test.db"}, sqliteServer["args"])
-
-		// Verify GitHub server
-		githubServer := cursorConfig["mcp-server-github"].(map[string]interface{})
-		assert.Equal(t, "http://localhost:3000/mcp", githubServer["url"])
-		assert.Equal(t, map[string]interface{}{"Authorization": "Bearer token123"}, githubServer["headers"])
 	})
 }
 
@@ -749,7 +679,7 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 
 	// Test 2: List quarantined servers (should include our new server)
 	listQuarantinedRequest := mcp.CallToolRequest{}
-	listQuarantinedRequest.Params.Name = "upstream_servers"
+	listQuarantinedRequest.Params.Name = "quarantine_security"
 	listQuarantinedRequest.Params.Arguments = map[string]interface{}{
 		"operation": "list_quarantined",
 	}
@@ -759,8 +689,21 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 	assert.False(t, listResult.IsError)
 
 	// Parse the response to check if our server is quarantined
+	require.Greater(t, len(listResult.Content), 0)
+	var contentText string
+	if len(listResult.Content) > 0 {
+		contentBytes, err := json.Marshal(listResult.Content[0])
+		require.NoError(t, err)
+		var contentMap map[string]interface{}
+		err = json.Unmarshal(contentBytes, &contentMap)
+		require.NoError(t, err)
+		if text, ok := contentMap["text"].(string); ok {
+			contentText = text
+		}
+	}
+
 	var listResponse map[string]interface{}
-	err = json.Unmarshal([]byte(listResult.Content[0].(mcp.TextContent).Text), &listResponse)
+	err = json.Unmarshal([]byte(contentText), &listResponse)
 	require.NoError(t, err)
 
 	servers, ok := listResponse["servers"].([]interface{})
@@ -780,35 +723,27 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 	assert.False(t, toolCallResult.IsError)
 
 	// Check that the response indicates the server is quarantined
+	require.Greater(t, len(toolCallResult.Content), 0)
+	var toolCallContentText string
+	if len(toolCallResult.Content) > 0 {
+		contentBytes, err := json.Marshal(toolCallResult.Content[0])
+		require.NoError(t, err)
+		var contentMap map[string]interface{}
+		err = json.Unmarshal(contentBytes, &contentMap)
+		require.NoError(t, err)
+		if text, ok := contentMap["text"].(string); ok {
+			toolCallContentText = text
+		}
+	}
+
 	var toolCallResponse map[string]interface{}
-	err = json.Unmarshal([]byte(toolCallResult.Content[0].(mcp.TextContent).Text), &toolCallResponse)
+	err = json.Unmarshal([]byte(toolCallContentText), &toolCallResponse)
 	require.NoError(t, err)
 	assert.Equal(t, "QUARANTINED_SERVER_BLOCKED", toolCallResponse["status"])
 
-	// Test 4: Unquarantine the server
-	unquarantineRequest := mcp.CallToolRequest{}
-	unquarantineRequest.Params.Name = "upstream_servers"
-	unquarantineRequest.Params.Arguments = map[string]interface{}{
-		"operation": "unquarantine",
-		"name":      "quarantine-test",
-	}
-
-	unquarantineResult, err := mcpClient.CallTool(ctx, unquarantineRequest)
-	require.NoError(t, err)
-	assert.False(t, unquarantineResult.IsError)
-
-	// Test 5: Now tool calls should work (wait a moment for server to be available)
-	time.Sleep(2 * time.Second)
-
-	toolCallResult2, err := mcpClient.CallTool(ctx, toolCallRequest)
-	require.NoError(t, err)
-	assert.False(t, toolCallResult2.IsError)
-
-	// Parse response - should now be a successful tool call, not a quarantine block
-	var toolCallResponse2 map[string]interface{}
-	err = json.Unmarshal([]byte(toolCallResult2.Content[0].(mcp.TextContent).Text), &toolCallResponse2)
-	require.NoError(t, err)
-	assert.NotEqual(t, "QUARANTINED_SERVER_BLOCKED", toolCallResponse2["status"])
+	// Test 4: Test quarantine operation (quarantine is handled through tray/config, not LLM tools for security)
+	// This test shows that the server remains quarantined and tools are blocked
+	// In a real scenario, unquarantining would be done through the system tray or manual config editing
 }
 
 // Test: Error handling and recovery

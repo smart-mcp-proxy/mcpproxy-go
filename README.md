@@ -502,11 +502,9 @@ Comprehensive tool for managing upstream MCP servers with support for multiple o
 
 - **`list`** - List all configured upstream servers
 - **`add`** - Add a single upstream server
-- **`add_batch`** - Add multiple servers at once
 - **`remove`** - Remove an upstream server
 - **`update`** - Update an existing server
 - **`patch`** - Partially update server configuration
-- **`import_cursor`** - Import servers from Cursor IDE format
 
 #### Adding Single Server
 
@@ -535,57 +533,7 @@ Comprehensive tool for managing upstream MCP servers with support for multiple o
 }
 ```
 
-#### Batch Adding Servers
 
-```json
-{
-  "operation": "add_batch",
-  "servers": [
-    {
-      "name": "github-tools",
-      "url": "http://localhost:3001",
-      "headers": {
-        "Authorization": "Bearer token123"
-      },
-      "enabled": true
-    },
-    {
-      "name": "sqlite-tools", 
-      "command": "uvx",
-      "args": ["mcp-server-sqlite", "--db-path", "/tmp/test.db"],
-      "env": {
-        "MCP_SQLITE_PATH": "/tmp/test.db"
-      },
-      "enabled": true
-    }
-  ]
-}
-```
-
-#### Import from Cursor IDE
-
-You can directly import your Cursor IDE MCP configuration:
-
-```json
-{
-  "operation": "import_cursor",
-  "cursor_config": {
-    "mcp-server-sqlite": {
-      "command": "uvx",
-      "args": ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
-      "env": {
-        "MCP_SQLITE_PATH": "/path/to/db.sqlite"
-      }
-    },
-    "mcp-server-github": {
-      "url": "http://localhost:3000/mcp",
-      "headers": {
-        "Authorization": "Bearer github-token"
-      }
-    }
-  }
-}
-```
 
 #### Patch/Update Server
 
@@ -611,6 +559,30 @@ Search for tools across all upstream servers:
 }
 ```
 
+### `quarantine_security` - Security Management
+
+Manage server quarantine and security review:
+
+```json
+{
+  "operation": "list_quarantined"
+}
+```
+
+```json
+{
+  "operation": "inspect_quarantined",
+  "name": "server-name"
+}
+```
+
+```json
+{
+  "operation": "quarantine",
+  "name": "server-name"
+}
+```
+
 ### `call_tool` - Tool Execution
 
 Execute tools on upstream servers:
@@ -625,15 +597,7 @@ Execute tools on upstream servers:
 }
 ```
 
-### `tools_stats` - Usage Statistics
 
-Get tool usage statistics:
-
-```json
-{
-  "top_n": 10
-}
-```
 
 ## Configuration Management & Sync
 
@@ -694,25 +658,18 @@ The proxy automatically:
 
 ## Basic Usage Scenarios
 
-### Scenario 1: Import from Cursor IDE
-
-1. Copy your Cursor IDE `mcp.json` configuration
-2. Use the `import_cursor` operation with the `upstream_servers` tool
-3. All servers will be automatically added and connected
-4. Configuration is persisted to `~/.mcpproxy/mcp_config.json`
-
-### Scenario 2: Add Individual Servers
+### Scenario 1: Add Individual Servers
 
 1. Use `upstream_servers` with `add` operation
 2. Specify either `url` (for HTTP) or `command`/`args` (for stdio)
 3. Include authentication headers if needed
 4. Server is immediately connected and tools indexed
 
-### Scenario 3: Batch Server Management
+### Scenario 2: Manage Quarantine Security
 
-1. Use `add_batch` operation with array of server configurations
-2. Mix HTTP and stdio servers in the same request
-3. All servers processed and connected simultaneously
+1. Use `quarantine_security` tool to manage server security
+2. List quarantined servers and inspect their tools
+3. Use system tray or manual config to unquarantine if safe
 
 ## 🔒 Security Quarantine System
 
@@ -725,9 +682,10 @@ The Smart MCP Proxy implements a comprehensive security model to protect against
 - **Safe Defaults**: Security-first approach with manual unquarantining required
 
 ### 🔍 **Security Review Tools**
-- **`list_quarantined`**: List all servers in security quarantine
-- **`inspect_quarantined`**: Analyze tool descriptions for security threats
-- **`quarantine`/`unquarantine`**: Manually manage server quarantine status
+- **`quarantine_security`** tool with operations:
+  - **`list_quarantined`**: List all servers in security quarantine
+  - **`inspect_quarantined`**: Analyze tool descriptions for security threats
+  - **`quarantine`**: Manually quarantine servers for security review
 - **Tray Menu Integration**: Security quarantine management via system tray
 
 ### ⚠️ **Tool Poisoning Attack Prevention**
