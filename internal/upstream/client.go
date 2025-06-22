@@ -347,6 +347,20 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	toolsResult, err := c.client.ListTools(ctx, toolsRequest)
 	if err != nil {
 		c.lastError = err
+
+		// Check if this is a connection error that indicates the connection is broken
+		errStr := err.Error()
+		if strings.Contains(errStr, "broken pipe") ||
+			strings.Contains(errStr, "connection reset") ||
+			strings.Contains(errStr, "EOF") ||
+			strings.Contains(errStr, "connection refused") ||
+			strings.Contains(errStr, "transport error") {
+			c.logger.Warn("Connection appears broken, updating state",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			c.connected = false
+		}
+
 		return nil, fmt.Errorf("failed to list tools: %w", err)
 	}
 
@@ -401,6 +415,21 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 	result, err := c.client.CallTool(ctx, request)
 	if err != nil {
 		c.lastError = err
+
+		// Check if this is a connection error that indicates the connection is broken
+		errStr := err.Error()
+		if strings.Contains(errStr, "broken pipe") ||
+			strings.Contains(errStr, "connection reset") ||
+			strings.Contains(errStr, "EOF") ||
+			strings.Contains(errStr, "connection refused") ||
+			strings.Contains(errStr, "transport error") {
+			c.logger.Warn("Connection appears broken during tool call, updating state",
+				zap.String("server", c.config.Name),
+				zap.String("tool", toolName),
+				zap.Error(err))
+			c.connected = false
+		}
+
 		return nil, fmt.Errorf("failed to call tool %s: %w", toolName, err)
 	}
 
