@@ -182,6 +182,47 @@ The proxy supports dynamic management of upstream MCP servers through the `upstr
 4. **Connection Management**: Upstream manager connects/disconnects servers
 5. **Index Update**: Tool discovery runs to update search index
 
+#### Configuration Sync Architecture
+
+```mermaid
+graph TD
+    A["Config File<br/>(Single Source of Truth)"] --> B["File Watcher<br/>(Runtime Sync)"]
+    A --> C["loadConfiguredServers()<br/>(Startup & Manual Sync)"]
+    
+    B --> D["ReloadConfiguration()"]
+    D --> C
+    
+    C --> E["Compare Config vs Storage"]
+    E --> F["Sync to Storage/Database"]
+    E --> G["Sync to UpstreamManager"]
+    E --> H["Remove Orphaned Servers"]
+    
+    H --> I["Delete from Storage"]
+    H --> J["Remove from UpstreamManager"]
+    H --> K["Delete Tools from Index"]
+    
+    L["LLM Server Changes"] --> M["Save to Storage"]
+    M --> N["SaveConfiguration()"]
+    N --> O["Write to Config File"]
+    O --> B
+    
+    P["Quarantined Servers"] --> Q["Remove from UpstreamManager<br/>(Not Active)"]
+    Q --> R["Keep in Storage<br/>(For UI Display)"]
+    
+    style A fill:#ffeeee
+    style E fill:#ffffcc
+    style H fill:#ffcccc
+    style K fill:#ccffcc
+```
+
+The configuration sync system ensures **config file remains the single source of truth** by:
+
+- **Bidirectional sync**: Changes in config file automatically sync to database and vice versa
+- **Orphan cleanup**: Removes servers from database/index when removed from config file
+- **Runtime changes**: LLM-added servers are immediately saved to config file
+- **Startup reconciliation**: At startup, config file state overrides database state
+- **File watching**: Runtime config file changes trigger automatic resync
+
 ### Server Types
 
 #### HTTP Servers

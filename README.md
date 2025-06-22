@@ -635,12 +635,37 @@ Get tool usage statistics:
 }
 ```
 
-## Configuration Persistence
+## Configuration Management & Sync
+
+### 🔄 **Configuration as Single Source of Truth**
+
+The Smart MCP Proxy implements a robust configuration sync system where the **config file serves as the single source of truth**:
+
+#### **Key Features:**
+- **Bidirectional Sync**: Changes made via LLM tools are automatically saved to config file
+- **Startup Reconciliation**: Config file state overrides database on startup
+- **Runtime File Watching**: Manual config file changes trigger automatic resync
+- **Orphan Cleanup**: Servers removed from config file are automatically purged from database and search index
+- **Hot Reloading**: Live updates without requiring restart
+
+#### **Sync Scenarios:**
+1. **LLM adds server** → Saved to database → **Automatically written to config file** ✅
+2. **User edits config file** → File watcher detects change → **Database updated** ✅  
+3. **User removes server from config** → Startup sync → **Database cleaned up** ✅
+4. **Config attributes changed** (enabled/quarantined) → **Internal state synchronized** ✅
+
+#### **Automatic Cleanup:**
+- **Database purging**: Removes servers not in config file
+- **Index cleanup**: Deletes search index entries for removed servers
+- **Connection management**: Disconnects removed upstream servers
+- **Status synchronization**: Updates enabled/quarantined states
+
+### Configuration Persistence
 
 The proxy automatically saves configuration changes to `~/.mcpproxy/mcp_config.json`. This includes:
 
 - All upstream server configurations
-- Server states (enabled/disabled)
+- Server states (enabled/disabled/quarantined)
 - Connection parameters (URLs, commands, environment variables)
 - Authentication headers
 
@@ -660,9 +685,11 @@ export MCPPROXY_DATA_DIR=/custom/path
 ### Hot Reloading
 
 The proxy automatically:
-- Saves configuration after any server changes
+- Saves configuration after any server changes via LLM tools
+- Watches config file for manual edits and syncs changes
 - Attempts to connect to newly added servers
 - Updates the tool index when servers are modified
+- Purges outdated database entries when servers are removed from config
 - Reflects changes in the system tray (if enabled)
 
 ## Basic Usage Scenarios

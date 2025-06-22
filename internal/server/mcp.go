@@ -657,6 +657,10 @@ func (p *MCPProxyServer) handleQuarantineUpstream(ctx context.Context, request m
 
 	// Trigger configuration save and update
 	if p.mainServer != nil {
+		// Save configuration first to ensure servers are persisted to config file
+		if err := p.mainServer.SaveConfiguration(); err != nil {
+			p.logger.Error("Failed to save configuration after quarantining server", zap.Error(err))
+		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -780,6 +784,10 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 
 	// Trigger configuration save and update
 	if p.mainServer != nil {
+		// Save configuration first to ensure servers are persisted to config file
+		if err := p.mainServer.SaveConfiguration(); err != nil {
+			p.logger.Error("Failed to save configuration after adding server", zap.Error(err))
+		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -915,6 +923,10 @@ func (p *MCPProxyServer) handleAddBatchUpstreams(ctx context.Context, request mc
 
 	// Trigger configuration save and update
 	if p.mainServer != nil {
+		// Save configuration first to ensure servers are persisted to config file
+		if err := p.mainServer.SaveConfiguration(); err != nil {
+			p.logger.Error("Failed to save configuration after batch adding servers", zap.Error(err))
+		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -972,8 +984,19 @@ func (p *MCPProxyServer) handleRemoveUpstream(ctx context.Context, request mcp.C
 	// Remove from upstream manager
 	p.upstreamManager.RemoveServer(serverID)
 
+	// Remove tools from search index
+	if err := p.index.DeleteServerTools(serverID); err != nil {
+		p.logger.Error("Failed to remove server tools from index", zap.String("server", serverID), zap.Error(err))
+	} else {
+		p.logger.Info("Removed server tools from search index", zap.String("server", serverID))
+	}
+
 	// Trigger configuration save and update
 	if p.mainServer != nil {
+		// Save configuration first to ensure servers are persisted to config file
+		if err := p.mainServer.SaveConfiguration(); err != nil {
+			p.logger.Error("Failed to save configuration after removing server", zap.Error(err))
+		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -1040,6 +1063,10 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 
 	// Trigger configuration save and update
 	if p.mainServer != nil {
+		// Save configuration first to ensure servers are persisted to config file
+		if err := p.mainServer.SaveConfiguration(); err != nil {
+			p.logger.Error("Failed to save configuration after updating server", zap.Error(err))
+		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -1107,6 +1134,10 @@ func (p *MCPProxyServer) handlePatchUpstream(ctx context.Context, request mcp.Ca
 
 	// Trigger configuration save and update
 	if p.mainServer != nil {
+		// Save configuration first to ensure servers are persisted to config file
+		if err := p.mainServer.SaveConfiguration(); err != nil {
+			p.logger.Error("Failed to save configuration after patching server", zap.Error(err))
+		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -1229,6 +1260,10 @@ func (p *MCPProxyServer) handleImportCursor(ctx context.Context, request mcp.Cal
 
 	// Trigger configuration save and update
 	if p.mainServer != nil {
+		// Save configuration first to ensure servers are persisted to config file
+		if err := p.mainServer.SaveConfiguration(); err != nil {
+			p.logger.Error("Failed to save configuration after importing cursor servers", zap.Error(err))
+		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
