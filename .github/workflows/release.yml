@@ -92,7 +92,12 @@ jobs:
             mkdir -p assets/icons
             cp ../assets/icons/icon.svg assets/icons/
           fi
+          # Create versioned package
           ${{ matrix.package_cmd }}
+          # Create latest package for stable links
+          LATEST_CMD="${{ matrix.package_cmd }}"
+          LATEST_CMD=$(echo "$LATEST_CMD" | sed 's/${{ github.ref_name }}/latest/g')
+          eval "$LATEST_CMD"
 
       - name: Package artifacts (Windows)
         if: runner.os == 'Windows'
@@ -103,12 +108,18 @@ jobs:
             New-Item -ItemType Directory -Force -Path assets/icons
             Copy-Item ../assets/icons/icon.svg assets/icons/
           }
+          # Create versioned package
           ${{ matrix.package_cmd }}
+          # Create latest package for stable links
+          $latestCmd = "${{ matrix.package_cmd }}" -replace "${{ github.ref_name }}", "latest"
+          Invoke-Expression $latestCmd
 
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/mcpproxy-*
+          files: |
+            build/mcpproxy-${{ github.ref_name }}-*
+            build/mcpproxy-latest-*
           draft: false
           prerelease: false
           generate_release_notes: true
@@ -128,6 +139,12 @@ jobs:
             1. Download the appropriate archive for your platform
             2. Extract the binary
             3. Run `mcpproxy` to start with system tray, or `mcpproxy --tray=false` for headless mode
+
+            #### Stable Download Links (Always Latest)
+            For scripts and websites that need stable URLs:
+            - **macOS**: `https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-macos-universal.zip`
+            - **Windows**: `https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-amd64.zip`
+            - **Linux**: `https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz`
 
             #### macOS
             - Download `mcpproxy-*-macos-universal.zip`
