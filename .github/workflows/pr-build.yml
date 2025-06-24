@@ -40,6 +40,7 @@ jobs:
         run: go test -tags nogui -v ./...
 
       - name: Build binary
+        shell: bash
         run: |
           VERSION=pr-${{ github.event.number }}-${{ github.sha }}
           go build -tags nogui -ldflags "-X main.version=${VERSION}" -o mcpproxy ./cmd/mcpproxy
