@@ -20,7 +20,7 @@ linters:
     - gocritic
     - revive
     - gosec
-    - exportloopref
+    - copyloopvar
 
 linters-settings:
   goconst:
@@ -39,9 +39,6 @@ linters-settings:
       - ifElseChain
       - octalLiteral
       - whyNoLint
-  
-  revive:
-    min-confidence: 0
   
   gosec:
     excludes:
