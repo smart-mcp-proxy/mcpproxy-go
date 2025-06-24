@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"fyne.io/systray"
 	"github.com/fsnotify/fsnotify"
-	"github.com/getlantern/systray"
 	"github.com/inconshreveable/go-update"
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"

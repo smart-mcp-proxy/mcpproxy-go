@@ -1,172 +1,30 @@
-name: Build and Release
-
+name: goreleaser
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-  packages: write
-
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            goos: linux
-            goarch: amd64
-            ext: ""
-            artifact_name: "mcpproxy-linux-amd64"
-            package_cmd: "tar -czf mcpproxy-${{ github.ref_name }}-linux-amd64.tar.gz mcpproxy"
-          - os: windows-latest
-            goos: windows
-            goarch: amd64
-            ext: ".exe"
-            artifact_name: "mcpproxy-windows-amd64"
-            ldflags: "-H windowsgui"
-            package_cmd: "7z a mcpproxy-${{ github.ref_name }}-windows-amd64.zip mcpproxy.exe"
-          - os: macos-14
-            goos: darwin
-            goarch: "amd64 arm64" # Universal binary
-            ext: ""
-            artifact_name: "mcpproxy-macos-universal"
-            package_cmd: "ditto -ck --rsrc --sequesterRsrc mcpproxy mcpproxy-${{ github.ref_name }}-macos-universal.zip"
-
-    runs-on: ${{ matrix.os }}
-
-    env:
-      CGO_ENABLED: "1"
-      GO111MODULE: "on"
-
+  release:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      # Linux-only: install GUI headers
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: "1.23.10"
-
-      - name: Get version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Build for macOS Universal
-        if: matrix.goos == 'darwin'
+          go-version: "1.22"
+      - name: Install fyne-cross
+        run: go install github.com/fyne-io/fyne-cross/v2/cmd/fyne-cross@latest
+      - name: Cross-compile (linux,win,mac)
         run: |
-          mkdir -p build
-          # Build for both architectures separately
-          GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" -o build/mcpproxy_amd64 ./cmd/mcpproxy
-          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" -o build/mcpproxy_arm64 ./cmd/mcpproxy
-          # Combine into universal binary
-          lipo -create -output build/mcpproxy build/mcpproxy_amd64 build/mcpproxy_arm64
-          # Clean up individual binaries
-          rm build/mcpproxy_amd64 build/mcpproxy_arm64
-
-      - name: Build for Linux/Windows
-        if: matrix.goos != 'darwin'
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "1"
-        run: |
-          mkdir -p build
-          go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }} ${{ matrix.ldflags }}" -o build/mcpproxy${{ matrix.ext }} ./cmd/mcpproxy
-
-      - name: Package artifacts (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          cd build
-          cp ../README.md .
-          if [ -f ../assets/icons/icon.svg ]; then
-            mkdir -p assets/icons
-            cp ../assets/icons/icon.svg assets/icons/
-          fi
-          # Create versioned package
-          ${{ matrix.package_cmd }}
-          # Create latest package for stable links
-          LATEST_CMD="${{ matrix.package_cmd }}"
-          LATEST_CMD=$(echo "$LATEST_CMD" | sed 's/${{ github.ref_name }}/latest/g')
-          eval "$LATEST_CMD"
-
-      - name: Package artifacts (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          cd build
-          Copy-Item ../README.md .
-          if (Test-Path ../assets/icons/icon.svg) {
-            New-Item -ItemType Directory -Force -Path assets/icons
-            Copy-Item ../assets/icons/icon.svg assets/icons/
-          }
-          # Create versioned package
-          ${{ matrix.package_cmd }}
-          # Create latest package for stable links
-          $latestCmd = "${{ matrix.package_cmd }}" -replace "${{ github.ref_name }}", "latest"
-          Invoke-Expression $latestCmd
-
-      - name: Upload artifacts to release
-        uses: softprops/action-gh-release@v2
+          fyne-cross linux   --pull --app-id mcpproxy ./cmd/mcpproxy
+          fyne-cross windows --pull --app-id mcpproxy ./cmd/mcpproxy
+          fyne-cross darwin  --pull --app-id mcpproxy ./cmd/mcpproxy
+          echo "fyne-cross output structure:"
+          find fyne-cross -type f -name "*mcpproxy*" | head -20
+      - uses: goreleaser/goreleaser-action@v5
         with:
-          files: |
-            build/mcpproxy-${{ github.ref_name }}-*
-            build/mcpproxy-latest-*
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          body: |
-            ## mcpproxy ${{ steps.version.outputs.version }}
-
-            Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
-
-            ### Changes in this release
-            - Full GUI/System Tray support on all platforms
-            - Native builds with CGO support for optimal performance
-            - Cross-platform compatibility (Linux, Windows, macOS)
-
-            ### Installation
-
-            #### Download and Run
-            1. Download the appropriate archive for your platform
-            2. Extract the binary
-            3. Run `mcpproxy` to start with system tray, or `mcpproxy --tray=false` for headless mode
-
-            #### Stable Download Links (Always Latest)
-            For scripts and websites that need stable URLs:
-            - **macOS**: `https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-macos-universal.zip`
-            - **Windows**: `https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-amd64.zip`
-            - **Linux**: `https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz`
-
-            #### macOS
-            - Download `mcpproxy-*-macos-universal.zip`
-            - Right-click → Open to bypass Gatekeeper (unsigned app)
-
-            #### Windows  
-            - Download `mcpproxy-*-windows-amd64.zip`
-            - Extract and run `mcpproxy.exe`
-
-            #### Linux
-            - Download `mcpproxy-*-linux-amd64.tar.gz`
-            - Extract: `tar -xzf mcpproxy-*-linux-amd64.tar.gz`
-            - Run: `./mcpproxy`
-            - Requires GTK3 and AppIndicator libraries
+          version: "v2"
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Optional: Create macOS DMG (can be added later)
-  # macos-dmg:
-  #   needs: build
-  #   runs-on: macos-14
-  #   if: github.event.repository.default_branch == 'main'
-  #   steps:
-  #     - name: Create DMG
-  #       run: echo "DMG creation can be added here later"
