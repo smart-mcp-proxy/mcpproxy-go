@@ -16,6 +16,7 @@ require (
 	go.etcd.io/bbolt v1.4.1
 	go.uber.org/zap v1.27.0
 	golang.org/x/mod v0.22.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (

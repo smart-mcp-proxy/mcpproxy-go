@@ -16,6 +16,9 @@ type Config struct {
 	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
 	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
 
+	// Logging configuration
+	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
+
 	// Security settings
 	ReadOnlyMode      bool `json:"read_only_mode" mapstructure:"read-only-mode"`
 	DisableManagement bool `json:"disable_management" mapstructure:"disable-management"`
@@ -24,6 +27,19 @@ type Config struct {
 
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
+}
+
+// LogConfig represents logging configuration
+type LogConfig struct {
+	Level         string `json:"level" mapstructure:"level"`
+	EnableFile    bool   `json:"enable_file" mapstructure:"enable-file"`
+	EnableConsole bool   `json:"enable_console" mapstructure:"enable-console"`
+	Filename      string `json:"filename" mapstructure:"filename"`
+	MaxSize       int    `json:"max_size" mapstructure:"max-size"`       // MB
+	MaxBackups    int    `json:"max_backups" mapstructure:"max-backups"` // number of backup files
+	MaxAge        int    `json:"max_age" mapstructure:"max-age"`         // days
+	Compress      bool   `json:"compress" mapstructure:"compress"`
+	JSONFormat    bool   `json:"json_format" mapstructure:"json-format"`
 }
 
 // ServerConfig represents upstream MCP server configuration
@@ -132,6 +148,19 @@ func DefaultConfig() *Config {
 		TopK:              5,
 		ToolsLimit:        15,
 		ToolResponseLimit: 20000, // Default 20000 characters
+
+		// Default logging configuration
+		Logging: &LogConfig{
+			Level:         "info",
+			EnableFile:    true,
+			EnableConsole: true,
+			Filename:      "mcpproxy.log",
+			MaxSize:       10, // 10MB
+			MaxBackups:    5,  // 5 backup files
+			MaxAge:        30, // 30 days
+			Compress:      true,
+			JSONFormat:    false, // Use console format for readability
+		},
 
 		// Security defaults - permissive by default for compatibility
 		ReadOnlyMode:      false,

@@ -49,9 +49,20 @@ jobs:
         env:
           GO_TEST_TIMEOUT: 300s
 
+      - name: Run Logging E2E tests
+        run: go test -v -race -timeout 5m ./internal/logs -run TestE2E
+        env:
+          GO_TEST_TIMEOUT: 300s
+
       - name: Run E2E tests with race detector
         if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23'
         run: go test -v -race -timeout 10m ./internal/server -run TestE2E
+        env:
+          GO_TEST_TIMEOUT: 600s
+
+      - name: Run Logging E2E tests with race detector
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23'
+        run: go test -v -race -timeout 10m ./internal/logs -run TestE2E
         env:
           GO_TEST_TIMEOUT: 600s
 
@@ -75,18 +86,30 @@ jobs:
       - name: Test mcpproxy binary
         run: |
           # Test version command
-          ./mcpproxy version
+          ./mcpproxy --version
 
           # Test help command
           ./mcpproxy --help
 
-          # Test serve command with dry-run (if available)
-          timeout 10s ./mcpproxy serve --port 0 || true
+          # Test logging functionality
+          timeout 10s ./mcpproxy --log-to-file --log-level debug --listen :0 --tray=false || true
+
+          # Verify log file was created in standard OS location
+          if [ "$(uname)" = "Linux" ]; then
+            if [ -f "$HOME/.local/state/mcpproxy/logs/mcpproxy.log" ]; then
+              echo "✓ Log file created in Linux standard location"
+              head -5 "$HOME/.local/state/mcpproxy/logs/mcpproxy.log"
+            else
+              echo "⚠ Log file not found in expected location"
+            fi
+          fi
 
       - name: Run tests with coverage
         run: |
           go test -v -race -coverprofile=coverage.out -covermode=atomic ./internal/server -run TestE2E
+          go test -v -race -coverprofile=coverage-logs.out -covermode=atomic ./internal/logs -run TestE2E
           go tool cover -html=coverage.out -o coverage.html
+          go tool cover -html=coverage-logs.out -o coverage-logs.html
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v3
@@ -95,6 +118,144 @@ jobs:
           flags: e2e-tests
           name: e2e-coverage
           fail_ci_if_error: false
+
+  logging-tests:
+    name: Cross-Platform Logging Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            log_path_check: "$HOME/.local/state/mcpproxy/logs"
+            log_standard: "XDG Base Directory Specification"
+          - os: macos-latest
+            log_path_check: "$HOME/Library/Logs/mcpproxy"
+            log_standard: "macOS File System Programming Guide"
+          - os: windows-latest
+            log_path_check: "$env:LOCALAPPDATA\\mcpproxy\\logs"
+            log_standard: "Windows Application Data Guidelines"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23"
+
+      - name: Run logging unit tests
+        run: go test -v -race -timeout 2m ./internal/logs
+
+      - name: Run logging E2E tests
+        run: go test -v -race -timeout 5m ./internal/logs -run TestE2E
+
+      - name: Build mcpproxy for logging test
+        run: go build -o mcpproxy ./cmd/mcpproxy
+
+      - name: Test OS-specific log directory creation (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          echo "Testing logging on ${{ matrix.os }}"
+          echo "Expected log path: ${{ matrix.log_path_check }}"
+          echo "OS Standard: ${{ matrix.log_standard }}"
+
+          # Run mcpproxy briefly to create log files
+          timeout 5s ./mcpproxy --log-to-file --log-level info --listen :0 --tray=false || true
+
+          # Check if log directory was created
+          if [ -d "${{ matrix.log_path_check }}" ]; then
+            echo "✓ Log directory created successfully"
+            ls -la "${{ matrix.log_path_check }}"
+            
+            # Check if log file exists and has content
+            if [ -f "${{ matrix.log_path_check }}/mcpproxy.log" ]; then
+              echo "✓ Log file created successfully"
+              echo "Log file size: $(wc -c < "${{ matrix.log_path_check }}/mcpproxy.log") bytes"
+              echo "First few lines:"
+              head -3 "${{ matrix.log_path_check }}/mcpproxy.log"
+              
+              # Verify log contains expected content
+              if grep -q "Log directory configured" "${{ matrix.log_path_check }}/mcpproxy.log"; then
+                echo "✓ Log contains expected startup messages"
+              else
+                echo "⚠ Log missing expected startup messages"
+              fi
+              
+              if grep -q "${{ matrix.log_standard }}" "${{ matrix.log_path_check }}/mcpproxy.log"; then
+                echo "✓ Log contains OS standard compliance information"
+              else
+                echo "⚠ Log missing OS standard compliance information"
+              fi
+            else
+              echo "✗ Log file not created"
+              exit 1
+            fi
+          else
+            echo "✗ Log directory not created"
+            exit 1
+          fi
+
+      - name: Test OS-specific log directory creation (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          Write-Host "Testing logging on Windows"
+          Write-Host "Expected log path: ${{ matrix.log_path_check }}"
+          Write-Host "OS Standard: ${{ matrix.log_standard }}"
+
+          # Run mcpproxy briefly to create log files
+          Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru | ForEach-Object { Start-Sleep -Seconds 5; $_ | Stop-Process -Force }
+
+          # Check if log directory was created
+          $logPath = "${{ matrix.log_path_check }}"
+          if (Test-Path $logPath) {
+            Write-Host "✓ Log directory created successfully"
+            Get-ChildItem $logPath
+            
+            # Check if log file exists and has content
+            $logFile = Join-Path $logPath "mcpproxy.log"
+            if (Test-Path $logFile) {
+              Write-Host "✓ Log file created successfully"
+              $fileSize = (Get-Item $logFile).Length
+              Write-Host "Log file size: $fileSize bytes"
+              Write-Host "First few lines:"
+              Get-Content $logFile -Head 3
+              
+              # Verify log contains expected content
+              $content = Get-Content $logFile -Raw
+              if ($content -match "Log directory configured") {
+                Write-Host "✓ Log contains expected startup messages"
+              } else {
+                Write-Host "⚠ Log missing expected startup messages"
+              }
+              
+              if ($content -match "${{ matrix.log_standard }}") {
+                Write-Host "✓ Log contains OS standard compliance information"
+              } else {
+                Write-Host "⚠ Log missing OS standard compliance information"
+              }
+            } else {
+              Write-Host "✗ Log file not created"
+              exit 1
+            }
+          } else {
+            Write-Host "✗ Log directory not created"
+            exit 1
+          }
+
+      - name: Test log rotation
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "Testing log rotation functionality"
+          go test -v -timeout 2m ./internal/logs -run TestE2E_LogRotation
+
+      - name: Test concurrent logging
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "Testing concurrent logging functionality"
+          go test -v -race -timeout 3m ./internal/logs -run TestE2E_ConcurrentLogging
 
   stress-tests:
     name: Stress Tests

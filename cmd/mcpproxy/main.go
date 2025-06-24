@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/server"
 	"mcpproxy-go/internal/tray"
 )
@@ -24,6 +25,8 @@ var (
 	enableTray        bool
 	debugSearch       bool
 	toolResponseLimit int
+	logToFile         bool
+	logFile           string
 
 	// Security flags
 	readOnlyMode      bool
@@ -51,6 +54,8 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&enableTray, "tray", true, "Enable system tray")
 	rootCmd.PersistentFlags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	rootCmd.PersistentFlags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
+	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", true, "Enable logging to file in standard OS location")
+	rootCmd.PersistentFlags().StringVar(&logFile, "log-file", "", "Custom log file path (overrides standard OS location)")
 	rootCmd.PersistentFlags().BoolVar(&readOnlyMode, "read-only", false, "Enable read-only mode")
 	rootCmd.PersistentFlags().BoolVar(&disableManagement, "disable-management", false, "Disable management features")
 	rootCmd.PersistentFlags().BoolVar(&allowServerAdd, "allow-server-add", true, "Allow adding new servers")
@@ -64,31 +69,62 @@ func main() {
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
-	// Setup logger
-	logger, err := setupLogger(logLevel)
-	if err != nil {
-		return fmt.Errorf("failed to setup logger: %w", err)
-	}
-	defer logger.Sync()
-
-	logger.Info("Starting mcpproxy",
-		zap.String("version", version),
-		zap.String("log_level", logLevel),
-		zap.Bool("tray_enabled", enableTray))
-
-	// Load configuration
+	// Load configuration first to get logging settings
 	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Override tray setting from command line
-	cfg.EnableTray = enableTray
+	// Override logging settings from command line
+	if cfg.Logging == nil {
+		cfg.Logging = &config.LogConfig{
+			Level:         logLevel,
+			EnableFile:    logToFile,
+			EnableConsole: true,
+			Filename:      "mcpproxy.log",
+			MaxSize:       10,
+			MaxBackups:    5,
+			MaxAge:        30,
+			Compress:      true,
+			JSONFormat:    false,
+		}
+	} else {
+		// Override specific fields from command line
+		cfg.Logging.Level = logLevel
+		cfg.Logging.EnableFile = logToFile
+		if logFile != "" {
+			cfg.Logging.Filename = logFile
+		}
+	}
 
-	// Override debug search setting from command line
+	// Setup logger with new logging system
+	logger, err := logs.SetupLogger(cfg.Logging)
+	if err != nil {
+		return fmt.Errorf("failed to setup logger: %w", err)
+	}
+	defer logger.Sync()
+
+	// Log startup information including log directory info
+	logDirInfo, err := logs.GetLogDirInfo()
+	if err != nil {
+		logger.Warn("Failed to get log directory info", zap.Error(err))
+	} else {
+		logger.Info("Log directory configured",
+			zap.String("path", logDirInfo.Path),
+			zap.String("os", logDirInfo.OS),
+			zap.String("standard", logDirInfo.Standard))
+	}
+
+	logger.Info("Starting mcpproxy",
+		zap.String("version", version),
+		zap.String("log_level", logLevel),
+		zap.Bool("tray_enabled", enableTray),
+		zap.Bool("log_to_file", logToFile))
+
+	// Override other settings from command line
+	cfg.EnableTray = enableTray
 	cfg.DebugSearch = debugSearch
 
-	// Override tool response limit from command line if provided
 	if toolResponseLimit != 0 {
 		cfg.ToolResponseLimit = toolResponseLimit
 	}
@@ -194,33 +230,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	logger.Info("mcpproxy shutdown complete")
 	return nil
-}
-
-func setupLogger(level string) (*zap.Logger, error) {
-	var zapLevel zap.AtomicLevel
-	switch level {
-	case "debug":
-		zapLevel = zap.NewAtomicLevelAt(zap.DebugLevel)
-	case "info":
-		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
-	case "warn":
-		zapLevel = zap.NewAtomicLevelAt(zap.WarnLevel)
-	case "error":
-		zapLevel = zap.NewAtomicLevelAt(zap.ErrorLevel)
-	default:
-		return nil, fmt.Errorf("invalid log level: %s", level)
-	}
-
-	cfg := zap.Config{
-		Level:            zapLevel,
-		Development:      false,
-		Encoding:         "console",
-		EncoderConfig:    zap.NewDevelopmentEncoderConfig(),
-		OutputPaths:      []string{"stderr"},
-		ErrorOutputPaths: []string{"stderr"},
-	}
-
-	return cfg.Build()
 }
 
 func loadConfig() (*config.Config, error) {
