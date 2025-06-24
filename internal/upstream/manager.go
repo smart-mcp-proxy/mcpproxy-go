@@ -131,7 +131,7 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 			continue
 		}
 		if !client.IsConnected() {
-			m.logger.Warn("Skipping disconnected client", zap.String("id", id))
+			m.logger.Debug("Skipping disconnected client", zap.String("id", id))
 			continue
 		}
 		connectedCount++
@@ -332,14 +332,33 @@ func (m *Manager) GetStats() map[string]interface{} {
 }
 
 // GetTotalToolCount returns the total number of tools across all servers
+// This is optimized to avoid network calls during shutdown for performance
 func (m *Manager) GetTotalToolCount() int {
-	ctx := context.Background()
-	tools, err := m.DiscoverTools(ctx)
-	if err != nil {
-		m.logger.Error("Failed to discover tools for count", zap.Error(err))
-		return 0
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	totalTools := 0
+	for _, client := range m.clients {
+		if !client.config.Enabled || !client.IsConnected() {
+			continue
+		}
+
+		// Quick check if client is actually reachable before making network call
+		connectionStatus := client.GetConnectionStatus()
+		if connected, ok := connectionStatus["connected"].(bool); !ok || !connected {
+			continue
+		}
+
+		// Use a very short timeout to avoid hanging during shutdown
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		tools, err := client.ListTools(ctx)
+		cancel()
+		if err == nil && tools != nil {
+			totalTools += len(tools)
+		}
+		// Silently ignore errors during tool counting to avoid noise during shutdown
 	}
-	return len(tools)
+	return totalTools
 }
 
 // ListServers returns information about all registered servers

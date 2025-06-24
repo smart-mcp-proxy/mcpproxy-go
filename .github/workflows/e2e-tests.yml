@@ -78,7 +78,6 @@ jobs:
 
     env:
       GO111MODULE: "on"
-      CGO_ENABLED: "0"
 
     steps:
       - name: Checkout code
@@ -90,6 +89,8 @@ jobs:
           go-version: "1.23.10"
 
       - name: Build mcpproxy
+        env:
+          CGO_ENABLED: "0"
         run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
       - name: Test mcpproxy binary
@@ -144,7 +145,6 @@ jobs:
 
     env:
       GO111MODULE: "on"
-      CGO_ENABLED: "0"
 
     strategy:
       matrix:
@@ -177,10 +177,14 @@ jobs:
 
       - name: Build mcpproxy for logging test (Windows)
         if: matrix.os == 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
         run: go build -tags nogui -o mcpproxy.exe ./cmd/mcpproxy
 
       - name: Build mcpproxy for logging test (Unix)
         if: matrix.os != 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
         run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
       - name: Test OS-specific log directory creation (Unix)

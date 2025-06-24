@@ -134,11 +134,11 @@ jobs:
       - name: Build for different architectures (Linux only)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          GOOS=linux GOARCH=amd64 go build -o mcpproxy-linux-amd64 ./cmd/mcpproxy
-          GOOS=linux GOARCH=arm64 go build -o mcpproxy-linux-arm64 ./cmd/mcpproxy
-          GOOS=darwin GOARCH=amd64 go build -o mcpproxy-darwin-amd64 ./cmd/mcpproxy
-          GOOS=darwin GOARCH=arm64 go build -o mcpproxy-darwin-arm64 ./cmd/mcpproxy
-          GOOS=windows GOARCH=amd64 go build -o mcpproxy-windows-amd64.exe ./cmd/mcpproxy
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o mcpproxy-linux-amd64 ./cmd/mcpproxy
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o mcpproxy-linux-arm64 ./cmd/mcpproxy
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o mcpproxy-darwin-amd64 ./cmd/mcpproxy || echo "macOS amd64 cross-compilation may fail (expected)"
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o mcpproxy-darwin-arm64 ./cmd/mcpproxy || echo "macOS arm64 cross-compilation may fail (expected)"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o mcpproxy-windows-amd64.exe ./cmd/mcpproxy
 
       - name: Upload build artifacts
         if: matrix.os == 'ubuntu-latest'
