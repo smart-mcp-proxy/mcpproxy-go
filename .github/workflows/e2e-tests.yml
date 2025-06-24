@@ -34,6 +34,7 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
+            ~/AppData/Local/go-build
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
@@ -112,7 +113,17 @@ jobs:
             fi
           fi
 
-      - name: Run tests with coverage
+      - name: Run tests with coverage (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          go test -v -race '-coverprofile=coverage.out' -covermode=atomic ./internal/server -run TestE2E
+          go test -v -race '-coverprofile=coverage-logs.out' -covermode=atomic ./internal/logs -run TestE2E
+          go tool cover '-html=coverage.out' -o coverage.html
+          go tool cover '-html=coverage-logs.out' -o coverage-logs.html
+
+      - name: Run tests with coverage (Unix)
+        if: matrix.os != 'windows-latest'
         run: |
           go test -v -race -coverprofile=coverage.out -covermode=atomic ./internal/server -run TestE2E
           go test -v -race -coverprofile=coverage-logs.out -covermode=atomic ./internal/logs -run TestE2E
@@ -164,7 +175,12 @@ jobs:
       - name: Run logging E2E tests
         run: go test -v -race -timeout 5m ./internal/logs -run TestE2E
 
-      - name: Build mcpproxy for logging test
+      - name: Build mcpproxy for logging test (Windows)
+        if: matrix.os == 'windows-latest'
+        run: go build -tags nogui -o mcpproxy.exe ./cmd/mcpproxy
+
+      - name: Build mcpproxy for logging test (Unix)
+        if: matrix.os != 'windows-latest'
         run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
       - name: Test OS-specific log directory creation (Unix)

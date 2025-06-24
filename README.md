@@ -438,9 +438,42 @@ go build -ldflags "-X main.version=$(git describe --tags)" ./cmd/mcpproxy
 
 ### Testing
 
+#### Basic Tests
+
 ```bash
 go test ./...
 ```
+
+#### Unit Tests with Coverage
+
+**Linux/macOS:**
+```bash
+go test -v -race -coverprofile=coverage.out -run "^Test[^E]" ./...
+```
+
+**Windows PowerShell:**
+```powershell
+# Use the provided PowerShell script for proper argument handling
+.\scripts\run-unit-tests.ps1
+```
+
+**Windows Command Prompt:**
+```cmd
+# Use the provided batch file for proper argument handling
+.\scripts\run-unit-tests.cmd
+```
+
+#### E2E Tests
+
+```bash
+# Linux/macOS
+./scripts/run-e2e-tests.sh
+
+# Windows - run unit tests first, then E2E tests
+go test -v -race -run "TestE2E" ./internal/server
+```
+
+**Note for Windows users:** Due to PowerShell argument parsing differences, direct use of the `go test` command with complex arguments may fail. Use the provided scripts in the `scripts/` directory for reliable test execution.
 
 ### Running in Development
 

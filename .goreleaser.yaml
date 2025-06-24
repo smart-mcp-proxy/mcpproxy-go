@@ -5,38 +5,62 @@ before:
     - go mod tidy
 
 builds:
-  - skip: true
+  - id: linux
+    main: ./cmd/mcpproxy
+    binary: mcpproxy
+    goos:
+      - linux
+    goarch:
+      - amd64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: windows
+    main: ./cmd/mcpproxy
+    binary: mcpproxy
+    goos:
+      - windows
+    goarch:
+      - amd64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: darwin
+    main: ./cmd/mcpproxy
+    binary: mcpproxy
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=1
+    ldflags:
+      - -s -w -X main.version={{.Version}}
 
 archives:
   - id: linux
+    builds: ["linux"]
     name_template: "mcpproxy-{{ .Version }}-linux-amd64"
     files:
-      - src: "fyne-cross/bin/linux-amd64/mcpproxy"
-        dst: "mcpproxy"
       - README.md
       - assets/**/*
     
   - id: windows
+    builds: ["windows"]
     name_template: "mcpproxy-{{ .Version }}-windows-amd64"
     files:
-      - src: "fyne-cross/bin/windows-amd64/mcpproxy.exe"
-        dst: "mcpproxy.exe"
       - README.md
       - assets/**/*
     
-  - id: darwin-amd64
-    name_template: "mcpproxy-{{ .Version }}-darwin-amd64"
+  - id: darwin
+    builds: ["darwin"]
+    name_template: "mcpproxy-{{ .Version }}-darwin-{{ .Arch }}"
     files:
-      - src: "fyne-cross/bin/darwin-amd64/mcpproxy"
-        dst: "mcpproxy"
-      - README.md
-      - assets/**/*
-      
-  - id: darwin-arm64
-    name_template: "mcpproxy-{{ .Version }}-darwin-arm64"
-    files:
-      - src: "fyne-cross/bin/darwin-arm64/mcpproxy"
-        dst: "mcpproxy"
       - README.md
       - assets/**/*
 
@@ -61,9 +85,9 @@ release:
     3. Run `mcpproxy` to start with system tray, or `mcpproxy --tray=false` for headless mode
     
     #### Platform-specific notes:
-    - **macOS**: Right-click → Open to bypass Gatekeeper (unsigned app)
-    - **Windows**: Extract and run `mcpproxy.exe`
-    - **Linux**: Requires GTK3 and AppIndicator libraries
+    - **macOS**: Full system tray support with menu and icons
+    - **Windows**: Full system tray support with menu and icons  
+    - **Linux**: Headless mode only (no system tray due to compatibility)
 
 checksum:
   name_template: "checksums.txt"

@@ -1,30 +1,120 @@
-name: goreleaser
+name: Release
+
 on:
   push:
     tags: ["v*"]
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+            name: mcpproxy-linux-amd64
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            cgo: "0"
+            name: mcpproxy-windows-amd64.exe
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            cgo: "1"
+            name: mcpproxy-darwin-amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
+            name: mcpproxy-darwin-arm64
+
+    runs-on: ${{ matrix.os }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
-      - name: Install fyne-cross
-        run: go install github.com/fyne-io/fyne-cross/v2/cmd/fyne-cross@latest
-      - name: Cross-compile (linux,win,mac)
+          go-version: "1.23.10"
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
-          fyne-cross linux   --pull --app-id mcpproxy ./cmd/mcpproxy
-          fyne-cross windows --pull --app-id mcpproxy ./cmd/mcpproxy
-          fyne-cross darwin  --pull --app-id mcpproxy ./cmd/mcpproxy
-          echo "fyne-cross output structure:"
-          find fyne-cross -type f -name "*mcpproxy*" | head -20
-      - uses: goreleaser/goreleaser-action@v5
+          VERSION=${GITHUB_REF#refs/tags/}
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          go build -ldflags "${LDFLAGS}" -o ${{ matrix.name }} ./cmd/mcpproxy
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
         with:
-          version: v2.3.2
-          args: release --clean
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: List artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find dist -type f -name "*mcpproxy*" -exec ls -la {} \;
+
+      - name: Create release with binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*/mcpproxy-*
+          body: |
+            ## mcpproxy ${{ github.ref_name }}
+
+            Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
+
+            ### Installation
+
+            1. Download the appropriate binary for your platform
+            2. Make it executable: `chmod +x mcpproxy-*` (Linux/macOS)
+            3. Run `./mcpproxy-*` to start
+
+            ### Platform Support
+
+            - **macOS**: Full system tray support with menu and icons
+            - **Windows**: Full system tray support with menu and icons  
+            - **Linux**: Headless mode only (no system tray due to compatibility)
+
+            ### Usage
+
+            - With tray: `./mcpproxy` (default)
+            - Headless: `./mcpproxy --tray=false`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
