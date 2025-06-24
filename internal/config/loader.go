@@ -63,8 +63,34 @@ func Load() (*Config, error) {
 		}
 	} else {
 		// Try to find config file in common locations
-		if err := findAndLoadConfigFile(cfg); err != nil {
-			// Config file not found, that's OK - we'll use defaults and env vars
+		configFound, _, err := findAndLoadConfigFile(cfg)
+		if err != nil && configFound {
+			return nil, err // Only return error if config was found but couldn't be loaded
+		}
+
+		// If no config file was found, create a default one
+		if !configFound {
+			// Set data directory first to know where to create the config
+			if cfg.DataDir == "" {
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					return nil, fmt.Errorf("failed to get user home directory: %w", err)
+				}
+				cfg.DataDir = filepath.Join(homeDir, DefaultDataDir)
+			}
+
+			// Create data directory if it doesn't exist
+			if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+			}
+
+			// Create default config file
+			defaultConfigPath := filepath.Join(cfg.DataDir, ConfigFileName)
+			if err := createDefaultConfigFile(defaultConfigPath, cfg); err != nil {
+				return nil, fmt.Errorf("failed to create default config file: %w", err)
+			}
+
+			fmt.Printf("INFO: Created default configuration file at %s\n", defaultConfigPath)
 		}
 	}
 
@@ -127,7 +153,7 @@ func setupViper() {
 }
 
 // findAndLoadConfigFile tries to find config file in common locations
-func findAndLoadConfigFile(cfg *Config) error {
+func findAndLoadConfigFile(cfg *Config) (bool, string, error) {
 	// Common config file locations
 	locations := []string{
 		ConfigFileName,
@@ -141,11 +167,11 @@ func findAndLoadConfigFile(cfg *Config) error {
 
 	for _, location := range locations {
 		if _, err := os.Stat(location); err == nil {
-			return loadConfigFile(location, cfg)
+			return true, location, loadConfigFile(location, cfg)
 		}
 	}
 
-	return fmt.Errorf("config file not found in any location")
+	return false, "", nil
 }
 
 // loadConfigFile loads configuration from a JSON file
@@ -301,4 +327,14 @@ func CreateSampleConfig(path string) error {
 // Helper function to get current time (useful for testing)
 var now = func() time.Time {
 	return time.Now()
+}
+
+// createDefaultConfigFile creates a default configuration file with default settings
+func createDefaultConfigFile(path string, cfg *Config) error {
+	// Use the default config with empty servers list
+	defaultCfg := DefaultConfig()
+	defaultCfg.DataDir = cfg.DataDir
+	defaultCfg.Servers = []*ServerConfig{} // Empty servers list
+
+	return SaveConfig(defaultCfg, path)
 }

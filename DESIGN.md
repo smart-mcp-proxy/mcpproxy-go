@@ -265,3 +265,62 @@ The configuration sync system ensures **config file remains the single source of
 - **Tray Updates**: System tray reflects server changes
 - **Status Broadcasting**: Real-time status updates to UI components
 - **Configuration Sync**: UI displays current server state
+
+## Configuration Management
+
+### First-Time Setup
+When mcpproxy is first installed or the configuration directory doesn't exist, the system automatically:
+
+1. **Creates default configuration directory** (`~/.mcpproxy` on macOS/Linux)
+2. **Generates default configuration file** with sensible defaults:
+   - Empty `mcpServers` array (no upstream servers configured initially)
+   - Standard tool response limits and connection settings
+   - Logging configuration with appropriate file rotation
+   - Security settings (read-only mode, management controls)
+3. **Logs the creation** with informational message for user awareness
+4. **Preserves existing configuration** if file already exists (no override)
+
+### Configuration Loading Priority
+1. Command-line specified config file (`--config` flag)
+2. Standard locations search:
+   - `~/.mcpproxy/mcp_config.json`
+   - `./mcp_config.json` (current directory)
+3. **Auto-creation fallback** if no configuration found
+
+## Process Lifecycle & Signal Handling
+
+### Startup Sequence
+1. **Configuration loading** (with auto-creation if needed)
+2. **Logger initialization** (separate from config to allow early logging)
+3. **Server component creation** (storage, index, upstream managers)
+4. **Background operations startup** (connections, tool discovery)
+5. **Transport layer activation** (HTTP server or stdio)
+6. **Tray initialization** (if enabled)
+
+### Signal Handling Architecture
+The proxy implements robust signal handling with proper context propagation:
+
+#### Context Hierarchy
+```
+Main Context (from signal)
+    ├─ Server Context (for background operations)
+    │   ├─ Background Connections
+    │   ├─ Tool Discovery/Indexing  
+    │   └─ Cache Management
+    └─ HTTP Server Context (for request handling)
+```
+
+#### Graceful Shutdown Sequence
+1. **Signal received** (SIGTERM, SIGINT)
+2. **Main context cancelled** → triggers shutdown goroutine
+3. **HTTP server shutdown** (5-second timeout, force close if needed)
+4. **Background operations cancellation** (via server context)
+5. **Resource cleanup** (storage, indexes, connections)
+6. **Process termination**
+
+#### Key Implementation Details
+- **Double shutdown protection**: Guards against multiple shutdown calls
+- **Context-aware operations**: All background goroutines respect cancellation
+- **Proper HTTP server handling**: Uses `http.Server.Shutdown()` vs blocking `ListenAndServe()`
+- **Logging throughout**: Every shutdown step is logged for debugging
+- **Timeout management**: Prevents hanging on unresponsive operations

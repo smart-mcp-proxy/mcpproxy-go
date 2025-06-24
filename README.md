@@ -10,6 +10,7 @@ The Smart MCP Proxy features optimized startup with immediate tray appearance an
 - **Immediate Tray**: Appears within 1-2 seconds, no waiting for upstream connections
 - **Non-blocking**: Connections happen in background while proxy is fully functional
 - **Quick Access**: Users can quit, check status, or interact immediately after launch
+- **Auto-Configuration**: Creates default configuration file automatically if none exists
 
 ### 🔄 **Smart Connection Management** 
 - **Exponential Backoff**: Retry failed connections with 1s, 2s, 4s, 8s... intervals up to 5 minutes
@@ -22,6 +23,12 @@ The Smart MCP Proxy features optimized startup with immediate tray appearance an
 - **Connection Phases**: Shows progression through Initializing → Loading → Connecting → Ready
 - **Detailed Feedback**: Connection counts, retry attempts, and error information
 - **Transparent Operations**: Users always know what's happening in the background
+
+### 🛑 **Robust Signal Handling**
+- **Graceful Termination**: Properly handles SIGTERM and SIGINT signals (Ctrl+C)
+- **Background Cleanup**: Stops all background operations cleanly
+- **No Hanging Processes**: Exits promptly without requiring force kill
+- **Clean Shutdown Logs**: Detailed logging shows exactly what's being stopped
 
 ## Enhanced System Tray Features
 
