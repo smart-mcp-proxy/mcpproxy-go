@@ -101,13 +101,13 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 		// Stop mock servers
 		for _, mockServer := range env.mockServers {
 			if mockServer.stopFunc != nil {
-				mockServer.stopFunc()
+				_ = mockServer.stopFunc()
 			}
 		}
 
 		// Stop proxy server
-		env.proxyServer.StopServer()
-		env.proxyServer.Shutdown()
+		_ = env.proxyServer.StopServer()
+		_ = env.proxyServer.Shutdown()
 
 		// Remove temp directory
 		os.RemoveAll(tempDir)
@@ -342,7 +342,7 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Manually trigger tool discovery and indexing
-	env.proxyServer.discoverAndIndexTools(ctx)
+	_ = env.proxyServer.discoverAndIndexTools(ctx)
 
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)
@@ -443,7 +443,7 @@ func TestE2E_ToolCalling(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Manually trigger tool discovery and indexing
-	env.proxyServer.discoverAndIndexTools(ctx)
+	_ = env.proxyServer.discoverAndIndexTools(ctx)
 
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)
@@ -763,8 +763,8 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 					}
 
 					// Verify environment variables
-					if env_vars, ok := serverMap["env"].(map[string]interface{}); ok {
-						assert.Equal(t, "test_key_123", env_vars["BRAVE_API_KEY"])
+					if envVars, ok := serverMap["env"].(map[string]interface{}); ok {
+						assert.Equal(t, "test_key_123", envVars["BRAVE_API_KEY"])
 					}
 					break
 				}

@@ -18,8 +18,8 @@ import (
 	"mcpproxy-go/internal/upstream"
 )
 
-// ServerStatus represents the current status of the server
-type ServerStatus struct {
+// Status represents the current status of the server
+type Status struct {
 	Phase         string                 `json:"phase"`          // Starting, Ready, Error
 	Message       string                 `json:"message"`        // Human readable status message
 	UpstreamStats map[string]interface{} `json:"upstream_stats"` // Upstream server statistics
@@ -47,9 +47,9 @@ type Server struct {
 	shutdown   bool // Guard against double shutdown
 
 	// Status reporting
-	status   ServerStatus
+	status   Status
 	statusMu sync.RWMutex
-	statusCh chan ServerStatus
+	statusCh chan Status
 }
 
 // NewServer creates a new server instance
@@ -94,8 +94,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 		truncator:       truncator,
 		serverCtx:       ctx,
 		cancelFunc:      cancel,
-		statusCh:        make(chan ServerStatus, 10), // Buffered channel for status updates
-		status: ServerStatus{
+		statusCh:        make(chan Status, 10), // Buffered channel for status updates
+		status: Status{
 			Phase:       "Initializing",
 			Message:     "Server is initializing...",
 			LastUpdated: time.Now(),
@@ -136,7 +136,7 @@ func (s *Server) GetStatus() interface{} {
 
 // StatusChannel returns a channel that receives status updates
 func (s *Server) StatusChannel() <-chan interface{} {
-	// Create a new channel that converts ServerStatus to interface{}
+	// Create a new channel that converts Status to interface{}
 	ch := make(chan interface{}, 10)
 	go func() {
 		defer close(ch)
@@ -269,7 +269,7 @@ func (s *Server) backgroundToolIndexing(ctx context.Context) {
 	// Initial indexing after a short delay to let connections establish
 	select {
 	case <-time.After(2 * time.Second):
-		s.discoverAndIndexTools(ctx)
+		_ = s.discoverAndIndexTools(ctx)
 	case <-ctx.Done():
 		s.logger.Info("Background tool indexing stopped during initial delay")
 		return
@@ -282,7 +282,7 @@ func (s *Server) backgroundToolIndexing(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			s.discoverAndIndexTools(ctx)
+			_ = s.discoverAndIndexTools(ctx)
 		case <-ctx.Done():
 			s.logger.Info("Background tool indexing stopped due to context cancellation")
 			return
@@ -416,16 +416,6 @@ func (s *Server) loadConfiguredServers() error {
 		zap.Int("removed_servers", len(serversToRemove)))
 
 	return nil
-}
-
-// isServerInConfig checks if a server name is already in the config
-func (s *Server) isServerInConfig(name string) bool {
-	for _, serverConfig := range s.config.Servers {
-		if serverConfig.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 // Start starts the MCP proxy server
@@ -836,8 +826,9 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
-		Addr:    s.config.Listen,
-		Handler: mux,
+		Addr:              s.config.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 	s.running = true
 	s.mu.Unlock()

@@ -68,7 +68,7 @@ func main() {
 	}
 }
 
-func runServer(cmd *cobra.Command, args []string) error {
+func runServer(_ *cobra.Command, args []string) error {
 	// Load configuration first to get logging settings
 	cfg, err := loadConfig()
 	if err != nil {
@@ -102,7 +102,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to setup logger: %w", err)
 	}
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	// Log startup information including log directory info
 	logDirInfo, err := logs.GetLogDirInfo()

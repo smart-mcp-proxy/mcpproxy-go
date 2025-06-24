@@ -109,7 +109,7 @@ func TestE2E_LoggingSystem(t *testing.T) {
 			logger.Error("Error message for E2E test", zap.String("test_case", tc.name))
 
 			// Sync to ensure all logs are written
-			logger.Sync()
+			_ = logger.Sync()
 
 			// If file logging is enabled, verify the log file exists and has content
 			if tc.config.EnableFile && tc.config.Filename != "" {
@@ -215,7 +215,7 @@ func TestE2E_LogRotation(t *testing.T) {
 			zap.String("data", strings.Repeat("x", 100)))
 	}
 
-	logger.Sync()
+	_ = logger.Sync()
 
 	// Check if log files exist
 	logFilePath, err := GetLogFilePath(config.Filename)
@@ -324,11 +324,11 @@ func TestE2E_MCPProxyWithLogging(t *testing.T) {
 
 	// Kill the process
 	if cmd.Process != nil {
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 	}
 
 	// Wait for the command to finish
-	cmd.Wait()
+	_ = cmd.Wait()
 
 	// Check if log file was created
 	logFilePath, err := GetLogFilePath("mcpproxy-e2e-binary.log")
@@ -433,7 +433,7 @@ func TestE2E_ConcurrentLogging(t *testing.T) {
 		}
 	}
 
-	logger.Sync()
+	_ = logger.Sync()
 
 	// Verify log file
 	logFilePath, err := GetLogFilePath(config.Filename)
@@ -490,9 +490,9 @@ func BenchmarkE2E_LoggingPerformance(b *testing.B) {
 	require.NoError(b, err)
 
 	defer func() {
-		logger.Sync()
+		_ = logger.Sync()
 		logFilePath, _ := GetLogFilePath(config.Filename)
-		os.Remove(logFilePath)
+		_ = os.Remove(logFilePath)
 	}()
 
 	b.ResetTimer()
