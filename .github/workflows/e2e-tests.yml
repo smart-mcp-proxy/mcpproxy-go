@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: ["1.21", "1.22", "1.23"]
+        go-version: ["1.21", "1.22", "1.23.10"]
 
     steps:
       - name: Checkout code
@@ -59,13 +59,13 @@ jobs:
           GO_TEST_TIMEOUT: 300s
 
       - name: Run E2E tests with race detector
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23'
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23.10'
         run: go test -v -race -timeout 10m ./internal/server -run TestE2E
         env:
           GO_TEST_TIMEOUT: 600s
 
       - name: Run Logging E2E tests with race detector
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23'
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23.10'
         run: go test -v -race -timeout 10m ./internal/logs -run TestE2E
         env:
           GO_TEST_TIMEOUT: 600s
@@ -85,7 +85,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: "1.23"
+          go-version: "1.23.10"
 
       - name: Build mcpproxy
         run: go build -o mcpproxy ./cmd/mcpproxy
@@ -154,7 +154,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: "1.23"
+          go-version: "1.23.10"
 
       - name: Run logging unit tests
         run: go test -v -race -timeout 2m ./internal/logs
@@ -281,7 +281,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: "1.23"
+          go-version: "1.23.10"
 
       - name: Run concurrent stress tests
         run: |
