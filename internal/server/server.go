@@ -190,10 +190,16 @@ func (s *Server) backgroundInitialization() {
 
 	// Start background connection attempts
 	s.updateStatus("Connecting", "Connecting to upstream servers...")
-	go s.backgroundConnections(s.serverCtx)
+	s.mu.RLock()
+	ctx := s.serverCtx
+	s.mu.RUnlock()
+	go s.backgroundConnections(ctx)
 
 	// Start background tool discovery and indexing
-	go s.backgroundToolIndexing(s.serverCtx)
+	s.mu.RLock()
+	ctx = s.serverCtx
+	s.mu.RUnlock()
+	go s.backgroundToolIndexing(ctx)
 
 	// Only set "Ready" status if the server is not already running
 	// If server is running, don't override the "Running" status
@@ -726,6 +732,11 @@ func (s *Server) StartServer(ctx context.Context) error {
 		return fmt.Errorf("server is already running")
 	}
 
+	// Cancel the old context before creating a new one to avoid race conditions
+	if s.cancelFunc != nil {
+		s.cancelFunc()
+	}
+
 	s.serverCtx, s.cancelFunc = context.WithCancel(ctx)
 
 	go func() {
@@ -899,7 +910,10 @@ func (s *Server) ReloadConfiguration() error {
 
 	// Trigger tool re-indexing after configuration changes
 	go func() {
-		if err := s.discoverAndIndexTools(s.serverCtx); err != nil {
+		s.mu.RLock()
+		ctx := s.serverCtx
+		s.mu.RUnlock()
+		if err := s.discoverAndIndexTools(ctx); err != nil {
 			s.logger.Error("Failed to re-index tools after config reload", zap.Error(err))
 		}
 	}()
