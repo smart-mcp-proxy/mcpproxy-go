@@ -260,7 +260,7 @@ jobs:
           $process | Stop-Process -Force
 
           # Check if log directory was created
-          $logPath = "${{ matrix.log_path_check }}"
+          $logPath = "$env:LOCALAPPDATA\mcpproxy\logs"
           if (Test-Path $logPath) {
             Write-Host "✓ Log directory created successfully"
             Get-ChildItem $logPath
@@ -282,7 +282,7 @@ jobs:
                 Write-Host "⚠ Log missing expected startup messages"
               }
               
-              if ($content -match "${{ matrix.log_standard }}") {
+              if ($content -match "Windows Application Data Guidelines") {
                 Write-Host "✓ Log contains OS standard compliance information"
               } else {
                 Write-Host "⚠ Log missing OS standard compliance information"
