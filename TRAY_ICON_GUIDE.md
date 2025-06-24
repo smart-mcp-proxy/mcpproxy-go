@@ -35,11 +35,12 @@ Smart MCP Proxy
 
 ## Tooltip Information
 
-The tray icon tooltip displays:
-- **Proxy Status**: "Smart MCP Proxy - Running" or "Smart MCP Proxy - Stopped"
-- **Connection URL**: "URL: http://localhost:8080/mcp" (when running)
-- **Server Status**: "Servers: 2/3 connected" (connected/total)
-- **Tool Count**: "Tools: 15 available" (total tools across all servers)
+The tray icon tooltip displays comprehensive status in multiple lines:
+- **Server Status**: "mcpproxy (Ready) - http://localhost:3001" (phase and listen address)
+- **Server Connections**: "Servers: 2/3 connected" (connected/total configured)
+- **Tool Count**: "Tools: 15 available" (total tools across all connected servers)
+
+When stopped: "mcpproxy is stopped"
 
 ## Server Control
 

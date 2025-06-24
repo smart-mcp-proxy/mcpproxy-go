@@ -337,15 +337,14 @@ Response:
 
 ### Status Information
 
-The tray tooltip shows:
-- **Proxy Status**: Running/Stopped
-- **Connection URL**: Where clients can connect
-- **Server Statistics**: Connected servers and available tools
+The tray tooltip shows comprehensive status in multiple lines:
+- **Server Status**: Current phase and listen address
+- **Server Connections**: Connected/total upstream servers  
+- **Tool Count**: Total tools available from all connected servers
 
 Example tooltip:
 ```
-Smart MCP Proxy - Running
-URL: http://localhost:8080/mcp
+mcpproxy (Ready) - http://localhost:3001
 Servers: 2/3 connected
 Tools: 15 available
 ```

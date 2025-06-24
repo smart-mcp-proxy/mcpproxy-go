@@ -343,10 +343,22 @@ func (a *App) onReady() {
 
 // updateTooltip updates the tooltip based on the server's running state
 func (a *App) updateTooltip() {
-	if a.server.IsRunning() {
-		systray.SetTooltip(fmt.Sprintf("mcpproxy is running on %s", a.server.GetListenAddress()))
-	} else {
+	if a.server == nil {
 		systray.SetTooltip("mcpproxy is stopped")
+		return
+	}
+
+	// Get full status and use comprehensive tooltip
+	statusData := a.server.GetStatus()
+	if status, ok := statusData.(map[string]interface{}); ok {
+		a.updateTooltipFromStatusData(status)
+	} else {
+		// Fallback to basic tooltip if status format is unexpected
+		if a.server.IsRunning() {
+			systray.SetTooltip(fmt.Sprintf("mcpproxy is running on %s", a.server.GetListenAddress()))
+		} else {
+			systray.SetTooltip("mcpproxy is stopped")
+		}
 	}
 }
 
@@ -381,12 +393,58 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 // updateTooltipFromStatusData updates the tray tooltip from status data map
 func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 	running, _ := status["running"].(bool)
-	if running {
-		listenAddr, _ := status["listen_addr"].(string)
-		systray.SetTooltip(fmt.Sprintf("mcpproxy is running on %s", listenAddr))
-	} else {
+
+	if !running {
 		systray.SetTooltip("mcpproxy is stopped")
+		return
 	}
+
+	// Build comprehensive tooltip for running server
+	listenAddr, _ := status["listen_addr"].(string)
+	phase, _ := status["phase"].(string)
+	toolsIndexed, _ := status["tools_indexed"].(int)
+
+	// Get upstream stats for connected servers and total tools
+	upstreamStats, _ := status["upstream_stats"].(map[string]interface{})
+
+	var connectedServers, totalServers, totalTools int
+	if upstreamStats != nil {
+		if connected, ok := upstreamStats["connected_servers"].(int); ok {
+			connectedServers = connected
+		}
+		if total, ok := upstreamStats["total_servers"].(int); ok {
+			totalServers = total
+		}
+		if tools, ok := upstreamStats["total_tools"].(int); ok {
+			totalTools = tools
+		}
+	}
+
+	// Build multi-line tooltip with comprehensive information
+	var tooltipLines []string
+
+	// Main status line
+	tooltipLines = append(tooltipLines, fmt.Sprintf("mcpproxy (%s) - %s", phase, listenAddr))
+
+	// Server connection status
+	if totalServers > 0 {
+		tooltipLines = append(tooltipLines, fmt.Sprintf("Servers: %d/%d connected", connectedServers, totalServers))
+	} else {
+		tooltipLines = append(tooltipLines, "Servers: none configured")
+	}
+
+	// Tool count - this is the key information the user wanted
+	if totalTools > 0 {
+		tooltipLines = append(tooltipLines, fmt.Sprintf("Tools: %d available", totalTools))
+	} else if toolsIndexed > 0 {
+		// Fallback to indexed count if total tools not available
+		tooltipLines = append(tooltipLines, fmt.Sprintf("Tools: %d indexed", toolsIndexed))
+	} else {
+		tooltipLines = append(tooltipLines, "Tools: none available")
+	}
+
+	tooltip := strings.Join(tooltipLines, "\n")
+	systray.SetTooltip(tooltip)
 }
 
 // updateServersMenuFromStatusData is a legacy method, functionality is now in MenuManager

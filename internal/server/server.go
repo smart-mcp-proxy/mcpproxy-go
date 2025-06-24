@@ -566,40 +566,17 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 		zap.String("server", serverName),
 		zap.Bool("enabled", enabled))
 
-	// First, check current state in storage before update
-	currentServer, err := s.storageManager.GetUpstreamServer(serverName)
-	if err != nil {
-		s.logger.Error("Failed to get current server state from storage", zap.Error(err))
-		return fmt.Errorf("failed to get server '%s' from storage: %w", serverName, err)
-	}
-	s.logger.Info("Current server state in storage",
-		zap.String("server", serverName),
-		zap.Bool("current_enabled", currentServer.Enabled))
-
 	// First, update the authoritative record in storage.
 	if err := s.storageManager.EnableUpstreamServer(serverName, enabled); err != nil {
 		s.logger.Error("Failed to update server enabled state in storage", zap.Error(err))
 		return fmt.Errorf("failed to update server '%s' in storage: %w", serverName, err)
 	}
 
-	// Verify the update in storage
-	updatedServer, err := s.storageManager.GetUpstreamServer(serverName)
-	if err != nil {
-		s.logger.Error("Failed to verify server state in storage after update", zap.Error(err))
-	} else {
-		s.logger.Info("Verified server state in storage after update",
-			zap.String("server", serverName),
-			zap.Bool("enabled_in_storage", updatedServer.Enabled))
-	}
-
 	// Now that storage is updated, save the configuration to disk.
 	// This ensures the file reflects the authoritative state.
-	s.logger.Info("About to save configuration to disk", zap.String("server", serverName))
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Error("Failed to save configuration after state change", zap.Error(err))
 		// Don't return here; the primary state is updated. The file watcher will eventually sync.
-	} else {
-		s.logger.Info("Successfully saved configuration to disk", zap.String("server", serverName))
 	}
 
 	// The file watcher in the tray will detect the change to the config file and
@@ -847,28 +824,9 @@ func (s *Server) SaveConfiguration() error {
 		s.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))
 		return err
 	}
-
-	s.logger.Info("Retrieved servers from storage for config save",
-		zap.Int("server_count", len(latestServers)))
-
-	// Log each server's state for debugging
-	for _, server := range latestServers {
-		s.logger.Debug("Server in config to be saved",
-			zap.String("name", server.Name),
-			zap.Bool("enabled", server.Enabled),
-			zap.Bool("quarantined", server.Quarantined))
-	}
-
 	s.config.Servers = latestServers
 
-	s.logger.Info("About to call config.SaveConfig", zap.String("path", configPath))
-	if err := config.SaveConfig(s.config, configPath); err != nil {
-		s.logger.Error("Failed to save config file", zap.Error(err), zap.String("path", configPath))
-		return err
-	}
-
-	s.logger.Info("Successfully saved configuration file", zap.String("path", configPath))
-	return nil
+	return config.SaveConfig(s.config, configPath)
 }
 
 // ReloadConfiguration reloads the configuration from disk
