@@ -195,7 +195,11 @@ jobs:
           echo "OS Standard: ${{ matrix.log_standard }}"
 
           # Run mcpproxy briefly to create log files
-          timeout 5s ./mcpproxy --log-to-file --log-level info --listen :0 --tray=false || true
+          ./mcpproxy --log-to-file --log-level info --listen :0 --tray=false &
+          MCPPROXY_PID=$!
+          sleep 5
+          kill $MCPPROXY_PID 2>/dev/null || true
+          wait $MCPPROXY_PID 2>/dev/null || true
 
           # Check if log directory was created
           if [ -d "${{ matrix.log_path_check }}" ]; then

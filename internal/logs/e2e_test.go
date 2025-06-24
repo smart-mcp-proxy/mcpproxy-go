@@ -443,25 +443,23 @@ func TestE2E_ConcurrentLogging(t *testing.T) {
 	require.NoError(t, err)
 
 	contentStr := string(content)
-	lines := strings.Split(contentStr, "\n")
 
-	// Should have approximately numGoroutines * messagesPerGoroutine log lines
-	expectedLines := numGoroutines * messagesPerGoroutine
-	actualLines := len(lines) - 1 // Subtract 1 for the final empty line
+	// Count actual log messages by looking for the specific message text
+	// This is more reliable than counting newlines which can vary by platform
+	logMessageCount := strings.Count(contentStr, "Concurrent log message")
 
-	// Allow some tolerance for concurrent operations
-	assert.GreaterOrEqual(t, actualLines, expectedLines-10)
-	assert.LessOrEqual(t, actualLines, expectedLines+10)
+	// Should have exactly numGoroutines * messagesPerGoroutine log messages
+	expectedMessages := numGoroutines * messagesPerGoroutine
+
+	// Allow some tolerance for concurrent operations (messages might be lost due to race conditions)
+	assert.GreaterOrEqual(t, logMessageCount, expectedMessages-10)
+	assert.LessOrEqual(t, logMessageCount, expectedMessages+10)
 
 	// Verify that messages from different goroutines are present
 	goroutinesSeen := make(map[int]bool)
-	for _, line := range lines {
-		if strings.Contains(line, "Concurrent log message") {
-			for i := 0; i < numGoroutines; i++ {
-				if strings.Contains(line, fmt.Sprintf(`"goroutine": %d`, i)) {
-					goroutinesSeen[i] = true
-				}
-			}
+	for i := 0; i < numGoroutines; i++ {
+		if strings.Contains(contentStr, fmt.Sprintf(`"goroutine": %d`, i)) {
+			goroutinesSeen[i] = true
 		}
 	}
 
