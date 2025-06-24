@@ -46,6 +46,18 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
+      - name: Build mcpproxy binary for tests (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy.exe ./cmd/mcpproxy
+
+      - name: Build mcpproxy binary for tests (Unix)
+        if: matrix.os != 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
+
       - name: Run unit tests
         run: go test -v -race -timeout 30s ./internal/...
 
