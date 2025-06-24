@@ -1,0 +1,91 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - skip: true
+
+archives:
+  - id: linux
+    name_template: "mcpproxy-{{ .Version }}-linux-amd64"
+    files:
+      - src: "fyne-cross/bin/linux-amd64/mcpproxy"
+        dst: "mcpproxy"
+      - README.md
+      - assets/**/*
+    
+  - id: windows
+    name_template: "mcpproxy-{{ .Version }}-windows-amd64"
+    files:
+      - src: "fyne-cross/bin/windows-amd64/mcpproxy.exe"
+        dst: "mcpproxy.exe"
+      - README.md
+      - assets/**/*
+    
+  - id: darwin-amd64
+    name_template: "mcpproxy-{{ .Version }}-darwin-amd64"
+    files:
+      - src: "fyne-cross/bin/darwin-amd64/mcpproxy"
+        dst: "mcpproxy"
+      - README.md
+      - assets/**/*
+      
+  - id: darwin-arm64
+    name_template: "mcpproxy-{{ .Version }}-darwin-arm64"
+    files:
+      - src: "fyne-cross/bin/darwin-arm64/mcpproxy"
+        dst: "mcpproxy"
+      - README.md
+      - assets/**/*
+
+release:
+  github:
+    owner: smart-mcp-proxy
+    name: mcpproxy-go
+  draft: false
+  prerelease: auto
+  name_template: "mcpproxy {{ .Tag }}"
+  header: |
+    ## mcpproxy {{ .Tag }}
+    
+    Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
+    
+  footer: |
+    ### Installation
+    
+    #### Download and Run
+    1. Download the appropriate archive for your platform
+    2. Extract the binary
+    3. Run `mcpproxy` to start with system tray, or `mcpproxy --tray=false` for headless mode
+    
+    #### Platform-specific notes:
+    - **macOS**: Right-click → Open to bypass Gatekeeper (unsigned app)
+    - **Windows**: Extract and run `mcpproxy.exe`
+    - **Linux**: Requires GTK3 and AppIndicator libraries
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch 

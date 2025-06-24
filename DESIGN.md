@@ -32,7 +32,7 @@ Re‑implement the existing Python MCP proxy in Go, delivering a single‑binary
 | Full‑text search  | **Bleve v2**                      | Embeddable BM25                    |
 | CLI & config      | **`spf13/cobra` + `spf13/viper`** | Flags → env → file binding         |
 | Persistence       | **bbolt**                         | Single‑file ACID                   |
-| Sys‑tray          | **`getlantern/systray`**          | Tiny cross‑platform tray           |
+| Sys‑tray          | **`fyne.io/systray`**             | Tiny cross‑platform tray           |
 | Logging           | **zap** / **slog**                | Structured logs                    |
 | Metrics           | `prometheus/client_golang`        | Optional `/metrics`                |
 

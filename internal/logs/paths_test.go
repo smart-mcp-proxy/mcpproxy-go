@@ -196,8 +196,14 @@ func TestEnsureLogDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, info.IsDir())
 
-	// Verify permissions (should be 0755)
-	assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
+	// Verify permissions (Windows has different permission handling)
+	if runtime.GOOS == "windows" {
+		// On Windows, permissions are different and less granular
+		assert.True(t, info.Mode().IsDir())
+	} else {
+		// On Unix-like systems, verify exact permissions (should be 0755)
+		assert.Equal(t, os.FileMode(0755), info.Mode().Perm())
+	}
 }
 
 func TestGetLogFilePath(t *testing.T) {

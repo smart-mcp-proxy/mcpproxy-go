@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/getlantern/systray"
+	"fyne.io/systray"
 	"go.uber.org/zap/zaptest"
 )
 

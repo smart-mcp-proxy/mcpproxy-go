@@ -42,6 +42,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create index manager: %v", err)
 	}
+	defer indexManager.Close()
 
 	// Create upstream manager
 	upstreamManager := upstream.NewManager(zap.NewNop())
@@ -140,6 +141,7 @@ func TestUpstreamServersListOperation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create index manager: %v", err)
 	}
+	defer indexManager.Close()
 
 	// Create upstream manager
 	upstreamManager := upstream.NewManager(zap.NewNop())

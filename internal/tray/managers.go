@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/getlantern/systray"
+	"fyne.io/systray"
 	"go.uber.org/zap"
 )
 

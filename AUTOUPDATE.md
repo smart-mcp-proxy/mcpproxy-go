@@ -171,6 +171,6 @@ go run -ldflags "-X main.version=v0.1.0-test" ./cmd/mcpproxy --version
 ```
 
 ### Dependencies
-- `github.com/getlantern/systray` - System tray functionality
+- `fyne.io/systray` - System tray functionality
 - `github.com/inconshreveable/go-update` - Binary update mechanism
 - `golang.org/x/mod/semver` - Semantic version comparison 

@@ -40,9 +40,14 @@ jobs:
         run: go test -tags nogui -v ./...
 
       - name: Build binary
+        shell: bash
         run: |
           VERSION=pr-${{ github.event.number }}-${{ github.sha }}
-          go build -tags nogui -ldflags "-X main.version=${VERSION}" -o mcpproxy ./cmd/mcpproxy
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            go build -tags nogui -ldflags "-X main.version=${VERSION}" -o mcpproxy.exe ./cmd/mcpproxy
+          else
+            go build -tags nogui -ldflags "-X main.version=${VERSION}" -o mcpproxy ./cmd/mcpproxy
+          fi
 
       - name: Test version output
         shell: bash
@@ -73,5 +78,5 @@ jobs:
       - name: Check GoReleaser config
         uses: goreleaser/goreleaser-action@v5
         with:
-          version: latest
+          version: v2.3.2
           args: check

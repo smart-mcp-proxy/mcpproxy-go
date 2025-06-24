@@ -1,4 +1,4 @@
-//go:build nogui || headless
+//go:build nogui || headless || linux
 
 package tray
 
