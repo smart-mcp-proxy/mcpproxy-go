@@ -10,7 +10,6 @@ builds:
 archives:
   - id: linux
     name_template: "mcpproxy-{{ .Version }}-linux-amd64"
-    format: tar.gz
     files:
       - src: "fyne-cross/bin/linux-amd64/mcpproxy"
         dst: "mcpproxy"
@@ -19,7 +18,6 @@ archives:
     
   - id: windows
     name_template: "mcpproxy-{{ .Version }}-windows-amd64"
-    format: zip
     files:
       - src: "fyne-cross/bin/windows-amd64/mcpproxy.exe"
         dst: "mcpproxy.exe"
@@ -28,7 +26,6 @@ archives:
     
   - id: darwin-amd64
     name_template: "mcpproxy-{{ .Version }}-darwin-amd64"
-    format: tar.gz
     files:
       - src: "fyne-cross/bin/darwin-amd64/mcpproxy"
         dst: "mcpproxy"
@@ -37,7 +34,6 @@ archives:
       
   - id: darwin-arm64
     name_template: "mcpproxy-{{ .Version }}-darwin-arm64"
-    format: tar.gz
     files:
       - src: "fyne-cross/bin/darwin-arm64/mcpproxy"
         dst: "mcpproxy"
