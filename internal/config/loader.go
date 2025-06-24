@@ -153,7 +153,7 @@ func setupViper() {
 }
 
 // findAndLoadConfigFile tries to find config file in common locations
-func findAndLoadConfigFile(cfg *Config) (bool, string, error) {
+func findAndLoadConfigFile(cfg *Config) (found bool, path string, err error) {
 	// Common config file locations
 	locations := []string{
 		ConfigFileName,
@@ -247,7 +247,7 @@ func SaveConfig(cfg *Config, path string) error {
 	}
 
 	fmt.Printf("[DEBUG] SaveConfig - about to write file: %s\n", path)
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		fmt.Printf("[DEBUG] SaveConfig - WriteFile failed: %v\n", err)
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
@@ -325,9 +325,7 @@ func CreateSampleConfig(path string) error {
 }
 
 // Helper function to get current time (useful for testing)
-var now = func() time.Time {
-	return time.Now()
-}
+var now = time.Now
 
 // createDefaultConfigFile creates a default configuration file with default settings
 func createDefaultConfigFile(path string, cfg *Config) error {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.etcd.io/bbolt"
+	"go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +31,7 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 		logger.Warnf("Failed to open database on first attempt: %v", err)
 
 		// Check if it's a timeout or lock issue
-		if err == bbolt.ErrTimeout {
+		if err == errors.ErrTimeout {
 			logger.Info("Database timeout detected, attempting recovery...")
 
 			// Try to backup and recreate if file exists

@@ -722,7 +722,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 				toolAnalysis := map[string]interface{}{
 					"name":              tool.Name,
 					"full_name":         fmt.Sprintf("%s:%s", serverName, tool.Name),
-					"description":       fmt.Sprintf("\"%s\"", tool.Description), // Quote the description for LLM analysis
+					"description":       fmt.Sprintf("%q", tool.Description), // Quote the description for LLM analysis
 					"input_schema":      inputSchema,
 					"server_name":       serverName,
 					"quarantine_status": "QUARANTINED",
@@ -1213,7 +1213,7 @@ func (p *MCPProxyServer) analyzeQuery(query string) map[string]interface{} {
 }
 
 // explainToolRanking explains why a specific tool was ranked as it was
-func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, results []*config.SearchResult) map[string]interface{} {
+func (p *MCPProxyServer) explainToolRanking(query, targetTool string, results []*config.SearchResult) map[string]interface{} {
 	explanation := map[string]interface{}{
 		"target_tool":      targetTool,
 		"query":            query,
@@ -1223,18 +1223,19 @@ func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, res
 
 	// Find the tool in results
 	for i, result := range results {
-		if result.Tool.Name == targetTool {
-			explanation["found_in_results"] = true
-			explanation["rank"] = i + 1
-			explanation["score"] = result.Score
-			explanation["tool_details"] = map[string]interface{}{
-				"name":        result.Tool.Name,
-				"server":      result.Tool.ServerName,
-				"description": result.Tool.Description,
-				"has_params":  len(result.Tool.ParamsJSON) > 0,
-			}
-			break
+		if result.Tool.Name != targetTool {
+			continue
 		}
+		explanation["found_in_results"] = true
+		explanation["rank"] = i + 1
+		explanation["score"] = result.Score
+		explanation["tool_details"] = map[string]interface{}{
+			"name":        result.Tool.Name,
+			"server":      result.Tool.ServerName,
+			"description": result.Tool.Description,
+			"has_params":  result.Tool.ParamsJSON != "",
+		}
+		break
 	}
 
 	// Analyze why tool might not rank well
@@ -1256,8 +1257,9 @@ func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, res
 	if strings.Contains(targetTool, ":") {
 		parts := strings.SplitN(targetTool, ":", 2)
 		if len(parts) == 2 {
-			suggestions = append(suggestions, fmt.Sprintf("Try searching for server name: '%s'", parts[0]))
-			suggestions = append(suggestions, fmt.Sprintf("Try searching for tool name: '%s'", parts[1]))
+			suggestions = append(suggestions,
+				fmt.Sprintf("Try searching for server name: '%s'", parts[0]),
+				fmt.Sprintf("Try searching for tool name: '%s'", parts[1]))
 			if strings.Contains(parts[1], "_") {
 				words := strings.Split(parts[1], "_")
 				suggestions = append(suggestions, fmt.Sprintf("Try searching for individual words: '%s'", strings.Join(words, " ")))

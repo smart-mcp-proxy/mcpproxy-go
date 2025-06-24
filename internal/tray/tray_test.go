@@ -45,7 +45,7 @@ func (m *MockServerInterface) GetUpstreamStats() map[string]interface{} {
 	return m.upstreamStats
 }
 
-func (m *MockServerInterface) StartServer(ctx context.Context) error {
+func (m *MockServerInterface) StartServer(_ context.Context) error {
 	m.running = true
 	return nil
 }

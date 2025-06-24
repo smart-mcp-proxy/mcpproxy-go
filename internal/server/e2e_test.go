@@ -136,12 +136,39 @@ func (env *TestEnvironment) waitForServerReady() {
 			env.t.Fatalf("Timeout waiting for server to be ready. Status: %+v", status)
 		case <-ticker.C:
 			if env.proxyServer.IsRunning() {
-				// Give it a bit more time to fully initialize
-				time.Sleep(2 * time.Second)
-				return
+				// Actually test if the HTTP server is accepting connections
+				if env.testServerConnection() {
+					// Give it a bit more time to fully initialize
+					time.Sleep(500 * time.Millisecond)
+					return
+				}
 			}
 		}
 	}
+}
+
+// testServerConnection tests if the server is actually accepting HTTP connections
+func (env *TestEnvironment) testServerConnection() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", env.proxyAddr, http.NoBody)
+	if err != nil {
+		return false
+	}
+
+	client := &http.Client{
+		Timeout: 1 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+
+	// Any response (even an error response) means the server is accepting connections
+	return true
 }
 
 // CreateMockUpstreamServer creates and starts a mock upstream MCP server

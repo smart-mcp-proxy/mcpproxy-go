@@ -72,7 +72,7 @@ type ArrayInfo struct {
 }
 
 // findArraysRecursive recursively finds all arrays in JSON structure up to maxDepth
-func (t *Truncator) findArraysRecursive(data interface{}, currentPath string, depth int, maxDepth int) []ArrayInfo {
+func (t *Truncator) findArraysRecursive(data interface{}, currentPath string, depth, maxDepth int) []ArrayInfo {
 	var arrays []ArrayInfo
 
 	if depth > maxDepth {
@@ -135,7 +135,7 @@ func (t *Truncator) looksLikeJSON(s string) bool {
 }
 
 // parseJSONStringForArrays attempts to parse a JSON string and find arrays within it
-func (t *Truncator) parseJSONStringForArrays(jsonStr, basePath string, depth int, maxDepth int) []ArrayInfo {
+func (t *Truncator) parseJSONStringForArrays(jsonStr, basePath string, depth, maxDepth int) []ArrayInfo {
 	// Don't exceed max depth when parsing JSON strings
 	if depth >= maxDepth {
 		return nil
@@ -177,7 +177,7 @@ func (t *Truncator) calculateArraySize(arr []interface{}) int {
 }
 
 // chooseBestArray selects the best array using enhanced criteria
-func (t *Truncator) chooseBestArray(arrays []ArrayInfo, originalContent string) ArrayInfo {
+func (t *Truncator) chooseBestArray(arrays []ArrayInfo, _ string) ArrayInfo {
 	if len(arrays) == 0 {
 		return ArrayInfo{}
 	}

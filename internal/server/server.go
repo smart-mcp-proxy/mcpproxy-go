@@ -292,6 +292,8 @@ func (s *Server) backgroundToolIndexing(ctx context.Context) {
 
 // loadConfiguredServers synchronizes the storage and upstream manager from the current config.
 // This is the source of truth when configuration is loaded from disk.
+//
+//nolint:unparam // function designed to be best-effort, always returns nil by design
 func (s *Server) loadConfiguredServers() error {
 	s.logger.Info("Synchronizing servers from configuration (config as source of truth)")
 
@@ -764,7 +766,9 @@ func (s *Server) StopServer() error {
 	defer s.mu.Unlock()
 
 	if !s.running {
-		return fmt.Errorf("server is not running")
+		// Return nil instead of error to prevent race condition logs
+		s.logger.Debug("Server stop requested but server is not running")
+		return nil
 	}
 
 	// Notify about server stopping

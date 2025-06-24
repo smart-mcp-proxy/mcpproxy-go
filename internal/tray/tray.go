@@ -24,7 +24,8 @@ import (
 )
 
 const (
-	repo = "smart-mcp-proxy/mcpproxy-go" // Actual repository
+	repo     = "smart-mcp-proxy/mcpproxy-go" // Actual repository
+	osDarwin = "darwin"
 )
 
 //go:embed icon-mono-44.png
@@ -279,7 +280,7 @@ func (a *App) cleanup() {
 func (a *App) onReady() {
 	systray.SetIcon(iconData)
 	// On macOS, also set as template icon for better system integration
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == osDarwin {
 		systray.SetTemplateIcon(iconData, iconData)
 	}
 	a.updateTooltip()
@@ -448,7 +449,7 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 }
 
 // updateServersMenuFromStatusData is a legacy method, functionality is now in MenuManager
-func (a *App) updateServersMenuFromStatusData(status map[string]interface{}) {
+func (a *App) updateServersMenuFromStatusData(_ map[string]interface{}) {
 	// This function is kept for reference during transition but the primary
 	// logic is now handled by the MenuManager and SynchronizationManager.
 	// We trigger a sync instead of manually updating here.
@@ -534,7 +535,7 @@ func (a *App) checkForUpdates() {
 // getLatestRelease fetches the latest release information from GitHub
 func (a *App) getLatestRelease() (*GitHubRelease, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
-	resp, err := http.Get(url)
+	resp, err := http.Get(url) // #nosec G107 -- URL is constructed from known repo constant
 	if err != nil {
 		return nil, err
 	}
@@ -560,7 +561,7 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 
 // downloadAndApplyUpdate downloads and applies the update
 func (a *App) downloadAndApplyUpdate(url string) error {
-	resp, err := http.Get(url)
+	resp, err := http.Get(url) // #nosec G107 -- URL is from GitHub releases API which is trusted
 	if err != nil {
 		return err
 	}
@@ -599,15 +600,17 @@ func (a *App) applyZipUpdate(body io.Reader) error {
 	}
 
 	for _, f := range r.File {
-		if !f.FileInfo().IsDir() {
-			rc, err := f.Open()
-			if err != nil {
-				return err
-			}
-			defer rc.Close()
-
-			return update.Apply(rc, update.Options{TargetPath: executablePath})
+		if f.FileInfo().IsDir() {
+			continue
 		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+
+		err = update.Apply(rc, update.Options{TargetPath: executablePath})
+		rc.Close()
+		return err
 	}
 
 	return fmt.Errorf("no file found in zip archive to apply")
@@ -655,7 +658,7 @@ func (a *App) refreshMenusImmediate() {
 }
 
 // handleServerAction is the centralized handler for all server-related menu actions.
-func (a *App) handleServerAction(serverName string, action string) {
+func (a *App) handleServerAction(serverName, action string) {
 	var err error
 	a.logger.Info("Handling server action", zap.String("server", serverName), zap.String("action", action))
 

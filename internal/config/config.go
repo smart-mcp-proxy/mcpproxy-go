@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+const (
+	defaultPort = ":8080"
+)
+
 // Config represents the main configuration structure
 type Config struct {
 	Listen            string          `json:"listen" mapstructure:"listen"`
@@ -140,7 +144,7 @@ type ToolStatEntry struct {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Listen:            ":8080",
+		Listen:            defaultPort,
 		DataDir:           "", // Will be set to ~/.mcpproxy by loader
 		EnableTray:        true,
 		DebugSearch:       false,
@@ -176,7 +180,7 @@ func DefaultConfig() *Config {
 // Validate validates the configuration
 func (c *Config) Validate() error {
 	if c.Listen == "" {
-		c.Listen = ":8080"
+		c.Listen = defaultPort
 	}
 	if c.TopK <= 0 {
 		c.TopK = 5
