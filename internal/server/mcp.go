@@ -126,9 +126,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.Required(),
 			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_repository'). Get this from retrieve_tools results."),
 		),
-		mcp.WithObject("args",
-			mcp.Description("Arguments to pass to the tool. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
-			mcp.AdditionalProperties(true),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: '{\"param1\": \"value1\", \"param2\": 123}'"),
 		),
 	)
 	p.server.AddTool(callToolTool, p.handleCallTool)
@@ -165,11 +164,10 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Description("Command to run for stdio servers (e.g., 'uvx', 'python')"),
 			),
 			mcp.WithArray("args",
-				mcp.Description("Command arguments for stdio servers (e.g., ['mcp-server-sqlite', '--db-path', '/path/to/db'])"),
+				mcp.Description("Command arguments for stdio servers as JSON array strings (e.g., ['mcp-server-sqlite', '--db-path', '/path/to/db'])"),
 			),
-			mcp.WithObject("env",
-				mcp.Description("Environment variables for stdio servers"),
-				mcp.AdditionalProperties(true),
+			mcp.WithString("env_json",
+				mcp.Description("Environment variables for stdio servers as JSON string (e.g., '{\"API_KEY\": \"value\"}')"),
 			),
 			mcp.WithString("url",
 				mcp.Description("Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')"),
@@ -178,16 +176,14 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Description("Transport protocol: stdio, http, sse, streamable-http, auto (default: auto-detect)"),
 				mcp.Enum("stdio", "http", "sse", "streamable-http", "auto"),
 			),
-			mcp.WithObject("headers",
-				mcp.Description("HTTP headers for authentication (e.g., {'Authorization': 'Bearer token'})"),
-				mcp.AdditionalProperties(true),
+			mcp.WithString("headers_json",
+				mcp.Description("HTTP headers for authentication as JSON string (e.g., '{\"Authorization\": \"Bearer token\"}')"),
 			),
 			mcp.WithBoolean("enabled",
 				mcp.Description("Whether server should be enabled (default: true)"),
 			),
-			mcp.WithObject("patch",
-				mcp.Description("Fields to update for patch operations"),
-				mcp.AdditionalProperties(true),
+			mcp.WithString("patch_json",
+				mcp.Description("Fields to update for patch operations as JSON string"),
 			),
 		)
 		p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
@@ -343,9 +339,18 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
 	}
 
-	// Get optional args parameter - this should be from the "args" field, not all arguments
+	// Get optional args parameter - handle both new JSON string format and legacy object format
 	var args map[string]interface{}
-	if request.Params.Arguments != nil {
+
+	// Try new JSON string format first
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
+		}
+	}
+
+	// Fallback to legacy object format for backward compatibility
+	if args == nil && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if argsParam, ok := argumentsMap["args"]; ok {
 				if argsMap, ok := argsParam.(map[string]interface{}); ok {
@@ -865,9 +870,16 @@ func (p *MCPProxyServer) handleAddUpstream(_ context.Context, request mcp.CallTo
 		}
 	}
 
-	// Handle env map
+	// Handle env JSON string
 	var env map[string]string
-	if request.Params.Arguments != nil {
+	if envJSON := request.GetString("env_json", ""); envJSON != "" {
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid env_json format: %v", err)), nil
+		}
+	}
+
+	// Legacy support for old env format
+	if env == nil && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if envParam, ok := argumentsMap["env"]; ok {
 				if envMap, ok := envParam.(map[string]interface{}); ok {
@@ -882,9 +894,16 @@ func (p *MCPProxyServer) handleAddUpstream(_ context.Context, request mcp.CallTo
 		}
 	}
 
-	// Handle headers map
+	// Handle headers JSON string
 	var headers map[string]string
-	if request.Params.Arguments != nil {
+	if headersJSON := request.GetString("headers_json", ""); headersJSON != "" {
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid headers_json format: %v", err)), nil
+		}
+	}
+
+	// Legacy support for old headers format
+	if headers == nil && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if headersParam, ok := argumentsMap["headers"]; ok {
 				if headersMap, ok := headersParam.(map[string]interface{}); ok {
