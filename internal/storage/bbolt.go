@@ -166,7 +166,7 @@ func (b *BoltDB) ListUpstreams() ([]*UpstreamRecord, error) {
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(UpstreamsBucket))
-		return bucket.ForEach(func(k, v []byte) error {
+		return bucket.ForEach(func(_, v []byte) error {
 			record := &UpstreamRecord{}
 			if err := record.UnmarshalBinary(v); err != nil {
 				return err
@@ -243,7 +243,7 @@ func (b *BoltDB) ListToolStats() ([]*ToolStatRecord, error) {
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolStatsBucket))
-		return bucket.ForEach(func(k, v []byte) error {
+		return bucket.ForEach(func(_, v []byte) error {
 			record := &ToolStatRecord{}
 			if err := record.UnmarshalBinary(v); err != nil {
 				return err

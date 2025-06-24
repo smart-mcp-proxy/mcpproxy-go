@@ -6,14 +6,20 @@ import (
 	"runtime"
 )
 
+const (
+	osWindows = "windows"
+	osDarwin  = "darwin"
+	osLinux   = "linux"
+)
+
 // GetLogDir returns the standard log directory for the current OS
 func GetLogDir() (string, error) {
 	switch runtime.GOOS {
-	case "windows":
+	case osWindows:
 		return getWindowsLogDir()
-	case "darwin":
+	case osDarwin:
 		return getMacOSLogDir()
-	case "linux":
+	case osLinux:
 		return getLinuxLogDir()
 	default:
 		// Fallback to home directory for unsupported OS
@@ -119,13 +125,13 @@ func GetLogDirInfo() (*LogDirInfo, error) {
 	}
 
 	switch runtime.GOOS {
-	case "windows":
+	case osWindows:
 		info.Description = "Windows Local AppData logs directory"
 		info.Standard = "Windows Application Data Guidelines"
-	case "darwin":
+	case osDarwin:
 		info.Description = "macOS Library Logs directory"
 		info.Standard = "macOS File System Programming Guide"
-	case "linux":
+	case osLinux:
 		info.Description = "Linux XDG state directory or system logs"
 		info.Standard = "XDG Base Directory Specification"
 	default:

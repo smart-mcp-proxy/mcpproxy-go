@@ -73,7 +73,7 @@ func GenerateKey(toolName string, args map[string]interface{}, timestamp time.Ti
 }
 
 // Store saves a tool response to cache
-func (m *Manager) Store(key, toolName string, args map[string]interface{}, content string, recordPath string, totalRecords int) error {
+func (m *Manager) Store(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int) error {
 	record := &Record{
 		Key:          key,
 		ToolName:     toolName,

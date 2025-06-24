@@ -34,7 +34,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 	// Remove existing client if it exists
 	if existingClient, exists := m.clients[id]; exists {
-		existingClient.Disconnect()
+		_ = existingClient.Disconnect()
 		delete(m.clients, id)
 	}
 
@@ -80,7 +80,7 @@ func (m *Manager) RemoveServer(id string) {
 	defer m.mu.Unlock()
 
 	if client, exists := m.clients[id]; exists {
-		client.Disconnect()
+		_ = client.Disconnect()
 		delete(m.clients, id)
 		m.logger.Info("Removed upstream server", zap.String("id", id))
 	}
@@ -220,7 +220,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		if !client.config.Enabled {
 			if client.IsConnected() {
 				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.config.Name))
-				client.Disconnect()
+				_ = client.Disconnect()
 			}
 			continue
 		}

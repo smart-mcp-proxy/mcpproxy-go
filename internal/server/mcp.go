@@ -19,6 +19,16 @@ import (
 	"mcpproxy-go/internal/upstream"
 )
 
+const (
+	operationList            = "list"
+	operationAdd             = "add"
+	operationRemove          = "remove"
+	operationCallTool        = "call_tool"
+	operationUpstreamServers = "upstream_servers"
+	operationQuarantineSec   = "quarantine_security"
+	operationRetrieveTools   = "retrieve_tools"
+)
+
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
 	server          *mcpserver.MCPServer
@@ -347,11 +357,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Check if this is a proxy tool (doesn't contain ':' or is one of our known proxy tools)
 	proxyTools := map[string]bool{
-		"upstream_servers":    true,
-		"quarantine_security": true,
-		"retrieve_tools":      true,
-		"call_tool":           true,
-		"read_cache":          true,
+		operationUpstreamServers: true,
+		operationQuarantineSec:   true,
+		operationRetrieveTools:   true,
+		operationCallTool:        true,
+		"read_cache":             true,
 	}
 
 	if proxyTools[toolName] {
@@ -362,15 +372,15 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 		// Route to appropriate proxy tool handler
 		switch toolName {
-		case "upstream_servers":
+		case operationUpstreamServers:
 			return p.handleUpstreamServers(ctx, proxyRequest)
-		case "quarantine_security":
+		case operationQuarantineSec:
 			return p.handleQuarantineSecurity(ctx, proxyRequest)
-		case "retrieve_tools":
+		case operationRetrieveTools:
 			return p.handleRetrieveTools(ctx, proxyRequest)
 		case "read_cache":
 			return p.handleReadCache(ctx, proxyRequest)
-		case "call_tool":
+		case operationCallTool:
 			// Prevent infinite recursion
 			return mcp.NewToolResultError("call_tool cannot call itself"), nil
 		default:
@@ -396,7 +406,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
 	if err == nil && serverConfig.Quarantined {
 		// Server is in quarantine - return security warning with tool analysis
-		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args)
+		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
 	}
 
 	// Call tool via upstream manager
@@ -469,7 +479,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 }
 
 // handleQuarantinedToolCall handles tool calls to quarantined servers with security analysis
-func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverName, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverName, toolName string, args map[string]interface{}) *mcp.CallToolResult {
 	// Get the client to analyze the tool
 	client, exists := p.upstreamManager.GetClient(serverName)
 	var toolAnalysis map[string]interface{}
@@ -515,10 +525,10 @@ func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverNa
 
 	jsonResult, err := json.Marshal(securityResponse)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Security block: Server '%s' is quarantined. Failed to serialize security response: %v", serverName, err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Security block: Server '%s' is quarantined. Failed to serialize security response: %v", serverName, err))
 	}
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	return mcp.NewToolResultText(string(jsonResult))
 }
 
 // handleUpstreamServers implements upstream server management
@@ -530,7 +540,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 	// Security checks
 	if p.config.ReadOnlyMode {
-		if operation != "list" {
+		if operation != operationList {
 			return mcp.NewToolResultError("Operation not allowed in read-only mode"), nil
 		}
 	}
@@ -541,22 +551,22 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 	// Specific operation security checks
 	switch operation {
-	case "add":
+	case operationAdd:
 		if !p.config.AllowServerAdd {
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil
 		}
-	case "remove":
+	case operationRemove:
 		if !p.config.AllowServerRemove {
 			return mcp.NewToolResultError("Removing servers is not allowed"), nil
 		}
 	}
 
 	switch operation {
-	case "list":
+	case operationList:
 		return p.handleListUpstreams(ctx)
-	case "add":
+	case operationAdd:
 		return p.handleAddUpstream(ctx, request)
-	case "remove":
+	case operationRemove:
 		return p.handleRemoveUpstream(ctx, request)
 	case "update":
 		return p.handleUpdateUpstream(ctx, request)

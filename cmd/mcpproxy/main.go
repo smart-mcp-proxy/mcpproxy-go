@@ -68,7 +68,7 @@ func main() {
 	}
 }
 
-func runServer(_ *cobra.Command, args []string) error {
+func runServer(_ *cobra.Command, _ []string) error {
 	// Load configuration first to get logging settings
 	cfg, err := loadConfig()
 	if err != nil {

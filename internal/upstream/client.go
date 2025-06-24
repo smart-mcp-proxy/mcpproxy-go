@@ -16,6 +16,12 @@ import (
 	"mcpproxy-go/internal/hash"
 )
 
+const (
+	transportHTTP           = "http"
+	transportStreamableHTTP = "streamable-http"
+	transportStdio          = "stdio"
+)
+
 // Client represents an MCP client connection to an upstream server
 type Client struct {
 	id     string
@@ -72,7 +78,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	transportType := c.determineTransportType()
 
 	switch transportType {
-	case "http", "streamable-http":
+	case transportHTTP, transportStreamableHTTP:
 		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
 		if err != nil {
 			c.lastError = err
@@ -96,7 +102,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			return fmt.Errorf("failed to create SSE transport: %w", err)
 		}
 		c.client = client.NewClient(httpTransport)
-	case "stdio":
+	case transportStdio:
 		var command string
 		var cmdArgs []string
 
@@ -252,17 +258,17 @@ func (c *Client) determineTransportType() string {
 
 	// Auto-detect based on command first (highest priority)
 	if c.config.Command != "" {
-		return "stdio"
+		return transportStdio
 	}
 
 	// Auto-detect based on URL
 	if strings.HasPrefix(c.config.URL, "http://") || strings.HasPrefix(c.config.URL, "https://") {
 		// Default to streamable-http for HTTP URLs unless explicitly set
-		return "streamable-http"
+		return transportStreamableHTTP
 	}
 
 	// Assume stdio for command-like URLs or when command is specified
-	return "stdio"
+	return transportStdio
 }
 
 // parseCommand parses a command string into command and arguments
@@ -366,7 +372,8 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 
 	// Convert MCP tools to our metadata format
 	var tools []*config.ToolMetadata
-	for _, tool := range toolsResult.Tools {
+	for i := range toolsResult.Tools {
+		tool := &toolsResult.Tools[i]
 		// Compute hash of tool definition
 		toolHash := hash.ComputeToolHash(c.config.Name, tool.Name, tool.InputSchema)
 
@@ -434,7 +441,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 	}
 
 	// Extract content from result
-	if result.Content != nil && len(result.Content) > 0 {
+	if len(result.Content) > 0 {
 		// Return the content array directly
 		return result.Content, nil
 	}

@@ -159,9 +159,9 @@ func (env *TestEnvironment) CreateMockUpstreamServer(name string, tools []mcp.To
 	}
 
 	// Register tools
-	for _, tool := range tools {
-		toolCopy := tool // Capture for closure
-		mcpServer.AddTool(toolCopy, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	for i := range tools {
+		toolCopy := tools[i] // Capture for closure
+		mcpServer.AddTool(toolCopy, func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Mock tool implementation
 			result := map[string]interface{}{
 				"tool":    toolCopy.Name,
@@ -599,8 +599,14 @@ func TestE2E_ConcurrentOperations(t *testing.T) {
 	for i := range clients {
 		clients[i] = env.CreateProxyClient()
 		env.ConnectClient(clients[i])
-		defer clients[i].Close()
 	}
+
+	// Defer close all clients
+	defer func() {
+		for _, client := range clients {
+			client.Close()
+		}
+	}()
 
 	// Create mock server
 	mockTools := []mcp.Tool{
