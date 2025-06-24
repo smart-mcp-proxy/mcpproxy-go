@@ -138,11 +138,35 @@ export MCPPROXY_LISTEN=:8080
 
 - **macOS**: 44x44 pixels, transparent PNG. For dynamic adaptation to light/dark system themes, the icon should be black with only an alpha channel.
 - **Windows**: 32x32 pixels.
-- **Linux**: 24x24 pixels.
+- **Linux**: 24x24 pixels. **Note: System tray functionality is currently disabled on Linux** due to compatibility issues with the systray library. Use `--tray=false` or run without tray on Linux.
 - **Format**: PNG with transparency is generally recommended.
 - **Color**: Monochrome icons often work better and adapt to system theme on macOS.
 - **Style**: Simple, high contrast designs work best.
 - **Template**: Consider using template images that adapt to dark/light modes.
+
+### Platform Limitations
+
+#### Linux Support
+The system tray functionality is currently **disabled on Linux builds** due to incomplete support in the underlying `fyne.io/systray` library. On Linux, the application will:
+
+- Automatically use the stub implementation (no tray)  
+- Run normally in server-only mode
+- Log: "Tray functionality disabled (nogui/headless build)"
+
+**Workarounds for Linux users:**
+```bash
+# Run without tray (recommended)
+./mcpproxy --tray=false
+
+# Or use environment variable
+export MCPPROXY_TRAY=false
+./mcpproxy
+```
+
+**Alternative Linux tray solutions:**
+- Use a different systray library (requires code changes)
+- Run the server and use a separate GUI client
+- Use command-line interface for management
 
 ### Current Icons
 
