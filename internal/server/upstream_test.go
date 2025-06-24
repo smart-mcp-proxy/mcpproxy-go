@@ -110,7 +110,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 	t.Logf("handleUpstreamServers completed in %v", duration)
 
 	// Verify the result contains expected fields
-	if result.Content == nil || len(result.Content) == 0 {
+	if len(result.Content) == 0 {
 		t.Fatal("Result should contain content")
 	}
 

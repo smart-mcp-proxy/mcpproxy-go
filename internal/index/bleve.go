@@ -317,7 +317,7 @@ func (b *BleveIndex) BatchIndex(tools []*config.ToolMetadata) error {
 		}
 
 		docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolName)
-		batch.Index(docID, doc)
+		_ = batch.Index(docID, doc)
 	}
 
 	b.logger.Debug("Batch indexing tools", zap.Int("count", len(tools)))

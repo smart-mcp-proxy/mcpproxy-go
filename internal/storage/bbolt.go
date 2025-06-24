@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.etcd.io/bbolt"
+	"go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +31,7 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 		logger.Warnf("Failed to open database on first attempt: %v", err)
 
 		// Check if it's a timeout or lock issue
-		if err == bbolt.ErrTimeout {
+		if err == errors.ErrTimeout {
 			logger.Info("Database timeout detected, attempting recovery...")
 
 			// Try to backup and recreate if file exists
@@ -166,7 +167,7 @@ func (b *BoltDB) ListUpstreams() ([]*UpstreamRecord, error) {
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(UpstreamsBucket))
-		return bucket.ForEach(func(k, v []byte) error {
+		return bucket.ForEach(func(_, v []byte) error {
 			record := &UpstreamRecord{}
 			if err := record.UnmarshalBinary(v); err != nil {
 				return err
@@ -243,7 +244,7 @@ func (b *BoltDB) ListToolStats() ([]*ToolStatRecord, error) {
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolStatsBucket))
-		return bucket.ForEach(func(k, v []byte) error {
+		return bucket.ForEach(func(_, v []byte) error {
 			record := &ToolStatRecord{}
 			if err := record.UnmarshalBinary(v); err != nil {
 				return err

@@ -1,4 +1,4 @@
-//go:build !nogui && !headless
+//go:build !nogui && !headless && !linux
 
 package tray
 
@@ -10,6 +10,13 @@ import (
 
 	"fyne.io/systray"
 	"go.uber.org/zap"
+)
+
+const (
+	actionEnable  = "enable"
+	actionDisable = "disable"
+	textEnable    = "Enable"
+	textDisable   = "Disable"
 )
 
 // ServerStateManager manages server state synchronization between storage, config, and menu
@@ -150,9 +157,9 @@ func (m *ServerStateManager) UnquarantineServer(serverName string) error {
 
 // EnableServer enables/disables a server and ensures all state is synchronized
 func (m *ServerStateManager) EnableServer(serverName string, enabled bool) error {
-	action := "disable"
+	action := actionDisable
 	if enabled {
-		action = "enable"
+		action = actionEnable
 	}
 
 	m.logger.Info("EnableServer called",
@@ -274,16 +281,17 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 
 	// --- Create Menu Items for New Servers ---
 	for serverName, serverData := range currentServerMap {
-		if _, exists := m.serverMenuItems[serverName]; !exists {
-			// This is a new server, create its menu item
-			m.logger.Info("Creating menu item for new server", zap.String("server", serverName))
-			status, tooltip := m.getServerStatusDisplay(serverData)
-			serverMenuItem := m.upstreamServersMenu.AddSubMenuItem(status, tooltip)
-			m.serverMenuItems[serverName] = serverMenuItem
-
-			// Create its action submenus
-			m.createServerActionSubmenus(serverMenuItem, serverData)
+		if _, exists := m.serverMenuItems[serverName]; exists {
+			continue
 		}
+		// This is a new server, create its menu item
+		m.logger.Info("Creating menu item for new server", zap.String("server", serverName))
+		status, tooltip := m.getServerStatusDisplay(serverData)
+		serverMenuItem := m.upstreamServersMenu.AddSubMenuItem(status, tooltip)
+		m.serverMenuItems[serverName] = serverMenuItem
+
+		// Create its action submenus
+		m.createServerActionSubmenus(serverMenuItem, serverData)
 	}
 }
 
@@ -391,7 +399,7 @@ func (m *MenuManager) ForceRefresh() {
 }
 
 // getServerStatusDisplay returns display text and tooltip for a server
-func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (string, string) {
+func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (displayText, tooltip string) {
 	serverName, _ := server["name"].(string)
 	enabled, _ := server["enabled"].(bool)
 	connected, _ := server["connected"].(bool)
@@ -415,10 +423,10 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (str
 		statusText = "disconnected"
 	}
 
-	displayText := fmt.Sprintf("%s %s", statusIcon, serverName)
-	tooltip := fmt.Sprintf("%s - %s", serverName, statusText)
+	displayText = fmt.Sprintf("%s %s", statusIcon, serverName)
+	tooltip = fmt.Sprintf("%s - %s", serverName, statusText)
 
-	return displayText, tooltip
+	return
 }
 
 // createServerActionSubmenus creates action submenus for a server (enable/disable, quarantine)
@@ -434,9 +442,9 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	// Enable/Disable action
 	var enableText string
 	if enabled {
-		enableText = "Disable"
+		enableText = textDisable
 	} else {
-		enableText = "Enable"
+		enableText = textEnable
 	}
 	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
 	m.serverActionItems[serverName] = enableItem
@@ -477,9 +485,9 @@ func (m *MenuManager) updateServerActionMenus(serverName string, server map[stri
 	if actionItem, exists := m.serverActionItems[serverName]; exists {
 		var enableText string
 		if enabled {
-			enableText = "Disable"
+			enableText = textDisable
 		} else {
-			enableText = "Enable"
+			enableText = textEnable
 		}
 		actionItem.SetTitle(enableText)
 		actionItem.SetTooltip(fmt.Sprintf("%s server %s", enableText, serverName))

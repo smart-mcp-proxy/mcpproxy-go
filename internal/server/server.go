@@ -18,8 +18,8 @@ import (
 	"mcpproxy-go/internal/upstream"
 )
 
-// ServerStatus represents the current status of the server
-type ServerStatus struct {
+// Status represents the current status of the server
+type Status struct {
 	Phase         string                 `json:"phase"`          // Starting, Ready, Error
 	Message       string                 `json:"message"`        // Human readable status message
 	UpstreamStats map[string]interface{} `json:"upstream_stats"` // Upstream server statistics
@@ -44,11 +44,12 @@ type Server struct {
 	mu         sync.RWMutex
 	serverCtx  context.Context
 	cancelFunc context.CancelFunc
+	shutdown   bool // Guard against double shutdown
 
 	// Status reporting
-	status   ServerStatus
+	status   Status
 	statusMu sync.RWMutex
-	statusCh chan ServerStatus
+	statusCh chan Status
 }
 
 // NewServer creates a new server instance
@@ -80,6 +81,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	// Initialize truncator
 	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
 
+	// Create a context that will be used for background operations
+	ctx, cancel := context.WithCancel(context.Background())
+
 	server := &Server{
 		config:          cfg,
 		logger:          logger,
@@ -88,8 +92,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 		upstreamManager: upstreamManager,
 		cacheManager:    cacheManager,
 		truncator:       truncator,
-		statusCh:        make(chan ServerStatus, 10), // Buffered channel for status updates
-		status: ServerStatus{
+		serverCtx:       ctx,
+		cancelFunc:      cancel,
+		statusCh:        make(chan Status, 10), // Buffered channel for status updates
+		status: Status{
 			Phase:       "Initializing",
 			Message:     "Server is initializing...",
 			LastUpdated: time.Now(),
@@ -130,7 +136,7 @@ func (s *Server) GetStatus() interface{} {
 
 // StatusChannel returns a channel that receives status updates
 func (s *Server) StatusChannel() <-chan interface{} {
-	// Create a new channel that converts ServerStatus to interface{}
+	// Create a new channel that converts Status to interface{}
 	ch := make(chan interface{}, 10)
 	go func() {
 		defer close(ch)
@@ -184,10 +190,16 @@ func (s *Server) backgroundInitialization() {
 
 	// Start background connection attempts
 	s.updateStatus("Connecting", "Connecting to upstream servers...")
-	go s.backgroundConnections()
+	s.mu.RLock()
+	ctx := s.serverCtx
+	s.mu.RUnlock()
+	go s.backgroundConnections(ctx)
 
 	// Start background tool discovery and indexing
-	go s.backgroundToolIndexing()
+	s.mu.RLock()
+	ctx = s.serverCtx
+	s.mu.RUnlock()
+	go s.backgroundToolIndexing(ctx)
 
 	// Only set "Ready" status if the server is not already running
 	// If server is running, don't override the "Running" status
@@ -201,9 +213,7 @@ func (s *Server) backgroundInitialization() {
 }
 
 // backgroundConnections handles connecting to upstream servers with retry logic
-func (s *Server) backgroundConnections() {
-	ctx := context.Background()
-
+func (s *Server) backgroundConnections(ctx context.Context) {
 	// Initial connection attempt
 	s.connectAllWithRetry(ctx)
 
@@ -216,6 +226,7 @@ func (s *Server) backgroundConnections() {
 		case <-ticker.C:
 			s.connectAllWithRetry(ctx)
 		case <-ctx.Done():
+			s.logger.Info("Background connections stopped due to context cancellation")
 			return
 		}
 	}
@@ -260,10 +271,15 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 }
 
 // backgroundToolIndexing handles tool discovery and indexing
-func (s *Server) backgroundToolIndexing() {
+func (s *Server) backgroundToolIndexing(ctx context.Context) {
 	// Initial indexing after a short delay to let connections establish
-	time.Sleep(2 * time.Second)
-	s.discoverAndIndexTools(context.Background())
+	select {
+	case <-time.After(2 * time.Second):
+		_ = s.discoverAndIndexTools(ctx)
+	case <-ctx.Done():
+		s.logger.Info("Background tool indexing stopped during initial delay")
+		return
+	}
 
 	// Re-index every 5 minutes
 	ticker := time.NewTicker(5 * time.Minute)
@@ -272,13 +288,18 @@ func (s *Server) backgroundToolIndexing() {
 	for {
 		select {
 		case <-ticker.C:
-			s.discoverAndIndexTools(context.Background())
+			_ = s.discoverAndIndexTools(ctx)
+		case <-ctx.Done():
+			s.logger.Info("Background tool indexing stopped due to context cancellation")
+			return
 		}
 	}
 }
 
 // loadConfiguredServers synchronizes the storage and upstream manager from the current config.
 // This is the source of truth when configuration is loaded from disk.
+//
+//nolint:unparam // function designed to be best-effort, always returns nil by design
 func (s *Server) loadConfiguredServers() error {
 	s.logger.Info("Synchronizing servers from configuration (config as source of truth)")
 
@@ -405,19 +426,28 @@ func (s *Server) loadConfiguredServers() error {
 	return nil
 }
 
-// isServerInConfig checks if a server name is already in the config
-func (s *Server) isServerInConfig(name string) bool {
-	for _, serverConfig := range s.config.Servers {
-		if serverConfig.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
 // Start starts the MCP proxy server
 func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info("Starting MCP proxy server")
+
+	// Listen for context cancellation to trigger shutdown
+	go func() {
+		<-ctx.Done()
+		s.logger.Info("Main context cancelled, shutting down server")
+		// First shutdown the HTTP server
+		if err := s.StopServer(); err != nil {
+			s.logger.Error("Error stopping server during context cancellation", zap.Error(err))
+		}
+		// Then shutdown the rest (only if not already shutdown)
+		s.mu.Lock()
+		alreadyShutdown := s.shutdown
+		s.mu.Unlock()
+		if !alreadyShutdown {
+			if err := s.Shutdown(); err != nil {
+				s.logger.Error("Error during context-triggered shutdown", zap.Error(err))
+			}
+		}
+	}()
 
 	// Determine transport mode based on listen address
 	if s.config.Listen != "" && s.config.Listen != ":0" {
@@ -477,7 +507,22 @@ func (s *Server) discoverAndIndexTools(ctx context.Context) error {
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown() error {
+	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		s.logger.Info("Server already shutdown, skipping")
+		return nil
+	}
+	s.shutdown = true
+	s.mu.Unlock()
+
 	s.logger.Info("Shutting down MCP proxy server...")
+
+	// Cancel the server context to stop all background operations
+	if s.cancelFunc != nil {
+		s.logger.Info("Cancelling server context to stop background operations")
+		s.cancelFunc()
+	}
 
 	// Disconnect upstream servers
 	if err := s.upstreamManager.DisconnectAll(); err != nil {
@@ -687,6 +732,11 @@ func (s *Server) StartServer(ctx context.Context) error {
 		return fmt.Errorf("server is already running")
 	}
 
+	// Cancel the old context before creating a new one to avoid race conditions
+	if s.cancelFunc != nil {
+		s.cancelFunc()
+	}
+
 	s.serverCtx, s.cancelFunc = context.WithCancel(ctx)
 
 	go func() {
@@ -727,7 +777,9 @@ func (s *Server) StopServer() error {
 	defer s.mu.Unlock()
 
 	if !s.running {
-		return fmt.Errorf("server is not running")
+		// Return nil instead of error to prevent race condition logs
+		s.logger.Debug("Server stop requested but server is not running")
+		return nil
 	}
 
 	// Notify about server stopping
@@ -787,10 +839,14 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.Handle("/v1/tool_code", loggingHandler(streamableServer))
 	mux.Handle("/v1/tool-code", loggingHandler(streamableServer)) // Alias for python client
 
+	s.mu.Lock()
 	s.httpServer = &http.Server{
-		Addr:    s.config.Listen,
-		Handler: mux,
+		Addr:              s.config.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
+	s.running = true
+	s.mu.Unlock()
 
 	s.logger.Info("Starting HTTP server",
 		zap.String("address", s.config.Listen),
@@ -805,6 +861,7 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 		return err
 	}
 
+	s.logger.Info("HTTP server stopped")
 	return nil
 }
 
@@ -853,7 +910,9 @@ func (s *Server) ReloadConfiguration() error {
 
 	// Trigger tool re-indexing after configuration changes
 	go func() {
-		ctx := context.Background()
+		s.mu.RLock()
+		ctx := s.serverCtx
+		s.mu.RUnlock()
 		if err := s.discoverAndIndexTools(ctx); err != nil {
 			s.logger.Error("Failed to re-index tools after config reload", zap.Error(err))
 		}
@@ -875,11 +934,9 @@ func (s *Server) OnUpstreamServerChange() {
 	// Saving should be done explicitly when the state change is initiated.
 	s.logger.Info("Upstream server configuration changed, triggering comprehensive update")
 	go func() {
-		ctx := context.Background()
-
 		// Re-index tools from all active servers
 		// This will automatically handle removed/disabled servers since they won't be discovered
-		if err := s.discoverAndIndexTools(ctx); err != nil {
+		if err := s.discoverAndIndexTools(s.serverCtx); err != nil {
 			s.logger.Error("Failed to update tool index after upstream change", zap.Error(err))
 		}
 

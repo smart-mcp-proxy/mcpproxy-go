@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -14,6 +15,12 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/hash"
+)
+
+const (
+	transportHTTP           = "http"
+	transportStreamableHTTP = "streamable-http"
+	transportStdio          = "stdio"
 )
 
 // Client represents an MCP client connection to an upstream server
@@ -26,7 +33,8 @@ type Client struct {
 	// Server information received during initialization
 	serverInfo *mcp.InitializeResult
 
-	// Connection state
+	// Connection state (protected by mutex)
+	mu            sync.RWMutex
 	connected     bool
 	lastError     error
 	retryCount    int
@@ -57,27 +65,40 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger)
 
 // Connect establishes a connection to the upstream MCP server
 func (c *Client) Connect(ctx context.Context) error {
+	c.mu.Lock()
 	if c.connecting {
+		c.mu.Unlock()
 		return fmt.Errorf("connection already in progress")
 	}
-
 	c.connecting = true
-	defer func() { c.connecting = false }()
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		c.connecting = false
+		c.mu.Unlock()
+	}()
+
+	c.mu.RLock()
+	retryCount := c.retryCount
+	c.mu.RUnlock()
 
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("url", c.config.URL),
 		zap.String("protocol", c.config.Protocol),
-		zap.Int("retry_count", c.retryCount))
+		zap.Int("retry_count", retryCount))
 
 	transportType := c.determineTransportType()
 
 	switch transportType {
-	case "http", "streamable-http":
+	case transportHTTP, transportStreamableHTTP:
 		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
 		if err != nil {
+			c.mu.Lock()
 			c.lastError = err
 			c.retryCount++
 			c.lastRetryTime = time.Now()
+			c.mu.Unlock()
 			return fmt.Errorf("failed to create HTTP transport: %w", err)
 		}
 		c.client = client.NewClient(httpTransport)
@@ -90,13 +111,15 @@ func (c *Client) Connect(ctx context.Context) error {
 		// Create SSE transport with special handling for Cloudflare endpoints
 		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
 		if err != nil {
+			c.mu.Lock()
 			c.lastError = err
 			c.retryCount++
 			c.lastRetryTime = time.Now()
+			c.mu.Unlock()
 			return fmt.Errorf("failed to create SSE transport: %w", err)
 		}
 		c.client = client.NewClient(httpTransport)
-	case "stdio":
+	case transportStdio:
 		var command string
 		var cmdArgs []string
 
@@ -108,9 +131,11 @@ func (c *Client) Connect(ctx context.Context) error {
 			// Fallback to parsing from URL
 			args := c.parseCommand(c.config.URL)
 			if len(args) == 0 {
+				c.mu.Lock()
 				c.lastError = fmt.Errorf("invalid stdio command: %s", c.config.URL)
 				c.retryCount++
 				c.lastRetryTime = time.Now()
+				c.mu.Unlock()
 				return c.lastError
 			}
 			command = args[0]
@@ -118,9 +143,11 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 
 		if command == "" {
+			c.mu.Lock()
 			c.lastError = fmt.Errorf("no command specified for stdio transport")
 			c.retryCount++
 			c.lastRetryTime = time.Now()
+			c.mu.Unlock()
 			return c.lastError
 		}
 
@@ -133,9 +160,11 @@ func (c *Client) Connect(ctx context.Context) error {
 		stdioTransport := transport.NewStdio(command, envVars, cmdArgs...)
 		c.client = client.NewClient(stdioTransport)
 	default:
+		c.mu.Lock()
 		c.lastError = fmt.Errorf("unsupported transport type: %s", transportType)
 		c.retryCount++
 		c.lastRetryTime = time.Now()
+		c.mu.Unlock()
 		return c.lastError
 	}
 
@@ -146,9 +175,11 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Start the client
 	if err := c.client.Start(connectCtx); err != nil {
+		c.mu.Lock()
 		c.lastError = err
 		c.retryCount++
 		c.lastRetryTime = time.Now()
+		c.mu.Unlock()
 		return fmt.Errorf("failed to start MCP client: %w", err)
 	}
 
@@ -163,17 +194,21 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	serverInfo, err := c.client.Initialize(connectCtx, initRequest)
 	if err != nil {
+		c.mu.Lock()
 		c.lastError = err
 		c.retryCount++
 		c.lastRetryTime = time.Now()
+		c.mu.Unlock()
 		c.client.Close()
 		return fmt.Errorf("failed to initialize MCP client: %w", err)
 	}
 
 	c.serverInfo = serverInfo
+	c.mu.Lock()
 	c.connected = true
 	c.lastError = nil
 	c.retryCount = 0 // Reset retry count on successful connection
+	c.mu.Unlock()
 
 	c.logger.Info("Successfully connected to upstream MCP server",
 		zap.String("server_name", serverInfo.ServerInfo.Name),
@@ -185,12 +220,17 @@ func (c *Client) Connect(ctx context.Context) error {
 // getConnectionTimeout returns the connection timeout with exponential backoff
 func (c *Client) getConnectionTimeout() time.Duration {
 	baseTimeout := 30 * time.Second
-	if c.retryCount == 0 {
+
+	c.mu.RLock()
+	retryCount := c.retryCount
+	c.mu.RUnlock()
+
+	if retryCount == 0 {
 		return baseTimeout
 	}
 
 	// Exponential backoff: min(base * 2^retry, max)
-	backoffMultiplier := math.Pow(2, float64(c.retryCount))
+	backoffMultiplier := math.Pow(2, float64(retryCount))
 	maxTimeout := 5 * time.Minute
 	timeout := time.Duration(float64(baseTimeout) * backoffMultiplier)
 
@@ -203,6 +243,13 @@ func (c *Client) getConnectionTimeout() time.Duration {
 
 // ShouldRetry returns true if the client should retry connecting based on exponential backoff
 func (c *Client) ShouldRetry() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.shouldRetryLocked()
+}
+
+// shouldRetryLocked is the implementation of ShouldRetry that assumes the mutex is already held
+func (c *Client) shouldRetryLocked() bool {
 	if c.connected || c.connecting {
 		return false
 	}
@@ -218,18 +265,22 @@ func (c *Client) ShouldRetry() bool {
 		backoffDuration = maxBackoff
 	}
 
-	nextRetryTime := c.lastRetryTime.Add(backoffDuration)
-	return time.Now().After(nextRetryTime)
+	return time.Since(c.lastRetryTime) >= backoffDuration
 }
 
 // GetConnectionStatus returns detailed connection status information
 func (c *Client) GetConnectionStatus() map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	shouldRetry := c.shouldRetryLocked()
+
 	status := map[string]interface{}{
 		"connected":       c.connected,
 		"connecting":      c.connecting,
 		"retry_count":     c.retryCount,
 		"last_retry_time": c.lastRetryTime,
-		"should_retry":    c.ShouldRetry(),
+		"should_retry":    shouldRetry,
 	}
 
 	if c.lastError != nil {
@@ -252,17 +303,17 @@ func (c *Client) determineTransportType() string {
 
 	// Auto-detect based on command first (highest priority)
 	if c.config.Command != "" {
-		return "stdio"
+		return transportStdio
 	}
 
 	// Auto-detect based on URL
 	if strings.HasPrefix(c.config.URL, "http://") || strings.HasPrefix(c.config.URL, "https://") {
 		// Default to streamable-http for HTTP URLs unless explicitly set
-		return "streamable-http"
+		return transportStreamableHTTP
 	}
 
 	// Assume stdio for command-like URLs or when command is specified
-	return "stdio"
+	return transportStdio
 }
 
 // parseCommand parses a command string into command and arguments
@@ -303,6 +354,9 @@ func (c *Client) parseCommand(cmd string) []string {
 
 // Disconnect closes the connection to the upstream server
 func (c *Client) Disconnect() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.client != nil {
 		c.logger.Info("Disconnecting from upstream MCP server")
 		c.client.Close()
@@ -313,11 +367,15 @@ func (c *Client) Disconnect() error {
 
 // IsConnected returns whether the client is currently connected
 func (c *Client) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.connected
 }
 
 // IsConnecting returns whether the client is currently connecting
 func (c *Client) IsConnecting() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.connecting
 }
 
@@ -333,19 +391,29 @@ func (c *Client) GetLastError() error {
 
 // ListTools retrieves available tools from the upstream server
 func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	if !c.connected || c.client == nil {
+	c.mu.RLock()
+	connected := c.connected
+	client := c.client
+	c.mu.RUnlock()
+
+	if !connected || client == nil {
 		return nil, fmt.Errorf("client not connected")
 	}
 
 	// Check if server supports tools
-	if c.serverInfo.Capabilities.Tools == nil {
+	c.mu.RLock()
+	serverInfo := c.serverInfo
+	c.mu.RUnlock()
+
+	if serverInfo.Capabilities.Tools == nil {
 		c.logger.Debug("Server does not support tools")
 		return nil, nil
 	}
 
 	toolsRequest := mcp.ListToolsRequest{}
-	toolsResult, err := c.client.ListTools(ctx, toolsRequest)
+	toolsResult, err := client.ListTools(ctx, toolsRequest)
 	if err != nil {
+		c.mu.Lock()
 		c.lastError = err
 
 		// Check if this is a connection error that indicates the connection is broken
@@ -360,13 +428,15 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 				zap.Error(err))
 			c.connected = false
 		}
+		c.mu.Unlock()
 
 		return nil, fmt.Errorf("failed to list tools: %w", err)
 	}
 
 	// Convert MCP tools to our metadata format
 	var tools []*config.ToolMetadata
-	for _, tool := range toolsResult.Tools {
+	for i := range toolsResult.Tools {
+		tool := &toolsResult.Tools[i]
 		// Compute hash of tool definition
 		toolHash := hash.ComputeToolHash(c.config.Name, tool.Name, tool.InputSchema)
 
@@ -392,12 +462,18 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 
 // CallTool calls a specific tool on the upstream server
 func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
-	if !c.connected || c.client == nil {
+	c.mu.RLock()
+	connected := c.connected
+	client := c.client
+	serverInfo := c.serverInfo
+	c.mu.RUnlock()
+
+	if !connected || client == nil {
 		return nil, fmt.Errorf("client not connected")
 	}
 
 	// Check if server supports tools
-	if c.serverInfo.Capabilities.Tools == nil {
+	if serverInfo.Capabilities.Tools == nil {
 		return nil, fmt.Errorf("server does not support tools")
 	}
 
@@ -412,8 +488,9 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		zap.String("tool_name", toolName),
 		zap.Any("args", args))
 
-	result, err := c.client.CallTool(ctx, request)
+	result, err := client.CallTool(ctx, request)
 	if err != nil {
+		c.mu.Lock()
 		c.lastError = err
 
 		// Check if this is a connection error that indicates the connection is broken
@@ -429,12 +506,13 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 				zap.Error(err))
 			c.connected = false
 		}
+		c.mu.Unlock()
 
 		return nil, fmt.Errorf("failed to call tool %s: %w", toolName, err)
 	}
 
 	// Extract content from result
-	if result.Content != nil && len(result.Content) > 0 {
+	if len(result.Content) > 0 {
 		// Return the content array directly
 		return result.Content, nil
 	}
@@ -449,20 +527,28 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 
 // ListResources retrieves available resources from the upstream server (if supported)
 func (c *Client) ListResources(ctx context.Context) ([]interface{}, error) {
-	if !c.connected || c.client == nil {
+	c.mu.RLock()
+	connected := c.connected
+	client := c.client
+	serverInfo := c.serverInfo
+	c.mu.RUnlock()
+
+	if !connected || client == nil {
 		return nil, fmt.Errorf("client not connected")
 	}
 
 	// Check if server supports resources
-	if c.serverInfo.Capabilities.Resources == nil {
+	if serverInfo.Capabilities.Resources == nil {
 		c.logger.Debug("Server does not support resources")
 		return nil, nil
 	}
 
 	resourcesRequest := mcp.ListResourcesRequest{}
-	resourcesResult, err := c.client.ListResources(ctx, resourcesRequest)
+	resourcesResult, err := client.ListResources(ctx, resourcesRequest)
 	if err != nil {
+		c.mu.Lock()
 		c.lastError = err
+		c.mu.Unlock()
 		return nil, fmt.Errorf("failed to list resources: %w", err)
 	}
 

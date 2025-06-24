@@ -34,6 +34,7 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
+            ~/AppData/Local/go-build
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
@@ -44,6 +45,18 @@ jobs:
 
       - name: Verify dependencies
         run: go mod verify
+
+      - name: Build mcpproxy binary for tests (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy.exe ./cmd/mcpproxy
+
+      - name: Build mcpproxy binary for tests (Unix)
+        if: matrix.os != 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
       - name: Run unit tests
         run: go test -v -race -timeout 30s ./internal/...
@@ -77,7 +90,6 @@ jobs:
 
     env:
       GO111MODULE: "on"
-      CGO_ENABLED: "0"
 
     steps:
       - name: Checkout code
@@ -89,6 +101,8 @@ jobs:
           go-version: "1.23.10"
 
       - name: Build mcpproxy
+        env:
+          CGO_ENABLED: "0"
         run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
       - name: Test mcpproxy binary
@@ -112,7 +126,17 @@ jobs:
             fi
           fi
 
-      - name: Run tests with coverage
+      - name: Run tests with coverage (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          go test -v -race '-coverprofile=coverage.out' -covermode=atomic ./internal/server -run TestE2E
+          go test -v -race '-coverprofile=coverage-logs.out' -covermode=atomic ./internal/logs -run TestE2E
+          go tool cover '-html=coverage.out' -o coverage.html
+          go tool cover '-html=coverage-logs.out' -o coverage-logs.html
+
+      - name: Run tests with coverage (Unix)
+        if: matrix.os != 'windows-latest'
         run: |
           go test -v -race -coverprofile=coverage.out -covermode=atomic ./internal/server -run TestE2E
           go test -v -race -coverprofile=coverage-logs.out -covermode=atomic ./internal/logs -run TestE2E
@@ -133,7 +157,6 @@ jobs:
 
     env:
       GO111MODULE: "on"
-      CGO_ENABLED: "0"
 
     strategy:
       matrix:
@@ -164,7 +187,16 @@ jobs:
       - name: Run logging E2E tests
         run: go test -v -race -timeout 5m ./internal/logs -run TestE2E
 
-      - name: Build mcpproxy for logging test
+      - name: Build mcpproxy for logging test (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags nogui -o mcpproxy.exe ./cmd/mcpproxy
+
+      - name: Build mcpproxy for logging test (Unix)
+        if: matrix.os != 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
         run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
       - name: Test OS-specific log directory creation (Unix)
@@ -175,7 +207,11 @@ jobs:
           echo "OS Standard: ${{ matrix.log_standard }}"
 
           # Run mcpproxy briefly to create log files
-          timeout 5s ./mcpproxy --log-to-file --log-level info --listen :0 --tray=false || true
+          ./mcpproxy --log-to-file --log-level info --listen :0 --tray=false &
+          MCPPROXY_PID=$!
+          sleep 5
+          kill $MCPPROXY_PID 2>/dev/null || true
+          wait $MCPPROXY_PID 2>/dev/null || true
 
           # Check if log directory was created
           if [ -d "${{ matrix.log_path_check }}" ]; then
@@ -212,50 +248,56 @@ jobs:
 
       - name: Test OS-specific log directory creation (Windows)
         if: matrix.os == 'windows-latest'
-        shell: powershell
+        shell: pwsh
         run: |
           Write-Host "Testing logging on Windows"
-          Write-Host "Expected log path: ${{ matrix.log_path_check }}"
-          Write-Host "OS Standard: ${{ matrix.log_standard }}"
+          Write-Host "Expected log path: $env:LOCALAPPDATA\mcpproxy\logs"
+          Write-Host "OS Standard: Windows Application Data Guidelines"
 
           # Run mcpproxy briefly to create log files
-          Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru | ForEach-Object { Start-Sleep -Seconds 5; $_ | Stop-Process -Force }
+          try {
+            $process = Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru
+            Start-Sleep -Seconds 5
+            $process | Stop-Process -Force -ErrorAction SilentlyContinue
+          } catch {
+            Write-Host "Error starting/stopping mcpproxy: $_"
+          }
 
           # Check if log directory was created
-          $logPath = "${{ matrix.log_path_check }}"
-          if (Test-Path $logPath) {
-            Write-Host "✓ Log directory created successfully"
-            Get-ChildItem $logPath
-            
-            # Check if log file exists and has content
-            $logFile = Join-Path $logPath "mcpproxy.log"
-            if (Test-Path $logFile) {
-              Write-Host "✓ Log file created successfully"
-              $fileSize = (Get-Item $logFile).Length
-              Write-Host "Log file size: $fileSize bytes"
-              Write-Host "First few lines:"
-              Get-Content $logFile -Head 3
-              
-              # Verify log contains expected content
-              $content = Get-Content $logFile -Raw
-              if ($content -match "Log directory configured") {
-                Write-Host "✓ Log contains expected startup messages"
-              } else {
-                Write-Host "⚠ Log missing expected startup messages"
-              }
-              
-              if ($content -match "${{ matrix.log_standard }}") {
-                Write-Host "✓ Log contains OS standard compliance information"
-              } else {
-                Write-Host "⚠ Log missing OS standard compliance information"
-              }
-            } else {
-              Write-Host "✗ Log file not created"
-              exit 1
-            }
-          } else {
+          $logPath = "$env:LOCALAPPDATA\mcpproxy\logs"
+          if (-not (Test-Path $logPath)) {
             Write-Host "✗ Log directory not created"
             exit 1
+          }
+
+          Write-Host "✓ Log directory created successfully"
+          Get-ChildItem $logPath
+
+          # Check if log file exists and has content
+          $logFile = Join-Path $logPath "mcpproxy.log"
+          if (-not (Test-Path $logFile)) {
+            Write-Host "✗ Log file not created"
+            exit 1
+          }
+
+          Write-Host "✓ Log file created successfully"
+          $fileSize = (Get-Item $logFile).Length
+          Write-Host "Log file size: $fileSize bytes"
+          Write-Host "First few lines:"
+          Get-Content $logFile -Head 3
+
+          # Verify log contains expected content
+          $content = Get-Content $logFile -Raw
+          if ($content -match "Log directory configured") {
+            Write-Host "✓ Log contains expected startup messages"
+          } else {
+            Write-Host "⚠ Log missing expected startup messages"
+          }
+
+          if ($content -match "Windows Application Data Guidelines") {
+            Write-Host "✓ Log contains OS standard compliance information"
+          } else {
+            Write-Host "⚠ Log missing OS standard compliance information"
           }
 
       - name: Test log rotation

@@ -10,6 +10,7 @@ The Smart MCP Proxy features optimized startup with immediate tray appearance an
 - **Immediate Tray**: Appears within 1-2 seconds, no waiting for upstream connections
 - **Non-blocking**: Connections happen in background while proxy is fully functional
 - **Quick Access**: Users can quit, check status, or interact immediately after launch
+- **Auto-Configuration**: Creates default configuration file automatically if none exists
 
 ### 🔄 **Smart Connection Management** 
 - **Exponential Backoff**: Retry failed connections with 1s, 2s, 4s, 8s... intervals up to 5 minutes
@@ -22,6 +23,12 @@ The Smart MCP Proxy features optimized startup with immediate tray appearance an
 - **Connection Phases**: Shows progression through Initializing → Loading → Connecting → Ready
 - **Detailed Feedback**: Connection counts, retry attempts, and error information
 - **Transparent Operations**: Users always know what's happening in the background
+
+### 🛑 **Robust Signal Handling**
+- **Graceful Termination**: Properly handles SIGTERM and SIGINT signals (Ctrl+C)
+- **Background Cleanup**: Stops all background operations cleanly
+- **No Hanging Processes**: Exits promptly without requiring force kill
+- **Clean Shutdown Logs**: Detailed logging shows exactly what's being stopped
 
 ## Enhanced System Tray Features
 
@@ -431,9 +438,42 @@ go build -ldflags "-X main.version=$(git describe --tags)" ./cmd/mcpproxy
 
 ### Testing
 
+#### Basic Tests
+
 ```bash
 go test ./...
 ```
+
+#### Unit Tests with Coverage
+
+**Linux/macOS:**
+```bash
+go test -v -race -coverprofile=coverage.out -run "^Test[^E]" ./...
+```
+
+**Windows PowerShell:**
+```powershell
+# Use the provided PowerShell script for proper argument handling
+.\scripts\run-unit-tests.ps1
+```
+
+**Windows Command Prompt:**
+```cmd
+# Use the provided batch file for proper argument handling
+.\scripts\run-unit-tests.cmd
+```
+
+#### E2E Tests
+
+```bash
+# Linux/macOS
+./scripts/run-e2e-tests.sh
+
+# Windows - run unit tests first, then E2E tests
+go test -v -race -run "TestE2E" ./internal/server
+```
+
+**Note for Windows users:** Due to PowerShell argument parsing differences, direct use of the `go test` command with complex arguments may fail. Use the provided scripts in the `scripts/` directory for reliable test execution.
 
 ### Running in Development
 

@@ -285,7 +285,7 @@ func TestExpiredRecords(t *testing.T) {
 			return nil
 		}
 
-		var record CacheRecord
+		var record Record
 		if err := record.UnmarshalBinary(data); err != nil {
 			return err
 		}
@@ -338,7 +338,7 @@ func TestCleanup(t *testing.T) {
 
 		count := 0
 		for key, value := cursor.First(); key != nil && count < 2; key, value = cursor.Next() {
-			var record CacheRecord
+			var record Record
 			if err := record.UnmarshalBinary(value); err != nil {
 				continue
 			}
@@ -351,7 +351,7 @@ func TestCleanup(t *testing.T) {
 				continue
 			}
 
-			bucket.Put(key, data)
+			_ = bucket.Put(key, data)
 			count++
 		}
 

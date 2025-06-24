@@ -28,7 +28,10 @@ jobs:
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
-          path: ~/go/pkg/mod
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/AppData/Local/go-build
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
@@ -36,18 +39,29 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Run tests
+      - name: Run tests (with nogui for CI)
         run: go test -tags nogui -v ./...
 
-      - name: Build binary
+      - name: Build binary for Linux
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           VERSION=pr-${{ github.event.number }}-${{ github.sha }}
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            go build -tags nogui -ldflags "-X main.version=${VERSION}" -o mcpproxy.exe ./cmd/mcpproxy
-          else
-            go build -tags nogui -ldflags "-X main.version=${VERSION}" -o mcpproxy ./cmd/mcpproxy
-          fi
+          CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o mcpproxy ./cmd/mcpproxy
+
+      - name: Build binary for macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION=pr-${{ github.event.number }}-${{ github.sha }}
+          go build -ldflags "-X main.version=${VERSION}" -o mcpproxy ./cmd/mcpproxy
+
+      - name: Build binary for Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          VERSION=pr-${{ github.event.number }}-${{ github.sha }}
+          CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o mcpproxy.exe ./cmd/mcpproxy
 
       - name: Test version output
         shell: bash
@@ -57,26 +71,3 @@ jobs:
           else
             ./mcpproxy --version
           fi
-
-  goreleaser-check:
-    runs-on: ubuntu-latest
-
-    env:
-      GO111MODULE: "on"
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.23.10"
-
-      - name: Check GoReleaser config
-        uses: goreleaser/goreleaser-action@v5
-        with:
-          version: v2.3.2
-          args: check

@@ -101,13 +101,13 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 		// Stop mock servers
 		for _, mockServer := range env.mockServers {
 			if mockServer.stopFunc != nil {
-				mockServer.stopFunc()
+				_ = mockServer.stopFunc()
 			}
 		}
 
 		// Stop proxy server
-		env.proxyServer.StopServer()
-		env.proxyServer.Shutdown()
+		_ = env.proxyServer.StopServer()
+		_ = env.proxyServer.Shutdown()
 
 		// Remove temp directory
 		os.RemoveAll(tempDir)
@@ -136,12 +136,39 @@ func (env *TestEnvironment) waitForServerReady() {
 			env.t.Fatalf("Timeout waiting for server to be ready. Status: %+v", status)
 		case <-ticker.C:
 			if env.proxyServer.IsRunning() {
-				// Give it a bit more time to fully initialize
-				time.Sleep(2 * time.Second)
-				return
+				// Actually test if the HTTP server is accepting connections
+				if env.testServerConnection() {
+					// Give it a bit more time to fully initialize
+					time.Sleep(500 * time.Millisecond)
+					return
+				}
 			}
 		}
 	}
+}
+
+// testServerConnection tests if the server is actually accepting HTTP connections
+func (env *TestEnvironment) testServerConnection() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", env.proxyAddr, http.NoBody)
+	if err != nil {
+		return false
+	}
+
+	client := &http.Client{
+		Timeout: 1 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+
+	// Any response (even an error response) means the server is accepting connections
+	return true
 }
 
 // CreateMockUpstreamServer creates and starts a mock upstream MCP server
@@ -159,9 +186,9 @@ func (env *TestEnvironment) CreateMockUpstreamServer(name string, tools []mcp.To
 	}
 
 	// Register tools
-	for _, tool := range tools {
-		toolCopy := tool // Capture for closure
-		mcpServer.AddTool(toolCopy, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	for i := range tools {
+		toolCopy := tools[i] // Capture for closure
+		mcpServer.AddTool(toolCopy, func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Mock tool implementation
 			result := map[string]interface{}{
 				"tool":    toolCopy.Name,
@@ -342,7 +369,7 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Manually trigger tool discovery and indexing
-	env.proxyServer.discoverAndIndexTools(ctx)
+	_ = env.proxyServer.discoverAndIndexTools(ctx)
 
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)
@@ -443,7 +470,7 @@ func TestE2E_ToolCalling(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Manually trigger tool discovery and indexing
-	env.proxyServer.discoverAndIndexTools(ctx)
+	_ = env.proxyServer.discoverAndIndexTools(ctx)
 
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)
@@ -599,8 +626,14 @@ func TestE2E_ConcurrentOperations(t *testing.T) {
 	for i := range clients {
 		clients[i] = env.CreateProxyClient()
 		env.ConnectClient(clients[i])
-		defer clients[i].Close()
 	}
+
+	// Defer close all clients
+	defer func() {
+		for _, client := range clients {
+			client.Close()
+		}
+	}()
 
 	// Create mock server
 	mockTools := []mcp.Tool{
@@ -763,8 +796,8 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 					}
 
 					// Verify environment variables
-					if env_vars, ok := serverMap["env"].(map[string]interface{}); ok {
-						assert.Equal(t, "test_key_123", env_vars["BRAVE_API_KEY"])
+					if envVars, ok := serverMap["env"].(map[string]interface{}); ok {
+						assert.Equal(t, "test_key_123", envVars["BRAVE_API_KEY"])
 					}
 					break
 				}

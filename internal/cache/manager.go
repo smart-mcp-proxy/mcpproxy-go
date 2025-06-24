@@ -24,7 +24,7 @@ const (
 type Manager struct {
 	db     *bbolt.DB
 	logger *zap.Logger
-	stats  *CacheStats
+	stats  *Stats
 	stopCh chan struct{}
 }
 
@@ -33,7 +33,7 @@ func NewManager(db *bbolt.DB, logger *zap.Logger) (*Manager, error) {
 	manager := &Manager{
 		db:     db,
 		logger: logger,
-		stats:  &CacheStats{},
+		stats:  &Stats{},
 		stopCh: make(chan struct{}),
 	}
 
@@ -73,8 +73,8 @@ func GenerateKey(toolName string, args map[string]interface{}, timestamp time.Ti
 }
 
 // Store saves a tool response to cache
-func (m *Manager) Store(key, toolName string, args map[string]interface{}, content string, recordPath string, totalRecords int) error {
-	record := &CacheRecord{
+func (m *Manager) Store(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int) error {
+	record := &Record{
 		Key:          key,
 		ToolName:     toolName,
 		Args:         args,
@@ -109,30 +109,30 @@ func (m *Manager) Store(key, toolName string, args map[string]interface{}, conte
 }
 
 // Get retrieves a cached tool response
-func (m *Manager) Get(key string) (*CacheRecord, error) {
-	var record *CacheRecord
+func (m *Manager) Get(key string) (*Record, error) {
+	var record *Record
 
 	err := m.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
 		data := bucket.Get([]byte(key))
 		if data == nil {
 			m.stats.MissCount++
-			m.saveStats(tx)
+			_ = m.saveStats(tx)
 			return fmt.Errorf("cache key not found")
 		}
 
-		record = &CacheRecord{}
+		record = &Record{}
 		if err := record.UnmarshalBinary(data); err != nil {
 			return fmt.Errorf("unmarshal cache record: %w", err)
 		}
 
 		// Check if expired
 		if record.IsExpired() {
-			bucket.Delete([]byte(key))
+			_ = bucket.Delete([]byte(key))
 			m.stats.EvictedCount++
 			m.stats.TotalEntries--
 			m.stats.TotalSizeBytes -= record.TotalSize
-			m.saveStats(tx)
+			_ = m.saveStats(tx)
 			return fmt.Errorf("cache key expired")
 		}
 
@@ -193,7 +193,7 @@ func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse,
 
 	response := &ReadCacheResponse{
 		Records: paginatedRecords,
-		Meta: CacheMeta{
+		Meta: Meta{
 			Key:          key,
 			TotalRecords: totalRecords,
 			Limit:        limit,
@@ -207,7 +207,7 @@ func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse,
 }
 
 // GetStats returns current cache statistics
-func (m *Manager) GetStats() *CacheStats {
+func (m *Manager) GetStats() *Stats {
 	return m.stats
 }
 
@@ -241,7 +241,7 @@ func (m *Manager) cleanup() error {
 		var keysToDelete [][]byte
 
 		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
-			var record CacheRecord
+			var record Record
 			if err := record.UnmarshalBinary(value); err != nil {
 				m.logger.Warn("Failed to unmarshal cache record during cleanup",
 					zap.String("key", string(key)), zap.Error(err))

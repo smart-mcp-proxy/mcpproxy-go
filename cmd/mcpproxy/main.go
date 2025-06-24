@@ -14,7 +14,6 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/server"
-	"mcpproxy-go/internal/tray"
 )
 
 var (
@@ -37,6 +36,13 @@ var (
 
 	version = "v0.1.0" // This will be injected by -ldflags during build
 )
+
+// TrayInterface defines the interface for system tray functionality
+type TrayInterface interface {
+	Run(ctx context.Context) error
+}
+
+// createTray is implemented in build-tagged files
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -68,7 +74,7 @@ func main() {
 	}
 }
 
-func runServer(cmd *cobra.Command, args []string) error {
+func runServer(_ *cobra.Command, _ []string) error {
 	// Load configuration first to get logging settings
 	cfg, err := loadConfig()
 	if err != nil {
@@ -102,7 +108,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to setup logger: %w", err)
 	}
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	// Log startup information including log directory info
 	logDirInfo, err := logs.GetLogDirInfo()
@@ -174,7 +182,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		logger.Info("Starting system tray with auto-start server")
 
 		// Create and start tray on main thread (required for macOS)
-		trayApp := tray.New(srv, logger.Sugar(), version, shutdownFunc)
+		trayApp := createTray(srv, logger.Sugar(), version, shutdownFunc)
 
 		// Auto-start server in background
 		wg.Add(1)
@@ -197,38 +205,18 @@ func runServer(cmd *cobra.Command, args []string) error {
 	} else {
 		// Without tray, run server normally and wait
 		logger.Info("Starting server without tray")
-
-		wg.Add(1)
-		serverErr := make(chan error, 1)
-		go func() {
-			defer wg.Done()
-			serverErr <- srv.Start(ctx)
-		}()
-
-		// Wait for either server error or context cancellation
-		select {
-		case err := <-serverErr:
-			if err != nil {
-				logger.Error("Server error", zap.Error(err))
-				cancel()
-				wg.Wait()
-				return err
-			}
-		case <-ctx.Done():
-			logger.Info("Context cancelled, shutting down")
+		if err := srv.StartServer(ctx); err != nil {
+			return fmt.Errorf("failed to start server: %w", err)
 		}
 
-		// Wait for all goroutines to finish
-		wg.Wait()
+		// Wait for context to be cancelled
+		<-ctx.Done()
+		logger.Info("Shutting down server")
+		if err := srv.StopServer(); err != nil {
+			logger.Error("Error stopping server", zap.Error(err))
+		}
 	}
 
-	// Graceful shutdown
-	if err := srv.Shutdown(); err != nil {
-		logger.Error("Error during shutdown", zap.Error(err))
-		return err
-	}
-
-	logger.Info("mcpproxy shutdown complete")
 	return nil
 }
 

@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// CacheRecord represents a cached tool response
-type CacheRecord struct {
+// Record represents a cached tool response
+type Record struct {
 	Key          string                 `json:"key"`
 	ToolName     string                 `json:"tool_name"`
 	Args         map[string]interface{} `json:"args"`
@@ -21,8 +21,8 @@ type CacheRecord struct {
 	CreatedAt    time.Time              `json:"created_at"`
 }
 
-// CacheStats represents cache statistics
-type CacheStats struct {
+// Stats represents cache statistics
+type Stats struct {
 	TotalEntries   int `json:"total_entries"`
 	TotalSizeBytes int `json:"total_size_bytes"`
 	HitCount       int `json:"hit_count"`
@@ -34,11 +34,11 @@ type CacheStats struct {
 // ReadCacheResponse represents the response structure for read_cache tool
 type ReadCacheResponse struct {
 	Records []interface{} `json:"records"`
-	Meta    CacheMeta     `json:"meta"`
+	Meta    Meta          `json:"meta"`
 }
 
-// CacheMeta represents metadata about the cached response
-type CacheMeta struct {
+// Meta represents metadata about the cached response
+type Meta struct {
 	Key          string `json:"key"`
 	TotalRecords int    `json:"total_records"`
 	Limit        int    `json:"limit"`
@@ -47,27 +47,27 @@ type CacheMeta struct {
 	RecordPath   string `json:"record_path,omitempty"`
 }
 
-// MarshalBinary implements encoding.BinaryMarshaler for CacheRecord
-func (c *CacheRecord) MarshalBinary() ([]byte, error) {
+// MarshalBinary implements encoding.BinaryMarshaler for Record
+func (c *Record) MarshalBinary() ([]byte, error) {
 	return json.Marshal(c)
 }
 
-// UnmarshalBinary implements encoding.BinaryUnmarshaler for CacheRecord
-func (c *CacheRecord) UnmarshalBinary(data []byte) error {
+// UnmarshalBinary implements encoding.BinaryUnmarshaler for Record
+func (c *Record) UnmarshalBinary(data []byte) error {
 	return json.Unmarshal(data, c)
 }
 
-// MarshalBinary implements encoding.BinaryMarshaler for CacheStats
-func (s *CacheStats) MarshalBinary() ([]byte, error) {
+// MarshalBinary implements encoding.BinaryMarshaler for Stats
+func (s *Stats) MarshalBinary() ([]byte, error) {
 	return json.Marshal(s)
 }
 
-// UnmarshalBinary implements encoding.BinaryUnmarshaler for CacheStats
-func (s *CacheStats) UnmarshalBinary(data []byte) error {
+// UnmarshalBinary implements encoding.BinaryUnmarshaler for Stats
+func (s *Stats) UnmarshalBinary(data []byte) error {
 	return json.Unmarshal(data, s)
 }
 
 // IsExpired checks if the cache record has expired
-func (c *CacheRecord) IsExpired() bool {
+func (c *Record) IsExpired() bool {
 	return time.Now().After(c.ExpiresAt)
 }

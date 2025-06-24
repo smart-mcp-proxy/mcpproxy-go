@@ -19,6 +19,16 @@ import (
 	"mcpproxy-go/internal/upstream"
 )
 
+const (
+	operationList            = "list"
+	operationAdd             = "add"
+	operationRemove          = "remove"
+	operationCallTool        = "call_tool"
+	operationUpstreamServers = "upstream_servers"
+	operationQuarantineSec   = "quarantine_security"
+	operationRetrieveTools   = "retrieve_tools"
+)
+
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
 	server          *mcpserver.MCPServer
@@ -51,10 +61,10 @@ func NewMCPProxyServer(
 	}
 
 	// Add prompts capability if enabled
-	if config.EnablePrompts {
-		// Note: prompts capability would be added here when mcp-go supports it
-		// capabilities = append(capabilities, mcpserver.WithPromptCapabilities(true))
-	}
+	// Note: prompts capability would be added here when mcp-go supports it
+	// if config.EnablePrompts {
+	//     capabilities = append(capabilities, mcpserver.WithPromptCapabilities(true))
+	// }
 
 	mcpServer := mcpserver.NewMCPServer(
 		"mcpproxy-go",
@@ -86,7 +96,7 @@ func NewMCPProxyServer(
 }
 
 // registerTools registers all proxy tools with the MCP server
-func (p *MCPProxyServer) registerTools(debugSearch bool) {
+func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
 		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Then use call_tool with the discovered tool names. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers."),
@@ -116,9 +126,8 @@ func (p *MCPProxyServer) registerTools(debugSearch bool) {
 			mcp.Required(),
 			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_repository'). Get this from retrieve_tools results."),
 		),
-		mcp.WithObject("args",
-			mcp.Description("Arguments to pass to the tool. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
-			mcp.AdditionalProperties(true),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: '{\"param1\": \"value1\", \"param2\": 123}'"),
 		),
 	)
 	p.server.AddTool(callToolTool, p.handleCallTool)
@@ -154,12 +163,11 @@ func (p *MCPProxyServer) registerTools(debugSearch bool) {
 			mcp.WithString("command",
 				mcp.Description("Command to run for stdio servers (e.g., 'uvx', 'python')"),
 			),
-			mcp.WithArray("args",
-				mcp.Description("Command arguments for stdio servers (e.g., ['mcp-server-sqlite', '--db-path', '/path/to/db'])"),
+			mcp.WithString("args_json",
+				mcp.Description("Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]')"),
 			),
-			mcp.WithObject("env",
-				mcp.Description("Environment variables for stdio servers"),
-				mcp.AdditionalProperties(true),
+			mcp.WithString("env_json",
+				mcp.Description("Environment variables for stdio servers as JSON string (e.g., '{\"API_KEY\": \"value\"}')"),
 			),
 			mcp.WithString("url",
 				mcp.Description("Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')"),
@@ -168,16 +176,14 @@ func (p *MCPProxyServer) registerTools(debugSearch bool) {
 				mcp.Description("Transport protocol: stdio, http, sse, streamable-http, auto (default: auto-detect)"),
 				mcp.Enum("stdio", "http", "sse", "streamable-http", "auto"),
 			),
-			mcp.WithObject("headers",
-				mcp.Description("HTTP headers for authentication (e.g., {'Authorization': 'Bearer token'})"),
-				mcp.AdditionalProperties(true),
+			mcp.WithString("headers_json",
+				mcp.Description("HTTP headers for authentication as JSON string (e.g., '{\"Authorization\": \"Bearer token\"}')"),
 			),
 			mcp.WithBoolean("enabled",
 				mcp.Description("Whether server should be enabled (default: true)"),
 			),
-			mcp.WithObject("patch",
-				mcp.Description("Fields to update for patch operations"),
-				mcp.AdditionalProperties(true),
+			mcp.WithString("patch_json",
+				mcp.Description("Fields to update for patch operations as JSON string"),
 			),
 		)
 		p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
@@ -212,7 +218,7 @@ func (p *MCPProxyServer) registerPrompts() {
 }
 
 // handleRetrieveTools implements the retrieve_tools functionality
-func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	query, err := request.RequireString("query")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'query': %v", err)), nil
@@ -333,9 +339,18 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
 	}
 
-	// Get optional args parameter - this should be from the "args" field, not all arguments
+	// Get optional args parameter - handle both new JSON string format and legacy object format
 	var args map[string]interface{}
-	if request.Params.Arguments != nil {
+
+	// Try new JSON string format first
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
+		}
+	}
+
+	// Fallback to legacy object format for backward compatibility
+	if args == nil && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if argsParam, ok := argumentsMap["args"]; ok {
 				if argsMap, ok := argsParam.(map[string]interface{}); ok {
@@ -347,11 +362,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Check if this is a proxy tool (doesn't contain ':' or is one of our known proxy tools)
 	proxyTools := map[string]bool{
-		"upstream_servers":    true,
-		"quarantine_security": true,
-		"retrieve_tools":      true,
-		"call_tool":           true,
-		"read_cache":          true,
+		operationUpstreamServers: true,
+		operationQuarantineSec:   true,
+		operationRetrieveTools:   true,
+		operationCallTool:        true,
+		"read_cache":             true,
 	}
 
 	if proxyTools[toolName] {
@@ -362,15 +377,15 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 		// Route to appropriate proxy tool handler
 		switch toolName {
-		case "upstream_servers":
+		case operationUpstreamServers:
 			return p.handleUpstreamServers(ctx, proxyRequest)
-		case "quarantine_security":
+		case operationQuarantineSec:
 			return p.handleQuarantineSecurity(ctx, proxyRequest)
-		case "retrieve_tools":
+		case operationRetrieveTools:
 			return p.handleRetrieveTools(ctx, proxyRequest)
 		case "read_cache":
 			return p.handleReadCache(ctx, proxyRequest)
-		case "call_tool":
+		case operationCallTool:
 			// Prevent infinite recursion
 			return mcp.NewToolResultError("call_tool cannot call itself"), nil
 		default:
@@ -396,7 +411,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
 	if err == nil && serverConfig.Quarantined {
 		// Server is in quarantine - return security warning with tool analysis
-		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args)
+		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
 	}
 
 	// Call tool via upstream manager
@@ -469,7 +484,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 }
 
 // handleQuarantinedToolCall handles tool calls to quarantined servers with security analysis
-func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverName, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverName, toolName string, args map[string]interface{}) *mcp.CallToolResult {
 	// Get the client to analyze the tool
 	client, exists := p.upstreamManager.GetClient(serverName)
 	var toolAnalysis map[string]interface{}
@@ -483,7 +498,7 @@ func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverNa
 					// Parse the ParamsJSON to get input schema
 					var inputSchema map[string]interface{}
 					if tool.ParamsJSON != "" {
-						json.Unmarshal([]byte(tool.ParamsJSON), &inputSchema)
+						_ = json.Unmarshal([]byte(tool.ParamsJSON), &inputSchema)
 					}
 
 					// Provide full tool description with security analysis
@@ -515,10 +530,10 @@ func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverNa
 
 	jsonResult, err := json.Marshal(securityResponse)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Security block: Server '%s' is quarantined. Failed to serialize security response: %v", serverName, err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Security block: Server '%s' is quarantined. Failed to serialize security response: %v", serverName, err))
 	}
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	return mcp.NewToolResultText(string(jsonResult))
 }
 
 // handleUpstreamServers implements upstream server management
@@ -530,7 +545,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 	// Security checks
 	if p.config.ReadOnlyMode {
-		if operation != "list" {
+		if operation != operationList {
 			return mcp.NewToolResultError("Operation not allowed in read-only mode"), nil
 		}
 	}
@@ -541,22 +556,22 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 	// Specific operation security checks
 	switch operation {
-	case "add":
+	case operationAdd:
 		if !p.config.AllowServerAdd {
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil
 		}
-	case "remove":
+	case operationRemove:
 		if !p.config.AllowServerRemove {
 			return mcp.NewToolResultError("Removing servers is not allowed"), nil
 		}
 	}
 
 	switch operation {
-	case "list":
+	case operationList:
 		return p.handleListUpstreams(ctx)
-	case "add":
+	case operationAdd:
 		return p.handleAddUpstream(ctx, request)
-	case "remove":
+	case operationRemove:
 		return p.handleRemoveUpstream(ctx, request)
 	case "update":
 		return p.handleUpdateUpstream(ctx, request)
@@ -595,7 +610,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	}
 }
 
-func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolResult, error) {
 	servers, err := p.storage.ListUpstreamServers()
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
@@ -612,7 +627,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleListQuarantinedUpstreams(ctx context.Context) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleListQuarantinedUpstreams(_ context.Context) (*mcp.CallToolResult, error) {
 	servers, err := p.storage.ListQuarantinedUpstreamServers()
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to list quarantined upstreams: %v", err)), nil
@@ -667,7 +682,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 				zap.Error(err))
 
 			// Force disconnect the client to update its state
-			client.Disconnect()
+			_ = client.Disconnect()
 
 			// Provide connection error information instead of failing completely
 			connectionStatus := client.GetConnectionStatus()
@@ -712,7 +727,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 				toolAnalysis := map[string]interface{}{
 					"name":              tool.Name,
 					"full_name":         fmt.Sprintf("%s:%s", serverName, tool.Name),
-					"description":       fmt.Sprintf("\"%s\"", tool.Description), // Quote the description for LLM analysis
+					"description":       fmt.Sprintf("%q", tool.Description), // Quote the description for LLM analysis
 					"input_schema":      inputSchema,
 					"server_name":       serverName,
 					"quarantine_status": "QUARANTINED",
@@ -771,7 +786,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleQuarantineUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleQuarantineUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	serverName, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -824,7 +839,7 @@ func (p *MCPProxyServer) handleQuarantineUpstream(ctx context.Context, request m
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleAddUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -839,9 +854,16 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		return mcp.NewToolResultError("Either 'url' or 'command' parameter is required"), nil
 	}
 
-	// Handle args array
+	// Handle args JSON string
 	var args []string
-	if request.Params.Arguments != nil {
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
+		}
+	}
+
+	// Legacy support for old args format
+	if args == nil && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if argsParam, ok := argumentsMap["args"]; ok {
 				if argsList, ok := argsParam.([]interface{}); ok {
@@ -855,9 +877,16 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
-	// Handle env map
+	// Handle env JSON string
 	var env map[string]string
-	if request.Params.Arguments != nil {
+	if envJSON := request.GetString("env_json", ""); envJSON != "" {
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid env_json format: %v", err)), nil
+		}
+	}
+
+	// Legacy support for old env format
+	if env == nil && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if envParam, ok := argumentsMap["env"]; ok {
 				if envMap, ok := envParam.(map[string]interface{}); ok {
@@ -872,9 +901,16 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
-	// Handle headers map
+	// Handle headers JSON string
 	var headers map[string]string
-	if request.Params.Arguments != nil {
+	if headersJSON := request.GetString("headers_json", ""); headersJSON != "" {
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid headers_json format: %v", err)), nil
+		}
+	}
+
+	// Legacy support for old headers format
+	if headers == nil && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if headersParam, ok := argumentsMap["headers"]; ok {
 				if headersMap, ok := headersParam.(map[string]interface{}); ok {
@@ -964,7 +1000,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleRemoveUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -1024,7 +1060,7 @@ func (p *MCPProxyServer) handleRemoveUpstream(ctx context.Context, request mcp.C
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleUpdateUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -1095,7 +1131,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handlePatchUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -1173,6 +1209,9 @@ func (p *MCPProxyServer) getIndexedToolCount() int {
 		p.logger.Warn("Failed to get document count", zap.Error(err))
 		return 0
 	}
+	if count > 0x7FFFFFFF { // Check for potential overflow
+		return 0x7FFFFFFF
+	}
 	return int(count)
 }
 
@@ -1200,7 +1239,7 @@ func (p *MCPProxyServer) analyzeQuery(query string) map[string]interface{} {
 }
 
 // explainToolRanking explains why a specific tool was ranked as it was
-func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, results []*config.SearchResult) map[string]interface{} {
+func (p *MCPProxyServer) explainToolRanking(query, targetTool string, results []*config.SearchResult) map[string]interface{} {
 	explanation := map[string]interface{}{
 		"target_tool":      targetTool,
 		"query":            query,
@@ -1210,18 +1249,19 @@ func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, res
 
 	// Find the tool in results
 	for i, result := range results {
-		if result.Tool.Name == targetTool {
-			explanation["found_in_results"] = true
-			explanation["rank"] = i + 1
-			explanation["score"] = result.Score
-			explanation["tool_details"] = map[string]interface{}{
-				"name":        result.Tool.Name,
-				"server":      result.Tool.ServerName,
-				"description": result.Tool.Description,
-				"has_params":  len(result.Tool.ParamsJSON) > 0,
-			}
-			break
+		if result.Tool.Name != targetTool {
+			continue
 		}
+		explanation["found_in_results"] = true
+		explanation["rank"] = i + 1
+		explanation["score"] = result.Score
+		explanation["tool_details"] = map[string]interface{}{
+			"name":        result.Tool.Name,
+			"server":      result.Tool.ServerName,
+			"description": result.Tool.Description,
+			"has_params":  result.Tool.ParamsJSON != "",
+		}
+		break
 	}
 
 	// Analyze why tool might not rank well
@@ -1243,8 +1283,9 @@ func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, res
 	if strings.Contains(targetTool, ":") {
 		parts := strings.SplitN(targetTool, ":", 2)
 		if len(parts) == 2 {
-			suggestions = append(suggestions, fmt.Sprintf("Try searching for server name: '%s'", parts[0]))
-			suggestions = append(suggestions, fmt.Sprintf("Try searching for tool name: '%s'", parts[1]))
+			suggestions = append(suggestions,
+				fmt.Sprintf("Try searching for server name: '%s'", parts[0]),
+				fmt.Sprintf("Try searching for tool name: '%s'", parts[1]))
 			if strings.Contains(parts[1], "_") {
 				words := strings.Split(parts[1], "_")
 				suggestions = append(suggestions, fmt.Sprintf("Try searching for individual words: '%s'", strings.Join(words, " ")))
@@ -1258,7 +1299,7 @@ func (p *MCPProxyServer) explainToolRanking(query string, targetTool string, res
 }
 
 // handleReadCache implements the read_cache functionality
-func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleReadCache(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	key, err := request.RequireString("key")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'key': %v", err)), nil
