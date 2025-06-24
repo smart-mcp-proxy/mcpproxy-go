@@ -251,8 +251,8 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Testing logging on Windows"
-          Write-Host "Expected log path: ${{ matrix.log_path_check }}"
-          Write-Host "OS Standard: ${{ matrix.log_standard }}"
+          Write-Host "Expected log path: $env:LOCALAPPDATA\mcpproxy\logs"
+          Write-Host "OS Standard: Windows Application Data Guidelines"
 
           # Run mcpproxy briefly to create log files
           $process = Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru
