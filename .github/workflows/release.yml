@@ -24,7 +24,7 @@ jobs:
           find fyne-cross -type f -name "*mcpproxy*" | head -20
       - uses: goreleaser/goreleaser-action@v5
         with:
-          version: "v2"
+          version: latest
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
