@@ -255,7 +255,9 @@ jobs:
           Write-Host "OS Standard: ${{ matrix.log_standard }}"
 
           # Run mcpproxy briefly to create log files
-          Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru | ForEach-Object { Start-Sleep -Seconds 5; $_ | Stop-Process -Force }
+          $process = Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru
+          Start-Sleep -Seconds 5
+          $process | Stop-Process -Force
 
           # Check if log directory was created
           $logPath = "${{ matrix.log_path_check }}"
