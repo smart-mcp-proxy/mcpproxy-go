@@ -13,6 +13,9 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    env:
+      GO111MODULE: "on"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,6 +55,10 @@ jobs:
 
   goreleaser-check:
     runs-on: ubuntu-latest
+
+    env:
+      GO111MODULE: "on"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4

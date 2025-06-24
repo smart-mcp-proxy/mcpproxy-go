@@ -10,6 +10,10 @@ jobs:
   e2e-tests:
     name: End-to-End Tests
     runs-on: ${{ matrix.os }}
+
+    env:
+      GO111MODULE: "on"
+
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -71,6 +75,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: e2e-tests
 
+    env:
+      GO111MODULE: "on"
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -122,6 +129,10 @@ jobs:
   logging-tests:
     name: Cross-Platform Logging Tests
     runs-on: ${{ matrix.os }}
+
+    env:
+      GO111MODULE: "on"
+
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
