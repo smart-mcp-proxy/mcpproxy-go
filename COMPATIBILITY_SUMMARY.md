@@ -19,6 +19,9 @@
 
 **Changed Parameters**:
 - `args` → `args_json` (JSON string)
+- `env` → `env_json` (JSON string)
+- `headers` → `headers_json` (JSON string)  
+- `patch` → `patch_json` (JSON string)
 
 ### 🔄 Backward Compatibility
 - ✅ All existing tools and scripts continue to work

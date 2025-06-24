@@ -163,8 +163,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.WithString("command",
 				mcp.Description("Command to run for stdio servers (e.g., 'uvx', 'python')"),
 			),
-			mcp.WithArray("args",
-				mcp.Description("Command arguments for stdio servers as JSON array strings (e.g., ['mcp-server-sqlite', '--db-path', '/path/to/db'])"),
+			mcp.WithString("args_json",
+				mcp.Description("Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]')"),
 			),
 			mcp.WithString("env_json",
 				mcp.Description("Environment variables for stdio servers as JSON string (e.g., '{\"API_KEY\": \"value\"}')"),
@@ -854,9 +854,16 @@ func (p *MCPProxyServer) handleAddUpstream(_ context.Context, request mcp.CallTo
 		return mcp.NewToolResultError("Either 'url' or 'command' parameter is required"), nil
 	}
 
-	// Handle args array
+	// Handle args JSON string
 	var args []string
-	if request.Params.Arguments != nil {
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
+		}
+	}
+
+	// Legacy support for old args format
+	if args == nil && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if argsParam, ok := argumentsMap["args"]; ok {
 				if argsList, ok := argsParam.([]interface{}); ok {

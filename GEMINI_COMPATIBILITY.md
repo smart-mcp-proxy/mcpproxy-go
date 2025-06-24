@@ -44,6 +44,19 @@ mcp.WithString("args_json",
 ),
 ```
 
+**`upstream_servers` Changes:**
+```go
+// Before (Gemini 2.5/GPT-4.1 incompatible)
+mcp.WithArray("args", ...),
+mcp.WithObject("env", ...),
+mcp.WithObject("headers", ...),
+
+// After (Gemini 2.5/GPT-4.1 compatible)
+mcp.WithString("args_json", ...),
+mcp.WithString("env_json", ...),
+mcp.WithString("headers_json", ...),
+```
+
 ### Usage Examples
 
 **upstream_servers - New JSON string format:**
