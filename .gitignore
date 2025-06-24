@@ -45,7 +45,6 @@ mcp_config.json
 
 # Log files
 *.log
-logs/
 
 # Temporary files
 *.tmp
