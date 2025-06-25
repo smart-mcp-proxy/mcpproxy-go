@@ -61,14 +61,27 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          LDFLAGS="-s -w -X main.version=${VERSION}"
+          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION}"
+
+          # Build versioned binary
           go build -ldflags "${LDFLAGS}" -o ${{ matrix.name }} ./cmd/mcpproxy
 
-      - name: Upload binary artifact
+          # Create latest binary (copy of the versioned one)
+          LATEST_NAME=$(echo "${{ matrix.name }}" | sed 's/-[^-]*-/-latest-/' | sed 's/\.exe$/-latest.exe/')
+          cp ${{ matrix.name }} ${LATEST_NAME}
+
+      - name: Upload versioned binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
+
+      - name: Upload latest binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-latest
+          path: |
+            mcpproxy-latest-*
 
   release:
     needs: build
@@ -100,9 +113,23 @@ jobs:
 
             Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
 
+            ### Quick Download Links
+
+            **Latest Version (auto-updates):**
+            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64)
+            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.exe)  
+            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64)
+            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64)
+
+            **This Version (${{ github.ref_name }}):**
+            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-linux-amd64)
+            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-windows-amd64.exe)
+            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-darwin-amd64)
+            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-darwin-arm64)
+
             ### Installation
 
-            1. Download the appropriate binary for your platform
+            1. Download the appropriate binary for your platform using the links above
             2. Make it executable: `chmod +x mcpproxy-*` (Linux/macOS)
             3. Run `./mcpproxy-*` to start
 
