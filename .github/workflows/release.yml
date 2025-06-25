@@ -179,3 +179,70 @@ jobs:
             - Headless: `./mcpproxy --tray=false`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout tap repository
+        uses: actions/checkout@v4
+        with:
+          repository: smart-mcp-proxy/homebrew-mcpproxy
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Download release info and update formula
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+
+          # Download archives to calculate SHA256
+          cd tap
+
+          # Download macOS AMD64
+          wget -q "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/mcpproxy-v${VERSION}-darwin-amd64.tar.gz"
+          AMD64_SHA=$(sha256sum "mcpproxy-v${VERSION}-darwin-amd64.tar.gz" | cut -d' ' -f1)
+
+          # Download macOS ARM64
+          wget -q "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/mcpproxy-v${VERSION}-darwin-arm64.tar.gz"
+          ARM64_SHA=$(sha256sum "mcpproxy-v${VERSION}-darwin-arm64.tar.gz" | cut -d' ' -f1)
+
+          # Update formula
+          cat > Formula/mcpproxy.rb << EOF
+          class Mcpproxy < Formula
+            desc "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers"
+            homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"
+            version "${VERSION}"
+            
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v#{version}/mcpproxy-v#{version}-darwin-arm64.tar.gz"
+                sha256 "${ARM64_SHA}"
+              else
+                url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v#{version}/mcpproxy-v#{version}-darwin-amd64.tar.gz"
+                sha256 "${AMD64_SHA}"
+              end
+            end
+
+            def install
+              bin.install "mcpproxy"
+            end
+
+            test do
+              system "#{bin}/mcpproxy", "--version"
+            end
+          end
+          EOF
+
+          # Clean up downloaded files
+          rm -f *.tar.gz
+
+      - name: Commit and push changes
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mcpproxy.rb
+          git commit -m "Update mcpproxy to ${GITHUB_REF#refs/tags/v}"
+          git push
