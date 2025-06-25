@@ -14,9 +14,10 @@ import (
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients map[string]*Client
-	mu      sync.RWMutex
-	logger  *zap.Logger
+	clients        map[string]*Client
+	mu             sync.RWMutex
+	logger         *zap.Logger
+	onStatusChange func(string) // Callback for status changes
 }
 
 // NewManager creates a new upstream manager
@@ -25,6 +26,11 @@ func NewManager(logger *zap.Logger) *Manager {
 		clients: make(map[string]*Client),
 		logger:  logger,
 	}
+}
+
+// SetOnStatusChangeCallback sets the callback function for status changes.
+func (m *Manager) SetOnStatusChangeCallback(callback func(string)) {
+	m.onStatusChange = callback
 }
 
 // AddServerConfig adds a server configuration without connecting
@@ -43,6 +49,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
+	client.SetStatusChangeCallback(m.handleClientStatusChange)
 
 	m.clients[id] = client
 	m.logger.Info("Added upstream server configuration",
@@ -371,4 +378,10 @@ func (m *Manager) ListServers() map[string]*config.ServerConfig {
 		servers[id] = client.config
 	}
 	return servers
+}
+
+func (m *Manager) handleClientStatusChange(clientID string) {
+	if m.onStatusChange != nil {
+		m.onStatusChange(clientID)
+	}
 }

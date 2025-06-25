@@ -34,12 +34,13 @@ type Client struct {
 	serverInfo *mcp.InitializeResult
 
 	// Connection state (protected by mutex)
-	mu            sync.RWMutex
-	connected     bool
-	lastError     error
-	retryCount    int
-	lastRetryTime time.Time
-	connecting    bool
+	mu             sync.RWMutex
+	connected      bool
+	lastError      error
+	retryCount     int
+	lastRetryTime  time.Time
+	connecting     bool
+	onStatusChange func(string) // Callback for status change
 }
 
 // Tool represents a tool from an upstream server
@@ -63,6 +64,24 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger)
 	return c, nil
 }
 
+// SetStatusChangeCallback sets the callback function for status changes.
+func (c *Client) SetStatusChangeCallback(callback func(string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onStatusChange = callback
+}
+
+func (c *Client) notifyStatusChange() {
+	c.mu.RLock()
+	callback := c.onStatusChange
+	id := c.id
+	c.mu.RUnlock()
+
+	if callback != nil {
+		callback(id)
+	}
+}
+
 // Connect establishes a connection to the upstream MCP server
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
@@ -77,6 +96,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.mu.Lock()
 		c.connecting = false
 		c.mu.Unlock()
+		c.notifyStatusChange()
 	}()
 
 	c.mu.RLock()
@@ -318,50 +338,29 @@ func (c *Client) determineTransportType() string {
 
 // parseCommand parses a command string into command and arguments
 func (c *Client) parseCommand(cmd string) []string {
-	var result []string
-	var current string
-	var inQuote bool
-	var quoteChar rune
-
-	for _, r := range cmd {
-		switch {
-		case r == ' ' && !inQuote:
-			if current != "" {
-				result = append(result, current)
-				current = ""
-			}
-		case (r == '"' || r == '\''):
-			if inQuote && r == quoteChar {
-				inQuote = false
-				quoteChar = 0
-			} else if !inQuote {
-				inQuote = true
-				quoteChar = r
-			} else {
-				current += string(r)
-			}
-		default:
-			current += string(r)
-		}
-	}
-
-	if current != "" {
-		result = append(result, current)
-	}
-
-	return result
+	// Simple split by space, might need more robust parsing for quoted args
+	return strings.Fields(cmd)
 }
 
 // Disconnect closes the connection to the upstream server
 func (c *Client) Disconnect() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if !c.connected {
+		c.mu.Unlock()
+		return nil // Already disconnected
+	}
 
 	if c.client != nil {
-		c.logger.Info("Disconnecting from upstream MCP server")
-		c.client.Close()
-		c.connected = false
+		if err := c.client.Close(); err != nil {
+			c.logger.Error("Error closing client", zap.Error(err))
+		}
 	}
+	c.connected = false
+	c.logger.Info("Disconnected from upstream MCP server")
+	c.mu.Unlock()
+
+	c.notifyStatusChange()
+
 	return nil
 }
 

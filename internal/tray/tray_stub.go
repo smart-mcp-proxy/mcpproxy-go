@@ -25,7 +25,11 @@ type ServerInterface interface {
 	// Server management methods for tray menu
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string, quarantined bool) error
+	DeleteServer(serverName string) error
 	GetAllServers() ([]map[string]interface{}, error)
+
+	// Direct notification methods for immediate updates
+	ForceMenuUpdate() // Force immediate menu refresh
 
 	// Config management for file watching
 	ReloadConfiguration() error

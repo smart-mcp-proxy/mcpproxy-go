@@ -61,11 +61,15 @@ type ServerInterface interface {
 	// Server management methods for tray menu
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string, quarantined bool) error
+	DeleteServer(serverName string) error
 	GetAllServers() ([]map[string]interface{}, error)
 
 	// Config management for file watching
 	ReloadConfiguration() error
 	GetConfigPath() string
+
+	// Direct notification methods for immediate updates
+	ForceMenuUpdate() // Force immediate menu refresh
 }
 
 // App represents the system tray application
@@ -117,9 +121,6 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 		version:  version,
 		shutdown: shutdown,
 	}
-
-	// Initialize managers (will be fully set up in onReady)
-	app.stateManager = NewServerStateManager(server, logger)
 
 	// Initialize menu tracking maps
 	app.serverMenus = make(map[string]*systray.MenuItem)
@@ -275,75 +276,71 @@ func (a *App) watchConfigFile() {
 
 // cleanup performs cleanup operations
 func (a *App) cleanup() {
+	a.logger.Info("Cleaning up tray application")
+	if a.cancel != nil {
+		a.cancel()
+	}
 	if a.configWatcher != nil {
 		a.configWatcher.Close()
 	}
-	a.cancel()
+	if a.syncManager != nil {
+		a.syncManager.Stop()
+	}
 }
 
 func (a *App) onReady() {
-	systray.SetIcon(iconData)
-	// On macOS, also set as template icon for better system integration
-	if runtime.GOOS == osDarwin {
-		systray.SetTemplateIcon(iconData, iconData)
-	}
-	a.updateTooltip()
+	a.logger.Info("Tray is ready")
+	systray.SetTemplateIcon(iconData, iconData)
 
-	// --- Initialize Menu Items ---
+	// Set initial status
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
-	a.statusItem.Disable() // Initially disabled as it's just for display
-	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
+	a.startStopItem = systray.AddMenuItem("Stop Server", "Stop the proxy server")
 	systray.AddSeparator()
 
-	// --- Upstream & Quarantine Menus ---
-	a.upstreamServersMenu = systray.AddMenuItem("Upstream Servers", "Manage upstream servers")
+	// Upstream servers menu (dynamic)
+	a.upstreamServersMenu = systray.AddMenuItem("Upstream Servers", "Manage upstream MCP servers")
+
+	// Security quarantine menu (dynamic)
 	a.quarantineMenu = systray.AddMenuItem("Security Quarantine", "Manage quarantined servers")
 	systray.AddSeparator()
 
-	// --- Initialize Managers ---
+	// Initialize managers now that menu items are created
 	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
-	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
+	a.syncManager = NewSynchronizationManager(nil, a.menuManager, a.logger)
+	a.stateManager = NewServerStateManager(a.server, a.logger, a.syncManager)
+	a.syncManager.SetStateManager(a.stateManager) // Complete the circular dependency
 
-	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
 	a.menuManager.SetActionCallback(a.handleServerAction)
 
-	// --- Other Menu Items ---
-	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
+	// Other menu items
+	updateItem := systray.AddMenuItem("Check for Updates...", "Check for new application updates")
 	openConfigItem := systray.AddMenuItem("Open Config", "Open the configuration file")
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit", "Quit the application")
 
-	// --- Set Initial State & Start Sync ---
-	a.updateStatus()
-	if err := a.syncManager.SyncNow(); err != nil {
-		a.logger.Error("Initial menu sync failed", zap.Error(err))
-	}
+	// Start background tasks
 	a.syncManager.Start()
+	a.updateStatus()
 
-	// --- Click Handlers ---
+	// Handle clicks
 	go func() {
 		for {
 			select {
 			case <-a.startStopItem.ClickedCh:
 				a.handleStartStop()
 			case <-updateItem.ClickedCh:
-				go a.checkForUpdates()
+				a.checkForUpdates()
 			case <-openConfigItem.ClickedCh:
 				a.openConfig()
 			case <-quitItem.ClickedCh:
-				a.logger.Info("Quit item clicked, shutting down")
-				if a.shutdown != nil {
-					a.shutdown()
-				}
-				return
-			case <-a.ctx.Done():
-				return
+				systray.Quit()
 			}
 		}
 	}()
 
-	a.logger.Info("System tray is ready")
+	a.logger.Info("Tray application fully initialized")
+	a.menusInitialized = true
 }
 
 // updateTooltip updates the tooltip based on the server's running state
@@ -453,14 +450,28 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	// Update tooltip
 	a.updateTooltipFromStatusData(status)
 
-	// Update server menus using the manager (only if server is running)
+	// Update server menus using the manager
 	if a.syncManager != nil {
 		if actuallyRunning {
-			a.syncManager.SyncDelayed()
+			// Check if this is an upstream server change or force update notification
+			if message, ok := status["message"].(string); ok {
+				if strings.Contains(message, "upstream servers") || strings.Contains(message, "Upstream servers") ||
+					strings.Contains(message, "Force menu update") {
+					a.logger.Info("Detected server change or force update, forcing immediate menu sync",
+						zap.String("message", message))
+					// Force immediate sync for upstream server changes and forced updates
+					a.syncManager.SyncNow()
+				} else {
+					// Normal delayed sync for other changes
+					a.syncManager.SyncDelayed()
+				}
+			} else {
+				a.syncManager.SyncDelayed()
+			}
 		} else {
-			// Clear menus when server is stopped to avoid showing stale data
-			a.menuManager.UpdateUpstreamServersMenu([]map[string]interface{}{})
-			a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
+			// Server is stopped - trigger sync to update menus appropriately
+			// (This will clear upstream servers but keep quarantine servers visible)
+			a.syncManager.SyncNow()
 		}
 	}
 }
@@ -642,7 +653,7 @@ func (a *App) handleStartStop() {
 
 // onExit is called when the application is quitting
 func (a *App) onExit() {
-	a.logger.Info("Tray application exiting")
+	a.logger.Info("Tray is exiting")
 	a.cleanup()
 	if a.cancel != nil {
 		a.cancel()
@@ -946,6 +957,9 @@ func (a *App) handleServerAction(serverName, action string) {
 
 	case "unquarantine":
 		err = a.syncManager.HandleServerUnquarantine(serverName)
+
+	case "delete":
+		err = a.syncManager.HandleServerDelete(serverName)
 
 	default:
 		a.logger.Warn("Unknown server action requested", zap.String("action", action))

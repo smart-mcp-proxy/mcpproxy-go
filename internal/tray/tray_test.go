@@ -11,14 +11,15 @@ import (
 
 // MockServerInterface provides a mock implementation for testing
 type MockServerInterface struct {
-	running                   bool
-	listenAddress             string
-	allServers                []map[string]interface{}
-	quarantinedServers        []map[string]interface{}
-	upstreamStats             map[string]interface{}
-	statusCh                  chan interface{}
-	configPath                string
-	reloadConfigurationCalled bool
+	running                      bool
+	listenAddress                string
+	allServers                   []map[string]interface{}
+	quarantinedServers           []map[string]interface{}
+	upstreamStats                map[string]interface{}
+	statusCh                     chan interface{}
+	configPath                   string
+	reloadConfigurationCalled    bool
+	reloadConfigurationCallCount int
 }
 
 func NewMockServer() *MockServerInterface {
@@ -127,8 +128,32 @@ func (m *MockServerInterface) GetAllServers() ([]map[string]interface{}, error) 
 	return m.allServers, nil
 }
 
+func (m *MockServerInterface) DeleteServer(serverName string) error {
+	// Remove from allServers
+	for i, server := range m.allServers {
+		if name, ok := server["name"].(string); ok && name == serverName {
+			m.allServers = append(m.allServers[:i], m.allServers[i+1:]...)
+			break
+		}
+	}
+
+	// Remove from quarantinedServers if present
+	for i, server := range m.quarantinedServers {
+		if name, ok := server["name"].(string); ok && name == serverName {
+			m.quarantinedServers = append(m.quarantinedServers[:i], m.quarantinedServers[i+1:]...)
+			break
+		}
+	}
+
+	return nil
+}
+
+func (m *MockServerInterface) ForceMenuUpdate() {
+	// Mock implementation - no-op for testing
+}
+
 func (m *MockServerInterface) ReloadConfiguration() error {
-	m.reloadConfigurationCalled = true
+	m.reloadConfigurationCallCount++
 	return nil
 }
 
