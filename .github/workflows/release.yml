@@ -243,8 +243,24 @@ jobs:
           # Create formula file
           printf 'class Mcpproxy < Formula\n  desc "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers"\n  homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"\n  url "https://github.com/smart-mcp-proxy/mcpproxy-go/archive/refs/tags/v%s.tar.gz"\n  sha256 "%s"\n  license "MIT"\n  head "https://github.com/smart-mcp-proxy/mcpproxy-go.git"\n\n  depends_on "go" => :build\n\n  def install\n    system "go", "build", "-ldflags", "-s -w", "-o", "mcpproxy", "./cmd/mcpproxy"\n    bin.install "mcpproxy"\n  end\n\n  test do\n    assert_match version.to_s, shell_output("#{bin}/mcpproxy --version")\n  end\nend\n' "${VERSION}" "${SOURCE_SHA}" > Formula/mcpproxy.rb
 
-          echo "Formula created successfully"
+                    echo "Formula created successfully"
           cat Formula/mcpproxy.rb
 
           # Clean up
           rm -f *.tar.gz
+
+      - name: Commit and push changes
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mcpproxy.rb
+
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update mcpproxy to ${GITHUB_REF#refs/tags/v}"
+            git push
+            echo "Changes committed and pushed successfully"
+          fi
