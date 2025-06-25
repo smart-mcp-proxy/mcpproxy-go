@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,9 +43,13 @@ type Server struct {
 	httpServer *http.Server
 	running    bool
 	mu         sync.RWMutex
-	serverCtx  context.Context
-	cancelFunc context.CancelFunc
-	shutdown   bool // Guard against double shutdown
+
+	// Separate contexts for different lifecycles
+	appCtx       context.Context    // Application-wide context (only cancelled on shutdown)
+	appCancel    context.CancelFunc // Application-wide cancel function
+	serverCtx    context.Context    // HTTP server context (cancelled on stop/start)
+	serverCancel context.CancelFunc // HTTP server cancel function
+	shutdown     bool               // Guard against double shutdown
 
 	// Status reporting
 	status   Status
@@ -92,8 +97,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 		upstreamManager: upstreamManager,
 		cacheManager:    cacheManager,
 		truncator:       truncator,
-		serverCtx:       ctx,
-		cancelFunc:      cancel,
+		appCtx:          ctx,
+		appCancel:       cancel,
 		statusCh:        make(chan Status, 10), // Buffered channel for status updates
 		status: Status{
 			Phase:       "Initializing",
@@ -188,18 +193,18 @@ func (s *Server) backgroundInitialization() {
 		return
 	}
 
-	// Start background connection attempts
+	// Start background connection attempts using application context
 	s.updateStatus("Connecting", "Connecting to upstream servers...")
 	s.mu.RLock()
-	ctx := s.serverCtx
+	appCtx := s.appCtx // Use application context, not server context
 	s.mu.RUnlock()
-	go s.backgroundConnections(ctx)
+	go s.backgroundConnections(appCtx)
 
-	// Start background tool discovery and indexing
+	// Start background tool discovery and indexing using application context
 	s.mu.RLock()
-	ctx = s.serverCtx
+	appCtx = s.appCtx // Use application context, not server context
 	s.mu.RUnlock()
-	go s.backgroundToolIndexing(ctx)
+	go s.backgroundToolIndexing(appCtx)
 
 	// Only set "Ready" status if the server is not already running
 	// If server is running, don't override the "Running" status
@@ -430,7 +435,7 @@ func (s *Server) loadConfiguredServers() error {
 func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info("Starting MCP proxy server")
 
-	// Listen for context cancellation to trigger shutdown
+	// Handle graceful shutdown when context is cancelled (for full application shutdown only)
 	go func() {
 		<-ctx.Done()
 		s.logger.Info("Main context cancelled, shutting down server")
@@ -438,14 +443,20 @@ func (s *Server) Start(ctx context.Context) error {
 		if err := s.StopServer(); err != nil {
 			s.logger.Error("Error stopping server during context cancellation", zap.Error(err))
 		}
-		// Then shutdown the rest (only if not already shutdown)
+		// Then shutdown the rest (only for full application shutdown, not server restarts)
+		// We distinguish this by checking if the cancelled context is the application context
 		s.mu.Lock()
 		alreadyShutdown := s.shutdown
+		isAppContext := (ctx == s.appCtx)
 		s.mu.Unlock()
-		if !alreadyShutdown {
+
+		if !alreadyShutdown && isAppContext {
+			s.logger.Info("Application context cancelled, performing full shutdown")
 			if err := s.Shutdown(); err != nil {
 				s.logger.Error("Error during context-triggered shutdown", zap.Error(err))
 			}
+		} else if !isAppContext {
+			s.logger.Info("Server context cancelled, server stop completed")
 		}
 	}()
 
@@ -519,9 +530,9 @@ func (s *Server) Shutdown() error {
 	s.logger.Info("Shutting down MCP proxy server...")
 
 	// Cancel the server context to stop all background operations
-	if s.cancelFunc != nil {
+	if s.appCancel != nil {
 		s.logger.Info("Cancelling server context to stop background operations")
-		s.cancelFunc()
+		s.appCancel()
 	}
 
 	// Disconnect upstream servers
@@ -576,10 +587,82 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 	return stats
 }
 
+// GetAllServers returns information about all upstream servers for tray UI
+func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
+	// Check if storage manager is available
+	if s.storageManager == nil {
+		return []map[string]interface{}{}, nil
+	}
+
+	servers, err := s.storageManager.ListUpstreamServers()
+	if err != nil {
+		// Handle database closed gracefully
+		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
+			s.logger.Debug("Database not available for GetAllServers, returning empty list")
+			return []map[string]interface{}{}, nil
+		}
+		return nil, err
+	}
+
+	var result []map[string]interface{}
+	for _, server := range servers {
+		// Get connection status and tool count from upstream manager
+		var connected bool
+		var connecting bool
+		var lastError string
+		var toolCount int
+
+		if s.upstreamManager != nil {
+			if client, exists := s.upstreamManager.GetClient(server.Name); exists {
+				connectionStatus := client.GetConnectionStatus()
+				if c, ok := connectionStatus["connected"].(bool); ok {
+					connected = c
+				}
+				if c, ok := connectionStatus["connecting"].(bool); ok {
+					connecting = c
+				}
+				if e, ok := connectionStatus["last_error"].(string); ok {
+					lastError = e
+				}
+
+				if connected {
+					toolCount = s.getServerToolCount(server.Name)
+				}
+			}
+		}
+
+		result = append(result, map[string]interface{}{
+			"name":        server.Name,
+			"url":         server.URL,
+			"command":     server.Command,
+			"protocol":    server.Protocol,
+			"enabled":     server.Enabled,
+			"quarantined": server.Quarantined,
+			"created":     server.Created,
+			"connected":   connected,
+			"connecting":  connecting,
+			"tool_count":  toolCount,
+			"last_error":  lastError,
+		})
+	}
+
+	return result, nil
+}
+
 // GetQuarantinedServers returns information about quarantined servers for tray UI
 func (s *Server) GetQuarantinedServers() ([]map[string]interface{}, error) {
+	// Check if storage manager is available
+	if s.storageManager == nil {
+		return []map[string]interface{}{}, nil
+	}
+
 	quarantinedServers, err := s.storageManager.ListQuarantinedUpstreamServers()
 	if err != nil {
+		// Handle database closed gracefully
+		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
+			s.logger.Debug("Database not available for GetQuarantinedServers, returning empty list")
+			return []map[string]interface{}{}, nil
+		}
 		return nil, err
 	}
 
@@ -654,56 +737,6 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	return nil
 }
 
-// GetAllServers returns information about all servers for tray UI
-func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
-	servers, err := s.storageManager.ListUpstreamServers()
-	if err != nil {
-		return nil, err
-	}
-
-	var result []map[string]interface{}
-	for _, server := range servers {
-		// Get connection status and tool count
-		toolCount := 0
-		connected := false
-		connecting := false
-		lastError := ""
-
-		if client, exists := s.upstreamManager.GetClient(server.Name); exists {
-			connectionStatus := client.GetConnectionStatus()
-			if c, ok := connectionStatus["connected"].(bool); ok {
-				connected = c
-			}
-			if c, ok := connectionStatus["connecting"].(bool); ok {
-				connecting = c
-			}
-			if e, ok := connectionStatus["last_error"].(string); ok {
-				lastError = e
-			}
-
-			if connected {
-				toolCount = s.getServerToolCount(server.Name)
-			}
-		}
-
-		result = append(result, map[string]interface{}{
-			"name":        server.Name,
-			"url":         server.URL,
-			"command":     server.Command,
-			"protocol":    server.Protocol,
-			"enabled":     server.Enabled,
-			"quarantined": server.Quarantined,
-			"connected":   connected,
-			"connecting":  connecting,
-			"tool_count":  toolCount,
-			"last_error":  lastError,
-			"created":     server.Created,
-		})
-	}
-
-	return result, nil
-}
-
 // getServerToolCount returns the number of tools for a specific server
 func (s *Server) getServerToolCount(serverID string) int {
 	client, exists := s.upstreamManager.GetClient(serverID)
@@ -733,11 +766,11 @@ func (s *Server) StartServer(ctx context.Context) error {
 	}
 
 	// Cancel the old context before creating a new one to avoid race conditions
-	if s.cancelFunc != nil {
-		s.cancelFunc()
+	if s.serverCancel != nil {
+		s.serverCancel()
 	}
 
-	s.serverCtx, s.cancelFunc = context.WithCancel(ctx)
+	s.serverCtx, s.serverCancel = context.WithCancel(ctx)
 
 	go func() {
 		var serverError error
@@ -786,8 +819,8 @@ func (s *Server) StopServer() error {
 	s.updateStatus("Stopping", "Server is stopping...")
 
 	// Cancel the server context first
-	if s.cancelFunc != nil {
-		s.cancelFunc()
+	if s.serverCancel != nil {
+		s.serverCancel()
 	}
 
 	// Gracefully shutdown HTTP server if it exists
@@ -806,10 +839,13 @@ func (s *Server) StopServer() error {
 		s.httpServer = nil
 	}
 
+	// Set running to false immediately after server is shut down
 	s.running = false
 
-	// Notify about server stopped
+	// Notify about server stopped with explicit status update
 	s.updateStatus("Stopped", "Server has been stopped")
+
+	s.logger.Info("Server stop completed")
 
 	return nil
 }

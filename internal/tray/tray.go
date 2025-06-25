@@ -23,6 +23,8 @@ import (
 	"github.com/inconshreveable/go-update"
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
+
+	"mcpproxy-go/internal/server"
 )
 
 const (
@@ -367,29 +369,99 @@ func (a *App) updateTooltip() {
 
 // updateStatusFromData updates menu items based on real-time status data from the server
 func (a *App) updateStatusFromData(statusData interface{}) {
-	status, ok := statusData.(map[string]interface{})
+	// Handle different status data formats
+	var status map[string]interface{}
+	var ok bool
+
+	switch v := statusData.(type) {
+	case map[string]interface{}:
+		status = v
+		ok = true
+	case server.Status:
+		// Convert Status struct to map for consistent handling
+		status = map[string]interface{}{
+			"running":     a.server != nil && a.server.IsRunning(),
+			"listen_addr": "",
+			"phase":       v.Phase,
+			"message":     v.Message,
+		}
+		if a.server != nil {
+			status["listen_addr"] = a.server.GetListenAddress()
+		}
+		ok = true
+	default:
+		// Try to handle basic server state even with unexpected format
+		a.logger.Debug("Received status data in unexpected format, using fallback",
+			zap.String("type", fmt.Sprintf("%T", statusData)))
+
+		// Fallback to basic server state
+		if a.server != nil {
+			status = map[string]interface{}{
+				"running":     a.server.IsRunning(),
+				"listen_addr": a.server.GetListenAddress(),
+				"phase":       "Unknown",
+				"message":     "Status format unknown",
+			}
+			ok = true
+		} else {
+			// No server available, can't determine status
+			return
+		}
+	}
+
 	if !ok {
-		a.logger.Warn("Received status data in unexpected format")
+		a.logger.Warn("Unable to process status data, skipping update")
 		return
 	}
 
-	// Update running status and start/stop button
+	// Check if menu items are initialized to prevent nil pointer dereference
+	if a.statusItem == nil || a.startStopItem == nil {
+		a.logger.Debug("Menu items not initialized yet, skipping status update")
+		return
+	}
+
+	// Debug logging to track status updates
 	running, _ := status["running"].(bool)
-	if running {
+	phase, _ := status["phase"].(string)
+	serverRunning := a.server != nil && a.server.IsRunning()
+
+	a.logger.Debug("Updating tray status",
+		zap.Bool("status_running", running),
+		zap.Bool("server_is_running", serverRunning),
+		zap.String("phase", phase),
+		zap.Any("status_data", status))
+
+	// Use the actual server running state as the authoritative source
+	actuallyRunning := serverRunning
+
+	// Update running status and start/stop button
+	if actuallyRunning {
 		listenAddr, _ := status["listen_addr"].(string)
-		a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
+		if listenAddr != "" {
+			a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
+		} else {
+			a.statusItem.SetTitle("Status: Running")
+		}
 		a.startStopItem.SetTitle("Stop Server")
+		a.logger.Debug("Set tray to running state")
 	} else {
 		a.statusItem.SetTitle("Status: Stopped")
 		a.startStopItem.SetTitle("Start Server")
+		a.logger.Debug("Set tray to stopped state")
 	}
 
 	// Update tooltip
 	a.updateTooltipFromStatusData(status)
 
-	// Update server menus using the manager
+	// Update server menus using the manager (only if server is running)
 	if a.syncManager != nil {
-		a.syncManager.SyncDelayed()
+		if actuallyRunning {
+			a.syncManager.SyncDelayed()
+		} else {
+			// Clear menus when server is stopped to avoid showing stale data
+			a.menuManager.UpdateUpstreamServersMenu([]map[string]interface{}{})
+			a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
+		}
 	}
 }
 
@@ -466,6 +538,12 @@ func (a *App) updateStatus() {
 		return
 	}
 
+	// Check if menu items are initialized
+	if a.statusItem == nil {
+		a.logger.Debug("Menu items not initialized yet, skipping status update")
+		return
+	}
+
 	statusData := a.server.GetStatus()
 	a.updateStatusFromData(statusData)
 }
@@ -481,20 +559,85 @@ func (a *App) updateServersMenu() {
 func (a *App) handleStartStop() {
 	if a.server.IsRunning() {
 		a.logger.Info("Stopping server from tray")
+
+		// Immediately update UI to show stopping state
+		if a.statusItem != nil {
+			a.statusItem.SetTitle("Status: Stopping...")
+		}
+		if a.startStopItem != nil {
+			a.startStopItem.SetTitle("Stopping...")
+		}
+
+		// Stop the server
 		if err := a.server.StopServer(); err != nil {
 			a.logger.Error("Failed to stop server", zap.Error(err))
+			// Restore UI state on error
+			a.updateStatus()
+			return
 		}
+
+		// Wait for server to fully stop with timeout
+		go func() {
+			timeout := time.After(10 * time.Second)
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-timeout:
+					a.logger.Warn("Timeout waiting for server to stop, updating status anyway")
+					a.updateStatus()
+					return
+				case <-ticker.C:
+					if !a.server.IsRunning() {
+						a.logger.Info("Server stopped, updating UI")
+						a.updateStatus()
+						return
+					}
+				}
+			}
+		}()
 	} else {
 		a.logger.Info("Starting server from tray")
+
+		// Immediately update UI to show starting state
+		if a.statusItem != nil {
+			a.statusItem.SetTitle("Status: Starting...")
+		}
+		if a.startStopItem != nil {
+			a.startStopItem.SetTitle("Starting...")
+		}
+
+		// Start the server
 		go func() {
 			if err := a.server.StartServer(a.ctx); err != nil {
 				a.logger.Error("Failed to start server", zap.Error(err))
+				// Restore UI state on error
+				a.updateStatus()
+				return
+			}
+
+			// Wait for server to fully start with timeout
+			timeout := time.After(10 * time.Second)
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-timeout:
+					a.logger.Warn("Timeout waiting for server to start, updating status anyway")
+					a.updateStatus()
+					return
+				case <-ticker.C:
+					if a.server.IsRunning() {
+						a.logger.Info("Server started, updating UI")
+						a.updateStatus()
+						return
+					}
+				}
 			}
 		}()
 	}
-	// Give a moment for the state to change before updating status
-	time.Sleep(200 * time.Millisecond)
-	a.updateStatus()
 }
 
 // onExit is called when the application is quitting

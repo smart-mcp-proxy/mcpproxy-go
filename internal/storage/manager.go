@@ -54,6 +54,23 @@ func (m *Manager) GetDB() *bbolt.DB {
 	return nil
 }
 
+// isDatabaseOpen checks if the database is open and available
+func (m *Manager) isDatabaseOpen() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.db == nil || m.db.db == nil {
+		return false
+	}
+
+	// Test if database is actually usable by attempting a quick read
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		return nil
+	})
+
+	return err == nil
+}
+
 // Upstream operations
 
 // SaveUpstreamServer saves an upstream server configuration

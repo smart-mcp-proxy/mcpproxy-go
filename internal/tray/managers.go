@@ -5,6 +5,7 @@ package tray
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,48 +68,68 @@ func (m *ServerStateManager) RefreshState() error {
 	return nil
 }
 
-// GetAllServers returns all servers (cached with refresh if needed)
+// GetAllServers returns cached or fresh server list
 func (m *ServerStateManager) GetAllServers() ([]map[string]interface{}, error) {
 	m.mu.RLock()
-	// Check if we need to refresh (older than 5 seconds)
-	needRefresh := time.Since(m.lastUpdate) > 5*time.Second
-	m.mu.RUnlock()
-
-	if needRefresh {
-		if err := m.RefreshState(); err != nil {
-			return nil, err
-		}
-	}
-
-	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Return a copy to prevent external modification
-	result := make([]map[string]interface{}, len(m.allServers))
-	copy(result, m.allServers)
-	return result, nil
+	// Return cached data if available and recent
+	if time.Since(m.lastUpdate) < 2*time.Second && len(m.allServers) > 0 {
+		return m.allServers, nil
+	}
+
+	// Get fresh data but handle database errors gracefully
+	servers, err := m.server.GetAllServers()
+	if err != nil {
+		// If database is closed, return cached data if available
+		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
+			if len(m.allServers) > 0 {
+				m.logger.Debug("Database not available, returning cached server data")
+				return m.allServers, nil
+			}
+			// No cached data available, return empty slice
+			m.logger.Debug("Database not available and no cached data, returning empty server list")
+			return []map[string]interface{}{}, nil
+		}
+		return nil, err
+	}
+
+	// Cache the fresh data
+	m.allServers = servers
+	m.lastUpdate = time.Now()
+	return servers, nil
 }
 
-// GetQuarantinedServers returns quarantined servers (cached with refresh if needed)
+// GetQuarantinedServers returns cached or fresh quarantined server list
 func (m *ServerStateManager) GetQuarantinedServers() ([]map[string]interface{}, error) {
-	m.mu.RLock()
-	// Check if we need to refresh (older than 5 seconds)
-	needRefresh := time.Since(m.lastUpdate) > 5*time.Second
-	m.mu.RUnlock()
-
-	if needRefresh {
-		if err := m.RefreshState(); err != nil {
-			return nil, err
-		}
-	}
-
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Return a copy to prevent external modification
-	result := make([]map[string]interface{}, len(m.quarantinedServers))
-	copy(result, m.quarantinedServers)
-	return result, nil
+	// Return cached data if available and recent
+	if time.Since(m.lastUpdate) < 2*time.Second && len(m.quarantinedServers) >= 0 {
+		return m.quarantinedServers, nil
+	}
+
+	// Get fresh data but handle database errors gracefully
+	servers, err := m.server.GetQuarantinedServers()
+	if err != nil {
+		// If database is closed, return cached data if available
+		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
+			if len(m.quarantinedServers) >= 0 {
+				m.logger.Debug("Database not available, returning cached quarantine data")
+				return m.quarantinedServers, nil
+			}
+			// No cached data available, return empty slice
+			m.logger.Debug("Database not available and no cached data, returning empty quarantine list")
+			return []map[string]interface{}{}, nil
+		}
+		return nil, err
+	}
+
+	// Cache the fresh data
+	m.quarantinedServers = servers
+	m.lastUpdate = time.Now()
+	return servers, nil
 }
 
 // QuarantineServer quarantines a server and ensures all state is synchronized
@@ -575,14 +596,31 @@ func (m *SynchronizationManager) syncLoop() {
 func (m *SynchronizationManager) performSync() error {
 	m.logger.Debug("Performing synchronization")
 
-	// Get current state
+	// Check if the state manager's server is available and running
+	// If not, skip the sync to avoid database errors
+	if m.stateManager.server != nil && !m.stateManager.server.IsRunning() {
+		m.logger.Debug("Server is stopped, skipping synchronization")
+		return nil
+	}
+
+	// Get current state with error handling for database issues
 	allServers, err := m.stateManager.GetAllServers()
 	if err != nil {
+		// Check if it's a database closed error and handle gracefully
+		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
+			m.logger.Debug("Database not available, skipping synchronization")
+			return nil
+		}
 		return fmt.Errorf("failed to get all servers: %w", err)
 	}
 
 	quarantinedServers, err := m.stateManager.GetQuarantinedServers()
 	if err != nil {
+		// Check if it's a database closed error and handle gracefully
+		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
+			m.logger.Debug("Database not available for quarantine data, skipping synchronization")
+			return nil
+		}
 		return fmt.Errorf("failed to get quarantined servers: %w", err)
 	}
 
