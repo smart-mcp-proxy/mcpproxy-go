@@ -3,7 +3,9 @@
 package tray
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -506,6 +508,15 @@ func (a *App) onExit() {
 
 // checkForUpdates checks for new releases on GitHub
 func (a *App) checkForUpdates() {
+	// Check if auto-update is disabled by environment variable
+	if os.Getenv("MCPPROXY_DISABLE_AUTO_UPDATE") == "true" {
+		a.logger.Info("Auto-update disabled by environment variable")
+		return
+	}
+
+	// Check if notification-only mode is enabled
+	notifyOnly := os.Getenv("MCPPROXY_UPDATE_NOTIFY_ONLY") == "true"
+
 	a.statusItem.SetTitle("Checking for updates...")
 	defer a.updateStatus() // Restore original status after check
 
@@ -518,6 +529,17 @@ func (a *App) checkForUpdates() {
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
 	if semver.Compare("v"+a.version, "v"+latestVersion) >= 0 {
 		a.logger.Info("You are running the latest version", zap.String("version", a.version))
+		return
+	}
+
+	if notifyOnly {
+		a.logger.Info("Update available - notification only mode",
+			zap.String("current", a.version),
+			zap.String("latest", latestVersion),
+			zap.String("url", fmt.Sprintf("https://github.com/%s/releases/tag/%s", repo, release.TagName)))
+
+		// You could add desktop notification here if desired
+		a.statusItem.SetTitle(fmt.Sprintf("Update available: %s", latestVersion))
 		return
 	}
 
@@ -550,13 +572,51 @@ func (a *App) getLatestRelease() (*GitHubRelease, error) {
 
 // findAssetURL finds the correct asset URL for the current system
 func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
-	suffix := fmt.Sprintf("%s-%s.zip", runtime.GOOS, runtime.GOARCH)
+	// Check if this is a Homebrew installation to avoid conflicts
+	if a.isHomebrewInstallation() {
+		return "", fmt.Errorf("auto-update disabled for Homebrew installations - use 'brew upgrade mcpproxy' instead")
+	}
+
+	// Determine file extension based on platform
+	var extension string
+	switch runtime.GOOS {
+	case "windows":
+		extension = ".zip"
+	default: // macOS, Linux
+		extension = ".tar.gz"
+	}
+
+	// Try latest assets first (for website integration)
+	latestSuffix := fmt.Sprintf("latest-%s-%s%s", runtime.GOOS, runtime.GOARCH, extension)
 	for _, asset := range release.Assets {
-		if strings.HasSuffix(asset.Name, suffix) {
+		if strings.HasSuffix(asset.Name, latestSuffix) {
 			return asset.BrowserDownloadURL, nil
 		}
 	}
-	return "", fmt.Errorf("no suitable asset found for %s", suffix)
+
+	// Fallback to versioned assets
+	versionedSuffix := fmt.Sprintf("-%s-%s%s", runtime.GOOS, runtime.GOARCH, extension)
+	for _, asset := range release.Assets {
+		if strings.HasSuffix(asset.Name, versionedSuffix) {
+			return asset.BrowserDownloadURL, nil
+		}
+	}
+
+	return "", fmt.Errorf("no suitable asset found for %s-%s (tried %s and %s)",
+		runtime.GOOS, runtime.GOARCH, latestSuffix, versionedSuffix)
+}
+
+// isHomebrewInstallation checks if this is a Homebrew installation
+func (a *App) isHomebrewInstallation() bool {
+	execPath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+
+	// Check if running from Homebrew path
+	return strings.Contains(execPath, "/opt/homebrew/") ||
+		strings.Contains(execPath, "/usr/local/Homebrew/") ||
+		strings.Contains(execPath, "/home/linuxbrew/")
 }
 
 // downloadAndApplyUpdate downloads and applies the update
@@ -569,6 +629,8 @@ func (a *App) downloadAndApplyUpdate(url string) error {
 
 	if strings.HasSuffix(url, ".zip") {
 		return a.applyZipUpdate(resp.Body)
+	} else if strings.HasSuffix(url, ".tar.gz") {
+		return a.applyTarGzUpdate(resp.Body)
 	}
 
 	return update.Apply(resp.Body, update.Options{})
@@ -614,6 +676,54 @@ func (a *App) applyZipUpdate(body io.Reader) error {
 	}
 
 	return fmt.Errorf("no file found in zip archive to apply")
+}
+
+// applyTarGzUpdate extracts and applies an update from a tar.gz archive
+func (a *App) applyTarGzUpdate(body io.Reader) error {
+	// For tar.gz files, we need to extract and find the binary
+	tmpfile, err := os.CreateTemp("", "update-*.tar.gz")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpfile.Name())
+	defer tmpfile.Close()
+
+	_, err = io.Copy(tmpfile, body)
+	if err != nil {
+		return err
+	}
+
+	// Open the tar.gz file and extract the binary
+	tmpfile.Seek(0, 0)
+
+	gzr, err := gzip.NewReader(tmpfile)
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		// Look for the mcpproxy binary (could be mcpproxy or mcpproxy.exe)
+		if strings.HasSuffix(header.Name, "mcpproxy") || strings.HasSuffix(header.Name, "mcpproxy.exe") {
+			executablePath, err := os.Executable()
+			if err != nil {
+				return err
+			}
+
+			return update.Apply(tr, update.Options{TargetPath: executablePath})
+		}
+	}
+
+	return fmt.Errorf("no mcpproxy binary found in tar.gz archive")
 }
 
 // openConfig opens the configuration file in the default editor

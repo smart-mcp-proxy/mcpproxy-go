@@ -2,175 +2,193 @@
 
 This document describes the auto-update functionality and release automation system implemented for mcpproxy.
 
-## Features
+## Update Modes
 
-### 1. Auto-Update via System Tray
+### 🔄 Auto-Update (Default - Recommended)
 
-- **Menu Integration**: "Check for Updates…" option in the system tray menu
-- **Automatic Checks**: Daily background checks for new releases (when tray is enabled)
-- **Seamless Updates**: Downloads and applies updates automatically
-- **Version Validation**: Uses semantic versioning for update detection
-- **Cross-Platform**: Works on macOS, Windows, and Linux
-
-### 2. Release Automation
-
-- **GitHub Actions**: Automated building and releasing on git tags
-- **GoReleaser**: Cross-platform binary generation
-- **Package Managers**: Optional integration with Homebrew, Winget, and Linux repos
-- **Docker Images**: Optional container image publishing
-
-## Usage
-
-### Enable System Tray (for Auto-Update)
+- **Automatic Updates**: Downloads and applies updates automatically
+- **Daily Checks**: Background checks every 24 hours
+- **Manual Checks**: "Check for Updates..." in system tray
+- **Smart Detection**: Avoids conflicts with package managers
 
 ```bash
-# Start with system tray enabled (default)
+# Default mode - auto-update enabled
+./mcpproxy --tray=true
+```
+
+### 🚫 Disabled Mode
+
+- **No Updates**: Completely disables update checking
+- **Manual Only**: User must update manually
+
+```bash
+# Disable auto-update completely
+export MCPPROXY_DISABLE_AUTO_UPDATE=true
 ./mcpproxy --tray=true
 
-# Or disable tray
-./mcpproxy --tray=false
+# Or add to shell profile for permanent setting
+echo 'export MCPPROXY_DISABLE_AUTO_UPDATE=true' >> ~/.zshrc
 ```
 
-### Manual Update Check
+### 🔔 Notification-Only Mode
 
-When the system tray is running, right-click the tray icon and select "Check for Updates…".
-
-### Release Process
-
-1. **Create a Release**:
-   ```bash
-   # Tag a new version (triggers release workflow)
-   git tag v1.0.0
-   git push origin v1.0.0
-   ```
-
-2. **The GitHub Action will**:
-   - Run tests
-   - Build cross-platform binaries
-   - Create GitHub release with assets
-   - Optionally update package managers
-
-### Build with Version Info
+- **Check Only**: Checks for updates but doesn't download
+- **User Choice**: Notifies user, lets them decide
+- **Log Messages**: Shows update info in logs
 
 ```bash
-# Using the build script
-./scripts/build.sh v1.0.0
-
-# Manual build with version injection
-go build -ldflags "-X main.version=v1.0.0" ./cmd/mcpproxy
-
-# Check version
-./mcpproxy --version
+# Notification-only mode
+export MCPPROXY_UPDATE_NOTIFY_ONLY=true
+./mcpproxy --tray=true
 ```
+
+## Package Manager Integration
+
+### 🍺 Homebrew (macOS)
+
+Auto-update is **automatically disabled** when installed via Homebrew to prevent conflicts:
+
+```bash
+# Homebrew installation - auto-update disabled automatically
+brew install smart-mcp-proxy/tap/mcpproxy
+
+# Use Homebrew for updates
+brew upgrade mcpproxy
+```
+
+### 📦 Other Package Managers
+
+The system detects common package manager paths and disables auto-update accordingly.
+
+## Technical Details
+
+### Update Process Flow
+
+```
+1. Check for Updates (Daily timer or manual click)
+2. Query GitHub API for latest release
+3. Compare versions using semantic versioning
+4. Detect installation type (standalone vs package manager)
+5. Download appropriate archive for OS/architecture
+6. Extract binary from archive
+7. Replace current executable atomically
+8. Restart application
+```
+
+### File Format Support
+
+- **Windows**: `.zip` archives
+- **macOS**: `.tar.gz` archives  
+- **Linux**: `.tar.gz` archives
+
+### Asset Detection Priority
+
+1. **Latest Assets**: `mcpproxy-latest-{os}-{arch}.{ext}`
+2. **Versioned Assets**: `mcpproxy-{version}-{os}-{arch}.{ext}`
+
+### Security Features
+
+- **HTTPS Only**: All downloads use HTTPS
+- **Atomic Updates**: Safe binary replacement with rollback
+- **Version Validation**: Semantic version checking prevents downgrades
+- **Package Manager Detection**: Prevents conflicts with system package managers
 
 ## Configuration
 
-### Repository Settings
+### Environment Variables
 
-Update these files to match your repository:
+| Variable | Values | Description |
+|----------|---------|-------------|
+| `MCPPROXY_DISABLE_AUTO_UPDATE` | `true`/`false` | Completely disable auto-update |
+| `MCPPROXY_UPDATE_NOTIFY_ONLY` | `true`/`false` | Check for updates but don't download |
 
-1. **internal/tray/tray.go**:
-   ```go
-   const (
-       repo = "smart-mcp-proxy/mcpproxy-go" // Actual repository
-   )
-   ```
-
-2. **.goreleaser.yaml**:
-   ```yaml
-   release:
-     github:
-       owner: smart-mcp-proxy  # Actual organization
-       name: mcpproxy-go
-   ```
-
-3. **Workflow files** (`.github/workflows/*.yml`):
-   - Repository references are configured correctly
-
-### GitHub Token
-
-The release workflow uses `GITHUB_TOKEN` which is automatically provided by GitHub Actions. No additional setup needed.
-
-## Architecture
-
-### Auto-Update Flow
+### System Tray Menu
 
 ```
-1. System Tray Menu Click / Daily Timer
-2. Query GitHub API for latest release
-3. Compare versions using semver
-4. Download appropriate binary for OS/arch
-5. Apply update using go-update library
-6. Restart application (OS handles restart via LaunchAgent/systemd/etc.)
+mcpproxy
+├── Status: Running (localhost:8080)
+├── ─────────────────────────────
+├── Start/Stop Server
+├── ─────────────────────────────  
+├── Check for Updates...          ← Manual update check
+│   ├── Auto-update: Enabled      ← Shows current mode
+│   └── [Disabled for Homebrew]   ← If package manager detected
+├── ─────────────────────────────
+└── Quit
 ```
-
-### Release Asset Naming
-
-GoReleaser creates assets with this naming convention:
-```
-mcpproxy_v1.0.0_darwin_x86_64.tar.gz
-mcpproxy_v1.0.0_linux_x86_64.tar.gz
-mcpproxy_v1.0.0_windows_x86_64.zip
-```
-
-The auto-updater automatically detects the correct asset for the current platform.
-
-## Platform-Specific Notes
-
-### macOS
-- App should be bundled in `.app` for proper tray functionality
-- LaunchAgent can restart the app after updates
-- Consider code signing for distribution
-
-### Windows
-- Use `-H windowsgui` build flag to avoid console window
-- Registry Run key can restart the app after updates
-- Consider code signing for SmartScreen
-
-### Linux
-- Requires display server with system tray support
-- systemd user service can restart the app after updates
-- See `scripts/mcpproxy.service` for systemd integration
-
-## Security Considerations
-
-- **HTTPS Only**: All GitHub API and download requests use HTTPS
-- **Checksum Verification**: GoReleaser generates checksums for all assets
-- **Version Validation**: Semantic version validation prevents downgrade attacks
-- **Atomic Updates**: go-update library provides atomic binary replacement with rollback
 
 ## Troubleshooting
 
-### Update Fails
-- Check network connectivity
-- Verify GitHub repository access
-- Check logs for specific error messages
+### Common Issues
 
-### Tray Not Showing
-- Ensure display server supports system tray
-- Check if other tray applications work
-- Try running without `--tray=false`
+#### ❌ "no suitable asset found for darwin-arm64.zip"
+**Fixed**: Now looks for correct `.tar.gz` files on macOS/Linux
 
-### Version Mismatch
-- Ensure proper semantic versioning (v1.0.0 format)
-- Check that git tags match expected format
-- Verify build includes version injection
+#### ⚠️ "auto-update disabled for Homebrew installations"
+**Expected**: Prevents conflicts with `brew upgrade`
 
-## Development
+#### 🔄 Updates Not Working
+1. Check network connectivity
+2. Verify GitHub access: `curl -I https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest`
+3. Check logs for specific errors
+4. Try notification-only mode to debug
 
-### Testing Releases
-Use the PR build workflow to test cross-platform compilation without creating actual releases.
+### Manual Update Methods
 
-### Local Testing
+#### Standalone Installation
 ```bash
-# Test build script
-./scripts/build.sh v0.1.0-test
-
-# Test with specific version
-go run -ldflags "-X main.version=v0.1.0-test" ./cmd/mcpproxy --version
+# Download from GitHub releases
+curl -L -o mcpproxy.tar.gz https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz
+tar -xzf mcpproxy.tar.gz
+chmod +x mcpproxy
+./mcpproxy --version
 ```
 
-### Dependencies
-- `fyne.io/systray` - System tray functionality
-- `github.com/inconshreveable/go-update` - Binary update mechanism
-- `golang.org/x/mod/semver` - Semantic version comparison 
+#### Homebrew
+```bash
+brew upgrade mcpproxy
+```
+
+#### Go Install (Development)
+```bash
+go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest
+```
+
+## Best Practices
+
+### For End Users
+- **Use Default Mode**: Auto-update provides the best experience
+- **Homebrew Users**: Let Homebrew handle updates
+- **Corporate/Restricted**: Use notification-only mode
+
+### For Developers
+- **Test Updates**: Use development builds before releases
+- **Version Tags**: Follow semantic versioning (v1.0.0)
+- **Asset Naming**: Maintain consistent asset naming conventions
+
+### For System Administrators
+- **Disable Auto-Update**: Use `MCPPROXY_DISABLE_AUTO_UPDATE=true` for controlled environments
+- **Monitor Logs**: Watch for update notifications and errors
+- **Network Access**: Ensure GitHub API access for update checks
+
+## Release Process
+
+### Creating a Release
+```bash
+# Tag a new version
+git tag v1.0.0
+git push origin v1.0.0
+
+# GitHub Actions will:
+# 1. Build cross-platform binaries
+# 2. Create both versioned and latest assets
+# 3. Create GitHub release with download links
+```
+
+### Asset Structure
+Each release includes:
+- `mcpproxy-v1.0.0-linux-amd64.tar.gz` (versioned)
+- `mcpproxy-latest-linux-amd64.tar.gz` (latest)
+- Similar files for all supported platforms
+
+The auto-updater prioritizes "latest" assets for consistency with website download links. 
