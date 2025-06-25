@@ -99,13 +99,13 @@ jobs:
       - name: Upload versioned archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: archive-versioned-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: versioned-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
       - name: Upload latest archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: archive-latest-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: latest-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
   release:
@@ -123,16 +123,24 @@ jobs:
         with:
           path: dist
 
-      - name: List artifacts
+      - name: Reorganize files
         run: |
-          echo "Downloaded artifacts:"
-          find dist -type f -name "*mcpproxy*" -exec ls -la {} \;
+          # Create a flat structure to avoid duplicates
+          mkdir -p release-files
+          find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
+            filename=$(basename "$file")
+            cp "$file" "release-files/$filename"
+          done
+
+      - name: List files for upload
+        run: |
+          echo "Files to upload:"
+          ls -la release-files/
 
       - name: Create release with binaries
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*/*
+          files: release-files/*
           body: |
             ## mcpproxy ${{ github.ref_name }}
 
