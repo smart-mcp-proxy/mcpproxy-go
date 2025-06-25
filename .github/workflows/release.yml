@@ -4,6 +4,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -14,21 +17,25 @@ jobs:
             goarch: amd64
             cgo: "0"
             name: mcpproxy-linux-amd64
+            archive_format: tar.gz
           - os: ubuntu-latest
             goos: windows
             goarch: amd64
             cgo: "0"
             name: mcpproxy-windows-amd64.exe
+            archive_format: zip
           - os: macos-latest
             goos: darwin
             goarch: amd64
             cgo: "1"
             name: mcpproxy-darwin-amd64
+            archive_format: tar.gz
           - os: macos-latest
             goos: darwin
             goarch: arm64
             cgo: "1"
             name: mcpproxy-darwin-arm64
+            archive_format: tar.gz
 
     runs-on: ${{ matrix.os }}
 
@@ -54,7 +61,7 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Build binary
+      - name: Build binary and create archives
         env:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
@@ -63,25 +70,56 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/}
           LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION}"
 
-          # Build versioned binary
+          # Determine clean binary name
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            CLEAN_BINARY="mcpproxy.exe"
+          else
+            CLEAN_BINARY="mcpproxy"
+          fi
+
+          # Build binary with original name for individual download
           go build -ldflags "${LDFLAGS}" -o ${{ matrix.name }} ./cmd/mcpproxy
 
+          # Create clean binary for archive
+          go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
+
+          # Create archive with version info
+          ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          LATEST_ARCHIVE_BASE="mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+          if [ "${{ matrix.archive_format }}" = "zip" ]; then
+            # Create versioned archive
+            zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+            # Create latest archive
+            zip "${LATEST_ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+          else
+            # Create versioned archive
+            tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
+            # Create latest archive  
+            tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
+          fi
+
           # Create latest binary (copy of the versioned one)
-          LATEST_NAME=$(echo "${{ matrix.name }}" | sed 's/-[^-]*-/-latest-/' | sed 's/\.exe$/-latest.exe/')
+          LATEST_NAME=$(echo "${{ matrix.name }}" | sed 's/-[^-]*-/-latest-/')
           cp ${{ matrix.name }} ${LATEST_NAME}
 
       - name: Upload versioned binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
+          name: binary-${{ matrix.name }}
           path: ${{ matrix.name }}
 
       - name: Upload latest binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-latest
-          path: |
-            mcpproxy-latest-*
+          name: binary-${{ matrix.name }}-latest
+          path: mcpproxy-latest-*
+
+      - name: Upload versioned archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*.${{ matrix.archive_format }}
 
   release:
     needs: build
@@ -107,7 +145,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*/mcpproxy-*
+            dist/*/*
           body: |
             ## mcpproxy ${{ github.ref_name }}
 
@@ -115,13 +153,29 @@ jobs:
 
             ### Quick Download Links
 
-            **Latest Version (auto-updates):**
+            **Archives (Recommended - Clean Binary Names):**
+
+            *Latest Version (auto-updates):*
+            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) 
+            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.zip)
+            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz)
+            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
+
+            *This Version (${{ github.ref_name }}):*
+            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-linux-amd64.tar.gz)
+            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-windows-amd64.zip)
+            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-amd64.tar.gz)
+            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-arm64.tar.gz)
+
+            **Individual Binaries:**
+
+            *Latest Version (auto-updates):*
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64)
             - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.exe)  
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64)
 
-            **This Version (${{ github.ref_name }}):**
+            *This Version (${{ github.ref_name }}):*
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-linux-amd64)
             - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-windows-amd64.exe)
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-darwin-amd64)
@@ -129,6 +183,13 @@ jobs:
 
             ### Installation
 
+            **From Archive (Recommended):**
+            1. Download the appropriate archive for your platform using the links above
+            2. Extract the archive: `tar -xzf mcpproxy-*.tar.gz` (Linux/macOS) or unzip (Windows)
+            3. Make it executable: `chmod +x mcpproxy` (Linux/macOS)
+            4. Run `./mcpproxy` to start
+
+            **From Individual Binary:**
             1. Download the appropriate binary for your platform using the links above
             2. Make it executable: `chmod +x mcpproxy-*` (Linux/macOS)
             3. Run `./mcpproxy-*` to start
