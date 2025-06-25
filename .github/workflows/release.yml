@@ -77,9 +77,6 @@ jobs:
             CLEAN_BINARY="mcpproxy"
           fi
 
-          # Build binary with original name for individual download
-          go build -ldflags "${LDFLAGS}" -o ${{ matrix.name }} ./cmd/mcpproxy
-
           # Create clean binary for archive
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
@@ -99,27 +96,17 @@ jobs:
             tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
           fi
 
-          # Create latest binary (copy of the versioned one)
-          LATEST_NAME=$(echo "${{ matrix.name }}" | sed 's/-[^-]*-/-latest-/')
-          cp ${{ matrix.name }} ${LATEST_NAME}
-
-      - name: Upload versioned binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ matrix.name }}
-          path: ${{ matrix.name }}
-
-      - name: Upload latest binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ matrix.name }}-latest
-          path: mcpproxy-latest-*
-
       - name: Upload versioned archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: mcpproxy-*.${{ matrix.archive_format }}
+          name: archive-versioned-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
+
+      - name: Upload latest archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-latest-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
   release:
     needs: build
@@ -151,48 +138,26 @@ jobs:
 
             Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
 
-            ### Quick Download Links
+            ### Download Links
 
-            **Archives (Recommended - Clean Binary Names):**
-
-            *Latest Version (auto-updates):*
+            **Latest Version (auto-updates):**
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) 
             - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.zip)
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
-            *This Version (${{ github.ref_name }}):*
+            **This Version (${{ github.ref_name }}):**
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-linux-amd64.tar.gz)
             - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-windows-amd64.zip)
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-amd64.tar.gz)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-arm64.tar.gz)
 
-            **Individual Binaries:**
-
-            *Latest Version (auto-updates):*
-            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64)
-            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.exe)  
-            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64)
-            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64)
-
-            *This Version (${{ github.ref_name }}):*
-            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-linux-amd64)
-            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-windows-amd64.exe)
-            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-darwin-amd64)
-            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-darwin-arm64)
-
             ### Installation
 
-            **From Archive (Recommended):**
             1. Download the appropriate archive for your platform using the links above
             2. Extract the archive: `tar -xzf mcpproxy-*.tar.gz` (Linux/macOS) or unzip (Windows)
             3. Make it executable: `chmod +x mcpproxy` (Linux/macOS)
             4. Run `./mcpproxy` to start
-
-            **From Individual Binary:**
-            1. Download the appropriate binary for your platform using the links above
-            2. Make it executable: `chmod +x mcpproxy-*` (Linux/macOS)
-            3. Run `./mcpproxy-*` to start
 
             ### Platform Support
 
