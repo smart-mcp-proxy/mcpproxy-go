@@ -22,9 +22,10 @@ const (
 
 // ServerStateManager manages server state synchronization between storage, config, and menu
 type ServerStateManager struct {
-	server ServerInterface
-	logger *zap.SugaredLogger
-	mu     sync.RWMutex
+	server      ServerInterface
+	logger      *zap.SugaredLogger
+	mu          sync.RWMutex
+	syncManager *SynchronizationManager
 
 	// Current state tracking
 	allServers         []map[string]interface{}
@@ -33,10 +34,11 @@ type ServerStateManager struct {
 }
 
 // NewServerStateManager creates a new server state manager
-func NewServerStateManager(server ServerInterface, logger *zap.SugaredLogger) *ServerStateManager {
+func NewServerStateManager(server ServerInterface, logger *zap.SugaredLogger, syncManager *SynchronizationManager) *ServerStateManager {
 	return &ServerStateManager{
-		server: server,
-		logger: logger,
+		server:      server,
+		logger:      logger,
+		syncManager: syncManager,
 	}
 }
 
@@ -73,8 +75,8 @@ func (m *ServerStateManager) GetAllServers() ([]map[string]interface{}, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Return cached data if available and recent
-	if time.Since(m.lastUpdate) < 2*time.Second && len(m.allServers) > 0 {
+	// Return cached data if available and recent (balanced cache time for responsive status)
+	if time.Since(m.lastUpdate) < 1*time.Second && len(m.allServers) > 0 {
 		return m.allServers, nil
 	}
 
@@ -105,8 +107,8 @@ func (m *ServerStateManager) GetQuarantinedServers() ([]map[string]interface{}, 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Return cached data if available and recent
-	if time.Since(m.lastUpdate) < 2*time.Second && len(m.quarantinedServers) >= 0 {
+	// Return cached data if available and recent (balanced cache time for responsive status)
+	if time.Since(m.lastUpdate) < 1*time.Second && len(m.quarantinedServers) >= 0 {
 		return m.quarantinedServers, nil
 	}
 
@@ -143,15 +145,14 @@ func (m *ServerStateManager) QuarantineServer(serverName string, quarantined boo
 		return fmt.Errorf("failed to quarantine server: %w", err)
 	}
 
-	// Force state refresh immediately after the change
-	if err := m.RefreshState(); err != nil {
-		m.logger.Error("Failed to refresh state after quarantine change", zap.Error(err))
-		// Don't return error here as the quarantine operation itself succeeded
-	}
-
-	m.logger.Info("Server quarantine status updated successfully",
+	m.logger.Info("Server quarantine status updated successfully, triggering immediate sync.",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
+
+	// Rather than waiting for file watcher, trigger sync immediately
+	if m.syncManager != nil {
+		m.syncManager.SyncNow()
+	}
 
 	return nil
 }
@@ -165,13 +166,13 @@ func (m *ServerStateManager) UnquarantineServer(serverName string) error {
 		return fmt.Errorf("failed to unquarantine server: %w", err)
 	}
 
-	// Force state refresh immediately after the change
-	if err := m.RefreshState(); err != nil {
-		m.logger.Error("Failed to refresh state after unquarantine change", zap.Error(err))
-		// Don't return error here as the unquarantine operation itself succeeded
-	}
+	m.logger.Info("Server unquarantine completed successfully, triggering immediate sync.",
+		zap.String("server", serverName))
 
-	m.logger.Info("Server unquarantine completed successfully", zap.String("server", serverName))
+	// Rather than waiting for file watcher, trigger sync immediately
+	if m.syncManager != nil {
+		m.syncManager.SyncNow()
+	}
 
 	return nil
 }
@@ -192,15 +193,32 @@ func (m *ServerStateManager) EnableServer(serverName string, enabled bool) error
 		return fmt.Errorf("failed to %s server: %w", action, err)
 	}
 
-	// Force state refresh immediately after the change
-	if err := m.RefreshState(); err != nil {
-		m.logger.Error("Failed to refresh state after enable change", zap.Error(err))
-		// Don't return error here as the enable operation itself succeeded
+	m.logger.Info("Successfully persisted server state change. Triggering immediate sync.",
+		zap.String("server", serverName))
+
+	// Rather than waiting for file watcher, trigger sync immediately
+	if m.syncManager != nil {
+		m.syncManager.SyncNow()
 	}
 
-	m.logger.Info("Server enable status updated successfully",
-		zap.String("server", serverName),
-		zap.String("action", action))
+	return nil
+}
+
+// DeleteServer deletes a server and ensures all state is synchronized
+func (m *ServerStateManager) DeleteServer(serverName string) error {
+	m.logger.Info("DeleteServer called", zap.String("server", serverName))
+
+	// Delete the server
+	if err := m.server.DeleteServer(serverName); err != nil {
+		return fmt.Errorf("failed to delete server: %w", err)
+	}
+
+	m.logger.Info("Server deletion completed successfully, triggering immediate sync.", zap.String("server", serverName))
+
+	// Rather than waiting for file watcher, trigger sync immediately
+	if m.syncManager != nil {
+		m.syncManager.SyncNow()
+	}
 
 	return nil
 }
@@ -324,6 +342,20 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 	// --- Update Title ---
 	quarantineCount := len(quarantinedServers)
 	menuTitle := fmt.Sprintf("Security Quarantine (%d)", quarantineCount)
+
+	m.logger.Info("Updating quarantine menu",
+		zap.Int("quarantined_count", quarantineCount),
+		zap.String("menu_title", menuTitle))
+
+	// Log quarantined servers for debugging
+	for i, server := range quarantinedServers {
+		if name, ok := server["name"].(string); ok {
+			m.logger.Debug("Quarantined server found",
+				zap.Int("index", i),
+				zap.String("server_name", name))
+		}
+	}
+
 	if m.quarantineMenu != nil {
 		m.quarantineMenu.SetTitle(menuTitle)
 	}
@@ -450,7 +482,7 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	return
 }
 
-// createServerActionSubmenus creates action submenus for a server (enable/disable, quarantine)
+// createServerActionSubmenus creates action submenus for a server (enable/disable, quarantine, delete)
 func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuItem, server map[string]interface{}) {
 	serverName, _ := server["name"].(string)
 	if serverName == "" {
@@ -485,6 +517,22 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 			}
 		}(serverName, quarantineItem)
 	}
+
+	// Add separator before delete action
+	serverMenuItem.AddSeparator()
+
+	// Delete action
+	deleteItem := serverMenuItem.AddSubMenuItem("🗑️ Delete Server", fmt.Sprintf("Remove server %s from configuration", serverName))
+
+	// Set up delete click handler
+	go func(name string, item *systray.MenuItem) {
+		for range item.ClickedCh {
+			if m.onServerAction != nil {
+				// Run in new goroutines to avoid blocking the event channel
+				go m.onServerAction(name, "delete")
+			}
+		}
+	}(serverName, deleteItem)
 
 	// Set up enable/disable click handler
 	go func(name string, item *systray.MenuItem) {
@@ -543,12 +591,21 @@ func NewSynchronizationManager(stateManager *ServerStateManager, menuManager *Me
 	}
 }
 
-// Start begins background synchronization
+// Start runs the synchronization manager's background loop
 func (m *SynchronizationManager) Start() {
+	m.logger.Info("Starting tray synchronization manager")
+
+	// Initial delay to allow server to establish connections before first sync
+	time.Sleep(2 * time.Second)
+
+	// Perform an immediate sync on startup
+	m.SyncNow()
+
+	// Start the periodic sync loop
 	go m.syncLoop()
 }
 
-// Stop stops background synchronization
+// Stop stops the background loop
 func (m *SynchronizationManager) Stop() {
 	if m.cancel != nil {
 		m.cancel()
@@ -558,8 +615,14 @@ func (m *SynchronizationManager) Stop() {
 	}
 }
 
-// SyncNow forces an immediate synchronization
+// SetStateManager sets the state manager after initialization to break circular dependency.
+func (m *SynchronizationManager) SetStateManager(stateManager *ServerStateManager) {
+	m.stateManager = stateManager
+}
+
+// SyncNow triggers an immediate synchronization
 func (m *SynchronizationManager) SyncNow() error {
+	m.logger.Debug("Immediate synchronization requested")
 	return m.performSync()
 }
 
@@ -577,7 +640,7 @@ func (m *SynchronizationManager) SyncDelayed() {
 
 // syncLoop runs the background synchronization loop
 func (m *SynchronizationManager) syncLoop() {
-	ticker := time.NewTicker(3 * time.Second) // Sync every 3 seconds for more responsive updates
+	ticker := time.NewTicker(2 * time.Second) // Sync every 2 seconds for responsive connection status updates
 	defer ticker.Stop()
 
 	for {
@@ -596,41 +659,48 @@ func (m *SynchronizationManager) syncLoop() {
 func (m *SynchronizationManager) performSync() error {
 	m.logger.Debug("Performing synchronization")
 
-	// Check if the state manager's server is available and running
-	// If not, skip the sync to avoid database errors
-	if m.stateManager.server != nil && !m.stateManager.server.IsRunning() {
-		m.logger.Debug("Server is stopped, skipping synchronization")
-		return nil
-	}
+	serverRunning := m.stateManager.server != nil && m.stateManager.server.IsRunning()
 
-	// Get current state with error handling for database issues
-	allServers, err := m.stateManager.GetAllServers()
-	if err != nil {
-		// Check if it's a database closed error and handle gracefully
-		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
-			m.logger.Debug("Database not available, skipping synchronization")
-			return nil
-		}
-		return fmt.Errorf("failed to get all servers: %w", err)
-	}
-
+	// Always try to get quarantined servers - they should be visible even when server is stopped
 	quarantinedServers, err := m.stateManager.GetQuarantinedServers()
 	if err != nil {
 		// Check if it's a database closed error and handle gracefully
 		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
-			m.logger.Debug("Database not available for quarantine data, skipping synchronization")
-			return nil
+			m.logger.Debug("Database not available for quarantine data, skipping quarantine sync")
+		} else {
+			m.logger.Error("Failed to get quarantined servers", zap.Error(err))
 		}
-		return fmt.Errorf("failed to get quarantined servers: %w", err)
+		// Continue with empty quarantine list rather than failing
+		quarantinedServers = []map[string]interface{}{}
 	}
 
-	// Update menus
-	m.menuManager.UpdateUpstreamServersMenu(allServers)
+	// Always update quarantine menu regardless of server state
 	m.menuManager.UpdateQuarantineMenu(quarantinedServers)
 
-	m.logger.Debug("Synchronization completed",
-		zap.Int("total_servers", len(allServers)),
-		zap.Int("quarantined_servers", len(quarantinedServers)))
+	// Only get and update upstream servers if server is running
+	if serverRunning {
+		allServers, err := m.stateManager.GetAllServers()
+		if err != nil {
+			// Check if it's a database closed error and handle gracefully
+			if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
+				m.logger.Debug("Database not available, skipping upstream servers sync")
+				return nil
+			}
+			return fmt.Errorf("failed to get all servers: %w", err)
+		}
+
+		// Update upstream servers menu
+		m.menuManager.UpdateUpstreamServersMenu(allServers)
+
+		m.logger.Debug("Synchronization completed",
+			zap.Int("total_servers", len(allServers)),
+			zap.Int("quarantined_servers", len(quarantinedServers)))
+	} else {
+		// Server is stopped - clear upstream servers but keep quarantine servers visible
+		m.menuManager.UpdateUpstreamServersMenu([]map[string]interface{}{})
+		m.logger.Debug("Server stopped - cleared upstream servers, showing quarantine servers",
+			zap.Int("quarantined_servers", len(quarantinedServers)))
+	}
 
 	return nil
 }
@@ -675,6 +745,19 @@ func (m *SynchronizationManager) HandleServerEnable(serverName string, enabled b
 
 	// Update state
 	if err := m.stateManager.EnableServer(serverName, enabled); err != nil {
+		return err
+	}
+
+	// Force immediate sync
+	return m.SyncNow()
+}
+
+// HandleServerDelete handles server deletion with full synchronization
+func (m *SynchronizationManager) HandleServerDelete(serverName string) error {
+	m.logger.Info("Handling server deletion", zap.String("server", serverName))
+
+	// Delete server
+	if err := m.stateManager.DeleteServer(serverName); err != nil {
 		return err
 	}
 

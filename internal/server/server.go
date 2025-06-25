@@ -107,13 +107,16 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 		},
 	}
 
+	// Set the status change callback now that 'server' is created
+	upstreamManager.SetOnStatusChangeCallback(func(serverID string) {
+		logger.Info("Detected status change for server, forcing menu update.", zap.String("server_id", serverID))
+		server.ForceMenuUpdate()
+	})
+
 	// Create MCP proxy server
 	mcpProxy := NewMCPProxyServer(storageManager, indexManager, upstreamManager, cacheManager, truncator, logger, server, cfg.DebugSearch, cfg)
 
 	server.mcpProxy = mcpProxy
-
-	// Start background initialization immediately
-	go server.backgroundInitialization()
 
 	return server, nil
 }
@@ -182,46 +185,8 @@ func (s *Server) getIndexedToolCount() int {
 	return 0
 }
 
-// backgroundInitialization handles server initialization in the background
-func (s *Server) backgroundInitialization() {
-	s.updateStatus("Loading", "Loading configuration and connecting to servers...")
-
-	// Load configured servers from storage and add to upstream manager
-	if err := s.loadConfiguredServers(); err != nil {
-		s.logger.Error("Failed to load configured servers", zap.Error(err))
-		s.updateStatus("Error", fmt.Sprintf("Failed to load servers: %v", err))
-		return
-	}
-
-	// Start background connection attempts using application context
-	s.updateStatus("Connecting", "Connecting to upstream servers...")
-	s.mu.RLock()
-	appCtx := s.appCtx // Use application context, not server context
-	s.mu.RUnlock()
-	go s.backgroundConnections(appCtx)
-
-	// Start background tool discovery and indexing using application context
-	s.mu.RLock()
-	appCtx = s.appCtx // Use application context, not server context
-	s.mu.RUnlock()
-	go s.backgroundToolIndexing(appCtx)
-
-	// Only set "Ready" status if the server is not already running
-	// If server is running, don't override the "Running" status
-	s.mu.RLock()
-	isRunning := s.running
-	s.mu.RUnlock()
-
-	if !isRunning {
-		s.updateStatus("Ready", "Server is ready (connections continue in background)")
-	}
-}
-
 // backgroundConnections handles connecting to upstream servers with retry logic
 func (s *Server) backgroundConnections(ctx context.Context) {
-	// Initial connection attempt
-	s.connectAllWithRetry(ctx)
-
 	// Start periodic reconnection attempts for failed connections
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -229,6 +194,7 @@ func (s *Server) backgroundConnections(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
+			s.logger.Info("Performing periodic check for disconnected servers...")
 			s.connectAllWithRetry(ctx)
 		case <-ctx.Done():
 			s.logger.Info("Background connections stopped due to context cancellation")
@@ -239,53 +205,40 @@ func (s *Server) backgroundConnections(ctx context.Context) {
 
 // connectAllWithRetry attempts to connect to all servers with exponential backoff
 func (s *Server) connectAllWithRetry(ctx context.Context) {
-	stats := s.upstreamManager.GetStats()
-	connectedCount := 0
-	totalCount := 0
+	s.mu.RLock()
+	isRunning := s.running
+	s.mu.RUnlock()
 
-	if serverStats, ok := stats["servers"].(map[string]interface{}); ok {
-		totalCount = len(serverStats)
-		for _, serverStat := range serverStats {
-			if stat, ok := serverStat.(map[string]interface{}); ok {
-				if connected, ok := stat["connected"].(bool); ok && connected {
-					connectedCount++
+	// Only update status to "Connecting" if server is not running
+	// If server is running, don't override the "Running" status
+	if !isRunning {
+		stats := s.upstreamManager.GetStats()
+		connectedCount := 0
+		totalCount := 0
+		if serverStats, ok := stats["servers"].(map[string]interface{}); ok {
+			totalCount = len(serverStats)
+			for _, serverStat := range serverStats {
+				if stat, ok := serverStat.(map[string]interface{}); ok {
+					if connected, ok := stat["connected"].(bool); ok && connected {
+						connectedCount++
+					}
 				}
 			}
 		}
+		s.updateStatus("Connecting", fmt.Sprintf("Connected to %d/%d servers, retrying...", connectedCount, totalCount))
 	}
 
-	if connectedCount < totalCount {
-		// Only update status to "Connecting" if server is not running
-		// If server is running, don't override the "Running" status
-		s.mu.RLock()
-		isRunning := s.running
-		s.mu.RUnlock()
+	// Try to connect with timeout
+	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
-		if !isRunning {
-			s.updateStatus("Connecting", fmt.Sprintf("Connected to %d/%d servers, retrying...", connectedCount, totalCount))
-		}
-
-		// Try to connect with timeout
-		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-
-		if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
-			s.logger.Warn("Some upstream servers failed to connect", zap.Error(err))
-		}
+	if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
+		s.logger.Warn("Some upstream servers failed to connect", zap.Error(err))
 	}
 }
 
 // backgroundToolIndexing handles tool discovery and indexing
 func (s *Server) backgroundToolIndexing(ctx context.Context) {
-	// Initial indexing after a short delay to let connections establish
-	select {
-	case <-time.After(2 * time.Second):
-		_ = s.discoverAndIndexTools(ctx)
-	case <-ctx.Done():
-		s.logger.Info("Background tool indexing stopped during initial delay")
-		return
-	}
-
 	// Re-index every 5 minutes
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -293,6 +246,7 @@ func (s *Server) backgroundToolIndexing(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
+			s.logger.Info("Performing periodic tool re-indexing...")
 			_ = s.discoverAndIndexTools(ctx)
 		case <-ctx.Done():
 			s.logger.Info("Background tool indexing stopped due to context cancellation")
@@ -359,6 +313,21 @@ func (s *Server) loadConfiguredServers() error {
 			// Quarantined servers are kept connected for inspection but blocked for execution
 			if err := s.upstreamManager.AddServer(serverCfg.Name, serverCfg); err != nil {
 				s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", serverCfg.Name))
+			} else if hasChanged && existsInStorage && !storedServer.Enabled && serverCfg.Enabled {
+				// Only trigger immediate connection if server was specifically enabled (not during startup)
+				go func(serverName string) {
+					s.logger.Info("Server was enabled, attempting immediate connection", zap.String("server", serverName))
+					connectCtx, cancel := context.WithTimeout(s.serverCtx, 5*time.Second)
+					defer cancel()
+					// Try to connect this specific server immediately
+					if client, exists := s.upstreamManager.GetClient(serverName); exists {
+						if err := client.Connect(connectCtx); err != nil {
+							s.logger.Warn("Immediate connection attempt failed", zap.String("server", serverName), zap.Error(err))
+						} else {
+							s.logger.Info("Server connected successfully", zap.String("server", serverName))
+						}
+					}
+				}(serverCfg.Name)
 			}
 
 			if serverCfg.Quarantined {
@@ -431,9 +400,33 @@ func (s *Server) loadConfiguredServers() error {
 	return nil
 }
 
-// Start starts the MCP proxy server
+// Start starts the MCP proxy server and performs synchronous initialization.
 func (s *Server) Start(ctx context.Context) error {
-	s.logger.Info("Starting MCP proxy server")
+	s.logger.Info("Starting MCP proxy server...")
+
+	// --- Synchronous Initialization ---
+	s.updateStatus("Loading", "Loading server configurations...")
+	if err := s.loadConfiguredServers(); err != nil {
+		s.logger.Error("Failed to load configured servers during startup", zap.Error(err))
+		s.updateStatus("Error", fmt.Sprintf("Failed to load servers: %v", err))
+		// We still try to continue
+	}
+
+	s.updateStatus("Connecting", "Performing initial connection to upstream servers...")
+	s.connectAllWithRetry(ctx) // First connection attempt
+	s.logger.Info("Initial connection attempt finished.")
+
+	s.updateStatus("Indexing", "Discovering and indexing tools...")
+	if err := s.discoverAndIndexTools(ctx); err != nil {
+		s.logger.Error("Initial tool discovery failed", zap.Error(err))
+		s.updateStatus("Warning", "Initial tool discovery failed. Will retry.")
+	}
+	s.logger.Info("Initial tool indexing finished.")
+	// --- End of Synchronous Initialization ---
+
+	// Start background tasks for periodic checks
+	go s.backgroundConnections(s.appCtx)
+	go s.backgroundToolIndexing(s.appCtx)
 
 	// Handle graceful shutdown when context is cancelled (for full application shutdown only)
 	go func() {
@@ -737,6 +730,40 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	return nil
 }
 
+// DeleteServer deletes a server from the configuration
+func (s *Server) DeleteServer(serverName string) error {
+	s.logger.Info("Request to delete server", zap.String("server", serverName))
+
+	// First, remove from storage
+	if err := s.storageManager.DeleteUpstreamServer(serverName); err != nil {
+		s.logger.Error("Failed to remove server from storage", zap.Error(err))
+		return fmt.Errorf("failed to remove server '%s' from storage: %w", serverName, err)
+	}
+
+	// Remove from upstream manager if it exists
+	if s.upstreamManager != nil {
+		s.upstreamManager.RemoveServer(serverName)
+	}
+
+	// Remove tools from search index
+	if s.indexManager != nil {
+		if err := s.indexManager.DeleteServerTools(serverName); err != nil {
+			s.logger.Error("Failed to remove server tools from index", zap.String("server", serverName), zap.Error(err))
+		} else {
+			s.logger.Info("Removed server tools from search index", zap.String("server", serverName))
+		}
+	}
+
+	// Save configuration to persist the changes
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Error("Failed to save configuration after server deletion", zap.Error(err))
+	}
+
+	s.logger.Info("Successfully deleted server", zap.String("server", serverName))
+
+	return nil
+}
+
 // getServerToolCount returns the number of tools for a specific server
 func (s *Server) getServerToolCount(serverID string) int {
 	client, exists := s.upstreamManager.GetClient(serverID)
@@ -965,29 +992,23 @@ func (s *Server) ReloadConfiguration() error {
 
 // OnUpstreamServerChange should be called when upstream servers are modified
 func (s *Server) OnUpstreamServerChange() {
-	// This function should primarily trigger re-discovery and re-indexing.
-	// It should NOT save the configuration, as that can cause loops.
-	// Saving should be done explicitly when the state change is initiated.
-	s.logger.Info("Upstream server configuration changed, triggering comprehensive update")
-	go func() {
-		// Re-index tools from all active servers
-		// This will automatically handle removed/disabled servers since they won't be discovered
-		if err := s.discoverAndIndexTools(s.serverCtx); err != nil {
-			s.logger.Error("Failed to update tool index after upstream change", zap.Error(err))
-		}
+	s.logger.Info("Upstream server configuration change detected, forcing menu update")
 
-		// Clean up any orphaned tools in index that are no longer from active servers
-		// This handles edge cases where servers were removed abruptly
-		s.cleanupOrphanedIndexEntries()
-	}()
-
-	// Update status
-	s.updateStatus(s.status.Phase, "Upstream servers updated")
+	// This is now the primary method to trigger UI updates for any server change.
+	s.ForceMenuUpdate()
 }
 
-// cleanupOrphanedIndexEntries removes index entries for servers that are no longer active
+// OnUpstreamServerStatusChange is called when a server's connection status changes
+func (s *Server) OnUpstreamServerStatusChange(serverID string) {
+	s.logger.Info("Upstream server status change detected", zap.String("server_id", serverID))
+
+	// Force a menu update to reflect the new connection status
+	s.ForceMenuUpdate()
+}
+
+// cleanupOrphanedIndexEntries removes index entries for servers that no longer exist
 func (s *Server) cleanupOrphanedIndexEntries() {
-	s.logger.Debug("Checking for orphaned index entries")
+	s.logger.Debug("Cleaning up orphaned index entries")
 
 	// Get list of active server names
 	activeServers := s.upstreamManager.GetAllServerNames()
@@ -1003,11 +1024,31 @@ func (s *Server) cleanupOrphanedIndexEntries() {
 	// 3. Remove orphaned entries
 	// This is left as a future enhancement since batch indexing handles most cases
 
-	s.logger.Debug("Orphaned index cleanup completed",
-		zap.Int("active_servers", len(activeServers)))
+	s.logger.Debug("Finished cleaning up orphaned index entries")
 }
 
 // GetConfigPath returns the path to the configuration file for file watching
 func (s *Server) GetConfigPath() string {
 	return config.GetConfigPath(s.config.DataDir)
+}
+
+// ForceMenuUpdate sends a signal to the tray to force a refresh.
+func (s *Server) ForceMenuUpdate() {
+	s.logger.Debug("ForceMenuUpdate called, refreshing and sending status")
+
+	// Refresh the status object with the latest stats before sending
+	s.statusMu.Lock()
+	s.status.UpstreamStats = s.upstreamManager.GetStats()
+	s.status.ToolsIndexed = s.getIndexedToolCount()
+	s.status.LastUpdated = time.Now()
+	status := s.status
+	s.statusMu.Unlock()
+
+	// Non-blocking send on status channel to trigger menu refresh
+	select {
+	case s.statusCh <- status:
+		s.logger.Debug("Sent status update to channel for menu refresh")
+	default:
+		s.logger.Warn("Status channel full, skipping menu update signal")
+	}
 }
