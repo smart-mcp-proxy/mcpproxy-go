@@ -193,56 +193,58 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
-      - name: Download release info and update formula
+      - name: Update Homebrew formula
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Processing version: ${VERSION}"
 
-          # Download archives to calculate SHA256
           cd tap
 
-          # Download macOS AMD64
-          wget -q "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/mcpproxy-v${VERSION}-darwin-amd64.tar.gz"
-          AMD64_SHA=$(sha256sum "mcpproxy-v${VERSION}-darwin-amd64.tar.gz" | cut -d' ' -f1)
+          # Add debugging and retry logic
+          ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz"
+          echo "Downloading from: ${ARCHIVE_URL}"
 
-          # Download macOS ARM64
-          wget -q "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/mcpproxy-v${VERSION}-darwin-arm64.tar.gz"
-          ARM64_SHA=$(sha256sum "mcpproxy-v${VERSION}-darwin-arm64.tar.gz" | cut -d' ' -f1)
+          # Wait a bit for GitHub to generate the archive
+          sleep 10
 
-          # Update formula
-          cat > Formula/mcpproxy.rb << EOF
-          class Mcpproxy < Formula
-            desc "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers"
-            homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"
-            version "${VERSION}"
+          # Try downloading with retries
+          for i in {1..5}; do
+            echo "Download attempt ${i}/5..."
+            if wget -q "${ARCHIVE_URL}" -O "v${VERSION}.tar.gz"; then
+              echo "Download successful"
+              break
+            else
+              echo "Download failed, retrying in 10 seconds..."
+              sleep 10
+            fi
             
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v#{version}/mcpproxy-v#{version}-darwin-arm64.tar.gz"
-                sha256 "${ARM64_SHA}"
-              else
-                url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v#{version}/mcpproxy-v#{version}-darwin-amd64.tar.gz"
-                sha256 "${AMD64_SHA}"
-              end
-            end
+            if [ $i -eq 5 ]; then
+              echo "All download attempts failed"
+              echo "Checking if file exists at URL..."
+              curl -I "${ARCHIVE_URL}" || true
+              exit 1
+            fi
+          done
 
-            def install
-              bin.install "mcpproxy"
-            end
+          # Verify file was downloaded
+          if [ ! -f "v${VERSION}.tar.gz" ]; then
+            echo "Archive file not found after download"
+            ls -la
+            exit 1
+          fi
 
-            test do
-              system "#{bin}/mcpproxy", "--version"
-            end
-          end
-          EOF
+          # Calculate SHA256
+          SOURCE_SHA=$(sha256sum "v${VERSION}.tar.gz" | cut -d' ' -f1)
+          echo "Calculated SHA256: ${SOURCE_SHA}"
 
-          # Clean up downloaded files
+          # Create formula directory
+          mkdir -p Formula
+
+          # Create formula file
+          printf 'class Mcpproxy < Formula\n  desc "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers"\n  homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"\n  url "https://github.com/smart-mcp-proxy/mcpproxy-go/archive/refs/tags/v%s.tar.gz"\n  sha256 "%s"\n  license "MIT"\n  head "https://github.com/smart-mcp-proxy/mcpproxy-go.git"\n\n  depends_on "go" => :build\n\n  def install\n    system "go", "build", "-ldflags", "-s -w", "-o", "mcpproxy", "./cmd/mcpproxy"\n    bin.install "mcpproxy"\n  end\n\n  test do\n    assert_match version.to_s, shell_output("#{bin}/mcpproxy --version")\n  end\nend\n' "${VERSION}" "${SOURCE_SHA}" > Formula/mcpproxy.rb
+
+          echo "Formula created successfully"
+          cat Formula/mcpproxy.rb
+
+          # Clean up
           rm -f *.tar.gz
-
-      - name: Commit and push changes
-        run: |
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/mcpproxy.rb
-          git commit -m "Update mcpproxy to ${GITHUB_REF#refs/tags/v}"
-          git push
