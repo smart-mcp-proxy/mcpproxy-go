@@ -2,7 +2,6 @@
 
 <a href="https://mcpproxy.app" target="_blank" rel="noopener">🌐 Visit mcpproxy.app</a>
 
-[![Install in Cursor](https://img.shields.io/badge/Install_in_Cursor-3e44fe?logo=data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94P…&style=for-the-badge)](https://mcpproxy.app/cursor-install)
 
 **MCPProxy** is an open-source desktop application that super-charges AI agents with intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
@@ -43,7 +42,7 @@ Edit `mcp_config.json` (see below). Or ask LLM to add servers (see [doc](https:/
 
 ### One-click install into Cursor IDE
 
-[One-click install into Cursor IDE](cursor://anysphere.cursor-deeplink/mcp/install?name=MCPProxy&config=eyJ0eXBlIjoiaHR0cCIsInVybCI6Imh0dHA6Ly9sb2NhbGhvc3Q6ODA4MC9tY3AvIn0=).
+[![Install in Cursor IDE](https://img.shields.io/badge/Install_in_Cursor-3e44fe?logo=data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94P…&style=for-the-badge)](https://mcpproxy.app/cursor-install.html)
 
 ### Manual install
 
