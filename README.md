@@ -35,9 +35,26 @@ mcpproxy                # starts HTTP server on :8080 and shows tray
 
 ### 3. Add servers
 
-Click the tray icon → "Upstream Servers" or edit `mcp_config.json` (see below).
+Edit `mcp_config.json` (see below). Or ask LLM to add servers (see [doc](https://mcpproxy.app/docs/configuration#adding-servers)).
 
-Optional: [One-click install into Cursor IDE](cursor://anysphere.cursor-deeplink/mcp/install?name=MCPProxy&config=eyJ0eXBlIjoiaHR0cCIsInVybCI6Imh0dHA6Ly9sb2NhbGhvc3Q6ODA4MC9tY3AvIn0=).
+## Add proxy to Cursor
+
+### One-click install into Cursor IDE
+
+[One-click install into Cursor IDE](cursor://anysphere.cursor-deeplink/mcp/install?name=MCPProxy&config=eyJ0eXBlIjoiaHR0cCIsInVybCI6Imh0dHA6Ly9sb2NhbGhvc3Q6ODA4MC9tY3AvIn0=).
+
+### Manual install
+
+
+1. Open Cursor Settings
+2. Click "Tools & Integrations"
+3. Add MCP server
+```json
+    "MCPProxy": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp/"
+    }
+```
 
 ---
 
@@ -91,7 +108,7 @@ mcpproxy --help
 
 ## Learn More
 
-* Documentation: [Configuration](docs/configuration), [Features](docs/features), [Usage](docs/usage)
+* Documentation: [Configuration](https://mcpproxy.app/docs/configuration), [Features](https://mcpproxy.app/docs/features), [Usage](https://mcpproxy.app/docs/usage)
 * Website: <https://mcpproxy.app>
 * Releases: <https://github.com/smart-mcp-proxy/mcpproxy-go/releases>
 
