@@ -2,6 +2,17 @@
 
 <a href="https://mcpproxy.app" target="_blank" rel="noopener">🌐 Visit mcpproxy.app</a>
 
+<div align="center">
+  <a href="https://mcpproxy.app/images/menu_upstream_servers.png" target="_blank">
+    <img src="https://mcpproxy.app/images/menu_upstream_servers.png" alt="System Tray - Upstream Servers" width="250" />
+  </a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://mcpproxy.app/images/menu_security_quarantine.png" target="_blank">
+    <img src="https://mcpproxy.app/images/menu_security_quarantine.png" alt="System Tray - Quarantine Management" width="250" />
+  </a>
+  <br />
+  <em>System Tray - Upstream Servers &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; System Tray - Quarantine Management</em>
+</div>
 
 **MCPProxy** is an open-source desktop application that super-charges AI agents with intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
