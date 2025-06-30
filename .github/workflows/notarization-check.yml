@@ -25,7 +25,7 @@ jobs:
           PENDING_FOUND=false
 
           # Get recent releases (last 10)
-          gh release list --limit 10 --json tagName,assets | jq -r '.[] | select(.assets | length > 0) | .tagName' > release_tags.txt
+          gh release list --limit 10 --json tagName | jq -r '.[].tagName' > release_tags.txt
 
           while IFS= read -r tag; do
             echo "Checking release: $tag"
