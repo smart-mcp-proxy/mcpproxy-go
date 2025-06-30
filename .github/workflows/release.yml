@@ -138,22 +138,19 @@ jobs:
 
           echo "DMG created and signed: ${DMG_NAME}"
 
-      - name: Notarize macOS artifacts
+      - name: Submit for notarization (macOS)
         if: matrix.goos == 'darwin'
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
 
           echo "Submitting DMG for notarization..."
-          xcrun notarytool submit "${DMG_NAME}" --apple-id "${{ secrets.APPLE_ID_USERNAME }}" --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          SUBMISSION_ID=$(xcrun notarytool submit "${DMG_NAME}" --apple-id "${{ secrets.APPLE_ID_USERNAME }}" --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --output-format json | jq -r '.id')
 
-          echo "Stapling notarization to DMG..."
-          xcrun stapler staple "${DMG_NAME}"
+          echo "Submission ID: ${SUBMISSION_ID}"
+          echo "${SUBMISSION_ID}" > "${DMG_NAME}.submission_id"
 
-          echo "Verifying notarization..."
-          xcrun stapler validate "${DMG_NAME}"
-
-          echo "DMG notarized successfully"
+          echo "DMG submitted for notarization (ID: ${SUBMISSION_ID})"
 
       - name: Upload versioned archive artifact
         uses: actions/upload-artifact@v4
@@ -172,7 +169,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
+          path: |
+            mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
+            mcpproxy-*-darwin-${{ matrix.goarch }}.dmg.submission_id
 
   release:
     needs: build
@@ -191,12 +190,57 @@ jobs:
 
       - name: Reorganize files
         run: |
+          VERSION=${GITHUB_REF#refs/tags/}
           # Create a flat structure to avoid duplicates
           mkdir -p release-files
-          find dist -name "*.tar.gz" -o -name "*.zip" -o -name "*.dmg" | while read file; do
+
+          # Copy archives (tar.gz and zip files)
+          find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
             filename=$(basename "$file")
             cp "$file" "release-files/$filename"
           done
+
+          # Handle DMG files and notarization submissions
+          mkdir -p pending-notarizations
+
+          find dist -path "*/dmg-*" -name "*.dmg" | while read dmg_file; do
+            filename=$(basename "$dmg_file")
+            submission_id_file="${dmg_file}.submission_id"
+            
+            if [ -f "$submission_id_file" ]; then
+              # DMG has pending notarization
+              echo "Found pending notarization for $filename"
+              cp "$dmg_file" "release-files/$filename"
+              
+              # Create pending notarization record
+              SUBMISSION_ID=$(cat "$submission_id_file")
+              cat > "pending-notarizations/${filename}.pending" << EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "dmg_name": "$filename",
+            "version": "$VERSION",
+            "submitted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+            else
+              # No notarization submission (shouldn't happen, but handle it)
+              echo "No submission ID for $filename, copying as-is"
+              cp "$dmg_file" "release-files/$filename"
+            fi
+          done
+
+      - name: Upload pending notarizations
+        if: hashFiles('pending-notarizations/*.pending') != ''
+        run: |
+          # Upload pending notarization files as release assets
+          for pending_file in pending-notarizations/*.pending; do
+            if [ -f "$pending_file" ]; then
+              echo "Uploading pending notarization: $(basename "$pending_file")"
+              gh release upload "${{ github.ref_name }}" "$pending_file" --clobber
+            fi
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List files for upload
         run: |
