@@ -87,6 +87,25 @@ cat >> "$TEMP_DIR/$APP_BUNDLE/Contents/Info.plist" << EOF
 </plist>
 EOF
 
+# Create empty PkgInfo file (required for proper app bundle)
+echo "APPLMCPP" > "$TEMP_DIR/$APP_BUNDLE/Contents/PkgInfo"
+
+# Sign the app bundle properly
+echo "Signing app bundle..."
+
+# Use development entitlements if available, otherwise sign without entitlements
+if [ -f "scripts/entitlements-dev.plist" ]; then
+    echo "Using development entitlements..."
+    codesign --force --deep --sign - --identifier "$BUNDLE_ID" --entitlements "scripts/entitlements-dev.plist" "$TEMP_DIR/$APP_BUNDLE"
+else
+    echo "Signing without entitlements..."
+    codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$TEMP_DIR/$APP_BUNDLE"
+fi
+
+# Verify signing
+codesign --verify --verbose "$TEMP_DIR/$APP_BUNDLE"
+echo "App bundle signed successfully"
+
 # Create Applications symlink
 ln -s /Applications "$TEMP_DIR/Applications"
 

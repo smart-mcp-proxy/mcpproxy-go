@@ -8,35 +8,52 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: ["1.22", "1.23.10"]
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+            name: mcpproxy-linux-amd64
+            archive_format: tar.gz
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            cgo: "0"
+            name: mcpproxy-windows-amd64.exe
+            archive_format: zip
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            cgo: "1"
+            name: mcpproxy-darwin-amd64
+            archive_format: tar.gz
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
+            name: mcpproxy-darwin-arm64
+            archive_format: tar.gz
 
     runs-on: ${{ matrix.os }}
-
-    env:
-      GO111MODULE: "on"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Need full history for git describe
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: "1.23.10"
 
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-            ~/AppData/Local/go-build
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-
 
       - name: Download dependencies
         run: go mod download
@@ -44,7 +61,7 @@ jobs:
       - name: Run tests (with nogui for CI)
         run: go test -tags nogui -v ./...
 
-      - name: Generate version
+      - name: Generate PR version
         id: version
         shell: bash
         run: |
@@ -55,71 +72,90 @@ jobs:
           # Create version: last-tag-dev-hash
           VERSION="${LATEST_TAG}-dev-${COMMIT_HASH}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Generated version: ${VERSION}"
+          echo "Generated PR version: ${VERSION}"
 
-      - name: Build binary for Linux
-        if: runner.os == 'Linux'
-        shell: bash
+      - name: Build binary and create archives
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
-          CGO_ENABLED=0 go build -ldflags "-X main.version=${{ steps.version.outputs.version }}" -o mcpproxy ./cmd/mcpproxy
+          VERSION=${{ steps.version.outputs.version }}
+          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION}"
 
-      - name: Build binary for macOS
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          go build -ldflags "-X main.version=${{ steps.version.outputs.version }}" -o mcpproxy ./cmd/mcpproxy
-
-      - name: Build binary for Windows
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          CGO_ENABLED=0 go build -ldflags "-X main.version=${{ steps.version.outputs.version }}" -o mcpproxy.exe ./cmd/mcpproxy
-
-      - name: Test version output
-        shell: bash
-        run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            ./mcpproxy.exe --version
+          # Determine clean binary name
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            CLEAN_BINARY="mcpproxy.exe"
           else
-            ./mcpproxy --version
+            CLEAN_BINARY="mcpproxy"
+          fi
+
+          # Create clean binary for archive
+          go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
+
+          # Ad-hoc sign macOS binaries (development only)
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "Ad-hoc signing macOS binary for development..."
+            codesign --force --deep --sign - --identifier "com.smartmcpproxy.mcpproxy.dev" ${CLEAN_BINARY}
+            
+            # Verify signing
+            codesign --verify --verbose ${CLEAN_BINARY}
+            echo "Binary signed successfully (development)"
+          fi
+
+          # Create archive with version info
+          ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+          if [ "${{ matrix.archive_format }}" = "zip" ]; then
+            # Create archive
+            zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+          else
+            # Create archive
+            tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
           fi
 
       - name: Create .icns icon (macOS)
-        if: runner.os == 'macOS'
+        if: matrix.goos == 'darwin'
         run: |
           chmod +x scripts/create-icns.sh
           ./scripts/create-icns.sh
 
       - name: Create DMG installer (macOS)
-        if: runner.os == 'macOS'
+        if: matrix.goos == 'darwin'
         run: |
+          VERSION=${{ steps.version.outputs.version }}
           chmod +x scripts/create-dmg.sh
 
-          # Determine binary name and architecture
+          # Determine binary name
           CLEAN_BINARY="mcpproxy"
-          ARCH=$(uname -m)
-          if [ "$ARCH" = "x86_64" ]; then
-            ARCH="amd64"
-          elif [ "$ARCH" = "arm64" ]; then
-            ARCH="arm64"
-          fi
 
           # Create DMG
-          ./scripts/create-dmg.sh ${CLEAN_BINARY} ${{ steps.version.outputs.version }} ${ARCH}
+          ./scripts/create-dmg.sh ${CLEAN_BINARY} ${VERSION} ${{ matrix.goarch }}
 
-      - name: Upload DMG artifact (macOS)
-        if: runner.os == 'macOS'
+          # Ad-hoc sign DMG (development only)
+          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
+          echo "Ad-hoc signing DMG for development: ${DMG_NAME}"
+          codesign --force --deep --sign - "${DMG_NAME}"
+
+          echo "DMG created and signed (development): ${DMG_NAME}"
+
+      - name: Skip notarization (PR Build)
+        if: matrix.goos == 'darwin'
+        run: |
+          echo "Skipping notarization for PR build - this is a development build"
+          echo "Production builds go through full notarization in release workflow"
+
+      - name: Upload archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mcpproxy-dmg-${{ matrix.go-version }}-${{ runner.arch }}
-          path: mcpproxy-*-darwin-*.dmg
+          name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
           retention-days: 7
 
-      - name: Upload binary artifact
+      - name: Upload DMG installer (macOS)
+        if: matrix.goos == 'darwin'
         uses: actions/upload-artifact@v4
         with:
-          name: mcpproxy-${{ runner.os }}-${{ matrix.go-version }}
-          path: |
-            mcpproxy*
-            !mcpproxy-*-darwin-*.dmg
+          name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
           retention-days: 7
