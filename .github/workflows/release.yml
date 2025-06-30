@@ -61,6 +61,13 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Import Code-Signing Certificates (macOS)
+        if: matrix.goos == 'darwin'
+        uses: Apple-Actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+          p12-password: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+
       - name: Build binary and create archives
         env:
           CGO_ENABLED: ${{ matrix.cgo }}
@@ -80,6 +87,16 @@ jobs:
           # Create clean binary for archive
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
+          # Code sign macOS binaries
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "Code signing macOS binary..."
+            codesign --force --options runtime --entitlements scripts/entitlements.plist --sign "${{ secrets.APPLE_TEAM_ID }}" ${CLEAN_BINARY}
+            
+            # Verify signing
+            codesign --verify --verbose ${CLEAN_BINARY}
+            echo "Binary signed successfully"
+          fi
+
           # Create archive with version info
           ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
           LATEST_ARCHIVE_BASE="mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}"
@@ -96,6 +113,48 @@ jobs:
             tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
           fi
 
+      - name: Create .icns icon (macOS)
+        if: matrix.goos == 'darwin'
+        run: |
+          chmod +x scripts/create-icns.sh
+          ./scripts/create-icns.sh
+
+      - name: Create DMG installer (macOS)
+        if: matrix.goos == 'darwin'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          chmod +x scripts/create-dmg.sh
+
+          # Determine binary name
+          CLEAN_BINARY="mcpproxy"
+
+          # Create DMG
+          ./scripts/create-dmg.sh ${CLEAN_BINARY} ${VERSION} ${{ matrix.goarch }}
+
+          # Sign DMG
+          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
+          echo "Signing DMG: ${DMG_NAME}"
+          codesign --force --sign "${{ secrets.APPLE_TEAM_ID }}" "${DMG_NAME}"
+
+          echo "DMG created and signed: ${DMG_NAME}"
+
+      - name: Notarize macOS artifacts
+        if: matrix.goos == 'darwin'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
+
+          echo "Submitting DMG for notarization..."
+          xcrun notarytool submit "${DMG_NAME}" --apple-id "${{ secrets.APPLE_ID_USERNAME }}" --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+
+          echo "Stapling notarization to DMG..."
+          xcrun stapler staple "${DMG_NAME}"
+
+          echo "Verifying notarization..."
+          xcrun stapler validate "${DMG_NAME}"
+
+          echo "DMG notarized successfully"
+
       - name: Upload versioned archive artifact
         uses: actions/upload-artifact@v4
         with:
@@ -107,6 +166,13 @@ jobs:
         with:
           name: latest-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
+
+      - name: Upload DMG installer (macOS)
+        if: matrix.goos == 'darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
 
   release:
     needs: build
@@ -127,7 +193,7 @@ jobs:
         run: |
           # Create a flat structure to avoid duplicates
           mkdir -p release-files
-          find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
+          find dist -name "*.tar.gz" -o -name "*.zip" -o -name "*.dmg" | while read file; do
             filename=$(basename "$file")
             cp "$file" "release-files/$filename"
           done
@@ -154,6 +220,10 @@ jobs:
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
+            **macOS Installers (Recommended):**
+            - [macOS Universal DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-arm64.dmg) (Apple Silicon)
+            - [macOS Intel DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-amd64.dmg) (Intel)
+
             **This Version (${{ github.ref_name }}):**
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-linux-amd64.tar.gz)
             - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-windows-amd64.zip)
@@ -162,6 +232,14 @@ jobs:
 
             ### Installation
 
+            **macOS (Recommended - DMG Installer):**
+            1. Download the appropriate DMG file for your Mac (Apple Silicon or Intel)
+            2. Double-click the DMG to mount it
+            3. Drag mcpproxy.app to Applications folder
+            4. Launch from Applications or Launchpad
+            5. The app will appear in your system tray with autostart capability
+
+            **Manual Installation (All Platforms):**
             1. Download the appropriate archive for your platform using the links above
             2. Extract the archive: `tar -xzf mcpproxy-*.tar.gz` (Linux/macOS) or unzip (Windows)
             3. Make it executable: `chmod +x mcpproxy` (Linux/macOS)
