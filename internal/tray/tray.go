@@ -86,6 +86,10 @@ type App struct {
 	menuManager  *MenuManager
 	syncManager  *SynchronizationManager
 
+	// Autostart manager
+	autostartManager *AutostartManager
+	autostartItem    *systray.MenuItem
+
 	// Config file watching
 	configWatcher *fsnotify.Watcher
 	configPath    string
@@ -120,6 +124,13 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 
 	// Initialize managers (will be fully set up in onReady)
 	app.stateManager = NewServerStateManager(server, logger)
+
+	// Initialize autostart manager
+	if autostartManager, err := NewAutostartManager(); err != nil {
+		logger.Warn("Failed to initialize autostart manager", zap.Error(err))
+	} else {
+		app.autostartManager = autostartManager
+	}
 
 	// Initialize menu tracking maps
 	app.serverMenus = make(map[string]*systray.MenuItem)
@@ -312,6 +323,14 @@ func (a *App) onReady() {
 	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
 	openConfigItem := systray.AddMenuItem("Open Config", "Open the configuration file")
 	systray.AddSeparator()
+
+	// --- Autostart Menu Item (macOS only) ---
+	if runtime.GOOS == osDarwin && a.autostartManager != nil {
+		a.autostartItem = systray.AddMenuItem("🚀 Start at Login", "Start mcpproxy automatically when you log in")
+		a.updateAutostartMenuItem()
+		systray.AddSeparator()
+	}
+
 	quitItem := systray.AddMenuItem("Quit", "Quit the application")
 
 	// --- Set Initial State & Start Sync ---
@@ -342,6 +361,20 @@ func (a *App) onReady() {
 			}
 		}
 	}()
+
+	// --- Autostart Click Handler (separate goroutine for macOS) ---
+	if runtime.GOOS == osDarwin && a.autostartItem != nil {
+		go func() {
+			for {
+				select {
+				case <-a.autostartItem.ClickedCh:
+					a.handleAutostartToggle()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	a.logger.Info("System tray is ready")
 }
@@ -657,6 +690,12 @@ func (a *App) checkForUpdates() {
 		return
 	}
 
+	// Disable auto-update for app bundles by default (DMG installation should be manual)
+	if a.isAppBundle() && os.Getenv("MCPPROXY_UPDATE_APP_BUNDLE") != "true" {
+		a.logger.Info("Auto-update disabled for app bundle installations (use DMG for updates)")
+		return
+	}
+
 	// Check if notification-only mode is enabled
 	notifyOnly := os.Getenv("MCPPROXY_UPDATE_NOTIFY_ONLY") == "true"
 
@@ -760,6 +799,20 @@ func (a *App) isHomebrewInstallation() bool {
 	return strings.Contains(execPath, "/opt/homebrew/") ||
 		strings.Contains(execPath, "/usr/local/Homebrew/") ||
 		strings.Contains(execPath, "/home/linuxbrew/")
+}
+
+// isAppBundle checks if running from macOS app bundle
+func (a *App) isAppBundle() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+
+	execPath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+
+	return strings.Contains(execPath, ".app/Contents/MacOS/")
 }
 
 // downloadAndApplyUpdate downloads and applies the update
@@ -970,4 +1023,44 @@ func stringSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// updateAutostartMenuItem updates the autostart menu item based on current state
+func (a *App) updateAutostartMenuItem() {
+	if a.autostartItem == nil || a.autostartManager == nil {
+		return
+	}
+
+	if a.autostartManager.IsEnabled() {
+		a.autostartItem.SetTitle("✅ Start at Login")
+		a.autostartItem.SetTooltip("mcpproxy will start automatically when you log in (click to disable)")
+	} else {
+		a.autostartItem.SetTitle("🚀 Start at Login")
+		a.autostartItem.SetTooltip("Start mcpproxy automatically when you log in (click to enable)")
+	}
+}
+
+// handleAutostartToggle handles toggling the autostart functionality
+func (a *App) handleAutostartToggle() {
+	if a.autostartManager == nil {
+		a.logger.Warn("Autostart manager not available")
+		return
+	}
+
+	a.logger.Info("Toggling autostart functionality")
+
+	if err := a.autostartManager.Toggle(); err != nil {
+		a.logger.Error("Failed to toggle autostart", zap.Error(err))
+		return
+	}
+
+	// Update the menu item to reflect the new state
+	a.updateAutostartMenuItem()
+
+	// Log the new state
+	if a.autostartManager.IsEnabled() {
+		a.logger.Info("Autostart enabled - mcpproxy will start automatically at login")
+	} else {
+		a.logger.Info("Autostart disabled - mcpproxy will not start automatically at login")
+	}
 }
