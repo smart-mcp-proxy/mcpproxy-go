@@ -257,9 +257,14 @@ jobs:
             echo "=== Checking for hardened runtime and timestamp ==="
             codesign --display --entitlements - ${CLEAN_BINARY} | head -10
             
-            # Verify with spctl (Gatekeeper assessment)  
-            spctl --assess --verbose ${CLEAN_BINARY}
-            echo "Gatekeeper assessment: $?"
+            # Verify with spctl (Gatekeeper assessment) - expected to fail before notarization
+            echo "=== Gatekeeper assessment (expected to fail before notarization) ==="
+            if spctl --assess --verbose ${CLEAN_BINARY}; then
+              echo "✅ Gatekeeper assessment: PASSED (unexpected but good!)"
+            else
+              echo "⚠️  Gatekeeper assessment: REJECTED (expected - binary needs notarization)"
+              echo "This is normal - the binary will pass after Apple completes notarization"
+            fi
             
             echo "✅ Binary signed successfully with hardened runtime and timestamp"
           fi
