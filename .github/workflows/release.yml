@@ -195,13 +195,23 @@ jobs:
             # Sign with proper Developer ID certificate, hardened runtime, and timestamp  
             echo "=== Signing binary with hardened runtime ==="
             
+            # Install GNU coreutils for timeout command (macOS compatibility)
+            if ! command -v timeout &> /dev/null; then
+              echo "Installing GNU coreutils for timeout command..."
+              brew install coreutils
+              # Use gtimeout from coreutils
+              TIMEOUT_CMD="gtimeout"
+            else
+              TIMEOUT_CMD="timeout"
+            fi
+            
             # Add timeout and retry logic for signing to prevent hanging
             SIGN_SUCCESS=false
             for attempt in 1 2 3; do
               echo "Signing attempt $attempt/3..."
               
               # Use timeout command to prevent hanging (max 5 minutes per attempt)
-              if timeout 300 codesign --force \
+              if $TIMEOUT_CMD 300 codesign --force \
                 --options runtime \
                 --entitlements scripts/entitlements.plist \
                 --sign "${CERT_IDENTITY}" \
@@ -225,7 +235,7 @@ jobs:
               
               # Try signing without timestamp as fallback
               echo "Attempting fallback signing without timestamp..."
-              if timeout 120 codesign --force \
+              if $TIMEOUT_CMD 120 codesign --force \
                 --options runtime \
                 --entitlements scripts/entitlements.plist \
                 --sign "${CERT_IDENTITY}" \
