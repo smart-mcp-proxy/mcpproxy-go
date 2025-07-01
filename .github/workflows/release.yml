@@ -69,12 +69,41 @@ jobs:
           # Decode the base64 P12 file
           echo "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" | base64 -d > legacy_cert.p12
 
-          # Extract certificate and private key with legacy provider support
-          openssl pkcs12 -in legacy_cert.p12 \
+          # Try extracting with standard OpenSSL first
+          echo "Attempting extraction with standard OpenSSL..."
+          if openssl pkcs12 -in legacy_cert.p12 \
             -passin pass:"${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
-            -provider legacy -provider default \
             -nodes \
-            -out temp_cert_and_key.pem
+            -out temp_cert_and_key.pem 2>/dev/null; then
+            echo "✅ Standard OpenSSL extraction succeeded"
+          else
+            echo "❌ Standard OpenSSL failed, installing OpenSSL 3.x with legacy provider..."
+            
+            # Install OpenSSL 3.x with legacy provider support
+            brew install openssl@3
+            export PATH="/opt/homebrew/bin:$PATH"
+            
+            # Verify OpenSSL version
+            openssl version
+            
+            # Extract with legacy provider support
+            openssl pkcs12 -in legacy_cert.p12 \
+              -passin pass:"${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
+              -provider legacy -provider default \
+              -nodes \
+              -out temp_cert_and_key.pem
+            
+            echo "✅ Legacy provider extraction succeeded"
+          fi
+
+          # Verify extraction worked
+          if [ ! -f temp_cert_and_key.pem ]; then
+            echo "❌ Certificate extraction failed"
+            exit 1
+          fi
+
+          echo "Certificates found: $(grep -c "BEGIN CERTIFICATE" temp_cert_and_key.pem)"
+          echo "Private keys found: $(grep -c "BEGIN PRIVATE KEY" temp_cert_and_key.pem)"
 
           # Import certificate and key separately to avoid P12 compatibility issues
           openssl x509 -in temp_cert_and_key.pem -out cert_only.pem
@@ -88,12 +117,13 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "" ~/Library/Keychains/login.keychain-db
 
           # Verify import
+          echo "=== Available code signing identities ==="
           security find-identity -v -p codesigning
 
           # Clean up
           rm -f legacy_cert.p12 temp_cert_and_key.pem cert_only.pem key_only.pem
 
-          echo "Certificate import completed"
+          echo "✅ Certificate import completed"
 
       - name: Build binary and create archives
         env:
