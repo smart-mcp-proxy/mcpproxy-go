@@ -90,11 +90,34 @@ jobs:
           # Code sign macOS binaries
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             echo "Code signing macOS binary..."
-            codesign --force --options runtime --entitlements scripts/entitlements.plist --sign "${{ secrets.APPLE_TEAM_ID }}" ${CLEAN_BINARY}
             
-            # Verify signing
+            # Debug: List all available certificates
+            echo "Available certificates:"
+            security find-identity -v -p codesigning
+            
+            # Find the Developer ID certificate identity
+            CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+            
+            # Fallback to team ID if certificate identity not found
+            if [ -z "${CERT_IDENTITY}" ]; then
+              echo "Certificate identity not found, using team ID as fallback"
+              CERT_IDENTITY="${{ secrets.APPLE_TEAM_ID }}"
+            fi
+            
+            echo "Using certificate identity: ${CERT_IDENTITY}"
+            
+            # Sign with proper Developer ID certificate, hardened runtime, and timestamp
+            codesign --force \
+              --options runtime \
+              --entitlements scripts/entitlements.plist \
+              --sign "${CERT_IDENTITY}" \
+              --timestamp \
+              ${CLEAN_BINARY}
+            
+            # Verify signing and hardened runtime
             codesign --verify --verbose ${CLEAN_BINARY}
-            echo "Binary signed successfully"
+            codesign --display --verbose=2 ${CLEAN_BINARY}
+            echo "Binary signed successfully with hardened runtime"
           fi
 
           # Create archive with version info
@@ -134,8 +157,23 @@ jobs:
           # Sign DMG
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
           echo "Signing DMG: ${DMG_NAME}"
-          codesign --force --sign "${{ secrets.APPLE_TEAM_ID }}" "${DMG_NAME}"
 
+          # Find the Developer ID certificate identity
+          CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+
+          # Fallback to team ID if certificate identity not found
+          if [ -z "${CERT_IDENTITY}" ]; then
+            echo "Certificate identity not found, using team ID as fallback"
+            CERT_IDENTITY="${{ secrets.APPLE_TEAM_ID }}"
+          fi
+
+          echo "Using certificate identity for DMG: ${CERT_IDENTITY}"
+
+          # Sign DMG with proper certificate and timestamp
+          codesign --force --sign "${CERT_IDENTITY}" --timestamp "${DMG_NAME}"
+
+          # Verify DMG signing
+          codesign --verify --verbose "${DMG_NAME}"
           echo "DMG created and signed: ${DMG_NAME}"
 
       - name: Submit for notarization (macOS)
