@@ -111,46 +111,44 @@ jobs:
 
           # Try importing to login keychain first, fallback to temp keychain
           echo "=== Importing certificates ==="
-          if security import cert_only.pem -T /usr/bin/codesign && security import key_only.pem -T /usr/bin/codesign; then
-            echo "✅ Imported to login keychain"
-            KEYCHAIN_PATH="~/Library/Keychains/login.keychain-db"
-            
-            # Unlock keychain for codesign access
-            security unlock-keychain ~/Library/Keychains/login.keychain-db || echo "Keychain unlock not needed"
-            
-            # Try to set partition list, but don't fail if it doesn't work
-            if security set-key-partition-list -S apple-tool:,apple: -s ~/Library/Keychains/login.keychain-db 2>/dev/null; then
-              echo "✅ Partition list set successfully"
-            else
-              echo "⚠️  Partition list setting skipped (not critical for GitHub Actions)"
-            fi
-            
-          else
-            echo "⚠️  Login keychain import failed, using temporary keychain"
-            
-            # Create temporary keychain
-            TEMP_KEYCHAIN="build.keychain"
-            security create-keychain -p "temp123" "$TEMP_KEYCHAIN"
-            security default-keychain -s "$TEMP_KEYCHAIN"
-            security unlock-keychain -p "temp123" "$TEMP_KEYCHAIN"
-            security set-keychain-settings -t 3600 -l "$TEMP_KEYCHAIN"
-            
-            # Import to temp keychain
-            security import cert_only.pem -k "$TEMP_KEYCHAIN" -T /usr/bin/codesign
-            security import key_only.pem -k "$TEMP_KEYCHAIN" -T /usr/bin/codesign
-            
-            # Set partition list for temp keychain
-            security set-key-partition-list -S apple-tool:,apple: -s -k "temp123" "$TEMP_KEYCHAIN"
-            
-            echo "✅ Imported to temporary keychain"
-            KEYCHAIN_PATH="$TEMP_KEYCHAIN"
-          fi
+
+          # Skip login keychain in CI to avoid conflicts between parallel workers
+          # Go directly to isolated temporary keychain
+          echo "Creating isolated temporary keychain for this worker..."
+
+          # Create unique keychain name for this matrix job to prevent conflicts
+          UNIQUE_ID="${{ matrix.goos }}-${{ matrix.goarch }}-$$-$(date +%s)"
+          TEMP_KEYCHAIN="mcpproxy-build-${UNIQUE_ID}.keychain"
+
+          echo "Using keychain: ${TEMP_KEYCHAIN}"
+
+          # Create isolated temporary keychain
+          security create-keychain -p "temp123" "$TEMP_KEYCHAIN"
+
+          # Add to search list WITHOUT setting as default (avoid conflicts)
+          security list-keychains -s "$TEMP_KEYCHAIN" ~/Library/Keychains/login.keychain-db /Library/Keychains/System.keychain
+
+          # Unlock and configure
+          security unlock-keychain -p "temp123" "$TEMP_KEYCHAIN"
+          security set-keychain-settings -t 3600 -l "$TEMP_KEYCHAIN"
+
+          # Import to isolated keychain
+          security import cert_only.pem -k "$TEMP_KEYCHAIN" -T /usr/bin/codesign
+          security import key_only.pem -k "$TEMP_KEYCHAIN" -T /usr/bin/codesign
+
+          # Set partition list for isolated keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k "temp123" "$TEMP_KEYCHAIN"
+
+          echo "✅ Imported to isolated temporary keychain: ${TEMP_KEYCHAIN}"
+
+          # Store keychain name for cleanup
+          echo "$TEMP_KEYCHAIN" > .keychain_name
 
           # Verify import
           echo "=== Available code signing identities ==="
           security find-identity -v -p codesigning
 
-          # Clean up
+          # Clean up temporary files
           rm -f legacy_cert.p12 temp_cert_and_key.pem cert_only.pem key_only.pem
 
           echo "✅ Certificate import completed"
@@ -194,13 +192,51 @@ jobs:
               echo "⚠️  Using fallback identity: ${CERT_IDENTITY}"
             fi
             
-            # Sign with proper Developer ID certificate, hardened runtime, and timestamp
-            codesign --force \
-              --options runtime \
-              --entitlements scripts/entitlements.plist \
-              --sign "${CERT_IDENTITY}" \
-              --timestamp \
-              ${CLEAN_BINARY}
+            # Sign with proper Developer ID certificate, hardened runtime, and timestamp  
+            echo "=== Signing binary with hardened runtime ==="
+            
+            # Add timeout and retry logic for signing to prevent hanging
+            SIGN_SUCCESS=false
+            for attempt in 1 2 3; do
+              echo "Signing attempt $attempt/3..."
+              
+              # Use timeout command to prevent hanging (max 5 minutes per attempt)
+              if timeout 300 codesign --force \
+                --options runtime \
+                --entitlements scripts/entitlements.plist \
+                --sign "${CERT_IDENTITY}" \
+                --timestamp \
+                ${CLEAN_BINARY}; then
+                
+                SIGN_SUCCESS=true
+                echo "✅ Signing succeeded on attempt $attempt"
+                break
+              else
+                echo "❌ Signing attempt $attempt failed or timed out"
+                if [ $attempt -lt 3 ]; then
+                  echo "Retrying in 10 seconds..."
+                  sleep 10
+                fi
+              fi
+            done
+            
+            if [ "$SIGN_SUCCESS" != "true" ]; then
+              echo "❌ All signing attempts failed"
+              
+              # Try signing without timestamp as fallback
+              echo "Attempting fallback signing without timestamp..."
+              if timeout 120 codesign --force \
+                --options runtime \
+                --entitlements scripts/entitlements.plist \
+                --sign "${CERT_IDENTITY}" \
+                ${CLEAN_BINARY}; then
+                echo "⚠️  Fallback signing succeeded (without timestamp)"
+                echo "NOTE: This binary may not pass notarization without timestamp"
+              else
+                echo "❌ Even fallback signing failed - cannot proceed"
+                exit 1
+              fi
+            fi
             
             # Verify signing, hardened runtime, and timestamp
             echo "=== Verifying binary signature ==="
@@ -211,7 +247,7 @@ jobs:
             echo "=== Checking for hardened runtime and timestamp ==="
             codesign --display --entitlements - ${CLEAN_BINARY} | head -10
             
-            # Verify with spctl (Gatekeeper assessment)
+            # Verify with spctl (Gatekeeper assessment)  
             spctl --assess --verbose ${CLEAN_BINARY}
             echo "Gatekeeper assessment: $?"
             
@@ -296,6 +332,22 @@ jobs:
           echo "${SUBMISSION_ID}" > "${DMG_NAME}.submission_id"
 
           echo "DMG submitted for notarization (ID: ${SUBMISSION_ID})"
+
+      - name: Cleanup isolated keychain (macOS)
+        if: matrix.goos == 'darwin' && always()
+        run: |
+          # Clean up the isolated keychain we created for this worker
+          if [ -f .keychain_name ]; then
+            TEMP_KEYCHAIN=$(cat .keychain_name)
+            echo "Cleaning up keychain: ${TEMP_KEYCHAIN}"
+            
+            # Remove from search list and delete
+            security delete-keychain "$TEMP_KEYCHAIN" 2>/dev/null || echo "Keychain already cleaned up"
+            rm -f .keychain_name
+            echo "✅ Keychain cleanup completed"
+          else
+            echo "No keychain to clean up"
+          fi
 
       - name: Upload versioned archive artifact
         uses: actions/upload-artifact@v4
