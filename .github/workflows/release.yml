@@ -192,6 +192,24 @@ jobs:
               echo "⚠️  Using fallback identity: ${CERT_IDENTITY}"
             fi
             
+            # Validate entitlements file formatting (Apple's recommendation)
+            echo "=== Validating entitlements file ==="
+            if [ -f "scripts/entitlements.plist" ]; then
+              echo "Validating entitlements formatting with plutil..."
+              if plutil -lint scripts/entitlements.plist; then
+                echo "✅ Entitlements file is properly formatted"
+              else
+                echo "❌ Entitlements file has formatting issues"
+                exit 1
+              fi
+              
+              # Convert to XML format if needed (Apple's recommendation)
+              plutil -convert xml1 scripts/entitlements.plist
+              echo "✅ Entitlements converted to XML format"
+            else
+              echo "⚠️  No entitlements file found"
+            fi
+            
             # Sign with proper Developer ID certificate, hardened runtime, and timestamp  
             echo "=== Signing binary with hardened runtime ==="
             
@@ -248,13 +266,39 @@ jobs:
               fi
             fi
             
-            # Verify signing, hardened runtime, and timestamp
-            echo "=== Verifying binary signature ==="
+            # Verify signing, hardened runtime, and timestamp using Apple's recommended methods
+            echo "=== Verifying binary signature (Apple's recommended verification) ==="
+            
+            # Basic verification
             codesign --verify --verbose ${CLEAN_BINARY}
             echo "Basic verification: $?"
             
+            # Apple's recommended strict verification for notarization
+            echo "=== Strict verification (matches notarization requirements) ==="
+            if codesign -vvv --deep --strict ${CLEAN_BINARY}; then
+              echo "✅ Strict verification PASSED - ready for notarization"
+            else
+              echo "❌ Strict verification FAILED - will not pass notarization"
+              exit 1
+            fi
+            
+            # Check for secure timestamp (Apple's recommended check)
+            echo "=== Checking for secure timestamp ==="
+            TIMESTAMP_CHECK=$(codesign -dvv ${CLEAN_BINARY} 2>&1)
+            if echo "$TIMESTAMP_CHECK" | grep -q "Timestamp="; then
+              echo "✅ Secure timestamp present:"
+              echo "$TIMESTAMP_CHECK" | grep "Timestamp="
+            else
+              echo "❌ No secure timestamp found"
+              echo "Full output:"
+              echo "$TIMESTAMP_CHECK"
+            fi
+            
+            # Display detailed signature info
             codesign --display --verbose=4 ${CLEAN_BINARY}
-            echo "=== Checking for hardened runtime and timestamp ==="
+            
+            # Check entitlements formatting (Apple's recommendation)
+            echo "=== Checking entitlements formatting ==="
             codesign --display --entitlements - ${CLEAN_BINARY} | head -10
             
             # Verify with spctl (Gatekeeper assessment) - expected to fail before notarization

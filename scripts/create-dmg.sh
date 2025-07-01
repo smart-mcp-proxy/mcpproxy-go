@@ -73,6 +73,14 @@ cat > "$TEMP_DIR/$APP_BUNDLE/Contents/Info.plist" << EOF
     <true/>
     <key>LSBackgroundOnly</key>
     <false/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSUserNotificationAlertStyle</key>
+    <string>alert</string>
 EOF
 
 if [ -n "$ICON_FILE" ]; then
@@ -90,21 +98,86 @@ EOF
 # Create empty PkgInfo file (required for proper app bundle)
 echo "APPLMCPP" > "$TEMP_DIR/$APP_BUNDLE/Contents/PkgInfo"
 
-# Sign the app bundle properly
-echo "Signing app bundle..."
+# Sign the app bundle properly with Developer ID certificate
+echo "Signing app bundle with Developer ID certificate..."
 
-# Use development entitlements if available, otherwise sign without entitlements
-if [ -f "scripts/entitlements-dev.plist" ]; then
-    echo "Using development entitlements..."
-    codesign --force --deep --sign - --identifier "$BUNDLE_ID" --entitlements "scripts/entitlements-dev.plist" "$TEMP_DIR/$APP_BUNDLE"
+# Find the Developer ID certificate (same logic as in workflow)
+CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+
+if [ -n "${CERT_IDENTITY}" ]; then
+    echo "✅ Found Developer ID certificate: ${CERT_IDENTITY}"
+    
+    # Validate entitlements file formatting (Apple's recommendation)
+    if [ -f "scripts/entitlements.plist" ]; then
+        echo "=== Validating entitlements file ==="
+        if plutil -lint scripts/entitlements.plist; then
+            echo "✅ Entitlements file is properly formatted"
+        else
+            echo "❌ Entitlements file has formatting issues"
+            exit 1
+        fi
+        
+        # Convert to XML format if needed
+        plutil -convert xml1 scripts/entitlements.plist
+        echo "✅ Entitlements converted to XML format"
+    fi
+    
+    # Sign with proper Developer ID certificate, hardened runtime, and production entitlements
+    if [ -f "scripts/entitlements.plist" ]; then
+        echo "Using production entitlements..."
+        codesign --force --deep \
+            --options runtime \
+            --sign "${CERT_IDENTITY}" \
+            --identifier "$BUNDLE_ID" \
+            --entitlements "scripts/entitlements.plist" \
+            --timestamp \
+            "$TEMP_DIR/$APP_BUNDLE"
+    else
+        echo "No entitlements file found, signing without..."
+        codesign --force --deep \
+            --options runtime \
+            --sign "${CERT_IDENTITY}" \
+            --identifier "$BUNDLE_ID" \
+            --timestamp \
+            "$TEMP_DIR/$APP_BUNDLE"
+    fi
+    
+    # Verify signing using Apple's recommended methods
+    echo "=== Verifying app bundle signature ==="
+    codesign --verify --verbose "$TEMP_DIR/$APP_BUNDLE"
+    
+    # Apple's recommended strict verification for notarization
+    echo "=== Strict verification (matches notarization requirements) ==="
+    if codesign -vvv --deep --strict "$TEMP_DIR/$APP_BUNDLE"; then
+        echo "✅ App bundle strict verification PASSED - ready for notarization"
+    else
+        echo "❌ App bundle strict verification FAILED - will not pass notarization"
+        exit 1
+    fi
+    
+    # Check for secure timestamp
+    echo "=== Checking app bundle timestamp ==="
+    TIMESTAMP_CHECK=$(codesign -dvv "$TEMP_DIR/$APP_BUNDLE" 2>&1)
+    if echo "$TIMESTAMP_CHECK" | grep -q "Timestamp="; then
+        echo "✅ App bundle has secure timestamp:"
+        echo "$TIMESTAMP_CHECK" | grep "Timestamp="
+    else
+        echo "❌ App bundle missing secure timestamp"
+    fi
+    
+    # Show detailed signature information
+    echo "=== App bundle signature details ==="
+    codesign --display --verbose=4 "$TEMP_DIR/$APP_BUNDLE"
+    
+    # Check entitlements
+    echo "=== App bundle entitlements ==="
+    codesign --display --entitlements - "$TEMP_DIR/$APP_BUNDLE"
+    
 else
-    echo "Signing without entitlements..."
+    echo "❌ No Developer ID certificate found - using ad-hoc signature"
+    echo "This will NOT work for notarization!"
     codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$TEMP_DIR/$APP_BUNDLE"
 fi
-
-# Verify signing
-codesign --verify --verbose "$TEMP_DIR/$APP_BUNDLE"
-echo "App bundle signed successfully"
 
 # Create Applications symlink
 ln -s /Applications "$TEMP_DIR/Applications"
