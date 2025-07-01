@@ -63,10 +63,37 @@ jobs:
 
       - name: Import Code-Signing Certificates (macOS)
         if: matrix.goos == 'darwin'
-        uses: Apple-Actions/import-codesign-certs@v3
-        with:
-          p12-file-base64: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
-          p12-password: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          echo "Converting and importing legacy P12 certificate..."
+
+          # Decode the base64 P12 file
+          echo "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" | base64 -d > legacy_cert.p12
+
+          # Extract certificate and private key with legacy provider support
+          openssl pkcs12 -in legacy_cert.p12 \
+            -passin pass:"${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
+            -provider legacy -provider default \
+            -nodes \
+            -out temp_cert_and_key.pem
+
+          # Import certificate and key separately to avoid P12 compatibility issues
+          openssl x509 -in temp_cert_and_key.pem -out cert_only.pem
+          openssl rsa -in temp_cert_and_key.pem -out key_only.pem
+
+          # Import to default keychain
+          security import cert_only.pem -T /usr/bin/codesign
+          security import key_only.pem -T /usr/bin/codesign
+
+          # Set partition list for codesign access
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" ~/Library/Keychains/login.keychain-db
+
+          # Verify import
+          security find-identity -v -p codesigning
+
+          # Clean up
+          rm -f legacy_cert.p12 temp_cert_and_key.pem cert_only.pem key_only.pem
+
+          echo "Certificate import completed"
 
       - name: Build binary and create archives
         env:
@@ -98,13 +125,14 @@ jobs:
             # Find the Developer ID certificate identity
             CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
             
-            # Fallback to team ID if certificate identity not found
-            if [ -z "${CERT_IDENTITY}" ]; then
-              echo "Certificate identity not found, using team ID as fallback"
+            # Verify we found a valid certificate
+            if [ -n "${CERT_IDENTITY}" ]; then
+              echo "✅ Found Developer ID certificate: ${CERT_IDENTITY}"
+            else
+              echo "❌ No Developer ID certificate found, using team ID as fallback"
               CERT_IDENTITY="${{ secrets.APPLE_TEAM_ID }}"
+              echo "⚠️  Using fallback identity: ${CERT_IDENTITY}"
             fi
-            
-            echo "Using certificate identity: ${CERT_IDENTITY}"
             
             # Sign with proper Developer ID certificate, hardened runtime, and timestamp
             codesign --force \
@@ -114,10 +142,20 @@ jobs:
               --timestamp \
               ${CLEAN_BINARY}
             
-            # Verify signing and hardened runtime
+            # Verify signing, hardened runtime, and timestamp
+            echo "=== Verifying binary signature ==="
             codesign --verify --verbose ${CLEAN_BINARY}
-            codesign --display --verbose=2 ${CLEAN_BINARY}
-            echo "Binary signed successfully with hardened runtime"
+            echo "Basic verification: $?"
+            
+            codesign --display --verbose=4 ${CLEAN_BINARY}
+            echo "=== Checking for hardened runtime and timestamp ==="
+            codesign --display --entitlements - ${CLEAN_BINARY} | head -10
+            
+            # Verify with spctl (Gatekeeper assessment)
+            spctl --assess --verbose ${CLEAN_BINARY}
+            echo "Gatekeeper assessment: $?"
+            
+            echo "✅ Binary signed successfully with hardened runtime and timestamp"
           fi
 
           # Create archive with version info
@@ -158,23 +196,32 @@ jobs:
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
           echo "Signing DMG: ${DMG_NAME}"
 
-          # Find the Developer ID certificate identity
+                    # Find the Developer ID certificate identity
           CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
 
-          # Fallback to team ID if certificate identity not found
-          if [ -z "${CERT_IDENTITY}" ]; then
-            echo "Certificate identity not found, using team ID as fallback"
+          # Verify we found a valid certificate
+          if [ -n "${CERT_IDENTITY}" ]; then
+            echo "✅ Found Developer ID certificate for DMG: ${CERT_IDENTITY}"
+          else
+            echo "❌ No Developer ID certificate found for DMG, using team ID as fallback"
             CERT_IDENTITY="${{ secrets.APPLE_TEAM_ID }}"
+            echo "⚠️  Using fallback identity for DMG: ${CERT_IDENTITY}"
           fi
 
-          echo "Using certificate identity for DMG: ${CERT_IDENTITY}"
-
           # Sign DMG with proper certificate and timestamp
-          codesign --force --sign "${CERT_IDENTITY}" --timestamp "${DMG_NAME}"
+          codesign --force \
+            --sign "${CERT_IDENTITY}" \
+            --timestamp \
+            "${DMG_NAME}"
 
           # Verify DMG signing
+          echo "=== Verifying DMG signature ==="
           codesign --verify --verbose "${DMG_NAME}"
-          echo "DMG created and signed: ${DMG_NAME}"
+          echo "DMG verification: $?"
+
+          codesign --display --verbose=4 "${DMG_NAME}"
+
+          echo "✅ DMG created and signed successfully: ${DMG_NAME}"
 
       - name: Submit for notarization (macOS)
         if: matrix.goos == 'darwin'
