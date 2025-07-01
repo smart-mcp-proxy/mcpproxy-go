@@ -109,12 +109,42 @@ jobs:
           openssl x509 -in temp_cert_and_key.pem -out cert_only.pem
           openssl rsa -in temp_cert_and_key.pem -out key_only.pem
 
-          # Import to default keychain
-          security import cert_only.pem -T /usr/bin/codesign
-          security import key_only.pem -T /usr/bin/codesign
-
-          # Set partition list for codesign access
-          security set-key-partition-list -S apple-tool:,apple: -s -k "" ~/Library/Keychains/login.keychain-db
+          # Try importing to login keychain first, fallback to temp keychain
+          echo "=== Importing certificates ==="
+          if security import cert_only.pem -T /usr/bin/codesign && security import key_only.pem -T /usr/bin/codesign; then
+            echo "✅ Imported to login keychain"
+            KEYCHAIN_PATH="~/Library/Keychains/login.keychain-db"
+            
+            # Unlock keychain for codesign access
+            security unlock-keychain ~/Library/Keychains/login.keychain-db || echo "Keychain unlock not needed"
+            
+            # Try to set partition list, but don't fail if it doesn't work
+            if security set-key-partition-list -S apple-tool:,apple: -s ~/Library/Keychains/login.keychain-db 2>/dev/null; then
+              echo "✅ Partition list set successfully"
+            else
+              echo "⚠️  Partition list setting skipped (not critical for GitHub Actions)"
+            fi
+            
+          else
+            echo "⚠️  Login keychain import failed, using temporary keychain"
+            
+            # Create temporary keychain
+            TEMP_KEYCHAIN="build.keychain"
+            security create-keychain -p "temp123" "$TEMP_KEYCHAIN"
+            security default-keychain -s "$TEMP_KEYCHAIN"
+            security unlock-keychain -p "temp123" "$TEMP_KEYCHAIN"
+            security set-keychain-settings -t 3600 -l "$TEMP_KEYCHAIN"
+            
+            # Import to temp keychain
+            security import cert_only.pem -k "$TEMP_KEYCHAIN" -T /usr/bin/codesign
+            security import key_only.pem -k "$TEMP_KEYCHAIN" -T /usr/bin/codesign
+            
+            # Set partition list for temp keychain
+            security set-key-partition-list -S apple-tool:,apple: -s -k "temp123" "$TEMP_KEYCHAIN"
+            
+            echo "✅ Imported to temporary keychain"
+            KEYCHAIN_PATH="$TEMP_KEYCHAIN"
+          fi
 
           # Verify import
           echo "=== Available code signing identities ==="
