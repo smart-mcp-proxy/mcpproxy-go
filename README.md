@@ -29,6 +29,14 @@
 
 ### 1. Install
 
+**macOS (Recommended - DMG Installer):**
+
+Download the latest DMG installer for your architecture:
+- **Apple Silicon (M1/M2):** [Download DMG](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest) → `mcpproxy-*-darwin-arm64.dmg`
+- **Intel Mac:** [Download DMG](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest) → `mcpproxy-*-darwin-amd64.dmg`
+
+**Alternative install methods:**
+
 macOS (Homebrew):
 ```bash
 brew install smart-mcp-proxy/mcpproxy/mcpproxy
