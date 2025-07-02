@@ -492,6 +492,11 @@ jobs:
           echo "Pending notarizations:"
           ls -la pending-notarizations/ || echo "No pending notarizations"
 
+      - name: Set version variable
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
+
       - name: Create release with binaries
         uses: softprops/action-gh-release@v2
         with:
@@ -510,14 +515,14 @@ jobs:
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
             **macOS Installers (Recommended):**
-            - [macOS Universal DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-arm64.dmg) (Apple Silicon)
-            - [macOS Intel DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-amd64.dmg) (Intel)
+            - [macOS Universal DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.dmg) (Apple Silicon)
+            - [macOS Intel DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.dmg) (Intel)
 
             **This Version (${{ github.ref_name }}):**
-            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-linux-amd64.tar.gz)
-            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-windows-amd64.zip)
-            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-amd64.tar.gz)
-            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ github.ref_name }}-darwin-arm64.tar.gz)
+            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz)
+            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-amd64.zip)
+            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.tar.gz)
+            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.tar.gz)
 
             ### Installation
 
@@ -543,7 +548,8 @@ jobs:
             ### Usage
 
             - With tray: `./mcpproxy` (default)
-            - Headless: `./mcpproxy --tray=false`
+            - Custom port (default: 8080): `./mcpproxy --listen :8081`
+            - Headless: `./mcpproxy --tray false`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
