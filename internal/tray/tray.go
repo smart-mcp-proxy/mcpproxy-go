@@ -326,7 +326,7 @@ func (a *App) onReady() {
 
 	// --- Autostart Menu Item (macOS only) ---
 	if runtime.GOOS == osDarwin && a.autostartManager != nil {
-		a.autostartItem = systray.AddMenuItem("🚀 Start at Login", "Start mcpproxy automatically when you log in")
+		a.autostartItem = systray.AddMenuItem("☐ Start at Login", "Start mcpproxy automatically when you log in")
 		a.updateAutostartMenuItem()
 		systray.AddSeparator()
 	}
@@ -1032,10 +1032,10 @@ func (a *App) updateAutostartMenuItem() {
 	}
 
 	if a.autostartManager.IsEnabled() {
-		a.autostartItem.SetTitle("✅ Start at Login")
+		a.autostartItem.SetTitle("☑️ Start at Login")
 		a.autostartItem.SetTooltip("mcpproxy will start automatically when you log in (click to disable)")
 	} else {
-		a.autostartItem.SetTitle("🚀 Start at Login")
+		a.autostartItem.SetTitle("☐ Start at Login")
 		a.autostartItem.SetTooltip("Start mcpproxy automatically when you log in (click to enable)")
 	}
 }
