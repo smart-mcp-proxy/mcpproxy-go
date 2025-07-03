@@ -334,11 +334,18 @@ func (a *App) onReady() {
 	quitItem := systray.AddMenuItem("Quit", "Quit the application")
 
 	// --- Set Initial State & Start Sync ---
+	a.logger.Debug("=== TRAY STARTUP: Setting initial state ===")
 	a.updateStatus()
+
+	a.logger.Debug("=== TRAY STARTUP: Calling initial SyncNow ===")
 	if err := a.syncManager.SyncNow(); err != nil {
 		a.logger.Error("Initial menu sync failed", zap.Error(err))
 	}
+
+	a.logger.Debug("=== TRAY STARTUP: Starting background sync manager ===")
 	a.syncManager.Start()
+
+	a.logger.Debug("=== TRAY STARTUP: Initialization completed ===")
 
 	// --- Click Handlers ---
 	go func() {
@@ -493,7 +500,10 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		} else {
 			// Clear menus when server is stopped to avoid showing stale data
 			a.menuManager.UpdateUpstreamServersMenu([]map[string]interface{}{})
-			a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
+			// DON'T clear quarantine menu - quarantine data is persistent storage,
+			// not runtime connection data. Users should manage quarantined servers
+			// even when server is stopped.
+			//a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
 		}
 	}
 }
