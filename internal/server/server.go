@@ -651,11 +651,15 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 
 // GetQuarantinedServers returns information about quarantined servers for tray UI
 func (s *Server) GetQuarantinedServers() ([]map[string]interface{}, error) {
+	s.logger.Debug("GetQuarantinedServers called")
+
 	// Check if storage manager is available
 	if s.storageManager == nil {
+		s.logger.Warn("Storage manager is nil in GetQuarantinedServers")
 		return []map[string]interface{}{}, nil
 	}
 
+	s.logger.Debug("Calling storage manager ListQuarantinedUpstreamServers")
 	quarantinedServers, err := s.storageManager.ListQuarantinedUpstreamServers()
 	if err != nil {
 		// Handle database closed gracefully
@@ -663,12 +667,16 @@ func (s *Server) GetQuarantinedServers() ([]map[string]interface{}, error) {
 			s.logger.Debug("Database not available for GetQuarantinedServers, returning empty list")
 			return []map[string]interface{}{}, nil
 		}
+		s.logger.Error("Failed to get quarantined servers from storage", zap.Error(err))
 		return nil, err
 	}
 
+	s.logger.Debug("Retrieved quarantined servers from storage",
+		zap.Int("count", len(quarantinedServers)))
+
 	var result []map[string]interface{}
 	for _, server := range quarantinedServers {
-		result = append(result, map[string]interface{}{
+		serverMap := map[string]interface{}{
 			"name":        server.Name,
 			"url":         server.URL,
 			"command":     server.Command,
@@ -676,8 +684,16 @@ func (s *Server) GetQuarantinedServers() ([]map[string]interface{}, error) {
 			"enabled":     server.Enabled,
 			"quarantined": server.Quarantined,
 			"created":     server.Created,
-		})
+		}
+		result = append(result, serverMap)
+
+		s.logger.Debug("Added quarantined server to result",
+			zap.String("server", server.Name),
+			zap.Bool("quarantined", server.Quarantined))
 	}
+
+	s.logger.Debug("GetQuarantinedServers completed",
+		zap.Int("total_result_count", len(result)))
 
 	return result, nil
 }
@@ -722,10 +738,18 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
+	s.logger.Debug("Calling storage manager QuarantineUpstreamServer",
+		zap.String("server", serverName),
+		zap.Bool("quarantined", quarantined))
+
 	if err := s.storageManager.QuarantineUpstreamServer(serverName, quarantined); err != nil {
 		s.logger.Error("Failed to update server quarantine state in storage", zap.Error(err))
 		return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)
 	}
+
+	s.logger.Debug("Successfully updated quarantine state in storage, saving configuration",
+		zap.String("server", serverName),
+		zap.Bool("quarantined", quarantined))
 
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))

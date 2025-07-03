@@ -139,13 +139,25 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	m.logger.Debug("ListQuarantinedUpstreamServers called")
+
 	records, err := m.db.ListUpstreams()
 	if err != nil {
+		m.logger.Errorw("Failed to list upstreams for quarantine filtering",
+			"error", err)
 		return nil, err
 	}
 
+	m.logger.Debugw("Retrieved all upstream records for quarantine filtering",
+		"total_records", len(records))
+
 	var quarantinedServers []*config.ServerConfig
 	for _, record := range records {
+		m.logger.Debugw("Checking server quarantine status",
+			"server", record.Name,
+			"quarantined", record.Quarantined,
+			"enabled", record.Enabled)
+
 		if record.Quarantined {
 			quarantinedServers = append(quarantinedServers, &config.ServerConfig{
 				Name:        record.Name,
@@ -160,8 +172,15 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 				Created:     record.Created,
 				Updated:     record.Updated,
 			})
+
+			m.logger.Debugw("Added server to quarantined list",
+				"server", record.Name,
+				"total_quarantined_so_far", len(quarantinedServers))
 		}
 	}
+
+	m.logger.Debugw("ListQuarantinedUpstreamServers completed",
+		"total_quarantined", len(quarantinedServers))
 
 	return quarantinedServers, nil
 }
@@ -226,14 +245,39 @@ func (m *Manager) QuarantineUpstreamServer(name string, quarantined bool) error 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.logger.Debugw("QuarantineUpstreamServer called",
+		"server", name,
+		"quarantined", quarantined)
+
 	record, err := m.db.GetUpstream(name)
 	if err != nil {
+		m.logger.Errorw("Failed to get upstream record for quarantine operation",
+			"server", name,
+			"error", err)
 		return err
 	}
 
+	m.logger.Debugw("Retrieved upstream record for quarantine",
+		"server", name,
+		"current_quarantined", record.Quarantined,
+		"new_quarantined", quarantined)
+
 	record.Quarantined = quarantined
 	record.Updated = time.Now()
-	return m.db.SaveUpstream(record)
+
+	if err := m.db.SaveUpstream(record); err != nil {
+		m.logger.Errorw("Failed to save quarantine status to database",
+			"server", name,
+			"quarantined", quarantined,
+			"error", err)
+		return err
+	}
+
+	m.logger.Debugw("Successfully saved quarantine status to database",
+		"server", name,
+		"quarantined", quarantined)
+
+	return nil
 }
 
 // Tool statistics operations

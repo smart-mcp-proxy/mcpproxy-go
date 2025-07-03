@@ -326,7 +326,7 @@ func (a *App) onReady() {
 
 	// --- Autostart Menu Item (macOS only) ---
 	if runtime.GOOS == osDarwin && a.autostartManager != nil {
-		a.autostartItem = systray.AddMenuItem("🚀 Start at Login", "Start mcpproxy automatically when you log in")
+		a.autostartItem = systray.AddMenuItem("Start at Login", "Start mcpproxy automatically when you log in")
 		a.updateAutostartMenuItem()
 		systray.AddSeparator()
 	}
@@ -335,9 +335,11 @@ func (a *App) onReady() {
 
 	// --- Set Initial State & Start Sync ---
 	a.updateStatus()
+
 	if err := a.syncManager.SyncNow(); err != nil {
 		a.logger.Error("Initial menu sync failed", zap.Error(err))
 	}
+
 	a.syncManager.Start()
 
 	// --- Click Handlers ---
@@ -493,7 +495,10 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		} else {
 			// Clear menus when server is stopped to avoid showing stale data
 			a.menuManager.UpdateUpstreamServersMenu([]map[string]interface{}{})
-			a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
+			// DON'T clear quarantine menu - quarantine data is persistent storage,
+			// not runtime connection data. Users should manage quarantined servers
+			// even when server is stopped.
+			//a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
 		}
 	}
 }
@@ -1032,10 +1037,10 @@ func (a *App) updateAutostartMenuItem() {
 	}
 
 	if a.autostartManager.IsEnabled() {
-		a.autostartItem.SetTitle("✅ Start at Login")
+		a.autostartItem.SetTitle("☑️ Start at Login")
 		a.autostartItem.SetTooltip("mcpproxy will start automatically when you log in (click to disable)")
 	} else {
-		a.autostartItem.SetTitle("🚀 Start at Login")
+		a.autostartItem.SetTitle("Start at Login")
 		a.autostartItem.SetTooltip("Start mcpproxy automatically when you log in (click to enable)")
 	}
 }
