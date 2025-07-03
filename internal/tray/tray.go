@@ -334,18 +334,13 @@ func (a *App) onReady() {
 	quitItem := systray.AddMenuItem("Quit", "Quit the application")
 
 	// --- Set Initial State & Start Sync ---
-	a.logger.Debug("=== TRAY STARTUP: Setting initial state ===")
 	a.updateStatus()
 
-	a.logger.Debug("=== TRAY STARTUP: Calling initial SyncNow ===")
 	if err := a.syncManager.SyncNow(); err != nil {
 		a.logger.Error("Initial menu sync failed", zap.Error(err))
 	}
 
-	a.logger.Debug("=== TRAY STARTUP: Starting background sync manager ===")
 	a.syncManager.Start()
-
-	a.logger.Debug("=== TRAY STARTUP: Initialization completed ===")
 
 	// --- Click Handlers ---
 	go func() {
