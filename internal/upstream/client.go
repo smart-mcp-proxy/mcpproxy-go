@@ -17,6 +17,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/hash"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/secureenv"
 )
 
 const (
@@ -38,6 +39,9 @@ type Client struct {
 	// Server information received during initialization
 	serverInfo *mcp.InitializeResult
 
+	// Secure environment manager for filtering environment variables
+	envManager *secureenv.Manager
+
 	// Connection state (protected by mutex)
 	mu            sync.RWMutex
 	connected     bool
@@ -55,7 +59,7 @@ type Tool struct {
 }
 
 // NewClient creates a new MCP client for connecting to an upstream server
-func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig) (*Client, error) {
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*Client, error) {
 	c := &Client{
 		id:     id,
 		config: serverConfig,
@@ -64,6 +68,39 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 			zap.String("upstream_name", serverConfig.Name),
 		),
 	}
+
+	// Create secure environment manager
+	var envConfig *secureenv.EnvConfig
+	if globalConfig != nil && globalConfig.Environment != nil {
+		envConfig = globalConfig.Environment
+	} else {
+		envConfig = secureenv.DefaultEnvConfig()
+	}
+	
+	// Add server-specific environment variables to the custom vars
+	if len(serverConfig.Env) > 0 {
+		// Create a copy of the environment config with server-specific variables
+		serverEnvConfig := *envConfig
+		if serverEnvConfig.CustomVars == nil {
+			serverEnvConfig.CustomVars = make(map[string]string)
+		} else {
+			// Create a copy of the custom vars map
+			customVars := make(map[string]string)
+			for k, v := range serverEnvConfig.CustomVars {
+				customVars[k] = v
+			}
+			serverEnvConfig.CustomVars = customVars
+		}
+		
+		// Add server-specific environment variables
+		for k, v := range serverConfig.Env {
+			serverEnvConfig.CustomVars[k] = v
+		}
+		
+		envConfig = &serverEnvConfig
+	}
+	
+	c.envManager = secureenv.NewManager(envConfig)
 
 	// Create upstream server logger if logging config is provided
 	if logConfig != nil {
@@ -176,11 +213,12 @@ func (c *Client) Connect(ctx context.Context) error {
 			return c.lastError
 		}
 
-		// Convert env map to format needed for the process
-		var envVars []string
-		for k, v := range c.config.Env {
-			envVars = append(envVars, k+"="+v)
-		}
+		// Use secure environment manager to build filtered environment variables
+		envVars := c.envManager.BuildSecureEnvironment()
+
+		c.logger.Debug("Environment variables configured for process",
+			zap.Int("filtered_count", len(envVars)),
+			zap.String("command", command))
 
 		stdioTransport := transport.NewStdio(command, envVars, cmdArgs...)
 		c.client = client.NewClient(stdioTransport)

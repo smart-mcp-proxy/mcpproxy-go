@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"mcpproxy-go/internal/secureenv"
 	"time"
 )
 
@@ -19,6 +20,9 @@ type Config struct {
 	TopK              int             `json:"top_k" mapstructure:"top-k"`
 	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
 	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
+
+	// Environment configuration for secure variable filtering
+	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
 
 	// Logging configuration
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
@@ -154,6 +158,9 @@ func DefaultConfig() *Config {
 		ToolsLimit:        15,
 		ToolResponseLimit: 20000, // Default 20000 characters
 
+		// Default secure environment configuration
+		Environment: secureenv.DefaultEnvConfig(),
+
 		// Default logging configuration
 		Logging: &LogConfig{
 			Level:         "info",
@@ -192,6 +199,12 @@ func (c *Config) Validate() error {
 	if c.ToolResponseLimit < 0 {
 		c.ToolResponseLimit = 0 // 0 means disabled
 	}
+	
+	// Ensure Environment config is not nil
+	if c.Environment == nil {
+		c.Environment = secureenv.DefaultEnvConfig()
+	}
+	
 	return nil
 }
 

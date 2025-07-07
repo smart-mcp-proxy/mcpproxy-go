@@ -74,7 +74,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	}
 
 	// Initialize upstream manager
-	upstreamManager := upstream.NewManager(logger)
+	upstreamManager := upstream.NewManager(logger, cfg)
 
 	// Set logging configuration on upstream manager for per-server logging
 	if cfg.Logging != nil {
