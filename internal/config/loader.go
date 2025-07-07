@@ -139,7 +139,6 @@ func setupViper() {
 
 	// Set defaults
 	viper.SetDefault("listen", ":8080")
-	viper.SetDefault("tray", true)
 	viper.SetDefault("top-k", 5)
 	viper.SetDefault("tools-limit", 15)
 	viper.SetDefault("config", "")

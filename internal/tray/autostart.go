@@ -28,9 +28,9 @@ const (
     <key>KeepAlive</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>%s/mcpproxy.log</string>
+    <string>%s/main.log</string>
     <key>StandardErrorPath</key>
-    <string>%s/mcpproxy-error.log</string>
+    <string>%s/main-error.log</string>
     <key>WorkingDirectory</key>
     <string>%s</string>
 </dict>

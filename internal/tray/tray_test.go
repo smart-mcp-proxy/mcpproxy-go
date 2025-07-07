@@ -136,6 +136,10 @@ func (m *MockServerInterface) GetConfigPath() string {
 	return m.configPath
 }
 
+func (m *MockServerInterface) GetLogDir() string {
+	return "/test/logs"
+}
+
 // Helper methods for testing
 func (m *MockServerInterface) AddServer(name, url string, enabled, quarantined bool) {
 	server := map[string]interface{}{

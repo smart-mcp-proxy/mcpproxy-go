@@ -24,12 +24,12 @@ Re‑implement the existing Python MCP proxy in Go, delivering a single‑binary
 
 * WebSocket/stdin transports, distributed indexing, vector search.
 
-## 3  Tech Stack
+## 3  Tech Stack
 
 | Concern           | Library                           | Reason                             |
 | ----------------- | --------------------------------- | ---------------------------------- |
 | MCP server/client | **`mark3labs/mcp-go`**            | Native Go, Streamable‑HTTP support |
-| Full‑text search  | **Bleve v2**                      | Embeddable BM25                    |
+| Full‑text search  | **Bleve v2**                      | Embeddable BM25                    |
 | CLI & config      | **`spf13/cobra` + `spf13/viper`** | Flags → env → file binding         |
 | Persistence       | **bbolt**                         | Single‑file ACID                   |
 | Sys‑tray          | **`fyne.io/systray`**             | Tiny cross‑platform tray           |
@@ -66,7 +66,7 @@ Re‑implement the existing Python MCP proxy in Go, delivering a single‑binary
   * Stored alongside tool metadata in both Bleve doc and Bolt `toolhash` bucket.
   * During re‑sync `ListTools` results are hashed; unchanged hashes skip re‑indexing.
 
-## 6  Data Model (bbolt)
+## 6  Data Model (bbolt)
 
 | Bucket      | Key           | Value                        |
 | ----------- | ------------- | ---------------------------- |
@@ -119,7 +119,22 @@ Input:  {"operation":"add","url":"https://api.mcp.dev","name":"dev"}
 Output: {"id":"uuid","enabled":true}
 ```
 
-Operations: `list` / `add` / `remove` / `update`.
+Operations: `list` / `add` / `remove` / `update` / `tail_log`.
+
+#### 8.3.1 `tail_log` Operation
+
+The `tail_log` operation allows LLMs to read recent log entries from a specific upstream server for debugging purposes:
+
+```jsonc
+Input:  {"operation":"tail_log","name":"dev","lines":50}
+Output: {"server":"dev","lines":50,"log_entries":[...]}
+```
+
+**Parameters:**
+- `name` (required): Server name to read logs from
+- `lines` (optional): Number of recent lines to return (default: 50, max: 500)
+
+**Use Case:** Enables AI agents to autonomously diagnose connection issues, authentication failures, and other upstream server problems by reading recent log entries.
 
 ### 8.4  `tools_stat`
 
@@ -134,9 +149,54 @@ Returns `{total_tools, top:[{tool_name,count}]}`.
 
 ## 10  CLI, Config & Tray
 
-* `mcpproxy [--listen :8080] [--data-dir ~/.mcpproxy] [--upstream "prod=https://api"]`
+* `mcpproxy [--listen :8080] [--log-dir ~/.mcpproxy/logs] [--upstream "prod=https://api"]`
 * Viper reads `$MCPP_` envs and `config.toml`.
 * Tray (systray): icon + menu items (Enable, Disable, Add…, Reindex, Quit).
+
+### 10.1 Logging System
+
+#### Per-Upstream Server Logging
+
+mcpproxy implements comprehensive per-upstream-server logging to facilitate debugging of connection issues and MCP communication problems.
+
+**Log File Structure:**
+```
+~/.mcpproxy/logs/
+├── main.log                    # Main application log
+├── server-github.log           # GitHub MCP server interactions
+├── server-filesystem.log       # Filesystem MCP server interactions
+└── server-database.log         # Database MCP server interactions
+```
+
+**Log Content:**
+- **MCP Protocol Messages**: All JSON-RPC messages between mcpproxy and upstream servers
+- **Connection Events**: Connect, disconnect, retry attempts, and failures
+- **Authentication**: OAuth flows, token refreshes, and auth errors
+- **Process Output**: STDERR from stdio-based MCP servers
+- **Timing Information**: Request/response latencies and timeout events
+
+**Example Log Format:**
+```
+2025-06-04T03:42:38.375Z [github] [info] Connecting to upstream server
+2025-06-04T03:42:38.630Z [github] [info] Connected successfully
+2025-06-04T03:42:38.663Z [github] [debug] [Client→Server] initialize
+2025-06-04T03:42:38.663Z [github] [debug] {"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mcpproxy-go","version":"1.0.0"}},"jsonrpc":"2.0","id":0}
+2025-06-04T03:42:38.700Z [github] [debug] [Server→Client] 0
+2025-06-04T03:42:38.700Z [github] [debug] {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"GitHub MCP Server","version":"1.0.0"}}}
+2025-06-04T03:42:41.670Z [github] [error] Connection error: HTTP 500 - Internal Server Error
+2025-06-04T03:42:41.671Z [github] [info] Attempting reconnection in 5 seconds...
+```
+
+**CLI Configuration:**
+- `--log-dir`: Specify custom log directory (default: OS-specific standard location)
+- `--log-level`: Set log level for all loggers (debug, info, warn, error)
+- Main application log: `main.log`
+- Per-server logs: `server-{name}.log`
+
+**Log Rotation:**
+- Automatic rotation based on file size (10MB default)
+- Configurable retention (5 backup files, 30 days default)
+- Optional compression for rotated files
 
 ## 11  Build & Packaging
 
@@ -171,7 +231,10 @@ The proxy supports dynamic management of upstream MCP servers through the `upstr
 ~/.mcpproxy/
 ├── mcp_config.json          # Main configuration file
 ├── data.bolt                # BoltDB storage (tool stats, metadata)
-└── index.bleve/             # Search index directory
+├── index.bleve/             # Search index directory
+└── logs/                    # Log files directory
+    ├── main.log             # Main application log
+    └── server-*.log         # Per-upstream server logs
 ```
 
 #### Configuration Flow

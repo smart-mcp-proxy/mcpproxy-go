@@ -14,6 +14,7 @@ import (
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
@@ -74,6 +75,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 
 	// Initialize upstream manager
 	upstreamManager := upstream.NewManager(logger)
+
+	// Set logging configuration on upstream manager for per-server logging
+	if cfg.Logging != nil {
+		upstreamManager.SetLogConfig(cfg.Logging)
+	}
 
 	// Initialize cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
@@ -1034,4 +1040,17 @@ func (s *Server) cleanupOrphanedIndexEntries() {
 // GetConfigPath returns the path to the configuration file for file watching
 func (s *Server) GetConfigPath() string {
 	return config.GetConfigPath(s.config.DataDir)
+}
+
+// GetLogDir returns the log directory path for tray UI
+func (s *Server) GetLogDir() string {
+	if s.config.Logging != nil && s.config.Logging.LogDir != "" {
+		return s.config.Logging.LogDir
+	}
+	// Return OS-specific default log directory if not configured
+	if defaultLogDir, err := logs.GetLogDir(); err == nil {
+		return defaultLogDir
+	}
+	// Last resort fallback to data directory
+	return s.config.DataDir
 }
