@@ -76,3 +76,5 @@ coverage.txt
 *.cache 
 cmd/mcpproxy/mcpproxy
 data/
+.cursor/
+assets/mcpproxy.icns
