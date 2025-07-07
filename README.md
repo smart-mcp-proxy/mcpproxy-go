@@ -116,7 +116,7 @@ mcpproxy --help
   -c, --config <file>          path to mcp_config.json
   -l, --listen <addr>          listen address (":8080")
   -d, --data-dir <dir>         custom data directory
-      --tray                   enable/disable system tray (default true)
+      --tray                   enable/disable system tray (default true, use --tray=false to disable)
       --log-level <level>      debug|info|warn|error
       --read-only              forbid config changes
       --disable-management     disable upstream_servers tool

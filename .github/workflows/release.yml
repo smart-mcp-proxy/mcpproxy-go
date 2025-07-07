@@ -549,7 +549,7 @@ jobs:
 
             - With tray: `./mcpproxy` (default)
             - Custom port (default: 8080): `./mcpproxy --listen :8081`
-            - Headless: `./mcpproxy --tray false`
+            - Headless: `./mcpproxy --tray=false`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

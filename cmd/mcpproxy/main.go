@@ -57,7 +57,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&dataDir, "data-dir", "d", "", "Data directory path (default: ~/.mcpproxy)")
 	rootCmd.PersistentFlags().StringVarP(&listen, "listen", "l", "", "Listen address (for HTTP mode, not used in stdio mode)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
-	rootCmd.PersistentFlags().BoolVar(&enableTray, "tray", true, "Enable system tray")
+	rootCmd.PersistentFlags().BoolVar(&enableTray, "tray", true, "Enable system tray (use --tray=false to disable)")
 	rootCmd.PersistentFlags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	rootCmd.PersistentFlags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
 	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", true, "Enable logging to file in standard OS location")
@@ -74,7 +74,7 @@ func main() {
 	}
 }
 
-func runServer(_ *cobra.Command, _ []string) error {
+func runServer(cmd *cobra.Command, _ []string) error {
 	// Load configuration first to get logging settings
 	cfg, err := loadConfig()
 	if err != nil {
@@ -135,7 +135,10 @@ func runServer(_ *cobra.Command, _ []string) error {
 		zap.Bool("log_to_file", logToFile))
 
 	// Override other settings from command line
-	cfg.EnableTray = enableTray
+	// Check if the tray flag was explicitly set by the user
+	if cmd.Flags().Changed("tray") {
+		cfg.EnableTray = enableTray
+	}
 	cfg.DebugSearch = debugSearch
 
 	if toolResponseLimit != 0 {
