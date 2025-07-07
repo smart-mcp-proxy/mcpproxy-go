@@ -13,10 +13,18 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// Log level constants
+const (
+	LogLevelDebug = "debug"
+	LogLevelInfo  = "info"
+	LogLevelWarn  = "warn"
+	LogLevelError = "error"
+)
+
 // DefaultLogConfig returns default logging configuration
 func DefaultLogConfig() *config.LogConfig {
 	return &config.LogConfig{
-		Level:         "info",
+		Level:         LogLevelInfo,
 		EnableFile:    true,
 		EnableConsole: true,
 		Filename:      "main.log",
@@ -37,13 +45,13 @@ func SetupLogger(config *config.LogConfig) (*zap.Logger, error) {
 	// Parse log level
 	var level zapcore.Level
 	switch config.Level {
-	case "debug":
+	case LogLevelDebug:
 		level = zap.DebugLevel
-	case "info":
+	case LogLevelInfo:
 		level = zap.InfoLevel
-	case "warn":
+	case LogLevelWarn:
 		level = zap.WarnLevel
-	case "error":
+	case LogLevelError:
 		level = zap.ErrorLevel
 	default:
 		level = zap.InfoLevel
@@ -226,13 +234,13 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 	// Parse log level
 	var level zapcore.Level
 	switch serverConfig.Level {
-	case "debug":
+	case LogLevelDebug:
 		level = zap.DebugLevel
-	case "info":
+	case LogLevelInfo:
 		level = zap.InfoLevel
-	case "warn":
+	case LogLevelWarn:
 		level = zap.WarnLevel
-	case "error":
+	case LogLevelError:
 		level = zap.ErrorLevel
 	default:
 		level = zap.InfoLevel
