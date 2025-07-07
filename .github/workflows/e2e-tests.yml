@@ -118,9 +118,9 @@ jobs:
 
           # Verify log file was created in standard OS location
           if [ "$(uname)" = "Linux" ]; then
-            if [ -f "$HOME/.local/state/mcpproxy/logs/mcpproxy.log" ]; then
+            if [ -f "$HOME/.local/state/mcpproxy/logs/main.log" ]; then
               echo "✓ Log file created in Linux standard location"
-              head -5 "$HOME/.local/state/mcpproxy/logs/mcpproxy.log"
+              head -5 "$HOME/.local/state/mcpproxy/logs/main.log"
             else
               echo "⚠ Log file not found in expected location"
             fi
@@ -219,20 +219,20 @@ jobs:
             ls -la "${{ matrix.log_path_check }}"
             
             # Check if log file exists and has content
-            if [ -f "${{ matrix.log_path_check }}/mcpproxy.log" ]; then
+            if [ -f "${{ matrix.log_path_check }}/main.log" ]; then
               echo "✓ Log file created successfully"
-              echo "Log file size: $(wc -c < "${{ matrix.log_path_check }}/mcpproxy.log") bytes"
+              echo "Log file size: $(wc -c < "${{ matrix.log_path_check }}/main.log") bytes"
               echo "First few lines:"
-              head -3 "${{ matrix.log_path_check }}/mcpproxy.log"
+              head -3 "${{ matrix.log_path_check }}/main.log"
               
               # Verify log contains expected content
-              if grep -q "Log directory configured" "${{ matrix.log_path_check }}/mcpproxy.log"; then
+              if grep -q "Log directory configured" "${{ matrix.log_path_check }}/main.log"; then
                 echo "✓ Log contains expected startup messages"
               else
                 echo "⚠ Log missing expected startup messages"
               fi
               
-              if grep -q "${{ matrix.log_standard }}" "${{ matrix.log_path_check }}/mcpproxy.log"; then
+              if grep -q "${{ matrix.log_standard }}" "${{ matrix.log_path_check }}/main.log"; then
                 echo "✓ Log contains OS standard compliance information"
               else
                 echo "⚠ Log missing OS standard compliance information"
@@ -274,7 +274,7 @@ jobs:
           Get-ChildItem $logPath
 
           # Check if log file exists and has content
-          $logFile = Join-Path $logPath "mcpproxy.log"
+          $logFile = Join-Path $logPath "main.log"
           if (-not (Test-Path $logFile)) {
             Write-Host "✗ Log file not created"
             exit 1

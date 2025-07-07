@@ -19,7 +19,7 @@ func DefaultLogConfig() *config.LogConfig {
 		Level:         "info",
 		EnableFile:    true,
 		EnableConsole: true,
-		Filename:      "mcpproxy.log",
+		Filename:      "main.log",
 		MaxSize:       10, // 10MB
 		MaxBackups:    5,  // 5 backup files
 		MaxAge:        30, // 30 days
