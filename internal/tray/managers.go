@@ -5,6 +5,7 @@ package tray
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -277,26 +278,31 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 
 	// --- Create a map for efficient lookup of current servers ---
 	currentServerMap := make(map[string]map[string]interface{})
+	var currentServerNames []string
 	for _, server := range servers {
 		if name, ok := server["name"].(string); ok {
 			currentServerMap[name] = server
+			currentServerNames = append(currentServerNames, name)
+		}
+	}
+	sort.Strings(currentServerNames)
+
+	// --- Check if we need to rebuild the menu (new servers added) ---
+	var newServerNames []string
+	for serverName := range currentServerMap {
+		if _, exists := m.serverMenuItems[serverName]; !exists {
+			newServerNames = append(newServerNames, serverName)
 		}
 	}
 
-	// --- Hide or Update Existing Menu Items ---
-	for serverName, menuItem := range m.serverMenuItems {
-		if serverData, exists := currentServerMap[serverName]; exists {
-			// Server exists, update its display and ensure it's visible
-			status, tooltip := m.getServerStatusDisplay(serverData)
-			menuItem.SetTitle(status)
-			menuItem.SetTooltip(tooltip)
-			m.updateServerActionMenus(serverName, serverData) // Update sub-menu items too
-			menuItem.Show()
-		} else {
-			// Server was removed from config, hide it
-			m.logger.Info("Hiding menu item for removed server", zap.String("server", serverName))
+	if len(newServerNames) > 0 {
+		// New servers detected - rebuild entire menu in sorted order
+		m.logger.Info("Rebuilding upstream servers menu in sorted order", zap.Int("new_servers", len(newServerNames)))
+
+		// Hide all existing menu items
+		for serverName, menuItem := range m.serverMenuItems {
 			menuItem.Hide()
-			// Also hide its sub-menu items if they exist
+			// Also hide sub-menu items
 			if actionItem, ok := m.serverActionItems[serverName]; ok {
 				actionItem.Hide()
 			}
@@ -304,21 +310,51 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 				quarantineActionItem.Hide()
 			}
 		}
-	}
 
-	// --- Create Menu Items for New Servers ---
-	for serverName, serverData := range currentServerMap {
-		if _, exists := m.serverMenuItems[serverName]; exists {
-			continue
+		// Clear the tracking maps
+		m.serverMenuItems = make(map[string]*systray.MenuItem)
+		m.serverActionItems = make(map[string]*systray.MenuItem)
+		m.serverQuarantineItems = make(map[string]*systray.MenuItem)
+
+		// Create all servers in sorted order
+		for _, serverName := range currentServerNames {
+			serverData := currentServerMap[serverName]
+			m.logger.Info("Creating menu item for server", zap.String("server", serverName))
+			status, tooltip := m.getServerStatusDisplay(serverData)
+			serverMenuItem := m.upstreamServersMenu.AddSubMenuItem(status, tooltip)
+			m.serverMenuItems[serverName] = serverMenuItem
+
+			// Create its action submenus
+			m.createServerActionSubmenus(serverMenuItem, serverData)
 		}
-		// This is a new server, create its menu item
-		m.logger.Info("Creating menu item for new server", zap.String("server", serverName))
-		status, tooltip := m.getServerStatusDisplay(serverData)
-		serverMenuItem := m.upstreamServersMenu.AddSubMenuItem(status, tooltip)
-		m.serverMenuItems[serverName] = serverMenuItem
+	} else {
+		// No new servers - just update existing items
+		for _, serverName := range currentServerNames {
+			if menuItem, exists := m.serverMenuItems[serverName]; exists {
+				serverData := currentServerMap[serverName]
+				// Server exists, update its display and ensure it's visible
+				status, tooltip := m.getServerStatusDisplay(serverData)
+				menuItem.SetTitle(status)
+				menuItem.SetTooltip(tooltip)
+				m.updateServerActionMenus(serverName, serverData) // Update sub-menu items too
+				menuItem.Show()
+			}
+		}
 
-		// Create its action submenus
-		m.createServerActionSubmenus(serverMenuItem, serverData)
+		// Hide servers that are no longer in the config
+		for serverName, menuItem := range m.serverMenuItems {
+			if _, exists := currentServerMap[serverName]; !exists {
+				m.logger.Info("Hiding menu item for removed server", zap.String("server", serverName))
+				menuItem.Hide()
+				// Also hide its sub-menu items if they exist
+				if actionItem, ok := m.serverActionItems[serverName]; ok {
+					actionItem.Hide()
+				}
+				if quarantineActionItem, ok := m.serverQuarantineItems[serverName]; ok {
+					quarantineActionItem.Hide()
+				}
+			}
+		}
 	}
 }
 
@@ -358,29 +394,40 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 
 	// --- Create a map for efficient lookup of current quarantined servers ---
 	currentQuarantineMap := make(map[string]bool)
+	var currentQuarantineNames []string
 	for _, server := range quarantinedServers {
 		if name, ok := server["name"].(string); ok {
 			currentQuarantineMap[name] = true
+			currentQuarantineNames = append(currentQuarantineNames, name)
 		} else {
 			m.logger.Warn("Quarantined server missing name field", zap.Any("server", server))
 		}
 	}
+	sort.Strings(currentQuarantineNames)
 
-	// --- Hide or Show Existing Menu Items ---
-	for serverName, menuItem := range m.quarantineMenuItems {
-		if _, exists := currentQuarantineMap[serverName]; exists {
-			// Server is still quarantined, ensure it's visible
-			menuItem.Show()
-		} else {
-			// Server is no longer quarantined, hide it
-			menuItem.Hide()
+	// --- Check if we need to rebuild the quarantine menu (new servers added) ---
+	var newQuarantineNames []string
+	for serverName := range currentQuarantineMap {
+		if _, exists := m.quarantineMenuItems[serverName]; !exists {
+			newQuarantineNames = append(newQuarantineNames, serverName)
 		}
 	}
 
-	// --- Create Menu Items for Newly Quarantined Servers ---
-	for serverName := range currentQuarantineMap {
-		if _, exists := m.quarantineMenuItems[serverName]; !exists {
-			// This is a newly quarantined server, create its menu item
+	if len(newQuarantineNames) > 0 {
+		// New quarantined servers detected - rebuild entire menu in sorted order
+		m.logger.Info("Rebuilding quarantine menu in sorted order", zap.Int("new_quarantined", len(newQuarantineNames)))
+
+		// Hide all existing quarantine menu items
+		for _, menuItem := range m.quarantineMenuItems {
+			menuItem.Hide()
+		}
+
+		// Clear the tracking map
+		m.quarantineMenuItems = make(map[string]*systray.MenuItem)
+
+		// Create all quarantined servers in sorted order
+		for _, serverName := range currentQuarantineNames {
+			// This is a quarantined server, create its menu item
 			if m.quarantineMenu == nil {
 				m.logger.Error("Cannot create quarantine menu item - quarantineMenu is nil!", zap.String("server", serverName))
 				continue
@@ -407,6 +454,22 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 					}
 				}
 			}(serverName, quarantineMenuItem)
+		}
+	} else {
+		// No new quarantined servers - just update existing items
+		for _, serverName := range currentQuarantineNames {
+			if menuItem, exists := m.quarantineMenuItems[serverName]; exists {
+				// Server is still quarantined, ensure it's visible
+				menuItem.Show()
+			}
+		}
+
+		// Hide servers that are no longer quarantined
+		for serverName, menuItem := range m.quarantineMenuItems {
+			if _, exists := currentQuarantineMap[serverName]; !exists {
+				// Server is no longer quarantined, hide it
+				menuItem.Hide()
+			}
 		}
 	}
 }
