@@ -30,6 +30,7 @@ type ServerInterface interface {
 	// Config management for file watching
 	ReloadConfiguration() error
 	GetConfigPath() string
+	GetLogDir() string
 }
 
 // App represents the system tray application (stub version)

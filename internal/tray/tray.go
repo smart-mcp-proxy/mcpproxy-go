@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -66,6 +67,7 @@ type ServerInterface interface {
 	// Config management for file watching
 	ReloadConfiguration() error
 	GetConfigPath() string
+	GetLogDir() string
 }
 
 // App represents the system tray application
@@ -321,7 +323,8 @@ func (a *App) onReady() {
 
 	// --- Other Menu Items ---
 	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
-	openConfigItem := systray.AddMenuItem("Open Config", "Open the configuration file")
+	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
+	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
 	systray.AddSeparator()
 
 	// --- Autostart Menu Item (macOS only) ---
@@ -351,7 +354,9 @@ func (a *App) onReady() {
 			case <-updateItem.ClickedCh:
 				go a.checkForUpdates()
 			case <-openConfigItem.ClickedCh:
-				a.openConfig()
+				a.openConfigDir()
+			case <-openLogsItem.ClickedCh:
+				a.openLogsDir()
 			case <-quitItem.ClickedCh:
 				a.logger.Info("Quit item clicked, shutting down")
 				if a.shutdown != nil {
@@ -927,28 +932,52 @@ func (a *App) applyTarGzUpdate(body io.Reader) error {
 	return fmt.Errorf("no mcpproxy binary found in tar.gz archive")
 }
 
-// openConfig opens the configuration file in the default editor
-func (a *App) openConfig() {
+// openConfigDir opens the directory containing the configuration file
+func (a *App) openConfigDir() {
 	if a.configPath == "" {
 		a.logger.Warn("Config path is not set, cannot open")
 		return
 	}
 
+	configDir := filepath.Dir(a.configPath)
+	a.openDirectory(configDir, "config directory")
+}
+
+// openLogsDir opens the logs directory
+func (a *App) openLogsDir() {
+	if a.server == nil {
+		a.logger.Warn("Server interface not available, cannot open logs directory")
+		return
+	}
+
+	logDir := a.server.GetLogDir()
+	if logDir == "" {
+		a.logger.Warn("Log directory path is not set, cannot open")
+		return
+	}
+
+	a.openDirectory(logDir, "logs directory")
+}
+
+// openDirectory opens a directory using the OS-specific file manager
+func (a *App) openDirectory(dirPath, dirType string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", a.configPath)
+		cmd = exec.Command("open", dirPath)
 	case "linux":
-		cmd = exec.Command("xdg-open", a.configPath)
+		cmd = exec.Command("xdg-open", dirPath)
 	case "windows":
-		cmd = exec.Command("cmd", "/C", "start", a.configPath)
+		cmd = exec.Command("explorer", dirPath)
 	default:
-		a.logger.Warn("Unsupported OS for opening config file", zap.String("os", runtime.GOOS))
+		a.logger.Warn("Unsupported OS for opening directory", zap.String("os", runtime.GOOS))
 		return
 	}
 
 	if err := cmd.Run(); err != nil {
-		a.logger.Error("Failed to open config file", zap.Error(err))
+		a.logger.Error("Failed to open directory", zap.Error(err), zap.String("dir_type", dirType), zap.String("path", dirPath))
+	} else {
+		a.logger.Info("Successfully opened directory", zap.String("dir_type", dirType), zap.String("path", dirPath))
 	}
 }
 
