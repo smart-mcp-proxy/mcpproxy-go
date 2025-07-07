@@ -1,6 +1,7 @@
 package logs
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"mcpproxy-go/internal/config"
@@ -85,8 +86,8 @@ func SetupLogger(config *config.LogConfig) (*zap.Logger, error) {
 
 // createFileCore creates a file-based logging core
 func createFileCore(config *config.LogConfig, level zapcore.Level) (zapcore.Core, error) {
-	// Get log file path
-	logFilePath, err := GetLogFilePath(config.Filename)
+	// Get log file path with custom directory support
+	logFilePath, err := GetLogFilePathWithDir(config.LogDir, config.Filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get log file path: %w", err)
 	}
@@ -209,4 +210,90 @@ func CleanupTestWriter(file *os.File) error {
 		return os.Remove(filename)
 	}
 	return nil
+}
+
+// CreateUpstreamServerLogger creates a logger for a specific upstream server
+func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*zap.Logger, error) {
+	if config == nil {
+		config = DefaultLogConfig()
+	}
+
+	// Create a copy of the config for the upstream server
+	serverConfig := *config
+	serverConfig.Filename = fmt.Sprintf("server-%s.log", serverName)
+	serverConfig.EnableConsole = false // Upstream servers only log to file
+
+	// Parse log level
+	var level zapcore.Level
+	switch serverConfig.Level {
+	case "debug":
+		level = zap.DebugLevel
+	case "info":
+		level = zap.InfoLevel
+	case "warn":
+		level = zap.WarnLevel
+	case "error":
+		level = zap.ErrorLevel
+	default:
+		level = zap.InfoLevel
+	}
+
+	// Create file core for upstream server
+	fileCore, err := createFileCore(&serverConfig, level)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file core for upstream server %s: %w", serverName, err)
+	}
+
+	// Create logger with server name prefix
+	logger := zap.New(fileCore, zap.AddCaller(), zap.AddCallerSkip(1))
+	logger = logger.With(zap.String("server", serverName))
+
+	return logger, nil
+}
+
+// ReadUpstreamServerLogTail reads the last N lines from an upstream server log file
+func ReadUpstreamServerLogTail(config *config.LogConfig, serverName string, lines int) ([]string, error) {
+	if lines <= 0 {
+		lines = 50
+	}
+	if lines > 500 {
+		lines = 500
+	}
+
+	// Get log file path
+	filename := fmt.Sprintf("server-%s.log", serverName)
+	logFilePath, err := GetLogFilePathWithDir(config.LogDir, filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get log file path for server %s: %w", serverName, err)
+	}
+
+	// Check if file exists
+	if _, err := os.Stat(logFilePath); os.IsNotExist(err) {
+		return []string{}, nil // Return empty slice if file doesn't exist
+	}
+
+	// Read file
+	file, err := os.Open(logFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file for server %s: %w", serverName, err)
+	}
+	defer file.Close()
+
+	// Read all lines
+	var allLines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		allLines = append(allLines, scanner.Text())
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read log file for server %s: %w", serverName, err)
+	}
+
+	// Return last N lines
+	if len(allLines) <= lines {
+		return allLines, nil
+	}
+
+	return allLines[len(allLines)-lines:], nil
 }

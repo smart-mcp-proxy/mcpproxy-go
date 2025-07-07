@@ -14,6 +14,7 @@ import (
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
@@ -154,11 +155,14 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Operation: list, add, remove, update, patch. For quarantine operations, use the 'quarantine_security' tool."),
-				mcp.Enum("list", "add", "remove", "update", "patch"),
+				mcp.Description("Operation: list, add, remove, update, patch, tail_log. For quarantine operations, use the 'quarantine_security' tool."),
+				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log"),
 			),
 			mcp.WithString("name",
-				mcp.Description("Server name (required for add/remove/update/patch operations)"),
+				mcp.Description("Server name (required for add/remove/update/patch/tail_log operations)"),
+			),
+			mcp.WithNumber("lines",
+				mcp.Description("Number of lines to tail from server log (default: 50, max: 500) - used with tail_log operation"),
 			),
 			mcp.WithString("command",
 				mcp.Description("Command to run for stdio servers (e.g., 'uvx', 'python')"),
@@ -577,6 +581,8 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		return p.handleUpdateUpstream(ctx, request)
 	case "patch":
 		return p.handlePatchUpstream(ctx, request)
+	case "tail_log":
+		return p.handleTailLog(ctx, request)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
 	}
@@ -1327,6 +1333,77 @@ func (p *MCPProxyServer) handleReadCache(_ context.Context, request mcp.CallTool
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// handleTailLog implements the tail_log functionality
+func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	name, err := request.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
+	}
+
+	// Get optional lines parameter
+	lines := 50 // default
+	if request.Params.Arguments != nil {
+		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			if linesParam, ok := argumentsMap["lines"]; ok {
+				if linesFloat, ok := linesParam.(float64); ok {
+					lines = int(linesFloat)
+				}
+			}
+		}
+	}
+
+	// Validate lines parameter
+	if lines <= 0 {
+		lines = 50
+	}
+	if lines > 500 {
+		lines = 500
+	}
+
+	// Check if server exists
+	serverConfig, err := p.storage.GetUpstreamServer(name)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found: %v", name, err)), nil
+	}
+
+	// Get log configuration from main server
+	var logConfig *config.LogConfig
+	if p.mainServer != nil && p.mainServer.config.Logging != nil {
+		logConfig = p.mainServer.config.Logging
+	}
+
+	// Read log tail
+	logLines, err := logs.ReadUpstreamServerLogTail(logConfig, name, lines)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to read log for server '%s': %v", name, err)), nil
+	}
+
+	// Prepare response
+	result := map[string]interface{}{
+		"server_name":     name,
+		"lines_requested": lines,
+		"lines_returned":  len(logLines),
+		"log_lines":       logLines,
+		"server_status": map[string]interface{}{
+			"enabled":     serverConfig.Enabled,
+			"quarantined": serverConfig.Quarantined,
+		},
+	}
+
+	// Add connection status if available
+	if client, exists := p.upstreamManager.GetClient(name); exists {
+		connectionStatus := client.GetConnectionStatus()
+		result["connection_status"] = connectionStatus
+	}
+
+	jsonResult, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
 	}
 
 	return mcp.NewToolResultText(string(jsonResult)), nil

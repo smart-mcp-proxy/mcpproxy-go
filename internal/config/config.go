@@ -39,9 +39,10 @@ type LogConfig struct {
 	EnableFile    bool   `json:"enable_file" mapstructure:"enable-file"`
 	EnableConsole bool   `json:"enable_console" mapstructure:"enable-console"`
 	Filename      string `json:"filename" mapstructure:"filename"`
-	MaxSize       int    `json:"max_size" mapstructure:"max-size"`       // MB
-	MaxBackups    int    `json:"max_backups" mapstructure:"max-backups"` // number of backup files
-	MaxAge        int    `json:"max_age" mapstructure:"max-age"`         // days
+	LogDir        string `json:"log_dir,omitempty" mapstructure:"log-dir"` // Custom log directory
+	MaxSize       int    `json:"max_size" mapstructure:"max-size"`         // MB
+	MaxBackups    int    `json:"max_backups" mapstructure:"max-backups"`   // number of backup files
+	MaxAge        int    `json:"max_age" mapstructure:"max-age"`           // days
 	Compress      bool   `json:"compress" mapstructure:"compress"`
 	JSONFormat    bool   `json:"json_format" mapstructure:"json-format"`
 }
@@ -158,7 +159,7 @@ func DefaultConfig() *Config {
 			Level:         "info",
 			EnableFile:    true,
 			EnableConsole: true,
-			Filename:      "mcpproxy.log",
+			Filename:      "main.log",
 			MaxSize:       10, // 10MB
 			MaxBackups:    5,  // 5 backup files
 			MaxAge:        30, // 30 days

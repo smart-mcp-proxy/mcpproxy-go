@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 const (
@@ -95,6 +96,28 @@ func GetLogFilePath(filename string) (string, error) {
 	logDir, err := GetLogDir()
 	if err != nil {
 		return "", err
+	}
+
+	if err := EnsureLogDir(logDir); err != nil {
+		return "", err
+	}
+
+	return filepath.Join(logDir, filename), nil
+}
+
+// GetLogFilePathWithDir returns the full path for a log file in a custom log directory
+func GetLogFilePathWithDir(logDir, filename string) (string, error) {
+	if logDir == "" {
+		return GetLogFilePath(filename)
+	}
+
+	// Expand user home directory if needed
+	if strings.HasPrefix(logDir, "~/") {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		logDir = filepath.Join(homeDir, logDir[2:])
 	}
 
 	if err := EnsureLogDir(logDir); err != nil {

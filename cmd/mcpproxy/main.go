@@ -25,7 +25,7 @@ var (
 	debugSearch       bool
 	toolResponseLimit int
 	logToFile         bool
-	logFile           string
+	logDir            string
 
 	// Security flags
 	readOnlyMode      bool
@@ -61,7 +61,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	rootCmd.PersistentFlags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
 	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", true, "Enable logging to file in standard OS location")
-	rootCmd.PersistentFlags().StringVar(&logFile, "log-file", "", "Custom log file path (overrides standard OS location)")
+	rootCmd.PersistentFlags().StringVar(&logDir, "log-dir", "", "Custom log directory path (overrides standard OS location)")
 	rootCmd.PersistentFlags().BoolVar(&readOnlyMode, "read-only", false, "Enable read-only mode")
 	rootCmd.PersistentFlags().BoolVar(&disableManagement, "disable-management", false, "Disable management features")
 	rootCmd.PersistentFlags().BoolVar(&allowServerAdd, "allow-server-add", true, "Allow adding new servers")
@@ -87,7 +87,7 @@ func runServer(_ *cobra.Command, _ []string) error {
 			Level:         logLevel,
 			EnableFile:    logToFile,
 			EnableConsole: true,
-			Filename:      "mcpproxy.log",
+			Filename:      "main.log",
 			MaxSize:       10,
 			MaxBackups:    5,
 			MaxAge:        30,
@@ -98,9 +98,14 @@ func runServer(_ *cobra.Command, _ []string) error {
 		// Override specific fields from command line
 		cfg.Logging.Level = logLevel
 		cfg.Logging.EnableFile = logToFile
-		if logFile != "" {
-			cfg.Logging.Filename = logFile
+		if cfg.Logging.Filename == "" || cfg.Logging.Filename == "mcpproxy.log" {
+			cfg.Logging.Filename = "main.log"
 		}
+	}
+
+	// Override log directory if specified
+	if logDir != "" {
+		cfg.Logging.LogDir = logDir
 	}
 
 	// Setup logger with new logging system

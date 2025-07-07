@@ -14,9 +14,10 @@ import (
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients map[string]*Client
-	mu      sync.RWMutex
-	logger  *zap.Logger
+	clients   map[string]*Client
+	mu        sync.RWMutex
+	logger    *zap.Logger
+	logConfig *config.LogConfig
 }
 
 // NewManager creates a new upstream manager
@@ -25,6 +26,13 @@ func NewManager(logger *zap.Logger) *Manager {
 		clients: make(map[string]*Client),
 		logger:  logger,
 	}
+}
+
+// SetLogConfig sets the logging configuration for upstream server loggers
+func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logConfig = logConfig
 }
 
 // AddServerConfig adds a server configuration without connecting
@@ -39,7 +47,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	}
 
 	// Create new client but don't connect yet
-	client, err := NewClient(id, serverConfig, m.logger)
+	client, err := NewClient(id, serverConfig, m.logger, m.logConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
