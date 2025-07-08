@@ -297,26 +297,21 @@ func LoadOrCreateConfig(dataDir string) (*Config, error) {
 
 // CreateSampleConfig creates a sample configuration file
 func CreateSampleConfig(path string) error {
-	cfg := &Config{
-		Listen:     ":8080",
-		EnableTray: true,
-		TopK:       5,
-		ToolsLimit: 15,
-		Servers: []*ServerConfig{
-			{
-				Name:    "example",
-				URL:     "http://localhost:8000/mcp/",
-				Enabled: true,
-				Created: now(),
-			},
-			{
-				Name:    "local-command",
-				Command: "mcp-server-example",
-				Args:    []string{"--config", "example.json"},
-				Env:     map[string]string{"DEBUG": "true"},
-				Enabled: true,
-				Created: now(),
-			},
+	cfg := DefaultConfig()
+	cfg.Servers = []*ServerConfig{
+		{
+			Name:    "example",
+			URL:     "http://localhost:8000/mcp/",
+			Enabled: true,
+			Created: now(),
+		},
+		{
+			Name:    "local-command",
+			Command: "mcp-server-example",
+			Args:    []string{"--config", "example.json"},
+			Env:     map[string]string{"DEBUG": "true"},
+			Enabled: true,
+			Created: now(),
 		},
 	}
 

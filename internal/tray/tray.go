@@ -29,8 +29,10 @@ import (
 )
 
 const (
-	repo     = "smart-mcp-proxy/mcpproxy-go" // Actual repository
-	osDarwin = "darwin"
+	repo      = "smart-mcp-proxy/mcpproxy-go" // Actual repository
+	osDarwin  = "darwin"
+	osWindows = "windows"
+	trueStr   = "true"
 )
 
 //go:embed icon-mono-44.png
@@ -503,7 +505,7 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 			// DON'T clear quarantine menu - quarantine data is persistent storage,
 			// not runtime connection data. Users should manage quarantined servers
 			// even when server is stopped.
-			//a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
+			// a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
 		}
 	}
 }
@@ -695,19 +697,19 @@ func (a *App) onExit() {
 // checkForUpdates checks for new releases on GitHub
 func (a *App) checkForUpdates() {
 	// Check if auto-update is disabled by environment variable
-	if os.Getenv("MCPPROXY_DISABLE_AUTO_UPDATE") == "true" {
+	if os.Getenv("MCPPROXY_DISABLE_AUTO_UPDATE") == trueStr {
 		a.logger.Info("Auto-update disabled by environment variable")
 		return
 	}
 
 	// Disable auto-update for app bundles by default (DMG installation should be manual)
-	if a.isAppBundle() && os.Getenv("MCPPROXY_UPDATE_APP_BUNDLE") != "true" {
+	if a.isAppBundle() && os.Getenv("MCPPROXY_UPDATE_APP_BUNDLE") != trueStr {
 		a.logger.Info("Auto-update disabled for app bundle installations (use DMG for updates)")
 		return
 	}
 
 	// Check if notification-only mode is enabled
-	notifyOnly := os.Getenv("MCPPROXY_UPDATE_NOTIFY_ONLY") == "true"
+	notifyOnly := os.Getenv("MCPPROXY_UPDATE_NOTIFY_ONLY") == trueStr
 
 	a.statusItem.SetTitle("Checking for updates...")
 	defer a.updateStatus() // Restore original status after check
@@ -772,7 +774,7 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 	// Determine file extension based on platform
 	var extension string
 	switch runtime.GOOS {
-	case "windows":
+	case osWindows:
 		extension = ".zip"
 	default: // macOS, Linux
 		extension = ".tar.gz"
@@ -813,7 +815,7 @@ func (a *App) isHomebrewInstallation() bool {
 
 // isAppBundle checks if running from macOS app bundle
 func (a *App) isAppBundle() bool {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != osDarwin {
 		return false
 	}
 
@@ -900,7 +902,9 @@ func (a *App) applyTarGzUpdate(body io.Reader) error {
 	}
 
 	// Open the tar.gz file and extract the binary
-	tmpfile.Seek(0, 0)
+	if _, err := tmpfile.Seek(0, 0); err != nil {
+		return fmt.Errorf("failed to seek to beginning of file: %w", err)
+	}
 
 	gzr, err := gzip.NewReader(tmpfile)
 	if err != nil {
@@ -963,11 +967,11 @@ func (a *App) openLogsDir() {
 func (a *App) openDirectory(dirPath, dirType string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
-	case "darwin":
+	case osDarwin:
 		cmd = exec.Command("open", dirPath)
 	case "linux":
 		cmd = exec.Command("xdg-open", dirPath)
-	case "windows":
+	case osWindows:
 		cmd = exec.Command("explorer", dirPath)
 	default:
 		a.logger.Warn("Unsupported OS for opening directory", zap.String("os", runtime.GOOS))
