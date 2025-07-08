@@ -29,10 +29,23 @@
     <key>StandardErrorPath</key>
     <string>/tmp/mcpproxy.err</string>
     
+    <key>WorkingDirectory</key>
+    <string>/Applications</string>
+    
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin</string>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/user</string>
+        <key>SHELL</key>
+        <string>/bin/zsh</string>
+        <key>HOMEBREW_PREFIX</key>
+        <string>/opt/homebrew</string>
+        <key>HOMEBREW_CELLAR</key>
+        <string>/opt/homebrew/Cellar</string>
+        <key>HOMEBREW_REPOSITORY</key>
+        <string>/opt/homebrew</string>
     </dict>
 </dict>
 </plist> 
