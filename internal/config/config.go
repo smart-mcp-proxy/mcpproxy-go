@@ -199,12 +199,12 @@ func (c *Config) Validate() error {
 	if c.ToolResponseLimit < 0 {
 		c.ToolResponseLimit = 0 // 0 means disabled
 	}
-	
+
 	// Ensure Environment config is not nil
 	if c.Environment == nil {
 		c.Environment = secureenv.DefaultEnvConfig()
 	}
-	
+
 	return nil
 }
 

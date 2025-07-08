@@ -74,7 +74,7 @@ func NewAutostartManager() (*AutostartManager, error) {
 
 // IsEnabled checks if autostart is currently enabled
 func (m *AutostartManager) IsEnabled() bool {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != osDarwin {
 		return false
 	}
 
@@ -90,7 +90,7 @@ func (m *AutostartManager) IsEnabled() bool {
 
 // Enable enables autostart functionality
 func (m *AutostartManager) Enable() error {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != osDarwin {
 		return fmt.Errorf("autostart is only supported on macOS")
 	}
 
@@ -119,7 +119,7 @@ func (m *AutostartManager) Enable() error {
 
 	// Write plist file
 	plistPath := filepath.Join(launchAgentsDir, "com.smartmcpproxy.mcpproxy.plist")
-	if err := os.WriteFile(plistPath, []byte(plistContent), 0644); err != nil {
+	if err := os.WriteFile(plistPath, []byte(plistContent), 0600); err != nil {
 		return fmt.Errorf("failed to write plist file: %w", err)
 	}
 
@@ -137,7 +137,7 @@ func (m *AutostartManager) Enable() error {
 
 // Disable disables autostart functionality
 func (m *AutostartManager) Disable() error {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != osDarwin {
 		return fmt.Errorf("autostart is only supported on macOS")
 	}
 

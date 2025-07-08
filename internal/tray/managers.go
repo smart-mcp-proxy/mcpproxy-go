@@ -330,15 +330,18 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 	} else {
 		// No new servers - just update existing items
 		for _, serverName := range currentServerNames {
-			if menuItem, exists := m.serverMenuItems[serverName]; exists {
-				serverData := currentServerMap[serverName]
-				// Server exists, update its display and ensure it's visible
-				status, tooltip := m.getServerStatusDisplay(serverData)
-				menuItem.SetTitle(status)
-				menuItem.SetTooltip(tooltip)
-				m.updateServerActionMenus(serverName, serverData) // Update sub-menu items too
-				menuItem.Show()
+			menuItem, exists := m.serverMenuItems[serverName]
+			if !exists {
+				continue
 			}
+
+			serverData := currentServerMap[serverName]
+			// Server exists, update its display and ensure it's visible
+			status, tooltip := m.getServerStatusDisplay(serverData)
+			menuItem.SetTitle(status)
+			menuItem.SetTooltip(tooltip)
+			m.updateServerActionMenus(serverName, serverData) // Update sub-menu items too
+			menuItem.Show()
 		}
 
 		// Hide servers that are no longer in the config

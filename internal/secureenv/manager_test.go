@@ -420,8 +420,7 @@ func TestRealWorldNpxScenario(t *testing.T) {
 func splitEnvVar(envVar string) []string {
 	parts := make([]string, 0, 2)
 	if idx := findFirstEquals(envVar); idx != -1 {
-		parts = append(parts, envVar[:idx])
-		parts = append(parts, envVar[idx+1:])
+		parts = append(parts, envVar[:idx], envVar[idx+1:])
 	}
 	return parts
 }

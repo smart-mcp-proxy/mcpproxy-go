@@ -19,7 +19,6 @@ type Manager struct {
 	logger       *zap.Logger
 	logConfig    *config.LogConfig
 	globalConfig *config.Config
-	
 }
 
 // NewManager creates a new upstream manager

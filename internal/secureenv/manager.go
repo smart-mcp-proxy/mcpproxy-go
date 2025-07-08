@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+const (
+	osWindows = "windows"
+)
+
 // EnvConfig represents environment configuration for secure filtering
 type EnvConfig struct {
 	InheritSystemSafe bool              `json:"inherit_system_safe"`
@@ -29,7 +33,7 @@ func DefaultEnvConfig() *EnvConfig {
 	}
 
 	// Add Windows-specific variables
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		allowedVars = append(allowedVars,
 			"USERPROFILE",  // User profile directory
 			"APPDATA",      // Application data directory
@@ -41,7 +45,7 @@ func DefaultEnvConfig() *EnvConfig {
 	}
 
 	// Add Unix-specific variables
-	if runtime.GOOS != "windows" {
+	if runtime.GOOS != osWindows {
 		allowedVars = append(allowedVars,
 			"XDG_CONFIG_HOME", // XDG config directory
 			"XDG_DATA_HOME",   // XDG data directory
@@ -173,7 +177,7 @@ func (m *Manager) ValidateConfig() error {
 }
 
 // GetFilteredEnvCount returns the number of filtered environment variables
-func (m *Manager) GetFilteredEnvCount() (int, int) {
+func (m *Manager) GetFilteredEnvCount() (filteredCount, totalCount int) {
 	systemEnv := os.Environ()
 	filteredEnv := m.getFilteredSystemEnv()
 	return len(filteredEnv), len(systemEnv)
