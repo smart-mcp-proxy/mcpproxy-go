@@ -774,7 +774,8 @@ func (s *Server) getServerToolCount(serverID string) int {
 		return 0
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	tools, err := client.ListTools(ctx)
 	if err != nil {
 		s.logger.Warn("Failed to get tool count for server",

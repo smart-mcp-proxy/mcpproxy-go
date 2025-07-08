@@ -76,7 +76,7 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 	} else {
 		envConfig = secureenv.DefaultEnvConfig()
 	}
-	
+
 	// Add server-specific environment variables to the custom vars
 	if len(serverConfig.Env) > 0 {
 		// Create a copy of the environment config with server-specific variables
@@ -91,15 +91,15 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 			}
 			serverEnvConfig.CustomVars = customVars
 		}
-		
+
 		// Add server-specific environment variables
 		for k, v := range serverConfig.Env {
 			serverEnvConfig.CustomVars[k] = v
 		}
-		
+
 		envConfig = &serverEnvConfig
 	}
-	
+
 	c.envManager = secureenv.NewManager(envConfig)
 
 	// Create upstream server logger if logging config is provided
@@ -220,6 +220,17 @@ func (c *Client) Connect(ctx context.Context) error {
 			zap.Int("filtered_count", len(envVars)),
 			zap.String("command", command))
 
+		// Debug logging for stdio transport (only at debug level)
+		c.logger.Debug("Creating stdio transport",
+			zap.String("command", command),
+			zap.Strings("args", cmdArgs),
+			zap.Int("env_count", len(envVars)))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Debug("Process starting",
+				zap.String("full_command", fmt.Sprintf("%s %s", command, strings.Join(cmdArgs, " "))))
+		}
+
 		stdioTransport := transport.NewStdio(command, envVars, cmdArgs...)
 		c.client = client.NewClient(stdioTransport)
 	default:
@@ -243,6 +254,21 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.retryCount++
 		c.lastRetryTime = time.Now()
 		c.mu.Unlock()
+
+		// Log to both main and server logs for critical errors
+		c.logger.Error("Failed to start MCP client", zap.Error(err))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("Client start failed", zap.Error(err))
+		}
+
+		// Add debug transport info if DEBUG level is enabled
+		if c.logger.Core().Enabled(zap.DebugLevel) {
+			c.logger.Debug("MCP client start failed details",
+				zap.String("error_type", fmt.Sprintf("%T", err)),
+				zap.String("command", c.config.Command),
+				zap.Strings("args", c.config.Args))
+		}
+
 		return fmt.Errorf("failed to start MCP client: %w", err)
 	}
 
@@ -262,6 +288,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.retryCount++
 		c.lastRetryTime = time.Now()
 		c.mu.Unlock()
+
+		// Log to both main and server logs for critical errors
+		c.logger.Error("Failed to initialize MCP client", zap.Error(err))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("Initialize failed", zap.Error(err))
+		}
+
 		c.client.Close()
 		return fmt.Errorf("failed to initialize MCP client: %w", err)
 	}
@@ -277,18 +310,31 @@ func (c *Client) Connect(ctx context.Context) error {
 		zap.String("server_name", serverInfo.ServerInfo.Name),
 		zap.String("server_version", serverInfo.ServerInfo.Version))
 
+	// Add debug transport info if DEBUG level is enabled
+	if c.logger.Core().Enabled(zap.DebugLevel) {
+		c.logger.Debug("MCP connection details",
+			zap.String("protocol_version", serverInfo.ProtocolVersion),
+			zap.String("command", c.config.Command),
+			zap.Strings("args", c.config.Args),
+			zap.String("transport", c.determineTransportType()))
+	}
+
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Connected successfully",
 			zap.String("server_name", serverInfo.ServerInfo.Name),
 			zap.String("server_version", serverInfo.ServerInfo.Version),
 			zap.String("protocol_version", serverInfo.ProtocolVersion))
-		c.upstreamLogger.Debug("[Client→Server] initialize")
-		if initBytes, err := json.Marshal(initRequest); err == nil {
-			c.upstreamLogger.Debug(string(initBytes))
-		}
-		c.upstreamLogger.Debug("[Server→Client] initialize response")
-		if respBytes, err := json.Marshal(serverInfo); err == nil {
-			c.upstreamLogger.Debug(string(respBytes))
+
+		// Only log initialization JSON if DEBUG level is enabled
+		if c.logger.Core().Enabled(zap.DebugLevel) {
+			c.upstreamLogger.Debug("[Client→Server] initialize")
+			if initBytes, err := json.Marshal(initRequest); err == nil {
+				c.upstreamLogger.Debug(string(initBytes))
+			}
+			c.upstreamLogger.Debug("[Server→Client] initialize response")
+			if respBytes, err := json.Marshal(serverInfo); err == nil {
+				c.upstreamLogger.Debug(string(respBytes))
+			}
 		}
 	}
 
@@ -437,6 +483,10 @@ func (c *Client) Disconnect() error {
 
 	if c.client != nil {
 		c.logger.Info("Disconnecting from upstream MCP server")
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("Disconnecting client")
+		}
+
 		c.client.Close()
 		c.connected = false
 	}
@@ -494,6 +544,12 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		c.mu.Lock()
 		c.lastError = err
 
+		// Log to both main and server logs for critical errors
+		c.logger.Error("ListTools failed", zap.Error(err))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("ListTools failed", zap.Error(err))
+		}
+
 		// Check if this is a connection error that indicates the connection is broken
 		errStr := err.Error()
 		if strings.Contains(errStr, "broken pipe") ||
@@ -501,15 +557,21 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			strings.Contains(errStr, "EOF") ||
 			strings.Contains(errStr, "connection refused") ||
 			strings.Contains(errStr, "transport error") {
-			c.logger.Warn("Connection appears broken, updating state",
-				zap.String("server", c.config.Name),
-				zap.Error(err))
+
+			// Log pipe errors to both main and server logs
+			c.logger.Warn("Connection appears broken, updating state", zap.Error(err))
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Warn("Connection broken detected", zap.Error(err))
+			}
+
 			c.connected = false
 		}
 		c.mu.Unlock()
 
 		return nil, fmt.Errorf("failed to list tools: %w", err)
 	}
+
+	c.logger.Debug("ListTools successful", zap.Int("tools_count", len(toolsResult.Tools)))
 
 	// Convert MCP tools to our metadata format
 	var tools []*config.ToolMetadata
@@ -566,12 +628,16 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		zap.String("tool_name", toolName),
 		zap.Any("args", args))
 
-	// Log to upstream logger
+	// Log detailed transport debug information if DEBUG level is enabled
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Debug("[Client→Server] tools/call",
 			zap.String("tool", toolName))
-		if reqBytes, err := json.Marshal(request); err == nil {
-			c.upstreamLogger.Debug(string(reqBytes))
+
+		// Only log full request/response JSON if DEBUG level is enabled
+		if c.logger.Core().Enabled(zap.DebugLevel) {
+			if reqBytes, err := json.Marshal(request); err == nil {
+				c.upstreamLogger.Debug(string(reqBytes))
+			}
 		}
 	}
 
@@ -580,11 +646,10 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		c.mu.Lock()
 		c.lastError = err
 
-		// Log error to upstream logger
+		// Log to both main and server logs for critical errors
+		c.logger.Error("CallTool failed", zap.String("tool", toolName), zap.Error(err))
 		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("Tool call failed",
-				zap.String("tool", toolName),
-				zap.Error(err))
+			c.upstreamLogger.Error("Tool call failed", zap.String("tool", toolName), zap.Error(err))
 		}
 
 		// Check if this is a connection error that indicates the connection is broken
@@ -594,26 +659,32 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 			strings.Contains(errStr, "EOF") ||
 			strings.Contains(errStr, "connection refused") ||
 			strings.Contains(errStr, "transport error") {
-			c.logger.Warn("Connection appears broken during tool call, updating state",
-				zap.String("server", c.config.Name),
-				zap.String("tool", toolName),
-				zap.Error(err))
-			c.connected = false
 
+			// Log pipe errors to both main and server logs
+			c.logger.Warn("Connection appears broken during tool call, updating state",
+				zap.String("tool", toolName), zap.Error(err))
 			if c.upstreamLogger != nil {
-				c.upstreamLogger.Warn("Connection appears broken during tool call")
+				c.upstreamLogger.Warn("Connection broken during tool call", zap.Error(err))
 			}
+
+			c.connected = false
 		}
 		c.mu.Unlock()
 
 		return nil, fmt.Errorf("failed to call tool %s: %w", toolName, err)
 	}
 
+	c.logger.Debug("CallTool successful", zap.String("tool", toolName))
+
 	// Log successful response to upstream logger
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Debug("[Server→Client] tools/call response")
-		if respBytes, err := json.Marshal(result); err == nil {
-			c.upstreamLogger.Debug(string(respBytes))
+
+		// Only log full response JSON if DEBUG level is enabled
+		if c.logger.Core().Enabled(zap.DebugLevel) {
+			if respBytes, err := json.Marshal(result); err == nil {
+				c.upstreamLogger.Debug(string(respBytes))
+			}
 		}
 	}
 

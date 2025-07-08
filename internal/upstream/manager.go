@@ -360,8 +360,8 @@ func (m *Manager) GetTotalToolCount() int {
 			continue
 		}
 
-		// Use a very short timeout to avoid hanging during shutdown
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		// Use a reasonable timeout to allow for Docker container startup and GitHub API calls
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		tools, err := client.ListTools(ctx)
 		cancel()
 		if err == nil && tools != nil {
