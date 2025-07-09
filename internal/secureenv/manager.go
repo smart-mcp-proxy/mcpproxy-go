@@ -166,9 +166,9 @@ func (m *Manager) discoverMacOSPaths(discovery *PathDiscovery) *PathDiscovery {
 	// Node.js paths (nvm, brew, system)
 	if homeDir != "" {
 		potentialNodePaths := []string{
-			filepath.Join(homeDir, ".nvm/versions/node/*/bin"), // Will be expanded
-			filepath.Join(homeDir, ".volta/bin"),
-			filepath.Join(homeDir, ".fnm/versions/*/installation/bin"),
+			filepath.Join(homeDir, ".nvm", "versions", "node", "*", "bin"), // Will be expanded
+			filepath.Join(homeDir, ".volta", "bin"),
+			filepath.Join(homeDir, ".fnm", "versions", "*", "installation", "bin"),
 		}
 
 		for _, pathPattern := range potentialNodePaths {
@@ -185,9 +185,9 @@ func (m *Manager) discoverMacOSPaths(discovery *PathDiscovery) *PathDiscovery {
 	// Python paths (pyenv, pip user, system)
 	if homeDir != "" {
 		potentialPythonPaths := []string{
-			filepath.Join(homeDir, ".pyenv/versions/*/bin"), // Will be expanded
-			filepath.Join(homeDir, ".local/bin"),            // pip user installs
-			filepath.Join(homeDir, "Library/Python/*/bin"),  // Will be expanded
+			filepath.Join(homeDir, ".pyenv", "versions", "*", "bin"), // Will be expanded
+			filepath.Join(homeDir, ".local", "bin"),                  // pip user installs
+			filepath.Join(homeDir, "Library", "Python", "*", "bin"),  // Will be expanded
 		}
 
 		for _, pathPattern := range potentialPythonPaths {
@@ -202,7 +202,7 @@ func (m *Manager) discoverMacOSPaths(discovery *PathDiscovery) *PathDiscovery {
 
 	// Rust paths (cargo)
 	if homeDir != "" {
-		rustPath := filepath.Join(homeDir, ".cargo/bin")
+		rustPath := filepath.Join(homeDir, ".cargo", "bin")
 		if m.pathExists(rustPath) {
 			discovery.RustPaths = append(discovery.RustPaths, rustPath)
 		}
@@ -213,7 +213,7 @@ func (m *Manager) discoverMacOSPaths(discovery *PathDiscovery) *PathDiscovery {
 		"/usr/local/go/bin",
 	}
 	if homeDir != "" {
-		goPaths = append(goPaths, filepath.Join(homeDir, "go/bin"))
+		goPaths = append(goPaths, filepath.Join(homeDir, "go", "bin"))
 	}
 
 	for _, path := range goPaths {

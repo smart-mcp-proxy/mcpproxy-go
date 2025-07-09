@@ -34,7 +34,6 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 
 	// Set up test environment with both safe and unsafe variables
 	os.Clearenv()
-	
 	// Set platform-specific test paths
 	var testPath, testHome string
 	if runtime.GOOS == "windows" {
@@ -44,7 +43,7 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 		testPath = "/usr/bin:/bin"
 		testHome = "/tmp/test-home"
 	}
-	
+
 	os.Setenv("PATH", testPath)
 	os.Setenv("HOME", testHome)
 	os.Setenv("SECRET_API_KEY", "secret123")        // Should be filtered out
