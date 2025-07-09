@@ -3,6 +3,7 @@ package secureenv
 import (
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -172,8 +173,11 @@ func TestBuildSecureEnvironment(t *testing.T) {
 			}
 		}
 
-		// Should include allowed system variables
-		assert.Equal(t, "/usr/bin:/bin", envMap["PATH"])
+		// Should include allowed system variables with enhanced PATH discovery
+		pathValue := envMap["PATH"]
+		assert.Contains(t, pathValue, "/usr/bin", "PATH should contain /usr/bin")
+		assert.Contains(t, pathValue, "/bin", "PATH should contain /bin")
+		// Enhanced PATH discovery may include additional paths like /opt/homebrew/bin
 		assert.Equal(t, "/home/user", envMap["HOME"])
 		assert.Equal(t, "en_US.UTF-8", envMap["LC_ALL"])
 
@@ -406,14 +410,21 @@ func TestRealWorldNpxScenario(t *testing.T) {
 
 	// Verify PATH is available for npx to find node/npm
 	foundPath := false
+	var actualPath string
 	for _, envVar := range envVars {
-		if envVar == "PATH="+testPath {
-			foundPath = true
-			break
+		if strings.HasPrefix(envVar, "PATH=") {
+			actualPath = envVar[5:] // Remove "PATH=" prefix
+			// Enhanced path discovery should include the original test paths
+			if strings.Contains(actualPath, "/usr/local/bin") &&
+				strings.Contains(actualPath, "/usr/bin") &&
+				strings.Contains(actualPath, "/bin") {
+				foundPath = true
+				break
+			}
 		}
 	}
 
-	assert.True(t, foundPath, "PATH should be available for npx to find executables")
+	assert.True(t, foundPath, "PATH should be available for npx to find executables, got: %s", actualPath)
 }
 
 // Helper function to split environment variable string
