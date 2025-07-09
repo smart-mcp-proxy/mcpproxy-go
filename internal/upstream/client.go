@@ -127,6 +127,11 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.connecting = true
 	c.mu.Unlock()
 
+	// Declare variables that will be used in error handling
+	var command string
+	var cmdArgs []string
+	var envVars []string
+
 	defer func() {
 		c.mu.Lock()
 		c.connecting = false
@@ -182,9 +187,6 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 		c.client = client.NewClient(httpTransport)
 	case transportStdio:
-		var command string
-		var cmdArgs []string
-
 		// Check if command is specified separately (preferred)
 		if c.config.Command != "" {
 			command = c.config.Command
@@ -214,17 +216,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 
 		// Use secure environment manager to build filtered environment variables
-		envVars := c.envManager.BuildSecureEnvironment()
-
-		c.logger.Debug("Environment variables configured for process",
-			zap.Int("filtered_count", len(envVars)),
-			zap.String("command", command))
-
-		// Debug logging for stdio transport (only at debug level)
-		c.logger.Debug("Creating stdio transport",
-			zap.String("command", command),
-			zap.Strings("args", cmdArgs),
-			zap.Int("env_count", len(envVars)))
+		envVars = c.envManager.BuildSecureEnvironment()
 
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Debug("Process starting",
@@ -255,18 +247,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.lastRetryTime = time.Now()
 		c.mu.Unlock()
 
-		// Log to both main and server logs for critical errors
-		c.logger.Error("Failed to start MCP client", zap.Error(err))
+		c.logger.Error("Failed to start MCP client",
+			zap.Error(err),
+			zap.String("command", command),
+			zap.Strings("args", cmdArgs))
+
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Error("Client start failed", zap.Error(err))
-		}
-
-		// Add debug transport info if DEBUG level is enabled
-		if c.logger.Core().Enabled(zap.DebugLevel) {
-			c.logger.Debug("MCP client start failed details",
-				zap.String("error_type", fmt.Sprintf("%T", err)),
-				zap.String("command", c.config.Command),
-				zap.Strings("args", c.config.Args))
 		}
 
 		return fmt.Errorf("failed to start MCP client: %w", err)

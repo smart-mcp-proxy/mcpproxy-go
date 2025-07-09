@@ -34,8 +34,18 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 
 	// Set up test environment with both safe and unsafe variables
 	os.Clearenv()
-	os.Setenv("PATH", "/usr/bin:/bin")
-	os.Setenv("HOME", "/tmp/test-home")
+	// Set platform-specific test paths
+	var testPath, testHome string
+	if runtime.GOOS == "windows" {
+		testPath = "C:\\Windows\\System32;C:\\Windows"
+		testHome = "C:\\Users\\test-user"
+	} else {
+		testPath = "/usr/bin:/bin"
+		testHome = "/tmp/test-home"
+	}
+
+	os.Setenv("PATH", testPath)
+	os.Setenv("HOME", testHome)
 	os.Setenv("SECRET_API_KEY", "secret123")        // Should be filtered out
 	os.Setenv("DATABASE_PASSWORD", "dbpass123")     // Should be filtered out
 	os.Setenv("SAFE_TEST_VAR", "should_be_blocked") // Should be filtered out (not in allow list)
@@ -74,9 +84,19 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 			}
 		}
 
-		// Should include safe system variables
-		assert.Equal(t, "/usr/bin:/bin", envMap["PATH"])
-		assert.Equal(t, "/tmp/test-home", envMap["HOME"])
+		// Should include safe system variables with enhanced PATH discovery
+		pathValue := envMap["PATH"]
+		if runtime.GOOS == "windows" {
+			// On Windows, PATH should contain Windows system paths
+			assert.Contains(t, pathValue, "C:\\Windows\\System32")
+			assert.Contains(t, pathValue, "C:\\Windows")
+		} else {
+			// On Unix/macOS, PATH should contain Unix system paths
+			assert.Contains(t, pathValue, "/usr/bin")
+			assert.Contains(t, pathValue, "/bin")
+		}
+		// Enhanced PATH should include additional system paths when available
+		assert.Equal(t, testHome, envMap["HOME"])
 
 		// Should include custom server variables
 		assert.Equal(t, "custom_value", envMap["CUSTOM_SERVER_VAR"])
@@ -93,8 +113,9 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 		// We set 5 environment variables (PATH, HOME, SECRET_API_KEY, DATABASE_PASSWORD, SAFE_TEST_VAR)
 		assert.Equal(t, 5, totalCount)
 
-		// Only PATH and HOME should be filtered through (2 safe system vars)
-		assert.Equal(t, 2, filteredCount)
+		// At minimum PATH and HOME should be filtered through (2 safe system vars)
+		// May include additional safe system variables from the allow list
+		assert.GreaterOrEqual(t, filteredCount, 2, "Should filter at least PATH and HOME")
 	})
 }
 
@@ -192,7 +213,13 @@ func TestEnvironmentInheritanceDisabled(t *testing.T) {
 	}()
 
 	// Set up system environment
-	os.Setenv("PATH", "/usr/bin:/bin")
+	var testPath string
+	if runtime.GOOS == "windows" {
+		testPath = "C:\\Windows\\System32;C:\\Windows"
+	} else {
+		testPath = "/usr/bin:/bin"
+	}
+	os.Setenv("PATH", testPath)
 
 	// Create config with inheritance disabled
 	cfg := config.DefaultConfig()

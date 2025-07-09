@@ -9,7 +9,7 @@ require (
 	github.com/blevesearch/bleve/v2 v2.5.2
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf
-	github.com/mark3labs/mcp-go v0.32.0
+	github.com/mark3labs/mcp-go v0.33.0
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.10.0

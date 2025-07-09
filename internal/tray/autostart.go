@@ -110,7 +110,7 @@ func NewAutostartManager() (*AutostartManager, error) {
 }
 
 // discoverEnvironmentPaths discovers common tool installation paths
-func (m *AutostartManager) discoverEnvironmentPaths() (string, map[string]string) {
+func (m *AutostartManager) discoverEnvironmentPaths() (discoveredPath string, envVars map[string]string) {
 	homeDir, _ := os.UserHomeDir()
 
 	// Start with essential system paths
@@ -151,7 +151,7 @@ func (m *AutostartManager) discoverEnvironmentPaths() (string, map[string]string
 	}
 
 	// Build environment variables
-	envVars := make(map[string]string)
+	envVars = make(map[string]string)
 
 	// Set Homebrew variables if available
 	if brewPrefix := m.getBrewPrefix(); brewPrefix != "" {
@@ -298,20 +298,20 @@ func (m *AutostartManager) buildEnvironmentSetupScript() string {
 	var script strings.Builder
 
 	// Set PATH
-	script.WriteString(fmt.Sprintf("launchctl setenv PATH \"%s\";\n", discoveredPath))
+	script.WriteString(fmt.Sprintf("launchctl setenv PATH %q;\n", discoveredPath))
 
 	// Set other environment variables
 	for key, value := range envVars {
-		script.WriteString(fmt.Sprintf("launchctl setenv %s \"%s\";\n", key, value))
+		script.WriteString(fmt.Sprintf("launchctl setenv %s %q;\n", key, value))
 	}
 
 	// Set HOME and SHELL
 	if homeDir, err := os.UserHomeDir(); err == nil {
-		script.WriteString(fmt.Sprintf("launchctl setenv HOME \"%s\";\n", homeDir))
+		script.WriteString(fmt.Sprintf("launchctl setenv HOME %q;\n", homeDir))
 	}
 
 	if shell := os.Getenv("SHELL"); shell != "" {
-		script.WriteString(fmt.Sprintf("launchctl setenv SHELL \"%s\";\n", shell))
+		script.WriteString(fmt.Sprintf("launchctl setenv SHELL %q;\n", shell))
 	}
 
 	return script.String()
