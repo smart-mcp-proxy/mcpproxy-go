@@ -347,8 +347,10 @@ func (m *Manager) BuildSecureEnvironment() []string {
 		envVars = append(envVars, k+"="+v)
 	}
 
-	// Ensure PATH is comprehensive by checking and enhancing it
-	envVars = m.ensureComprehensivePath(envVars)
+	// Ensure PATH is comprehensive by checking and enhancing it, but only if inheritance is enabled
+	if m.config.InheritSystemSafe {
+		envVars = m.ensureComprehensivePath(envVars)
+	}
 
 	return envVars
 }
