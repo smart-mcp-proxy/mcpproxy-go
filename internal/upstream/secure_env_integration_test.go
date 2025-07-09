@@ -34,8 +34,19 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 
 	// Set up test environment with both safe and unsafe variables
 	os.Clearenv()
-	os.Setenv("PATH", "/usr/bin:/bin")
-	os.Setenv("HOME", "/tmp/test-home")
+	
+	// Set platform-specific test paths
+	var testPath, testHome string
+	if runtime.GOOS == "windows" {
+		testPath = "C:\\Windows\\System32;C:\\Windows"
+		testHome = "C:\\Users\\test-user"
+	} else {
+		testPath = "/usr/bin:/bin"
+		testHome = "/tmp/test-home"
+	}
+	
+	os.Setenv("PATH", testPath)
+	os.Setenv("HOME", testHome)
 	os.Setenv("SECRET_API_KEY", "secret123")        // Should be filtered out
 	os.Setenv("DATABASE_PASSWORD", "dbpass123")     // Should be filtered out
 	os.Setenv("SAFE_TEST_VAR", "should_be_blocked") // Should be filtered out (not in allow list)
@@ -75,13 +86,18 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 		}
 
 		// Should include safe system variables with enhanced PATH discovery
-		assert.Contains(t, envMap["PATH"], "/usr/bin")
-		assert.Contains(t, envMap["PATH"], "/bin")
-		// Enhanced PATH should include additional system paths when available
 		pathValue := envMap["PATH"]
-		assert.True(t, strings.Contains(pathValue, "/usr/bin") && strings.Contains(pathValue, "/bin"),
-			"PATH should contain basic system paths, got: %s", pathValue)
-		assert.Equal(t, "/tmp/test-home", envMap["HOME"])
+		if runtime.GOOS == "windows" {
+			// On Windows, PATH should contain Windows system paths
+			assert.Contains(t, pathValue, "C:\\Windows\\System32")
+			assert.Contains(t, pathValue, "C:\\Windows")
+		} else {
+			// On Unix/macOS, PATH should contain Unix system paths
+			assert.Contains(t, pathValue, "/usr/bin")
+			assert.Contains(t, pathValue, "/bin")
+		}
+		// Enhanced PATH should include additional system paths when available
+		assert.Equal(t, testHome, envMap["HOME"])
 
 		// Should include custom server variables
 		assert.Equal(t, "custom_value", envMap["CUSTOM_SERVER_VAR"])
@@ -198,7 +214,13 @@ func TestEnvironmentInheritanceDisabled(t *testing.T) {
 	}()
 
 	// Set up system environment
-	os.Setenv("PATH", "/usr/bin:/bin")
+	var testPath string
+	if runtime.GOOS == "windows" {
+		testPath = "C:\\Windows\\System32;C:\\Windows"
+	} else {
+		testPath = "/usr/bin:/bin"
+	}
+	os.Setenv("PATH", testPath)
 
 	// Create config with inheritance disabled
 	cfg := config.DefaultConfig()

@@ -149,8 +149,19 @@ func TestBuildSecureEnvironment(t *testing.T) {
 
 	// Set up test environment
 	os.Clearenv()
-	os.Setenv("PATH", "/usr/bin:/bin")
-	os.Setenv("HOME", "/home/user")
+
+	// Set platform-specific test paths
+	var testPath, testHome string
+	if runtime.GOOS == "windows" {
+		testPath = "C:\\Windows\\System32;C:\\Windows"
+		testHome = "C:\\Users\\testuser"
+	} else {
+		testPath = "/usr/bin:/bin"
+		testHome = "/home/user"
+	}
+
+	os.Setenv("PATH", testPath)
+	os.Setenv("HOME", testHome)
 	os.Setenv("SECRET_KEY", "secret123") // Should be filtered out
 	os.Setenv("API_TOKEN", "token123")   // Should be filtered out
 	os.Setenv("LC_ALL", "en_US.UTF-8")   // Should be included
@@ -175,10 +186,18 @@ func TestBuildSecureEnvironment(t *testing.T) {
 
 		// Should include allowed system variables with enhanced PATH discovery
 		pathValue := envMap["PATH"]
-		assert.Contains(t, pathValue, "/usr/bin", "PATH should contain /usr/bin")
-		assert.Contains(t, pathValue, "/bin", "PATH should contain /bin")
+		if runtime.GOOS == "windows" {
+			// On Windows, PATH should contain Windows system paths
+			assert.Contains(t, pathValue, "C:\\Windows\\System32", "PATH should contain C:\\Windows\\System32")
+			assert.Contains(t, pathValue, "C:\\Windows", "PATH should contain C:\\Windows")
+		} else {
+			// On Unix/macOS, PATH should contain Unix system paths
+			assert.Contains(t, pathValue, "/usr/bin", "PATH should contain /usr/bin")
+			assert.Contains(t, pathValue, "/bin", "PATH should contain /bin")
+		}
+
 		// Enhanced PATH discovery may include additional paths like /opt/homebrew/bin
-		assert.Equal(t, "/home/user", envMap["HOME"])
+		assert.Equal(t, testHome, envMap["HOME"])
 		assert.Equal(t, "en_US.UTF-8", envMap["LC_ALL"])
 
 		// Should include custom variables
@@ -227,7 +246,12 @@ func TestGetSystemEnvVar(t *testing.T) {
 	}()
 
 	// Set test environment
-	testPath := "/test/bin:/test/usr/bin"
+	var testPath string
+	if runtime.GOOS == "windows" {
+		testPath = "C:\\test\\bin;C:\\test\\usr\\bin"
+	} else {
+		testPath = "/test/bin:/test/usr/bin"
+	}
 	os.Setenv("PATH", testPath)
 
 	manager := NewManager(&EnvConfig{
@@ -273,8 +297,19 @@ func TestGetFilteredEnvCount(t *testing.T) {
 
 	// Set up test environment
 	os.Clearenv()
-	os.Setenv("PATH", "/usr/bin:/bin")
-	os.Setenv("HOME", "/home/user")
+
+	// Set platform-specific test paths
+	var testPath, testHome string
+	if runtime.GOOS == "windows" {
+		testPath = "C:\\Windows\\System32;C:\\Windows"
+		testHome = "C:\\Users\\testuser"
+	} else {
+		testPath = "/usr/bin:/bin"
+		testHome = "/home/user"
+	}
+
+	os.Setenv("PATH", testPath)
+	os.Setenv("HOME", testHome)
 	os.Setenv("SECRET_KEY", "secret123")
 	os.Setenv("API_TOKEN", "token123")
 
@@ -400,7 +435,16 @@ func TestRealWorldNpxScenario(t *testing.T) {
 	}()
 
 	// Set up realistic environment
-	testPath := "/usr/local/bin:/usr/bin:/bin"
+	var testPath string
+	var expectedPaths []string
+	if runtime.GOOS == "windows" {
+		testPath = "C:\\Program Files\\nodejs;C:\\Windows\\System32;C:\\Windows"
+		expectedPaths = []string{"C:\\Program Files\\nodejs", "C:\\Windows\\System32", "C:\\Windows"}
+	} else {
+		testPath = "/usr/local/bin:/usr/bin:/bin"
+		expectedPaths = []string{"/usr/local/bin", "/usr/bin", "/bin"}
+	}
+
 	os.Setenv("PATH", testPath)
 
 	// Create environment config for npx usage
@@ -415,9 +459,14 @@ func TestRealWorldNpxScenario(t *testing.T) {
 		if strings.HasPrefix(envVar, "PATH=") {
 			actualPath = envVar[5:] // Remove "PATH=" prefix
 			// Enhanced path discovery should include the original test paths
-			if strings.Contains(actualPath, "/usr/local/bin") &&
-				strings.Contains(actualPath, "/usr/bin") &&
-				strings.Contains(actualPath, "/bin") {
+			foundAllPaths := true
+			for _, expectedPath := range expectedPaths {
+				if !strings.Contains(actualPath, expectedPath) {
+					foundAllPaths = false
+					break
+				}
+			}
+			if foundAllPaths {
 				foundPath = true
 				break
 			}
