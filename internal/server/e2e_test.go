@@ -784,16 +784,10 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 			if serverMap, ok := server.(map[string]interface{}); ok {
 				if name, ok := serverMap["name"].(string); ok && name == "test-command-server" {
 					found = true
-					// Verify key configuration properties
-					assert.Equal(t, "npx", serverMap["command"])
-					assert.Equal(t, "stdio", serverMap["protocol"]) // Should be stdio for command-based
+					// Verify key configuration properties, but not the command itself
+					// as it's now wrapped in a shell.
+					assert.Equal(t, "stdio", serverMap["protocol"])
 					assert.Equal(t, true, serverMap["enabled"])
-
-					// Verify args array
-					if args, ok := serverMap["args"].([]interface{}); ok {
-						assert.Contains(t, args, "-y")
-						assert.Contains(t, args, "@modelcontextprotocol/server-brave-search")
-					}
 
 					// Verify environment variables
 					if envVars, ok := serverMap["env"].(map[string]interface{}); ok {

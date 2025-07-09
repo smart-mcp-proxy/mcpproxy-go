@@ -184,19 +184,11 @@ func TestBuildSecureEnvironment(t *testing.T) {
 			}
 		}
 
-		// Should include allowed system variables with enhanced PATH discovery
-		pathValue := envMap["PATH"]
-		if runtime.GOOS == "windows" {
-			// On Windows, PATH should contain Windows system paths
-			assert.Contains(t, pathValue, "C:\\Windows\\System32", "PATH should contain C:\\Windows\\System32")
-			assert.Contains(t, pathValue, "C:\\Windows", "PATH should contain C:\\Windows")
-		} else {
-			// On Unix/macOS, PATH should contain Unix system paths
-			assert.Contains(t, pathValue, "/usr/bin", "PATH should contain /usr/bin")
-			assert.Contains(t, pathValue, "/bin", "PATH should contain /bin")
-		}
+		// Should include allowed system variables, but PATH should not be enhanced
+		pathValue, pathExists := envMap["PATH"]
+		assert.True(t, pathExists, "PATH should exist in the environment")
+		assert.Equal(t, testPath, pathValue, "PATH should be inherited exactly from the environment, not enhanced")
 
-		// Enhanced PATH discovery may include additional paths like /opt/homebrew/bin
 		assert.Equal(t, testHome, envMap["HOME"])
 		assert.Equal(t, "en_US.UTF-8", envMap["LC_ALL"])
 
@@ -436,13 +428,10 @@ func TestRealWorldNpxScenario(t *testing.T) {
 
 	// Set up realistic environment
 	var testPath string
-	var expectedPaths []string
 	if runtime.GOOS == "windows" {
 		testPath = "C:\\Program Files\\nodejs;C:\\Windows\\System32;C:\\Windows"
-		expectedPaths = []string{"C:\\Program Files\\nodejs", "C:\\Windows\\System32", "C:\\Windows"}
 	} else {
 		testPath = "/usr/local/bin:/usr/bin:/bin"
-		expectedPaths = []string{"/usr/local/bin", "/usr/bin", "/bin"}
 	}
 
 	os.Setenv("PATH", testPath)
@@ -458,22 +447,13 @@ func TestRealWorldNpxScenario(t *testing.T) {
 	for _, envVar := range envVars {
 		if strings.HasPrefix(envVar, "PATH=") {
 			actualPath = envVar[5:] // Remove "PATH=" prefix
-			// Enhanced path discovery should include the original test paths
-			foundAllPaths := true
-			for _, expectedPath := range expectedPaths {
-				if !strings.Contains(actualPath, expectedPath) {
-					foundAllPaths = false
-					break
-				}
-			}
-			if foundAllPaths {
-				foundPath = true
-				break
-			}
+			foundPath = true
+			break
 		}
 	}
 
-	assert.True(t, foundPath, "PATH should be available for npx to find executables, got: %s", actualPath)
+	assert.True(t, foundPath, "PATH should be available in the environment")
+	assert.Equal(t, testPath, actualPath, "PATH should be inherited exactly from the test setup")
 }
 
 // Helper function to split environment variable string

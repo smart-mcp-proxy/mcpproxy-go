@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,7 @@ const (
 	transportHTTP           = "http"
 	transportStreamableHTTP = "streamable-http"
 	transportStdio          = "stdio"
+	osWindows               = "windows"
 )
 
 // Client represents an MCP client connection to an upstream server
@@ -187,10 +190,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 		c.client = client.NewClient(httpTransport)
 	case transportStdio:
+		var originalCommand string
+		var originalArgs []string
+
 		// Check if command is specified separately (preferred)
 		if c.config.Command != "" {
-			command = c.config.Command
-			cmdArgs = c.config.Args
+			originalCommand = c.config.Command
+			originalArgs = c.config.Args
 		} else {
 			// Fallback to parsing from URL
 			args := c.parseCommand(c.config.URL)
@@ -202,11 +208,11 @@ func (c *Client) Connect(ctx context.Context) error {
 				c.mu.Unlock()
 				return c.lastError
 			}
-			command = args[0]
-			cmdArgs = args[1:]
+			originalCommand = args[0]
+			originalArgs = args[1:]
 		}
 
-		if command == "" {
+		if originalCommand == "" {
 			c.mu.Lock()
 			c.lastError = fmt.Errorf("no command specified for stdio transport")
 			c.retryCount++
@@ -217,6 +223,9 @@ func (c *Client) Connect(ctx context.Context) error {
 
 		// Use secure environment manager to build filtered environment variables
 		envVars = c.envManager.BuildSecureEnvironment()
+
+		// Wrap command in a shell to ensure user's PATH is respected, especially in GUI apps
+		command, cmdArgs = c.wrapCommandInShell(originalCommand, originalArgs)
 
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Debug("Process starting",
@@ -350,6 +359,34 @@ func (c *Client) getConnectionTimeout() time.Duration {
 	}
 
 	return timeout
+}
+
+// wrapCommandInShell wraps the original command in a shell to ensure PATH is loaded.
+func (c *Client) wrapCommandInShell(command string, args []string) (shellCmd string, shellArgs []string) {
+	fullCmd := command
+	if len(args) > 0 {
+		quotedArgs := make([]string, len(args))
+		for i, arg := range args {
+			// Basic quoting for arguments with spaces
+			if strings.Contains(arg, " ") {
+				quotedArgs[i] = fmt.Sprintf("%q", arg)
+			} else {
+				quotedArgs[i] = arg
+			}
+		}
+		fullCmd = fmt.Sprintf("%s %s", command, strings.Join(quotedArgs, " "))
+	}
+
+	if runtime.GOOS == osWindows {
+		return "cmd.exe", []string{"/c", fullCmd}
+	}
+
+	// For Unix-like systems, use a login shell to load profile scripts
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	return shell, []string{"-l", "-c", fullCmd}
 }
 
 // ShouldRetry returns true if the client should retry connecting based on exponential backoff
