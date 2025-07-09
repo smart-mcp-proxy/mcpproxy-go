@@ -64,6 +64,53 @@ type ServerConfig struct {
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
 	Created     time.Time         `json:"created" mapstructure:"created"`
 	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
+
+	// OAuth configuration
+	OAuth *OAuthConfig `json:"oauth,omitempty" mapstructure:"oauth"`
+}
+
+// OAuthConfig represents OAuth configuration for upstream servers
+type OAuthConfig struct {
+	// OAuth flow type - "authorization_code" or "device_code"
+	FlowType string `json:"flow_type,omitempty" mapstructure:"flow-type"`
+
+	// OAuth endpoints (auto-discovered if not provided)
+	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty" mapstructure:"authorization-endpoint"`
+	TokenEndpoint         string `json:"token_endpoint,omitempty" mapstructure:"token-endpoint"`
+	DeviceEndpoint        string `json:"device_endpoint,omitempty" mapstructure:"device-endpoint"`
+
+	// Client credentials (for pre-registered clients)
+	ClientID     string `json:"client_id,omitempty" mapstructure:"client-id"`
+	ClientSecret string `json:"client_secret,omitempty" mapstructure:"client-secret"`
+
+	// OAuth scopes
+	Scopes []string `json:"scopes,omitempty" mapstructure:"scopes"`
+
+	// Token storage
+	TokenStorage *TokenStorage `json:"token_storage,omitempty" mapstructure:"token-storage"`
+
+	// Device flow specific settings
+	DeviceFlow *DeviceFlowConfig `json:"device_flow,omitempty" mapstructure:"device-flow"`
+}
+
+// TokenStorage represents stored OAuth tokens
+type TokenStorage struct {
+	AccessToken  string    `json:"access_token,omitempty" mapstructure:"access-token"`
+	RefreshToken string    `json:"refresh_token,omitempty" mapstructure:"refresh-token"`
+	ExpiresAt    time.Time `json:"expires_at,omitempty" mapstructure:"expires-at"`
+	TokenType    string    `json:"token_type,omitempty" mapstructure:"token-type"`
+}
+
+// DeviceFlowConfig represents device flow specific configuration
+type DeviceFlowConfig struct {
+	// Poll interval for device flow (default: 5 seconds)
+	PollInterval time.Duration `json:"poll_interval,omitempty" mapstructure:"poll-interval"`
+
+	// Device code expiration (default: 600 seconds)
+	CodeExpiration time.Duration `json:"code_expiration,omitempty" mapstructure:"code-expiration"`
+
+	// Enable notification to user (tray notification, etc.)
+	EnableNotification bool `json:"enable_notification,omitempty" mapstructure:"enable-notification"`
 }
 
 // CursorMCPConfig represents the structure for Cursor IDE MCP configuration

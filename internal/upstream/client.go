@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -27,6 +29,10 @@ const (
 	transportStreamableHTTP = "streamable-http"
 	transportStdio          = "stdio"
 	osWindows               = "windows"
+
+	// OAuth flow types
+	oauthFlowDeviceCode = "device_code"
+	oauthFlowAuthCode   = "authorization_code"
 )
 
 // Client represents an MCP client connection to an upstream server
@@ -279,20 +285,63 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	serverInfo, err := c.client.Initialize(connectCtx, initRequest)
 	if err != nil {
-		c.mu.Lock()
-		c.lastError = err
-		c.retryCount++
-		c.lastRetryTime = time.Now()
-		c.mu.Unlock()
+		// Check if this is an OAuth authorization required error
+		if c.isOAuthAuthorizationRequired(err) {
+			c.logger.Info("OAuth authorization required, initiating OAuth flow")
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Info("OAuth authorization required")
+			}
 
-		// Log to both main and server logs for critical errors
-		c.logger.Error("Failed to initialize MCP client", zap.Error(err))
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("Initialize failed", zap.Error(err))
+			// Handle OAuth flow
+			if oauthErr := c.handleOAuthFlow(connectCtx); oauthErr != nil {
+				c.mu.Lock()
+				c.lastError = oauthErr
+				c.retryCount++
+				c.lastRetryTime = time.Now()
+				c.mu.Unlock()
+
+				c.logger.Error("OAuth flow failed", zap.Error(oauthErr))
+				if c.upstreamLogger != nil {
+					c.upstreamLogger.Error("OAuth flow failed", zap.Error(oauthErr))
+				}
+
+				c.client.Close()
+				return fmt.Errorf("OAuth flow failed: %w", oauthErr)
+			}
+
+			// Retry initialization after OAuth flow
+			serverInfo, err = c.client.Initialize(connectCtx, initRequest)
+			if err != nil {
+				c.mu.Lock()
+				c.lastError = err
+				c.retryCount++
+				c.lastRetryTime = time.Now()
+				c.mu.Unlock()
+
+				c.logger.Error("Failed to initialize MCP client after OAuth", zap.Error(err))
+				if c.upstreamLogger != nil {
+					c.upstreamLogger.Error("Initialize failed after OAuth", zap.Error(err))
+				}
+
+				c.client.Close()
+				return fmt.Errorf("failed to initialize MCP client after OAuth: %w", err)
+			}
+		} else {
+			c.mu.Lock()
+			c.lastError = err
+			c.retryCount++
+			c.lastRetryTime = time.Now()
+			c.mu.Unlock()
+
+			// Log to both main and server logs for critical errors
+			c.logger.Error("Failed to initialize MCP client", zap.Error(err))
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Error("Initialize failed", zap.Error(err))
+			}
+
+			c.client.Close()
+			return fmt.Errorf("failed to initialize MCP client: %w", err)
 		}
-
-		c.client.Close()
-		return fmt.Errorf("failed to initialize MCP client: %w", err)
 	}
 
 	c.serverInfo = serverInfo
@@ -761,4 +810,276 @@ func (c *Client) ListResources(ctx context.Context) ([]interface{}, error) {
 
 	c.logger.Debug("Listed resources from upstream server", zap.Int("count", len(resources)))
 	return resources, nil
+}
+
+// isOAuthAuthorizationRequired checks if the error indicates OAuth authorization is required
+func (c *Client) isOAuthAuthorizationRequired(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for OAuth authorization required error from mcp-go library
+	if strings.Contains(err.Error(), "authorization required") ||
+		strings.Contains(err.Error(), "no valid token available") ||
+		strings.Contains(err.Error(), "unauthorized") {
+		return true
+	}
+
+	// Check for HTTP 401 unauthorized errors
+	if strings.Contains(err.Error(), "401") {
+		return true
+	}
+
+	return false
+}
+
+// handleOAuthFlow handles the OAuth authorization flow
+func (c *Client) handleOAuthFlow(ctx context.Context) error {
+	if c.config.OAuth == nil {
+		return fmt.Errorf("OAuth configuration not found")
+	}
+
+	// Determine which OAuth flow to use
+	flowType := c.config.OAuth.FlowType
+	if flowType == "" {
+		// Default to device flow for headless/remote scenarios
+		flowType = oauthFlowDeviceCode
+	}
+
+	switch flowType {
+	case oauthFlowAuthCode:
+		return c.handleAuthorizationCodeFlow(ctx)
+	case oauthFlowDeviceCode:
+		return c.handleDeviceCodeFlow(ctx)
+	default:
+		return fmt.Errorf("unsupported OAuth flow type: %s", flowType)
+	}
+}
+
+// handleAuthorizationCodeFlow handles the OAuth Authorization Code flow
+func (c *Client) handleAuthorizationCodeFlow(_ context.Context) error {
+	c.logger.Info("Starting OAuth Authorization Code flow")
+
+	// This flow requires user interaction on the same device
+	// For now, return an error indicating this is not supported in headless mode
+	return fmt.Errorf("Authorization Code flow requires user interaction on the same device. Use %s flow for remote/headless scenarios", oauthFlowDeviceCode)
+}
+
+// handleDeviceCodeFlow handles the OAuth Device Code flow for headless/remote scenarios
+func (c *Client) handleDeviceCodeFlow(ctx context.Context) error {
+	c.logger.Info("Starting OAuth Device Code flow")
+
+	oauth := c.config.OAuth
+	if oauth.DeviceEndpoint == "" {
+		return fmt.Errorf("device endpoint not configured for OAuth Device Code flow")
+	}
+
+	// Get device code from authorization server
+	deviceResp, err := c.requestDeviceCode(ctx, oauth)
+	if err != nil {
+		return fmt.Errorf("failed to request device code: %w", err)
+	}
+
+	// Display authorization URL and user code to user
+	c.logger.Info("OAuth Device Code flow started",
+		zap.String("authorization_url", deviceResp.VerificationURI),
+		zap.String("user_code", deviceResp.UserCode),
+		zap.Duration("expires_in", deviceResp.ExpiresIn))
+
+	// Show notification to user via tray if enabled
+	if oauth.DeviceFlow != nil && oauth.DeviceFlow.EnableNotification {
+		c.showDeviceCodeNotification(deviceResp)
+	}
+
+	// Poll for token
+	token, err := c.pollForToken(ctx, oauth, deviceResp)
+	if err != nil {
+		return fmt.Errorf("failed to get token: %w", err)
+	}
+
+	// Store token
+	oauth.TokenStorage = &config.TokenStorage{
+		AccessToken:  token.AccessToken,
+		RefreshToken: token.RefreshToken,
+		ExpiresAt:    time.Now().Add(token.ExpiresIn),
+		TokenType:    token.TokenType,
+	}
+
+	c.logger.Info("OAuth Device Code flow completed successfully")
+	return nil
+}
+
+// DeviceCodeResponse represents the response from device code request
+type DeviceCodeResponse struct {
+	DeviceCode              string        `json:"device_code"`
+	UserCode                string        `json:"user_code"`
+	VerificationURI         string        `json:"verification_uri"`
+	VerificationURIComplete string        `json:"verification_uri_complete,omitempty"`
+	ExpiresIn               time.Duration `json:"expires_in"`
+	Interval                time.Duration `json:"interval"`
+}
+
+// TokenResponse represents the OAuth token response
+type TokenResponse struct {
+	AccessToken  string        `json:"access_token"`
+	RefreshToken string        `json:"refresh_token,omitempty"`
+	TokenType    string        `json:"token_type"`
+	ExpiresIn    time.Duration `json:"expires_in"`
+	Scope        string        `json:"scope,omitempty"`
+}
+
+// requestDeviceCode requests a device code from the authorization server
+func (c *Client) requestDeviceCode(ctx context.Context, oauth *config.OAuthConfig) (*DeviceCodeResponse, error) {
+	// Prepare request data
+	data := url.Values{}
+	data.Set("client_id", oauth.ClientID)
+	if len(oauth.Scopes) > 0 {
+		data.Set("scope", strings.Join(oauth.Scopes, " "))
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, "POST", oauth.DeviceEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create device code request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	// Send request
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send device code request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("device code request failed with status %d", resp.StatusCode)
+	}
+
+	// Parse response
+	var rawResp map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&rawResp); err != nil {
+		return nil, fmt.Errorf("failed to decode device code response: %w", err)
+	}
+
+	deviceResp := &DeviceCodeResponse{
+		DeviceCode:      getStringValue(rawResp, "device_code"),
+		UserCode:        getStringValue(rawResp, "user_code"),
+		VerificationURI: getStringValue(rawResp, "verification_uri"),
+		ExpiresIn:       getDurationValue(rawResp, "expires_in", 600*time.Second),
+		Interval:        getDurationValue(rawResp, "interval", 5*time.Second),
+	}
+
+	if complete, ok := rawResp["verification_uri_complete"].(string); ok {
+		deviceResp.VerificationURIComplete = complete
+	}
+
+	return deviceResp, nil
+}
+
+// pollForToken polls the token endpoint until the user authorizes the device
+func (c *Client) pollForToken(ctx context.Context, oauth *config.OAuthConfig, deviceResp *DeviceCodeResponse) (*TokenResponse, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	interval := deviceResp.Interval
+	deadline := time.Now().Add(deviceResp.ExpiresIn)
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
+			// Poll for token
+			data := url.Values{}
+			data.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+			data.Set("device_code", deviceResp.DeviceCode)
+			data.Set("client_id", oauth.ClientID)
+
+			req, err := http.NewRequestWithContext(ctx, "POST", oauth.TokenEndpoint, strings.NewReader(data.Encode()))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create token request: %w", err)
+			}
+
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				c.logger.Debug("Token poll request failed", zap.Error(err))
+				continue
+			}
+
+			var rawResp map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&rawResp); err != nil {
+				resp.Body.Close()
+				c.logger.Debug("Failed to decode token response", zap.Error(err))
+				continue
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				// Success - got token
+				token := &TokenResponse{
+					AccessToken:  getStringValue(rawResp, "access_token"),
+					RefreshToken: getStringValue(rawResp, "refresh_token"),
+					TokenType:    getStringValue(rawResp, "token_type"),
+					ExpiresIn:    getDurationValue(rawResp, "expires_in", 3600*time.Second),
+				}
+				if scope, ok := rawResp["scope"].(string); ok {
+					token.Scope = scope
+				}
+				return token, nil
+			} else if resp.StatusCode == http.StatusBadRequest {
+				// Check for specific error codes
+				if errorCode, ok := rawResp["error"].(string); ok {
+					switch errorCode {
+					case "authorization_pending":
+						// User hasn't authorized yet, continue polling
+						continue
+					case "slow_down":
+						// Server requests slower polling
+						interval *= 2
+						continue
+					case "expired_token":
+						return nil, fmt.Errorf("device code expired")
+					case "access_denied":
+						return nil, fmt.Errorf("user denied authorization")
+					default:
+						return nil, fmt.Errorf("OAuth error: %s", errorCode)
+					}
+				}
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("device code expired")
+}
+
+// showDeviceCodeNotification shows a notification to the user with the device code
+func (c *Client) showDeviceCodeNotification(deviceResp *DeviceCodeResponse) {
+	// TODO: Implement system tray notification
+	// For now, just log the information
+	c.logger.Info("Please authorize this device:",
+		zap.String("url", deviceResp.VerificationURI),
+		zap.String("code", deviceResp.UserCode))
+}
+
+// getStringValue safely gets a string value from a map
+func getStringValue(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
+}
+
+// getDurationValue safely gets a duration value from a map (expects seconds as number)
+func getDurationValue(m map[string]interface{}, key string, defaultValue time.Duration) time.Duration {
+	if val, ok := m[key].(float64); ok {
+		return time.Duration(val) * time.Second
+	}
+	if val, ok := m[key].(int); ok {
+		return time.Duration(val) * time.Second
+	}
+	return defaultValue
 }
