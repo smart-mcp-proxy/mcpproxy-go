@@ -25,12 +25,12 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return err
 	}
-	
+
 	duration, err := time.ParseDuration(s)
 	if err != nil {
 		return err
 	}
-	
+
 	*d = Duration(duration)
 	return nil
 }
@@ -534,12 +534,12 @@ func (c *Config) validateServerConfig(server *ServerConfig) error {
 	// Validate timeout if specified
 	if server.Timeout != nil {
 		timeout := server.Timeout.ToDuration()
-		
+
 		// Minimum timeout: 5 seconds
 		if timeout < 5*time.Second {
 			return fmt.Errorf("timeout must be at least 5 seconds, got %v", timeout)
 		}
-		
+
 		// Maximum timeout: 10 minutes
 		if timeout > 10*time.Minute {
 			return fmt.Errorf("timeout must be at most 10 minutes, got %v", timeout)

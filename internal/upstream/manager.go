@@ -39,11 +39,11 @@ func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
-	m.logger.Debug("AddServerConfig called", 
-		zap.String("id", id), 
+	m.logger.Debug("AddServerConfig called",
+		zap.String("id", id),
 		zap.String("name", serverConfig.Name),
 		zap.Bool("enabled", serverConfig.Enabled))
-	
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -252,17 +252,17 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			status := c.GetConnectionStatus()
 			connected, _ := status["connected"].(bool)
 			connecting, _ := status["connecting"].(bool)
-			
-			m.logger.Debug("Client status check", 
-				zap.String("id", id), 
+
+			m.logger.Debug("Client status check",
+				zap.String("id", id),
 				zap.String("name", c.config.Name),
 				zap.Bool("connected", connected),
 				zap.Bool("connecting", connecting))
-			
+
 			if !connected {
 				if !connecting {
-					m.logger.Debug("Attempting to connect client", 
-						zap.String("id", id), 
+					m.logger.Debug("Attempting to connect client",
+						zap.String("id", id),
 						zap.String("name", c.config.Name))
 					if err := c.Connect(ctx); err != nil {
 						m.logger.Error("Failed to connect to upstream server",
@@ -271,13 +271,13 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 							zap.Error(err))
 					}
 				} else {
-					m.logger.Debug("Client already connecting, skipping", 
-						zap.String("id", id), 
+					m.logger.Debug("Client already connecting, skipping",
+						zap.String("id", id),
 						zap.String("name", c.config.Name))
 				}
 			} else {
-				m.logger.Debug("Client already connected, skipping", 
-					zap.String("id", id), 
+				m.logger.Debug("Client already connected, skipping",
+					zap.String("id", id),
 					zap.String("name", c.config.Name))
 			}
 		}(id, client)

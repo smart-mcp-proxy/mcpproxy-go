@@ -234,7 +234,7 @@ func (s *Server) backgroundInitialization() {
 // backgroundConnections handles connecting to upstream servers with retry logic
 func (s *Server) backgroundConnections(ctx context.Context) {
 	s.logger.Debug("Background connections started")
-	
+
 	// Initial connection attempt
 	s.logger.Debug("Starting initial connection attempt")
 	s.connectAllWithRetry(ctx)
@@ -273,7 +273,7 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 		}
 	}
 
-	s.logger.Debug("Connection status", 
+	s.logger.Debug("Connection status",
 		zap.Int("connected_count", connectedCount),
 		zap.Int("total_count", totalCount))
 

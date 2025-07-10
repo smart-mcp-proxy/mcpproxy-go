@@ -561,11 +561,6 @@ func TestTimeoutValidation(t *testing.T) {
 	}
 }
 
-// Helper function to create a pointer to a time.Duration
-func ptr(d time.Duration) *time.Duration {
-	return &d
-}
-
 // Helper function to create a pointer to a Duration
 func ptrDuration(d time.Duration) *Duration {
 	duration := Duration(d)

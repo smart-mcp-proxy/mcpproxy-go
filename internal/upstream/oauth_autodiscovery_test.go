@@ -289,7 +289,7 @@ func TestOAuthAutoDiscovery(t *testing.T) {
 				return
 			}
 
-						require.NoError(t, err)
+			require.NoError(t, err)
 
 			// Verify configuration - replace SERVER_URL in expected config
 			expectedAuthEndpoint := strings.ReplaceAll(tt.expectedConfig.AuthorizationEndpoint, "SERVER_URL", server.URL)
