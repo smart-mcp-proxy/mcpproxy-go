@@ -914,6 +914,11 @@ func (c *Client) shouldRetryLocked() bool {
 		return false
 	}
 
+	// Don't retry if OAuth is pending - wait for user to complete the flow
+	if c.oauthPending {
+		return false
+	}
+
 	if c.retryCount == 0 {
 		return true
 	}
