@@ -602,33 +602,57 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	switch transportType {
 	case transportHTTP, transportStreamableHTTP:
-		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
-		if err != nil {
-			c.mu.Lock()
-			c.lastError = err
-			c.retryCount++
-			c.lastRetryTime = time.Now()
-			c.mu.Unlock()
-			return fmt.Errorf("failed to create HTTP transport: %w", err)
+		// Create streamable HTTP transport with headers if provided
+		if len(c.config.Headers) > 0 {
+			httpTransport, err := transport.NewStreamableHTTP(c.config.URL,
+				transport.WithHTTPHeaders(c.config.Headers))
+			if err != nil {
+				c.mu.Lock()
+				c.lastError = err
+				c.retryCount++
+				c.lastRetryTime = time.Now()
+				c.mu.Unlock()
+				return fmt.Errorf("failed to create HTTP transport: %w", err)
+			}
+			c.client = client.NewClient(httpTransport)
+		} else {
+			httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
+			if err != nil {
+				c.mu.Lock()
+				c.lastError = err
+				c.retryCount++
+				c.lastRetryTime = time.Now()
+				c.mu.Unlock()
+				return fmt.Errorf("failed to create HTTP transport: %w", err)
+			}
+			c.client = client.NewClient(httpTransport)
 		}
-		c.client = client.NewClient(httpTransport)
 	case transportSSE:
-		// For SSE, we need to handle Cloudflare's two-step connection pattern
-		// First connect to /sse to get session info, then use that for actual communication
-		c.logger.Debug("Creating SSE transport with Cloudflare compatibility",
-			zap.String("url", c.config.URL))
-
-		// Create SSE transport with special handling for Cloudflare endpoints
-		httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
-		if err != nil {
-			c.mu.Lock()
-			c.lastError = err
-			c.retryCount++
-			c.lastRetryTime = time.Now()
-			c.mu.Unlock()
-			return fmt.Errorf("failed to create SSE transport: %w", err)
+		// Create SSE client with headers if provided
+		if len(c.config.Headers) > 0 {
+			sseClient, err := client.NewSSEMCPClient(c.config.URL,
+				client.WithHeaders(c.config.Headers))
+			if err != nil {
+				c.mu.Lock()
+				c.lastError = err
+				c.retryCount++
+				c.lastRetryTime = time.Now()
+				c.mu.Unlock()
+				return fmt.Errorf("failed to create SSE client: %w", err)
+			}
+			c.client = sseClient
+		} else {
+			sseClient, err := client.NewSSEMCPClient(c.config.URL)
+			if err != nil {
+				c.mu.Lock()
+				c.lastError = err
+				c.retryCount++
+				c.lastRetryTime = time.Now()
+				c.mu.Unlock()
+				return fmt.Errorf("failed to create SSE client: %w", err)
+			}
+			c.client = sseClient
 		}
-		c.client = client.NewClient(httpTransport)
 	case transportStdio:
 		var originalCommand string
 		var originalArgs []string
