@@ -688,6 +688,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	connectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Log the timeout being used for debugging
+	c.logger.Debug("Using connection timeout",
+		zap.Duration("timeout", timeout),
+		zap.Bool("custom_timeout", c.config.Timeout != nil),
+		zap.Int("retry_count", retryCount))
+
 	// Start the client
 	if err := c.client.Start(connectCtx); err != nil {
 		c.mu.Lock()
@@ -851,7 +857,11 @@ func (c *Client) Connect(ctx context.Context) error {
 
 // getConnectionTimeout returns the connection timeout with exponential backoff
 func (c *Client) getConnectionTimeout() time.Duration {
+	// Use custom timeout if specified, otherwise default to 30 seconds
 	baseTimeout := 30 * time.Second
+	if c.config.Timeout != nil {
+		baseTimeout = c.config.Timeout.ToDuration()
+	}
 
 	c.mu.RLock()
 	retryCount := c.retryCount

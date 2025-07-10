@@ -39,11 +39,17 @@ func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
+	m.logger.Debug("AddServerConfig called", 
+		zap.String("id", id), 
+		zap.String("name", serverConfig.Name),
+		zap.Bool("enabled", serverConfig.Enabled))
+	
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Remove existing client if it exists
 	if existingClient, exists := m.clients[id]; exists {
+		m.logger.Debug("Removing existing client", zap.String("id", id))
 		_ = existingClient.Disconnect()
 		delete(m.clients, id)
 	}
@@ -57,7 +63,8 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	m.clients[id] = client
 	m.logger.Info("Added upstream server configuration",
 		zap.String("id", id),
-		zap.String("name", serverConfig.Name))
+		zap.String("name", serverConfig.Name),
+		zap.Bool("enabled", serverConfig.Enabled))
 
 	return nil
 }
@@ -218,12 +225,15 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 
 // ConnectAll connects to all configured servers that should retry
 func (m *Manager) ConnectAll(ctx context.Context) error {
+	m.logger.Debug("ConnectAll called")
 	m.mu.RLock()
 	clients := make(map[string]*Client)
 	for id, client := range m.clients {
 		clients[id] = client
 	}
 	m.mu.RUnlock()
+
+	m.logger.Debug("ConnectAll found clients", zap.Int("client_count", len(clients)))
 
 	var wg sync.WaitGroup
 	for id, client := range clients {
@@ -240,20 +250,41 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			defer wg.Done()
 			// Only connect if not already connected or trying to connect
 			status := c.GetConnectionStatus()
-			if connected, ok := status["connected"].(bool); !ok || !connected {
-				if connecting, ok := status["connecting"].(bool); !ok || !connecting {
+			connected, _ := status["connected"].(bool)
+			connecting, _ := status["connecting"].(bool)
+			
+			m.logger.Debug("Client status check", 
+				zap.String("id", id), 
+				zap.String("name", c.config.Name),
+				zap.Bool("connected", connected),
+				zap.Bool("connecting", connecting))
+			
+			if !connected {
+				if !connecting {
+					m.logger.Debug("Attempting to connect client", 
+						zap.String("id", id), 
+						zap.String("name", c.config.Name))
 					if err := c.Connect(ctx); err != nil {
 						m.logger.Error("Failed to connect to upstream server",
 							zap.String("id", id),
 							zap.String("name", c.config.Name),
 							zap.Error(err))
 					}
+				} else {
+					m.logger.Debug("Client already connecting, skipping", 
+						zap.String("id", id), 
+						zap.String("name", c.config.Name))
 				}
+			} else {
+				m.logger.Debug("Client already connected, skipping", 
+					zap.String("id", id), 
+					zap.String("name", c.config.Name))
 			}
 		}(id, client)
 	}
 
 	wg.Wait()
+	m.logger.Debug("ConnectAll completed")
 	return nil
 }
 

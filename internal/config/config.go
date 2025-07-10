@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"mcpproxy-go/internal/secureenv"
 	"time"
 )
@@ -9,6 +10,40 @@ import (
 const (
 	defaultPort = ":8080"
 )
+
+// Duration is a custom type that wraps time.Duration for JSON marshaling
+type Duration time.Duration
+
+// MarshalJSON implements json.Marshaler
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+// UnmarshalJSON implements json.Unmarshaler
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	
+	duration, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	
+	*d = Duration(duration)
+	return nil
+}
+
+// String returns the string representation of the duration
+func (d Duration) String() string {
+	return time.Duration(d).String()
+}
+
+// ToDuration converts Duration to time.Duration
+func (d Duration) ToDuration() time.Duration {
+	return time.Duration(d)
+}
 
 // OAuth flow types
 const (
@@ -100,6 +135,9 @@ type ServerConfig struct {
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
 	Created     time.Time         `json:"created" mapstructure:"created"`
 	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
+
+	// Connection timeout (e.g., "30s", "2m", "120s"). If not specified, defaults to 30s
+	Timeout *Duration `json:"timeout,omitempty" mapstructure:"timeout"`
 
 	// OAuth configuration
 	OAuth *OAuthConfig `json:"oauth,omitempty" mapstructure:"oauth"`
@@ -476,9 +514,36 @@ func (c *Config) Validate() error {
 		c.ToolResponseLimit = 0 // 0 means disabled
 	}
 
+	// Validate server configurations
+	for _, server := range c.Servers {
+		if err := c.validateServerConfig(server); err != nil {
+			return fmt.Errorf("invalid server config for '%s': %w", server.Name, err)
+		}
+	}
+
 	// Ensure Environment config is not nil
 	if c.Environment == nil {
 		c.Environment = secureenv.DefaultEnvConfig()
+	}
+
+	return nil
+}
+
+// validateServerConfig validates a single server configuration
+func (c *Config) validateServerConfig(server *ServerConfig) error {
+	// Validate timeout if specified
+	if server.Timeout != nil {
+		timeout := server.Timeout.ToDuration()
+		
+		// Minimum timeout: 5 seconds
+		if timeout < 5*time.Second {
+			return fmt.Errorf("timeout must be at least 5 seconds, got %v", timeout)
+		}
+		
+		// Maximum timeout: 10 minutes
+		if timeout > 10*time.Minute {
+			return fmt.Errorf("timeout must be at most 10 minutes, got %v", timeout)
+		}
 	}
 
 	return nil

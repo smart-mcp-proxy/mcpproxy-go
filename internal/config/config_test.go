@@ -489,3 +489,85 @@ func TestCreateSampleConfig(t *testing.T) {
 		t.Error("Expected sample config to have 'local-command' server")
 	}
 }
+
+func TestTimeoutValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		timeout   *Duration
+		expectErr bool
+		errMsg    string
+	}{
+		{
+			name:      "nil timeout is valid",
+			timeout:   nil,
+			expectErr: false,
+		},
+		{
+			name:      "30 second timeout is valid",
+			timeout:   ptrDuration(30 * time.Second),
+			expectErr: false,
+		},
+		{
+			name:      "2 minute timeout is valid",
+			timeout:   ptrDuration(2 * time.Minute),
+			expectErr: false,
+		},
+		{
+			name:      "timeout too short",
+			timeout:   ptrDuration(2 * time.Second),
+			expectErr: true,
+			errMsg:    "timeout must be at least 5 seconds",
+		},
+		{
+			name:      "timeout too long",
+			timeout:   ptrDuration(15 * time.Minute),
+			expectErr: true,
+			errMsg:    "timeout must be at most 10 minutes",
+		},
+		{
+			name:      "minimum valid timeout",
+			timeout:   ptrDuration(5 * time.Second),
+			expectErr: false,
+		},
+		{
+			name:      "maximum valid timeout",
+			timeout:   ptrDuration(10 * time.Minute),
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &ServerConfig{
+				Name:    "test-server",
+				Timeout: tt.timeout,
+				Enabled: true,
+				Created: time.Now(),
+			}
+
+			config := &Config{
+				Servers: []*ServerConfig{server},
+			}
+
+			err := config.Validate()
+
+			if tt.expectErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// Helper function to create a pointer to a time.Duration
+func ptr(d time.Duration) *time.Duration {
+	return &d
+}
+
+// Helper function to create a pointer to a Duration
+func ptrDuration(d time.Duration) *Duration {
+	duration := Duration(d)
+	return &duration
+}
