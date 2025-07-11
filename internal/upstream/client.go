@@ -31,6 +31,7 @@ import (
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/prompt"
 	"mcpproxy-go/internal/secureenv"
+	"mcpproxy-go/internal/storage"
 )
 
 const (
@@ -40,6 +41,11 @@ const (
 	transportStdio          = "stdio"
 	osWindows               = "windows"
 	defaultClientName       = "mcpproxy-go"
+
+	// ListTools cache duration – limits how frequently we hit the upstream
+	// server with tools/list requests when we are already connected.
+	// A short 30-second TTL keeps the UI responsive while preventing spam.
+	listToolsCacheDuration = 30 * time.Second
 
 	// OAuth flow types - removed unused local constants, using config package constants instead
 )
@@ -85,6 +91,12 @@ type Client struct {
 	// User prompter for interactive OAuth setup
 	prompter prompt.UserPrompter
 
+	// Storage manager for OAuth token persistence
+	storageManager *storage.Manager
+
+	// Global configuration for accessing tracing settings
+	globalConfig *config.Config
+
 	// Connection state (protected by mutex)
 	mu            sync.RWMutex
 	connected     bool
@@ -92,6 +104,21 @@ type Client struct {
 	retryCount    int
 	lastRetryTime time.Time
 	connecting    bool
+
+	// Connection request deduplication
+	connectionRequestID string // Tracks current connection attempt
+
+	// ListTools request deduplication
+	listToolsInProgress bool
+	listToolsRequestID  string
+	listToolsResult     []*config.ToolMetadata
+	listToolsError      error
+	listToolsWaiters    []chan struct{} // Channels to notify waiting requests
+
+	// ListTools circuit breaker
+	listToolsFailureCount int
+	listToolsLastFailure  time.Time
+	listToolsCircuitOpen  bool
 
 	// OAuth state management
 	oauthPending    bool
@@ -104,6 +131,9 @@ type Client struct {
 	// Deployment detection cache
 	deploymentType    DeploymentType // DeploymentLocal, DeploymentRemote, DeploymentHeadless
 	detectedPublicURL string
+
+	// OAuth token storage
+	oauthToken *oauth2.Token
 }
 
 // Tool represents a tool from an upstream server
@@ -114,10 +144,12 @@ type Tool struct {
 }
 
 // NewClient creates a new MCP client for connecting to an upstream server
-func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*Client, error) {
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storageManager *storage.Manager) (*Client, error) {
 	c := &Client{
-		id:     id,
-		config: serverConfig,
+		id:             id,
+		config:         serverConfig,
+		storageManager: storageManager,
+		globalConfig:   globalConfig,
 		logger: logger.With(
 			zap.String("upstream_id", id),
 			zap.String("upstream_name", serverConfig.Name),
@@ -176,6 +208,14 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // SetPrompter sets a custom prompter for testing
 func (c *Client) SetPrompter(prompter prompt.UserPrompter) {
 	c.prompter = prompter
+}
+
+// wrapWithTracingIfEnabled wraps a transport with tracing if tracing is enabled
+func (c *Client) wrapWithTracingIfEnabled(transport transport.Interface) transport.Interface {
+	if c.globalConfig != nil && c.globalConfig.EnableTracing {
+		return NewTracingTransport(transport, c.logger, c.config.Name, true)
+	}
+	return transport
 }
 
 // PKCE helper functions for OAuth 2.0 PKCE extension (RFC 7636)
@@ -507,17 +547,20 @@ func (c *Client) registerClient(ctx context.Context, registrationEndpoint string
 // detectDeploymentType automatically detects the deployment type based on environment
 func (c *Client) detectDeploymentType() DeploymentType {
 	if c.deploymentType != 0 {
+		c.logger.Debug("Using cached deployment type", zap.String("type", c.deploymentType.String()))
 		return c.deploymentType // Use cached result
 	}
 
 	// Check if running in headless environment
 	if os.Getenv("DISPLAY") == "" && runtime.GOOS == "linux" {
+		c.logger.Info("Detected headless deployment", zap.String("os", runtime.GOOS), zap.String("display", os.Getenv("DISPLAY")))
 		c.deploymentType = DeploymentHeadless
 		return DeploymentHeadless
 	}
 
 	// Check if mcpproxy is configured with public URL
 	if c.config.PublicURL != "" {
+		c.logger.Info("Detected remote deployment", zap.String("public_url", c.config.PublicURL))
 		c.deploymentType = DeploymentRemote
 		c.detectedPublicURL = c.config.PublicURL
 		return DeploymentRemote
@@ -525,6 +568,7 @@ func (c *Client) detectDeploymentType() DeploymentType {
 
 	// Check if mcpproxy is listening on non-localhost interfaces
 	// This would require access to global config, for now assume local
+	c.logger.Info("Detected local deployment", zap.String("os", runtime.GOOS))
 	c.deploymentType = DeploymentLocal
 	return DeploymentLocal
 }
@@ -736,12 +780,19 @@ func (c *Client) triggerOAuthFlowAsync(ctx context.Context) {
 
 	c.logger.Info("Automatic OAuth flow completed successfully")
 
-	// Try to reconnect after successful OAuth using original context
+	// Clear OAuth pending state before attempting to reconnect
+	c.setOAuthPending(false, nil)
+
+	// Force reconnection after successful OAuth - bypass shouldAttemptConnection()
+	// since we know OAuth just completed and we need to establish a fresh connection
+	c.logger.Info("Forcing reconnection after successful OAuth")
 	if err := c.Connect(ctx); err != nil {
 		c.logger.Error("Failed to reconnect after automatic OAuth", zap.Error(err))
 		c.mu.Lock()
 		c.oauthError = err
 		c.mu.Unlock()
+	} else {
+		c.logger.Info("Successfully reconnected after OAuth flow")
 	}
 }
 
@@ -814,23 +865,36 @@ func (c *Client) selectOAuthFlow() string {
 
 // Connect establishes a connection to the upstream MCP server
 func (c *Client) Connect(ctx context.Context) error {
-	c.mu.Lock()
-	if c.connecting {
-		c.mu.Unlock()
-		return fmt.Errorf("connection already in progress")
+	// Use connection deduplication system
+	requestID, shouldProceed := c.startConnectionAttempt()
+	if !shouldProceed {
+		c.logger.Debug("Connection attempt skipped - already connected, connecting, or OAuth pending")
+		return nil // Not an error - just nothing to do
 	}
-	c.connecting = true
-	c.mu.Unlock()
 
 	// Declare variables that will be used in error handling
 	var command string
 	var cmdArgs []string
 	var envVars []string
 
+	// Track success and error for connection attempt cleanup
+	var connectionSuccess bool
+	var connectionError error
+
+	// Ensure we finish the connection attempt regardless of outcome
 	defer func() {
-		c.mu.Lock()
-		c.connecting = false
-		c.mu.Unlock()
+		// If we exited early because OAuth is pending, treat the attempt as
+		// "successful" for back-off purposes so the manager does not schedule an
+		// immediate retry that races with the post-OAuth reconnect. This avoids the
+		// extra Connect that gets cancelled and logged as a transport error.
+		c.mu.RLock()
+		oauthPendingNow := c.oauthPending
+		c.mu.RUnlock()
+		if oauthPendingNow && connectionError == nil {
+			connectionSuccess = true
+		}
+
+		c.finishConnectionAttempt(requestID, connectionSuccess, connectionError)
 	}()
 
 	c.mu.RLock()
@@ -850,96 +914,168 @@ func (c *Client) Connect(ctx context.Context) error {
 			zap.Int("retry_count", retryCount))
 	}
 
+	// Debug: Check for stored OAuth tokens before connection attempt
+	hasStoredToken := false
+	var tokenInfo string
+	if c.config.OAuth != nil && c.config.OAuth.TokenStorage != nil {
+		hasStoredToken = true
+		tokenInfo = fmt.Sprintf("type=%s, expires_at=%v, has_refresh=%t",
+			c.config.OAuth.TokenStorage.TokenType,
+			c.config.OAuth.TokenStorage.ExpiresAt,
+			c.config.OAuth.TokenStorage.RefreshToken != "")
+	}
+
+	c.logger.Debug("Connection attempt starting",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.Bool("has_stored_oauth_token", hasStoredToken),
+		zap.String("stored_token_info", tokenInfo))
+
+	// Load OAuth tokens from storage if not already loaded
+	if !hasStoredToken {
+		if err := c.loadOAuthTokensFromStorage(ctx); err != nil {
+			c.logger.Warn("Failed to load OAuth tokens from storage", zap.Error(err))
+		} else {
+			// Update token info after loading from storage
+			if c.config.OAuth != nil && c.config.OAuth.TokenStorage != nil {
+				hasStoredToken = true
+				tokenInfo = fmt.Sprintf("type=%s, expires_at=%v, has_refresh=%t",
+					c.config.OAuth.TokenStorage.TokenType,
+					c.config.OAuth.TokenStorage.ExpiresAt,
+					c.config.OAuth.TokenStorage.RefreshToken != "")
+				c.logger.Debug("Updated token info after loading from storage",
+					zap.String("upstream_id", c.id),
+					zap.String("upstream_name", c.config.Name),
+					zap.Bool("has_stored_oauth_token", hasStoredToken),
+					zap.String("stored_token_info", tokenInfo))
+			}
+		}
+	}
+
 	transportType := c.determineTransportType()
 
 	switch transportType {
 	case transportHTTP, transportStreamableHTTP:
-		// Create streamable HTTP transport with headers if provided
-		if len(c.config.Headers) > 0 {
-			httpTransport, err := transport.NewStreamableHTTP(c.config.URL,
-				transport.WithHTTPHeaders(c.config.Headers))
-			if err != nil {
-				// Check if this is an OAuth authorization required error during HTTP connection
-				if c.isOAuthAuthorizationRequired(err) {
-					c.logger.Info("OAuth authorization required during HTTP connection")
-					if c.upstreamLogger != nil {
-						c.upstreamLogger.Info("OAuth authorization required during HTTP connection")
-					}
-
-					// Auto-initialize OAuth configuration if not present
-					if c.config.OAuth == nil {
-						c.logger.Info("Auto-initializing OAuth configuration for HTTP")
-						c.config.OAuth = c.createAutoOAuthConfig()
-					} else {
-						c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
-					}
-
-					// Set OAuth pending state
-					c.setOAuthPending(true, err)
-
-					// For local deployments, automatically trigger OAuth flow
-					deploymentType := c.detectDeploymentType()
-					if deploymentType == DeploymentLocal {
-						go c.triggerOAuthFlowAsync(ctx)
-					}
-
-					// Return nil to indicate "success" with OAuth pending
-					return nil
-				}
-
-				c.mu.Lock()
-				c.lastError = err
-				c.retryCount++
-				c.lastRetryTime = time.Now()
-				c.mu.Unlock()
-				return fmt.Errorf("failed to create HTTP transport: %w", err)
-			}
-			c.client = client.NewClient(httpTransport)
-		} else {
-			httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
-			if err != nil {
-				// Check if this is an OAuth authorization required error during HTTP connection
-				if c.isOAuthAuthorizationRequired(err) {
-					c.logger.Info("OAuth authorization required during HTTP connection")
-					if c.upstreamLogger != nil {
-						c.upstreamLogger.Info("OAuth authorization required during HTTP connection")
-					}
-
-					// Auto-initialize OAuth configuration if not present
-					if c.config.OAuth == nil {
-						c.logger.Info("Auto-initializing OAuth configuration for HTTP")
-						c.config.OAuth = c.createAutoOAuthConfig()
-					} else {
-						c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
-					}
-
-					// Set OAuth pending state
-					c.setOAuthPending(true, err)
-
-					// For local deployments, automatically trigger OAuth flow
-					deploymentType := c.detectDeploymentType()
-					if deploymentType == DeploymentLocal {
-						go c.triggerOAuthFlowAsync(ctx)
-					}
-
-					// Return nil to indicate "success" with OAuth pending
-					return nil
-				}
-
-				c.mu.Lock()
-				c.lastError = err
-				c.retryCount++
-				c.lastRetryTime = time.Now()
-				c.mu.Unlock()
-				return fmt.Errorf("failed to create HTTP transport: %w", err)
-			}
-			c.client = client.NewClient(httpTransport)
+		// Merge static headers with OAuth Authorization header if a valid token is available
+		allHeaders := make(map[string]string)
+		for k, v := range c.config.Headers {
+			allHeaders[k] = v
 		}
+
+		shouldUseOAuth := false
+		var tokenExpired bool
+		if c.config.OAuth != nil && c.config.OAuth.TokenStorage != nil {
+			tokenExpired = time.Now().After(c.config.OAuth.TokenStorage.ExpiresAt)
+			if !tokenExpired {
+				shouldUseOAuth = true
+				allHeaders["Authorization"] = fmt.Sprintf("Bearer %s", c.config.OAuth.TokenStorage.AccessToken)
+			} else {
+				c.logger.Warn("OAuth token expired during HTTP client creation",
+					zap.String("upstream_id", c.id),
+					zap.String("upstream_name", c.config.Name),
+					zap.Time("expires_at", c.config.OAuth.TokenStorage.ExpiresAt))
+			}
+		}
+
+		c.logger.Debug("Creating HTTP client",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name),
+			zap.Bool("should_use_oauth", shouldUseOAuth),
+			zap.Bool("token_expired", tokenExpired),
+			zap.Int("total_headers", len(allHeaders)),
+			zap.Bool("has_authorization", allHeaders["Authorization"] != ""))
+
+		httpTransport, err := transport.NewStreamableHTTP(c.config.URL, transport.WithHTTPHeaders(allHeaders))
+		if err != nil {
+			// Check if this is an OAuth authorization required error during HTTP connection
+			if c.isOAuthAuthorizationRequired(err) {
+				c.logger.Info("OAuth authorization required during HTTP connection")
+				if c.upstreamLogger != nil {
+					c.upstreamLogger.Info("OAuth authorization required during HTTP connection")
+				}
+
+				// Auto-initialize OAuth configuration if not present
+				if c.config.OAuth == nil {
+					c.logger.Info("Auto-initializing OAuth configuration for HTTP")
+					c.config.OAuth = c.createAutoOAuthConfig()
+				} else {
+					c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
+				}
+
+				// Set OAuth pending state
+				c.setOAuthPending(true, err)
+
+				// For local deployments, automatically trigger OAuth flow
+				deploymentType := c.detectDeploymentType()
+				c.logger.Info("Checking deployment type for OAuth flow trigger",
+					zap.String("deployment_type", deploymentType.String()),
+					zap.Bool("is_local", deploymentType == DeploymentLocal))
+				if deploymentType == DeploymentLocal {
+					go c.triggerOAuthFlowAsync(ctx)
+				} else {
+					c.logger.Info("OAuth flow not triggered - not local deployment",
+						zap.String("deployment_type", deploymentType.String()))
+				}
+
+				// Return nil to indicate "success" with OAuth pending
+				return nil
+			}
+
+			connectionError = fmt.Errorf("failed to create HTTP transport: %w", err)
+			return connectionError
+		}
+
+		c.client = client.NewClient(c.wrapWithTracingIfEnabled(httpTransport))
 	case transportSSE:
+		// Debug: Check if OAuth tokens should be applied to SSE client
+		shouldUseOAuth := false
+		authHeaders := make(map[string]string)
+		var tokenExpired bool
+		if c.config.OAuth != nil && c.config.OAuth.TokenStorage != nil {
+			tokenExpired = time.Now().After(c.config.OAuth.TokenStorage.ExpiresAt)
+			if !tokenExpired {
+				shouldUseOAuth = true
+				authHeaders["Authorization"] = fmt.Sprintf("Bearer %s", c.config.OAuth.TokenStorage.AccessToken)
+			} else {
+				c.logger.Warn("OAuth token expired during SSE client creation",
+					zap.String("upstream_id", c.id),
+					zap.String("upstream_name", c.config.Name),
+					zap.Time("expires_at", c.config.OAuth.TokenStorage.ExpiresAt),
+					zap.Duration("expired_since", time.Now().Sub(c.config.OAuth.TokenStorage.ExpiresAt)))
+			}
+		}
+
+		c.logger.Debug("Creating SSE client",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name),
+			zap.Bool("should_use_oauth", shouldUseOAuth),
+			zap.Bool("token_expired", tokenExpired),
+			zap.Bool("has_config_headers", len(c.config.Headers) > 0))
+
 		// Create SSE client with headers if provided
 		if len(c.config.Headers) > 0 {
-			sseClient, err := client.NewSSEMCPClient(c.config.URL,
-				client.WithHeaders(c.config.Headers))
+			// Merge config headers with OAuth headers
+			allHeaders := make(map[string]string)
+			for k, v := range c.config.Headers {
+				allHeaders[k] = v
+			}
+			for k, v := range authHeaders {
+				allHeaders[k] = v
+			}
+
+			c.logger.Debug("SSE client headers applied",
+				zap.String("upstream_id", c.id),
+				zap.String("upstream_name", c.config.Name),
+				zap.Int("total_headers", len(allHeaders)),
+				zap.Bool("has_authorization", allHeaders["Authorization"] != ""))
+
+			c.logger.Debug("Creating SSE client with authentication headers",
+				zap.String("upstream_id", c.id),
+				zap.String("upstream_name", c.config.Name),
+				zap.String("url", c.config.URL))
+
+			sseTransport, err := transport.NewSSE(c.config.URL,
+				transport.WithHeaders(allHeaders))
 			if err != nil {
 				// Check if this is an OAuth authorization required error during SSE connection
 				if c.isOAuthAuthorizationRequired(err) {
@@ -969,53 +1105,96 @@ func (c *Client) Connect(ctx context.Context) error {
 					return nil
 				}
 
-				c.mu.Lock()
-				c.lastError = err
-				c.retryCount++
-				c.lastRetryTime = time.Now()
-				c.mu.Unlock()
-				return fmt.Errorf("failed to create SSE client: %w", err)
+				connectionError = fmt.Errorf("failed to create SSE transport: %w", err)
+				return connectionError
 			}
-			c.client = sseClient
+			c.client = client.NewClient(c.wrapWithTracingIfEnabled(sseTransport))
 		} else {
-			sseClient, err := client.NewSSEMCPClient(c.config.URL)
-			if err != nil {
-				// Check if this is an OAuth authorization required error during SSE connection
-				if c.isOAuthAuthorizationRequired(err) {
-					c.logger.Info("OAuth authorization required during SSE connection")
-					if c.upstreamLogger != nil {
-						c.upstreamLogger.Info("OAuth authorization required during SSE connection")
+			// Apply OAuth headers even if no config headers
+			if shouldUseOAuth {
+				c.logger.Debug("Applying OAuth headers to SSE client (no config headers)",
+					zap.String("upstream_id", c.id),
+					zap.String("upstream_name", c.config.Name),
+					zap.Bool("has_authorization", authHeaders["Authorization"] != ""))
+				sseTransport, err := transport.NewSSE(c.config.URL,
+					transport.WithHeaders(authHeaders))
+				if err != nil {
+					// Check if this is an OAuth authorization required error during SSE connection
+					if c.isOAuthAuthorizationRequired(err) {
+						c.logger.Info("OAuth authorization required during SSE connection")
+						if c.upstreamLogger != nil {
+							c.upstreamLogger.Info("OAuth authorization required during SSE connection")
+						}
+
+						// Auto-initialize OAuth configuration if not present
+						if c.config.OAuth == nil {
+							c.logger.Info("Auto-initializing OAuth configuration for SSE")
+							c.config.OAuth = c.createAutoOAuthConfig()
+						} else {
+							c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
+						}
+
+						// Set OAuth pending state
+						c.setOAuthPending(true, err)
+
+						// For local deployments, automatically trigger OAuth flow
+						deploymentType := c.detectDeploymentType()
+						if deploymentType == DeploymentLocal {
+							go c.triggerOAuthFlowAsync(ctx)
+						}
+
+						// Return nil to indicate "success" with OAuth pending
+						return nil
 					}
 
-					// Auto-initialize OAuth configuration if not present
-					if c.config.OAuth == nil {
-						c.logger.Info("Auto-initializing OAuth configuration for SSE")
-						c.config.OAuth = c.createAutoOAuthConfig()
-					} else {
-						c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
-					}
-
-					// Set OAuth pending state
-					c.setOAuthPending(true, err)
-
-					// For local deployments, automatically trigger OAuth flow
-					deploymentType := c.detectDeploymentType()
-					if deploymentType == DeploymentLocal {
-						go c.triggerOAuthFlowAsync(ctx)
-					}
-
-					// Return nil to indicate "success" with OAuth pending
-					return nil
+					c.mu.Lock()
+					c.lastError = err
+					c.retryCount++
+					c.lastRetryTime = time.Now()
+					c.mu.Unlock()
+					return fmt.Errorf("failed to create SSE transport: %w", err)
 				}
+				c.client = client.NewClient(c.wrapWithTracingIfEnabled(sseTransport))
+			} else {
+				sseTransport, err := transport.NewSSE(c.config.URL)
+				if err != nil {
+					// Check if this is an OAuth authorization required error during SSE connection
+					if c.isOAuthAuthorizationRequired(err) {
+						c.logger.Info("OAuth authorization required during SSE connection")
+						if c.upstreamLogger != nil {
+							c.upstreamLogger.Info("OAuth authorization required during SSE connection")
+						}
 
-				c.mu.Lock()
-				c.lastError = err
-				c.retryCount++
-				c.lastRetryTime = time.Now()
-				c.mu.Unlock()
-				return fmt.Errorf("failed to create SSE client: %w", err)
+						// Auto-initialize OAuth configuration if not present
+						if c.config.OAuth == nil {
+							c.logger.Info("Auto-initializing OAuth configuration for SSE")
+							c.config.OAuth = c.createAutoOAuthConfig()
+						} else {
+							c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
+						}
+
+						// Set OAuth pending state
+						c.setOAuthPending(true, err)
+
+						// For local deployments, automatically trigger OAuth flow
+						deploymentType := c.detectDeploymentType()
+						if deploymentType == DeploymentLocal {
+							go c.triggerOAuthFlowAsync(ctx)
+						}
+
+						// Return nil to indicate "success" with OAuth pending
+						return nil
+					}
+
+					c.mu.Lock()
+					c.lastError = err
+					c.retryCount++
+					c.lastRetryTime = time.Now()
+					c.mu.Unlock()
+					return fmt.Errorf("failed to create SSE transport: %w", err)
+				}
+				c.client = client.NewClient(c.wrapWithTracingIfEnabled(sseTransport))
 			}
-			c.client = sseClient
 		}
 	case transportStdio:
 		var originalCommand string
@@ -1029,24 +1208,16 @@ func (c *Client) Connect(ctx context.Context) error {
 			// Fallback to parsing from URL
 			args := c.parseCommand(c.config.URL)
 			if len(args) == 0 {
-				c.mu.Lock()
-				c.lastError = fmt.Errorf("invalid stdio command: %s", c.config.URL)
-				c.retryCount++
-				c.lastRetryTime = time.Now()
-				c.mu.Unlock()
-				return c.lastError
+				connectionError = fmt.Errorf("invalid stdio command: %s", c.config.URL)
+				return connectionError
 			}
 			originalCommand = args[0]
 			originalArgs = args[1:]
 		}
 
 		if originalCommand == "" {
-			c.mu.Lock()
-			c.lastError = fmt.Errorf("no command specified for stdio transport")
-			c.retryCount++
-			c.lastRetryTime = time.Now()
-			c.mu.Unlock()
-			return c.lastError
+			connectionError = fmt.Errorf("no command specified for stdio transport")
+			return connectionError
 		}
 
 		// Use secure environment manager to build filtered environment variables
@@ -1061,14 +1232,10 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 
 		stdioTransport := transport.NewStdio(command, envVars, cmdArgs...)
-		c.client = client.NewClient(stdioTransport)
+		c.client = client.NewClient(c.wrapWithTracingIfEnabled(stdioTransport))
 	default:
-		c.mu.Lock()
-		c.lastError = fmt.Errorf("unsupported transport type: %s", transportType)
-		c.retryCount++
-		c.lastRetryTime = time.Now()
-		c.mu.Unlock()
-		return c.lastError
+		connectionError = fmt.Errorf("unsupported transport type: %s", transportType)
+		return connectionError
 	}
 
 	// Set connection timeout with exponential backoff consideration
@@ -1110,12 +1277,6 @@ func (c *Client) Connect(ctx context.Context) error {
 			return nil
 		}
 
-		c.mu.Lock()
-		c.lastError = err
-		c.retryCount++
-		c.lastRetryTime = time.Now()
-		c.mu.Unlock()
-
 		c.logger.Error("Failed to start MCP client",
 			zap.Error(err),
 			zap.String("command", command),
@@ -1125,7 +1286,8 @@ func (c *Client) Connect(ctx context.Context) error {
 			c.upstreamLogger.Error("Client start failed", zap.Error(err))
 		}
 
-		return fmt.Errorf("failed to start MCP client: %w", err)
+		connectionError = fmt.Errorf("failed to start MCP client: %w", err)
+		return connectionError
 	}
 
 	// Initialize the client
@@ -1164,8 +1326,14 @@ func (c *Client) Connect(ctx context.Context) error {
 
 				// For local deployments, automatically open browser for better UX
 				deploymentType := c.detectDeploymentType()
+				c.logger.Info("Checking deployment type for OAuth flow trigger (lazy OAuth)",
+					zap.String("deployment_type", deploymentType.String()),
+					zap.Bool("is_local", deploymentType == DeploymentLocal))
 				if deploymentType == DeploymentLocal {
 					go c.triggerOAuthFlowAsync(connectCtx)
+				} else {
+					c.logger.Info("OAuth flow not triggered - not local deployment (lazy OAuth)",
+						zap.String("deployment_type", deploymentType.String()))
 				}
 
 				// Close client connection since we can't use it yet
@@ -1235,13 +1403,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	c.serverInfo = serverInfo
-	c.mu.Lock()
-	c.connected = true
-	c.lastError = nil
-	c.retryCount = 0       // Reset retry count on successful connection
-	c.oauthPending = false // Clear OAuth pending state
-	c.oauthError = nil
-	c.mu.Unlock()
+
+	// Mark connection as successful (will be handled by defer)
+	connectionSuccess = true
 
 	// Set connection state
 	c.setConnectionState(config.ConnectionStateConnected)
@@ -1543,11 +1707,109 @@ func (c *Client) GetLastError() error {
 
 // ListTools retrieves available tools from the upstream server
 func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	// Fast path: if we recently cached the tools list, return it immediately
+	if cached := c.getCachedTools(); cached != nil {
+		c.logger.Debug("ListTools returning cached tools", zap.Int("count", len(cached)))
+		return cached, nil
+	}
+
+	// Use request deduplication to prevent multiple concurrent requests
+	requestID, shouldProceed, waiter := c.startListToolsRequest()
+
+	if !shouldProceed {
+		// Another request is in progress, wait for it to complete
+		select {
+		case <-waiter:
+			// Request completed, return the cached result
+			return c.getListToolsResult()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// We're the primary request, proceed with the actual ListTools call
+	var finalResult []*config.ToolMetadata
+	var finalError error
+
+	defer func() {
+		// Update circuit breaker state based on result
+		c.mu.Lock()
+		if finalError != nil {
+			c.listToolsFailureCount++
+			c.listToolsLastFailure = time.Now()
+			// Open circuit after 3 consecutive failures
+			if c.listToolsFailureCount >= 3 {
+				c.listToolsCircuitOpen = true
+				c.logger.Warn("ListTools circuit breaker opened due to consecutive failures",
+					zap.String("upstream_id", c.id),
+					zap.String("upstream_name", c.config.Name),
+					zap.Int("failure_count", c.listToolsFailureCount))
+			}
+		} else {
+			// Reset on success
+			c.listToolsFailureCount = 0
+			c.listToolsCircuitOpen = false
+		}
+		c.mu.Unlock()
+
+		c.finishListToolsRequest(requestID, finalResult, finalError)
+	}()
+
+	// Check circuit breaker
+	c.mu.RLock()
+	circuitOpen := c.listToolsCircuitOpen
+	lastFailure := c.listToolsLastFailure
+	failureCount := c.listToolsFailureCount
+	c.mu.RUnlock()
+
+	if circuitOpen {
+		// Check if enough time has passed to try again (exponential backoff)
+		backoffDuration := time.Duration(math.Pow(2, float64(failureCount-3))) * time.Minute
+		if backoffDuration > 10*time.Minute {
+			backoffDuration = 10 * time.Minute
+		}
+
+		if time.Since(lastFailure) < backoffDuration {
+			c.logger.Debug("ListTools circuit breaker is open, skipping request",
+				zap.String("upstream_id", c.id),
+				zap.String("upstream_name", c.config.Name),
+				zap.Duration("backoff_remaining", backoffDuration-time.Since(lastFailure)))
+			finalError = fmt.Errorf("ListTools circuit breaker is open due to repeated failures")
+			return nil, finalError
+		}
+
+		c.logger.Debug("ListTools circuit breaker trying half-open state",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name))
+	}
+
 	c.mu.RLock()
 	connected := c.connected
 	client := c.client
 	oauthPending := c.oauthPending
 	c.mu.RUnlock()
+
+	// Debug: Check OAuth token state before ListTools
+	hasStoredToken := false
+	var tokenInfo string
+	var tokenExpired bool
+	if c.config.OAuth != nil && c.config.OAuth.TokenStorage != nil {
+		hasStoredToken = true
+		tokenExpired = time.Now().After(c.config.OAuth.TokenStorage.ExpiresAt)
+		tokenInfo = fmt.Sprintf("type=%s, expires_at=%v, expired=%t",
+			c.config.OAuth.TokenStorage.TokenType,
+			c.config.OAuth.TokenStorage.ExpiresAt,
+			tokenExpired)
+	}
+
+	c.logger.Debug("ListTools request starting",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.Bool("connected", connected),
+		zap.Bool("oauth_pending", oauthPending),
+		zap.Bool("has_stored_token", hasStoredToken),
+		zap.Bool("token_expired", tokenExpired),
+		zap.String("token_info", tokenInfo))
 
 	// If OAuth is pending, return cached tools if available
 	if oauthPending {
@@ -1559,14 +1821,26 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			for _, tool := range cachedTools {
 				tool.Status = config.ConnectionStateOAuthPending
 			}
+			finalResult = cachedTools
 			return cachedTools, nil
 		}
 		c.logger.Debug("No cached tools available for OAuth pending server")
+		finalResult = nil
 		return nil, nil
 	}
 
 	if !connected || client == nil {
-		return nil, fmt.Errorf("client not connected")
+		finalError = fmt.Errorf("client not connected")
+		return nil, finalError
+	}
+
+	// Try to refresh token if needed before making the request
+	if err := c.refreshTokenIfNeeded(ctx); err != nil {
+		c.logger.Warn("Token refresh failed before ListTools",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name),
+			zap.Error(err))
+		// Continue anyway, as the request might still work
 	}
 
 	// Check if server supports tools
@@ -1574,14 +1848,63 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	serverInfo := c.serverInfo
 	c.mu.RUnlock()
 
+	// If initialization never completed we might have a connected flag without
+	// serverInfo populated. Avoid nil-pointer panics and signal caller to retry
+	// after a successful Connect.
+	if serverInfo == nil {
+		finalError = fmt.Errorf("server not initialized")
+		return nil, finalError
+	}
+
 	if serverInfo.Capabilities.Tools == nil {
 		c.logger.Debug("Server does not support tools")
+		finalResult = nil
 		return nil, nil
 	}
 
 	toolsRequest := mcp.ListToolsRequest{}
+
+	c.logger.Debug("Making ListTools MCP request",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.String("request_type", "tools/list"))
+
 	toolsResult, err := client.ListTools(ctx, toolsRequest)
 	if err != nil {
+		c.logger.Debug("ListTools MCP request failed",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name),
+			zap.Error(err),
+			zap.String("error_type", fmt.Sprintf("%T", err)),
+			zap.String("error_details", err.Error()))
+
+		// Check if this is an OAuth authorization required error
+		if c.isOAuthAuthorizationRequired(err) {
+			c.logger.Info("OAuth authorization required during ListTools")
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Info("OAuth authorization required during ListTools")
+			}
+
+			// Auto-initialize OAuth configuration if not present
+			if c.config.OAuth == nil {
+				c.logger.Info("Auto-initializing OAuth configuration for ListTools")
+				c.config.OAuth = c.createAutoOAuthConfig()
+			}
+
+			// Set OAuth pending state
+			c.setOAuthPending(true, err)
+
+			// For local deployments, automatically trigger OAuth flow
+			deploymentType := c.detectDeploymentType()
+			if deploymentType == DeploymentLocal {
+				go c.triggerOAuthFlowAsync(ctx)
+			}
+
+			// Return nil to indicate tools are not yet available due to OAuth pending
+			finalResult = nil
+			return nil, nil
+		}
+
 		c.mu.Lock()
 		c.lastError = err
 
@@ -1609,7 +1932,8 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		}
 		c.mu.Unlock()
 
-		return nil, fmt.Errorf("failed to list tools: %w", err)
+		finalError = fmt.Errorf("failed to list tools: %w", err)
+		return nil, finalError
 	}
 
 	c.logger.Debug("ListTools successful", zap.Int("tools_count", len(toolsResult.Tools)))
@@ -1638,10 +1962,11 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		tools = append(tools, metadata)
 	}
 
-	// Cache tools for 1 hour in case connection is lost
-	c.setCachedTools(tools, 1*time.Hour)
+	// Cache tools for a short period to avoid excessive polling
+	c.setCachedTools(tools, listToolsCacheDuration)
 
 	c.logger.Debug("Listed tools from upstream server", zap.Int("count", len(tools)))
+	finalResult = tools
 	return tools, nil
 }
 
@@ -1653,6 +1978,29 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 	serverInfo := c.serverInfo
 	oauthPending := c.oauthPending
 	c.mu.RUnlock()
+
+	// Debug: Check OAuth token state before CallTool
+	hasStoredToken := false
+	var tokenInfo string
+	var tokenExpired bool
+	if c.config.OAuth != nil && c.config.OAuth.TokenStorage != nil {
+		hasStoredToken = true
+		tokenExpired = time.Now().After(c.config.OAuth.TokenStorage.ExpiresAt)
+		tokenInfo = fmt.Sprintf("type=%s, expires_at=%v, expired=%t",
+			c.config.OAuth.TokenStorage.TokenType,
+			c.config.OAuth.TokenStorage.ExpiresAt,
+			tokenExpired)
+	}
+
+	c.logger.Debug("CallTool request starting",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.String("tool_name", toolName),
+		zap.Bool("connected", connected),
+		zap.Bool("oauth_pending", oauthPending),
+		zap.Bool("has_stored_token", hasStoredToken),
+		zap.Bool("token_expired", tokenExpired),
+		zap.String("token_info", tokenInfo))
 
 	// If OAuth is pending, trigger the OAuth flow now
 	if oauthPending {
@@ -1687,6 +2035,16 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		return nil, fmt.Errorf("client not connected")
 	}
 
+	// Try to refresh token if needed before making the request
+	if err := c.refreshTokenIfNeeded(ctx); err != nil {
+		c.logger.Warn("Token refresh failed before CallTool",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name),
+			zap.String("tool_name", toolName),
+			zap.Error(err))
+		// Continue anyway, as the request might still work
+	}
+
 	// Check if server supports tools
 	if serverInfo.Capabilities.Tools == nil {
 		return nil, fmt.Errorf("server does not support tools")
@@ -1716,8 +2074,20 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		}
 	}
 
+	c.logger.Debug("Making CallTool MCP request",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.String("tool_name", toolName),
+		zap.String("request_type", "tools/call"))
+
 	result, err := client.CallTool(ctx, request)
 	if err != nil {
+		c.logger.Debug("CallTool MCP request failed",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name),
+			zap.String("tool_name", toolName),
+			zap.Error(err),
+			zap.String("error_type", fmt.Sprintf("%T", err)))
 		c.mu.Lock()
 		c.lastError = err
 
@@ -1814,25 +2184,168 @@ func (c *Client) ListResources(ctx context.Context) ([]interface{}, error) {
 	return resources, nil
 }
 
+// refreshTokenIfNeeded checks if the OAuth token is expired and refreshes it if possible
+func (c *Client) refreshTokenIfNeeded(ctx context.Context) error {
+	if c.config.OAuth == nil || c.config.OAuth.TokenStorage == nil {
+		return nil // No OAuth configured
+	}
+
+	// Check if token is expired or about to expire (within 5 minutes)
+	if time.Now().Add(5 * time.Minute).Before(c.config.OAuth.TokenStorage.ExpiresAt) {
+		return nil // Token is still valid
+	}
+
+	c.logger.Info("OAuth token expired or expiring soon, attempting refresh",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.Time("expires_at", c.config.OAuth.TokenStorage.ExpiresAt),
+		zap.Bool("has_refresh_token", c.config.OAuth.TokenStorage.RefreshToken != ""))
+
+	// Check if we have a refresh token
+	if c.config.OAuth.TokenStorage.RefreshToken == "" {
+		c.logger.Warn("No refresh token available, cannot refresh",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name))
+		return fmt.Errorf("token expired and no refresh token available")
+	}
+
+	// Use oauth2.Config to refresh the token
+	if c.config.OAuth.TokenEndpoint == "" {
+		return fmt.Errorf("no token endpoint configured for refresh")
+	}
+
+	conf := &oauth2.Config{
+		ClientID:     c.config.OAuth.ClientID,
+		ClientSecret: c.config.OAuth.ClientSecret,
+		Endpoint: oauth2.Endpoint{
+			TokenURL: c.config.OAuth.TokenEndpoint,
+		},
+	}
+
+	// Convert stored token to oauth2.Token
+	oldToken := &oauth2.Token{
+		AccessToken:  c.config.OAuth.TokenStorage.AccessToken,
+		RefreshToken: c.config.OAuth.TokenStorage.RefreshToken,
+		TokenType:    c.config.OAuth.TokenStorage.TokenType,
+		Expiry:       c.config.OAuth.TokenStorage.ExpiresAt,
+	}
+
+	// Refresh the token
+	tokenSource := conf.TokenSource(ctx, oldToken)
+	newToken, err := tokenSource.Token()
+	if err != nil {
+		c.logger.Error("Failed to refresh OAuth token",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name),
+			zap.Error(err))
+		return fmt.Errorf("failed to refresh token: %w", err)
+	}
+
+	// Update stored token
+	c.config.OAuth.TokenStorage = &config.TokenStorage{
+		AccessToken:  newToken.AccessToken,
+		RefreshToken: newToken.RefreshToken,
+		ExpiresAt:    newToken.Expiry,
+		TokenType:    newToken.TokenType,
+	}
+
+	// Also update the oauth2.Token field
+	c.mu.Lock()
+	c.oauthToken = newToken
+	c.mu.Unlock()
+
+	c.logger.Info("OAuth token refreshed successfully",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.Time("new_expires_at", newToken.Expiry),
+		zap.String("new_expires_in", newToken.Expiry.Sub(time.Now()).String()))
+
+	// Save refreshed tokens to storage for persistence
+	if err := c.saveOAuthTokensToStorage(c.config.OAuth.TokenStorage); err != nil {
+		c.logger.Warn("Failed to persist refreshed OAuth tokens to storage", zap.Error(err))
+		// Continue anyway - tokens are still in memory
+	} else {
+		c.logger.Debug("Refreshed OAuth tokens persisted to storage successfully")
+	}
+
+	// CRITICAL: Force SSE client reconnection with new tokens
+	// The existing SSE client was created with the old expired token headers
+	if c.client != nil {
+		c.logger.Info("Forcing SSE client reconnection due to token refresh",
+			zap.String("upstream_id", c.id),
+			zap.String("upstream_name", c.config.Name))
+
+		// Disconnect current client
+		c.client.Close()
+		c.mu.Lock()
+		c.connected = false
+		c.client = nil
+		c.mu.Unlock()
+
+		// This will trigger a new connection attempt with fresh tokens
+		c.logger.Debug("SSE client disconnected, will need fresh connection with new OAuth tokens")
+	}
+
+	return nil
+}
+
 // isOAuthAuthorizationRequired checks if the error indicates OAuth authorization is required
 func (c *Client) isOAuthAuthorizationRequired(err error) bool {
 	if err == nil {
 		return false
 	}
 
+	// Check current OAuth state
+	hasStoredToken := false
+	var tokenValidInfo string
+	if c.config.OAuth != nil && c.config.OAuth.TokenStorage != nil {
+		hasStoredToken = true
+		tokenValidInfo = fmt.Sprintf("type=%s, expires_at=%v",
+			c.config.OAuth.TokenStorage.TokenType,
+			c.config.OAuth.TokenStorage.ExpiresAt)
+	}
+
 	// Check for OAuth authorization required error from mcp-go library
+	isRequired := false
 	if strings.Contains(err.Error(), "authorization required") ||
 		strings.Contains(err.Error(), "no valid token available") ||
 		strings.Contains(err.Error(), "unauthorized") {
-		return true
+		isRequired = true
 	}
 
 	// Check for HTTP 401 unauthorized errors
 	if strings.Contains(err.Error(), "401") {
-		return true
+		isRequired = true
 	}
 
-	return false
+	// Check for timeout errors on known OAuth-enabled servers
+	// Some servers (like Cloudflare AutoRAG) don't respond to MCP requests until OAuth is completed
+	if strings.Contains(err.Error(), "context deadline exceeded") ||
+		strings.Contains(err.Error(), "timeout") {
+		// Only treat timeouts as OAuth requirement for known OAuth servers and when no token is available
+		if !hasStoredToken {
+			// Check if this is a known OAuth-enabled server
+			if strings.Contains(c.config.URL, "mcp.cloudflare.com") ||
+				strings.Contains(c.config.URL, "builds.mcp.cloudflare.com") ||
+				strings.Contains(c.config.URL, "autorag.mcp.cloudflare.com") {
+				isRequired = true
+			}
+			// If OAuth config exists but no token, likely OAuth-enabled
+			if c.config.OAuth != nil && c.config.OAuth.AuthorizationEndpoint != "" {
+				isRequired = true
+			}
+		}
+	}
+
+	c.logger.Debug("OAuth requirement check",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.Error(err),
+		zap.Bool("oauth_required", isRequired),
+		zap.Bool("has_stored_token", hasStoredToken),
+		zap.String("token_info", tokenValidInfo))
+
+	return isRequired
 }
 
 // handleOAuthFlow handles the OAuth authorization flow with auto-discovery
@@ -2413,6 +2926,27 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 		TokenType:    token.TokenType,
 	}
 
+	// Also store the oauth2.Token for automatic refresh capabilities
+	c.mu.Lock()
+	c.oauthToken = token
+	c.mu.Unlock()
+
+	c.logger.Info("OAuth tokens stored successfully",
+		zap.String("upstream_id", c.id),
+		zap.String("upstream_name", c.config.Name),
+		zap.Bool("has_access_token", token.AccessToken != ""),
+		zap.Bool("has_refresh_token", token.RefreshToken != ""),
+		zap.String("token_type", token.TokenType),
+		zap.String("expires_in", token.Expiry.Sub(time.Now()).String()))
+
+	// Save tokens to storage for persistence across restarts
+	if err := c.saveOAuthTokensToStorage(oauthCfg.TokenStorage); err != nil {
+		c.logger.Warn("Failed to persist OAuth tokens to storage", zap.Error(err))
+		// Continue anyway - tokens are still in memory
+	} else {
+		c.logger.Debug("OAuth tokens persisted to storage successfully")
+	}
+
 	c.logger.Info("OAuth Authorization Code flow completed successfully")
 	return nil
 }
@@ -2814,4 +3348,233 @@ func getDurationValue(m map[string]interface{}, key string, defaultValue time.Du
 		return time.Duration(val) * time.Second
 	}
 	return defaultValue
+}
+
+// loadOAuthTokensFromStorage loads stored OAuth tokens for this server during startup
+func (c *Client) loadOAuthTokensFromStorage(ctx context.Context) error {
+	if c.storageManager == nil {
+		return nil // No storage available
+	}
+
+	tokens, err := c.storageManager.LoadOAuthTokens(c.config.Name)
+	if err != nil {
+		c.logger.Debug("Failed to load OAuth tokens from storage", zap.Error(err))
+		return nil // Don't treat this as a fatal error
+	}
+
+	if tokens == nil {
+		c.logger.Debug("No OAuth tokens found in storage for server",
+			zap.String("server_name", c.config.Name))
+		return nil
+	}
+
+	// Check if tokens are expired
+	if time.Now().After(tokens.ExpiresAt) {
+		c.logger.Info("Stored OAuth tokens are expired, will need re-authentication",
+			zap.String("server_name", c.config.Name),
+			zap.Time("expired_at", tokens.ExpiresAt),
+			zap.Duration("expired_since", time.Now().Sub(tokens.ExpiresAt)))
+
+		// Don't load expired tokens but don't delete them either (they might have refresh tokens)
+		// Set up OAuth config structure for potential refresh
+		if c.config.OAuth == nil {
+			c.config.OAuth = &config.OAuthConfig{}
+		}
+		c.config.OAuth.TokenStorage = tokens
+
+		return nil
+	}
+
+	// Load valid tokens
+	if c.config.OAuth == nil {
+		c.config.OAuth = &config.OAuthConfig{}
+	}
+	c.config.OAuth.TokenStorage = tokens
+
+	// Also create oauth2.Token for refresh capabilities
+	c.mu.Lock()
+	c.oauthToken = &oauth2.Token{
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		TokenType:    tokens.TokenType,
+		Expiry:       tokens.ExpiresAt,
+	}
+	c.mu.Unlock()
+
+	c.logger.Info("Loaded valid OAuth tokens from storage",
+		zap.String("server_name", c.config.Name),
+		zap.String("token_type", tokens.TokenType),
+		zap.Time("expires_at", tokens.ExpiresAt),
+		zap.Duration("expires_in", tokens.ExpiresAt.Sub(time.Now())))
+
+	return nil
+}
+
+// saveOAuthTokensToStorage saves OAuth tokens to storage for persistence across restarts
+func (c *Client) saveOAuthTokensToStorage(tokens *config.TokenStorage) error {
+	if c.storageManager == nil {
+		c.logger.Warn("No storage manager available, OAuth tokens will not persist across restarts")
+		return nil
+	}
+
+	if tokens == nil {
+		c.logger.Debug("No tokens to save to storage")
+		return nil
+	}
+
+	err := c.storageManager.SaveOAuthTokens(c.config.Name, tokens)
+	if err != nil {
+		c.logger.Error("Failed to save OAuth tokens to storage",
+			zap.String("server_name", c.config.Name),
+			zap.Error(err))
+		return err
+	}
+
+	c.logger.Debug("Successfully saved OAuth tokens to storage",
+		zap.String("server_name", c.config.Name),
+		zap.String("token_type", tokens.TokenType),
+		zap.Time("expires_at", tokens.ExpiresAt))
+
+	return nil
+}
+
+// clearOAuthTokensFromStorage removes OAuth tokens from storage (e.g., on logout)
+func (c *Client) clearOAuthTokensFromStorage() error {
+	if c.storageManager == nil {
+		return nil
+	}
+
+	err := c.storageManager.SaveOAuthTokens(c.config.Name, nil)
+	if err != nil {
+		c.logger.Error("Failed to clear OAuth tokens from storage",
+			zap.String("server_name", c.config.Name),
+			zap.Error(err))
+		return err
+	}
+
+	c.logger.Debug("Cleared OAuth tokens from storage",
+		zap.String("server_name", c.config.Name))
+
+	return nil
+}
+
+// shouldAttemptConnection checks if a connection attempt should proceed
+// Returns false if already connected, connecting, or OAuth is pending without user intervention
+func (c *Client) shouldAttemptConnection() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Don't attempt if already connected or connecting
+	if c.connected || c.connecting {
+		return false
+	}
+
+	// Don't attempt if OAuth is pending - wait for user to complete the flow
+	// This prevents background retries from interfering with OAuth flow
+	if c.oauthPending {
+		return false
+	}
+
+	return true
+}
+
+// startConnectionAttempt marks the start of a connection attempt with deduplication
+// Returns a unique request ID and whether this attempt should proceed
+func (c *Client) startConnectionAttempt() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if already connected, connecting, or OAuth pending
+	if c.connected || c.connecting || c.oauthPending {
+		return "", false
+	}
+
+	// Generate unique request ID for this attempt
+	requestID := fmt.Sprintf("%s-%d", c.id, time.Now().UnixNano())
+	c.connectionRequestID = requestID
+	c.connecting = true
+
+	return requestID, true
+}
+
+// finishConnectionAttempt marks the end of a connection attempt
+func (c *Client) finishConnectionAttempt(requestID string, success bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Only update state if this is the current connection attempt
+	if c.connectionRequestID != requestID {
+		c.logger.Debug("Ignoring stale connection attempt finish",
+			zap.String("request_id", requestID),
+			zap.String("current_request_id", c.connectionRequestID))
+		return
+	}
+
+	c.connecting = false
+	c.connectionRequestID = ""
+
+	if success {
+		c.connected = true
+		c.lastError = nil
+		c.retryCount = 0
+		c.oauthPending = false
+		c.oauthError = nil
+	} else {
+		c.connected = false
+		c.lastError = err
+		c.retryCount++
+		c.lastRetryTime = time.Now()
+	}
+}
+
+// startListToolsRequest starts a ListTools request with deduplication
+// Returns a request ID, whether this request should proceed, and a channel to wait on if another request is in progress
+func (c *Client) startListToolsRequest() (string, bool, <-chan struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// If a request is already in progress, add ourselves to the waiters
+	if c.listToolsInProgress {
+		waiter := make(chan struct{})
+		c.listToolsWaiters = append(c.listToolsWaiters, waiter)
+		return "", false, waiter
+	}
+
+	// Start a new request
+	requestID := fmt.Sprintf("listtools-%s-%d", c.id, time.Now().UnixNano())
+	c.listToolsInProgress = true
+	c.listToolsRequestID = requestID
+	c.listToolsResult = nil
+	c.listToolsError = nil
+
+	return requestID, true, nil
+}
+
+// finishListToolsRequest finishes a ListTools request and notifies waiters
+func (c *Client) finishListToolsRequest(requestID string, result []*config.ToolMetadata, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Only update if this is the current request
+	if c.listToolsRequestID != requestID {
+		return
+	}
+
+	c.listToolsInProgress = false
+	c.listToolsRequestID = ""
+	c.listToolsResult = result
+	c.listToolsError = err
+
+	// Notify all waiters
+	for _, waiter := range c.listToolsWaiters {
+		close(waiter)
+	}
+	c.listToolsWaiters = nil
+}
+
+// getListToolsResult returns the cached result from the last ListTools request
+func (c *Client) getListToolsResult() ([]*config.ToolMetadata, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.listToolsResult, c.listToolsError
 }

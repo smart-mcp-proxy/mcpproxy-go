@@ -74,7 +74,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	}
 
 	// Initialize upstream manager
-	upstreamManager := upstream.NewManager(logger, cfg)
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager)
 
 	// Set logging configuration on upstream manager for per-server logging
 	if cfg.Logging != nil {
@@ -261,6 +261,7 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 	stats := s.upstreamManager.GetStats()
 	connectedCount := 0
 	totalCount := 0
+	oauthPendingCount := 0
 
 	if serverStats, ok := stats["servers"].(map[string]interface{}); ok {
 		totalCount = len(serverStats)
@@ -269,15 +270,24 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 				if connected, ok := stat["connected"].(bool); ok && connected {
 					connectedCount++
 				}
+				// Count OAuth pending servers separately - they shouldn't trigger retries
+				if oauthPending, ok := stat["oauth_pending"].(bool); ok && oauthPending {
+					oauthPendingCount++
+				}
 			}
 		}
 	}
 
 	s.logger.Debug("Connection status",
 		zap.Int("connected_count", connectedCount),
+		zap.Int("oauth_pending_count", oauthPendingCount),
 		zap.Int("total_count", totalCount))
 
-	if connectedCount < totalCount {
+	// Only attempt connections if there are servers that can actually connect
+	// Don't retry if all remaining servers are OAuth pending
+	serversNeedingConnection := totalCount - connectedCount - oauthPendingCount
+
+	if serversNeedingConnection > 0 {
 		// Only update status to "Connecting" if server is not running
 		// If server is running, don't override the "Running" status
 		s.mu.RLock()
@@ -285,21 +295,23 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 		s.mu.RUnlock()
 
 		if !isRunning {
-			s.updateStatus("Connecting", fmt.Sprintf("Connected to %d/%d servers, retrying...", connectedCount, totalCount))
+			s.updateStatus("Connecting", fmt.Sprintf("Connected to %d/%d servers (%d OAuth pending), retrying...",
+				connectedCount, totalCount, oauthPendingCount))
 		}
 
-		// ISSUE: This hardcoded 10s timeout overrides custom server timeouts!
-		// Try to connect with timeout
-		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Use a reasonable timeout but don't override custom server timeouts completely
+		// The individual clients will still respect their own timeouts
+		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
-		s.logger.Debug("Calling upstreamManager.ConnectAll with hardcoded 10s timeout - this overrides custom server timeouts!")
+		s.logger.Debug("Calling upstreamManager.ConnectAll",
+			zap.Int("servers_needing_connection", serversNeedingConnection))
 
 		if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
 			s.logger.Warn("Some upstream servers failed to connect", zap.Error(err))
 		}
 	} else {
-		s.logger.Debug("All servers already connected, skipping connection attempt")
+		s.logger.Debug("All servers already connected or OAuth pending, skipping connection attempt")
 	}
 }
 

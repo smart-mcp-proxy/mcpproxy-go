@@ -55,10 +55,60 @@ func NewMCPProxyServer(
 	debugSearch bool,
 	config *config.Config,
 ) *MCPProxyServer {
-	// Create MCP server with capabilities
+	// Create tracing hooks for raw JSON-RPC message logging
+	hooks := &mcpserver.Hooks{}
+
+	// Add hook for incoming requests (before processing)
+	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		if config.EnableTracing {
+			messageBytes, err := json.Marshal(message)
+			if err != nil {
+				logger.Error("Failed to marshal incoming message for tracing",
+					zap.Error(err),
+					zap.String("method", string(method)),
+					zap.Any("id", id))
+				return
+			}
+			logger.Info("🔍 MCP Request",
+				zap.String("method", string(method)),
+				zap.Any("id", id),
+				zap.String("message", string(messageBytes)))
+		}
+	})
+
+	// Add hook for successful responses (after processing)
+	hooks.AddOnSuccess(func(ctx context.Context, id any, method mcp.MCPMethod, message any, result any) {
+		if config.EnableTracing {
+			resultBytes, err := json.Marshal(result)
+			if err != nil {
+				logger.Error("Failed to marshal response for tracing",
+					zap.Error(err),
+					zap.String("method", string(method)),
+					zap.Any("id", id))
+				return
+			}
+			logger.Info("✅ MCP Response",
+				zap.String("method", string(method)),
+				zap.Any("id", id),
+				zap.String("result", string(resultBytes)))
+		}
+	})
+
+	// Add hook for errors
+	hooks.AddOnError(func(ctx context.Context, id any, method mcp.MCPMethod, message any, err error) {
+		if config.EnableTracing {
+			logger.Error("❌ MCP Error",
+				zap.String("method", string(method)),
+				zap.Any("id", id),
+				zap.Error(err))
+		}
+	})
+
+	// Create MCP server with capabilities and hooks
 	capabilities := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
+		mcpserver.WithHooks(hooks), // Add tracing hooks
 	}
 
 	// Add prompts capability if enabled

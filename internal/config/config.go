@@ -103,6 +103,9 @@ type Config struct {
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
 
+	// Tracing settings
+	EnableTracing bool `json:"enable_tracing" mapstructure:"enable-tracing"`
+
 	// Deployment configuration
 	PublicURL      string `json:"public_url,omitempty" mapstructure:"public-url"`           // For remote deployments
 	DeploymentType string `json:"deployment_type,omitempty" mapstructure:"deployment-type"` // "local", "remote", "headless", "auto"
