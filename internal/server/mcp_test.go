@@ -545,7 +545,7 @@ func TestHandleCallToolErrorRecovery(t *testing.T) {
 	// This test verifies the core issue mentioned in the error logs
 
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig()),
+		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil),
 		logger:          zap.NewNop(),
 	}
 
@@ -587,7 +587,7 @@ func TestHandleCallToolCompleteErrorHandling(t *testing.T) {
 	// Test comprehensive error handling scenarios including self-referential calls
 
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig()),
+		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil),
 		logger:          zap.NewNop(),
 		config:          &config.Config{}, // Add minimal config for testing
 	}

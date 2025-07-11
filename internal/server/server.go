@@ -74,7 +74,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	}
 
 	// Initialize upstream manager
-	upstreamManager := upstream.NewManager(logger, cfg)
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager)
 
 	// Set logging configuration on upstream manager for per-server logging
 	if cfg.Logging != nil {
@@ -119,8 +119,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	server.mcpProxy = mcpProxy
 
 	// Start background initialization immediately
+	logger.Debug("Starting background initialization goroutine")
 	go server.backgroundInitialization()
 
+	logger.Debug("Server creation completed")
 	return server, nil
 }
 
@@ -190,9 +192,11 @@ func (s *Server) getIndexedToolCount() int {
 
 // backgroundInitialization handles server initialization in the background
 func (s *Server) backgroundInitialization() {
+	s.logger.Debug("Background initialization started")
 	s.updateStatus("Loading", "Loading configuration and connecting to servers...")
 
 	// Load configured servers from storage and add to upstream manager
+	s.logger.Debug("Loading configured servers from storage")
 	if err := s.loadConfiguredServers(); err != nil {
 		s.logger.Error("Failed to load configured servers", zap.Error(err))
 		s.updateStatus("Error", fmt.Sprintf("Failed to load servers: %v", err))
@@ -200,6 +204,7 @@ func (s *Server) backgroundInitialization() {
 	}
 
 	// Start background connection attempts using application context
+	s.logger.Debug("Starting background connections")
 	s.updateStatus("Connecting", "Connecting to upstream servers...")
 	s.mu.RLock()
 	appCtx := s.appCtx // Use application context, not server context
@@ -207,6 +212,7 @@ func (s *Server) backgroundInitialization() {
 	go s.backgroundConnections(appCtx)
 
 	// Start background tool discovery and indexing using application context
+	s.logger.Debug("Starting background tool indexing")
 	s.mu.RLock()
 	appCtx = s.appCtx // Use application context, not server context
 	s.mu.RUnlock()
@@ -219,13 +225,18 @@ func (s *Server) backgroundInitialization() {
 	s.mu.RUnlock()
 
 	if !isRunning {
+		s.logger.Debug("Setting server status to Ready")
 		s.updateStatus("Ready", "Server is ready (connections continue in background)")
 	}
+	s.logger.Debug("Background initialization completed")
 }
 
 // backgroundConnections handles connecting to upstream servers with retry logic
 func (s *Server) backgroundConnections(ctx context.Context) {
+	s.logger.Debug("Background connections started")
+
 	// Initial connection attempt
+	s.logger.Debug("Starting initial connection attempt")
 	s.connectAllWithRetry(ctx)
 
 	// Start periodic reconnection attempts for failed connections
@@ -235,6 +246,7 @@ func (s *Server) backgroundConnections(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
+			s.logger.Debug("Periodic connection retry triggered")
 			s.connectAllWithRetry(ctx)
 		case <-ctx.Done():
 			s.logger.Info("Background connections stopped due to context cancellation")
@@ -245,9 +257,11 @@ func (s *Server) backgroundConnections(ctx context.Context) {
 
 // connectAllWithRetry attempts to connect to all servers with exponential backoff
 func (s *Server) connectAllWithRetry(ctx context.Context) {
+	s.logger.Debug("connectAllWithRetry called")
 	stats := s.upstreamManager.GetStats()
 	connectedCount := 0
 	totalCount := 0
+	oauthPendingCount := 0
 
 	if serverStats, ok := stats["servers"].(map[string]interface{}); ok {
 		totalCount = len(serverStats)
@@ -256,11 +270,24 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 				if connected, ok := stat["connected"].(bool); ok && connected {
 					connectedCount++
 				}
+				// Count OAuth pending servers separately - they shouldn't trigger retries
+				if oauthPending, ok := stat["oauth_pending"].(bool); ok && oauthPending {
+					oauthPendingCount++
+				}
 			}
 		}
 	}
 
-	if connectedCount < totalCount {
+	s.logger.Debug("Connection status",
+		zap.Int("connected_count", connectedCount),
+		zap.Int("oauth_pending_count", oauthPendingCount),
+		zap.Int("total_count", totalCount))
+
+	// Only attempt connections if there are servers that can actually connect
+	// Don't retry if all remaining servers are OAuth pending
+	serversNeedingConnection := totalCount - connectedCount - oauthPendingCount
+
+	if serversNeedingConnection > 0 {
 		// Only update status to "Connecting" if server is not running
 		// If server is running, don't override the "Running" status
 		s.mu.RLock()
@@ -268,16 +295,23 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 		s.mu.RUnlock()
 
 		if !isRunning {
-			s.updateStatus("Connecting", fmt.Sprintf("Connected to %d/%d servers, retrying...", connectedCount, totalCount))
+			s.updateStatus("Connecting", fmt.Sprintf("Connected to %d/%d servers (%d OAuth pending), retrying...",
+				connectedCount, totalCount, oauthPendingCount))
 		}
 
-		// Try to connect with timeout
-		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Use a reasonable timeout but don't override custom server timeouts completely
+		// The individual clients will still respect their own timeouts
+		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
+
+		s.logger.Debug("Calling upstreamManager.ConnectAll",
+			zap.Int("servers_needing_connection", serversNeedingConnection))
 
 		if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
 			s.logger.Warn("Some upstream servers failed to connect", zap.Error(err))
 		}
+	} else {
+		s.logger.Debug("All servers already connected or OAuth pending, skipping connection attempt")
 	}
 }
 

@@ -76,7 +76,71 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		Updated:     time.Now(),
 	}
 
+	// Include OAuth tokens if present
+	if serverConfig.OAuth != nil && serverConfig.OAuth.TokenStorage != nil {
+		record.OAuthTokens = &OAuthTokenRecord{
+			AccessToken:  serverConfig.OAuth.TokenStorage.AccessToken,
+			RefreshToken: serverConfig.OAuth.TokenStorage.RefreshToken,
+			ExpiresAt:    serverConfig.OAuth.TokenStorage.ExpiresAt,
+			TokenType:    serverConfig.OAuth.TokenStorage.TokenType,
+			Scope:        serverConfig.OAuth.TokenStorage.Scope,
+			Updated:      time.Now(),
+		}
+	}
+
 	return m.db.SaveUpstream(record)
+}
+
+// SaveOAuthTokens saves OAuth tokens for a specific upstream server
+func (m *Manager) SaveOAuthTokens(serverName string, tokens *config.TokenStorage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Get existing upstream record
+	record, err := m.db.GetUpstream(serverName)
+	if err != nil {
+		return fmt.Errorf("failed to get upstream server: %w", err)
+	}
+
+	// Update OAuth tokens
+	if tokens != nil {
+		record.OAuthTokens = &OAuthTokenRecord{
+			AccessToken:  tokens.AccessToken,
+			RefreshToken: tokens.RefreshToken,
+			ExpiresAt:    tokens.ExpiresAt,
+			TokenType:    tokens.TokenType,
+			Scope:        tokens.Scope,
+			Updated:      time.Now(),
+		}
+	} else {
+		record.OAuthTokens = nil
+	}
+
+	record.Updated = time.Now()
+	return m.db.SaveUpstream(record)
+}
+
+// LoadOAuthTokens loads OAuth tokens for a specific upstream server
+func (m *Manager) LoadOAuthTokens(serverName string) (*config.TokenStorage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	record, err := m.db.GetUpstream(serverName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get upstream server: %w", err)
+	}
+
+	if record.OAuthTokens == nil {
+		return nil, nil // No tokens stored
+	}
+
+	return &config.TokenStorage{
+		AccessToken:  record.OAuthTokens.AccessToken,
+		RefreshToken: record.OAuthTokens.RefreshToken,
+		ExpiresAt:    record.OAuthTokens.ExpiresAt,
+		TokenType:    record.OAuthTokens.TokenType,
+		Scope:        record.OAuthTokens.Scope,
+	}, nil
 }
 
 // GetUpstreamServer retrieves an upstream server by name
@@ -89,7 +153,7 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		return nil, err
 	}
 
-	return &config.ServerConfig{
+	serverConfig := &config.ServerConfig{
 		Name:        record.Name,
 		URL:         record.URL,
 		Protocol:    record.Protocol,
@@ -101,7 +165,23 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		Quarantined: record.Quarantined,
 		Created:     record.Created,
 		Updated:     record.Updated,
-	}, nil
+	}
+
+	// Load OAuth tokens if present
+	if record.OAuthTokens != nil {
+		if serverConfig.OAuth == nil {
+			serverConfig.OAuth = &config.OAuthConfig{}
+		}
+		serverConfig.OAuth.TokenStorage = &config.TokenStorage{
+			AccessToken:  record.OAuthTokens.AccessToken,
+			RefreshToken: record.OAuthTokens.RefreshToken,
+			ExpiresAt:    record.OAuthTokens.ExpiresAt,
+			TokenType:    record.OAuthTokens.TokenType,
+			Scope:        record.OAuthTokens.Scope,
+		}
+	}
+
+	return serverConfig, nil
 }
 
 // ListUpstreamServers returns all upstream servers

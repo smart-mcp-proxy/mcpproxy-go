@@ -21,6 +21,8 @@
 - **Scale beyond API limits** – Federate hundreds of MCP servers while bypassing Cursor's 40-tool limit and OpenAI's 128-function cap.
 - **Save tokens & accelerate responses** – Agents load just one `retrieve_tools` function instead of hundreds of schemas. Research shows ~99 % token reduction with **43 % accuracy improvement**.
 - **Advanced security protection** – Automatic quarantine blocks Tool Poisoning Attacks until you manually approve new servers.
+- **OAuth & authentication support** – Built-in OAuth 2.0 flows including Device Code Flow for remote/headless deployments.
+- **Multiple transport protocols** – HTTP, SSE, Streamable HTTP, and stdio with custom headers support.
 - **Works offline & cross-platform** – macOS, Windows, and Linux binaries with a native system-tray UI.
 
 ---
@@ -92,11 +94,108 @@ Edit `mcp_config.json` (see below). Or ask LLM to add servers (see [doc](https:/
   "tool_response_limit": 20000,
 
   "mcpServers": [
-    { "name": "local-python", "command": "python", "args": ["-m", "my_server"], "type": "stdio", "enabled": true },
-    { "name": "remote-http", "url": "http://localhost:3001", "type": "http", "enabled": true }
+    { "name": "local-python", "command": "python", "args": ["-m", "my_server"], "protocol": "stdio", "enabled": true },
+    { "name": "remote-http", "url": "http://localhost:3001", "protocol": "http", "enabled": true }
   ]
 }
 ```
+
+## Server Configuration Options
+
+### Basic Server Types
+
+#### Stdio Servers (Local Process)
+```jsonc
+{
+  "name": "local-python",
+  "command": "python",
+  "args": ["-m", "my_server"],
+  "protocol": "stdio",
+  "env": { "API_KEY": "your_key" },
+  "enabled": true
+}
+```
+
+#### HTTP/HTTPS Servers
+```jsonc
+{
+  "name": "remote-api",
+  "url": "https://api.example.com/mcp",
+  "protocol": "http",
+  "headers": { 
+    "Authorization": "Bearer your_token",
+    "X-API-Key": "your_key"
+  },
+  "enabled": true
+}
+```
+
+#### Server-Sent Events (SSE) Servers
+```jsonc
+{
+  "name": "sse-server",
+  "url": "https://api.example.com/sse",
+  "protocol": "sse",
+  "headers": { "Authorization": "Bearer your_token" },
+  "enabled": true
+}
+```
+
+#### Streamable HTTP Servers
+```jsonc
+{
+  "name": "streaming-server",
+  "url": "https://api.example.com/stream",
+  "protocol": "streamable-http",
+  "headers": { "Authorization": "Bearer your_token" },
+  "enabled": true
+}
+```
+
+### OAuth-Enabled Servers
+
+MCPProxy supports OAuth 2.0 authentication with automatic token management. For complete OAuth documentation, see [OAuth Authentication](docs/oauth.md).
+
+#### OAuth Device Code Flow (Recommended for Remote/Headless)
+```jsonc
+{
+  "name": "oauth-server",
+  "url": "https://api.example.com/mcp",
+  "protocol": "http",
+  "oauth": {
+    "flow_type": "device_code",
+    "client_id": "your_client_id",
+    "device_endpoint": "https://api.example.com/oauth/device",
+    "token_endpoint": "https://api.example.com/oauth/token",
+    "scopes": ["read", "write"],
+    "device_flow": {
+      "poll_interval": "5s",
+      "enable_notification": true
+    }
+  },
+  "enabled": true
+}
+```
+
+#### OAuth Authorization Code Flow
+```jsonc
+{
+  "name": "oauth-server",
+  "url": "https://api.example.com/mcp",
+  "protocol": "http",
+  "oauth": {
+    "flow_type": "authorization_code",
+    "client_id": "your_client_id",
+    "client_secret": "your_client_secret",
+    "authorization_endpoint": "https://api.example.com/oauth/authorize",
+    "token_endpoint": "https://api.example.com/oauth/token",
+    "scopes": ["read", "write"]
+  },
+  "enabled": true
+}
+```
+
+> **Note**: OAuth tokens are automatically refreshed and stored securely. For remote deployments, use `device_code` flow - users authenticate on their own devices while mcpproxy runs headless.
 
 ### Key parameters
 
@@ -108,6 +207,20 @@ Edit `mcp_config.json` (see below). Or ask LLM to add servers (see [doc](https:/
 | `top_k` | Tools returned by `retrieve_tools` | `5` |
 | `tools_limit` | Max tools returned to client | `15` |
 | `tool_response_limit` | Auto-truncate responses above N chars (`0` disables) | `20000` |
+
+### Server Configuration Fields
+
+| Field | Required | Description | Example |
+|-------|----------|-------------|---------|
+| `name` | Yes | Unique server identifier | `"my-server"` |
+| `protocol` | Yes | Transport protocol | `"stdio"`, `"http"`, `"sse"`, `"streamable-http"` |
+| `command` | stdio only | Command to execute | `"python"` |
+| `args` | stdio only | Command arguments | `["-m", "my_server"]` |
+| `env` | stdio only | Environment variables | `{"API_KEY": "value"}` |
+| `url` | http/sse only | Server endpoint URL | `"https://api.example.com/mcp"` |
+| `headers` | http/sse only | HTTP headers for authentication | `{"Authorization": "Bearer token"}` |
+| `oauth` | Optional | OAuth 2.0 configuration | See OAuth examples above |
+| `enabled` | Optional | Enable/disable server | `true` |
 
 ### CLI flags
 
@@ -128,7 +241,7 @@ mcpproxy --help
 
 ## Learn More
 
-* Documentation: [Configuration](https://mcpproxy.app/docs/configuration), [Features](https://mcpproxy.app/docs/features), [Usage](https://mcpproxy.app/docs/usage)
+* Documentation: [Configuration](https://mcpproxy.app/docs/configuration), [OAuth Authentication](docs/oauth.md), [Logging](docs/logging.md), [Features](https://mcpproxy.app/docs/features), [Usage](https://mcpproxy.app/docs/usage)
 * Website: <https://mcpproxy.app>
 * Releases: <https://github.com/smart-mcp-proxy/mcpproxy-go/releases>
 

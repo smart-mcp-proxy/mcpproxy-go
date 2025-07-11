@@ -55,10 +55,60 @@ func NewMCPProxyServer(
 	debugSearch bool,
 	config *config.Config,
 ) *MCPProxyServer {
-	// Create MCP server with capabilities
+	// Create tracing hooks for raw JSON-RPC message logging
+	hooks := &mcpserver.Hooks{}
+
+	// Add hook for incoming requests (before processing)
+	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		if config.EnableTracing {
+			messageBytes, err := json.Marshal(message)
+			if err != nil {
+				logger.Error("Failed to marshal incoming message for tracing",
+					zap.Error(err),
+					zap.String("method", string(method)),
+					zap.Any("id", id))
+				return
+			}
+			logger.Info("🔍 MCP Request",
+				zap.String("method", string(method)),
+				zap.Any("id", id),
+				zap.String("message", string(messageBytes)))
+		}
+	})
+
+	// Add hook for successful responses (after processing)
+	hooks.AddOnSuccess(func(ctx context.Context, id any, method mcp.MCPMethod, message any, result any) {
+		if config.EnableTracing {
+			resultBytes, err := json.Marshal(result)
+			if err != nil {
+				logger.Error("Failed to marshal response for tracing",
+					zap.Error(err),
+					zap.String("method", string(method)),
+					zap.Any("id", id))
+				return
+			}
+			logger.Info("✅ MCP Response",
+				zap.String("method", string(method)),
+				zap.Any("id", id),
+				zap.String("result", string(resultBytes)))
+		}
+	})
+
+	// Add hook for errors
+	hooks.AddOnError(func(ctx context.Context, id any, method mcp.MCPMethod, message any, err error) {
+		if config.EnableTracing {
+			logger.Error("❌ MCP Error",
+				zap.String("method", string(method)),
+				zap.Any("id", id),
+				zap.Error(err))
+		}
+	})
+
+	// Create MCP server with capabilities and hooks
 	capabilities := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
+		mcpserver.WithHooks(hooks), // Add tracing hooks
 	}
 
 	// Add prompts capability if enabled
@@ -155,8 +205,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Operation: list, add, remove, update, patch, tail_log. For quarantine operations, use the 'quarantine_security' tool."),
-				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log"),
+				mcp.Description("Operation: list, add, remove, update, patch, tail_log, authenticate. For quarantine operations, use the 'quarantine_security' tool."),
+				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log", "authenticate"),
 			),
 			mcp.WithString("name",
 				mcp.Description("Server name (required for add/remove/update/patch/tail_log operations)"),
@@ -583,6 +633,8 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		return p.handlePatchUpstream(ctx, request)
 	case "tail_log":
 		return p.handleTailLog(ctx, request)
+	case "authenticate":
+		return p.handleAuthenticateUpstream(ctx, request)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
 	}
@@ -622,9 +674,74 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
 	}
 
+	// Enhance server information with connection status and OAuth details
+	var enhancedServers []map[string]interface{}
+	for _, server := range servers {
+		serverInfo := map[string]interface{}{
+			"name":        server.Name,
+			"url":         server.URL,
+			"protocol":    server.Protocol,
+			"enabled":     server.Enabled,
+			"quarantined": server.Quarantined,
+			"created":     server.Created,
+			"updated":     server.Updated,
+		}
+
+		// Add command info for stdio servers
+		if server.Command != "" {
+			serverInfo["command"] = server.Command
+			serverInfo["args"] = server.Args
+		}
+
+		// Add OAuth configuration info
+		if server.OAuth != nil {
+			serverInfo["oauth_configured"] = true
+			serverInfo["oauth_flow_type"] = server.OAuth.FlowType
+		}
+
+		// Get connection status from upstream manager
+		if client, exists := p.upstreamManager.GetClient(server.Name); exists {
+			connectionStatus := client.GetConnectionStatus()
+			serverInfo["connection_status"] = connectionStatus
+
+			// Add specific OAuth status information
+			if oauthPending, exists := connectionStatus["oauth_pending"]; exists && oauthPending.(bool) {
+				serverInfo["oauth_pending"] = true
+				serverInfo["oauth_status"] = "authentication_required"
+				serverInfo["oauth_message"] = "🔐 OAuth authentication required. Click the link below to authenticate:"
+
+				// Add authentication link
+				if oauthInfo, exists := connectionStatus["oauth_info"]; exists {
+					if oauthInfoMap, ok := oauthInfo.(map[string]interface{}); ok {
+						if authURL, exists := oauthInfoMap["auth_url"]; exists {
+							serverInfo["oauth_auth_url"] = authURL
+							serverInfo["oauth_auth_link"] = fmt.Sprintf("🔗 [Click here to authenticate](%s)", authURL)
+						}
+						if instructions, exists := oauthInfoMap["auth_instructions"]; exists {
+							serverInfo["oauth_instructions"] = instructions
+						}
+					}
+				}
+			}
+		} else {
+			serverInfo["connection_status"] = map[string]interface{}{
+				"connected":  false,
+				"connecting": false,
+				"message":    "Not connected",
+			}
+		}
+
+		enhancedServers = append(enhancedServers, serverInfo)
+	}
+
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"servers": servers,
-		"total":   len(servers),
+		"servers": enhancedServers,
+		"total":   len(enhancedServers),
+		"oauth_help": map[string]interface{}{
+			"message":      "Servers requiring OAuth authentication will show authentication links above",
+			"instructions": "Click the authentication links to complete OAuth setup in your browser",
+			"note":         "OAuth is handled automatically - no manual configuration required",
+		},
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize servers: %v", err)), nil
@@ -1404,6 +1521,86 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 	jsonResult, err := json.Marshal(result)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// handleAuthenticateUpstream implements the authenticate functionality
+func (p *MCPProxyServer) handleAuthenticateUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	name, err := request.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
+	}
+
+	// Check if server exists
+	serverConfig, err := p.storage.GetUpstreamServer(name)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found: %v", name, err)), nil
+	}
+
+	// Get the client for this server
+	client, exists := p.upstreamManager.GetClient(name)
+	if !exists {
+		return mcp.NewToolResultError(fmt.Sprintf("No client found for server '%s'", name)), nil
+	}
+
+	// Get connection status
+	connectionStatus := client.GetConnectionStatus()
+
+	// Check if OAuth is pending
+	if oauthPending, exists := connectionStatus["oauth_pending"]; !exists || !oauthPending.(bool) {
+		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' does not require OAuth authentication", name)), nil
+	}
+
+	// Check if OAuth info is available
+	oauthInfo, exists := connectionStatus["oauth_info"]
+	if !exists {
+		return mcp.NewToolResultError(fmt.Sprintf("No OAuth information available for server '%s'", name)), nil
+	}
+
+	oauthInfoMap, ok := oauthInfo.(map[string]interface{})
+	if !ok {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid OAuth information format for server '%s'", name)), nil
+	}
+
+	// Prepare authentication response
+	response := map[string]interface{}{
+		"server_name":     name,
+		"oauth_status":    "authentication_required",
+		"oauth_flow_type": oauthInfoMap["flow_type"],
+		"message":         "OAuth authentication required for this server",
+	}
+
+	// Add authentication URL if available
+	if authURL, exists := oauthInfoMap["auth_url"]; exists {
+		response["auth_url"] = authURL
+		response["auth_link"] = fmt.Sprintf("🔗 [Click here to authenticate](%s)", authURL)
+		response["instructions"] = "Click the authentication link above to complete OAuth setup in your browser"
+	} else {
+		response["instructions"] = oauthInfoMap["auth_instructions"]
+	}
+
+	// Add server configuration details
+	response["server_config"] = map[string]interface{}{
+		"name":     serverConfig.Name,
+		"url":      serverConfig.URL,
+		"protocol": serverConfig.Protocol,
+		"enabled":  serverConfig.Enabled,
+	}
+
+	// Add OAuth configuration if available
+	if serverConfig.OAuth != nil {
+		response["oauth_config"] = map[string]interface{}{
+			"flow_type":      serverConfig.OAuth.FlowType,
+			"auto_discovery": serverConfig.OAuth.AutoDiscovery != nil && serverConfig.OAuth.AutoDiscovery.Enabled,
+			"lazy_auth":      serverConfig.OAuth.LazyAuth,
+		}
+	}
+
+	jsonResult, err := json.Marshal(response)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize authentication response: %v", err)), nil
 	}
 
 	return mcp.NewToolResultText(string(jsonResult)), nil

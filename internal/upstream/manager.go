@@ -10,23 +10,26 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/storage"
 )
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients      map[string]*Client
-	mu           sync.RWMutex
-	logger       *zap.Logger
-	logConfig    *config.LogConfig
-	globalConfig *config.Config
+	clients        map[string]*Client
+	mu             sync.RWMutex
+	logger         *zap.Logger
+	logConfig      *config.LogConfig
+	globalConfig   *config.Config
+	storageManager *storage.Manager
 }
 
 // NewManager creates a new upstream manager
-func NewManager(logger *zap.Logger, globalConfig *config.Config) *Manager {
+func NewManager(logger *zap.Logger, globalConfig *config.Config, storageManager *storage.Manager) *Manager {
 	return &Manager{
-		clients:      make(map[string]*Client),
-		logger:       logger,
-		globalConfig: globalConfig,
+		clients:        make(map[string]*Client),
+		logger:         logger,
+		globalConfig:   globalConfig,
+		storageManager: storageManager,
 	}
 }
 
@@ -39,17 +42,23 @@ func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
+	m.logger.Debug("AddServerConfig called",
+		zap.String("id", id),
+		zap.String("name", serverConfig.Name),
+		zap.Bool("enabled", serverConfig.Enabled))
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Remove existing client if it exists
 	if existingClient, exists := m.clients[id]; exists {
+		m.logger.Debug("Removing existing client", zap.String("id", id))
 		_ = existingClient.Disconnect()
 		delete(m.clients, id)
 	}
 
 	// Create new client but don't connect yet
-	client, err := NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig)
+	client, err := NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storageManager)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
@@ -57,7 +66,8 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	m.clients[id] = client
 	m.logger.Info("Added upstream server configuration",
 		zap.String("id", id),
-		zap.String("name", serverConfig.Name))
+		zap.String("name", serverConfig.Name),
+		zap.Bool("enabled", serverConfig.Enabled))
 
 	return nil
 }
@@ -218,12 +228,15 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 
 // ConnectAll connects to all configured servers that should retry
 func (m *Manager) ConnectAll(ctx context.Context) error {
+	m.logger.Debug("ConnectAll called")
 	m.mu.RLock()
 	clients := make(map[string]*Client)
 	for id, client := range m.clients {
 		clients[id] = client
 	}
 	m.mu.RUnlock()
+
+	m.logger.Debug("ConnectAll found clients", zap.Int("client_count", len(clients)))
 
 	var wg sync.WaitGroup
 	for id, client := range clients {
@@ -238,22 +251,41 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		wg.Add(1)
 		go func(id string, c *Client) {
 			defer wg.Done()
-			// Only connect if not already connected or trying to connect
-			status := c.GetConnectionStatus()
-			if connected, ok := status["connected"].(bool); !ok || !connected {
-				if connecting, ok := status["connecting"].(bool); !ok || !connecting {
-					if err := c.Connect(ctx); err != nil {
-						m.logger.Error("Failed to connect to upstream server",
-							zap.String("id", id),
-							zap.String("name", c.config.Name),
-							zap.Error(err))
-					}
+
+			// Use the new OAuth-aware connection check
+			if !c.shouldAttemptConnection() {
+				status := c.GetConnectionStatus()
+				connected, _ := status["connected"].(bool)
+				connecting, _ := status["connecting"].(bool)
+				oauthPending, _ := status["oauth_pending"].(bool)
+
+				m.logger.Debug("Skipping connection attempt",
+					zap.String("id", id),
+					zap.String("name", c.config.Name),
+					zap.Bool("connected", connected),
+					zap.Bool("connecting", connecting),
+					zap.Bool("oauth_pending", oauthPending))
+				return
+			}
+
+			m.logger.Debug("Attempting to connect client",
+				zap.String("id", id),
+				zap.String("name", c.config.Name))
+
+			if err := c.Connect(ctx); err != nil {
+				// Only log as error if it's a real error (not OAuth pending)
+				if err.Error() != "" {
+					m.logger.Error("Failed to connect to upstream server",
+						zap.String("id", id),
+						zap.String("name", c.config.Name),
+						zap.Error(err))
 				}
 			}
 		}(id, client)
 	}
 
 	wg.Wait()
+	m.logger.Debug("ConnectAll completed")
 	return nil
 }
 

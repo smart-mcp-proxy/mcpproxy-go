@@ -33,6 +33,7 @@ var (
 	allowServerAdd    bool
 	allowServerRemove bool
 	enablePrompts     bool
+	enableTracing     bool
 
 	version = "v0.1.0" // This will be injected by -ldflags during build
 )
@@ -67,6 +68,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&allowServerAdd, "allow-server-add", true, "Allow adding new servers")
 	rootCmd.PersistentFlags().BoolVar(&allowServerRemove, "allow-server-remove", true, "Allow removing existing servers")
 	rootCmd.PersistentFlags().BoolVar(&enablePrompts, "enable-prompts", true, "Enable prompts for user input")
+	rootCmd.PersistentFlags().BoolVar(&enableTracing, "enable-tracing", false, "Enable raw JSON-RPC message tracing")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -151,6 +153,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cfg.AllowServerAdd = allowServerAdd
 	cfg.AllowServerRemove = allowServerRemove
 	cfg.EnablePrompts = enablePrompts
+	cfg.EnableTracing = enableTracing
+
+	// Also check environment variable for tracing
+	if os.Getenv("MCP_TRACE") != "" {
+		cfg.EnableTracing = true
+	}
 
 	logger.Info("Configuration loaded",
 		zap.String("data_dir", cfg.DataDir),
@@ -158,7 +166,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.Bool("tray_enabled", cfg.EnableTray),
 		zap.Bool("read_only_mode", cfg.ReadOnlyMode),
 		zap.Bool("disable_management", cfg.DisableManagement),
-		zap.Bool("enable_prompts", cfg.EnablePrompts))
+		zap.Bool("enable_prompts", cfg.EnablePrompts),
+		zap.Bool("enable_tracing", cfg.EnableTracing))
 
 	// Create server
 	srv, err := server.NewServer(cfg, logger)

@@ -37,6 +37,19 @@ type UpstreamRecord struct {
 	Quarantined bool              `json:"quarantined"` // Security quarantine status
 	Created     time.Time         `json:"created"`
 	Updated     time.Time         `json:"updated"`
+
+	// OAuth token storage for persistence across restarts
+	OAuthTokens *OAuthTokenRecord `json:"oauth_tokens,omitempty"`
+}
+
+// OAuthTokenRecord represents stored OAuth tokens for an upstream server
+type OAuthTokenRecord struct {
+	AccessToken  string    `json:"access_token,omitempty"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
+	ExpiresAt    time.Time `json:"expires_at,omitempty"`
+	TokenType    string    `json:"token_type,omitempty"`
+	Scope        string    `json:"scope,omitempty"`
+	Updated      time.Time `json:"updated"`
 }
 
 // ToolStatRecord represents tool usage statistics
