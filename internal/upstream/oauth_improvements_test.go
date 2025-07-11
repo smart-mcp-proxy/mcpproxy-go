@@ -529,6 +529,69 @@ func TestShouldUseLazyAuth(t *testing.T) {
 	}
 }
 
+func TestCreateAutoOAuthConfig(t *testing.T) {
+	logger := zap.NewNop()
+
+	tests := []struct {
+		name       string
+		serverURL  string
+		deployment DeploymentType
+		expected   func(*config.OAuthConfig) bool
+	}{
+		{
+			name:       "cloudflare server - local deployment",
+			serverURL:  "https://dns-analytics.mcp.cloudflare.com/sse",
+			deployment: DeploymentLocal,
+			expected: func(cfg *config.OAuthConfig) bool {
+				return cfg.LazyAuth == true &&
+					cfg.AutoDiscovery.Enabled == true &&
+					cfg.DynamicClientRegistration.Enabled == true &&
+					cfg.FlowType == config.OAuthFlowAuthorizationCode &&
+					cfg.DynamicClientRegistration.ClientName == defaultClientName
+			},
+		},
+		{
+			name:       "cloudflare server - headless deployment",
+			serverURL:  "https://builds.mcp.cloudflare.com/sse",
+			deployment: DeploymentHeadless,
+			expected: func(cfg *config.OAuthConfig) bool {
+				return cfg.LazyAuth == true &&
+					cfg.AutoDiscovery.Enabled == true &&
+					cfg.DynamicClientRegistration.Enabled == true &&
+					cfg.FlowType == config.OAuthFlowDeviceCode &&
+					cfg.DynamicClientRegistration.ClientName == defaultClientName
+			},
+		},
+		{
+			name:       "generic server",
+			serverURL:  "https://api.example.com/mcp",
+			deployment: DeploymentLocal,
+			expected: func(cfg *config.OAuthConfig) bool {
+				return cfg.LazyAuth == true &&
+					cfg.AutoDiscovery.Enabled == true &&
+					cfg.DynamicClientRegistration.Enabled == true &&
+					cfg.FlowType == config.OAuthFlowAuto
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &Client{
+				logger:         logger,
+				deploymentType: tt.deployment,
+				config: &config.ServerConfig{
+					URL: tt.serverURL,
+				},
+			}
+
+			cfg := client.createAutoOAuthConfig()
+
+			assert.True(t, tt.expected(cfg), "OAuth config doesn't match expected values")
+		})
+	}
+}
+
 // Test OAuth Notification System
 
 func TestSendOAuthNotification(t *testing.T) {

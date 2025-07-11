@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -38,13 +39,14 @@ const (
 	transportSSE            = "sse"
 	transportStdio          = "stdio"
 	osWindows               = "windows"
+	defaultClientName       = "mcpproxy-go"
 
 	// OAuth flow types - removed unused local constants, using config package constants instead
 )
 
 // Deployment types
 const (
-	DeploymentLocal DeploymentType = iota
+	DeploymentLocal DeploymentType = iota + 1
 	DeploymentRemote
 	DeploymentHeadless
 )
@@ -94,6 +96,7 @@ type Client struct {
 	// OAuth state management
 	oauthPending    bool
 	oauthError      error
+	oauthFlowActive bool // Guard to prevent concurrent OAuth flows
 	cachedTools     []*config.ToolMetadata
 	toolCacheExpiry time.Time
 	connectionState string // "disconnected", "connecting", "connected", "oauth_pending", "failed"
@@ -248,12 +251,11 @@ func (c *Client) shouldUsePKCE() bool {
 
 // performDynamicClientRegistration attempts to register a client with the OAuth provider
 func (c *Client) performDynamicClientRegistration(ctx context.Context) error {
-	oauth := c.getOAuthConfig()
-
-	// Skip if DCR is not enabled
-	if oauth.DynamicClientRegistration == nil || !oauth.DynamicClientRegistration.Enabled {
+	if c.config.OAuth == nil || c.config.OAuth.DynamicClientRegistration == nil || !c.config.OAuth.DynamicClientRegistration.Enabled {
+		c.logger.Debug("DCR not enabled or configured, skipping.")
 		return nil
 	}
+	oauth := c.config.OAuth
 
 	// Skip if client is already registered
 	if oauth.ClientID != "" {
@@ -270,14 +272,18 @@ func (c *Client) performDynamicClientRegistration(ctx context.Context) error {
 
 	c.logger.Info("Attempting Dynamic Client Registration", zap.String("endpoint", registrationEndpoint))
 
-	// Prepare registration request
+	// Build registration request
 	regReq := c.buildRegistrationRequest()
 
 	// Make registration request
 	regResp, err := c.registerClient(ctx, registrationEndpoint, regReq)
 	if err != nil {
-		return fmt.Errorf("DCR failed: %w", err)
+		c.logger.Error("DCR request failed", zap.Error(err))
+		return fmt.Errorf("failed to register client dynamically: %w", err)
 	}
+
+	c.logger.Info("Dynamic Client Registration successful",
+		zap.String("client_id", regResp.ClientID))
 
 	// Update OAuth configuration with registered client credentials
 	oauth.ClientID = regResp.ClientID
@@ -288,6 +294,111 @@ func (c *Client) performDynamicClientRegistration(ctx context.Context) error {
 		zap.Bool("has_client_secret", oauth.ClientSecret != ""))
 
 	return nil
+}
+
+// performDCRWithExactRedirectURI performs DCR with a specific redirect URI (for two-phase OAuth)
+func (c *Client) performDCRWithExactRedirectURI(ctx context.Context, exactRedirectURI string) error {
+	if c.config.OAuth == nil {
+		return fmt.Errorf("OAuth configuration not initialized")
+	}
+
+	oauth := c.config.OAuth
+
+	// Get registration endpoint
+	registrationEndpoint := oauth.RegistrationEndpoint
+	if registrationEndpoint == "" {
+		c.logger.Debug("No registration endpoint available for DCR")
+		return nil
+	}
+
+	c.logger.Info("Attempting Dynamic Client Registration with exact redirect URI",
+		zap.String("endpoint", registrationEndpoint),
+		zap.String("redirect_uri", exactRedirectURI))
+
+	// Build registration request with exact redirect URI
+	regReq := c.buildRegistrationRequestWithExactURI(exactRedirectURI)
+
+	// Make registration request
+	regResp, err := c.registerClient(ctx, registrationEndpoint, regReq)
+	if err != nil {
+		c.logger.Error("DCR request with exact redirect URI failed", zap.Error(err))
+		return fmt.Errorf("failed to register client with exact redirect URI: %w", err)
+	}
+
+	c.logger.Info("Dynamic Client Registration with exact redirect URI successful",
+		zap.String("client_id", regResp.ClientID),
+		zap.String("redirect_uri", exactRedirectURI))
+
+	// Update OAuth configuration with registered client credentials
+	oauth.ClientID = regResp.ClientID
+	oauth.ClientSecret = regResp.ClientSecret
+
+	return nil
+}
+
+// buildRegistrationRequestWithExactURI creates a client registration request with exact redirect URI
+func (c *Client) buildRegistrationRequestWithExactURI(exactRedirectURI string) *config.ClientRegistrationRequest {
+	oauth := c.getOAuthConfig()
+	dcr := oauth.DynamicClientRegistration
+
+	// Determine grant types based on flow type
+	grantTypes := []string{"authorization_code", "refresh_token"}
+	if dcr != nil && dcr.GrantTypes != nil {
+		grantTypes = dcr.GrantTypes
+	}
+
+	// Determine response types
+	responseTypes := []string{"code"}
+	if dcr != nil && dcr.ResponseTypes != nil {
+		responseTypes = dcr.ResponseTypes
+	}
+
+	// Build application type
+	applicationType := "native"
+	deploymentType := c.detectDeploymentType()
+	if deploymentType == DeploymentRemote {
+		applicationType = "web"
+	}
+
+	// Build client metadata
+	clientName := "mcpproxy-go"
+	if dcr != nil && dcr.ClientName != "" {
+		clientName = dcr.ClientName
+	}
+
+	clientURI := "https://github.com/smart-mcp-proxy/mcpproxy-go"
+	if dcr != nil && dcr.ClientURI != "" {
+		clientURI = dcr.ClientURI
+	}
+
+	contacts := []string{"support@mcpproxy.com"}
+	if dcr != nil && dcr.Contacts != nil {
+		contacts = dcr.Contacts
+	}
+
+	var logoURI, tosURI, policyURI string
+	if dcr != nil {
+		logoURI = dcr.LogoURI
+		tosURI = dcr.TosURI
+		policyURI = dcr.PolicyURI
+	}
+
+	return &config.ClientRegistrationRequest{
+		ClientName:              clientName,
+		ClientURI:               clientURI,
+		LogoURI:                 logoURI,
+		TosURI:                  tosURI,
+		PolicyURI:               policyURI,
+		Contacts:                contacts,
+		RedirectURIs:            []string{exactRedirectURI}, // Use exact redirect URI
+		GrantTypes:              grantTypes,
+		ResponseTypes:           responseTypes,
+		TokenEndpointAuthMethod: "none", // For public clients
+		ApplicationType:         applicationType,
+		SubjectType:             "public",
+		SoftwareID:              "mcpproxy-go",
+		SoftwareVersion:         "1.0.0",
+	}
 }
 
 // buildRegistrationRequest creates a client registration request
@@ -353,16 +464,15 @@ func (c *Client) buildRegistrationRequest() *config.ClientRegistrationRequest {
 
 // registerClient makes the actual DCR request to the registration endpoint
 func (c *Client) registerClient(ctx context.Context, registrationEndpoint string, regReq *config.ClientRegistrationRequest) (*config.ClientRegistrationResponse, error) {
-	// Marshal request to JSON
+	// Marshal request body
 	reqBody, err := json.Marshal(regReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal registration request: %w", err)
+		return nil, fmt.Errorf("failed to marshal DCR request: %w", err)
 	}
-
-	c.logger.Debug("DCR request", zap.String("request", string(reqBody)))
+	c.logger.Debug("DCR request body", zap.String("body", string(reqBody)))
 
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", registrationEndpoint, strings.NewReader(string(reqBody)))
+	req, err := http.NewRequestWithContext(ctx, "POST", registrationEndpoint, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create registration request: %w", err)
 	}
@@ -389,7 +499,7 @@ func (c *Client) registerClient(ctx context.Context, registrationEndpoint string
 		return nil, fmt.Errorf("failed to decode registration response: %w", err)
 	}
 
-	c.logger.Debug("DCR response", zap.String("client_id", regResp.ClientID))
+	c.logger.Debug("DCR response", zap.Int("status", resp.StatusCode), zap.String("body", string(reqBody)))
 
 	return &regResp, nil
 }
@@ -495,6 +605,146 @@ func (c *Client) getOAuthConfig() *config.OAuthConfig {
 	return c.config.OAuth
 }
 
+// createAutoOAuthConfig creates an OAuth configuration optimized for auto-detection scenarios
+func (c *Client) createAutoOAuthConfig() *config.OAuthConfig {
+	oauthConfig := config.DefaultOAuthConfig()
+
+	// Enable lazy auth by default for auto-detected OAuth scenarios
+	oauthConfig.LazyAuth = true
+
+	// Configure for known server types
+	if strings.Contains(c.config.URL, "mcp.cloudflare.com") || strings.Contains(c.config.URL, "builds.mcp.cloudflare.com") {
+		// Cloudflare-specific configuration
+		oauthConfig.AutoDiscovery.Enabled = true
+		oauthConfig.AutoDiscovery.EnableDCR = true
+		oauthConfig.DynamicClientRegistration.Enabled = true
+		oauthConfig.DynamicClientRegistration.ClientName = defaultClientName
+		oauthConfig.DynamicClientRegistration.ClientURI = "https://github.com/smart-mcp-proxy/mcpproxy-go"
+		oauthConfig.DynamicClientRegistration.Contacts = []string{"support@mcpproxy.com"}
+
+		// For Cloudflare, prefer authorization code flow for better UX
+		deploymentType := c.detectDeploymentType()
+		if deploymentType == DeploymentLocal {
+			oauthConfig.FlowType = config.OAuthFlowAuthorizationCode
+		} else {
+			oauthConfig.FlowType = config.OAuthFlowDeviceCode
+		}
+
+		c.logger.Info("Auto-configured OAuth for Cloudflare server")
+	} else {
+		// Generic server configuration
+		oauthConfig.AutoDiscovery.Enabled = true
+		oauthConfig.AutoDiscovery.EnableDCR = true
+		oauthConfig.FlowType = config.OAuthFlowAuto
+
+		c.logger.Info("Auto-configured OAuth for generic server")
+	}
+
+	return oauthConfig
+}
+
+// generateAuthenticationURL generates a direct authentication URL for local deployments
+func (c *Client) generateAuthenticationURL() string {
+	if c.config.OAuth == nil {
+		return ""
+	}
+
+	oauth := c.config.OAuth
+
+	// For authorization code flow, generate authorization URL
+	if oauth.FlowType == config.OAuthFlowAuthorizationCode || oauth.FlowType == config.OAuthFlowAuto {
+		if oauth.AuthorizationEndpoint == "" {
+			c.logger.Debug("Cannot generate auth URL: AuthorizationEndpoint is empty")
+			return ""
+		}
+
+		// Build basic authorization URL
+		authURL := fmt.Sprintf("%s?response_type=code&client_id=%s",
+			oauth.AuthorizationEndpoint,
+			oauth.ClientID)
+
+		// Add redirect URI if available
+		redirectURIs := c.getRedirectURIs()
+		if len(redirectURIs) > 0 {
+			authURL += "&redirect_uri=" + redirectURIs[0]
+		}
+
+		// Add scopes if available
+		if len(oauth.Scopes) > 0 {
+			authURL += "&scope=" + strings.Join(oauth.Scopes, " ")
+		}
+
+		return authURL
+	}
+
+	// For device code flow, return device endpoint
+	if oauth.FlowType == config.OAuthFlowDeviceCode {
+		return oauth.DeviceEndpoint
+	}
+
+	return ""
+}
+
+// triggerOAuthFlowAsync triggers the OAuth flow asynchronously for better UX
+func (c *Client) triggerOAuthFlowAsync(ctx context.Context) {
+	c.logger.Info("Triggering automatic OAuth flow for local deployment")
+
+	// Check if OAuth flow is already active
+	c.mu.Lock()
+	if c.oauthFlowActive {
+		c.logger.Debug("OAuth flow already active, skipping duplicate trigger")
+		c.mu.Unlock()
+		return
+	}
+	c.oauthFlowActive = true
+	c.mu.Unlock()
+
+	// Ensure we reset the flag when done
+	defer func() {
+		c.mu.Lock()
+		c.oauthFlowActive = false
+		c.mu.Unlock()
+	}()
+
+	// Wait a brief moment to allow the connection to stabilize
+	time.Sleep(500 * time.Millisecond)
+
+	// Check if OAuth is still pending
+	c.mu.RLock()
+	stillPending := c.oauthPending
+	c.mu.RUnlock()
+
+	if !stillPending {
+		c.logger.Debug("OAuth no longer pending, skipping automatic flow")
+		return
+	}
+
+	// Use background context to prevent cancellation from connection timeouts
+	oauthCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	c.logger.Debug("Starting OAuth flow with background context")
+
+	// Trigger OAuth flow
+	if err := c.handleOAuthFlow(oauthCtx); err != nil {
+		c.logger.Error("Automatic OAuth flow failed", zap.Error(err))
+		c.mu.Lock()
+		c.oauthError = err
+		c.mu.Unlock()
+		return
+	}
+
+	c.logger.Info("Automatic OAuth flow completed successfully")
+
+	// Try to reconnect after successful OAuth using original context
+	if err := c.Connect(ctx); err != nil {
+		c.logger.Error("Failed to reconnect after automatic OAuth", zap.Error(err))
+		c.mu.Lock()
+		c.oauthError = err
+		c.mu.Unlock()
+	}
+}
+
 // shouldUseLazyAuth returns true if lazy OAuth should be used
 func (c *Client) shouldUseLazyAuth() bool {
 	oauth := c.getOAuthConfig()
@@ -518,9 +768,11 @@ func (c *Client) getRedirectURIs() []string {
 	deploymentType := c.detectDeploymentType()
 	switch deploymentType {
 	case DeploymentLocal:
+		// RFC 8252 Section 7.3: Register base loopback URIs without specific ports
+		// Authorization servers MUST allow any port at request time for loopback IPs
 		return []string{
-			"http://127.0.0.1:8080/oauth/callback",
-			"http://localhost:8080/oauth/callback",
+			"http://127.0.0.1/oauth/callback",
+			"http://localhost/oauth/callback",
 		}
 	case DeploymentRemote:
 		if c.detectedPublicURL != "" {
@@ -607,6 +859,34 @@ func (c *Client) Connect(ctx context.Context) error {
 			httpTransport, err := transport.NewStreamableHTTP(c.config.URL,
 				transport.WithHTTPHeaders(c.config.Headers))
 			if err != nil {
+				// Check if this is an OAuth authorization required error during HTTP connection
+				if c.isOAuthAuthorizationRequired(err) {
+					c.logger.Info("OAuth authorization required during HTTP connection")
+					if c.upstreamLogger != nil {
+						c.upstreamLogger.Info("OAuth authorization required during HTTP connection")
+					}
+
+					// Auto-initialize OAuth configuration if not present
+					if c.config.OAuth == nil {
+						c.logger.Info("Auto-initializing OAuth configuration for HTTP")
+						c.config.OAuth = c.createAutoOAuthConfig()
+					} else {
+						c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
+					}
+
+					// Set OAuth pending state
+					c.setOAuthPending(true, err)
+
+					// For local deployments, automatically trigger OAuth flow
+					deploymentType := c.detectDeploymentType()
+					if deploymentType == DeploymentLocal {
+						go c.triggerOAuthFlowAsync(ctx)
+					}
+
+					// Return nil to indicate "success" with OAuth pending
+					return nil
+				}
+
 				c.mu.Lock()
 				c.lastError = err
 				c.retryCount++
@@ -618,6 +898,34 @@ func (c *Client) Connect(ctx context.Context) error {
 		} else {
 			httpTransport, err := transport.NewStreamableHTTP(c.config.URL)
 			if err != nil {
+				// Check if this is an OAuth authorization required error during HTTP connection
+				if c.isOAuthAuthorizationRequired(err) {
+					c.logger.Info("OAuth authorization required during HTTP connection")
+					if c.upstreamLogger != nil {
+						c.upstreamLogger.Info("OAuth authorization required during HTTP connection")
+					}
+
+					// Auto-initialize OAuth configuration if not present
+					if c.config.OAuth == nil {
+						c.logger.Info("Auto-initializing OAuth configuration for HTTP")
+						c.config.OAuth = c.createAutoOAuthConfig()
+					} else {
+						c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
+					}
+
+					// Set OAuth pending state
+					c.setOAuthPending(true, err)
+
+					// For local deployments, automatically trigger OAuth flow
+					deploymentType := c.detectDeploymentType()
+					if deploymentType == DeploymentLocal {
+						go c.triggerOAuthFlowAsync(ctx)
+					}
+
+					// Return nil to indicate "success" with OAuth pending
+					return nil
+				}
+
 				c.mu.Lock()
 				c.lastError = err
 				c.retryCount++
@@ -633,6 +941,34 @@ func (c *Client) Connect(ctx context.Context) error {
 			sseClient, err := client.NewSSEMCPClient(c.config.URL,
 				client.WithHeaders(c.config.Headers))
 			if err != nil {
+				// Check if this is an OAuth authorization required error during SSE connection
+				if c.isOAuthAuthorizationRequired(err) {
+					c.logger.Info("OAuth authorization required during SSE connection")
+					if c.upstreamLogger != nil {
+						c.upstreamLogger.Info("OAuth authorization required during SSE connection")
+					}
+
+					// Auto-initialize OAuth configuration if not present
+					if c.config.OAuth == nil {
+						c.logger.Info("Auto-initializing OAuth configuration for SSE")
+						c.config.OAuth = c.createAutoOAuthConfig()
+					} else {
+						c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
+					}
+
+					// Set OAuth pending state
+					c.setOAuthPending(true, err)
+
+					// For local deployments, automatically trigger OAuth flow
+					deploymentType := c.detectDeploymentType()
+					if deploymentType == DeploymentLocal {
+						go c.triggerOAuthFlowAsync(ctx)
+					}
+
+					// Return nil to indicate "success" with OAuth pending
+					return nil
+				}
+
 				c.mu.Lock()
 				c.lastError = err
 				c.retryCount++
@@ -644,6 +980,34 @@ func (c *Client) Connect(ctx context.Context) error {
 		} else {
 			sseClient, err := client.NewSSEMCPClient(c.config.URL)
 			if err != nil {
+				// Check if this is an OAuth authorization required error during SSE connection
+				if c.isOAuthAuthorizationRequired(err) {
+					c.logger.Info("OAuth authorization required during SSE connection")
+					if c.upstreamLogger != nil {
+						c.upstreamLogger.Info("OAuth authorization required during SSE connection")
+					}
+
+					// Auto-initialize OAuth configuration if not present
+					if c.config.OAuth == nil {
+						c.logger.Info("Auto-initializing OAuth configuration for SSE")
+						c.config.OAuth = c.createAutoOAuthConfig()
+					} else {
+						c.logger.Debug("OAuth configuration already exists, preserving discovered endpoints")
+					}
+
+					// Set OAuth pending state
+					c.setOAuthPending(true, err)
+
+					// For local deployments, automatically trigger OAuth flow
+					deploymentType := c.detectDeploymentType()
+					if deploymentType == DeploymentLocal {
+						go c.triggerOAuthFlowAsync(ctx)
+					}
+
+					// Return nil to indicate "success" with OAuth pending
+					return nil
+				}
+
 				c.mu.Lock()
 				c.lastError = err
 				c.retryCount++
@@ -720,6 +1084,32 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Start the client
 	if err := c.client.Start(connectCtx); err != nil {
+		// Check if this is an OAuth authorization required error during client start
+		if c.isOAuthAuthorizationRequired(err) {
+			c.logger.Info("OAuth authorization required during client start")
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Info("OAuth authorization required during client start")
+			}
+
+			// Auto-initialize OAuth configuration if not present
+			if c.config.OAuth == nil {
+				c.logger.Info("Auto-initializing OAuth configuration during start")
+				c.config.OAuth = c.createAutoOAuthConfig()
+			}
+
+			// Set OAuth pending state
+			c.setOAuthPending(true, err)
+
+			// For local deployments, automatically trigger OAuth flow
+			deploymentType := c.detectDeploymentType()
+			if deploymentType == DeploymentLocal {
+				go c.triggerOAuthFlowAsync(ctx)
+			}
+
+			// Return nil to indicate "success" with OAuth pending
+			return nil
+		}
+
 		c.mu.Lock()
 		c.lastError = err
 		c.retryCount++
@@ -756,6 +1146,12 @@ func (c *Client) Connect(ctx context.Context) error {
 				c.upstreamLogger.Info("OAuth authorization required")
 			}
 
+			// Auto-initialize OAuth configuration if not present
+			if c.config.OAuth == nil {
+				c.logger.Info("Auto-initializing OAuth configuration")
+				c.config.OAuth = c.createAutoOAuthConfig()
+			}
+
 			// Check if lazy OAuth is enabled
 			if c.shouldUseLazyAuth() {
 				c.logger.Info("OAuth pending - entering lazy OAuth state")
@@ -765,6 +1161,12 @@ func (c *Client) Connect(ctx context.Context) error {
 
 				// Set OAuth pending state
 				c.setOAuthPending(true, err)
+
+				// For local deployments, automatically open browser for better UX
+				deploymentType := c.detectDeploymentType()
+				if deploymentType == DeploymentLocal {
+					go c.triggerOAuthFlowAsync(connectCtx)
+				}
 
 				// Close client connection since we can't use it yet
 				c.client.Close()
@@ -990,6 +1392,53 @@ func (c *Client) GetConnectionStatus() map[string]interface{} {
 		status["server_name"] = c.serverInfo.ServerInfo.Name
 		status["server_version"] = c.serverInfo.ServerInfo.Version
 	}
+
+	// Add OAuth-related status information
+	if c.oauthPending {
+		status["oauth_pending"] = true
+		status["oauth_status"] = "authentication_required"
+		status["oauth_message"] = "OAuth authentication required. Click the authentication link to complete the process."
+
+		// Add authentication URLs if OAuth is configured
+		if c.config.OAuth != nil {
+			oauthInfo := map[string]interface{}{
+				"flow_type": c.config.OAuth.FlowType,
+			}
+
+			// Generate authentication URL for local deployments
+			deploymentType := c.detectDeploymentType()
+			if deploymentType == DeploymentLocal {
+				// For local deployments, generate a direct authentication URL
+				authURL := c.generateAuthenticationURL()
+				if authURL != "" {
+					oauthInfo["auth_url"] = authURL
+					oauthInfo["auth_instructions"] = "Click the authentication URL to complete OAuth setup in your browser."
+				}
+			} else {
+				// For remote/headless deployments, provide device code instructions
+				oauthInfo["auth_instructions"] = "OAuth authentication required. Use the upstream_servers tool to initiate the authentication flow."
+			}
+
+			status["oauth_info"] = oauthInfo
+		}
+	} else if c.config.OAuth != nil {
+		status["oauth_configured"] = true
+		status["oauth_status"] = "configured"
+	}
+
+	if c.oauthError != nil {
+		status["oauth_error"] = c.oauthError.Error()
+	}
+
+	// Add cached tools info if available
+	cachedTools := c.getCachedTools()
+	if cachedTools != nil {
+		status["cached_tools_count"] = len(cachedTools)
+		status["cached_tools_available"] = true
+	}
+
+	// Add connection state
+	status["connection_state"] = c.getConnectionState()
 
 	return status
 }
@@ -1388,8 +1837,10 @@ func (c *Client) isOAuthAuthorizationRequired(err error) bool {
 
 // handleOAuthFlow handles the OAuth authorization flow with auto-discovery
 func (c *Client) handleOAuthFlow(ctx context.Context) error {
+	c.logger.Debug("Starting handleOAuthFlow")
 	// Initialize OAuth configuration if not present with auto-discovery enabled by default
 	if c.config.OAuth == nil {
+		c.logger.Debug("OAuth config is nil, initializing")
 		c.config.OAuth = &config.OAuthConfig{
 			AutoDiscovery: &config.OAuthAutoDiscovery{
 				Enabled:           true,
@@ -1400,6 +1851,7 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 	}
 
 	// Perform auto-discovery (enabled by default)
+	c.logger.Debug("Performing OAuth auto-discovery")
 	if err := c.performOAuthAutoDiscovery(ctx); err != nil {
 		c.logger.Warn("OAuth auto-discovery failed, continuing with manual configuration", zap.Error(err))
 		if c.upstreamLogger != nil {
@@ -1408,6 +1860,7 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 	}
 
 	// Perform dynamic client registration if enabled
+	c.logger.Debug("Performing dynamic client registration")
 	if err := c.performDynamicClientRegistration(ctx); err != nil {
 		c.logger.Warn("Dynamic Client Registration failed, continuing with manual configuration", zap.Error(err))
 		if c.upstreamLogger != nil {
@@ -1427,13 +1880,32 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 		} else {
 			// Check if this is a known server that requires client registration
 			if strings.Contains(c.config.URL, "mcp.cloudflare.com") || strings.Contains(c.config.URL, "builds.mcp.cloudflare.com") {
-				return fmt.Errorf("Cloudflare MCP servers require OAuth client registration. Please:\n" +
-					"1. Visit the Cloudflare dashboard to register an OAuth client\n" +
-					"2. Add the client_id to your server configuration\n" +
-					"3. Set the redirect URI to: http://127.0.0.1:*/oauth/callback\n" +
-					"For more info, see: https://developers.cloudflare.com/agents/model-context-protocol/authorization/")
+				// For Cloudflare servers, try to use Dynamic Client Registration first
+				if c.config.OAuth.DynamicClientRegistration != nil && c.config.OAuth.DynamicClientRegistration.Enabled {
+					c.logger.Info("Attempting Dynamic Client Registration for Cloudflare server")
+					if err := c.performDynamicClientRegistration(ctx); err != nil {
+						c.logger.Warn("Dynamic Client Registration failed for Cloudflare server", zap.Error(err))
+						return fmt.Errorf("Cloudflare MCP servers require OAuth client registration. Dynamic Client Registration failed: %w.\n"+
+							"Please visit the Cloudflare dashboard to register an OAuth client manually:\n"+
+							"1. Visit the Cloudflare dashboard\n"+
+							"2. Register an OAuth client for MCP access\n"+
+							"3. Add the client_id to your server configuration\n"+
+							"4. Set the redirect URI to: http://127.0.0.1:*/oauth/callback\n"+
+							"For more info, see: https://developers.cloudflare.com/agents/model-context-protocol/authorization/", err)
+					}
+				} else {
+					return fmt.Errorf("Cloudflare MCP servers require OAuth client registration.\n" +
+						"Your server configuration has been automatically initialized with OAuth settings.\n" +
+						"To complete setup, please:\n" +
+						"1. Visit the Cloudflare dashboard\n" +
+						"2. Register an OAuth client for MCP access\n" +
+						"3. Add the client_id to your server configuration\n" +
+						"4. Set the redirect URI to: http://127.0.0.1:*/oauth/callback\n" +
+						"For more info, see: https://developers.cloudflare.com/agents/model-context-protocol/authorization/")
+				}
+			} else {
+				c.logger.Info("Proceeding with OAuth flow without client ID (public client)")
 			}
-			c.logger.Info("Proceeding with OAuth flow without client ID (public client)")
 		}
 	}
 
@@ -1511,13 +1983,24 @@ func (c *Client) performOAuthAutoDiscovery(ctx context.Context) error {
 	}
 
 	baseURL := fmt.Sprintf("%s://%s", serverURL.Scheme, serverURL.Host)
+	c.logger.Debug("Setting OAuth discovery base URL",
+		zap.String("server_url", c.config.URL),
+		zap.String("base_url", baseURL))
 	oauthHandler.SetBaseURL(baseURL)
 
 	// Discover OAuth server metadata
+	c.logger.Debug("Starting OAuth metadata discovery", zap.String("base_url", baseURL))
 	metadata, err := oauthHandler.GetServerMetadata(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to discover OAuth metadata: %w", err)
 	}
+
+	c.logger.Debug("Raw OAuth metadata discovered", zap.Any("metadata", metadata))
+	c.logger.Info("OAuth metadata discovery request details",
+		zap.String("base_url_used", baseURL),
+		zap.String("discovered_auth_endpoint", metadata.AuthorizationEndpoint),
+		zap.String("discovered_token_endpoint", metadata.TokenEndpoint),
+		zap.String("discovered_registration_endpoint", metadata.RegistrationEndpoint))
 
 	c.logger.Info("OAuth metadata discovered successfully",
 		zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
@@ -1531,10 +2014,24 @@ func (c *Client) performOAuthAutoDiscovery(ctx context.Context) error {
 
 	// Update OAuth configuration with discovered endpoints (only if not manually configured)
 	if c.config.OAuth.AuthorizationEndpoint == "" {
-		c.config.OAuth.AuthorizationEndpoint = metadata.AuthorizationEndpoint
+		// HOTFIX: Cloudflare-specific endpoint correction
+		authEndpoint := metadata.AuthorizationEndpoint
+		if strings.Contains(c.config.URL, "mcp.cloudflare.com") {
+			// Cloudflare returns /authorize but actually uses /oauth/authorize
+			if strings.HasSuffix(authEndpoint, "/authorize") && !strings.HasSuffix(authEndpoint, "/oauth/authorize") {
+				authEndpoint = strings.Replace(authEndpoint, "/authorize", "/oauth/authorize", 1)
+				c.logger.Info("Applied Cloudflare OAuth endpoint fix",
+					zap.String("discovered", metadata.AuthorizationEndpoint),
+					zap.String("corrected", authEndpoint))
+			}
+		}
+
+		c.config.OAuth.AuthorizationEndpoint = authEndpoint
+		c.logger.Debug("Updated AuthorizationEndpoint from auto-discovery", zap.String("endpoint", authEndpoint))
 	}
 	if c.config.OAuth.TokenEndpoint == "" {
 		c.config.OAuth.TokenEndpoint = metadata.TokenEndpoint
+		c.logger.Debug("Updated TokenEndpoint from auto-discovery", zap.String("endpoint", metadata.TokenEndpoint))
 	}
 
 	// Set registration endpoint if available for DCR
@@ -1714,7 +2211,8 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 	resultChan := make(chan error, 1)
 	var token *oauth2.Token
 
-	// Start a local server to handle the OAuth callback
+	// RFC 8252 compliant: Use random/ephemeral ports for OAuth callback
+	// This prevents port conflicts and follows security best practices
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("failed to start local server for oauth callback: %w", err)
@@ -1724,22 +2222,49 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 	port := listener.Addr().(*net.TCPAddr).Port
 	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/oauth/callback", port)
 
-	// Only use configured redirect URIs if they're explicitly set (not auto-generated)
-	// For local authorization code flow, we need to use the dynamic port
-	oauth := c.getOAuthConfig()
-	if oauth.RedirectURI != "" || len(oauth.RedirectURIs) > 0 {
-		// User has explicitly configured redirect URIs, use the first one
-		redirectURIs := c.getRedirectURIs()
-		if len(redirectURIs) > 0 {
-			redirectURL = redirectURIs[0]
-			c.logger.Info("Using configured redirect URI", zap.String("redirect_uri", redirectURL))
+	// Two-Phase Solution: Perform DCR with exact redirect URI for Cloudflare compatibility
+	// Always re-register for local deployments to ensure exact redirect URI matching
+	if c.detectDeploymentType() == DeploymentLocal && oauthCfg.RegistrationEndpoint != "" {
+		c.logger.Info("Performing DCR with exact redirect URI for Cloudflare compatibility",
+			zap.String("redirect_uri", redirectURL),
+			zap.String("previous_client_id", oauthCfg.ClientID))
+		if err := c.performDCRWithExactRedirectURI(ctx, redirectURL); err != nil {
+			c.logger.Warn("DCR with exact redirect URI failed", zap.Error(err))
+		} else {
+			c.logger.Info("Successfully re-registered client with exact redirect URI",
+				zap.String("redirect_uri", redirectURL),
+				zap.String("new_client_id", oauthCfg.ClientID))
 		}
-	} else {
-		// Use dynamic redirect URL for local OAuth flow
-		c.logger.Info("Using dynamic redirect URI for local OAuth flow",
+	}
+
+	deploymentType := c.detectDeploymentType()
+	if deploymentType == DeploymentLocal {
+		c.logger.Info("Using random port for local OAuth flow (RFC 8252 compliant)",
 			zap.String("redirect_uri", redirectURL),
 			zap.Int("port", port))
+	} else {
+		// For remote deployments, use configured redirect URIs if available
+		oauth := c.getOAuthConfig()
+		if oauth.RedirectURI != "" || len(oauth.RedirectURIs) > 0 {
+			redirectURIs := c.getRedirectURIs()
+			if len(redirectURIs) > 0 {
+				redirectURL = redirectURIs[0]
+				c.logger.Info("Using configured redirect URI for remote deployment",
+					zap.String("redirect_uri", redirectURL))
+			}
+		}
+
+		// Start server on dynamic port for remote deployments
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return fmt.Errorf("failed to start local server for oauth callback: %w", err)
+		}
+		port = listener.Addr().(*net.TCPAddr).Port
+		if redirectURL == "" {
+			redirectURL = fmt.Sprintf("http://127.0.0.1:%d/oauth/callback", port)
+		}
 	}
+	defer listener.Close()
 
 	// Create a state token for CSRF protection
 	stateBytes := make([]byte, 32)
@@ -1747,6 +2272,13 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 		return fmt.Errorf("failed to generate state token: %w", err)
 	}
 	state := base64.URLEncoding.EncodeToString(stateBytes)
+
+	// Debug the OAuth configuration before building the URL
+	c.logger.Debug("Building OAuth config for authorization code flow",
+		zap.String("authorization_endpoint", oauthCfg.AuthorizationEndpoint),
+		zap.String("token_endpoint", oauthCfg.TokenEndpoint),
+		zap.String("client_id", oauthCfg.ClientID),
+		zap.String("redirect_url", redirectURL))
 
 	conf := &oauth2.Config{
 		ClientID:     oauthCfg.ClientID,
@@ -1778,6 +2310,12 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 	}
 
 	authURL := conf.AuthCodeURL(state, authURLOptions...)
+
+	// Debug the final authorization URL
+	c.logger.Debug("Generated authorization URL",
+		zap.String("auth_url", authURL),
+		zap.String("oauth_config_auth_url", conf.Endpoint.AuthURL),
+		zap.String("oauth_config_token_url", conf.Endpoint.TokenURL))
 
 	// Open browser for user to authorize
 	c.logger.Info("Opening browser for OAuth authorization", zap.String("url", authURL))
@@ -1850,12 +2388,20 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 	}()
 
 	// Wait for result from callback handler or context cancellation
+	c.logger.Debug("Waiting for OAuth callback or context cancellation",
+		zap.String("callback_url", redirectURL))
+
 	select {
 	case err := <-resultChan:
 		if err != nil {
+			c.logger.Error("OAuth callback received error", zap.Error(err))
 			return err
 		}
+		c.logger.Debug("OAuth callback completed successfully")
 	case <-ctx.Done():
+		c.logger.Error("OAuth flow context canceled",
+			zap.Error(ctx.Err()),
+			zap.String("callback_url", redirectURL))
 		return ctx.Err()
 	}
 
