@@ -547,20 +547,20 @@ func (c *Client) registerClient(ctx context.Context, registrationEndpoint string
 // detectDeploymentType automatically detects the deployment type based on environment
 func (c *Client) detectDeploymentType() DeploymentType {
 	if c.deploymentType != 0 {
-		c.logger.Debug("Using cached deployment type", zap.String("type", c.deploymentType.String()))
+		c.logger.Debug("🏠 DEPLOYMENT Using cached deployment type", zap.String("type", c.deploymentType.String()))
 		return c.deploymentType // Use cached result
 	}
 
 	// Check if running in headless environment
 	if os.Getenv("DISPLAY") == "" && runtime.GOOS == "linux" {
-		c.logger.Info("Detected headless deployment", zap.String("os", runtime.GOOS), zap.String("display", os.Getenv("DISPLAY")))
+		c.logger.Info("🏠 DEPLOYMENT Detected headless deployment", zap.String("os", runtime.GOOS), zap.String("display", os.Getenv("DISPLAY")))
 		c.deploymentType = DeploymentHeadless
 		return DeploymentHeadless
 	}
 
 	// Check if mcpproxy is configured with public URL
 	if c.config.PublicURL != "" {
-		c.logger.Info("Detected remote deployment", zap.String("public_url", c.config.PublicURL))
+		c.logger.Info("🏠 DEPLOYMENT Detected remote deployment", zap.String("public_url", c.config.PublicURL))
 		c.deploymentType = DeploymentRemote
 		c.detectedPublicURL = c.config.PublicURL
 		return DeploymentRemote
@@ -568,7 +568,7 @@ func (c *Client) detectDeploymentType() DeploymentType {
 
 	// Check if mcpproxy is listening on non-localhost interfaces
 	// This would require access to global config, for now assume local
-	c.logger.Info("Detected local deployment", zap.String("os", runtime.GOOS))
+	c.logger.Info("🏠 DEPLOYMENT Detected local deployment", zap.String("os", runtime.GOOS))
 	c.deploymentType = DeploymentLocal
 	return DeploymentLocal
 }
@@ -602,11 +602,24 @@ func (c *Client) isOAuthPending() bool {
 func (c *Client) setOAuthPending(pending bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Only allow clearing OAuth pending state if OAuth flow is not active
+	// This prevents background connections from clearing the state while OAuth flow is in progress
+	if !pending && c.oauthFlowActive {
+		c.logger.Debug("🔐 OAUTH_TOKEN Ignoring attempt to clear OAuth pending state while flow is active")
+		return
+	}
+
 	c.oauthPending = pending
 	c.oauthError = err
 	if pending {
 		c.connectionState = config.ConnectionStateOAuthPending
 	}
+
+	c.logger.Debug("🔐 OAUTH_TOKEN OAuth pending state updated",
+		zap.Bool("pending", pending),
+		zap.Bool("flow_active", c.oauthFlowActive),
+		zap.String("connection_state", c.connectionState))
 }
 
 // getCachedTools returns cached tools if available and not expired
@@ -731,35 +744,38 @@ func (c *Client) generateAuthenticationURL() string {
 
 // triggerOAuthFlowAsync triggers the OAuth flow asynchronously for better UX
 func (c *Client) triggerOAuthFlowAsync(ctx context.Context) {
-	c.logger.Info("Triggering automatic OAuth flow for local deployment")
+	c.logger.Info("🔐 OAUTH_TOKEN triggerOAuthFlowAsync started - triggering automatic OAuth flow for local deployment")
 
 	// Check if OAuth flow is already active
 	c.mu.Lock()
 	if c.oauthFlowActive {
-		c.logger.Debug("OAuth flow already active, skipping duplicate trigger")
+		c.logger.Debug("🔐 OAUTH_TOKEN Flow already active, skipping duplicate trigger")
 		c.mu.Unlock()
 		return
 	}
 	c.oauthFlowActive = true
+	c.logger.Debug("🔐 OAUTH_TOKEN Flow marked as active")
+
+	// CRITICAL FIX: Capture OAuth pending state while holding the lock
+	// This prevents the race condition where background connections clear the state
+	// before we can check it
+	oauthWasPending := c.oauthPending
+	c.logger.Debug("🔐 OAUTH_TOKEN Captured OAuth pending state", zap.Bool("oauth_was_pending", oauthWasPending))
 	c.mu.Unlock()
 
 	// Ensure we reset the flag when done
 	defer func() {
 		c.mu.Lock()
 		c.oauthFlowActive = false
+		c.logger.Debug("🔐 OAUTH_TOKEN Flow marked as inactive")
 		c.mu.Unlock()
 	}()
 
-	// Wait a brief moment to allow the connection to stabilize
-	time.Sleep(500 * time.Millisecond)
-
-	// Check if OAuth is still pending
-	c.mu.RLock()
-	stillPending := c.oauthPending
-	c.mu.RUnlock()
-
-	if !stillPending {
-		c.logger.Debug("OAuth no longer pending, skipping automatic flow")
+	// Skip the problematic state check - we know OAuth was required when this function was called
+	// The race condition occurred because we were checking oauthPending after a delay,
+	// but background connections were clearing it in the meantime
+	if !oauthWasPending {
+		c.logger.Debug("🔐 OAUTH_TOKEN OAuth was not pending when flow was triggered, skipping")
 		return
 	}
 
@@ -767,32 +783,37 @@ func (c *Client) triggerOAuthFlowAsync(ctx context.Context) {
 	oauthCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	c.logger.Debug("Starting OAuth flow with background context")
+	c.logger.Info("🔐 OAUTH_TOKEN Starting OAuth flow with background context")
 
 	// Trigger OAuth flow
+	c.logger.Info("🔐 OAUTH_TOKEN About to call handleOAuthFlow")
 	if err := c.handleOAuthFlow(oauthCtx); err != nil {
-		c.logger.Error("Automatic OAuth flow failed", zap.Error(err))
+		c.logger.Error("🔐 OAUTH_TOKEN Automatic OAuth flow failed", zap.Error(err))
 		c.mu.Lock()
 		c.oauthError = err
 		c.mu.Unlock()
 		return
 	}
 
-	c.logger.Info("Automatic OAuth flow completed successfully")
+	c.logger.Info("🔐 OAUTH_TOKEN Automatic OAuth flow completed successfully")
 
 	// Clear OAuth pending state before attempting to reconnect
 	c.setOAuthPending(false, nil)
 
 	// Force reconnection after successful OAuth - bypass shouldAttemptConnection()
 	// since we know OAuth just completed and we need to establish a fresh connection
-	c.logger.Info("Forcing reconnection after successful OAuth")
-	if err := c.Connect(ctx); err != nil {
-		c.logger.Error("Failed to reconnect after automatic OAuth", zap.Error(err))
+	c.logger.Info("🔐 OAUTH_TOKEN Forcing reconnection after successful OAuth")
+	// Use a fresh context for reconnection to avoid any cancellation issues
+	reconnectCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := c.Connect(reconnectCtx); err != nil {
+		c.logger.Error("🔐 OAUTH_TOKEN Failed to reconnect after automatic OAuth", zap.Error(err))
 		c.mu.Lock()
 		c.oauthError = err
 		c.mu.Unlock()
 	} else {
-		c.logger.Info("Successfully reconnected after OAuth flow")
+		c.logger.Info("🔐 OAUTH_TOKEN Successfully reconnected after OAuth flow")
 	}
 }
 
@@ -841,26 +862,40 @@ func (c *Client) getRedirectURIs() []string {
 func (c *Client) selectOAuthFlow() string {
 	oauth := c.getOAuthConfig()
 
+	c.logger.Debug("🔐 OAUTH_TOKEN selectOAuthFlow called",
+		zap.String("configured_flow_type", oauth.FlowType),
+		zap.Bool("prefer_device_flow", oauth.PreferDeviceFlow))
+
 	// Use configured flow if not auto (and not empty)
 	if oauth.FlowType != config.OAuthFlowAuto && oauth.FlowType != "" {
+		c.logger.Debug("🔐 OAUTH_TOKEN Using configured flow type", zap.String("flow_type", oauth.FlowType))
 		return oauth.FlowType
 	}
 
 	// Auto-select based on deployment type
 	deploymentType := c.detectDeploymentType()
+	c.logger.Debug("🔐 OAUTH_TOKEN Auto-selecting flow based on deployment type", zap.String("deployment_type", deploymentType.String()))
+
+	var selectedFlow string
 	switch deploymentType {
 	case DeploymentHeadless:
-		return config.OAuthFlowDeviceCode
+		selectedFlow = config.OAuthFlowDeviceCode
 	case DeploymentRemote:
 		if oauth.PreferDeviceFlow {
-			return config.OAuthFlowDeviceCode
+			selectedFlow = config.OAuthFlowDeviceCode
+		} else {
+			selectedFlow = config.OAuthFlowAuthorizationCode
 		}
-		return config.OAuthFlowAuthorizationCode
 	case DeploymentLocal:
-		return config.OAuthFlowAuthorizationCode
+		selectedFlow = config.OAuthFlowAuthorizationCode
 	default:
-		return config.OAuthFlowDeviceCode
+		selectedFlow = config.OAuthFlowDeviceCode
 	}
+
+	c.logger.Debug("🔐 OAUTH_TOKEN Auto-selected flow",
+		zap.String("deployment_type", deploymentType.String()),
+		zap.String("selected_flow", selectedFlow))
+	return selectedFlow
 }
 
 // Connect establishes a connection to the upstream MCP server
@@ -919,15 +954,19 @@ func (c *Client) Connect(ctx context.Context) error {
 	var tokenInfo string
 	if c.config.OAuth != nil && c.config.OAuth.TokenStorage != nil {
 		hasStoredToken = true
-		tokenInfo = fmt.Sprintf("type=%s, expires_at=%v, has_refresh=%t",
+		tokenExpired := time.Now().After(c.config.OAuth.TokenStorage.ExpiresAt)
+		tokenInfo = fmt.Sprintf("type=%s, expires_at=%v, has_refresh=%t, expired=%t",
 			c.config.OAuth.TokenStorage.TokenType,
 			c.config.OAuth.TokenStorage.ExpiresAt,
-			c.config.OAuth.TokenStorage.RefreshToken != "")
+			c.config.OAuth.TokenStorage.RefreshToken != "",
+			tokenExpired)
 	}
 
-	c.logger.Debug("Connection attempt starting",
+	deploymentType := c.detectDeploymentType()
+	c.logger.Debug("🔐 OAUTH_TOKEN Connection attempt starting",
 		zap.String("upstream_id", c.id),
 		zap.String("upstream_name", c.config.Name),
+		zap.String("deployment_type", deploymentType.String()),
 		zap.Bool("has_stored_oauth_token", hasStoredToken),
 		zap.String("stored_token_info", tokenInfo))
 
@@ -943,7 +982,7 @@ func (c *Client) Connect(ctx context.Context) error {
 					c.config.OAuth.TokenStorage.TokenType,
 					c.config.OAuth.TokenStorage.ExpiresAt,
 					c.config.OAuth.TokenStorage.RefreshToken != "")
-				c.logger.Debug("Updated token info after loading from storage",
+				c.logger.Debug("🔐 OAUTH_TOKEN Updated token info after loading from storage",
 					zap.String("upstream_id", c.id),
 					zap.String("upstream_name", c.config.Name),
 					zap.Bool("has_stored_oauth_token", hasStoredToken),
@@ -977,7 +1016,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 		}
 
-		c.logger.Debug("Creating HTTP client",
+		c.logger.Debug("🔐 OAUTH_TOKEN Creating HTTP client",
 			zap.String("upstream_id", c.id),
 			zap.String("upstream_name", c.config.Name),
 			zap.Bool("should_use_oauth", shouldUseOAuth),
@@ -1007,13 +1046,15 @@ func (c *Client) Connect(ctx context.Context) error {
 
 				// For local deployments, automatically trigger OAuth flow
 				deploymentType := c.detectDeploymentType()
-				c.logger.Info("Checking deployment type for OAuth flow trigger",
+				c.logger.Info("🏠 DEPLOYMENT Checking deployment type for OAuth flow trigger",
 					zap.String("deployment_type", deploymentType.String()),
 					zap.Bool("is_local", deploymentType == DeploymentLocal))
 				if deploymentType == DeploymentLocal {
-					go c.triggerOAuthFlowAsync(ctx)
+					c.logger.Info("🏠 DEPLOYMENT About to trigger OAuth flow async")
+					// Use background context to prevent cancellation when connection context is cancelled
+					go c.triggerOAuthFlowAsync(context.Background())
 				} else {
-					c.logger.Info("OAuth flow not triggered - not local deployment",
+					c.logger.Info("🏠 DEPLOYMENT OAuth flow not triggered - not local deployment",
 						zap.String("deployment_type", deploymentType.String()))
 				}
 
@@ -1045,7 +1086,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 		}
 
-		c.logger.Debug("Creating SSE client",
+		c.logger.Debug("🔐 OAUTH_TOKEN Creating SSE client",
 			zap.String("upstream_id", c.id),
 			zap.String("upstream_name", c.config.Name),
 			zap.Bool("should_use_oauth", shouldUseOAuth),
@@ -1063,7 +1104,7 @@ func (c *Client) Connect(ctx context.Context) error {
 				allHeaders[k] = v
 			}
 
-			c.logger.Debug("SSE client headers applied",
+			c.logger.Debug("🔐 OAUTH_TOKEN SSE client headers applied",
 				zap.String("upstream_id", c.id),
 				zap.String("upstream_name", c.config.Name),
 				zap.Int("total_headers", len(allHeaders)),
@@ -1112,7 +1153,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		} else {
 			// Apply OAuth headers even if no config headers
 			if shouldUseOAuth {
-				c.logger.Debug("Applying OAuth headers to SSE client (no config headers)",
+				c.logger.Debug("🔐 OAUTH_TOKEN Applying OAuth headers to SSE client (no config headers)",
 					zap.String("upstream_id", c.id),
 					zap.String("upstream_name", c.config.Name),
 					zap.Bool("has_authorization", authHeaders["Authorization"] != ""))
@@ -1326,13 +1367,15 @@ func (c *Client) Connect(ctx context.Context) error {
 
 				// For local deployments, automatically open browser for better UX
 				deploymentType := c.detectDeploymentType()
-				c.logger.Info("Checking deployment type for OAuth flow trigger (lazy OAuth)",
+				c.logger.Info("🏠 DEPLOYMENT Checking deployment type for OAuth flow trigger (lazy OAuth)",
 					zap.String("deployment_type", deploymentType.String()),
 					zap.Bool("is_local", deploymentType == DeploymentLocal))
 				if deploymentType == DeploymentLocal {
-					go c.triggerOAuthFlowAsync(connectCtx)
+					c.logger.Info("🏠 DEPLOYMENT About to trigger OAuth flow async")
+					// Use background context to prevent cancellation when connection context is cancelled
+					go c.triggerOAuthFlowAsync(context.Background())
 				} else {
-					c.logger.Info("OAuth flow not triggered - not local deployment (lazy OAuth)",
+					c.logger.Info("🏠 DEPLOYMENT OAuth flow not triggered - not local deployment (lazy OAuth)",
 						zap.String("deployment_type", deploymentType.String()))
 				}
 
@@ -1709,7 +1752,7 @@ func (c *Client) GetLastError() error {
 func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	// Fast path: if we recently cached the tools list, return it immediately
 	if cached := c.getCachedTools(); cached != nil {
-		c.logger.Debug("ListTools returning cached tools", zap.Int("count", len(cached)))
+		c.logger.Debug("🔐 OAUTH_TOKEN ListTools returning cached tools", zap.Int("count", len(cached)))
 		return cached, nil
 	}
 
@@ -1802,7 +1845,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			tokenExpired)
 	}
 
-	c.logger.Debug("ListTools request starting",
+	c.logger.Debug("🔐 OAUTH_TOKEN ListTools request starting",
 		zap.String("upstream_id", c.id),
 		zap.String("upstream_name", c.config.Name),
 		zap.Bool("connected", connected),
@@ -1965,7 +2008,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	// Cache tools for a short period to avoid excessive polling
 	c.setCachedTools(tools, listToolsCacheDuration)
 
-	c.logger.Debug("Listed tools from upstream server", zap.Int("count", len(tools)))
+	c.logger.Debug("🔐 OAUTH_TOKEN Listed tools from upstream server - cached for 30s", zap.Int("count", len(tools)))
 	finalResult = tools
 	return tools, nil
 }
@@ -1992,7 +2035,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 			tokenExpired)
 	}
 
-	c.logger.Debug("CallTool request starting",
+	c.logger.Debug("🔐 OAUTH_TOKEN CallTool request starting",
 		zap.String("upstream_id", c.id),
 		zap.String("upstream_name", c.config.Name),
 		zap.String("tool_name", toolName),
@@ -2195,7 +2238,7 @@ func (c *Client) refreshTokenIfNeeded(ctx context.Context) error {
 		return nil // Token is still valid
 	}
 
-	c.logger.Info("OAuth token expired or expiring soon, attempting refresh",
+	c.logger.Info("🔐 OAUTH_TOKEN Token expired or expiring soon, attempting refresh",
 		zap.String("upstream_id", c.id),
 		zap.String("upstream_name", c.config.Name),
 		zap.Time("expires_at", c.config.OAuth.TokenStorage.ExpiresAt),
@@ -2254,7 +2297,7 @@ func (c *Client) refreshTokenIfNeeded(ctx context.Context) error {
 	c.oauthToken = newToken
 	c.mu.Unlock()
 
-	c.logger.Info("OAuth token refreshed successfully",
+	c.logger.Info("🔐 OAUTH_TOKEN Token refreshed successfully",
 		zap.String("upstream_id", c.id),
 		zap.String("upstream_name", c.config.Name),
 		zap.Time("new_expires_at", newToken.Expiry),
@@ -2262,10 +2305,10 @@ func (c *Client) refreshTokenIfNeeded(ctx context.Context) error {
 
 	// Save refreshed tokens to storage for persistence
 	if err := c.saveOAuthTokensToStorage(c.config.OAuth.TokenStorage); err != nil {
-		c.logger.Warn("Failed to persist refreshed OAuth tokens to storage", zap.Error(err))
+		c.logger.Warn("🔐 OAUTH_TOKEN Failed to persist refreshed tokens to storage", zap.Error(err))
 		// Continue anyway - tokens are still in memory
 	} else {
-		c.logger.Debug("Refreshed OAuth tokens persisted to storage successfully")
+		c.logger.Debug("🔐 OAUTH_TOKEN Refreshed tokens persisted to storage successfully")
 	}
 
 	// CRITICAL: Force SSE client reconnection with new tokens
@@ -2337,7 +2380,7 @@ func (c *Client) isOAuthAuthorizationRequired(err error) bool {
 		}
 	}
 
-	c.logger.Debug("OAuth requirement check",
+	c.logger.Debug("🔐 OAUTH_TOKEN Requirement check",
 		zap.String("upstream_id", c.id),
 		zap.String("upstream_name", c.config.Name),
 		zap.Error(err),
@@ -2350,10 +2393,10 @@ func (c *Client) isOAuthAuthorizationRequired(err error) bool {
 
 // handleOAuthFlow handles the OAuth authorization flow with auto-discovery
 func (c *Client) handleOAuthFlow(ctx context.Context) error {
-	c.logger.Debug("Starting handleOAuthFlow")
+	c.logger.Info("🔐 OAUTH_TOKEN handleOAuthFlow started")
 	// Initialize OAuth configuration if not present with auto-discovery enabled by default
 	if c.config.OAuth == nil {
-		c.logger.Debug("OAuth config is nil, initializing")
+		c.logger.Info("🔐 OAUTH_TOKEN OAuth config is nil, initializing")
 		c.config.OAuth = &config.OAuthConfig{
 			AutoDiscovery: &config.OAuthAutoDiscovery{
 				Enabled:           true,
@@ -2364,18 +2407,18 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 	}
 
 	// Perform auto-discovery (enabled by default)
-	c.logger.Debug("Performing OAuth auto-discovery")
+	c.logger.Info("🔐 OAUTH_TOKEN Performing OAuth auto-discovery")
 	if err := c.performOAuthAutoDiscovery(ctx); err != nil {
-		c.logger.Warn("OAuth auto-discovery failed, continuing with manual configuration", zap.Error(err))
+		c.logger.Warn("🔐 OAUTH_TOKEN OAuth auto-discovery failed, continuing with manual configuration", zap.Error(err))
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Warn("OAuth auto-discovery failed", zap.Error(err))
 		}
 	}
 
 	// Perform dynamic client registration if enabled
-	c.logger.Debug("Performing dynamic client registration")
+	c.logger.Info("🔐 OAUTH_TOKEN Performing dynamic client registration")
 	if err := c.performDynamicClientRegistration(ctx); err != nil {
-		c.logger.Warn("Dynamic Client Registration failed, continuing with manual configuration", zap.Error(err))
+		c.logger.Warn("🔐 OAUTH_TOKEN Dynamic Client Registration failed, continuing with manual configuration", zap.Error(err))
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Warn("Dynamic Client Registration failed", zap.Error(err))
 		}
@@ -2383,21 +2426,24 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 
 	// Prompt for client ID now if it's missing (when OAuth flow actually starts)
 	if c.config.OAuth.ClientID == "" {
+		c.logger.Info("🔐 OAUTH_TOKEN No client ID configured, checking flow requirements")
 		// For authorization code flow, we can try without client ID (public client)
 		// Only prompt for client ID if we're using device code flow or if explicitly required
 		if c.config.OAuth.FlowType == config.OAuthFlowDeviceCode ||
 			(c.config.OAuth.FlowType == "" && c.config.OAuth.AutoDiscovery != nil && c.config.OAuth.AutoDiscovery.PromptForClientID) {
+			c.logger.Info("🔐 OAUTH_TOKEN Prompting for client ID")
 			if err := c.promptForClientID(); err != nil {
 				return fmt.Errorf("failed to get client ID: %w", err)
 			}
 		} else {
 			// Check if this is a known server that requires client registration
 			if strings.Contains(c.config.URL, "mcp.cloudflare.com") || strings.Contains(c.config.URL, "builds.mcp.cloudflare.com") {
+				c.logger.Info("🔐 OAUTH_TOKEN Detected Cloudflare server, checking DCR")
 				// For Cloudflare servers, try to use Dynamic Client Registration first
 				if c.config.OAuth.DynamicClientRegistration != nil && c.config.OAuth.DynamicClientRegistration.Enabled {
-					c.logger.Info("Attempting Dynamic Client Registration for Cloudflare server")
+					c.logger.Info("🔐 OAUTH_TOKEN Attempting Dynamic Client Registration for Cloudflare server")
 					if err := c.performDynamicClientRegistration(ctx); err != nil {
-						c.logger.Warn("Dynamic Client Registration failed for Cloudflare server", zap.Error(err))
+						c.logger.Warn("🔐 OAUTH_TOKEN Dynamic Client Registration failed for Cloudflare server", zap.Error(err))
 						return fmt.Errorf("Cloudflare MCP servers require OAuth client registration. Dynamic Client Registration failed: %w.\n"+
 							"Please visit the Cloudflare dashboard to register an OAuth client manually:\n"+
 							"1. Visit the Cloudflare dashboard\n"+
@@ -2407,6 +2453,7 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 							"For more info, see: https://developers.cloudflare.com/agents/model-context-protocol/authorization/", err)
 					}
 				} else {
+					c.logger.Error("🔐 OAUTH_TOKEN DCR not enabled for Cloudflare server")
 					return fmt.Errorf("Cloudflare MCP servers require OAuth client registration.\n" +
 						"Your server configuration has been automatically initialized with OAuth settings.\n" +
 						"To complete setup, please:\n" +
@@ -2417,7 +2464,7 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 						"For more info, see: https://developers.cloudflare.com/agents/model-context-protocol/authorization/")
 				}
 			} else {
-				c.logger.Info("Proceeding with OAuth flow without client ID (public client)")
+				c.logger.Info("🔐 OAUTH_TOKEN Proceeding with OAuth flow without client ID (public client)")
 			}
 		}
 	}
@@ -2425,7 +2472,7 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 	// Determine which OAuth flow to use based on deployment type
 	flowType := c.selectOAuthFlow()
 
-	c.logger.Info("Selected OAuth flow type",
+	c.logger.Info("🔐 OAUTH_TOKEN Selected OAuth flow type",
 		zap.String("flow_type", flowType),
 		zap.String("deployment_type", c.detectDeploymentType().String()))
 	if c.upstreamLogger != nil {
@@ -2434,12 +2481,16 @@ func (c *Client) handleOAuthFlow(ctx context.Context) error {
 			zap.String("deployment_type", c.detectDeploymentType().String()))
 	}
 
+	c.logger.Info("🔐 OAUTH_TOKEN About to switch on flow type", zap.String("flow_type", flowType))
 	switch flowType {
 	case config.OAuthFlowAuthorizationCode:
+		c.logger.Info("🔐 OAUTH_TOKEN Calling handleAuthorizationCodeFlow")
 		return c.handleAuthorizationCodeFlow(ctx)
 	case config.OAuthFlowDeviceCode:
+		c.logger.Info("🔐 OAUTH_TOKEN Calling handleDeviceCodeFlow")
 		return c.handleDeviceCodeFlow(ctx)
 	default:
+		c.logger.Error("🔐 OAUTH_TOKEN Unsupported OAuth flow type", zap.String("flow_type", flowType))
 		return fmt.Errorf("unsupported OAuth flow type: %s", flowType)
 	}
 }
@@ -2699,7 +2750,7 @@ func (c *Client) selectDefaultScopes(supportedScopes []string) []string {
 
 // handleAuthorizationCodeFlow handles the OAuth Authorization Code flow
 func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
-	c.logger.Info("Starting OAuth Authorization Code flow")
+	c.logger.Info("🔐 OAUTH_TOKEN Starting OAuth Authorization Code flow")
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Starting OAuth Authorization Code flow")
 	}
@@ -2831,9 +2882,12 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 		zap.String("oauth_config_token_url", conf.Endpoint.TokenURL))
 
 	// Open browser for user to authorize
-	c.logger.Info("Opening browser for OAuth authorization", zap.String("url", authURL))
+	c.logger.Info("🔐 OAUTH_TOKEN Opening browser for OAuth authorization", zap.String("url", authURL))
+	c.logger.Info("🔐 OAUTH_TOKEN BROWSER_OPEN_ATTEMPT - About to call browser.OpenURL", zap.String("auth_url", authURL))
 	if err := browser.OpenURL(authURL); err != nil {
-		c.logger.Error("Failed to open browser, please navigate to the URL manually", zap.Error(err))
+		c.logger.Error("🔐 OAUTH_TOKEN BROWSER_OPEN_FAILED - Failed to open browser, please navigate to the URL manually", zap.Error(err), zap.String("auth_url", authURL))
+	} else {
+		c.logger.Info("🔐 OAUTH_TOKEN BROWSER_OPEN_SUCCESS - Browser opened successfully", zap.String("auth_url", authURL))
 	}
 
 	// Implement a simple HTTP server to handle the callback
@@ -2931,7 +2985,7 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 	c.oauthToken = token
 	c.mu.Unlock()
 
-	c.logger.Info("OAuth tokens stored successfully",
+	c.logger.Info("🔐 OAUTH_TOKEN Tokens stored successfully",
 		zap.String("upstream_id", c.id),
 		zap.String("upstream_name", c.config.Name),
 		zap.Bool("has_access_token", token.AccessToken != ""),
@@ -2941,10 +2995,10 @@ func (c *Client) handleAuthorizationCodeFlow(ctx context.Context) error {
 
 	// Save tokens to storage for persistence across restarts
 	if err := c.saveOAuthTokensToStorage(oauthCfg.TokenStorage); err != nil {
-		c.logger.Warn("Failed to persist OAuth tokens to storage", zap.Error(err))
+		c.logger.Warn("🔐 OAUTH_TOKEN Failed to persist tokens to storage", zap.Error(err))
 		// Continue anyway - tokens are still in memory
 	} else {
-		c.logger.Debug("OAuth tokens persisted to storage successfully")
+		c.logger.Debug("🔐 OAUTH_TOKEN Tokens persisted to storage successfully")
 	}
 
 	c.logger.Info("OAuth Authorization Code flow completed successfully")
@@ -3401,7 +3455,7 @@ func (c *Client) loadOAuthTokensFromStorage(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 
-	c.logger.Info("Loaded valid OAuth tokens from storage",
+	c.logger.Info("🔐 OAUTH_TOKEN Loaded valid tokens from storage",
 		zap.String("server_name", c.config.Name),
 		zap.String("token_type", tokens.TokenType),
 		zap.Time("expires_at", tokens.ExpiresAt),
@@ -3430,7 +3484,7 @@ func (c *Client) saveOAuthTokensToStorage(tokens *config.TokenStorage) error {
 		return err
 	}
 
-	c.logger.Debug("Successfully saved OAuth tokens to storage",
+	c.logger.Debug("🔐 OAUTH_TOKEN Successfully saved tokens to storage",
 		zap.String("server_name", c.config.Name),
 		zap.String("token_type", tokens.TokenType),
 		zap.Time("expires_at", tokens.ExpiresAt))
@@ -3452,7 +3506,7 @@ func (c *Client) clearOAuthTokensFromStorage() error {
 		return err
 	}
 
-	c.logger.Debug("Cleared OAuth tokens from storage",
+	c.logger.Debug("🔐 OAUTH_TOKEN Cleared tokens from storage",
 		zap.String("server_name", c.config.Name))
 
 	return nil
