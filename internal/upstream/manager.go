@@ -14,19 +14,21 @@ import (
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients      map[string]*Client
-	mu           sync.RWMutex
-	logger       *zap.Logger
-	logConfig    *config.LogConfig
-	globalConfig *config.Config
+	clients         map[string]*Client
+	mu              sync.RWMutex
+	logger          *zap.Logger
+	logConfig       *config.LogConfig
+	globalConfig    *config.Config
+	notificationMgr *NotificationManager
 }
 
 // NewManager creates a new upstream manager
 func NewManager(logger *zap.Logger, globalConfig *config.Config) *Manager {
 	return &Manager{
-		clients:      make(map[string]*Client),
-		logger:       logger,
-		globalConfig: globalConfig,
+		clients:         make(map[string]*Client),
+		logger:          logger,
+		globalConfig:    globalConfig,
+		notificationMgr: NewNotificationManager(),
 	}
 }
 
@@ -35,6 +37,11 @@ func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.logConfig = logConfig
+}
+
+// AddNotificationHandler adds a notification handler to receive state change notifications
+func (m *Manager) AddNotificationHandler(handler NotificationHandler) {
+	m.notificationMgr.AddHandler(handler)
 }
 
 // AddServerConfig adds a server configuration without connecting
@@ -52,6 +59,21 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	client, err := NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
+	}
+
+	// Set up notification callback for state changes
+	if m.notificationMgr != nil {
+		notifierCallback := StateChangeNotifier(m.notificationMgr, serverConfig.Name)
+		// Combine with existing callback if present
+		existingCallback := client.stateManager.onStateChange
+		client.stateManager.SetStateChangeCallback(func(oldState, newState ConnectionState, info ConnectionInfo) {
+			// Call existing callback first (for logging)
+			if existingCallback != nil {
+				existingCallback(oldState, newState, info)
+			}
+			// Then call notification callback
+			notifierCallback(oldState, newState, info)
+		})
 	}
 
 	m.clients[id] = client
@@ -141,7 +163,7 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 			continue
 		}
 		if !client.IsConnected() {
-			m.logger.Debug("Skipping disconnected client", zap.String("id", id))
+			m.logger.Debug("Skipping disconnected client", zap.String("id", id), zap.String("state", client.GetState().String()))
 			continue
 		}
 		connectedCount++
@@ -198,18 +220,18 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	}
 
 	// Check connection status and provide detailed error information
-	connectionStatus := targetClient.GetConnectionStatus()
 	if !targetClient.IsConnected() {
-		if connecting, ok := connectionStatus["connecting"].(bool); ok && connecting {
-			return nil, fmt.Errorf("client for server %s is currently connecting", serverName)
+		state := targetClient.GetState()
+		if targetClient.IsConnecting() {
+			return nil, fmt.Errorf("client for server %s is currently %s", serverName, state.String())
 		}
 
 		// Include last error if available
-		if lastError, ok := connectionStatus["last_error"].(string); ok && lastError != "" {
-			return nil, fmt.Errorf("client for server %s is not connected (last error: %s)", serverName, lastError)
+		if lastError := targetClient.GetLastError(); lastError != nil {
+			return nil, fmt.Errorf("client for server %s is not connected (state: %s, last error: %s)", serverName, state.String(), lastError.Error())
 		}
 
-		return nil, fmt.Errorf("client for server %s is not connected", serverName)
+		return nil, fmt.Errorf("client for server %s is not connected (state: %s)", serverName, state.String())
 	}
 
 	// Call the tool on the upstream server
@@ -239,15 +261,13 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		go func(id string, c *Client) {
 			defer wg.Done()
 			// Only connect if not already connected or trying to connect
-			status := c.GetConnectionStatus()
-			if connected, ok := status["connected"].(bool); !ok || !connected {
-				if connecting, ok := status["connecting"].(bool); !ok || !connecting {
-					if err := c.Connect(ctx); err != nil {
-						m.logger.Error("Failed to connect to upstream server",
-							zap.String("id", id),
-							zap.String("name", c.config.Name),
-							zap.Error(err))
-					}
+			if !c.IsConnected() && !c.IsConnecting() {
+				if err := c.Connect(ctx); err != nil {
+					m.logger.Error("Failed to connect to upstream server",
+						zap.String("id", id),
+						zap.String("name", c.config.Name),
+						zap.String("state", c.GetState().String()),
+						zap.Error(err))
 				}
 			}
 		}(id, client)
@@ -287,41 +307,42 @@ func (m *Manager) GetStats() map[string]interface{} {
 
 	serverStatus := make(map[string]interface{})
 	for id, client := range m.clients {
-		// Get detailed connection status
-		connectionStatus := client.GetConnectionStatus()
+		// Get detailed connection info from state manager
+		connectionInfo := client.GetConnectionInfo()
 
 		status := map[string]interface{}{
-			"connected":    connectionStatus["connected"],
-			"connecting":   connectionStatus["connecting"],
-			"retry_count":  connectionStatus["retry_count"],
-			"should_retry": connectionStatus["should_retry"],
+			"state":        connectionInfo.State.String(),
+			"connected":    connectionInfo.State == StateReady,
+			"connecting":   client.IsConnecting(),
+			"retry_count":  connectionInfo.RetryCount,
+			"should_retry": client.ShouldRetry(),
 			"name":         client.config.Name,
 			"url":          client.config.URL,
 			"protocol":     client.config.Protocol,
 		}
 
-		if connected, ok := connectionStatus["connected"].(bool); ok && connected {
+		if connectionInfo.State == StateReady {
 			connectedCount++
 		}
 
-		if connecting, ok := connectionStatus["connecting"].(bool); ok && connecting {
+		if client.IsConnecting() {
 			connectingCount++
 		}
 
-		if lastRetryTime, ok := connectionStatus["last_retry_time"].(time.Time); ok && !lastRetryTime.IsZero() {
-			status["last_retry_time"] = lastRetryTime
+		if !connectionInfo.LastRetryTime.IsZero() {
+			status["last_retry_time"] = connectionInfo.LastRetryTime
 		}
 
-		if lastError, ok := connectionStatus["last_error"].(string); ok {
-			status["last_error"] = lastError
+		if connectionInfo.LastError != nil {
+			status["last_error"] = connectionInfo.LastError.Error()
 		}
 
-		if serverName, ok := connectionStatus["server_name"].(string); ok {
-			status["server_name"] = serverName
+		if connectionInfo.ServerName != "" {
+			status["server_name"] = connectionInfo.ServerName
 		}
 
-		if serverVersion, ok := connectionStatus["server_version"].(string); ok {
-			status["server_version"] = serverVersion
+		if connectionInfo.ServerVersion != "" {
+			status["server_version"] = connectionInfo.ServerVersion
 		}
 
 		if client.GetServerInfo() != nil {
@@ -354,8 +375,7 @@ func (m *Manager) GetTotalToolCount() int {
 		}
 
 		// Quick check if client is actually reachable before making network call
-		connectionStatus := client.GetConnectionStatus()
-		if connected, ok := connectionStatus["connected"].(bool); !ok || !connected {
+		if !client.IsConnected() {
 			continue
 		}
 

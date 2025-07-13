@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/transport"
 )
 
 func TestSecureEnvironmentIntegration(t *testing.T) {
@@ -304,7 +305,7 @@ func TestRealWorldNpxScenario(t *testing.T) {
 	assert.True(t, foundPath, "PATH should be available for npx to find Node.js/npm")
 
 	// Test that we can determine the transport type (should be stdio for command-based configs)
-	transportType := client.determineTransportType()
+	transportType := transport.DetermineTransportType(serverConfig)
 	assert.Equal(t, "stdio", transportType)
 }
 

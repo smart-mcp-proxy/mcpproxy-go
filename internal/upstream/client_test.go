@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/transport"
 )
 
 func TestClient_Connect_SSE_NotSupported(t *testing.T) {
@@ -56,14 +57,8 @@ func TestClient_DetermineTransportType_SSE(t *testing.T) {
 		URL:      "http://localhost:8080/sse",
 	}
 
-	logger, err := zap.NewDevelopment()
-	require.NoError(t, err)
-
-	client, err := NewClient("test-client", cfg, logger, nil, nil)
-	require.NoError(t, err)
-
-	// Test that determineTransportType returns "sse" for SSE protocol
-	transportType := client.determineTransportType()
+	// Test that DetermineTransportType returns "sse" for SSE protocol
+	transportType := transport.DetermineTransportType(cfg)
 	assert.Equal(t, "sse", transportType)
 }
 
