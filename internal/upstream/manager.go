@@ -58,7 +58,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	}
 
 	// Create new client but don't connect yet
-	client, err := NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storageManager)
+	client, err := NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storageManager, m)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
@@ -92,6 +92,15 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 	}
 
 	return nil
+}
+
+func (m *Manager) ForceReconnect(ctx context.Context, clientID string) {
+	m.logger.Info("Manager forcing reconnect for client", zap.String("client_id", clientID))
+	if client, exists := m.GetClient(clientID); exists {
+		client.forceReconnect(ctx)
+	} else {
+		m.logger.Warn("Failed to force reconnect: client not found", zap.String("client_id", clientID))
+	}
 }
 
 // RemoveServer removes an upstream server

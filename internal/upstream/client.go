@@ -97,6 +97,9 @@ type Client struct {
 	// Global configuration for accessing tracing settings
 	globalConfig *config.Config
 
+	// Upstream manager for callbacks
+	upstreamManager *Manager
+
 	// Connection state (protected by mutex)
 	mu            sync.RWMutex
 	connected     bool
@@ -144,12 +147,13 @@ type Tool struct {
 }
 
 // NewClient creates a new MCP client for connecting to an upstream server
-func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storageManager *storage.Manager) (*Client, error) {
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storageManager *storage.Manager, upstreamManager *Manager) (*Client, error) {
 	c := &Client{
-		id:             id,
-		config:         serverConfig,
-		storageManager: storageManager,
-		globalConfig:   globalConfig,
+		id:              id,
+		config:          serverConfig,
+		storageManager:  storageManager,
+		globalConfig:    globalConfig,
+		upstreamManager: upstreamManager,
 		logger: logger.With(
 			zap.String("upstream_id", id),
 			zap.String("upstream_name", serverConfig.Name),
@@ -702,6 +706,10 @@ func (c *Client) createAutoOAuthConfig() *config.OAuthConfig {
 
 // generateAuthenticationURL generates a direct authentication URL for local deployments
 func (c *Client) generateAuthenticationURL() string {
+	return c.generateAuthenticationURLWithPKCE(nil)
+}
+
+func (c *Client) generateAuthenticationURLWithPKCE(pkceParams *PKCEParams) string {
 	if c.config.OAuth == nil {
 		return ""
 	}
@@ -796,25 +804,12 @@ func (c *Client) triggerOAuthFlowAsync(ctx context.Context) {
 	}
 
 	c.logger.Info("🔐 OAUTH_TOKEN Automatic OAuth flow completed successfully")
+	c.resetListToolsCircuitBreaker()
 
-	// Clear OAuth pending state before attempting to reconnect
-	c.setOAuthPending(false, nil)
-
-	// Force reconnection after successful OAuth - bypass shouldAttemptConnection()
-	// since we know OAuth just completed and we need to establish a fresh connection
+	// After successful OAuth, force a reconnection to refresh the connection state
 	c.logger.Info("🔐 OAUTH_TOKEN Forcing reconnection after successful OAuth")
-	// Use a fresh context for reconnection to avoid any cancellation issues
-	reconnectCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := c.Connect(reconnectCtx); err != nil {
-		c.logger.Error("🔐 OAUTH_TOKEN Failed to reconnect after automatic OAuth", zap.Error(err))
-		c.mu.Lock()
-		c.oauthError = err
-		c.mu.Unlock()
-	} else {
-		c.logger.Info("🔐 OAUTH_TOKEN Successfully reconnected after OAuth flow")
-	}
+	c.upstreamManager.ForceReconnect(ctx, c.id) // Use the manager to force reconnect
+	c.logger.Info("🔐 OAUTH_TOKEN Successfully reconnected after OAuth flow")
 }
 
 // shouldUseLazyAuth returns true if lazy OAuth should be used
@@ -3631,4 +3626,26 @@ func (c *Client) getListToolsResult() ([]*config.ToolMetadata, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.listToolsResult, c.listToolsError
+}
+
+func (c *Client) resetListToolsCircuitBreaker() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.listToolsFailureCount = 0
+	c.listToolsCircuitOpen = false
+	c.listToolsLastFailure = time.Time{}
+	c.logger.Debug("ListTools circuit breaker has been reset")
+}
+
+func (c *Client) forceReconnect(ctx context.Context) {
+	c.logger.Info("Client force reconnect called")
+	_ = c.Disconnect()
+	go func() {
+		// Create a new context for the connection attempt
+		connectCtx, cancel := context.WithTimeout(context.Background(), c.getConnectionTimeout())
+		defer cancel()
+		if err := c.Connect(connectCtx); err != nil {
+			c.logger.Error("Failed to reconnect", zap.Error(err))
+		}
+	}()
 }
