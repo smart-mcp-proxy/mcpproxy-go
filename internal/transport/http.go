@@ -7,6 +7,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
+	"go.uber.org/zap"
 )
 
 const (
@@ -26,17 +27,44 @@ type HTTPTransportConfig struct {
 
 // CreateHTTPClient creates a new MCP client using HTTP transport
 func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
+	logger := zap.L().Named("transport")
+
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("no URL specified for HTTP transport")
 	}
 
+	logger.Debug("Creating HTTP client",
+		zap.String("url", cfg.URL),
+		zap.Bool("use_oauth", cfg.UseOAuth),
+		zap.Bool("has_oauth_config", cfg.OAuthConfig != nil))
+
 	if cfg.UseOAuth && cfg.OAuthConfig != nil {
-		// Use OAuth-enabled client
-		return client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig)
+		// Use OAuth-enabled client with Dynamic Client Registration
+		logger.Info("Creating OAuth-enabled streamable HTTP client with Dynamic Client Registration",
+			zap.String("url", cfg.URL),
+			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
+			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
+			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled))
+
+		logger.Debug("OAuth config details",
+			zap.String("client_id", cfg.OAuthConfig.ClientID),
+			zap.String("client_secret", cfg.OAuthConfig.ClientSecret),
+			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
+
+		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig)
+		if err != nil {
+			logger.Error("Failed to create OAuth client", zap.Error(err))
+			return nil, fmt.Errorf("failed to create OAuth client: %w", err)
+		}
+
+		logger.Debug("OAuth-enabled HTTP client created successfully")
+		return client, nil
 	}
 
+	logger.Debug("Creating regular HTTP client", zap.String("url", cfg.URL))
 	// Use regular HTTP client
 	if len(cfg.Headers) > 0 {
+		logger.Debug("Adding HTTP headers", zap.Int("header_count", len(cfg.Headers)))
 		httpTransport, err := transport.NewStreamableHTTP(cfg.URL,
 			transport.WithHTTPHeaders(cfg.Headers))
 		if err != nil {
@@ -54,17 +82,44 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 // CreateSSEClient creates a new MCP client using SSE transport
 func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
+	logger := zap.L().Named("transport")
+
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("no URL specified for SSE transport")
 	}
 
+	logger.Debug("Creating SSE client",
+		zap.String("url", cfg.URL),
+		zap.Bool("use_oauth", cfg.UseOAuth),
+		zap.Bool("has_oauth_config", cfg.OAuthConfig != nil))
+
 	if cfg.UseOAuth && cfg.OAuthConfig != nil {
-		// Use OAuth-enabled SSE client
-		return client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig)
+		// Use OAuth-enabled SSE client with Dynamic Client Registration
+		logger.Info("Creating OAuth-enabled SSE client with Dynamic Client Registration",
+			zap.String("url", cfg.URL),
+			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
+			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
+			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled))
+
+		logger.Debug("OAuth SSE config details",
+			zap.String("client_id", cfg.OAuthConfig.ClientID),
+			zap.String("client_secret", cfg.OAuthConfig.ClientSecret),
+			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
+
+		client, err := client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig)
+		if err != nil {
+			logger.Error("Failed to create OAuth SSE client", zap.Error(err))
+			return nil, fmt.Errorf("failed to create OAuth SSE client: %w", err)
+		}
+
+		logger.Debug("OAuth-enabled SSE client created successfully")
+		return client, nil
 	}
 
+	logger.Debug("Creating regular SSE client", zap.String("url", cfg.URL))
 	// Use regular SSE client
 	if len(cfg.Headers) > 0 {
+		logger.Debug("Adding SSE headers", zap.Int("header_count", len(cfg.Headers)))
 		sseClient, err := client.NewSSEMCPClient(cfg.URL,
 			client.WithHeaders(cfg.Headers))
 		if err != nil {
