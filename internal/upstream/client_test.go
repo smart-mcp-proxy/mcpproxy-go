@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,17 @@ import (
 )
 
 func TestClient_Connect_SSE_NotSupported(t *testing.T) {
+	// Disable OAuth for these unit tests to avoid network calls
+	oldValue := os.Getenv("MCPPROXY_DISABLE_OAUTH")
+	os.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	defer func() {
+		if oldValue == "" {
+			os.Unsetenv("MCPPROXY_DISABLE_OAUTH")
+		} else {
+			os.Setenv("MCPPROXY_DISABLE_OAUTH", oldValue)
+		}
+	}()
+
 	// Create a test config with SSE protocol
 	cfg := &config.ServerConfig{
 		Name:     "test-sse-server",
@@ -33,24 +45,22 @@ func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	// Attempt to connect - should fail with OAuth authorization required
+	// Attempt to connect - should fail with connection error (not OAuth)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	err = client.Connect(ctx)
 
-	// Verify we get an OAuth authorization error, not SSE not supported
+	// Verify we get a connection error, not OAuth authorization error
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "SSE transport is not supported")
-	// Should be an OAuth authorization error since SSE with OAuth is now supported
+	// Should be a connection error since OAuth is disabled
 	assert.True(t,
-		strings.Contains(err.Error(), "authorization required") ||
-			strings.Contains(err.Error(), "no valid token available") ||
-			strings.Contains(err.Error(), "connection") ||
+		strings.Contains(err.Error(), "connection") ||
 			strings.Contains(err.Error(), "dial") ||
 			strings.Contains(err.Error(), "refused") ||
 			strings.Contains(err.Error(), "timeout"),
-		"Error should be about OAuth authorization or connection failure, not SSE support")
+		"Error should be about connection failure, not OAuth or SSE support")
 }
 
 func TestClient_DetermineTransportType_SSE(t *testing.T) {
@@ -65,6 +75,17 @@ func TestClient_DetermineTransportType_SSE(t *testing.T) {
 }
 
 func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
+	// Disable OAuth for these unit tests to avoid network calls
+	oldValue := os.Getenv("MCPPROXY_DISABLE_OAUTH")
+	os.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	defer func() {
+		if oldValue == "" {
+			os.Unsetenv("MCPPROXY_DISABLE_OAUTH")
+		} else {
+			os.Setenv("MCPPROXY_DISABLE_OAUTH", oldValue)
+		}
+	}()
+
 	cfg := &config.ServerConfig{
 		Name:     "test-sse-server",
 		URL:      "http://localhost:8080/sse",
@@ -86,23 +107,32 @@ func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
 
 	require.Error(t, err)
 
-	// Verify that the error is about OAuth authorization or connection failure, not SSE not supported
+	// Verify that the error is about connection failure, not OAuth or SSE not supported
 	errorMsg := err.Error()
 	assert.NotContains(t, errorMsg, "SSE transport is not supported")
 	assert.NotContains(t, errorMsg, "streamable-http")
 
-	// Should be an OAuth authorization error or connection error since SSE with OAuth is now supported
+	// Should be a connection error since OAuth is disabled
 	assert.True(t,
-		strings.Contains(errorMsg, "authorization required") ||
-			strings.Contains(errorMsg, "no valid token available") ||
-			strings.Contains(errorMsg, "connection") ||
+		strings.Contains(errorMsg, "connection") ||
 			strings.Contains(errorMsg, "dial") ||
 			strings.Contains(errorMsg, "refused") ||
 			strings.Contains(errorMsg, "timeout"),
-		"Error should be about OAuth authorization or connection failure, not SSE support")
+		"Error should be about connection failure, not OAuth or SSE support")
 }
 
 func TestClient_Connect_WorkingTransports(t *testing.T) {
+	// Disable OAuth for these unit tests to avoid network calls
+	oldValue := os.Getenv("MCPPROXY_DISABLE_OAUTH")
+	os.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	defer func() {
+		if oldValue == "" {
+			os.Unsetenv("MCPPROXY_DISABLE_OAUTH")
+		} else {
+			os.Setenv("MCPPROXY_DISABLE_OAUTH", oldValue)
+		}
+	}()
+
 	tests := []struct {
 		name          string
 		protocol      string
@@ -169,6 +199,17 @@ func TestClient_Connect_WorkingTransports(t *testing.T) {
 }
 
 func TestClient_Headers_Support(t *testing.T) {
+	// Disable OAuth for these unit tests to avoid network calls
+	oldValue := os.Getenv("MCPPROXY_DISABLE_OAUTH")
+	os.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	defer func() {
+		if oldValue == "" {
+			os.Unsetenv("MCPPROXY_DISABLE_OAUTH")
+		} else {
+			os.Setenv("MCPPROXY_DISABLE_OAUTH", oldValue)
+		}
+	}()
+
 	tests := []struct {
 		name      string
 		protocol  string

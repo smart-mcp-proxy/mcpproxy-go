@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -307,6 +308,12 @@ func parseBaseURL(fullURL string) (string, error) {
 // This is now based on protocol type only - OAuth detection happens when server returns 401
 func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
 	logger := zap.L().Named("oauth")
+
+	// Check if OAuth is disabled for tests
+	if os.Getenv("MCPPROXY_DISABLE_OAUTH") == "true" {
+		logger.Debug("OAuth disabled for tests", zap.String("server", serverConfig.Name))
+		return false
+	}
 
 	// Only HTTP and SSE transports support OAuth
 	if serverConfig.Protocol == "stdio" {
