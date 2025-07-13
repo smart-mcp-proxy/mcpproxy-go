@@ -17,19 +17,14 @@ import (
 	"mcpproxy-go/internal/transport"
 )
 
-// createTestServer creates a simple HTTP server for testing that responds with appropriate errors
+// createTestServer creates a simple HTTP server for testing that simulates connection issues
+// This prevents MCP protocol errors and makes failures happen at the transport level
 func createTestServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// For SSE endpoints, return a different error
-		if strings.Contains(r.URL.Path, "/sse") {
-			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte("SSE endpoint not found"))
-			return
-		}
-
-		// For regular HTTP endpoints, return a 500 error to simulate server issues
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("Internal Server Error"))
+		// Simulate connection issues by returning 503 Service Unavailable
+		// This causes transport-level failures before MCP protocol is attempted
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("Service Unavailable"))
 	}))
 }
 
@@ -83,8 +78,8 @@ func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 			strings.Contains(err.Error(), "refused") ||
 			strings.Contains(err.Error(), "timeout") ||
 			strings.Contains(err.Error(), "unexpected status code") ||
-			strings.Contains(err.Error(), "status code: 404") ||
-			strings.Contains(err.Error(), "status code: 500"),
+			strings.Contains(err.Error(), "status code: 503") ||
+			strings.Contains(err.Error(), "Service Unavailable"),
 		"Error should be about connection failure, not OAuth or SSE support")
 }
 
@@ -148,8 +143,8 @@ func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
 			strings.Contains(errorMsg, "refused") ||
 			strings.Contains(errorMsg, "timeout") ||
 			strings.Contains(errorMsg, "unexpected status code") ||
-			strings.Contains(errorMsg, "status code: 404") ||
-			strings.Contains(errorMsg, "status code: 500"),
+			strings.Contains(errorMsg, "status code: 503") ||
+			strings.Contains(errorMsg, "Service Unavailable"),
 		"Error should be about connection failure, not OAuth or SSE support")
 }
 
