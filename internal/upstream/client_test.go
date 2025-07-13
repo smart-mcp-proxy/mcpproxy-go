@@ -2,6 +2,8 @@ package upstream
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +17,22 @@ import (
 	"mcpproxy-go/internal/transport"
 )
 
+// createTestServer creates a simple HTTP server for testing that responds with appropriate errors
+func createTestServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// For SSE endpoints, return a different error
+		if strings.Contains(r.URL.Path, "/sse") {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("SSE endpoint not found"))
+			return
+		}
+
+		// For regular HTTP endpoints, return a 500 error to simulate server issues
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Internal Server Error"))
+	}))
+}
+
 func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 	// Disable OAuth for these unit tests to avoid network calls
 	oldValue := os.Getenv("MCPPROXY_DISABLE_OAUTH")
@@ -27,10 +45,14 @@ func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 		}
 	}()
 
+	// Create a test HTTP server
+	server := createTestServer()
+	defer server.Close()
+
 	// Create a test config with SSE protocol
 	cfg := &config.ServerConfig{
 		Name:     "test-sse-server",
-		URL:      "http://localhost:8080/sse",
+		URL:      server.URL + "/sse",
 		Protocol: "sse",
 		Enabled:  true,
 		Created:  time.Now(),
@@ -59,7 +81,10 @@ func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 		strings.Contains(err.Error(), "connection") ||
 			strings.Contains(err.Error(), "dial") ||
 			strings.Contains(err.Error(), "refused") ||
-			strings.Contains(err.Error(), "timeout"),
+			strings.Contains(err.Error(), "timeout") ||
+			strings.Contains(err.Error(), "unexpected status code") ||
+			strings.Contains(err.Error(), "status code: 404") ||
+			strings.Contains(err.Error(), "status code: 500"),
 		"Error should be about connection failure, not OAuth or SSE support")
 }
 
@@ -86,9 +111,13 @@ func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
 		}
 	}()
 
+	// Create a test HTTP server
+	server := createTestServer()
+	defer server.Close()
+
 	cfg := &config.ServerConfig{
 		Name:     "test-sse-server",
-		URL:      "http://localhost:8080/sse",
+		URL:      server.URL + "/sse",
 		Protocol: "sse",
 		Enabled:  true,
 		Created:  time.Now(),
@@ -117,7 +146,10 @@ func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
 		strings.Contains(errorMsg, "connection") ||
 			strings.Contains(errorMsg, "dial") ||
 			strings.Contains(errorMsg, "refused") ||
-			strings.Contains(errorMsg, "timeout"),
+			strings.Contains(errorMsg, "timeout") ||
+			strings.Contains(errorMsg, "unexpected status code") ||
+			strings.Contains(errorMsg, "status code: 404") ||
+			strings.Contains(errorMsg, "status code: 500"),
 		"Error should be about connection failure, not OAuth or SSE support")
 }
 
@@ -133,10 +165,14 @@ func TestClient_Connect_WorkingTransports(t *testing.T) {
 		}
 	}()
 
+	// Create a test HTTP server
+	server := createTestServer()
+	defer server.Close()
+
 	tests := []struct {
 		name          string
 		protocol      string
-		url           string
+		urlSuffix     string
 		command       string
 		args          []string
 		shouldConnect bool
@@ -145,21 +181,21 @@ func TestClient_Connect_WorkingTransports(t *testing.T) {
 		{
 			name:          "SSE protocol should work (until actual connection)",
 			protocol:      "sse",
-			url:           "http://localhost:8080/sse",
+			urlSuffix:     "/sse",
 			shouldConnect: false, // Will fail at actual connection, but transport creation should work
 			errorContains: "",    // Won't check error for SSE as it depends on server availability
 		},
 		{
 			name:          "HTTP protocol should work (until actual connection)",
 			protocol:      "http",
-			url:           "http://localhost:8080",
+			urlSuffix:     "",
 			shouldConnect: false, // Will fail at actual connection, but transport creation should work
 			errorContains: "",    // Won't check error for HTTP as it depends on server availability
 		},
 		{
 			name:          "Streamable-HTTP protocol should work (until actual connection)",
 			protocol:      "streamable-http",
-			url:           "http://localhost:8080",
+			urlSuffix:     "",
 			shouldConnect: false, // Will fail at actual connection, but transport creation should work
 			errorContains: "",    // Won't check error for streamable-http as it depends on server availability
 		},
@@ -170,7 +206,7 @@ func TestClient_Connect_WorkingTransports(t *testing.T) {
 			cfg := &config.ServerConfig{
 				Name:     "test-server",
 				Protocol: tt.protocol,
-				URL:      tt.url,
+				URL:      server.URL + tt.urlSuffix,
 				Command:  tt.command,
 				Args:     tt.args,
 				Enabled:  true,
@@ -210,17 +246,21 @@ func TestClient_Headers_Support(t *testing.T) {
 		}
 	}()
 
+	// Create a test HTTP server
+	server := createTestServer()
+	defer server.Close()
+
 	tests := []struct {
 		name      string
 		protocol  string
-		url       string
+		urlSuffix string
 		headers   map[string]string
 		expectErr bool
 	}{
 		{
-			name:     "SSE with headers",
-			protocol: "sse",
-			url:      "http://localhost:8080/sse",
+			name:      "SSE with headers",
+			protocol:  "sse",
+			urlSuffix: "/sse",
 			headers: map[string]string{
 				"Authorization": "Bearer token123",
 				"X-Custom":      "custom-value",
@@ -228,9 +268,9 @@ func TestClient_Headers_Support(t *testing.T) {
 			expectErr: true, // Will fail at connection, but headers should be processed
 		},
 		{
-			name:     "Streamable-HTTP with headers",
-			protocol: "streamable-http",
-			url:      "http://localhost:8080",
+			name:      "Streamable-HTTP with headers",
+			protocol:  "streamable-http",
+			urlSuffix: "",
 			headers: map[string]string{
 				"Authorization": "Bearer token456",
 				"Content-Type":  "application/json",
@@ -240,14 +280,14 @@ func TestClient_Headers_Support(t *testing.T) {
 		{
 			name:      "SSE without headers",
 			protocol:  "sse",
-			url:       "http://localhost:8080/sse",
+			urlSuffix: "/sse",
 			headers:   nil,
 			expectErr: true, // Will fail at connection
 		},
 		{
 			name:      "Streamable-HTTP without headers",
 			protocol:  "streamable-http",
-			url:       "http://localhost:8080",
+			urlSuffix: "",
 			headers:   nil,
 			expectErr: true, // Will fail at connection
 		},
@@ -258,7 +298,7 @@ func TestClient_Headers_Support(t *testing.T) {
 			cfg := &config.ServerConfig{
 				Name:     "test-headers-server",
 				Protocol: tt.protocol,
-				URL:      tt.url,
+				URL:      server.URL + tt.urlSuffix,
 				Headers:  tt.headers,
 				Enabled:  true,
 				Created:  time.Now(),
