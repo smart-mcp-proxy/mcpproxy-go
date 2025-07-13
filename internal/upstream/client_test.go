@@ -33,22 +33,24 @@ func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	// Attempt to connect - should fail at connection, not at transport creation
+	// Attempt to connect - should fail with OAuth authorization required
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	err = client.Connect(ctx)
 
-	// Verify the error is about connection failure, not SSE not supported
+	// Verify we get an OAuth authorization error, not SSE not supported
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "SSE transport is not supported")
-	// Should be a connection error since there's no actual SSE server
+	// Should be an OAuth authorization error since SSE with OAuth is now supported
 	assert.True(t,
-		strings.Contains(err.Error(), "connection") ||
+		strings.Contains(err.Error(), "authorization required") ||
+			strings.Contains(err.Error(), "no valid token available") ||
+			strings.Contains(err.Error(), "connection") ||
 			strings.Contains(err.Error(), "dial") ||
 			strings.Contains(err.Error(), "refused") ||
 			strings.Contains(err.Error(), "timeout"),
-		"Error should be about connection failure, not SSE support")
+		"Error should be about OAuth authorization or connection failure, not SSE support")
 }
 
 func TestClient_DetermineTransportType_SSE(t *testing.T) {
@@ -84,18 +86,20 @@ func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
 
 	require.Error(t, err)
 
-	// Verify that the error is about connection failure, not SSE not supported
+	// Verify that the error is about OAuth authorization or connection failure, not SSE not supported
 	errorMsg := err.Error()
 	assert.NotContains(t, errorMsg, "SSE transport is not supported")
 	assert.NotContains(t, errorMsg, "streamable-http")
 
-	// Should be a connection error since there's no actual SSE server
+	// Should be an OAuth authorization error or connection error since SSE with OAuth is now supported
 	assert.True(t,
-		strings.Contains(errorMsg, "connection") ||
+		strings.Contains(errorMsg, "authorization required") ||
+			strings.Contains(errorMsg, "no valid token available") ||
+			strings.Contains(errorMsg, "connection") ||
 			strings.Contains(errorMsg, "dial") ||
 			strings.Contains(errorMsg, "refused") ||
 			strings.Contains(errorMsg, "timeout"),
-		"Error should be about connection failure, not SSE support")
+		"Error should be about OAuth authorization or connection failure, not SSE support")
 }
 
 func TestClient_Connect_WorkingTransports(t *testing.T) {

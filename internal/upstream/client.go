@@ -22,6 +22,10 @@ import (
 	"mcpproxy-go/internal/transport"
 )
 
+const (
+	osWindows = "windows"
+)
+
 // Client represents an MCP client connection to an upstream server
 type Client struct {
 	id     string
@@ -978,7 +982,7 @@ func openBrowser(url string) error {
 	var args []string
 
 	switch runtime.GOOS {
-	case "windows":
+	case osWindows:
 		cmd = "cmd"
 		args = []string{"/c", "start"}
 	case "darwin":

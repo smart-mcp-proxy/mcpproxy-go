@@ -149,8 +149,9 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 	// Create HTTP server with dedicated mux
 	mux := http.NewServeMux()
 	server := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
-		Handler: mux,
+		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // Security: prevent Slowloris attacks
 	}
 
 	// Create callback server instance
