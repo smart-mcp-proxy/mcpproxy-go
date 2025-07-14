@@ -49,10 +49,49 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Remove existing client if it exists
+	// Check if existing client exists and if config has changed
 	if existingClient, exists := m.clients[id]; exists {
-		_ = existingClient.Disconnect()
-		delete(m.clients, id)
+		existingConfig := existingClient.config
+
+		// Compare configurations to determine if reconnection is needed
+		configChanged := existingConfig.URL != serverConfig.URL ||
+			existingConfig.Protocol != serverConfig.Protocol ||
+			existingConfig.Command != serverConfig.Command ||
+			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
+			!equalStringMaps(existingConfig.Env, serverConfig.Env) ||
+			!equalStringMaps(existingConfig.Headers, serverConfig.Headers) ||
+			existingConfig.Enabled != serverConfig.Enabled ||
+			existingConfig.Quarantined != serverConfig.Quarantined
+
+		if configChanged {
+			m.logger.Info("UPSTREAM_DEBUG: Server configuration changed, disconnecting existing client",
+				zap.String("id", id),
+				zap.String("name", serverConfig.Name),
+				zap.String("current_state", existingClient.GetState().String()),
+				zap.Bool("is_connected", existingClient.IsConnected()),
+				zap.Bool("url_changed", existingConfig.URL != serverConfig.URL),
+				zap.Bool("protocol_changed", existingConfig.Protocol != serverConfig.Protocol),
+				zap.Bool("command_changed", existingConfig.Command != serverConfig.Command),
+				zap.Bool("enabled_changed", existingConfig.Enabled != serverConfig.Enabled),
+				zap.Bool("quarantined_changed", existingConfig.Quarantined != serverConfig.Quarantined))
+			_ = existingClient.Disconnect()
+			delete(m.clients, id)
+		} else {
+			m.logger.Info("UPSTREAM_DEBUG: Server configuration unchanged, keeping existing client",
+				zap.String("id", id),
+				zap.String("name", serverConfig.Name),
+				zap.String("current_state", existingClient.GetState().String()),
+				zap.Bool("is_connected", existingClient.IsConnected()),
+				zap.Bool("enabled", serverConfig.Enabled),
+				zap.Bool("quarantined", serverConfig.Quarantined))
+			// Update the client's config reference to the new config but don't recreate the client
+			existingClient.config = serverConfig
+			return nil
+		}
+	} else {
+		m.logger.Info("UPSTREAM_DEBUG: No existing client found, creating new client",
+			zap.String("id", id),
+			zap.String("name", serverConfig.Name))
 	}
 
 	// Create new client but don't connect yet
@@ -77,11 +116,38 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	}
 
 	m.clients[id] = client
-	m.logger.Info("Added upstream server configuration",
+	m.logger.Info("UPSTREAM_DEBUG: Added new client configuration",
 		zap.String("id", id),
-		zap.String("name", serverConfig.Name))
+		zap.String("name", serverConfig.Name),
+		zap.Bool("enabled", serverConfig.Enabled),
+		zap.Bool("quarantined", serverConfig.Quarantined))
 
 	return nil
+}
+
+// Helper functions for comparing slices and maps
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStringMaps(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // AddServer adds a new upstream server and connects to it (legacy method)
@@ -91,16 +157,36 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 	}
 
 	if !serverConfig.Enabled {
-		m.logger.Info("Skipping connection for disabled server", zap.String("id", id), zap.String("name", serverConfig.Name))
+		m.logger.Info("UPSTREAM_DEBUG: Server is disabled, skipping connection",
+			zap.String("id", id),
+			zap.String("name", serverConfig.Name))
 		return nil
 	}
 
-	// Connect to server
-	ctx := context.Background()
+	// Check if client exists and is already connected
 	if client, exists := m.GetClient(id); exists {
+		if client.IsConnected() {
+			m.logger.Info("UPSTREAM_DEBUG: Server is already connected, skipping connection attempt",
+				zap.String("id", id),
+				zap.String("name", serverConfig.Name),
+				zap.String("state", client.GetState().String()))
+			return nil
+		}
+
+		m.logger.Info("UPSTREAM_DEBUG: Server exists but not connected, attempting connection",
+			zap.String("id", id),
+			zap.String("name", serverConfig.Name),
+			zap.String("state", client.GetState().String()))
+
+		// Connect to server
+		ctx := context.Background()
 		if err := client.Connect(ctx); err != nil {
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
 		}
+	} else {
+		m.logger.Error("UPSTREAM_DEBUG: Client not found after AddServerConfig - this should not happen",
+			zap.String("id", id),
+			zap.String("name", serverConfig.Name))
 	}
 
 	return nil
@@ -112,9 +198,15 @@ func (m *Manager) RemoveServer(id string) {
 	defer m.mu.Unlock()
 
 	if client, exists := m.clients[id]; exists {
+		m.logger.Info("UPSTREAM_DEBUG: Removing server, disconnecting client",
+			zap.String("id", id),
+			zap.String("state", client.GetState().String()),
+			zap.Bool("is_connected", client.IsConnected()))
 		_ = client.Disconnect()
 		delete(m.clients, id)
-		m.logger.Info("Removed upstream server", zap.String("id", id))
+		m.logger.Info("UPSTREAM_DEBUG: Removed upstream server", zap.String("id", id))
+	} else {
+		m.logger.Info("UPSTREAM_DEBUG: Server not found for removal", zap.String("id", id))
 	}
 }
 

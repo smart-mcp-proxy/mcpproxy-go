@@ -346,11 +346,16 @@ func (s *Server) loadConfiguredServers() error {
 			storedServer.Protocol != serverCfg.Protocol
 
 		if hasChanged {
-			s.logger.Info("Server configuration changed, updating storage",
+			s.logger.Info("CONFIG_DEBUG: Server configuration changed, updating storage",
 				zap.String("server", serverCfg.Name),
 				zap.Bool("new", !existsInStorage),
 				zap.Bool("enabled_changed", existsInStorage && storedServer.Enabled != serverCfg.Enabled),
 				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined))
+		} else {
+			s.logger.Info("CONFIG_DEBUG: Server configuration unchanged, but still processing",
+				zap.String("server", serverCfg.Name),
+				zap.Bool("enabled", serverCfg.Enabled),
+				zap.Bool("quarantined", serverCfg.Quarantined))
 		}
 
 		// Always sync config to storage (ensures consistency)
@@ -363,6 +368,9 @@ func (s *Server) loadConfiguredServers() error {
 		if serverCfg.Enabled {
 			// Add server to upstream manager regardless of quarantine status
 			// Quarantined servers are kept connected for inspection but blocked for execution
+			s.logger.Info("CONFIG_DEBUG: Calling AddServer on upstream manager",
+				zap.String("server", serverCfg.Name),
+				zap.Bool("config_changed", hasChanged))
 			if err := s.upstreamManager.AddServer(serverCfg.Name, serverCfg); err != nil {
 				s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", serverCfg.Name))
 			}
@@ -372,6 +380,8 @@ func (s *Server) loadConfiguredServers() error {
 			}
 		} else {
 			// Remove from upstream manager only if disabled (not quarantined)
+			s.logger.Info("CONFIG_DEBUG: Removing disabled server from upstream manager",
+				zap.String("server", serverCfg.Name))
 			s.upstreamManager.RemoveServer(serverCfg.Name)
 			s.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
 		}
@@ -740,11 +750,11 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 
 // QuarantineServer quarantines/unquarantines a server
 func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
-	s.logger.Info("Request to change server quarantine state",
+	s.logger.Info("CONFIG_DEBUG: QuarantineServer called - request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
-	s.logger.Debug("Calling storage manager QuarantineUpstreamServer",
+	s.logger.Debug("CONFIG_DEBUG: Calling storage manager QuarantineUpstreamServer",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
@@ -753,7 +763,7 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 		return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)
 	}
 
-	s.logger.Debug("Successfully updated quarantine state in storage, saving configuration",
+	s.logger.Debug("CONFIG_DEBUG: Successfully updated quarantine state in storage, about to save configuration",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
@@ -761,8 +771,9 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 		s.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))
 	}
 
-	s.logger.Info("Successfully persisted server quarantine state change. Relying on file watcher to sync running state.",
-		zap.String("server", serverName))
+	s.logger.Info("CONFIG_DEBUG: Successfully persisted server quarantine state change. This will trigger file watcher to reload config.",
+		zap.String("server", serverName),
+		zap.Bool("quarantined", quarantined))
 
 	return nil
 }
@@ -940,7 +951,7 @@ func (s *Server) SaveConfiguration() error {
 		return fmt.Errorf("configuration file path is not available")
 	}
 
-	s.logger.Info("Saving configuration to file", zap.String("path", configPath))
+	s.logger.Info("CONFIG_DEBUG: SaveConfiguration called - saving configuration to file", zap.String("path", configPath))
 
 	// Ensure we have the latest server list from the storage manager
 	latestServers, err := s.storageManager.ListUpstreamServers()
@@ -950,12 +961,16 @@ func (s *Server) SaveConfiguration() error {
 	}
 	s.config.Servers = latestServers
 
+	s.logger.Info("CONFIG_DEBUG: About to save config file - this will trigger file watcher",
+		zap.String("path", configPath),
+		zap.Int("server_count", len(latestServers)))
+
 	return config.SaveConfig(s.config, configPath)
 }
 
 // ReloadConfiguration reloads the configuration from disk
 func (s *Server) ReloadConfiguration() error {
-	s.logger.Info("Reloading configuration from disk (config as source of truth)")
+	s.logger.Info("CONFIG_DEBUG: ReloadConfiguration called - config as source of truth")
 
 	// Store old config for comparison
 	oldServerCount := len(s.config.Servers)
@@ -971,6 +986,7 @@ func (s *Server) ReloadConfiguration() error {
 	s.config = newConfig
 
 	// Reload configured servers (this is where the comprehensive sync happens)
+	s.logger.Info("CONFIG_DEBUG: About to call loadConfiguredServers from ReloadConfiguration")
 	if err := s.loadConfiguredServers(); err != nil {
 		return fmt.Errorf("failed to reload servers: %w", err)
 	}
@@ -985,7 +1001,7 @@ func (s *Server) ReloadConfiguration() error {
 		}
 	}()
 
-	s.logger.Info("Configuration reload completed",
+	s.logger.Info("CONFIG_DEBUG: Configuration reload completed",
 		zap.String("path", configPath),
 		zap.Int("old_server_count", oldServerCount),
 		zap.Int("new_server_count", len(newConfig.Servers)),
