@@ -744,25 +744,18 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
-	s.logger.Debug("Calling storage manager QuarantineUpstreamServer",
-		zap.String("server", serverName),
-		zap.Bool("quarantined", quarantined))
-
 	if err := s.storageManager.QuarantineUpstreamServer(serverName, quarantined); err != nil {
 		s.logger.Error("Failed to update server quarantine state in storage", zap.Error(err))
 		return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)
 	}
 
-	s.logger.Debug("Successfully updated quarantine state in storage, saving configuration",
-		zap.String("server", serverName),
-		zap.Bool("quarantined", quarantined))
-
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))
 	}
 
-	s.logger.Info("Successfully persisted server quarantine state change. Relying on file watcher to sync running state.",
-		zap.String("server", serverName))
+	s.logger.Info("Successfully persisted server quarantine state change",
+		zap.String("server", serverName),
+		zap.Bool("quarantined", quarantined))
 
 	return nil
 }
@@ -940,7 +933,7 @@ func (s *Server) SaveConfiguration() error {
 		return fmt.Errorf("configuration file path is not available")
 	}
 
-	s.logger.Info("Saving configuration to file", zap.String("path", configPath))
+	s.logger.Debug("Saving configuration to file", zap.String("path", configPath))
 
 	// Ensure we have the latest server list from the storage manager
 	latestServers, err := s.storageManager.ListUpstreamServers()
@@ -955,7 +948,7 @@ func (s *Server) SaveConfiguration() error {
 
 // ReloadConfiguration reloads the configuration from disk
 func (s *Server) ReloadConfiguration() error {
-	s.logger.Info("Reloading configuration from disk (config as source of truth)")
+	s.logger.Info("Reloading configuration from disk")
 
 	// Store old config for comparison
 	oldServerCount := len(s.config.Servers)

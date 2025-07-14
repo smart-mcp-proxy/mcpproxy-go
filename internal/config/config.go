@@ -60,10 +60,20 @@ type ServerConfig struct {
 	Args        []string          `json:"args,omitempty" mapstructure:"args"`
 	Env         map[string]string `json:"env,omitempty" mapstructure:"env"`
 	Headers     map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
+	OAuth       *OAuthConfig      `json:"oauth,omitempty" mapstructure:"oauth"`     // OAuth configuration
 	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
 	Created     time.Time         `json:"created" mapstructure:"created"`
 	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
+}
+
+// OAuthConfig represents OAuth configuration for a server
+type OAuthConfig struct {
+	ClientID     string   `json:"client_id,omitempty" mapstructure:"client_id"`
+	ClientSecret string   `json:"client_secret,omitempty" mapstructure:"client_secret"`
+	RedirectURI  string   `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
+	Scopes       []string `json:"scopes,omitempty" mapstructure:"scopes"`
+	PKCEEnabled  bool     `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
 }
 
 // CursorMCPConfig represents the structure for Cursor IDE MCP configuration

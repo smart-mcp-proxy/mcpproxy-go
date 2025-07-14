@@ -387,3 +387,106 @@ Main Context (from signal)
 - **Proper HTTP server handling**: Uses `http.Server.Shutdown()` vs blocking `ListenAndServe()`
 - **Logging throughout**: Every shutdown step is logged for debugging
 - **Timeout management**: Prevents hanging on unresponsive operations
+
+### OAuth2 Authentication Implementation
+
+MCPProxy implements **OAuth 2.1 Authorization Code Flow with PKCE** for secure authentication with upstream MCP servers. The implementation is fully **RFC 8252 compliant** and handles the critical challenge of **exact URI matching** required by providers like Cloudflare.
+
+#### Key Implementation Features
+
+1. **Dynamic Port Allocation**: Each OAuth flow uses a unique, dynamically allocated port to avoid conflicts
+2. **Callback Server Coordination**: Global callback server manager ensures proper lifecycle management
+3. **RFC 8252 Compliance**: Uses `127.0.0.1` loopback interface with OS-assigned ephemeral ports
+4. **PKCE Security**: Mandatory Proof Key for Code Exchange for all OAuth flows
+5. **Automatic Retry**: OAuth-authenticated connections automatically retry MCP initialization
+
+#### OAuth Flow Sequence
+
+```mermaid
+sequenceDiagram
+    participant Client as MCPProxy
+    participant Server as MCP Server
+    participant Auth as OAuth Provider
+    participant Browser as User Browser
+    participant Callback as Local Callback Server
+
+    Client->>Server: MCP Initialize Request
+    Server-->>Client: 401 Unauthorized (OAuth Required)
+    
+    Client->>Client: Start Callback Server (Dynamic Port)
+    Client->>Auth: Dynamic Client Registration
+    Auth-->>Client: Client ID & Endpoints
+    
+    Client->>Client: Generate PKCE Challenge
+    Client->>Browser: Open Authorization URL
+    Browser->>Auth: User Authentication
+    Auth->>Callback: Authorization Code (via redirect)
+    Callback-->>Client: Authorization Code + State
+    
+    Client->>Auth: Token Exchange (with PKCE)
+    Auth-->>Client: Access & Refresh Tokens
+    
+    Client->>Server: Retry MCP Initialize (with tokens)
+    Server-->>Client: Success + Server Info
+```
+
+#### OAuth Configuration Structure
+
+```go
+type OAuthConfig struct {
+    ClientID     string   `json:"client_id,omitempty"`
+    ClientSecret string   `json:"client_secret,omitempty"`
+    RedirectURI  string   `json:"redirect_uri,omitempty"`  // Dynamically generated
+    Scopes       []string `json:"scopes,omitempty"`
+    PKCEEnabled  bool     `json:"pkce_enabled,omitempty"`
+}
+```
+
+#### Callback Server Management
+
+The **Global Callback Server Manager** coordinates OAuth callback servers to ensure:
+
+- **Unique Port Allocation**: Each server gets its own dedicated port
+- **Lifecycle Management**: Proper startup, shutdown, and cleanup
+- **Race Condition Prevention**: Port allocation and server startup are coordinated
+- **Resource Management**: Automatic cleanup of unused callback servers
+
+```go
+type CallbackServerManager struct {
+    servers map[string]*CallbackServer
+    mu      sync.RWMutex
+    logger  *zap.Logger
+}
+
+type CallbackServer struct {
+    Port         int
+    RedirectURI  string
+    Server       *http.Server
+    CallbackChan chan map[string]string
+    logger       *zap.Logger
+}
+```
+
+#### OAuth Integration with mcp-go
+
+MCPProxy leverages the `mark3labs/mcp-go` library's native OAuth support:
+
+- **OAuth-Enabled Clients**: Uses `client.NewOAuthStreamableHttpClient()` for HTTP transport
+- **Automatic Detection**: Library automatically detects OAuth requirements (401 responses)
+- **Built-in Flow Handling**: Library manages PKCE, state parameters, and token exchange
+- **Dynamic Client Registration**: Automatic client registration when no pre-configured client ID
+
+#### Error Handling and Retry Logic
+
+- **Exponential Backoff**: Failed OAuth attempts use exponential backoff (1s, 2s, 4s, ...)
+- **Timeout Handling**: 5-minute timeout for user authentication
+- **State Validation**: Strict validation of OAuth state parameters
+- **Graceful Degradation**: Clear error messages for common failure scenarios
+
+#### Security Considerations
+
+1. **PKCE Mandatory**: All OAuth flows use PKCE for code exchange security
+2. **State Parameter**: Random state generation and validation prevents CSRF
+3. **Localhost Binding**: Callback servers bind only to `127.0.0.1` loopback
+4. **Token Storage**: In-memory token storage with automatic refresh
+5. **Exact URI Matching**: Perfect URI consistency for Cloudflare OAuth compliance

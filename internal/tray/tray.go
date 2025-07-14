@@ -261,7 +261,7 @@ func (a *App) watchConfigFile() {
 			}
 
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				a.logger.Info("Config file changed, reloading configuration", zap.String("event", event.String()))
+				a.logger.Debug("Config file changed, reloading configuration", zap.String("event", event.String()))
 
 				// Add a small delay to ensure file write is complete
 				time.Sleep(500 * time.Millisecond)
@@ -269,7 +269,7 @@ func (a *App) watchConfigFile() {
 				if err := a.server.ReloadConfiguration(); err != nil {
 					a.logger.Error("Failed to reload configuration", zap.Error(err))
 				} else {
-					a.logger.Info("Configuration reloaded successfully")
+					a.logger.Debug("Configuration reloaded successfully")
 					// Force a menu refresh after config reload
 					a.forceRefresh = true
 					a.refreshMenusImmediate()

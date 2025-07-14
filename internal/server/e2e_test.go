@@ -44,6 +44,10 @@ type MockUpstreamServer struct {
 
 // NewTestEnvironment creates a complete test environment
 func NewTestEnvironment(t *testing.T) *TestEnvironment {
+	// Disable OAuth for e2e tests to avoid network calls to mock servers
+	oldValue := os.Getenv("MCPPROXY_DISABLE_OAUTH")
+	os.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
 	// Create temp directory
 	tempDir, err := os.MkdirTemp("", "mcpproxy-e2e-*")
 	require.NoError(t, err)
@@ -111,6 +115,13 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 
 		// Remove temp directory
 		os.RemoveAll(tempDir)
+
+		// Restore original OAuth environment variable
+		if oldValue == "" {
+			os.Unsetenv("MCPPROXY_DISABLE_OAUTH")
+		} else {
+			os.Setenv("MCPPROXY_DISABLE_OAUTH", oldValue)
+		}
 	}
 
 	return env
