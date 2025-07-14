@@ -55,66 +55,8 @@ mcpproxy                # starts HTTP server on :8080 and shows tray
 
 ### 3. Add servers
 
-Edit `mcp_config.json` (see below). Or ask LLM to add servers (see [doc](https://mcpproxy.app/docs/configuration#adding-servers)).
+Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](https://mcpproxy.app/docs/configuration#adding-servers)).
 
-## OAuth Authentication Support
-
-MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that require user authorization (like Cloudflare AutoRAG, GitHub, etc.):
-
-### ✨ **Key Features**
-- **RFC 8252 Compliant**: Dynamic port allocation for secure callback handling
-- **PKCE Security**: Proof Key for Code Exchange for enhanced security
-- **Auto Browser Launch**: Opens your default browser for authentication
-- **Dynamic Client Registration**: Automatic client registration with OAuth servers
-- **Token Management**: Automatic token refresh and storage
-
-### 🔄 **How It Works**
-1. **Add OAuth Server**: Configure an OAuth-enabled MCP server in your config
-2. **Auto Authentication**: MCPProxy detects when OAuth is required (401 response)
-3. **Browser Opens**: Your default browser opens to the OAuth provider's login page
-4. **Dynamic Callback**: MCPProxy starts a local callback server on a random port
-5. **Token Exchange**: Authorization code is automatically exchanged for access tokens
-6. **Ready to Use**: Server becomes available for tool calls immediately
-
-### 📝 **OAuth Server Configuration**
-
-> **Note**: The `"oauth"` configuration is **optional**. MCPProxy will automatically detect when OAuth is required and use sensible defaults in most cases. You only need to specify OAuth settings if you want to customize scopes or have pre-registered client credentials.
-
-```jsonc
-{
-  "mcpServers": [
-    {
-      "name": "cloudflare_autorag",
-      "url": "https://autorag.mcp.cloudflare.com/mcp",
-      "protocol": "streamable-http",
-      "enabled": true,
-      "oauth": {
-        "scopes": ["mcp.read", "mcp.write"],
-        "pkce_enabled": true
-      }
-    }
-  ]
-}
-```
-
-**OAuth Configuration Options** (all optional):
-- `scopes`: OAuth scopes to request (default: `["mcp.read", "mcp.write"]`)
-- `pkce_enabled`: Enable PKCE for security (default: `true`, recommended)
-- `client_id`: Pre-registered client ID (optional, uses Dynamic Client Registration if empty)
-- `client_secret`: Client secret (optional, for confidential clients)
-
-### 🔧 **OAuth Debugging**
-
-Enable debug logging to see the complete OAuth flow:
-
-```bash
-mcpproxy --log-level=debug --tray=false
-```
-
-Check logs for OAuth flow details:
-```bash
-tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(oauth|OAuth)"
-```
 
 ## Add proxy to Cursor
 
@@ -184,6 +126,65 @@ mcpproxy --help
 ```
 
 ---
+
+## OAuth Authentication Support
+
+MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that require user authorization (like Cloudflare AutoRAG, GitHub, etc.):
+
+### ✨ **Key Features**
+- **RFC 8252 Compliant**: Dynamic port allocation for secure callback handling
+- **PKCE Security**: Proof Key for Code Exchange for enhanced security
+- **Auto Browser Launch**: Opens your default browser for authentication
+- **Dynamic Client Registration**: Automatic client registration with OAuth servers
+- **Token Management**: Automatic token refresh and storage
+
+### 🔄 **How It Works**
+1. **Add OAuth Server**: Configure an OAuth-enabled MCP server in your config
+2. **Auto Authentication**: MCPProxy detects when OAuth is required (401 response)
+3. **Browser Opens**: Your default browser opens to the OAuth provider's login page
+4. **Dynamic Callback**: MCPProxy starts a local callback server on a random port
+5. **Token Exchange**: Authorization code is automatically exchanged for access tokens
+6. **Ready to Use**: Server becomes available for tool calls immediately
+
+### 📝 **OAuth Server Configuration**
+
+> **Note**: The `"oauth"` configuration is **optional**. MCPProxy will automatically detect when OAuth is required and use sensible defaults in most cases. You only need to specify OAuth settings if you want to customize scopes or have pre-registered client credentials.
+
+```jsonc
+{
+  "mcpServers": [
+    {
+      "name": "cloudflare_autorag",
+      "url": "https://autorag.mcp.cloudflare.com/mcp",
+      "protocol": "streamable-http",
+      "enabled": true,
+      "oauth": {
+        "scopes": ["mcp.read", "mcp.write"],
+        "pkce_enabled": true
+      }
+    }
+  ]
+}
+```
+
+**OAuth Configuration Options** (all optional):
+- `scopes`: OAuth scopes to request (default: `["mcp.read", "mcp.write"]`)
+- `pkce_enabled`: Enable PKCE for security (default: `true`, recommended)
+- `client_id`: Pre-registered client ID (optional, uses Dynamic Client Registration if empty)
+- `client_secret`: Client secret (optional, for confidential clients)
+
+### 🔧 **OAuth Debugging**
+
+Enable debug logging to see the complete OAuth flow:
+
+```bash
+mcpproxy --log-level=debug --tray=false
+```
+
+Check logs for OAuth flow details:
+```bash
+tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(oauth|OAuth)"
+```
 
 ## Learn More
 
