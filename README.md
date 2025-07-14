@@ -78,6 +78,8 @@ MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that req
 
 ### 📝 **OAuth Server Configuration**
 
+> **Note**: The `"oauth"` configuration is **optional**. MCPProxy will automatically detect when OAuth is required and use sensible defaults in most cases. You only need to specify OAuth settings if you want to customize scopes or have pre-registered client credentials.
+
 ```jsonc
 {
   "mcpServers": [
@@ -95,7 +97,7 @@ MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that req
 }
 ```
 
-**OAuth Configuration Options**:
+**OAuth Configuration Options** (all optional):
 - `scopes`: OAuth scopes to request (default: `["mcp.read", "mcp.write"]`)
 - `pkce_enabled`: Enable PKCE for security (default: `true`, recommended)
 - `client_id`: Pre-registered client ID (optional, uses Dynamic Client Registration if empty)
