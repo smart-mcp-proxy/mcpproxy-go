@@ -20,11 +20,11 @@ import (
 // createTestServer creates a simple HTTP server for testing that simulates connection issues
 // This prevents MCP protocol errors and makes failures happen at the transport level
 func createTestServer() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Simulate connection issues by returning 503 Service Unavailable
 		// This causes transport-level failures before MCP protocol is attempted
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte("Service Unavailable"))
+		_, _ = w.Write([]byte("Service Unavailable"))
 	}))
 }
 
