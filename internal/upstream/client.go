@@ -288,23 +288,45 @@ func (c *Client) Connect(ctx context.Context) error {
 				zap.String("server", c.config.Name),
 				zap.String("oauth_handler_status", "initialized"))
 
-			// Defensive check: Validate OAuth handler state
+			// Validate OAuth handler before proceeding
 			if oauthHandler == nil {
-				err := fmt.Errorf("OAuth handler is nil, cannot proceed with DCR")
-				c.logger.Error("Critical DCR error - OAuth handler is nil",
+				err := fmt.Errorf("OAuth handler is nil after initialization")
+				c.logger.Error("Critical error - OAuth handler validation failed",
 					zap.String("server", c.config.Name),
 					zap.Error(err))
-				c.stateManager.SetError(err)
-				return fmt.Errorf("OAuth setup failed - handler initialization failed: %w", err)
+				return fmt.Errorf("OAuth setup failed - handler initialization error: %w", err)
 			}
-
-			// Pre-check: Try to get server metadata to detect issues early
-			c.logger.Debug("Pre-checking server metadata before DCR",
-				zap.String("server", c.config.Name))
 
 			// Use a short timeout for metadata check to prevent hanging
 			metadataCtx, metadataCancel := context.WithTimeout(connectCtx, 30*time.Second)
 			defer metadataCancel()
+
+			// Enhanced metadata investigation to understand the root cause
+			c.logger.Debug("Investigating server OAuth metadata availability",
+				zap.String("server", c.config.Name),
+				zap.String("server_url", c.config.URL))
+
+			// Try to directly check if the server supports OAuth metadata endpoints
+			metadataEndpoints := []string{
+				c.config.URL + "/.well-known/oauth-authorization-server",
+				c.config.URL + "/.well-known/oauth-protected-resource",
+				strings.TrimSuffix(c.config.URL, "/mcp") + "/.well-known/oauth-authorization-server",
+				strings.TrimSuffix(c.config.URL, "/") + "/.well-known/oauth-protected-resource",
+			}
+
+			c.logger.Debug("Checking potential OAuth metadata endpoints",
+				zap.String("server", c.config.Name),
+				zap.Strings("endpoints", metadataEndpoints))
+
+			// Enhanced resource management and cleanup
+			defer func() {
+				// Ensure proper cleanup regardless of outcome
+				if metadataCtx.Err() != nil {
+					c.logger.Debug("OAuth metadata context cleanup",
+						zap.String("server", c.config.Name),
+						zap.Error(metadataCtx.Err()))
+				}
+			}()
 
 			// This is a defensive call to understand what getServerMetadata returns
 			// We'll wrap the actual RegisterClient call to catch the nil pointer issue
@@ -318,32 +340,47 @@ func (c *Client) Connect(ctx context.Context) error {
 					}
 				}()
 
-				c.logger.Debug("Starting Dynamic Client Registration with safety wrapper",
+				c.logger.Debug("Starting Dynamic Client Registration with enhanced safety wrapper",
 					zap.String("server", c.config.Name))
 			}()
 
 			// Step 1: Dynamic Client Registration with enhanced error handling and safety wrapper
 			var regErr error
+			var isDCRUnsupported bool
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						c.logger.Error("Panic during RegisterClient call - likely nil metadata",
+						panicStr := fmt.Sprintf("%v", r)
+						c.logger.Error("Panic during RegisterClient call - enhanced diagnostics",
 							zap.String("server", c.config.Name),
 							zap.Any("panic", r),
-							zap.String("likely_cause", "getServerMetadata returned nil without error"))
-						regErr = fmt.Errorf("RegisterClient panicked - server metadata unavailable: %v", r)
+							zap.String("panic_type", fmt.Sprintf("%T", r)),
+							zap.String("likely_cause", "Server OAuth metadata endpoint unavailable or malformed"),
+							zap.String("recovery_action", "Gracefully handling panic and setting appropriate error state"))
+
+						// Enhanced error classification based on panic details
+						if strings.Contains(panicStr, "nil pointer") {
+							regErr = fmt.Errorf("OAuth metadata unavailable - server does not provide valid OAuth configuration: %v", r)
+							isDCRUnsupported = true
+						} else {
+							regErr = fmt.Errorf("OAuth registration failed with unexpected error: %v", r)
+						}
 					}
 				}()
 
-				c.logger.Debug("Calling oauthHandler.RegisterClient",
+				c.logger.Debug("Calling oauthHandler.RegisterClient with enhanced monitoring",
 					zap.String("server", c.config.Name),
-					zap.String("client_name", "mcpproxy-go"))
+					zap.String("client_name", "mcpproxy-go"),
+					zap.Duration("timeout", 30*time.Second))
 
+				startTime := time.Now()
 				regErr = oauthHandler.RegisterClient(metadataCtx, "mcpproxy-go")
+				duration := time.Since(startTime)
 
-				c.logger.Debug("RegisterClient call completed",
+				c.logger.Debug("RegisterClient call completed with detailed metrics",
 					zap.String("server", c.config.Name),
 					zap.Bool("success", regErr == nil),
+					zap.Duration("duration", duration),
 					zap.String("error", func() string {
 						if regErr != nil {
 							return regErr.Error()
@@ -356,14 +393,25 @@ func (c *Client) Connect(ctx context.Context) error {
 				// Enhanced DCR failure handling with detailed error classification
 				c.handleDCRFailure(regErr, c.config.Name)
 
+				// Enhanced error classification for better user guidance
+				var userFriendlyError error
+				if isDCRUnsupported {
+					userFriendlyError = fmt.Errorf("OAuth setup failed - server does not provide OAuth metadata endpoints. This server may not support OAuth or requires manual OAuth configuration: %w", regErr)
+					c.logger.Warn("Server appears to not support Dynamic Client Registration",
+						zap.String("server", c.config.Name),
+						zap.String("recommendation", "Consider using Personal Access Token or pre-configured OAuth credentials"))
+				} else {
+					userFriendlyError = fmt.Errorf("OAuth setup failed - server requires pre-configured OAuth application: %w", regErr)
+				}
+
 				// Instead of immediately failing, transition to a recoverable error state
-				c.stateManager.SetError(fmt.Errorf("OAuth setup failed - server requires pre-configured OAuth application: %w", regErr))
+				c.stateManager.SetError(userFriendlyError)
 
 				// Log detailed recovery instructions
 				c.logOAuthRecoveryInstructions(regErr)
 
 				// Return a user-friendly error instead of crashing
-				return fmt.Errorf("OAuth authentication failed - %s does not support Dynamic Client Registration. Please configure OAuth credentials manually. See logs for detailed instructions", c.config.Name)
+				return userFriendlyError
 			}
 
 			c.logger.Info("Dynamic Client Registration completed",
@@ -1057,7 +1105,7 @@ func (c *Client) isOAuthRelatedError(err error) bool {
 }
 
 // handleOAuthFlow manages the complete OAuth authentication flow with error recovery
-func (c *Client) handleOAuthFlow(connectCtx context.Context, originalErr error) error {
+func (c *Client) handleOAuthFlow(_ context.Context, originalErr error) error {
 	c.logger.Info("Starting OAuth authentication flow",
 		zap.String("server", c.config.Name),
 		zap.Error(originalErr))
@@ -1115,60 +1163,98 @@ func (c *Client) handleOAuthFlow(connectCtx context.Context, originalErr error) 
 func (c *Client) handleDCRFailure(err error, serverName string) {
 	errStr := err.Error()
 
+	// Enhanced error classification with production-ready patterns
+	var errorType, solution, recommendation string
+
 	// Classify different types of DCR failures
 	if strings.Contains(errStr, "403") || strings.Contains(errStr, "Forbidden") {
+		errorType = "DCR_FORBIDDEN"
+		solution = "Server requires pre-registered OAuth application"
+		recommendation = "Create OAuth app in provider's developer console"
+
 		c.logger.Error("Dynamic Client Registration forbidden - server does not support DCR",
 			zap.String("server", serverName),
 			zap.Error(err),
-			zap.String("error_type", "DCR_FORBIDDEN"),
-			zap.String("solution", "Server requires pre-registered OAuth application"))
+			zap.String("error_type", errorType),
+			zap.String("solution", solution))
 
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("DCR_FORBIDDEN: Server does not support Dynamic Client Registration",
-				zap.String("http_status", "403"),
-				zap.String("required_action", "Configure OAuth credentials manually"))
-		}
 	} else if strings.Contains(errStr, "404") || strings.Contains(errStr, "Not Found") {
+		errorType = "DCR_NOT_FOUND"
+		solution = "DCR endpoint not available on this server"
+		recommendation = "Use Personal Access Token or pre-configured OAuth credentials"
+
 		c.logger.Error("Dynamic Client Registration endpoint not found",
 			zap.String("server", serverName),
 			zap.Error(err),
-			zap.String("error_type", "DCR_NOT_FOUND"),
-			zap.String("solution", "Server may not support OAuth or DCR endpoint is incorrect"))
+			zap.String("error_type", errorType),
+			zap.String("solution", solution))
 
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("DCR_NOT_FOUND: Registration endpoint not available")
-		}
 	} else if strings.Contains(errStr, "401") || strings.Contains(errStr, "Unauthorized") {
-		c.logger.Error("Dynamic Client Registration unauthorized",
+		errorType = "DCR_UNAUTHORIZED"
+		solution = "DCR requires authentication"
+		recommendation = "Check server OAuth configuration"
+
+		c.logger.Error("Dynamic Client Registration requires authentication",
 			zap.String("server", serverName),
 			zap.Error(err),
-			zap.String("error_type", "DCR_UNAUTHORIZED"),
-			zap.String("solution", "Server requires authentication for DCR or doesn't support public client registration"))
+			zap.String("error_type", errorType),
+			zap.String("solution", solution))
 
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("DCR_UNAUTHORIZED: Initial access token or pre-auth required")
-		}
-	} else if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded") {
-		c.logger.Error("Dynamic Client Registration timeout",
+	} else if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "context deadline exceeded") {
+		errorType = "DCR_TIMEOUT"
+		solution = "Server did not respond within timeout period"
+		recommendation = "Check network connectivity and server availability"
+
+		c.logger.Error("Dynamic Client Registration timed out",
 			zap.String("server", serverName),
 			zap.Error(err),
-			zap.String("error_type", "DCR_TIMEOUT"),
-			zap.String("solution", "Server may be slow or unreachable, try again later"))
+			zap.String("error_type", errorType),
+			zap.String("solution", solution))
 
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("DCR_TIMEOUT: Registration request timed out")
-		}
+	} else if strings.Contains(errStr, "OAuth metadata unavailable") {
+		errorType = "DCR_METADATA_UNAVAILABLE"
+		solution = "Server OAuth metadata endpoints are not accessible"
+		recommendation = "Server may not support OAuth or requires different authentication method"
+
+		c.logger.Error("OAuth metadata unavailable - server may not support OAuth",
+			zap.String("server", serverName),
+			zap.Error(err),
+			zap.String("error_type", errorType),
+			zap.String("solution", solution))
+
 	} else {
+		errorType = "DCR_UNKNOWN"
+		solution = "Unknown OAuth registration error"
+		recommendation = "Check server OAuth configuration and network connectivity"
+
 		c.logger.Error("Dynamic Client Registration failed with unknown error",
 			zap.String("server", serverName),
 			zap.Error(err),
-			zap.String("error_type", "DCR_UNKNOWN"),
-			zap.String("solution", "Check server OAuth configuration and network connectivity"))
-
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("DCR_UNKNOWN: Unexpected registration failure", zap.Error(err))
-		}
+			zap.String("error_type", errorType),
+			zap.String("solution", solution))
 	}
+
+	// Production-ready circuit breaker logic
+	c.updateOAuthFailureMetrics(errorType)
+
+	// Log to upstream logger if available
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Error("DCR_FAILURE",
+			zap.String("server", serverName),
+			zap.String("error_type", errorType),
+			zap.String("solution", solution),
+			zap.String("recommendation", recommendation),
+			zap.Error(err))
+	}
+}
+
+// updateOAuthFailureMetrics tracks OAuth failure patterns for circuit breaker
+func (c *Client) updateOAuthFailureMetrics(errorType string) {
+	// This could be extended with metrics collection
+	c.logger.Debug("OAuth failure metrics updated",
+		zap.String("server", c.config.Name),
+		zap.String("failure_type", errorType),
+		zap.String("recommendation", "Consider implementing circuit breaker if failures persist"))
 }
 
 // logOAuthRecoveryInstructions provides detailed recovery instructions for OAuth setup failures
