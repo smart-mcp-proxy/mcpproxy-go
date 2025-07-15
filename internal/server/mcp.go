@@ -421,6 +421,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Call tool via upstream manager
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
 	if err != nil {
+		// Enhanced error handling with OAuth-specific guidance
+		errorMsg := p.classifyAndFormatToolCallError(err, serverName, actualToolName)
+
 		// Log error with additional context for debugging
 		p.logger.Error("Tool call failed",
 			zap.String("tool_name", toolName),
@@ -428,18 +431,6 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.Error(err),
 			zap.String("server_name", serverName),
 			zap.String("actual_tool", actualToolName))
-
-		// Provide clear error messages based on error type
-		var errorMsg string
-		if strings.Contains(err.Error(), "no connected client found") {
-			errorMsg = fmt.Sprintf("Server '%s' does not exist or is not configured. Available proxy tools: upstream_servers, retrieve_tools, read_cache, call_tool. Use 'upstream_servers' with operation 'list' to see configured upstream servers.", serverName)
-		} else if strings.Contains(err.Error(), "client for server") && strings.Contains(err.Error(), "is not connected") {
-			errorMsg = fmt.Sprintf("Server '%s' is currently disconnected or in connecting state. Check server configuration and connectivity.", serverName)
-		} else if strings.Contains(err.Error(), "client not connected") {
-			errorMsg = fmt.Sprintf("Server '%s' is not connected. The server may be starting up, experiencing connection issues, or may be misconfigured.", serverName)
-		} else {
-			errorMsg = fmt.Sprintf("Tool call to '%s:%s' failed: %v", serverName, actualToolName, err)
-		}
 
 		return mcp.NewToolResultError(errorMsg), nil
 	}
@@ -1412,4 +1403,65 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 // GetMCPServer returns the underlying MCP server for serving
 func (p *MCPProxyServer) GetMCPServer() *mcpserver.MCPServer {
 	return p.server
+}
+
+// classifyAndFormatToolCallError provides enhanced error classification and user-friendly messages
+func (p *MCPProxyServer) classifyAndFormatToolCallError(err error, serverName, toolName string) string {
+	errStr := err.Error()
+
+	// OAuth-related errors with specific guidance
+	if strings.Contains(errStr, "OAuth authentication failed") ||
+		strings.Contains(errStr, "Dynamic Client Registration") ||
+		strings.Contains(errStr, "authorization required") {
+		return fmt.Sprintf("Server '%s' requires OAuth authentication but OAuth is not properly configured. The server does not support Dynamic Client Registration. Please configure OAuth credentials manually or use a Personal Access Token. Check mcpproxy logs for detailed setup instructions.", serverName)
+	}
+
+	// DCR-specific errors
+	if strings.Contains(errStr, "DCR failed") || strings.Contains(errStr, "Dynamic Client Registration failed") {
+		if strings.Contains(errStr, "403") || strings.Contains(errStr, "Forbidden") {
+			return fmt.Sprintf("Server '%s' does not support Dynamic Client Registration (HTTP 403). This server requires a pre-registered OAuth application. Please create an OAuth app with your provider and configure the client_id and client_secret in mcpproxy configuration.", serverName)
+		}
+		return fmt.Sprintf("Server '%s' Dynamic Client Registration failed. The server may not support automatic OAuth client registration. Please configure OAuth credentials manually or check if the server supports OAuth.", serverName)
+	}
+
+	// Token-related errors
+	if strings.Contains(errStr, "invalid_token") || strings.Contains(errStr, "Missing or invalid access token") || strings.Contains(errStr, "401") {
+		return fmt.Sprintf("Server '%s' returned authentication error (invalid or missing token). Please configure OAuth credentials or add Authorization header with a valid access token. Use the 'upstream_servers' tool to update server configuration.", serverName)
+	}
+
+	// Connection state errors
+	if strings.Contains(errStr, "no connected client found") || strings.Contains(errStr, "no client found") {
+		return fmt.Sprintf("Server '%s' does not exist or is not configured. Available proxy tools: upstream_servers, retrieve_tools, read_cache, call_tool. Use 'upstream_servers' with operation 'list' to see configured upstream servers.", serverName)
+	}
+
+	if strings.Contains(errStr, "client for server") && strings.Contains(errStr, "is not connected") {
+		return fmt.Sprintf("Server '%s' is currently disconnected or in connecting state. This may be due to authentication issues, network problems, or server configuration errors. Check server configuration and connectivity. Use 'upstream_servers' tool with operation 'list' to see server status.", serverName)
+	}
+
+	if strings.Contains(errStr, "client not connected") {
+		return fmt.Sprintf("Server '%s' is not connected. The server may be starting up, experiencing connection issues, authentication problems, or may be misconfigured. Check mcpproxy logs for detailed error information.", serverName)
+	}
+
+	// Network/timeout errors
+	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded") {
+		return fmt.Sprintf("Server '%s' request timed out. The server may be slow, overloaded, or unreachable. Try again later or check server connectivity.", serverName)
+	}
+
+	// Transport errors
+	if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") {
+		return fmt.Sprintf("Server '%s' connection failed. Check if the server URL is correct and the server is running. Verify network connectivity and server configuration.", serverName)
+	}
+
+	// Scope/permission errors
+	if strings.Contains(errStr, "insufficient_scope") || strings.Contains(errStr, "access_denied") {
+		return fmt.Sprintf("Server '%s' denied access due to insufficient permissions or scopes. Check OAuth scopes configuration or token permissions. You may need additional scopes for tool '%s'.", serverName, toolName)
+	}
+
+	// Rate limiting
+	if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "too many requests") {
+		return fmt.Sprintf("Server '%s' rate limit exceeded. Please wait before making more requests or check if you have appropriate API quotas.", serverName)
+	}
+
+	// Generic error with helpful context
+	return fmt.Sprintf("Tool call to '%s:%s' failed: %v. Check server configuration, authentication, and connectivity. Use 'upstream_servers' tool to manage server settings.", serverName, toolName, err)
 }

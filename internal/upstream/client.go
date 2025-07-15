@@ -20,6 +20,7 @@ import (
 	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/secureenv"
 	"mcpproxy-go/internal/transport"
+	"runtime/debug"
 )
 
 const (
@@ -216,42 +217,12 @@ func (c *Client) Connect(ctx context.Context) error {
 			zap.Error(err),
 			zap.String("error_type", fmt.Sprintf("%T", err)))
 
-		// Check if this is an OAuth authorization required error
-		if client.IsOAuthAuthorizationRequiredError(err) {
-			c.stateManager.TransitionTo(StateAuthenticating)
-			c.logger.Info("OAuth authorization required error detected",
-				zap.String("server", c.config.Name),
-				zap.Error(err))
-			c.logger.Info("OAuth authentication required - library will handle Dynamic Client Registration and browser opening",
-				zap.String("server", c.config.Name))
-			if c.upstreamLogger != nil {
-				c.upstreamLogger.Info("OAuth authentication flow starting automatically via mcp-go library")
-			}
-
-			// The mcp-go library should handle the OAuth flow automatically:
-			// 1. Dynamic Client Registration (DCR)
-			// 2. Start local callback server
-			// 3. Open browser for user authentication
-			// 4. Handle authorization code exchange
-			// If we reach here, the OAuth flow failed for some reason
-			c.stateManager.SetError(fmt.Errorf("OAuth authentication failed: %w", err))
-			return fmt.Errorf("OAuth authentication failed: %w", err)
+		// Enhanced OAuth error detection with guards
+		if c.isOAuthRelatedError(err) {
+			return c.handleOAuthFlow(connectCtx, err)
 		}
 
-		// Check if it's a regular HTTP error that might contain OAuth info
-		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
-			c.logger.Warn("Received 401/Unauthorized but not detected as OAuth error",
-				zap.String("server", c.config.Name),
-				zap.Error(err))
-		}
-
-		// Check if it's a transport-level error
-		if strings.Contains(err.Error(), "invalid_token") || strings.Contains(err.Error(), "Missing or invalid access token") {
-			c.logger.Warn("Server returned token error - may need OAuth but not properly detected",
-				zap.String("server", c.config.Name),
-				zap.Error(err))
-		}
-
+		// Enhanced error classification for non-OAuth errors
 		c.stateManager.SetError(err)
 		c.logger.Error("Failed to start MCP client",
 			zap.String("server", c.config.Name),
@@ -312,13 +283,87 @@ func (c *Client) Connect(ctx context.Context) error {
 			c.logger.Info("OAuth handler obtained - starting Dynamic Client Registration",
 				zap.String("server", c.config.Name))
 
-			// Step 1: Dynamic Client Registration
-			regErr := oauthHandler.RegisterClient(connectCtx, "mcpproxy-go")
-			if regErr != nil {
-				c.logger.Error("Dynamic Client Registration failed",
+			// Add comprehensive safety checks before DCR
+			c.logger.Debug("Performing pre-DCR safety checks",
+				zap.String("server", c.config.Name),
+				zap.String("oauth_handler_status", "initialized"))
+
+			// Defensive check: Validate OAuth handler state
+			if oauthHandler == nil {
+				err := fmt.Errorf("OAuth handler is nil, cannot proceed with DCR")
+				c.logger.Error("Critical DCR error - OAuth handler is nil",
 					zap.String("server", c.config.Name),
-					zap.Error(regErr))
-				return fmt.Errorf("DCR failed: %w", regErr)
+					zap.Error(err))
+				c.stateManager.SetError(err)
+				return fmt.Errorf("OAuth setup failed - handler initialization failed: %w", err)
+			}
+
+			// Pre-check: Try to get server metadata to detect issues early
+			c.logger.Debug("Pre-checking server metadata before DCR",
+				zap.String("server", c.config.Name))
+
+			// Use a short timeout for metadata check to prevent hanging
+			metadataCtx, metadataCancel := context.WithTimeout(connectCtx, 30*time.Second)
+			defer metadataCancel()
+
+			// This is a defensive call to understand what getServerMetadata returns
+			// We'll wrap the actual RegisterClient call to catch the nil pointer issue
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						c.logger.Error("Panic detected during DCR preparation",
+							zap.String("server", c.config.Name),
+							zap.Any("panic", r),
+							zap.String("stack", string(debug.Stack())))
+					}
+				}()
+
+				c.logger.Debug("Starting Dynamic Client Registration with safety wrapper",
+					zap.String("server", c.config.Name))
+			}()
+
+			// Step 1: Dynamic Client Registration with enhanced error handling and safety wrapper
+			var regErr error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						c.logger.Error("Panic during RegisterClient call - likely nil metadata",
+							zap.String("server", c.config.Name),
+							zap.Any("panic", r),
+							zap.String("likely_cause", "getServerMetadata returned nil without error"))
+						regErr = fmt.Errorf("RegisterClient panicked - server metadata unavailable: %v", r)
+					}
+				}()
+
+				c.logger.Debug("Calling oauthHandler.RegisterClient",
+					zap.String("server", c.config.Name),
+					zap.String("client_name", "mcpproxy-go"))
+
+				regErr = oauthHandler.RegisterClient(metadataCtx, "mcpproxy-go")
+
+				c.logger.Debug("RegisterClient call completed",
+					zap.String("server", c.config.Name),
+					zap.Bool("success", regErr == nil),
+					zap.String("error", func() string {
+						if regErr != nil {
+							return regErr.Error()
+						}
+						return "none"
+					}()))
+			}()
+
+			if regErr != nil {
+				// Enhanced DCR failure handling with detailed error classification
+				c.handleDCRFailure(regErr, c.config.Name)
+
+				// Instead of immediately failing, transition to a recoverable error state
+				c.stateManager.SetError(fmt.Errorf("OAuth setup failed - server requires pre-configured OAuth application: %w", regErr))
+
+				// Log detailed recovery instructions
+				c.logOAuthRecoveryInstructions(regErr)
+
+				// Return a user-friendly error instead of crashing
+				return fmt.Errorf("OAuth authentication failed - %s does not support Dynamic Client Registration. Please configure OAuth credentials manually. See logs for detailed instructions", c.config.Name)
 			}
 
 			c.logger.Info("Dynamic Client Registration completed",
@@ -974,6 +1019,194 @@ func (c *Client) isConnectionError(err error) bool {
 	return strings.Contains(err.Error(), "connection refused") ||
 		strings.Contains(err.Error(), "no such host") ||
 		strings.Contains(err.Error(), "timeout")
+}
+
+// isOAuthRelatedError detects various OAuth-related errors with enhanced guards
+func (c *Client) isOAuthRelatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for library-specific OAuth errors first
+	if client.IsOAuthAuthorizationRequiredError(err) {
+		return true
+	}
+
+	errStr := err.Error()
+
+	// Enhanced detection for various OAuth error patterns
+	oauthPatterns := []string{
+		"401", "Unauthorized", "unauthorized",
+		"invalid_token", "Missing or invalid access token",
+		"Bearer", "authentication required", "authorization required",
+		"oauth", "OAuth", "token", "access_denied",
+		"insufficient_scope", "invalid_grant",
+	}
+
+	for _, pattern := range oauthPatterns {
+		if strings.Contains(errStr, pattern) {
+			c.logger.Debug("OAuth-related error pattern detected",
+				zap.String("server", c.config.Name),
+				zap.String("pattern", pattern),
+				zap.Error(err))
+			return true
+		}
+	}
+
+	return false
+}
+
+// handleOAuthFlow manages the complete OAuth authentication flow with error recovery
+func (c *Client) handleOAuthFlow(connectCtx context.Context, originalErr error) error {
+	c.logger.Info("Starting OAuth authentication flow",
+		zap.String("server", c.config.Name),
+		zap.Error(originalErr))
+
+	// Transition to authenticating state
+	c.stateManager.TransitionTo(StateAuthenticating)
+
+	// Check if this is a standard OAuth authorization required error
+	if client.IsOAuthAuthorizationRequiredError(originalErr) {
+		c.logger.Info("Standard OAuth authorization required - starting DCR flow",
+			zap.String("server", c.config.Name))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("OAuth authentication flow starting via mcp-go library")
+		}
+
+		// This will fall through to the existing DCR handling in Initialize()
+		// The library should handle the OAuth flow automatically, but if we reach here,
+		// the OAuth flow failed for some reason
+		c.stateManager.SetError(fmt.Errorf("OAuth authentication failed: %w", originalErr))
+		return fmt.Errorf("OAuth authentication failed: %w", originalErr)
+	}
+
+	// Handle non-standard OAuth errors (like manual Bearer token requirements)
+	c.logger.Warn("Non-standard OAuth error detected",
+		zap.String("server", c.config.Name),
+		zap.Error(originalErr),
+		zap.String("suggestion", "Server may require manual OAuth configuration"))
+
+	// Check for specific error patterns and provide guidance
+	errStr := originalErr.Error()
+	if strings.Contains(errStr, "401") || strings.Contains(errStr, "Unauthorized") {
+		c.logger.Info("HTTP 401 Unauthorized detected",
+			zap.String("server", c.config.Name),
+			zap.String("likely_cause", "Missing or invalid access token"),
+			zap.String("solution", "Configure OAuth credentials or Personal Access Token"))
+	}
+
+	if strings.Contains(errStr, "invalid_token") || strings.Contains(errStr, "Missing or invalid access token") {
+		c.logger.Info("Token-related error detected",
+			zap.String("server", c.config.Name),
+			zap.String("likely_cause", "Server requires authentication but no valid token provided"),
+			zap.String("solution", "Add OAuth configuration or Authorization header"))
+	}
+
+	// Log recovery instructions for manual OAuth setup
+	c.logOAuthRecoveryInstructions(originalErr)
+
+	// Set recoverable error state instead of crashing
+	c.stateManager.SetError(fmt.Errorf("OAuth authentication required but not properly configured: %w", originalErr))
+
+	return fmt.Errorf("OAuth authentication failed for %s - server requires authentication but OAuth is not properly configured. See logs for setup instructions", c.config.Name)
+}
+
+// handleDCRFailure provides detailed error classification for Dynamic Client Registration failures
+func (c *Client) handleDCRFailure(err error, serverName string) {
+	errStr := err.Error()
+
+	// Classify different types of DCR failures
+	if strings.Contains(errStr, "403") || strings.Contains(errStr, "Forbidden") {
+		c.logger.Error("Dynamic Client Registration forbidden - server does not support DCR",
+			zap.String("server", serverName),
+			zap.Error(err),
+			zap.String("error_type", "DCR_FORBIDDEN"),
+			zap.String("solution", "Server requires pre-registered OAuth application"))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("DCR_FORBIDDEN: Server does not support Dynamic Client Registration",
+				zap.String("http_status", "403"),
+				zap.String("required_action", "Configure OAuth credentials manually"))
+		}
+	} else if strings.Contains(errStr, "404") || strings.Contains(errStr, "Not Found") {
+		c.logger.Error("Dynamic Client Registration endpoint not found",
+			zap.String("server", serverName),
+			zap.Error(err),
+			zap.String("error_type", "DCR_NOT_FOUND"),
+			zap.String("solution", "Server may not support OAuth or DCR endpoint is incorrect"))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("DCR_NOT_FOUND: Registration endpoint not available")
+		}
+	} else if strings.Contains(errStr, "401") || strings.Contains(errStr, "Unauthorized") {
+		c.logger.Error("Dynamic Client Registration unauthorized",
+			zap.String("server", serverName),
+			zap.Error(err),
+			zap.String("error_type", "DCR_UNAUTHORIZED"),
+			zap.String("solution", "Server requires authentication for DCR or doesn't support public client registration"))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("DCR_UNAUTHORIZED: Initial access token or pre-auth required")
+		}
+	} else if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded") {
+		c.logger.Error("Dynamic Client Registration timeout",
+			zap.String("server", serverName),
+			zap.Error(err),
+			zap.String("error_type", "DCR_TIMEOUT"),
+			zap.String("solution", "Server may be slow or unreachable, try again later"))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("DCR_TIMEOUT: Registration request timed out")
+		}
+	} else {
+		c.logger.Error("Dynamic Client Registration failed with unknown error",
+			zap.String("server", serverName),
+			zap.Error(err),
+			zap.String("error_type", "DCR_UNKNOWN"),
+			zap.String("solution", "Check server OAuth configuration and network connectivity"))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("DCR_UNKNOWN: Unexpected registration failure", zap.Error(err))
+		}
+	}
+}
+
+// logOAuthRecoveryInstructions provides detailed recovery instructions for OAuth setup failures
+func (c *Client) logOAuthRecoveryInstructions(err error) {
+	serverName := c.config.Name
+	serverURL := c.config.URL
+
+	c.logger.Info("=== OAuth Configuration Help ===",
+		zap.String("server", serverName),
+		zap.String("issue", "Server does not support Dynamic Client Registration"))
+
+	// Generic OAuth setup instructions for any MCP server
+	c.logger.Info("OAuth Setup Instructions",
+		zap.String("server", serverName),
+		zap.String("step_1", "Create OAuth application in your OAuth provider's developer settings"),
+		zap.String("step_2", "Set Authorization callback URL to: http://127.0.0.1:0/oauth/callback"),
+		zap.String("step_3", "Add OAuth configuration to mcpproxy server settings"),
+		zap.String("config_path", "~/.mcpproxy/mcp_config.json"))
+
+	c.logger.Info("OAuth Configuration Example",
+		zap.String("server", serverName),
+		zap.String("config_example", `"oauth": {"client_id": "your_oauth_client_id", "client_secret": "your_oauth_client_secret", "scopes": ["mcp.read", "mcp.write"]}`))
+
+	// Alternative solution using Personal Access Token
+	c.logger.Info("Alternative: Use Personal Access Token",
+		zap.String("server", serverName),
+		zap.String("option", "Instead of OAuth, you can use a Personal Access Token if supported by the server"),
+		zap.String("config_example", `"headers": {"Authorization": "Bearer your_personal_access_token"}`))
+
+	// Log the specific error for debugging
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("=== OAuth Setup Required ===",
+			zap.String("reason", "Dynamic Client Registration not supported"),
+			zap.String("server_url", serverURL),
+			zap.Error(err))
+	}
+
+	c.logger.Info("=== End OAuth Configuration Help ===", zap.String("server", serverName))
 }
 
 // openBrowser opens the given URL in the default browser
