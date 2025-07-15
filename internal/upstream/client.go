@@ -988,21 +988,53 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 	result, err := c.client.CallTool(ctx, request)
 	if err != nil {
 		c.stateManager.SetError(err)
-		c.logger.Error("CallTool failed", zap.String("tool", toolName), zap.Error(err))
+
+		// Enrich error messages at source with context and guidance
+		errStr := err.Error()
+		var enrichedErr error
+
+		// OAuth/Authentication errors
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "Unauthorized") {
+			enrichedErr = fmt.Errorf("authentication required for tool '%s' on server '%s' - OAuth/token authentication needed: %w", toolName, c.config.Name, err)
+		} else if strings.Contains(errStr, "403") || strings.Contains(errStr, "Forbidden") {
+			enrichedErr = fmt.Errorf("access forbidden for tool '%s' on server '%s' - insufficient permissions or invalid credentials: %w", toolName, c.config.Name, err)
+		} else if strings.Contains(errStr, "invalid_token") || strings.Contains(errStr, "token") {
+			enrichedErr = fmt.Errorf("invalid or expired token for tool '%s' on server '%s' - token refresh or re-authentication required: %w", toolName, c.config.Name, err)
+		} else if c.isConnectionError(err) {
+			// Connection errors
+			enrichedErr = fmt.Errorf("connection failed for tool '%s' on server '%s' - check server availability and network connectivity: %w", toolName, c.config.Name, err)
+		} else if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded") {
+			enrichedErr = fmt.Errorf("timeout calling tool '%s' on server '%s' - server may be overloaded or unresponsive: %w", toolName, c.config.Name, err)
+		} else {
+			// Generic error with server context
+			enrichedErr = fmt.Errorf("tool call failed for '%s' on server '%s': %w", toolName, c.config.Name, err)
+		}
+
+		c.logger.Error("CallTool failed",
+			zap.String("tool", toolName),
+			zap.String("server", c.config.Name),
+			zap.Error(enrichedErr))
 		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("Tool call failed", zap.String("tool", toolName), zap.Error(err))
+			c.upstreamLogger.Error("Tool call failed",
+				zap.String("tool", toolName),
+				zap.String("server", c.config.Name),
+				zap.Error(enrichedErr))
 		}
 
 		// Check if this is a connection error
 		if c.isConnectionError(err) {
 			c.logger.Warn("Connection appears broken during tool call, updating state",
-				zap.String("tool", toolName), zap.Error(err))
+				zap.String("tool", toolName),
+				zap.String("server", c.config.Name),
+				zap.Error(enrichedErr))
 			if c.upstreamLogger != nil {
-				c.upstreamLogger.Warn("Connection broken during tool call", zap.Error(err))
+				c.upstreamLogger.Warn("Connection broken during tool call",
+					zap.String("server", c.config.Name),
+					zap.Error(enrichedErr))
 			}
 		}
 
-		return nil, fmt.Errorf("failed to call tool %s: %w", toolName, err)
+		return nil, enrichedErr
 	}
 
 	c.logger.Debug("CallTool successful", zap.String("tool", toolName))
