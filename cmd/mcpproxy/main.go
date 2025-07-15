@@ -76,7 +76,7 @@ func main() {
 
 func runServer(cmd *cobra.Command, _ []string) error {
 	// Load configuration first to get logging settings
-	cfg, err := loadConfig()
+	cfg, err := loadConfig(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
@@ -228,7 +228,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func loadConfig() (*config.Config, error) {
+func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	var cfg *config.Config
 	var err error
 
@@ -243,11 +243,11 @@ func loadConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Override with command line flags if provided
+	// Override with command line flags ONLY if they were explicitly set
 	if dataDir != "" {
 		cfg.DataDir = dataDir
 	}
-	if listen != "" {
+	if cmd.Flags().Changed("listen") {
 		cfg.Listen = listen
 	}
 	if toolResponseLimit != 0 {

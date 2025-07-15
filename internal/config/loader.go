@@ -57,6 +57,7 @@ func Load() (*Config, error) {
 
 	// Load from config file if specified
 	configPath := viper.GetString("config")
+	configFileAutoLoaded := false
 	if configPath != "" {
 		if err := loadConfigFile(configPath, cfg); err != nil {
 			return nil, fmt.Errorf("failed to load config file %s: %w", configPath, err)
@@ -67,6 +68,7 @@ func Load() (*Config, error) {
 		if err != nil && configFound {
 			return nil, err // Only return error if config was found but couldn't be loaded
 		}
+		configFileAutoLoaded = configFound
 
 		// If no config file was found, create a default one
 		if !configFound {
@@ -94,9 +96,13 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// Override with viper (CLI flags and env vars)
-	if err := viper.Unmarshal(cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	// Only use viper.Unmarshal if no config file was auto-loaded
+	// When config file is auto-loaded, CLI flags are handled in main.go
+	if !configFileAutoLoaded {
+		// Override with viper (CLI flags and env vars)
+		if err := viper.Unmarshal(cfg); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+		}
 	}
 
 	// Set data directory if not specified
@@ -169,7 +175,6 @@ func findAndLoadConfigFile(cfg *Config) (found bool, path string, err error) {
 			return true, location, loadConfigFile(location, cfg)
 		}
 	}
-
 	return false, "", nil
 }
 
