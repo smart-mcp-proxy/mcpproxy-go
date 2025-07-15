@@ -421,6 +421,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Call tool via upstream manager
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
 	if err != nil {
+		// Errors are now enriched at their source with context and guidance
 		// Log error with additional context for debugging
 		p.logger.Error("Tool call failed",
 			zap.String("tool_name", toolName),
@@ -429,19 +430,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("server_name", serverName),
 			zap.String("actual_tool", actualToolName))
 
-		// Provide clear error messages based on error type
-		var errorMsg string
-		if strings.Contains(err.Error(), "no connected client found") {
-			errorMsg = fmt.Sprintf("Server '%s' does not exist or is not configured. Available proxy tools: upstream_servers, retrieve_tools, read_cache, call_tool. Use 'upstream_servers' with operation 'list' to see configured upstream servers.", serverName)
-		} else if strings.Contains(err.Error(), "client for server") && strings.Contains(err.Error(), "is not connected") {
-			errorMsg = fmt.Sprintf("Server '%s' is currently disconnected or in connecting state. Check server configuration and connectivity.", serverName)
-		} else if strings.Contains(err.Error(), "client not connected") {
-			errorMsg = fmt.Sprintf("Server '%s' is not connected. The server may be starting up, experiencing connection issues, or may be misconfigured.", serverName)
-		} else {
-			errorMsg = fmt.Sprintf("Tool call to '%s:%s' failed: %v", serverName, actualToolName, err)
-		}
-
-		return mcp.NewToolResultError(errorMsg), nil
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	// Increment usage stats

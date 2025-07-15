@@ -292,19 +292,68 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	if !targetClient.IsConnected() {
 		state := targetClient.GetState()
 		if targetClient.IsConnecting() {
-			return nil, fmt.Errorf("client for server %s is currently %s", serverName, state.String())
+			return nil, fmt.Errorf("server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())
 		}
 
-		// Include last error if available
+		// Include last error if available with enhanced context
 		if lastError := targetClient.GetLastError(); lastError != nil {
-			return nil, fmt.Errorf("client for server %s is not connected (state: %s, last error: %s)", serverName, state.String(), lastError.Error())
+			// Enrich OAuth-related errors at source
+			lastErrStr := lastError.Error()
+			if strings.Contains(lastErrStr, "OAuth authentication failed") ||
+				strings.Contains(lastErrStr, "Dynamic Client Registration") ||
+				strings.Contains(lastErrStr, "authorization required") {
+				return nil, fmt.Errorf("server '%s' requires OAuth authentication but is not properly configured. OAuth setup failed: %s. Please configure OAuth credentials manually or use a Personal Access Token - check mcpproxy logs for detailed setup instructions", serverName, lastError.Error())
+			}
+
+			if strings.Contains(lastErrStr, "OAuth metadata unavailable") {
+				return nil, fmt.Errorf("server '%s' does not provide valid OAuth configuration endpoints. This server may not support OAuth or requires manual authentication setup: %s", serverName, lastError.Error())
+			}
+
+			return nil, fmt.Errorf("server '%s' is not connected (state: %s) - connection failed with error: %s", serverName, state.String(), lastError.Error())
 		}
 
-		return nil, fmt.Errorf("client for server %s is not connected (state: %s)", serverName, state.String())
+		return nil, fmt.Errorf("server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 	}
 
-	// Call the tool on the upstream server
-	return targetClient.CallTool(ctx, actualToolName, args)
+	// Call the tool on the upstream server with enhanced error handling
+	result, err := targetClient.CallTool(ctx, actualToolName, args)
+	if err != nil {
+		// Enrich errors at source with server context
+		errStr := err.Error()
+
+		// OAuth-related errors
+		if strings.Contains(errStr, "OAuth authentication failed") ||
+			strings.Contains(errStr, "authorization required") ||
+			strings.Contains(errStr, "invalid_token") ||
+			strings.Contains(errStr, "Unauthorized") {
+			return nil, fmt.Errorf("server '%s' authentication failed for tool '%s'. OAuth/token authentication required but not properly configured. Check server authentication settings and ensure valid credentials are available: %w", serverName, actualToolName, err)
+		}
+
+		// Permission/scope errors
+		if strings.Contains(errStr, "insufficient_scope") || strings.Contains(errStr, "access_denied") {
+			return nil, fmt.Errorf("server '%s' denied access to tool '%s' due to insufficient permissions or scopes. Check OAuth scopes configuration or token permissions: %w", serverName, actualToolName, err)
+		}
+
+		// Rate limiting
+		if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "too many requests") {
+			return nil, fmt.Errorf("server '%s' rate limit exceeded for tool '%s'. Please wait before making more requests or check API quotas: %w", serverName, actualToolName, err)
+		}
+
+		// Connection issues
+		if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") {
+			return nil, fmt.Errorf("server '%s' connection failed for tool '%s'. Check if the server URL is correct and the server is running: %w", serverName, actualToolName, err)
+		}
+
+		// Tool-specific errors
+		if strings.Contains(errStr, "tool not found") || strings.Contains(errStr, "unknown tool") {
+			return nil, fmt.Errorf("tool '%s' not found on server '%s'. Use 'retrieve_tools' to see available tools: %w", actualToolName, serverName, err)
+		}
+
+		// Generic error with helpful context
+		return nil, fmt.Errorf("tool '%s' on server '%s' failed: %w. Check server configuration, authentication, and tool parameters", actualToolName, serverName, err)
+	}
+
+	return result, nil
 }
 
 // ConnectAll connects to all configured servers that should retry
