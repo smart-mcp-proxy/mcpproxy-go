@@ -21,7 +21,7 @@
 - **Scale beyond API limits** – Federate hundreds of MCP servers while bypassing Cursor's 40-tool limit and OpenAI's 128-function cap.
 - **Save tokens & accelerate responses** – Agents load just one `retrieve_tools` function instead of hundreds of schemas. Research shows ~99 % token reduction with **43 % accuracy improvement**.
 - **Advanced security protection** – Automatic quarantine blocks Tool Poisoning Attacks until you manually approve new servers.
-- **Works offline & cross-platform** – macOS, Windows, and Linux binaries with a native system-tray UI.
+- **Works offline & cross-platform** – Native binaries for macOS (Intel & Apple Silicon), Windows (x64 & ARM64), and Linux (x64 & ARM64) with system-tray UI.
 
 ---
 
@@ -41,6 +41,11 @@ macOS (Homebrew):
 ```bash
 brew install smart-mcp-proxy/mcpproxy/mcpproxy
 ```
+
+Manual download (all platforms):
+- **Linux**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
+- **Windows**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-amd64.zip) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-arm64.zip)
+- **macOS**: [Intel](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz) | [Apple Silicon](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
 Anywhere with Go 1.22+:
 ```bash
