@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -235,6 +236,18 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.logger.Debug("Client.Start() completed successfully",
 		zap.String("server", c.config.Name))
+
+	// For stdio transports, start stderr monitoring after client is started
+	if transportType == transport.TransportStdio {
+		if stderr, hasStderr := client.GetStderr(c.client); hasStderr {
+			c.logger.Debug("Starting stderr monitoring for stdio process",
+				zap.String("server", c.config.Name))
+			c.startStderrMonitoring(stderr)
+		} else {
+			c.logger.Debug("No stderr available for stdio client",
+				zap.String("server", c.config.Name))
+		}
+	}
 
 	// Transition to discovering state for tool discovery
 	c.stateManager.TransitionTo(StateDiscovering)
@@ -772,8 +785,64 @@ func (c *Client) createStdioClient() (*client.Client, error) {
 	// Create stdio transport config
 	stdioConfig := transport.CreateStdioTransportConfig(c.config, c.envManager)
 
-	// Create stdio client
-	return transport.CreateStdioClient(stdioConfig)
+	// Create stdio client with stderr access
+	result, err := transport.CreateStdioClient(stdioConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdio client: %w", err)
+	}
+
+	c.logger.Debug("Created stdio client",
+		zap.String("server", c.config.Name))
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Debug("Created stdio client")
+	}
+
+	return result.Client, nil
+}
+
+// startStderrMonitoring starts a goroutine to monitor stderr output from stdio processes
+func (c *Client) startStderrMonitoring(stderr io.Reader) {
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Debug("Starting stderr monitoring")
+	}
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.logger.Error("Panic in stderr monitoring",
+					zap.String("server", c.config.Name),
+					zap.Any("panic", r))
+			}
+		}()
+
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderr.Read(buf)
+			if err != nil {
+				if err != io.EOF {
+					c.logger.Debug("Stderr monitoring ended",
+						zap.String("server", c.config.Name),
+						zap.Error(err))
+					if c.upstreamLogger != nil {
+						c.upstreamLogger.Debug("Stderr monitoring ended", zap.Error(err))
+					}
+				}
+				return
+			}
+			if n > 0 {
+				// Log stderr output to both main and upstream loggers
+				stderrOutput := string(buf[:n])
+				c.logger.Info("Process stderr output",
+					zap.String("server", c.config.Name),
+					zap.String("stderr", strings.TrimSpace(stderrOutput)))
+
+				if c.upstreamLogger != nil {
+					c.upstreamLogger.Info("Process stderr output",
+						zap.String("stderr", strings.TrimSpace(stderrOutput)))
+				}
+			}
+		}
+	}()
 }
 
 // getConnectionTimeout returns the connection timeout with exponential backoff
