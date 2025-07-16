@@ -62,6 +62,9 @@ mcpproxy                # starts HTTP server on :8080 and shows tray
 
 Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](https://mcpproxy.app/docs/configuration#adding-servers)).
 
+### 4. Connect to your IDE/AI tool
+
+📖 **[Complete Setup Guide](docs/setup.md)** - Detailed instructions for Cursor, VS Code, Claude Desktop, and Goose
 
 ## Add proxy to Cursor
 
