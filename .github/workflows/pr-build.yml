@@ -16,10 +16,22 @@ jobs:
             name: mcpproxy-linux-amd64
             archive_format: tar.gz
           - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: "0"
+            name: mcpproxy-linux-arm64
+            archive_format: tar.gz
+          - os: ubuntu-latest
             goos: windows
             goarch: amd64
             cgo: "0"
             name: mcpproxy-windows-amd64.exe
+            archive_format: zip
+          - os: ubuntu-latest
+            goos: windows
+            goarch: arm64
+            cgo: "0"
+            name: mcpproxy-windows-arm64.exe
             archive_format: zip
           - os: macos-latest
             goos: darwin

@@ -19,10 +19,22 @@ jobs:
             name: mcpproxy-linux-amd64
             archive_format: tar.gz
           - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: "0"
+            name: mcpproxy-linux-arm64
+            archive_format: tar.gz
+          - os: ubuntu-latest
             goos: windows
             goarch: amd64
             cgo: "0"
             name: mcpproxy-windows-amd64.exe
+            archive_format: zip
+          - os: ubuntu-latest
+            goos: windows
+            goarch: arm64
+            cgo: "0"
+            name: mcpproxy-windows-arm64.exe
             archive_format: zip
           - os: macos-latest
             goos: darwin
@@ -510,7 +522,9 @@ jobs:
 
             **Latest Version (auto-updates):**
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) 
+            - [Linux ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
             - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.zip)
+            - [Windows ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-arm64.zip)
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
@@ -520,7 +534,9 @@ jobs:
 
             **This Version (${{ github.ref_name }}):**
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz)
+            - [Linux ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-arm64.tar.gz)
             - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-amd64.zip)
+            - [Windows ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-arm64.zip)
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.tar.gz)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.tar.gz)
 
