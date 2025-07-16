@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"runtime"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
-	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/hash"
@@ -21,7 +20,10 @@ import (
 	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/secureenv"
 	"mcpproxy-go/internal/transport"
-	"runtime/debug"
+
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
+	"go.uber.org/zap"
 )
 
 const (
@@ -1058,9 +1060,12 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 	if err != nil {
 		c.stateManager.SetError(err)
 
-		// Enrich error messages at source with context and guidance
-		errStr := err.Error()
+		// Extract detailed HTTP error information
+		httpErr := c.extractHTTPErrorDetails(err)
+
+		// Enhanced error message creation with HTTP context
 		var enrichedErr error
+		errStr := err.Error()
 
 		// OAuth/Authentication errors
 		if strings.Contains(errStr, "401") || strings.Contains(errStr, "Unauthorized") {
@@ -1079,16 +1084,8 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 			enrichedErr = fmt.Errorf("tool call failed for '%s' on server '%s': %w", toolName, c.config.Name, err)
 		}
 
-		c.logger.Error("CallTool failed",
-			zap.String("tool", toolName),
-			zap.String("server", c.config.Name),
-			zap.Error(enrichedErr))
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("Tool call failed",
-				zap.String("tool", toolName),
-				zap.String("server", c.config.Name),
-				zap.Error(enrichedErr))
-		}
+		// Log detailed HTTP error information
+		c.logDetailedHTTPError(toolName, httpErr, nil)
 
 		// Check if this is a connection error
 		if c.isConnectionError(err) {
@@ -1122,12 +1119,28 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 
 	// Extract content from result
 	if len(result.Content) > 0 {
+		// Check for JSON-RPC errors in successful responses
+		if result.IsError {
+			// Extract JSON-RPC error details for better debugging
+			jsonRPCErr := c.extractJSONRPCErrorDetails(result, nil)
+			if jsonRPCErr != nil {
+				// Log detailed error information
+				c.logDetailedHTTPError(toolName, nil, jsonRPCErr)
+			}
+		}
+
 		// Return the content array directly
 		return result.Content, nil
 	}
 
 	// If there's an error in the result, return it
 	if result.IsError {
+		// Extract JSON-RPC error details for enhanced error message
+		jsonRPCErr := c.extractJSONRPCErrorDetails(result, nil)
+		if jsonRPCErr != nil {
+			c.logDetailedHTTPError(toolName, nil, jsonRPCErr)
+			return nil, fmt.Errorf("tool call failed: %s", jsonRPCErr.Error())
+		}
 		return nil, fmt.Errorf("tool call failed: error indicated in result")
 	}
 
@@ -1413,3 +1426,137 @@ func openBrowser(url string) error {
 	args = append(args, url)
 	return exec.Command(cmd, args...).Start()
 }
+
+// extractHTTPErrorDetails attempts to extract HTTP error details from error messages
+func (c *Client) extractHTTPErrorDetails(err error) *transport.HTTPError {
+	if err == nil {
+		return nil
+	}
+
+	errStr := err.Error()
+
+	// Try to extract status code from error message
+	statusCode := 0
+	if matches := regexp.MustCompile(`status (?:code )?(\d+)`).FindStringSubmatch(errStr); len(matches) > 1 {
+		if code, parseErr := strconv.Atoi(matches[1]); parseErr == nil {
+			statusCode = code
+		}
+	}
+
+	// Try to extract response body from error message
+	body := ""
+	if matches := regexp.MustCompile(`(?:response|body):\s*(.+)$`).FindStringSubmatch(errStr); len(matches) > 1 {
+		body = strings.TrimSpace(matches[1])
+	}
+
+	// If we found meaningful HTTP details, create HTTPError
+	if statusCode > 0 || body != "" {
+		return transport.NewHTTPError(
+			statusCode,
+			body,
+			"POST", // MCP calls are typically POST
+			c.config.URL,
+			map[string]string{}, // Headers not available from error
+			err,
+		)
+	}
+
+	return nil
+}
+
+// extractJSONRPCErrorDetails attempts to extract JSON-RPC error details from tool call results
+func (c *Client) extractJSONRPCErrorDetails(result *mcp.CallToolResult, httpErr *transport.HTTPError) *transport.JSONRPCError {
+	if result == nil || !result.IsError {
+		return nil
+	}
+
+	// Try to extract JSON-RPC error from content
+	for _, content := range result.Content {
+		// Convert content to JSON string to extract text
+		contentBytes, err := json.Marshal(content)
+		if err != nil {
+			continue
+		}
+
+		var contentObj map[string]interface{}
+		if err := json.Unmarshal(contentBytes, &contentObj); err != nil {
+			continue
+		}
+
+		// Look for text content
+		if textContent, ok := contentObj["text"].(string); ok {
+			// Look for JSON-RPC error patterns
+			if strings.Contains(textContent, "API Error") || strings.Contains(textContent, "status code") {
+				// Try to extract status code from text
+				code := -1
+				if matches := regexp.MustCompile(`status code (\d+)`).FindStringSubmatch(textContent); len(matches) > 1 {
+					if statusCode, err := strconv.Atoi(matches[1]); err == nil {
+						code = statusCode
+					}
+				}
+
+				return transport.NewJSONRPCError(
+					code,
+					textContent,
+					nil,
+					httpErr,
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
+// logDetailedHTTPError logs detailed HTTP error information for debugging
+func (c *Client) logDetailedHTTPError(toolName string, httpErr *transport.HTTPError, jsonRPCErr *transport.JSONRPCError) {
+	// Log to main logger
+	fields := []zap.Field{
+		zap.String("tool", toolName),
+		zap.String("server", c.config.Name),
+	}
+
+	if httpErr != nil {
+		fields = append(fields,
+			zap.Int("http_status", httpErr.StatusCode),
+			zap.String("http_method", httpErr.Method),
+			zap.String("http_url", httpErr.URL),
+			zap.String("http_body", httpErr.Body),
+			zap.Any("http_headers", httpErr.Headers),
+		)
+	}
+
+	if jsonRPCErr != nil {
+		fields = append(fields,
+			zap.Int("jsonrpc_code", jsonRPCErr.Code),
+			zap.String("jsonrpc_message", jsonRPCErr.Message),
+			zap.Any("jsonrpc_data", jsonRPCErr.Data),
+		)
+	}
+
+	c.logger.Error("Detailed HTTP tool call error", fields...)
+
+	// Log to upstream server log if available
+	if c.upstreamLogger != nil {
+		upstreamFields := []zap.Field{
+			zap.String("tool", toolName),
+		}
+
+		if httpErr != nil {
+			upstreamFields = append(upstreamFields,
+				zap.Int("http_status", httpErr.StatusCode),
+				zap.String("http_body", httpErr.Body),
+			)
+		}
+
+		if jsonRPCErr != nil {
+			upstreamFields = append(upstreamFields,
+				zap.String("jsonrpc_message", jsonRPCErr.Message),
+			)
+		}
+
+		c.upstreamLogger.Error("HTTP tool call failed", upstreamFields...)
+	}
+}
+
+// isConnectionError checks if an error is related to connection issues

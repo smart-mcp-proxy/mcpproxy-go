@@ -2,6 +2,7 @@ package transport
 
 import (
 	"fmt"
+	"net/http"
 
 	"mcpproxy-go/internal/config"
 
@@ -16,6 +17,69 @@ const (
 	TransportSSE            = "sse"
 	TransportStdio          = "stdio"
 )
+
+// HTTPError represents detailed HTTP error information for debugging
+type HTTPError struct {
+	StatusCode int               `json:"status_code"`
+	Headers    map[string]string `json:"headers"`
+	Body       string            `json:"body"`
+	Method     string            `json:"method"`
+	URL        string            `json:"url"`
+	Err        error             `json:"-"` // Original error
+}
+
+func (e *HTTPError) Error() string {
+	if e.Body != "" {
+		return fmt.Sprintf("HTTP %d %s: %s", e.StatusCode, http.StatusText(e.StatusCode), e.Body)
+	}
+	return fmt.Sprintf("HTTP %d %s", e.StatusCode, http.StatusText(e.StatusCode))
+}
+
+// JSONRPCError represents JSON-RPC specific error information
+type JSONRPCError struct {
+	Code      int         `json:"code"`
+	Message   string      `json:"message"`
+	Data      interface{} `json:"data,omitempty"`
+	HTTPError *HTTPError  `json:"http_error,omitempty"`
+}
+
+func (e *JSONRPCError) Error() string {
+	if e.HTTPError != nil {
+		return fmt.Sprintf("JSON-RPC Error %d: %s (HTTP: %s)", e.Code, e.Message, e.HTTPError.Error())
+	}
+	return fmt.Sprintf("JSON-RPC Error %d: %s", e.Code, e.Message)
+}
+
+// HTTPResponseDetails captures detailed HTTP response information for debugging
+type HTTPResponseDetails struct {
+	StatusCode int               `json:"status_code"`
+	Headers    map[string]string `json:"headers"`
+	Body       string            `json:"body"`
+	URL        string            `json:"url"`
+	Method     string            `json:"method"`
+}
+
+// EnhancedHTTPError creates an HTTPError with full context
+func NewHTTPError(statusCode int, body, method, url string, headers map[string]string, originalErr error) *HTTPError {
+	return &HTTPError{
+		StatusCode: statusCode,
+		Headers:    headers,
+		Body:       body,
+		Method:     method,
+		URL:        url,
+		Err:        originalErr,
+	}
+}
+
+// NewJSONRPCError creates a JSONRPCError with optional HTTP context
+func NewJSONRPCError(code int, message string, data interface{}, httpErr *HTTPError) *JSONRPCError {
+	return &JSONRPCError{
+		Code:      code,
+		Message:   message,
+		Data:      data,
+		HTTPError: httpErr,
+	}
+}
 
 // HTTPTransportConfig holds configuration for HTTP transport
 type HTTPTransportConfig struct {

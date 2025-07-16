@@ -4,20 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
-
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
-	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
+
+	"errors"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	"go.uber.org/zap"
 )
 
 const (
@@ -430,7 +435,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("server_name", serverName),
 			zap.String("actual_tool", actualToolName))
 
-		return mcp.NewToolResultError(err.Error()), nil
+		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
 
 	// Increment usage stats
@@ -1397,6 +1402,150 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
+
+// createDetailedErrorResponse creates an enhanced error response with HTTP and troubleshooting context
+func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, toolName string) *mcp.CallToolResult {
+	// Try to extract HTTP error details
+	var httpErr *transport.HTTPError
+	var jsonRPCErr *transport.JSONRPCError
+
+	// Check if it's our enhanced error types
+	if errors.As(err, &httpErr) {
+		// We have HTTP error details
+		errorDetails := map[string]interface{}{
+			"error": httpErr.Error(),
+			"http_details": map[string]interface{}{
+				"status_code":   httpErr.StatusCode,
+				"response_body": httpErr.Body,
+				"server_url":    httpErr.URL,
+				"method":        httpErr.Method,
+			},
+			"troubleshooting": p.generateTroubleshootingAdvice(httpErr.StatusCode, httpErr.Body),
+		}
+
+		jsonResponse, _ := json.Marshal(errorDetails)
+		return mcp.NewToolResultError(string(jsonResponse))
+	}
+
+	if errors.As(err, &jsonRPCErr) {
+		// We have JSON-RPC error details
+		errorDetails := map[string]interface{}{
+			"error":      jsonRPCErr.Message,
+			"error_code": jsonRPCErr.Code,
+			"error_data": jsonRPCErr.Data,
+		}
+
+		if jsonRPCErr.HTTPError != nil {
+			errorDetails["http_details"] = map[string]interface{}{
+				"status_code":   jsonRPCErr.HTTPError.StatusCode,
+				"response_body": jsonRPCErr.HTTPError.Body,
+				"server_url":    jsonRPCErr.HTTPError.URL,
+			}
+			errorDetails["troubleshooting"] = p.generateTroubleshootingAdvice(jsonRPCErr.HTTPError.StatusCode, jsonRPCErr.HTTPError.Body)
+		}
+
+		jsonResponse, _ := json.Marshal(errorDetails)
+		return mcp.NewToolResultError(string(jsonResponse))
+	}
+
+	// Extract status codes and helpful info from error message for enhanced responses
+	errStr := err.Error()
+	if strings.Contains(errStr, "status code") || strings.Contains(errStr, "HTTP") {
+		// Try to extract HTTP status code for troubleshooting advice
+		statusCode := p.extractStatusCodeFromError(errStr)
+
+		errorDetails := map[string]interface{}{
+			"error":       errStr,
+			"server_name": serverName,
+			"tool_name":   toolName,
+		}
+
+		if statusCode > 0 {
+			errorDetails["http_status"] = statusCode
+			errorDetails["troubleshooting"] = p.generateTroubleshootingAdvice(statusCode, errStr)
+		}
+
+		jsonResponse, _ := json.Marshal(errorDetails)
+		return mcp.NewToolResultError(string(jsonResponse))
+	}
+
+	// Fallback to enhanced error message
+	errorDetails := map[string]interface{}{
+		"error":           errStr,
+		"server_name":     serverName,
+		"tool_name":       toolName,
+		"troubleshooting": "Check server configuration, connectivity, and authentication credentials",
+	}
+
+	jsonResponse, _ := json.Marshal(errorDetails)
+	return mcp.NewToolResultError(string(jsonResponse))
+}
+
+// extractStatusCodeFromError attempts to extract HTTP status code from error message
+func (p *MCPProxyServer) extractStatusCodeFromError(errStr string) int {
+	// Common patterns for status codes in error messages
+	patterns := []string{
+		`status code (\d+)`,
+		`HTTP (\d+)`,
+		`(\d+) [A-Za-z\s]+$`, // "400 Bad Request" pattern
+	}
+
+	for _, pattern := range patterns {
+		if matches := regexp.MustCompile(pattern).FindStringSubmatch(errStr); len(matches) > 1 {
+			if code, err := strconv.Atoi(matches[1]); err == nil {
+				return code
+			}
+		}
+	}
+
+	return 0
+}
+
+// generateTroubleshootingAdvice provides specific troubleshooting advice based on HTTP status codes and error content
+func (p *MCPProxyServer) generateTroubleshootingAdvice(statusCode int, errorBody string) string {
+	switch statusCode {
+	case 400:
+		if strings.Contains(strings.ToLower(errorBody), "api key") || strings.Contains(strings.ToLower(errorBody), "key") {
+			return "Check API key configuration. Ensure the API key is correctly set in server environment variables or configuration."
+		}
+		if strings.Contains(strings.ToLower(errorBody), "auth") {
+			return "Authentication issue. Verify authentication credentials and configuration."
+		}
+		return "Bad request. Check tool parameters, API endpoint configuration, and request format."
+
+	case 401:
+		return "Authentication required. Check API keys, tokens, or authentication credentials in server configuration."
+
+	case 403:
+		return "Access forbidden. Verify API key permissions, user authorization, or check if the service requires additional authentication."
+
+	case 404:
+		return "Resource not found. Check API endpoint URL, server configuration, or verify the requested resource exists."
+
+	case 429:
+		return "Rate limit exceeded. Wait before retrying or check if you need a higher rate limit plan."
+
+	case 500:
+		return "Internal server error. The upstream service is experiencing issues. Try again later or contact the service provider."
+
+	case 502, 503, 504:
+		return "Service unavailable or timeout. The upstream service may be down or overloaded. Check service status and try again later."
+
+	default:
+		if strings.Contains(strings.ToLower(errorBody), "api key") {
+			return "API key issue detected. Check environment variables and server configuration for correct API key setup."
+		}
+		if strings.Contains(strings.ToLower(errorBody), "timeout") {
+			return "Request timeout. The server may be slow or overloaded. Check network connectivity and server responsiveness."
+		}
+		if strings.Contains(strings.ToLower(errorBody), "connection") {
+			return "Connection issue. Check network connectivity, server URL, and firewall settings."
+		}
+		return "Check server configuration, network connectivity, and authentication settings. Review server logs for more details."
+	}
+}
+
+// getServerErrorContext extracts relevant context information for error reporting
 
 // GetMCPServer returns the underlying MCP server for serving
 func (p *MCPProxyServer) GetMCPServer() *mcpserver.MCPServer {
