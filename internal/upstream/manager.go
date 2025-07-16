@@ -497,8 +497,9 @@ func (m *Manager) GetTotalToolCount() int {
 			continue
 		}
 
-		// Use a reasonable timeout to allow for Docker container startup and GitHub API calls
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Use shorter timeout for UI status updates (5 seconds instead of 30)
+		// This reduces waiting time for unresponsive servers like CoinGecko SSE
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		tools, err := client.ListTools(ctx)
 		cancel()
 		if err == nil && tools != nil {

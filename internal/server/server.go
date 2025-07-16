@@ -761,23 +761,58 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 }
 
 // getServerToolCount returns the number of tools for a specific server
+// Uses shorter timeout and better error handling for UI status display
 func (s *Server) getServerToolCount(serverID string) int {
 	client, exists := s.upstreamManager.GetClient(serverID)
 	if !exists || !client.IsConnected() {
 		return 0
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Use shorter timeout for UI status updates (5 seconds instead of 30)
+	// This reduces waiting time for unresponsive servers
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	tools, err := client.ListTools(ctx)
 	if err != nil {
-		s.logger.Warn("Failed to get tool count for server",
-			zap.String("server_id", serverID),
-			zap.Error(err))
+		// Classify errors to reduce noise from expected failures
+		if isTimeoutError(err) {
+			// Timeout errors are common for servers that don't support tool listing
+			// Log at debug level to reduce noise
+			s.logger.Debug("Tool listing timeout for server (server may not support tools)",
+				zap.String("server_id", serverID),
+				zap.String("error_type", "timeout"))
+		} else if isConnectionError(err) {
+			// Connection errors suggest the server is actually disconnected
+			s.logger.Debug("Connection error during tool listing",
+				zap.String("server_id", serverID),
+				zap.String("error_type", "connection"))
+		} else {
+			// Other errors might be more significant
+			s.logger.Warn("Failed to get tool count for server",
+				zap.String("server_id", serverID),
+				zap.Error(err))
+		}
 		return 0
 	}
 
 	return len(tools)
+}
+
+// Helper functions for error classification
+func isTimeoutError(err error) bool {
+	errStr := err.Error()
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "deadline exceeded") ||
+		strings.Contains(errStr, "context canceled")
+}
+
+func isConnectionError(err error) bool {
+	errStr := err.Error()
+	return strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe")
 }
 
 // StartServer starts the server if it's not already running

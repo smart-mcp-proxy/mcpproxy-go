@@ -305,7 +305,7 @@ func parseBaseURL(fullURL string) (string, error) {
 }
 
 // ShouldUseOAuth determines if OAuth should be attempted for a given server
-// This is now based on protocol type only - OAuth detection happens when server returns 401
+// Headers are tried first if configured, then OAuth as fallback on auth errors
 func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
 	logger := zap.L().Named("oauth")
 
@@ -321,9 +321,16 @@ func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
 		return false
 	}
 
-	// For HTTP/SSE servers, we should always try OAuth-enabled clients
-	// The mcp-go library will handle the OAuth flow only if the server requires it (returns 401)
-	logger.Debug("OAuth-enabled client will be used",
+	// If headers are configured, try headers first, not OAuth
+	if len(serverConfig.Headers) > 0 {
+		logger.Debug("Headers configured - will try headers first, OAuth as fallback if needed",
+			zap.String("server", serverConfig.Name),
+			zap.Int("header_count", len(serverConfig.Headers)))
+		return false
+	}
+
+	// For HTTP/SSE servers without headers, try OAuth-enabled clients
+	logger.Debug("No headers configured - OAuth-enabled client will be used",
 		zap.String("server", serverConfig.Name),
 		zap.String("protocol", serverConfig.Protocol))
 
