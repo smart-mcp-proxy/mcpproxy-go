@@ -2,6 +2,7 @@ package transport
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -25,8 +26,14 @@ type StdioTransportConfig struct {
 	EnvManager *secureenv.Manager
 }
 
-// CreateStdioClient creates a new MCP client using stdio transport
-func CreateStdioClient(cfg *StdioTransportConfig) (*client.Client, error) {
+// StdioClientResult holds the result of creating a stdio client with stderr access
+type StdioClientResult struct {
+	Client *client.Client
+	Stderr io.Reader
+}
+
+// CreateStdioClient creates a new MCP client using stdio transport and returns stderr access
+func CreateStdioClient(cfg *StdioTransportConfig) (*StdioClientResult, error) {
 	if cfg.Command == "" {
 		return nil, fmt.Errorf("no command specified for stdio transport")
 	}
@@ -38,7 +45,13 @@ func CreateStdioClient(cfg *StdioTransportConfig) (*client.Client, error) {
 	command, cmdArgs := wrapCommandInShell(cfg.Command, cfg.Args)
 
 	stdioTransport := transport.NewStdio(command, envVars, cmdArgs...)
-	return client.NewClient(stdioTransport), nil
+	mcpClient := client.NewClient(stdioTransport)
+
+	// Note: stderr will be available after the client is started
+	return &StdioClientResult{
+		Client: mcpClient,
+		Stderr: nil, // Will be set later via GetStderr after Start()
+	}, nil
 }
 
 // wrapCommandInShell wraps the original command in a shell to ensure PATH is loaded
