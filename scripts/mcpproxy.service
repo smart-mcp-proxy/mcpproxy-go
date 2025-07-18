@@ -6,7 +6,7 @@ Documentation=https://github.com/smart-mcp-proxy/mcpproxy-go
 [Service]
 Type=simple
 User=%i
-ExecStart=/usr/local/bin/mcpproxy --config %h/.mcpproxy/mcp_config.json
+ExecStart=/usr/local/bin/mcpproxy serve --config %h/.mcpproxy/mcp_config.json
 Restart=always
 RestartSec=5
 StandardOutput=journal

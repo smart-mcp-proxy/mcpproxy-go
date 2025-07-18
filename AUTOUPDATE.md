@@ -13,7 +13,7 @@ This document describes the auto-update functionality and release automation sys
 
 ```bash
 # Default mode - auto-update enabled
-./mcpproxy --tray=true
+./mcpproxy serve --tray=true
 ```
 
 ### 🚫 Disabled Mode
@@ -24,7 +24,7 @@ This document describes the auto-update functionality and release automation sys
 ```bash
 # Disable auto-update completely
 export MCPPROXY_DISABLE_AUTO_UPDATE=true
-./mcpproxy --tray=true
+./mcpproxy serve --tray=true
 
 # Or add to shell profile for permanent setting
 echo 'export MCPPROXY_DISABLE_AUTO_UPDATE=true' >> ~/.zshrc
@@ -39,7 +39,7 @@ echo 'export MCPPROXY_DISABLE_AUTO_UPDATE=true' >> ~/.zshrc
 ```bash
 # Notification-only mode
 export MCPPROXY_UPDATE_NOTIFY_ONLY=true
-./mcpproxy --tray=true
+./mcpproxy serve --tray=true
 ```
 
 ## Package Manager Integration

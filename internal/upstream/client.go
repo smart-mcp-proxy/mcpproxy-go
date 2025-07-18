@@ -346,6 +346,74 @@ func (c *Client) createSSEClientWithAuth(useOAuth bool) (*client.Client, error) 
 	return transport.CreateSSEClient(sseConfig)
 }
 
+// safeClientStart wraps client.Start() with panic recovery to prevent crashes
+// when connecting to non-MCP endpoints
+func (c *Client) safeClientStart(ctx context.Context, authType string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("Panic during client start - likely not an MCP server",
+				zap.String("server", c.config.Name),
+				zap.String("url", c.config.URL),
+				zap.String("auth_type", authType),
+				zap.Any("panic", r))
+
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Error("Panic during client start",
+					zap.String("auth_type", authType),
+					zap.Any("panic", r))
+			}
+
+			// Convert panic to a descriptive error
+			err = fmt.Errorf("failed to start MCP client - endpoint may not be an MCP server or may have crashed the client library. URL: %s, panic: %v", c.config.URL, r)
+		}
+	}()
+
+	if err := c.client.Start(ctx); err != nil {
+		c.logger.Debug("Client.Start() failed",
+			zap.String("server", c.config.Name),
+			zap.String("auth_type", authType),
+			zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
+// safeClientInitialize wraps client.Initialize() with panic recovery to prevent crashes
+// when connecting to non-MCP endpoints
+func (c *Client) safeClientInitialize(ctx context.Context, initRequest *mcp.InitializeRequest, authType string) (serverInfo *mcp.InitializeResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("Panic during client initialization - likely not an MCP server",
+				zap.String("server", c.config.Name),
+				zap.String("url", c.config.URL),
+				zap.String("auth_type", authType),
+				zap.Any("panic", r))
+
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Error("Panic during client initialization",
+					zap.String("auth_type", authType),
+					zap.Any("panic", r))
+			}
+
+			// Convert panic to a descriptive error
+			err = fmt.Errorf("failed to initialize MCP client - endpoint may not be an MCP server or may have returned invalid response. URL: %s, panic: %v", c.config.URL, r)
+			serverInfo = nil
+		}
+	}()
+
+	result, err := c.client.Initialize(ctx, *initRequest)
+	if err != nil {
+		c.logger.Debug("Client.Initialize() failed",
+			zap.String("server", c.config.Name),
+			zap.String("auth_type", authType),
+			zap.Error(err))
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // completeConnection completes the connection process after client creation
 func (c *Client) completeConnection(ctx context.Context, transportType, authType string) error {
 	c.logger.Debug("Completing connection",
@@ -358,17 +426,12 @@ func (c *Client) completeConnection(ctx context.Context, transportType, authType
 	connectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Start the client
+	// Start the client with panic recovery
 	c.logger.Debug("Starting MCP client connection",
 		zap.String("server", c.config.Name),
 		zap.String("auth_type", authType))
 
-	if err := c.client.Start(connectCtx); err != nil {
-		c.logger.Debug("Client.Start() failed",
-			zap.String("server", c.config.Name),
-			zap.String("auth_type", authType),
-			zap.Error(err))
-
+	if err := c.safeClientStart(connectCtx, authType); err != nil {
 		// For OAuth clients, handle OAuth flow errors
 		if authType == authTypeOAuth && c.isOAuthRelatedError(err) {
 			return c.handleOAuthFlow(connectCtx, err)
@@ -397,7 +460,7 @@ func (c *Client) completeConnection(ctx context.Context, transportType, authType
 	// Transition to discovering state
 	c.stateManager.TransitionTo(StateDiscovering)
 
-	// Initialize the client
+	// Initialize the client with panic recovery
 	c.logger.Debug("Initializing MCP client",
 		zap.String("server", c.config.Name),
 		zap.String("auth_type", authType))
@@ -410,13 +473,8 @@ func (c *Client) completeConnection(ctx context.Context, transportType, authType
 	}
 	initRequest.Params.Capabilities = mcp.ClientCapabilities{}
 
-	serverInfo, err := c.client.Initialize(connectCtx, initRequest)
+	serverInfo, err := c.safeClientInitialize(connectCtx, &initRequest, authType)
 	if err != nil {
-		c.logger.Debug("Client.Initialize() failed",
-			zap.String("server", c.config.Name),
-			zap.String("auth_type", authType),
-			zap.Error(err))
-
 		// For OAuth clients, handle OAuth initialization errors
 		if authType == authTypeOAuth && (client.IsOAuthAuthorizationRequiredError(err) ||
 			c.isOAuthRelatedError(err)) {
@@ -655,7 +713,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	}
 
 	toolsRequest := mcp.ListToolsRequest{}
-	toolsResult, err := c.client.ListTools(ctx, toolsRequest)
+	toolsResult, err := c.safeListTools(ctx, toolsRequest)
 	if err != nil {
 		c.stateManager.SetError(err)
 		c.logger.Error("ListTools failed", zap.Error(err))
@@ -705,6 +763,56 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	return tools, nil
 }
 
+// safeListTools wraps client.ListTools() with panic recovery to prevent crashes
+// when listing tools fails unexpectedly
+func (c *Client) safeListTools(ctx context.Context, request mcp.ListToolsRequest) (result *mcp.ListToolsResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("Panic during list tools",
+				zap.String("server", c.config.Name),
+				zap.String("url", c.config.URL),
+				zap.Any("panic", r))
+
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Error("Panic during list tools",
+					zap.Any("panic", r))
+			}
+
+			// Convert panic to a descriptive error
+			err = fmt.Errorf("list tools crashed - server may not be properly responding to tool listing. URL: %s, panic: %v", c.config.URL, r)
+			result = nil
+		}
+	}()
+
+	return c.client.ListTools(ctx, request)
+}
+
+// safeCallTool wraps client.CallTool() with panic recovery to prevent crashes
+// when tool calls fail unexpectedly
+func (c *Client) safeCallTool(ctx context.Context, request mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("Panic during tool call",
+				zap.String("server", c.config.Name),
+				zap.String("url", c.config.URL),
+				zap.String("tool", request.Params.Name),
+				zap.Any("panic", r))
+
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Error("Panic during tool call",
+					zap.String("tool", request.Params.Name),
+					zap.Any("panic", r))
+			}
+
+			// Convert panic to a descriptive error
+			err = fmt.Errorf("tool call crashed - server may not be properly responding to tool calls. Tool: %s, URL: %s, panic: %v", request.Params.Name, c.config.URL, r)
+			result = nil
+		}
+	}()
+
+	return c.client.CallTool(ctx, request)
+}
+
 // CallTool calls a tool on the upstream server
 func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
 	if !c.stateManager.IsReady() {
@@ -740,7 +848,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		}
 	}
 
-	result, err := c.client.CallTool(ctx, request)
+	result, err := c.safeCallTool(ctx, request)
 	if err != nil {
 		c.stateManager.SetError(err)
 
@@ -844,7 +952,7 @@ func (c *Client) ListResources(ctx context.Context) ([]interface{}, error) {
 	}
 
 	resourcesRequest := mcp.ListResourcesRequest{}
-	resourcesResult, err := c.client.ListResources(ctx, resourcesRequest)
+	resourcesResult, err := c.safeListResources(ctx, resourcesRequest)
 	if err != nil {
 		c.stateManager.SetError(err)
 		return nil, fmt.Errorf("failed to list resources: %w", err)
@@ -860,7 +968,31 @@ func (c *Client) ListResources(ctx context.Context) ([]interface{}, error) {
 	return resources, nil
 }
 
-// isConnectionError checks if an error indicates a broken connection
+// safeListResources wraps client.ListResources() with panic recovery to prevent crashes
+// when listing resources fails unexpectedly
+func (c *Client) safeListResources(ctx context.Context, request mcp.ListResourcesRequest) (result *mcp.ListResourcesResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("Panic during list resources",
+				zap.String("server", c.config.Name),
+				zap.String("url", c.config.URL),
+				zap.Any("panic", r))
+
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Error("Panic during list resources",
+					zap.Any("panic", r))
+			}
+
+			// Convert panic to a descriptive error
+			err = fmt.Errorf("list resources crashed - server may not be properly responding to resource listing. URL: %s, panic: %v", c.config.URL, r)
+			result = nil
+		}
+	}()
+
+	return c.client.ListResources(ctx, request)
+}
+
+// isConnectionError checks if an error is related to connection issues
 func (c *Client) isConnectionError(err error) bool {
 	return strings.Contains(err.Error(), "connection refused") ||
 		strings.Contains(err.Error(), "no such host") ||
@@ -1000,7 +1132,7 @@ func (c *Client) retryOAuthConnection(ctx context.Context) error {
 	c.logger.Debug("Retrying MCP client start with OAuth token",
 		zap.String("server", c.config.Name))
 
-	if err := c.client.Start(connectCtx); err != nil {
+	if err := c.safeClientStart(connectCtx, authTypeOAuth); err != nil {
 		c.logger.Error("OAuth client start retry failed",
 			zap.String("server", c.config.Name),
 			zap.Error(err))
@@ -1025,7 +1157,7 @@ func (c *Client) retryOAuthConnection(ctx context.Context) error {
 	}
 	initRequest.Params.Capabilities = mcp.ClientCapabilities{}
 
-	serverInfo, err := c.client.Initialize(connectCtx, initRequest)
+	serverInfo, err := c.safeClientInitialize(connectCtx, &initRequest, authTypeOAuth)
 	if err != nil {
 		c.logger.Error("OAuth client initialization retry failed",
 			zap.String("server", c.config.Name),

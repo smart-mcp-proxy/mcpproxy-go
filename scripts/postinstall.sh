@@ -22,4 +22,5 @@ if [ -n "$HOME" ] && [ -d "$HOME" ]; then
 fi
 
 echo "mcpproxy installation complete!"
-echo "Run 'mcpproxy --help' for usage information." 
+echo "Run 'mcpproxy --help' for usage information."
+echo "Run 'mcpproxy serve' to start the proxy server." 

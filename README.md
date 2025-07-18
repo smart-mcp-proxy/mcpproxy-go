@@ -55,7 +55,7 @@ go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest
 ### 2. Run
 
 ```bash
-mcpproxy                # starts HTTP server on :8080 and shows tray
+mcpproxy serve          # starts HTTP server on :8080 and shows tray
 ```
 
 ### 3. Add servers
@@ -121,7 +121,7 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 ### CLI flags
 
 ```text
-mcpproxy --help
+mcpproxy serve --help
   -c, --config <file>          path to mcp_config.json
   -l, --listen <addr>          listen address (":8080")
   -d, --data-dir <dir>         custom data directory
@@ -186,7 +186,7 @@ MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that req
 Enable debug logging to see the complete OAuth flow:
 
 ```bash
-mcpproxy --log-level=debug --tray=false
+mcpproxy serve --log-level=debug --tray=false
 ```
 
 Check logs for OAuth flow details:

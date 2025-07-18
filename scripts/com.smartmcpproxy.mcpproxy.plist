@@ -8,6 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Applications/mcpproxy</string>
+        <string>serve</string>
         <string>--tray=true</string>
     </array>
     

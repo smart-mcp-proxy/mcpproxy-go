@@ -563,9 +563,9 @@ jobs:
 
             ### Usage
 
-            - With tray: `./mcpproxy` (default)
-            - Custom port (default: 8080): `./mcpproxy --listen :8081`
-            - Headless: `./mcpproxy --tray=false`
+            - With tray: `./mcpproxy serve` (default)
+            - Custom port (default: 8080): `./mcpproxy serve --listen :8081`
+            - Headless: `./mcpproxy serve --tray=false`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -34,7 +34,7 @@ go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest
 
 **From Terminal:**
 ```bash
-mcpproxy
+mcpproxy serve
 ```
 
 **macOS (DMG Install):** Use Launchpad or Spotlight search to find and launch MCPProxy.
@@ -61,7 +61,7 @@ netstat -an | findstr 8080
 
 **Change Default Port:**
 ```bash
-mcpproxy --listen :8081
+mcpproxy serve --listen :8081
 # or set in config file
 ```
 
@@ -292,9 +292,9 @@ netstat -ano | findstr :8080
 
 **Command Line:**
 ```bash
-mcpproxy --listen :8081
-mcpproxy --listen :9000
-mcpproxy --listen 127.0.0.1:8080  # Bind to specific interface
+mcpproxy serve --listen :8081
+mcpproxy serve --listen :9000
+mcpproxy serve --listen 127.0.0.1:8080  # Bind to specific interface
 ```
 
 **Configuration File:**
@@ -308,7 +308,7 @@ mcpproxy --listen 127.0.0.1:8080  # Bind to specific interface
 **Environment Variable:**
 ```bash
 export MCPP_LISTEN=":8081"
-mcpproxy
+mcpproxy serve
 ```
 
 **📝 Note:** Environment variables are prefixed with `MCPP_`. For example, `MCPP_LISTEN` controls the listen address.
@@ -319,10 +319,10 @@ Run multiple MCPProxy instances on different ports:
 
 ```bash
 # Instance 1 - Development  
-mcpproxy --config dev_config.json --listen :8080
+mcpproxy serve --config dev_config.json --listen :8080
 
 # Instance 2 - Production
-mcpproxy --config prod_config.json --listen :8081
+mcpproxy serve --config prod_config.json --listen :8081
 ```
 
 ## Troubleshooting
@@ -340,17 +340,17 @@ taskkill /PID <PID> /F          # Windows
 **2. MCPProxy Not Starting**
 ```bash
 # Check logs
-mcpproxy --log-level debug
+mcpproxy serve --log-level debug
 
 # Check configuration
-mcpproxy --config ~/.mcpproxy/mcp_config.json --log-level debug
+mcpproxy serve --config ~/.mcpproxy/mcp_config.json --log-level debug
 ```
 
 **3. Client Connection Issues**
 - Verify MCPProxy is running: Check process with `ps aux | grep mcpproxy`
 - Check firewall settings
 - Ensure correct URL in client config
-- Try different port: `mcpproxy --listen :8081`
+- Try different port: `mcpproxy serve --listen :8081`
 - Check tray icon (if enabled) for status
 
 **4. Tools Not Appearing**
@@ -370,7 +370,7 @@ ps aux | grep mcpproxy
 lsof -i :8080
 
 # View logs (with debug mode)
-mcpproxy --log-level debug
+mcpproxy serve --log-level debug
 ```
 
 **📝 Note:** MCPProxy uses the MCP protocol over HTTP, not simple REST endpoints. Use MCP clients to interact with the server, not direct curl commands.
