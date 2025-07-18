@@ -35,6 +35,9 @@ type Config struct {
 
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
+
+	// Registries configuration for MCP server discovery
+	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
 }
 
 // LogConfig represents logging configuration
@@ -74,6 +77,18 @@ type OAuthConfig struct {
 	RedirectURI  string   `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
 	Scopes       []string `json:"scopes,omitempty" mapstructure:"scopes"`
 	PKCEEnabled  bool     `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+}
+
+// RegistryEntry represents a registry in the configuration
+type RegistryEntry struct {
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	URL         string      `json:"url"`
+	ServersURL  string      `json:"servers_url,omitempty"`
+	Tags        []string    `json:"tags,omitempty"`
+	Protocol    string      `json:"protocol,omitempty"`
+	Count       interface{} `json:"count,omitempty"` // number or string
 }
 
 // CursorMCPConfig represents the structure for Cursor IDE MCP configuration
@@ -192,6 +207,37 @@ func DefaultConfig() *Config {
 
 		// Prompts enabled by default
 		EnablePrompts: true,
+
+		// Default registries for MCP server discovery
+		Registries: []RegistryEntry{
+			{
+				ID:          "pulse",
+				Name:        "Pulse MCP",
+				Description: "Browse and discover MCP use-cases, servers, clients, and news",
+				URL:         "https://www.pulsemcp.com/",
+				ServersURL:  "https://api.pulsemcp.com/v0beta/servers",
+				Tags:        []string{"verified"},
+				Protocol:    "custom/pulse",
+			},
+			{
+				ID:          "docker-mcp-catalog",
+				Name:        "Docker MCP Catalog",
+				Description: "A collection of secure, high-quality MCP servers as docker images",
+				URL:         "https://hub.docker.com/catalogs/mcp",
+				ServersURL:  "https://hub.docker.com/v2/repositories/mcp/",
+				Tags:        []string{"verified"},
+				Protocol:    "custom/docker",
+			},
+			{
+				ID:          "fleur",
+				Name:        "Fleur",
+				Description: "Fleur is the app store for Claude",
+				URL:         "https://www.fleurmcp.com/",
+				ServersURL:  "https://raw.githubusercontent.com/fleuristes/app-registry/refs/heads/main/apps.json",
+				Tags:        []string{"verified"},
+				Protocol:    "custom/fleur",
+			},
+		},
 	}
 }
 

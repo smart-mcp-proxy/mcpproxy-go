@@ -18,16 +18,16 @@ The logging system provides:
 
 ```bash
 # Enable file logging with default settings
-mcpproxy --log-to-file
+mcpproxy serve --log-to-file
 
 # Set log level and enable file logging
-mcpproxy --log-level debug --log-to-file
+mcpproxy serve --log-level debug --log-to-file
 
 # Use custom log file location
-mcpproxy --log-file /path/to/custom/mcpproxy.log
+mcpproxy serve --log-file /path/to/custom/mcpproxy.log
 
 # Disable file logging (console only)
-mcpproxy --log-to-file=false
+mcpproxy serve --log-to-file=false
 ```
 
 ### Configuration File
@@ -137,7 +137,7 @@ The logging system automatically selects the appropriate directory based on your
 
 ```bash
 # Use a custom log file path
-mcpproxy --log-file /var/log/myapp/mcpproxy.log
+mcpproxy serve --log-file /var/log/myapp/mcpproxy.log
 
 # Use custom path with configuration
 {
@@ -204,7 +204,7 @@ Use the built-in command to find log directory:
 
 ```bash
 # The log directory path is shown in startup logs
-mcpproxy --log-level debug | grep "Log directory configured"
+mcpproxy serve --log-level debug | grep "Log directory configured"
 ```
 
 ### Common Log Patterns
@@ -253,7 +253,7 @@ Failed to connect to upstream server | {"server": "example", "error": "connectio
 
 ```bash
 # Test with custom path
-mcpproxy --log-file ./mcpproxy.log --log-level debug
+mcpproxy serve --log-file ./mcpproxy.log --log-level debug
 ```
 
 ### Log Rotation Not Working
@@ -321,7 +321,7 @@ ENV LOG_TO_FILE=true
 Description=MCP Proxy Service
 
 [Service]
-ExecStart=/usr/local/bin/mcpproxy --log-to-file --log-level info
+ExecStart=/usr/local/bin/mcpproxy serve --log-to-file --log-level info
 StandardOutput=journal
 StandardError=journal
 

@@ -293,6 +293,7 @@ func TestE2E_MCPProxyWithLogging(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binaryName,
+		"serve",
 		"--config", configFile,
 		"--log-level", "debug",
 		"--log-to-file",

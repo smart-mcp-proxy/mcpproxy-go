@@ -13,6 +13,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/truncate"
@@ -105,7 +106,7 @@ func NewMCPProxyServer(
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Then use call_tool with the discovered tool names. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers."),
+		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Then use call_tool with the discovered tool names. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers."),
 		mcp.WithString("query",
 			mcp.Required(),
 			mcp.Description("Natural language description of what you want to accomplish. Be specific about your task (e.g., 'create a new GitHub repository', 'get weather for London', 'query SQLite database for users'). The search will find the most relevant tools across all connected servers."),
@@ -210,6 +211,28 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			),
 		)
 		p.server.AddTool(quarantineSecurityTool, p.handleQuarantineSecurity)
+
+		// search_servers - Registry search and discovery
+		searchServersTool := mcp.NewTool("search_servers",
+			mcp.WithDescription("🔍 Discover MCP servers from known registries. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs ready for direct use with upstream_servers add command."),
+			mcp.WithString("registry",
+				mcp.Required(),
+				mcp.Description("Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries."),
+			),
+			mcp.WithString("search",
+				mcp.Description("Search term to filter servers by name or description (case-insensitive)"),
+			),
+			mcp.WithString("tag",
+				mcp.Description("Filter servers by tag/category (if supported by registry)"),
+			),
+		)
+		p.server.AddTool(searchServersTool, p.handleSearchServers)
+
+		// list_registries - Explicit registry discovery tool
+		listRegistriesTool := mcp.NewTool("list_registries",
+			mcp.WithDescription("📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams."),
+		)
+		p.server.AddTool(listRegistriesTool, p.handleListRegistries)
 	}
 }
 
@@ -224,6 +247,82 @@ func (p *MCPProxyServer) registerPrompts() {
 	// - "debug-search" - Help debug search results
 	// - "setup-new-server" - Guided workflow for adding servers
 	// - "troubleshoot-connection" - Help with connection issues
+}
+
+// handleSearchServers implements the search_servers functionality
+func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	registry, err := request.RequireString("registry")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'registry': %v", err)), nil
+	}
+
+	// Get optional parameters
+	search := request.GetString("search", "")
+	tag := request.GetString("tag", "")
+
+	// Search for servers
+	servers, err := registries.SearchServers(ctx, registry, tag, search)
+	if err != nil {
+		p.logger.Error("Registry search failed",
+			zap.String("registry", registry),
+			zap.String("search", search),
+			zap.String("tag", tag),
+			zap.Error(err))
+		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
+	}
+
+	// Format response
+	response := map[string]interface{}{
+		"servers":  servers,
+		"registry": registry,
+		"total":    len(servers),
+		"query":    search,
+		"tag":      tag,
+	}
+
+	if len(servers) == 0 {
+		response["message"] = fmt.Sprintf("No servers found in registry '%s'", registry)
+		if search != "" {
+			response["message"] = fmt.Sprintf("No servers found in registry '%s' matching '%s'", registry, search)
+		}
+	} else {
+		response["message"] = fmt.Sprintf("Found %d server(s). Use 'upstream_servers add' with the URL to add a server.", len(servers))
+	}
+
+	jsonResult, err := json.Marshal(response)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// handleListRegistries implements the list_registries functionality
+func (p *MCPProxyServer) handleListRegistries(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	registriesList := []map[string]interface{}{}
+	allRegistries := registries.ListRegistries()
+	for i := range allRegistries {
+		reg := &allRegistries[i]
+		registriesList = append(registriesList, map[string]interface{}{
+			"id":          reg.ID,
+			"name":        reg.Name,
+			"description": reg.Description,
+			"url":         reg.URL,
+			"tags":        reg.Tags,
+			"count":       reg.Count,
+		})
+	}
+
+	jsonResult, err := json.Marshal(map[string]interface{}{
+		"registries": registriesList,
+		"total":      len(registriesList),
+		"message":    "Available MCP registries. Use 'search_servers' tool with a registry ID to find servers.",
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize registries: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
 // handleRetrieveTools implements the retrieve_tools functionality
@@ -376,6 +475,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		operationRetrieveTools:   true,
 		operationCallTool:        true,
 		"read_cache":             true,
+		"list_registries":        true,
+		"search_servers":         true,
 	}
 
 	if proxyTools[toolName] {
@@ -394,6 +495,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			return p.handleRetrieveTools(ctx, proxyRequest)
 		case "read_cache":
 			return p.handleReadCache(ctx, proxyRequest)
+		case "list_registries":
+			return p.handleListRegistries(ctx, proxyRequest)
+		case "search_servers":
+			return p.handleSearchServers(ctx, proxyRequest)
 		case operationCallTool:
 			// Prevent infinite recursion
 			return mcp.NewToolResultError("call_tool cannot call itself"), nil

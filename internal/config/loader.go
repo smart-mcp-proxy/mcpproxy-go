@@ -45,6 +45,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	// Initialize registries from config
+	initializeRegistries(cfg)
+
 	return cfg, nil
 }
 
@@ -131,6 +134,9 @@ func Load() (*Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+
+	// Initialize registries from config
+	initializeRegistries(cfg)
 
 	return cfg, nil
 }
@@ -334,4 +340,21 @@ func createDefaultConfigFile(path string, cfg *Config) error {
 	defaultCfg.Servers = []*ServerConfig{} // Empty servers list
 
 	return SaveConfig(defaultCfg, path)
+}
+
+// initializeRegistries initializes the registries package with config data
+func initializeRegistries(cfg *Config) {
+	// This function will be implemented to avoid circular imports
+	// For now, we'll create a callback mechanism
+	if registriesInitCallback != nil {
+		registriesInitCallback(cfg)
+	}
+}
+
+// registriesInitCallback is set by main.go to avoid circular import
+var registriesInitCallback func(*Config)
+
+// SetRegistriesInitCallback sets the callback function for registries initialization
+func SetRegistriesInitCallback(callback func(*Config)) {
+	registriesInitCallback = callback
 }

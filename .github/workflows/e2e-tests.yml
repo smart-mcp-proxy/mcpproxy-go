@@ -114,7 +114,7 @@ jobs:
           ./mcpproxy --help
 
           # Test logging functionality
-          timeout 10s ./mcpproxy --log-to-file --log-level debug --listen :0 --tray=false || true
+          timeout 10s ./mcpproxy serve --log-to-file --log-level debug --listen :0 --tray=false || true
 
           # Verify log file was created in standard OS location
           if [ "$(uname)" = "Linux" ]; then
@@ -207,7 +207,7 @@ jobs:
           echo "OS Standard: ${{ matrix.log_standard }}"
 
           # Run mcpproxy briefly to create log files
-          ./mcpproxy --log-to-file --log-level info --listen :0 --tray=false &
+          ./mcpproxy serve --log-to-file --log-level info --listen :0 --tray=false &
           MCPPROXY_PID=$!
           sleep 5
           kill $MCPPROXY_PID 2>/dev/null || true
