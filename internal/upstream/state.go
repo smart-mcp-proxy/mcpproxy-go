@@ -108,6 +108,14 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 func (sm *StateManager) TransitionTo(newState ConnectionState) {
 	sm.mu.Lock()
 	oldState := sm.currentState
+
+	// Validate transition
+	if err := sm.ValidateTransition(oldState, newState); err != nil {
+		// For now, log the validation error but allow the transition
+		// In the future, we might want to be stricter
+		fmt.Printf("Invalid state transition: %v (from %s to %s)\n", err, oldState.String(), newState.String())
+	}
+
 	sm.currentState = newState
 
 	// Clear error on successful transitions

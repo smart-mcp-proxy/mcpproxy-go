@@ -144,10 +144,31 @@ func (c *Client) onStateChange(oldState, newState ConnectionState, info Connecti
 
 // Connect establishes a connection to the upstream MCP server
 func (c *Client) Connect(ctx context.Context) error {
+	c.logger.Debug("Connect method called",
+		zap.String("server", c.config.Name),
+		zap.String("url", c.config.URL),
+		zap.String("command", c.config.Command),
+		zap.String("protocol", c.config.Protocol),
+		zap.Bool("enabled", c.config.Enabled),
+		zap.Bool("quarantined", c.config.Quarantined),
+		zap.String("current_state", c.stateManager.GetState().String()),
+		zap.Bool("is_connecting", c.stateManager.IsConnecting()),
+		zap.Bool("is_ready", c.stateManager.IsReady()))
+
 	// Check if already connecting or connected
 	if c.stateManager.IsConnecting() || c.stateManager.IsReady() {
-		return fmt.Errorf("connection already in progress or established")
+		errMsg := fmt.Sprintf("connection already in progress or established (state: %s)", c.stateManager.GetState().String())
+		c.logger.Debug("Connect aborted - already in progress or connected",
+			zap.String("server", c.config.Name),
+			zap.String("current_state", c.stateManager.GetState().String()))
+		return fmt.Errorf(errMsg)
 	}
+
+	c.logger.Info("Starting connection to upstream MCP server",
+		zap.String("server", c.config.Name),
+		zap.String("url", c.config.URL),
+		zap.String("command", c.config.Command),
+		zap.String("protocol", c.config.Protocol))
 
 	// Transition to connecting state
 	c.stateManager.TransitionTo(StateConnecting)
