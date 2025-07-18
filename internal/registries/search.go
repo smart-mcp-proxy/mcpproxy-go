@@ -15,6 +15,8 @@ const (
 	protocolMCPStore = "custom/mcpstore"
 	protocolDocker   = "custom/docker"
 	protocolFleur    = "custom/fleur"
+	protocolMCPV0    = "mcp/v0"
+	protocolRemote   = "custom/remote"
 	dockerProtocol   = "docker"
 	noDescAvailable  = "No description available"
 )
@@ -101,6 +103,10 @@ func parseServers(rawData interface{}, reg *RegistryEntry) []ServerEntry {
 		servers = parseAPITracker(rawData)
 	case "custom/apify":
 		servers = parseApify(rawData)
+	case protocolMCPV0:
+		servers = parseAzureMCPDemo(rawData)
+	case protocolRemote:
+		servers = parseRemoteMCPServers(rawData)
 	default:
 		// Default handling: try to unmarshal directly into []ServerEntry
 		servers = parseDefault(rawData)
@@ -610,4 +616,134 @@ func derivePulseServerDetails(itemMap map[string]interface{}) (installCmd, conne
 	}
 
 	return installCmd, connectURL
+}
+
+// parseAzureMCPDemo handles Azure MCP Demo registry format (mcp/v0 protocol)
+func parseAzureMCPDemo(rawData interface{}) []ServerEntry {
+	servers := []ServerEntry{}
+
+	data, ok := rawData.(map[string]interface{})
+	if !ok {
+		return servers
+	}
+
+	serversData, ok := data["servers"]
+	if !ok {
+		return servers
+	}
+
+	serversArray, ok := serversData.([]interface{})
+	if !ok {
+		return servers
+	}
+
+	for _, item := range serversArray {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract basic fields
+		id, _ := itemMap["id"].(string)
+		name, _ := itemMap["name"].(string)
+		description, _ := itemMap["description"].(string)
+
+		if id == "" || name == "" {
+			continue
+		}
+
+		server := ServerEntry{
+			ID:          id,
+			Name:        name,
+			Description: description,
+		}
+
+		// Extract repository information for constructing URLs
+		if repo, ok := itemMap["repository"].(map[string]interface{}); ok {
+			if repoURL, ok := repo["url"].(string); ok && repoURL != "" {
+				// Use repository URL as the primary identifier
+				// For GitHub repos, we could construct MCP endpoints, but for now use the repo URL
+				server.URL = repoURL
+			}
+		}
+
+		// Extract version information for additional context
+		if versionDetail, ok := itemMap["version_detail"].(map[string]interface{}); ok {
+			if version, ok := versionDetail["version"].(string); ok && version != "" {
+				// Add version info to description if available
+				if server.Description != "" {
+					server.Description += " (v" + version + ")"
+				}
+			}
+			if releaseDate, ok := versionDetail["release_date"].(string); ok && releaseDate != "" {
+				server.UpdatedAt = releaseDate
+			}
+		}
+
+		// Set default description if empty
+		if server.Description == "" {
+			server.Description = noDescAvailable
+		}
+
+		servers = append(servers, server)
+	}
+
+	return servers
+}
+
+// parseRemoteMCPServers handles Remote MCP Servers registry format (custom/remote protocol)
+func parseRemoteMCPServers(rawData interface{}) []ServerEntry {
+	servers := []ServerEntry{}
+
+	data, ok := rawData.(map[string]interface{})
+	if !ok {
+		return servers
+	}
+
+	serversData, ok := data["servers"]
+	if !ok {
+		return servers
+	}
+
+	serversArray, ok := serversData.([]interface{})
+	if !ok {
+		return servers
+	}
+
+	for _, item := range serversArray {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract basic fields from the simple format
+		id, _ := itemMap["id"].(string)
+		name, _ := itemMap["name"].(string)
+		url, _ := itemMap["url"].(string)
+		auth, _ := itemMap["auth"].(string)
+
+		if id == "" || name == "" || url == "" {
+			continue
+		}
+
+		server := ServerEntry{
+			ID:   id,
+			Name: name,
+			URL:  url,
+		}
+
+		// Create description based on auth type and server name
+		switch auth {
+		case "oauth":
+			server.Description = fmt.Sprintf("%s (OAuth authentication required)", name)
+		case "open":
+			server.Description = fmt.Sprintf("%s (Open access)", name)
+		default:
+			server.Description = fmt.Sprintf("%s (Authentication: %s)", name, auth)
+		}
+
+		servers = append(servers, server)
+	}
+
+	return servers
 }
