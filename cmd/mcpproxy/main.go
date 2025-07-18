@@ -252,12 +252,22 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		cfg.ToolResponseLimit = cmdToolResponseLimit
 	}
 
-	// Apply security settings from command line
-	cfg.ReadOnlyMode = cmdReadOnlyMode
-	cfg.DisableManagement = cmdDisableManagement
-	cfg.AllowServerAdd = cmdAllowServerAdd
-	cfg.AllowServerRemove = cmdAllowServerRemove
-	cfg.EnablePrompts = cmdEnablePrompts
+	// Apply security settings from command line ONLY if explicitly set
+	if cmd.Flags().Changed("read-only") {
+		cfg.ReadOnlyMode = cmdReadOnlyMode
+	}
+	if cmd.Flags().Changed("disable-management") {
+		cfg.DisableManagement = cmdDisableManagement
+	}
+	if cmd.Flags().Changed("allow-server-add") {
+		cfg.AllowServerAdd = cmdAllowServerAdd
+	}
+	if cmd.Flags().Changed("allow-server-remove") {
+		cfg.AllowServerRemove = cmdAllowServerRemove
+	}
+	if cmd.Flags().Changed("enable-prompts") {
+		cfg.EnablePrompts = cmdEnablePrompts
+	}
 
 	logger.Info("Configuration loaded",
 		zap.String("data_dir", cfg.DataDir),
@@ -265,6 +275,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.Bool("tray_enabled", cfg.EnableTray),
 		zap.Bool("read_only_mode", cfg.ReadOnlyMode),
 		zap.Bool("disable_management", cfg.DisableManagement),
+		zap.Bool("allow_server_add", cfg.AllowServerAdd),
+		zap.Bool("allow_server_remove", cfg.AllowServerRemove),
 		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
 	// Create server

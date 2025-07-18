@@ -347,7 +347,7 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 		// Hide servers that are no longer in the config
 		for serverName, menuItem := range m.serverMenuItems {
 			if _, exists := currentServerMap[serverName]; !exists {
-				m.logger.Info("Hiding menu item for removed server", zap.String("server", serverName))
+				m.logger.Debug("Hiding menu item for removed server", zap.String("server", serverName))
 				menuItem.Hide()
 				// Also hide its sub-menu items if they exist
 				if actionItem, ok := m.serverActionItems[serverName]; ok {
