@@ -256,7 +256,7 @@ jobs:
 
           # Run mcpproxy briefly to create log files
           try {
-            $process = Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru
+            $process = Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "serve", "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru
             Start-Sleep -Seconds 5
             $process | Stop-Process -Force -ErrorAction SilentlyContinue
           } catch {
