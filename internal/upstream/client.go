@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -161,7 +162,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.logger.Debug("Connect aborted - already in progress or connected",
 			zap.String("server", c.config.Name),
 			zap.String("current_state", c.stateManager.GetState().String()))
-		return fmt.Errorf(errMsg)
+		return errors.New(errMsg)
 	}
 
 	c.logger.Info("Starting connection to upstream MCP server",
