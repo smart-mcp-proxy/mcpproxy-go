@@ -365,9 +365,25 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	}
 	m.mu.RUnlock()
 
+	m.logger.Debug("ConnectAll starting",
+		zap.Int("total_clients", len(clients)))
+
 	var wg sync.WaitGroup
 	for id, client := range clients {
+		m.logger.Debug("Evaluating client for connection",
+			zap.String("id", id),
+			zap.String("name", client.config.Name),
+			zap.Bool("enabled", client.config.Enabled),
+			zap.Bool("is_connected", client.IsConnected()),
+			zap.Bool("is_connecting", client.IsConnecting()),
+			zap.String("current_state", client.GetState().String()),
+			zap.Bool("quarantined", client.config.Quarantined))
+
 		if !client.config.Enabled {
+			m.logger.Debug("Skipping disabled client",
+				zap.String("id", id),
+				zap.String("name", client.config.Name))
+
 			if client.IsConnected() {
 				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.config.Name))
 				_ = client.Disconnect()
@@ -375,18 +391,42 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
+		// Check connection eligibility with detailed logging
+		if client.IsConnected() {
+			m.logger.Debug("Client already connected, skipping",
+				zap.String("id", id),
+				zap.String("name", client.config.Name))
+			continue
+		}
+
+		if client.IsConnecting() {
+			m.logger.Debug("Client already connecting, skipping",
+				zap.String("id", id),
+				zap.String("name", client.config.Name))
+			continue
+		}
+
+		m.logger.Info("Attempting to connect client",
+			zap.String("id", id),
+			zap.String("name", client.config.Name),
+			zap.String("url", client.config.URL),
+			zap.String("command", client.config.Command),
+			zap.String("protocol", client.config.Protocol))
+
 		wg.Add(1)
 		go func(id string, c *Client) {
 			defer wg.Done()
-			// Only connect if not already connected or trying to connect
-			if !c.IsConnected() && !c.IsConnecting() {
-				if err := c.Connect(ctx); err != nil {
-					m.logger.Error("Failed to connect to upstream server",
-						zap.String("id", id),
-						zap.String("name", c.config.Name),
-						zap.String("state", c.GetState().String()),
-						zap.Error(err))
-				}
+
+			if err := c.Connect(ctx); err != nil {
+				m.logger.Error("Failed to connect to upstream server",
+					zap.String("id", id),
+					zap.String("name", c.config.Name),
+					zap.String("state", c.GetState().String()),
+					zap.Error(err))
+			} else {
+				m.logger.Info("Successfully initiated connection to upstream server",
+					zap.String("id", id),
+					zap.String("name", c.config.Name))
 			}
 		}(id, client)
 	}
