@@ -237,6 +237,24 @@ func DefaultConfig() *Config {
 				Tags:        []string{"verified"},
 				Protocol:    "custom/fleur",
 			},
+			{
+				ID:          "azure-mcp-demo",
+				Name:        "Azure MCP Registry Demo",
+				Description: "A reference implementation of MCP registry using Azure API Center",
+				URL:         "https://demo.registry.azure-mcp.net/",
+				ServersURL:  "https://demo.registry.azure-mcp.net/v0/servers",
+				Tags:        []string{"verified", "demo", "azure", "reference"},
+				Protocol:    "mcp/v0",
+			},
+			{
+				ID:          "remote-mcp-servers",
+				Name:        "Remote MCP Servers",
+				Description: "Community-maintained list of remote Model Context Protocol servers",
+				URL:         "https://remote-mcp-servers.com/",
+				ServersURL:  "https://remote-mcp-servers.com/api/servers",
+				Tags:        []string{"verified", "community", "remote"},
+				Protocol:    "custom/remote",
+			},
 		},
 	}
 }
