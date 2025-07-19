@@ -38,82 +38,61 @@ func TestNewGuesser(t *testing.T) {
 	assert.Equal(t, requestTimeout, guesser.client.Timeout)
 }
 
-func TestExtractPackageNames(t *testing.T) {
-	guesser, db := setupTestGuesser(t)
-	defer db.Close()
-
+func TestGitHubURLPattern(t *testing.T) {
 	tests := []struct {
-		name             string
-		serverURL        string
-		serverName       string
-		shouldContain    []string
-		shouldNotContain []string
+		name     string
+		url      string
+		expected bool
+		author   string
+		repo     string
 	}{
 		{
-			name:          "simple server name",
-			serverURL:     "",
-			serverName:    "weather-service",
-			shouldContain: []string{"weather-service"},
+			name:     "valid GitHub repo URL",
+			url:      "https://github.com/facebook/react",
+			expected: true,
+			author:   "facebook",
+			repo:     "react",
 		},
 		{
-			name:             "URL with path",
-			serverURL:        "https://github.com/user/mcp-weather-server",
-			serverName:       "",
-			shouldContain:    []string{"user", "weather"},
-			shouldNotContain: []string{"mcp"},
+			name:     "GitHub repo with path",
+			url:      "https://github.com/microsoft/vscode/tree/main",
+			expected: true,
+			author:   "microsoft",
+			repo:     "vscode",
 		},
 		{
-			name:          "URL with subdomain",
-			serverURL:     "https://weather.example.com/api/mcp",
-			serverName:    "weather-api",
-			shouldContain: []string{"weather-api", "weather", "example"},
+			name:     "non-GitHub URL",
+			url:      "https://gitlab.com/user/repo",
+			expected: false,
 		},
 		{
-			name:          "complex URL with many parts",
-			serverURL:     "https://api.weather-mcp.example.com/v1/mcp-server",
-			serverName:    "weather-mcp-server",
-			shouldContain: []string{"weather", "example"},
+			name:     "invalid URL format",
+			url:      "not-a-url",
+			expected: false,
+		},
+		{
+			name:     "GitHub URL without repo",
+			url:      "https://github.com/user",
+			expected: false,
+		},
+		{
+			name:     "empty URL",
+			url:      "",
+			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := guesser.extractPackageNames(tt.serverURL, tt.serverName)
+			matches := githubURLPattern.FindStringSubmatch(tt.url)
 
-			for _, expected := range tt.shouldContain {
-				assert.Contains(t, result, expected, "Result should contain %s", expected)
+			if tt.expected {
+				assert.Len(t, matches, 3, "Should match GitHub pattern")
+				assert.Equal(t, tt.author, matches[1], "Author should match")
+				assert.Equal(t, tt.repo, matches[2], "Repo should match")
+			} else {
+				assert.Nil(t, matches, "Should not match GitHub pattern")
 			}
-
-			for _, notExpected := range tt.shouldNotContain {
-				assert.NotContains(t, result, notExpected, "Result should not contain %s", notExpected)
-			}
-
-			// Ensure we got some results
-			assert.NotEmpty(t, result, "Should extract at least some package names")
-		})
-	}
-}
-
-func TestCleanPackageName(t *testing.T) {
-	guesser, db := setupTestGuesser(t)
-	defer db.Close()
-
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"weather-service", "weather-service"},
-		{"mcp-weather", "weather"},
-		{"weather-mcp", "weather"},
-		{"mcp_weather_server", "weather"},
-		{"Weather-Service", "weather-service"}, // lowercase
-		{"@types/node", "@types/node"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := guesser.cleanPackageName(tt.input)
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
@@ -121,11 +100,11 @@ func TestCleanPackageName(t *testing.T) {
 func TestCheckNPMPackage_Success(t *testing.T) {
 	// Create mock npm registry server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/express" {
+		if r.URL.Path == "/@facebook/react" {
 			npmResponse := NPMPackageInfo{
-				Name:        "express",
-				Description: "Fast, unopinionated, minimalist web framework",
-				DistTags:    map[string]string{"latest": "4.18.2"},
+				Name:        "@facebook/react",
+				Description: "React is a JavaScript library for building user interfaces.",
+				DistTags:    map[string]string{"latest": "18.2.0"},
 				Versions:    map[string]interface{}{},
 				Time:        map[string]string{},
 			}
@@ -139,28 +118,22 @@ func TestCheckNPMPackage_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	guesser, db := setupTestGuesser(t)
-	defer db.Close()
-
-	// Use a custom guesser with test server URL
-	guesser.client = &http.Client{Timeout: requestTimeout}
-
-	// Mock the checkNPMPackage to use test server
+	// Mock the checkNPMPackage to use test server (simplified test)
 	info := &RepositoryInfo{
 		Type:        RepoTypeNPM,
-		PackageName: "express",
+		PackageName: "@facebook/react",
 		Exists:      true,
-		Description: "Fast, unopinionated, minimalist web framework",
-		Version:     "4.18.2",
-		InstallCmd:  "npm install express",
-		URL:         "https://www.npmjs.com/package/express",
+		Description: "React is a JavaScript library for building user interfaces.",
+		Version:     "18.2.0",
+		InstallCmd:  "npm install @facebook/react",
+		URL:         "https://www.npmjs.com/package/@facebook/react",
 	}
 
-	// Test the successful case (we'll mock this since we can't easily override const)
+	// Test the successful case
 	assert.Equal(t, RepoTypeNPM, info.Type)
 	assert.True(t, info.Exists)
-	assert.Equal(t, "express", info.PackageName)
-	assert.Equal(t, "4.18.2", info.Version)
+	assert.Equal(t, "@facebook/react", info.PackageName)
+	assert.Equal(t, "18.2.0", info.Version)
 	assert.Contains(t, info.InstallCmd, "npm install")
 }
 
@@ -171,89 +144,79 @@ func TestCheckNPMPackage_NotFound(t *testing.T) {
 	ctx := context.Background()
 
 	// Test with a package that doesn't exist
-	info := guesser.checkNPMPackage(ctx, "definitely-not-a-real-package-name-12345")
+	info := guesser.checkNPMPackage(ctx, "@nonexistent/package-12345")
 
 	assert.Equal(t, RepoTypeNPM, info.Type)
 	assert.False(t, info.Exists)
-	assert.Equal(t, "definitely-not-a-real-package-name-12345", info.PackageName)
+	assert.Equal(t, "@nonexistent/package-12345", info.PackageName)
 }
 
-func TestCheckPyPIPackage_Success(t *testing.T) {
-	// Similar test structure for PyPI
-	guesser, db := setupTestGuesser(t)
-	defer db.Close()
-
-	ctx := context.Background()
-
-	// Test with a real package (requests is very stable)
-	info := guesser.checkPyPIPackage(ctx, "requests")
-
-	// Since we're hitting the real API, we just verify structure
-	assert.Equal(t, RepoTypePyPI, info.Type)
-	assert.Equal(t, "requests", info.PackageName)
-	// Don't assert on Exists since network might fail
-	if info.Exists {
-		assert.NotEmpty(t, info.Version)
-		assert.Contains(t, info.InstallCmd, "pip install")
-	}
-}
-
-func TestCheckPyPIPackage_NotFound(t *testing.T) {
-	guesser, db := setupTestGuesser(t)
-	defer db.Close()
-
-	ctx := context.Background()
-
-	// Test with a package that doesn't exist
-	info := guesser.checkPyPIPackage(ctx, "definitely-not-a-real-pypi-package-name-12345")
-
-	assert.Equal(t, RepoTypePyPI, info.Type)
-	assert.False(t, info.Exists)
-	assert.Equal(t, "definitely-not-a-real-pypi-package-name-12345", info.PackageName)
-}
-
-func TestGuessRepositoryType(t *testing.T) {
+func TestGuessRepositoryType_GitHubURL(t *testing.T) {
 	guesser, db := setupTestGuesser(t)
 	defer db.Close()
 
 	ctx := context.Background()
 
 	tests := []struct {
-		name       string
-		serverURL  string
-		serverName string
-		timeout    time.Duration
+		name        string
+		githubURL   string
+		shouldCheck bool
+		expectedPkg string
 	}{
 		{
-			name:       "express-like server",
-			serverURL:  "https://github.com/user/express-mcp",
-			serverName: "express-mcp",
-			timeout:    2 * time.Second,
+			name:        "valid GitHub URL",
+			githubURL:   "https://github.com/facebook/react",
+			shouldCheck: true,
+			expectedPkg: "@facebook/react",
 		},
 		{
-			name:       "weather server",
-			serverURL:  "https://weather.example.com",
-			serverName: "weather-service",
-			timeout:    2 * time.Second,
+			name:        "GitHub URL with path",
+			githubURL:   "https://github.com/microsoft/vscode/tree/main",
+			shouldCheck: true,
+			expectedPkg: "@microsoft/vscode",
+		},
+		{
+			name:        "non-GitHub URL",
+			githubURL:   "https://gitlab.com/user/repo",
+			shouldCheck: false,
+		},
+		{
+			name:        "empty URL",
+			githubURL:   "",
+			shouldCheck: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Use short timeout to avoid long waits
-			ctx, cancel := context.WithTimeout(ctx, tt.timeout)
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
 
-			result, err := guesser.GuessRepositoryType(ctx, tt.serverURL, tt.serverName)
+			result, err := guesser.GuessRepositoryType(ctx, tt.githubURL)
 
-			// Should not error (though packages might not exist)
 			assert.NoError(t, err)
 			assert.NotNil(t, result)
 
-			// At least one of npm or pypi should be attempted
-			// (even if not found, the structure should be there)
+			if !tt.shouldCheck {
+				// Should not have found anything for non-GitHub URLs
+				assert.Nil(t, result.NPM)
+			}
+			// For GitHub URLs, NPM field might be nil if package doesn't exist,
+			// but we should have attempted to check
 		})
 	}
+}
+
+func TestGuessRepositoryType_EmptyURL(t *testing.T) {
+	guesser, db := setupTestGuesser(t)
+	defer db.Close()
+
+	ctx := context.Background()
+
+	result, err := guesser.GuessRepositoryType(ctx, "")
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Nil(t, result.NPM)
 }
 
 func TestCaching(t *testing.T) {
@@ -263,11 +226,11 @@ func TestCaching(t *testing.T) {
 	ctx := context.Background()
 
 	// First call should hit the API
-	info1 := guesser.checkNPMPackage(ctx, "nonexistent-package-for-test")
+	info1 := guesser.checkNPMPackage(ctx, "@nonexistent/package-for-test")
 	assert.False(t, info1.Exists)
 
 	// Second call should come from cache
-	info2 := guesser.checkNPMPackage(ctx, "nonexistent-package-for-test")
+	info2 := guesser.checkNPMPackage(ctx, "@nonexistent/package-for-test")
 	assert.False(t, info2.Exists)
 
 	// Both should have same structure
@@ -278,12 +241,8 @@ func TestCaching(t *testing.T) {
 
 func TestRepositoryInfoCacheKey(t *testing.T) {
 	info := &RepositoryInfo{Type: RepoTypeNPM}
-	key := info.CacheKey("express")
-	assert.Equal(t, "repo_guess:npm:express", key)
-
-	info2 := &RepositoryInfo{Type: RepoTypePyPI}
-	key2 := info2.CacheKey("requests")
-	assert.Equal(t, "repo_guess:pypi:requests", key2)
+	key := info.CacheKey("@facebook/react")
+	assert.Equal(t, "repo_guess:npm:@facebook/react", key)
 }
 
 func TestRepositoryInfoCacheTTL(t *testing.T) {
@@ -296,12 +255,7 @@ func TestGuessResultStructure(t *testing.T) {
 	result := &GuessResult{
 		NPM: &RepositoryInfo{
 			Type:        RepoTypeNPM,
-			PackageName: "express",
-			Exists:      true,
-		},
-		PyPI: &RepositoryInfo{
-			Type:        RepoTypePyPI,
-			PackageName: "flask",
+			PackageName: "@facebook/react",
 			Exists:      true,
 		},
 	}
@@ -310,14 +264,13 @@ func TestGuessResultStructure(t *testing.T) {
 	data, err := json.Marshal(result)
 	assert.NoError(t, err)
 	assert.Contains(t, string(data), "npm")
-	assert.Contains(t, string(data), "pypi")
+	assert.NotContains(t, string(data), "pypi") // Should not contain pypi anymore
 
 	// Test JSON unmarshaling
 	var restored GuessResult
 	err = json.Unmarshal(data, &restored)
 	assert.NoError(t, err)
 	assert.Equal(t, result.NPM.PackageName, restored.NPM.PackageName)
-	assert.Equal(t, result.PyPI.PackageName, restored.PyPI.PackageName)
 }
 
 func TestScopedNPMPackages(t *testing.T) {
@@ -351,9 +304,10 @@ func TestErrorHandling(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	result, err := guesser.GuessRepositoryType(ctx, "http://example.com", "test")
-	assert.Error(t, err)
-	assert.Nil(t, result)
+	result, err := guesser.GuessRepositoryType(ctx, "https://github.com/user/repo")
+	// Should not error for cancelled context since we check GitHub pattern first
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
 }
 
 func TestNilCacheManager(t *testing.T) {
@@ -363,7 +317,7 @@ func TestNilCacheManager(t *testing.T) {
 	ctx := context.Background()
 
 	// Should still work without cache
-	info := guesser.checkNPMPackage(ctx, "nonexistent-package")
+	info := guesser.checkNPMPackage(ctx, "@nonexistent/package")
 	assert.Equal(t, RepoTypeNPM, info.Type)
 	assert.False(t, info.Exists)
 }

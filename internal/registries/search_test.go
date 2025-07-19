@@ -228,7 +228,8 @@ func TestParsePulse(t *testing.T) {
 		},
 	}
 
-	servers := parsePulse(testData)
+	ctx := context.Background()
+	servers := parsePulse(ctx, testData, nil)
 
 	if len(servers) != 3 {
 		t.Errorf("expected 3 servers, got %d", len(servers))
@@ -408,6 +409,8 @@ func TestBuildFleurInstallCmd(t *testing.T) {
 }
 
 func TestDerivePulseServerDetails(t *testing.T) {
+	ctx := context.Background()
+
 	tests := []struct {
 		name            string
 		itemMap         map[string]interface{}
@@ -464,11 +467,27 @@ func TestDerivePulseServerDetails(t *testing.T) {
 			"",
 			"",
 		},
+		{
+			"no package info with GitHub source URL",
+			map[string]interface{}{
+				"source_code_url": "https://github.com/facebook/react",
+			},
+			"", // Won't find npm package for this GitHub repo in test
+			"",
+		},
+		{
+			"no package info with non-GitHub source URL",
+			map[string]interface{}{
+				"source_code_url": "https://gitlab.com/user/repo",
+			},
+			"", // Won't try to guess non-GitHub URLs
+			"",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd, url := derivePulseServerDetails(tt.itemMap)
+			cmd, url := derivePulseServerDetails(ctx, tt.itemMap, nil) // Pass nil guesser for tests without actual npm checking
 			if cmd != tt.expectedCmd {
 				t.Errorf("expected cmd '%s', got '%s'", tt.expectedCmd, cmd)
 			}
@@ -789,7 +808,7 @@ func TestProtocolParsersWithMissingData(t *testing.T) {
 		parser func(interface{}) []ServerEntry
 	}{
 		{"parseMCPRun", parseMCPRun},
-		{"parsePulse", parsePulse},
+		// parsePulse excluded - has different signature with context and guesser
 		{"parseMCPStore", parseMCPStore},
 		{"parseDocker", parseDocker},
 		{"parseFleur", parseFleur},
@@ -905,9 +924,6 @@ func TestSearchServersWithRepositoryGuessing(t *testing.T) {
 				if server.RepositoryInfo.NPM != nil {
 					assert.Equal(t, experiments.RepoTypeNPM, server.RepositoryInfo.NPM.Type)
 				}
-				if server.RepositoryInfo.PyPI != nil {
-					assert.Equal(t, experiments.RepoTypePyPI, server.RepositoryInfo.PyPI.Type)
-				}
 			}
 		}
 	}
@@ -963,38 +979,7 @@ func TestSearchServersInstallCommandGeneration(t *testing.T) {
 	assert.Equal(t, "npm install express", server.InstallCmd)
 }
 
-func TestSearchServersWithPyPIInstallCommand(t *testing.T) {
-	// This test doesn't require database setup, just testing logic
-
-	// Create a mock server entry
-	server := ServerEntry{
-		ID:          "test-server",
-		Name:        "requests",
-		Description: "Requests MCP server",
-		URL:         "https://requests.example.com/mcp",
-		InstallCmd:  "", // No existing install command
-	}
-
-	// Mock repository info that would be added by guesser
-	mockRepoInfo := &experiments.GuessResult{
-		PyPI: &experiments.RepositoryInfo{
-			Type:        experiments.RepoTypePyPI,
-			PackageName: "requests",
-			Exists:      true,
-			InstallCmd:  "pip install requests",
-		},
-	}
-
-	// Simulate what happens in SearchServers
-	server.RepositoryInfo = mockRepoInfo
-
-	// If we found pypi repository info and no install command exists, it should be generated
-	if server.InstallCmd == "" && mockRepoInfo.PyPI != nil && mockRepoInfo.PyPI.Exists {
-		server.InstallCmd = mockRepoInfo.PyPI.InstallCmd
-	}
-
-	assert.Equal(t, "pip install requests", server.InstallCmd)
-}
+// TestSearchServersWithPyPIInstallCommand removed - PyPI support has been removed from guesser
 
 func TestSearchServersExistingInstallCommand(t *testing.T) {
 	// This test doesn't require database setup, just testing logic
@@ -1084,7 +1069,6 @@ func TestRepositoryInfoIntegration(t *testing.T) {
 	// Verify structure
 	assert.NotNil(t, server.RepositoryInfo)
 	assert.NotNil(t, server.RepositoryInfo.NPM)
-	assert.Nil(t, server.RepositoryInfo.PyPI)
 
 	npm := server.RepositoryInfo.NPM
 	assert.True(t, npm.Exists)

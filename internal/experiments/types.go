@@ -8,7 +8,6 @@ type RepositoryType string
 const (
 	RepoTypeUnknown RepositoryType = "unknown"
 	RepoTypeNPM     RepositoryType = "npm"
-	RepoTypePyPI    RepositoryType = "pypi"
 )
 
 // RepositoryInfo contains information about a detected repository
@@ -32,30 +31,10 @@ type NPMPackageInfo struct {
 	Time        map[string]string      `json:"time"`
 }
 
-// PyPIPackageInfo represents PyPI package information from PyPI JSON API
-type PyPIPackageInfo struct {
-	Info     PyPIInfo                     `json:"info"`
-	Releases map[string][]PyPIReleaseInfo `json:"releases"`
-}
-
-// PyPIInfo contains PyPI package info
-type PyPIInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Summary string `json:"summary"`
-	Author  string `json:"author"`
-}
-
-// PyPIReleaseInfo contains PyPI release information
-type PyPIReleaseInfo struct {
-	Filename string `json:"filename"`
-	URL      string `json:"url"`
-}
-
 // GuessResult contains the result of repository type guessing
+// Only supports npm packages for GitHub repositories
 type GuessResult struct {
-	NPM  *RepositoryInfo `json:"npm,omitempty"`
-	PyPI *RepositoryInfo `json:"pypi,omitempty"`
+	NPM *RepositoryInfo `json:"npm,omitempty"`
 }
 
 // CacheKey generates a cache key for repository guessing

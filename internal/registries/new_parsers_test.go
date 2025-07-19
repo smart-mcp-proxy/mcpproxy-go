@@ -1,6 +1,7 @@
 package registries
 
 import (
+	"context"
 	"testing"
 )
 
@@ -41,7 +42,8 @@ func TestParseAzureMCPDemo(t *testing.T) {
 		},
 	}
 
-	servers := parseAzureMCPDemo(sampleData)
+	ctx := context.Background()
+	servers := parseAzureMCPDemo(ctx, sampleData, nil)
 
 	// Verify we parsed 2 servers
 	if len(servers) != 2 {
@@ -141,16 +143,18 @@ func TestParseRemoteMCPServers(t *testing.T) {
 }
 
 func TestParseAzureMCPDemo_EmptyData(t *testing.T) {
+	ctx := context.Background()
+
 	// Test with empty data
 	emptyData := map[string]interface{}{}
-	servers := parseAzureMCPDemo(emptyData)
+	servers := parseAzureMCPDemo(ctx, emptyData, nil)
 	if len(servers) != 0 {
 		t.Errorf("Expected 0 servers for empty data, got %d", len(servers))
 	}
 
 	// Test with invalid data
 	invalidData := "not a map"
-	servers = parseAzureMCPDemo(invalidData)
+	servers = parseAzureMCPDemo(ctx, invalidData, nil)
 	if len(servers) != 0 {
 		t.Errorf("Expected 0 servers for invalid data, got %d", len(servers))
 	}
