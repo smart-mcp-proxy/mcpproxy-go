@@ -69,7 +69,7 @@ func TestSearchServersIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("search all servers", func(t *testing.T) {
-		servers, err := SearchServers(ctx, "test-registry", "", "")
+		servers, err := SearchServers(ctx, "test-registry", "", "", 10, nil)
 		if err != nil {
 			t.Fatalf("SearchServers failed: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestSearchServersIntegration(t *testing.T) {
 	})
 
 	t.Run("search with filter", func(t *testing.T) {
-		servers, err := SearchServers(ctx, "test-registry", "", "weather")
+		servers, err := SearchServers(ctx, "test-registry", "", "weather", 10, nil)
 		if err != nil {
 			t.Fatalf("SearchServers failed: %v", err)
 		}
@@ -106,7 +106,7 @@ func TestSearchServersIntegration(t *testing.T) {
 	})
 
 	t.Run("search no results", func(t *testing.T) {
-		servers, err := SearchServers(ctx, "test-registry", "", "nonexistent")
+		servers, err := SearchServers(ctx, "test-registry", "", "nonexistent", 10, nil)
 		if err != nil {
 			t.Fatalf("SearchServers failed: %v", err)
 		}
@@ -117,7 +117,7 @@ func TestSearchServersIntegration(t *testing.T) {
 	})
 
 	t.Run("unknown registry", func(t *testing.T) {
-		_, err := SearchServers(ctx, "unknown-registry", "", "")
+		_, err := SearchServers(ctx, "unknown-registry", "", "", 10, nil)
 		if err == nil {
 			t.Error("expected error for unknown registry, got nil")
 		}

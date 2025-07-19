@@ -161,6 +161,7 @@ func setupViper() {
 	viper.SetDefault("allow-server-add", true)
 	viper.SetDefault("allow-server-remove", true)
 	viper.SetDefault("enable-prompts", true)
+	viper.SetDefault("check-server-repo", true)
 }
 
 // findAndLoadConfigFile tries to find config file in common locations

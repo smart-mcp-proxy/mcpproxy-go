@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"mcpproxy-go/internal/experiments"
 )
 
 // Constants for repeated strings
@@ -22,7 +24,8 @@ const (
 )
 
 // SearchServers searches the given registry for servers matching optional tag and query
-func SearchServers(ctx context.Context, registryID, tag, query string) ([]ServerEntry, error) {
+// with optional repository guessing and result limiting
+func SearchServers(ctx context.Context, registryID, tag, query string, limit int, guesser *experiments.Guesser) ([]ServerEntry, error) {
 	// Find registry by ID or name
 	reg := FindRegistry(registryID)
 	if reg == nil {
@@ -42,9 +45,37 @@ func SearchServers(ctx context.Context, registryID, tag, query string) ([]Server
 	// Filter results
 	filtered := filterServers(servers, tag, query)
 
-	// Set registry name for all results
+	// Apply limit (default 10, max 50)
+	if limit <= 0 {
+		limit = 10 // Default limit
+	}
+	if limit > 50 {
+		limit = 50 // Max limit
+	}
+
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+
+	// Set registry name and perform repository guessing for all results
 	for i := range filtered {
 		filtered[i].Registry = reg.Name
+
+		// Perform repository guessing if guesser is provided
+		if guesser != nil {
+			if guessResult, err := guesser.GuessRepositoryType(ctx, filtered[i].URL, filtered[i].Name); err == nil {
+				filtered[i].RepositoryInfo = guessResult
+
+				// If we found repository info and no install command exists, generate one
+				if filtered[i].InstallCmd == "" {
+					if guessResult.NPM != nil && guessResult.NPM.Exists {
+						filtered[i].InstallCmd = guessResult.NPM.InstallCmd
+					} else if guessResult.PyPI != nil && guessResult.PyPI.Exists {
+						filtered[i].InstallCmd = guessResult.PyPI.InstallCmd
+					}
+				}
+			}
+		}
 	}
 
 	return filtered, nil

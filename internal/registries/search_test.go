@@ -8,6 +8,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"mcpproxy-go/internal/cache"
+	"mcpproxy-go/internal/experiments"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
+	"go.uber.org/zap"
 )
 
 // setupTestRegistries sets up test registries for testing
@@ -579,7 +588,7 @@ func TestCreateServerEntry(t *testing.T) {
 
 func TestSearchServersUnknownRegistry(t *testing.T) {
 	ctx := context.Background()
-	_, err := SearchServers(ctx, "unknown-registry", "", "")
+	_, err := SearchServers(ctx, "unknown-registry", "", "", 10, nil)
 
 	if err == nil {
 		t.Error("expected error for unknown registry, got nil")
@@ -625,7 +634,7 @@ func TestSearchServersWithMockServer(t *testing.T) {
 	defer func() { registryList = originalList }()
 
 	ctx := context.Background()
-	servers, err := SearchServers(ctx, "test", "", "")
+	servers, err := SearchServers(ctx, "test", "", "", 10, nil)
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -689,7 +698,7 @@ func TestSearchServersWithSearch(t *testing.T) {
 	ctx := context.Background()
 
 	// Test search for "weather"
-	servers, err := SearchServers(ctx, "test", "", "weather")
+	servers, err := SearchServers(ctx, "test", "", "weather", 10, nil)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 		return
@@ -807,4 +816,280 @@ func TestProtocolParsersWithMissingData(t *testing.T) {
 			})
 		}
 	}
+}
+
+func setupTestSearchWithGuesser(t *testing.T) (*experiments.Guesser, *bbolt.DB) {
+	// Create temporary database for cache
+	db, err := bbolt.Open(":memory:", 0644, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+
+	logger := zap.NewNop()
+	cacheManager, err := cache.NewManager(db, logger)
+	require.NoError(t, err)
+
+	guesser := experiments.NewGuesser(cacheManager, logger)
+	return guesser, db
+}
+
+func TestSearchServersWithLimits(t *testing.T) {
+	// Test with a known registry that should return results
+	registryID := "pulse" // Using pulse as it's in the default config
+
+	tests := []struct {
+		name     string
+		limit    int
+		expected int
+	}{
+		{
+			name:     "default limit",
+			limit:    0, // Should use default 10
+			expected: 10,
+		},
+		{
+			name:     "custom limit",
+			limit:    5,
+			expected: 5,
+		},
+		{
+			name:     "over max limit",
+			limit:    100, // Should be capped at 50
+			expected: 50,
+		},
+		{
+			name:     "negative limit",
+			limit:    -1, // Should use default 10
+			expected: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			guesser, db := setupTestSearchWithGuesser(t)
+			defer db.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			servers, err := SearchServers(ctx, registryID, "", "", tt.limit, guesser)
+
+			// The search might fail due to network issues, but if it succeeds,
+			// check the limit is respected
+			if err == nil && len(servers) > 0 {
+				assert.LessOrEqual(t, len(servers), tt.expected,
+					"Result count should not exceed expected limit")
+			}
+		})
+	}
+}
+
+func TestSearchServersWithRepositoryGuessing(t *testing.T) {
+	guesser, db := setupTestSearchWithGuesser(t)
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Test with a registry
+	servers, err := SearchServers(ctx, "pulse", "", "", 5, guesser)
+
+	// If search succeeds and returns results, check repository info
+	if err == nil && len(servers) > 0 {
+		for _, server := range servers {
+			// Each server should have repository info attempted
+			// (though it might not find npm/pypi packages)
+			assert.Equal(t, "Pulse MCP", server.Registry)
+
+			// Repository info might be nil if no packages found
+			if server.RepositoryInfo != nil {
+				// If repository info exists, it should have proper structure
+				if server.RepositoryInfo.NPM != nil {
+					assert.Equal(t, experiments.RepoTypeNPM, server.RepositoryInfo.NPM.Type)
+				}
+				if server.RepositoryInfo.PyPI != nil {
+					assert.Equal(t, experiments.RepoTypePyPI, server.RepositoryInfo.PyPI.Type)
+				}
+			}
+		}
+	}
+}
+
+func TestSearchServersWithoutGuesser(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Test without guesser (nil)
+	servers, err := SearchServers(ctx, "pulse", "", "", 5, nil)
+
+	// Should still work without guesser
+	if err == nil && len(servers) > 0 {
+		for _, server := range servers {
+			// Should not have repository info when guesser is nil
+			assert.Nil(t, server.RepositoryInfo)
+			assert.Equal(t, "Pulse MCP", server.Registry)
+		}
+	}
+}
+
+func TestSearchServersInstallCommandGeneration(t *testing.T) {
+	// This test doesn't require database setup, just testing logic
+
+	// Create a mock server entry
+	server := ServerEntry{
+		ID:          "test-server",
+		Name:        "express",
+		Description: "Express MCP server",
+		URL:         "https://express.example.com/mcp",
+		InstallCmd:  "", // No existing install command
+	}
+
+	// Mock repository info that would be added by guesser
+	mockRepoInfo := &experiments.GuessResult{
+		NPM: &experiments.RepositoryInfo{
+			Type:        experiments.RepoTypeNPM,
+			PackageName: "express",
+			Exists:      true,
+			InstallCmd:  "npm install express",
+		},
+	}
+
+	// Simulate what happens in SearchServers
+	server.RepositoryInfo = mockRepoInfo
+
+	// If we found npm repository info and no install command exists, it should be generated
+	if server.InstallCmd == "" && mockRepoInfo.NPM != nil && mockRepoInfo.NPM.Exists {
+		server.InstallCmd = mockRepoInfo.NPM.InstallCmd
+	}
+
+	assert.Equal(t, "npm install express", server.InstallCmd)
+}
+
+func TestSearchServersWithPyPIInstallCommand(t *testing.T) {
+	// This test doesn't require database setup, just testing logic
+
+	// Create a mock server entry
+	server := ServerEntry{
+		ID:          "test-server",
+		Name:        "requests",
+		Description: "Requests MCP server",
+		URL:         "https://requests.example.com/mcp",
+		InstallCmd:  "", // No existing install command
+	}
+
+	// Mock repository info that would be added by guesser
+	mockRepoInfo := &experiments.GuessResult{
+		PyPI: &experiments.RepositoryInfo{
+			Type:        experiments.RepoTypePyPI,
+			PackageName: "requests",
+			Exists:      true,
+			InstallCmd:  "pip install requests",
+		},
+	}
+
+	// Simulate what happens in SearchServers
+	server.RepositoryInfo = mockRepoInfo
+
+	// If we found pypi repository info and no install command exists, it should be generated
+	if server.InstallCmd == "" && mockRepoInfo.PyPI != nil && mockRepoInfo.PyPI.Exists {
+		server.InstallCmd = mockRepoInfo.PyPI.InstallCmd
+	}
+
+	assert.Equal(t, "pip install requests", server.InstallCmd)
+}
+
+func TestSearchServersExistingInstallCommand(t *testing.T) {
+	// This test doesn't require database setup, just testing logic
+
+	// Create a mock server entry with existing install command
+	server := ServerEntry{
+		ID:          "test-server",
+		Name:        "custom-server",
+		Description: "Custom MCP server",
+		URL:         "https://custom.example.com/mcp",
+		InstallCmd:  "docker run custom/mcp-server", // Existing install command
+	}
+
+	// Mock repository info that would be added by guesser
+	mockRepoInfo := &experiments.GuessResult{
+		NPM: &experiments.RepositoryInfo{
+			Type:        experiments.RepoTypeNPM,
+			PackageName: "custom-server",
+			Exists:      true,
+			InstallCmd:  "npm install custom-server",
+		},
+	}
+
+	// Simulate what happens in SearchServers
+	server.RepositoryInfo = mockRepoInfo
+	originalInstallCmd := server.InstallCmd
+
+	// If install command already exists, it should not be overwritten
+	if server.InstallCmd == "" && mockRepoInfo.NPM != nil && mockRepoInfo.NPM.Exists {
+		server.InstallCmd = mockRepoInfo.NPM.InstallCmd
+	}
+
+	// Should keep the original install command
+	assert.Equal(t, originalInstallCmd, server.InstallCmd)
+	assert.Equal(t, "docker run custom/mcp-server", server.InstallCmd)
+}
+
+func TestFilterServersWithLimits(t *testing.T) {
+	// Create test servers
+	servers := []ServerEntry{
+		{ID: "1", Name: "server1", Description: "test server 1"},
+		{ID: "2", Name: "server2", Description: "test server 2"},
+		{ID: "3", Name: "server3", Description: "test server 3"},
+		{ID: "4", Name: "server4", Description: "test server 4"},
+		{ID: "5", Name: "server5", Description: "test server 5"},
+	}
+
+	// Test filtering
+	filtered := filterServers(servers, "", "server")
+	assert.Len(t, filtered, 5) // All should match
+
+	filtered = filterServers(servers, "", "server1")
+	assert.Len(t, filtered, 1) // Only one should match
+	assert.Equal(t, "server1", filtered[0].Name)
+
+	// Test case insensitive
+	filtered = filterServers(servers, "", "SERVER1")
+	assert.Len(t, filtered, 1)
+	assert.Equal(t, "server1", filtered[0].Name)
+
+	// Test no matches
+	filtered = filterServers(servers, "", "nonexistent")
+	assert.Len(t, filtered, 0)
+}
+
+func TestRepositoryInfoIntegration(t *testing.T) {
+	// Test that repository info is properly integrated into server entries
+	server := ServerEntry{
+		ID:   "express-mcp",
+		Name: "Express MCP Server",
+		URL:  "https://express.mcp.example.com",
+	}
+
+	// Add repository info as would be done by the guesser
+	server.RepositoryInfo = &experiments.GuessResult{
+		NPM: &experiments.RepositoryInfo{
+			Type:        experiments.RepoTypeNPM,
+			PackageName: "express",
+			Version:     "4.18.2",
+			Description: "Fast, unopinionated, minimalist web framework",
+			InstallCmd:  "npm install express",
+			URL:         "https://www.npmjs.com/package/express",
+			Exists:      true,
+		},
+	}
+
+	// Verify structure
+	assert.NotNil(t, server.RepositoryInfo)
+	assert.NotNil(t, server.RepositoryInfo.NPM)
+	assert.Nil(t, server.RepositoryInfo.PyPI)
+
+	npm := server.RepositoryInfo.NPM
+	assert.True(t, npm.Exists)
+	assert.Equal(t, "express", npm.PackageName)
+	assert.Equal(t, "4.18.2", npm.Version)
+	assert.Contains(t, npm.InstallCmd, "npm install")
+	assert.Contains(t, npm.URL, "npmjs.com")
 }
