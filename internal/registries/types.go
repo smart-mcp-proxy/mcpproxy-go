@@ -1,5 +1,7 @@
 package registries
 
+import "mcpproxy-go/internal/experiments"
+
 // RegistryEntry represents a registry in the embedded registry list
 type RegistryEntry struct {
 	ID          string      `json:"id"`
@@ -23,4 +25,7 @@ type ServerEntry struct {
 	UpdatedAt   string `json:"updatedAt,omitempty"`
 	CreatedAt   string `json:"createdAt,omitempty"`
 	Registry    string `json:"registry,omitempty"` // Which registry this came from
+
+	// Repository detection information
+	RepositoryInfo *experiments.GuessResult `json:"repository_info,omitempty"` // Detected npm/pypi package info
 }

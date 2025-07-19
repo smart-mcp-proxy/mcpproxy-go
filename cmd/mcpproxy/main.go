@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/server"
@@ -101,20 +102,22 @@ func main() {
 func createSearchServersCommand() *cobra.Command {
 	var registryFlag, searchFlag, tagFlag string
 	var listRegistries bool
+	var limitFlag int
 
 	cmd := &cobra.Command{
 		Use:   "search-servers",
-		Short: "Search MCP registries for available servers",
+		Short: "Search MCP registries for available servers with repository detection",
 		Long: `Search known MCP registries for available servers that can be added as upstreams.
-This tool queries embedded registries to discover MCP servers and returns results
-that can be directly used with the 'upstream_servers add' command.
+This tool queries embedded registries to discover MCP servers and includes automatic
+npm/PyPI package detection to enhance results with install commands.
+Results can be directly used with the 'upstream_servers add' command.
 
 Examples:
   # List all known registries
   mcpproxy search-servers --list-registries
 
-  # Search for weather-related servers in the Smithery registry
-  mcpproxy search-servers --registry smithery --search weather
+  # Search for weather-related servers in the Smithery registry (limit 10 results)
+  mcpproxy search-servers --registry smithery --search weather --limit 10
 
   # Search for servers tagged as "finance" in the Pulse registry
   mcpproxy search-servers --registry pulse --tag finance`,
@@ -128,7 +131,23 @@ Examples:
 			}
 
 			ctx := context.Background()
-			servers, err := registries.SearchServers(ctx, registryFlag, tagFlag, searchFlag)
+
+			// Create config to check if repository guessing is enabled
+			cfg, err := config.LoadFromFile("")
+			if err != nil {
+				// Use default config if loading fails
+				cfg = config.DefaultConfig()
+			}
+
+			// Create experiments guesser if repository checking is enabled
+			var guesser *experiments.Guesser
+			if cfg.CheckServerRepo {
+				// For CLI, we don't have cache manager, so pass nil
+				logger := zap.NewNop() // Use no-op logger for CLI
+				guesser = experiments.NewGuesser(nil, logger)
+			}
+
+			servers, err := registries.SearchServers(ctx, registryFlag, tagFlag, searchFlag, limitFlag, guesser)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
 			}
@@ -147,6 +166,7 @@ Examples:
 	cmd.Flags().StringVarP(&registryFlag, "registry", "r", "", "Registry ID or name to search (exact match)")
 	cmd.Flags().StringVarP(&searchFlag, "search", "s", "", "Search term for server name/description")
 	cmd.Flags().StringVarP(&tagFlag, "tag", "t", "", "Filter servers by tag/category")
+	cmd.Flags().IntVarP(&limitFlag, "limit", "l", 10, "Maximum number of results to return (default: 10, max: 50)")
 	cmd.Flags().BoolVar(&listRegistries, "list-registries", false, "List all known registries")
 
 	return cmd

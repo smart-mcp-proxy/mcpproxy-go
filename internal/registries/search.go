@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"mcpproxy-go/internal/experiments"
 )
 
 // Constants for repeated strings
@@ -22,7 +24,8 @@ const (
 )
 
 // SearchServers searches the given registry for servers matching optional tag and query
-func SearchServers(ctx context.Context, registryID, tag, query string) ([]ServerEntry, error) {
+// with optional repository guessing and result limiting
+func SearchServers(ctx context.Context, registryID, tag, query string, limit int, guesser *experiments.Guesser) ([]ServerEntry, error) {
 	// Find registry by ID or name
 	reg := FindRegistry(registryID)
 	if reg == nil {
@@ -34,7 +37,7 @@ func SearchServers(ctx context.Context, registryID, tag, query string) ([]Server
 	}
 
 	// Fetch servers from registry
-	servers, err := fetchServers(ctx, reg)
+	servers, err := fetchServers(ctx, reg, guesser)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch servers from %s: %w", reg.Name, err)
 	}
@@ -42,7 +45,19 @@ func SearchServers(ctx context.Context, registryID, tag, query string) ([]Server
 	// Filter results
 	filtered := filterServers(servers, tag, query)
 
-	// Set registry name for all results
+	// Apply limit (default 10, max 50)
+	if limit <= 0 {
+		limit = 10 // Default limit
+	}
+	if limit > 50 {
+		limit = 50 // Max limit
+	}
+
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+
+	// Set registry name
 	for i := range filtered {
 		filtered[i].Registry = reg.Name
 	}
@@ -51,7 +66,7 @@ func SearchServers(ctx context.Context, registryID, tag, query string) ([]Server
 }
 
 // fetchServers fetches and parses servers from a registry based on its protocol
-func fetchServers(ctx context.Context, reg *RegistryEntry) ([]ServerEntry, error) {
+func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.Guesser) ([]ServerEntry, error) {
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
@@ -78,12 +93,12 @@ func fetchServers(ctx context.Context, reg *RegistryEntry) ([]ServerEntry, error
 	}
 
 	// Process based on protocol
-	servers := parseServers(rawData, reg)
+	servers := parseServers(ctx, rawData, reg, guesser)
 	return servers, nil
 }
 
 // parseServers parses the raw JSON response based on the registry protocol
-func parseServers(rawData interface{}, reg *RegistryEntry) []ServerEntry {
+func parseServers(ctx context.Context, rawData interface{}, reg *RegistryEntry, guesser *experiments.Guesser) []ServerEntry {
 	var servers []ServerEntry
 
 	switch reg.Protocol {
@@ -92,7 +107,7 @@ func parseServers(rawData interface{}, reg *RegistryEntry) []ServerEntry {
 	case protocolMCPRun:
 		servers = parseMCPRun(rawData)
 	case "custom/pulse":
-		servers = parsePulse(rawData)
+		servers = parsePulse(ctx, rawData, guesser)
 	case protocolMCPStore:
 		servers = parseMCPStore(rawData)
 	case protocolDocker:
@@ -104,7 +119,7 @@ func parseServers(rawData interface{}, reg *RegistryEntry) []ServerEntry {
 	case "custom/apify":
 		servers = parseApify(rawData)
 	case protocolMCPV0:
-		servers = parseAzureMCPDemo(rawData)
+		servers = parseAzureMCPDemo(ctx, rawData, guesser)
 	case protocolRemote:
 		servers = parseRemoteMCPServers(rawData)
 	default:
@@ -186,7 +201,7 @@ func parseMCPRun(rawData interface{}) []ServerEntry {
 }
 
 // parsePulse handles Pulse registry format
-func parsePulse(rawData interface{}) []ServerEntry {
+func parsePulse(ctx context.Context, rawData interface{}, guesser *experiments.Guesser) []ServerEntry {
 	servers := []ServerEntry{}
 
 	data, ok := rawData.(map[string]interface{})
@@ -238,7 +253,7 @@ func parsePulse(rawData interface{}) []ServerEntry {
 		}
 
 		// Extract installation command and connection URL
-		installCmd, connectURL := derivePulseServerDetails(itemMap)
+		installCmd, connectURL := derivePulseServerDetails(ctx, itemMap, guesser)
 		server.InstallCmd = installCmd
 		server.ConnectURL = connectURL
 
@@ -581,25 +596,32 @@ func buildFleurInstallCmd(runtime string, args []string) string {
 	}
 }
 
-// derivePulseServerDetails extracts installation command and connection URL from Pulse server data (helper for tests)
-func derivePulseServerDetails(itemMap map[string]interface{}) (installCmd, connectURL string) {
+// derivePulseServerDetails extracts installation command and connection URL from Pulse server data
+// Uses guesser for source_code_url when package_registry and package_name are not set
+func derivePulseServerDetails(ctx context.Context, itemMap map[string]interface{}, guesser *experiments.Guesser) (installCmd, connectURL string) {
 	// Extract package registry and name for installation command
 	packageRegistry, _ := itemMap["package_registry"].(string)
 	packageName, _ := itemMap["package_name"].(string)
 
-	// Derive installation command based on registry type
-	switch packageRegistry {
-	case "npm":
-		if packageName != "" {
+	// If package registry and name are available, use them
+	if packageRegistry != "" && packageName != "" {
+		// Derive installation command based on registry type
+		switch packageRegistry {
+		case "npm":
 			installCmd = "npx -y " + packageName
-		}
-	case "pypi", "pip":
-		if packageName != "" {
+		case "pypi", "pip":
 			installCmd = "pipx run " + packageName
-		}
-	case "docker":
-		if packageName != "" {
+		case "docker":
 			installCmd = "docker run -i --rm " + packageName
+		}
+	} else if guesser != nil {
+		// If no package info available, try to guess from source_code_url
+		if sourceCodeURL, ok := itemMap["source_code_url"].(string); ok && sourceCodeURL != "" {
+			if guessResult, err := guesser.GuessRepositoryType(ctx, sourceCodeURL); err == nil {
+				if guessResult.NPM != nil && guessResult.NPM.Exists {
+					installCmd = guessResult.NPM.InstallCmd
+				}
+			}
 		}
 	}
 
@@ -619,7 +641,7 @@ func derivePulseServerDetails(itemMap map[string]interface{}) (installCmd, conne
 }
 
 // parseAzureMCPDemo handles Azure MCP Demo registry format (mcp/v0 protocol)
-func parseAzureMCPDemo(rawData interface{}) []ServerEntry {
+func parseAzureMCPDemo(ctx context.Context, rawData interface{}, guesser *experiments.Guesser) []ServerEntry {
 	servers := []ServerEntry{}
 
 	data, ok := rawData.(map[string]interface{})
@@ -662,8 +684,17 @@ func parseAzureMCPDemo(rawData interface{}) []ServerEntry {
 		if repo, ok := itemMap["repository"].(map[string]interface{}); ok {
 			if repoURL, ok := repo["url"].(string); ok && repoURL != "" {
 				// Use repository URL as the primary identifier
-				// For GitHub repos, we could construct MCP endpoints, but for now use the repo URL
 				server.URL = repoURL
+
+				// Try to guess npm package if this is a GitHub repository
+				if guesser != nil {
+					if guessResult, err := guesser.GuessRepositoryType(ctx, repoURL); err == nil {
+						if guessResult.NPM != nil && guessResult.NPM.Exists {
+							server.InstallCmd = guessResult.NPM.InstallCmd
+							server.RepositoryInfo = guessResult
+						}
+					}
+				}
 			}
 		}
 

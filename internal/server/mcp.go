@@ -11,6 +11,7 @@ import (
 
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
@@ -214,7 +215,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 		// search_servers - Registry search and discovery
 		searchServersTool := mcp.NewTool("search_servers",
-			mcp.WithDescription("🔍 Discover MCP servers from known registries. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs ready for direct use with upstream_servers add command."),
+			mcp.WithDescription("🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command."),
 			mcp.WithString("registry",
 				mcp.Required(),
 				mcp.Description("Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries."),
@@ -224,6 +225,9 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			),
 			mcp.WithString("tag",
 				mcp.Description("Filter servers by tag/category (if supported by registry)"),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum number of results to return (default: 10, max: 50)"),
 			),
 		)
 		p.server.AddTool(searchServersTool, p.handleSearchServers)
@@ -259,9 +263,16 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	// Get optional parameters
 	search := request.GetString("search", "")
 	tag := request.GetString("tag", "")
+	limit := int(request.GetFloat("limit", 10.0)) // Default limit of 10
+
+	// Create experiments guesser if repository checking is enabled
+	var guesser *experiments.Guesser
+	if p.config != nil && p.config.CheckServerRepo {
+		guesser = experiments.NewGuesser(p.cacheManager, p.logger)
+	}
 
 	// Search for servers
-	servers, err := registries.SearchServers(ctx, registry, tag, search)
+	servers, err := registries.SearchServers(ctx, registry, tag, search, limit, guesser)
 	if err != nil {
 		p.logger.Error("Registry search failed",
 			zap.String("registry", registry),

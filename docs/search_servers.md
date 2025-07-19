@@ -1,5 +1,51 @@
 Search Servers Feature Design for MCPProxy
 
+🔬 Repository Detection & Install Command Enhancement (NEW)
+
+The search_servers functionality now includes an experimental repository detection feature that automatically identifies whether MCP servers are available as npm or PyPI packages. This feature enhances the search results with accurate installation commands and package information.
+
+**Key Features:**
+• **Automatic Package Detection**: Uses HTTP calls to npm registry (registry.npmjs.org) and PyPI JSON API (pypi.org/pypi) to detect if servers are published as packages
+• **Smart Install Commands**: Generates accurate install commands (npm install package-name or pip install package-name) when packages are detected  
+• **Intelligent Caching**: Implements caching with 6-hour TTL to reduce API calls and improve performance
+• **Configurable**: Can be enabled/disabled via the `check_server_repo` configuration parameter (enabled by default)
+• **Result Limits**: Enforces default limit of 10 results (maximum 50) to ensure reasonable response times
+
+**Configuration:**
+```json
+{
+  "check_server_repo": true,  // Enable repository detection (default: true)
+  "listen": ":8080",
+  // ... other config options
+}
+```
+
+**Enhanced Output Format:**
+Results now include repository information when packages are detected:
+```json
+[
+  {
+    "id": "weather-service",
+    "name": "Weather MCP Server",
+    "description": "Provides weather data via MCP",
+    "url": "https://weather.example.com/mcp",
+    "installCmd": "npm install weather-mcp-server",
+    "repository_info": {
+      "npm": {
+        "type": "npm",
+        "package_name": "weather-mcp-server", 
+        "version": "1.2.3",
+        "description": "Weather MCP server package",
+        "install_cmd": "npm install weather-mcp-server",
+        "url": "https://www.npmjs.com/package/weather-mcp-server",
+        "exists": true
+      }
+    },
+    "registry": "Example Registry"
+  }
+]
+```
+
 📌 Functional Spec & Example Input/Output
 
 Objective: Extend mcpproxy with a new search_servers capability, enabling discovery of Model Context Protocol (MCP) servers from a built-in registry-of-registries. This mirrors the functionality of Mastra’s registryServers tool – allowing users or AI agents to list available MCP servers by querying known registries ￼. The feature will support filtering by a specific registry (exact match on registry ID or name) as well as optional search terms and tags for narrowing results.
@@ -32,11 +78,24 @@ or equivalently invoke the upstream_servers add tool with the given URL to integ
 # Example 1: Search "MCP Run" registry for servers with "weather" in name or description
 mcpproxy search-servers --registry mcprun --search weather
 
-# Example 2: List all servers from the "Pulse MCP" registry tagged as "finance"
-mcpproxy search-servers --registry pulse --tag finance
+# Example 2: List all servers from the "Pulse MCP" registry tagged as "finance" (limit to 5 results)
+mcpproxy search-servers --registry pulse --tag finance --limit 5
 
-# Example 3: List all known registries (if no search term given and special flag used)
+# Example 3: Search with custom limit (max 50)
+mcpproxy search-servers --registry smithery --search "database" --limit 20
+
+# Example 4: List all known registries
 mcpproxy search-servers --list-registries
+
+# Example 5: MCP Tool Usage (with repository detection)
+{
+  "name": "search_servers",
+  "arguments": {
+    "registry": "pulse",
+    "search": "weather",
+    "limit": 10
+  }
+}
 
 Example Output (for Example 1):
 
