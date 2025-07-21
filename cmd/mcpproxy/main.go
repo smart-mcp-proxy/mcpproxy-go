@@ -139,6 +139,9 @@ Examples:
 				cfg = config.DefaultConfig()
 			}
 
+			// Initialize registries from config
+			registries.SetRegistriesFromConfig(cfg)
+
 			// Create experiments guesser if repository checking is enabled
 			var guesser *experiments.Guesser
 			if cfg.CheckServerRepo {
@@ -173,6 +176,16 @@ Examples:
 }
 
 func listAllRegistries() error {
+	// Load config and initialize registries
+	cfg, err := config.LoadFromFile("")
+	if err != nil {
+		// Use default config if loading fails
+		cfg = config.DefaultConfig()
+	}
+
+	// Initialize registries from config
+	registries.SetRegistriesFromConfig(cfg)
+
 	registryList := registries.ListRegistries()
 
 	// Format as a simple table for CLI display

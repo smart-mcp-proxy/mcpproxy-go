@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +24,9 @@ const (
 	noDescAvailable  = "No description available"
 )
 
+// GitHub URL pattern for matching https://github.com/<author|org>/<repo>
+var githubURLPattern = regexp.MustCompile(`^https://github\.com/([^/]+)/([^/]+)(?:/.*)?$`)
+
 // SearchServers searches the given registry for servers matching optional tag and query
 // with optional repository guessing and result limiting
 func SearchServers(ctx context.Context, registryID, tag, query string, limit int, guesser *experiments.Guesser) ([]ServerEntry, error) {
@@ -36,16 +40,16 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 		return nil, fmt.Errorf("registry '%s' has no servers endpoint", reg.Name)
 	}
 
-	// Fetch servers from registry
-	servers, err := fetchServers(ctx, reg, guesser)
+	// Fetch servers from registry WITHOUT repository guessing (for performance)
+	servers, err := fetchServers(ctx, reg, nil) // Pass nil guesser to skip expensive operations
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch servers from %s: %w", reg.Name, err)
 	}
 
-	// Filter results
+	// Filter results BEFORE expensive repository guessing
 	filtered := filterServers(servers, tag, query)
 
-	// Apply limit (default 10, max 50)
+	// Apply limit BEFORE expensive repository guessing (default 10, max 50)
 	if limit <= 0 {
 		limit = 10 // Default limit
 	}
@@ -55,6 +59,11 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 
 	if len(filtered) > limit {
 		filtered = filtered[:limit]
+	}
+
+	// NOW apply repository guessing only to the limited, filtered set
+	if guesser != nil && len(filtered) > 0 {
+		filtered = applyBatchRepositoryGuessing(ctx, filtered, guesser)
 	}
 
 	// Set registry name
@@ -98,6 +107,7 @@ func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.
 }
 
 // parseServers parses the raw JSON response based on the registry protocol
+// Uses batch processing for repository guessing to improve performance
 func parseServers(ctx context.Context, rawData interface{}, reg *RegistryEntry, guesser *experiments.Guesser) []ServerEntry {
 	var servers []ServerEntry
 
@@ -107,7 +117,7 @@ func parseServers(ctx context.Context, rawData interface{}, reg *RegistryEntry, 
 	case protocolMCPRun:
 		servers = parseMCPRun(rawData)
 	case "custom/pulse":
-		servers = parsePulse(ctx, rawData, guesser)
+		servers = parsePulseWithoutGuesser(rawData) // Parse without guesser first
 	case protocolMCPStore:
 		servers = parseMCPStore(rawData)
 	case protocolDocker:
@@ -119,7 +129,7 @@ func parseServers(ctx context.Context, rawData interface{}, reg *RegistryEntry, 
 	case "custom/apify":
 		servers = parseApify(rawData)
 	case protocolMCPV0:
-		servers = parseAzureMCPDemo(ctx, rawData, guesser)
+		servers = parseAzureMCPDemoWithoutGuesser(rawData) // Parse without guesser first
 	case protocolRemote:
 		servers = parseRemoteMCPServers(rawData)
 	default:
@@ -134,7 +144,82 @@ func parseServers(ctx context.Context, rawData interface{}, reg *RegistryEntry, 
 		}
 	}
 
+	// Apply batch repository guessing if guesser is provided
+	if guesser != nil {
+		servers = applyBatchRepositoryGuessing(ctx, servers, guesser)
+	}
+
 	return servers
+}
+
+// applyBatchRepositoryGuessing applies repository guessing to all servers using batch processing
+func applyBatchRepositoryGuessing(ctx context.Context, servers []ServerEntry, guesser *experiments.Guesser) []ServerEntry {
+	if len(servers) == 0 {
+		return servers
+	}
+
+	// Collect all GitHub URLs that need checking
+	var githubURLs []string
+	urlToServerIndex := make(map[int][]int) // Maps URL index to server indices that use it
+
+	for i, server := range servers {
+		var githubURL string
+
+		// Check if server has a URL that looks like a GitHub repository
+		if server.URL != "" && isGitHubURL(server.URL) {
+			githubURL = server.URL
+		}
+
+		// Add to batch if we found a GitHub URL
+		if githubURL != "" {
+			// Check if we already have this URL
+			urlIndex := -1
+			for j, existingURL := range githubURLs {
+				if existingURL == githubURL {
+					urlIndex = j
+					break
+				}
+			}
+
+			// If URL not found, add it
+			if urlIndex == -1 {
+				urlIndex = len(githubURLs)
+				githubURLs = append(githubURLs, githubURL)
+			}
+
+			// Map this URL index to the server index
+			urlToServerIndex[urlIndex] = append(urlToServerIndex[urlIndex], i)
+		}
+	}
+
+	// If no GitHub URLs found, return servers unchanged
+	if len(githubURLs) == 0 {
+		return servers
+	}
+
+	// Perform batch guessing
+	batchResults := guesser.GuessRepositoryTypesBatch(ctx, githubURLs)
+
+	// Apply results back to servers
+	for urlIndex, guessResult := range batchResults {
+		if guessResult != nil && guessResult.NPM != nil && guessResult.NPM.Exists {
+			// Apply this result to all servers that use this URL
+			for _, serverIndex := range urlToServerIndex[urlIndex] {
+				servers[serverIndex].RepositoryInfo = guessResult
+				// Set install command if not already set
+				if servers[serverIndex].InstallCmd == "" {
+					servers[serverIndex].InstallCmd = guessResult.NPM.InstallCmd
+				}
+			}
+		}
+	}
+
+	return servers
+}
+
+// isGitHubURL checks if a URL is a GitHub repository URL
+func isGitHubURL(url string) bool {
+	return githubURLPattern.MatchString(url)
 }
 
 // parseOpenAPIRegistry handles the standard MCP Registry API format
@@ -195,69 +280,6 @@ func parseMCPRun(rawData interface{}) []ServerEntry {
 				servers = append(servers, server)
 			}
 		}
-	}
-
-	return servers
-}
-
-// parsePulse handles Pulse registry format
-func parsePulse(ctx context.Context, rawData interface{}, guesser *experiments.Guesser) []ServerEntry {
-	servers := []ServerEntry{}
-
-	data, ok := rawData.(map[string]interface{})
-	if !ok {
-		return servers
-	}
-
-	serversData, ok := data["servers"]
-	if !ok {
-		return servers
-	}
-
-	serversArray, ok := serversData.([]interface{})
-	if !ok {
-		return servers
-	}
-
-	for _, item := range serversArray {
-		itemMap, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		name, ok := itemMap["name"].(string)
-		if !ok || name == "" {
-			continue
-		}
-
-		server := ServerEntry{
-			ID:   name,
-			Name: name,
-		}
-
-		// Try to get description from multiple fields
-		if shortDesc, ok := itemMap["short_description"].(string); ok && shortDesc != "" {
-			if len(shortDesc) > 300 {
-				server.Description = shortDesc[:300]
-			} else {
-				server.Description = shortDesc
-			}
-		} else if aiDesc, ok := itemMap["EXPERIMENTAL_ai_generated_description"].(string); ok && aiDesc != "" {
-			if len(aiDesc) > 300 {
-				server.Description = aiDesc[:300]
-			} else {
-				server.Description = aiDesc
-			}
-		} else {
-			server.Description = noDescAvailable
-		}
-
-		// Extract installation command and connection URL
-		installCmd, connectURL := derivePulseServerDetails(ctx, itemMap, guesser)
-		server.InstallCmd = installCmd
-		server.ConnectURL = connectURL
-
-		servers = append(servers, server)
 	}
 
 	return servers
@@ -596,132 +618,6 @@ func buildFleurInstallCmd(runtime string, args []string) string {
 	}
 }
 
-// derivePulseServerDetails extracts installation command and connection URL from Pulse server data
-// Uses guesser for source_code_url when package_registry and package_name are not set
-func derivePulseServerDetails(ctx context.Context, itemMap map[string]interface{}, guesser *experiments.Guesser) (installCmd, connectURL string) {
-	// Extract package registry and name for installation command
-	packageRegistry, _ := itemMap["package_registry"].(string)
-	packageName, _ := itemMap["package_name"].(string)
-
-	// If package registry and name are available, use them
-	if packageRegistry != "" && packageName != "" {
-		// Derive installation command based on registry type
-		switch packageRegistry {
-		case "npm":
-			installCmd = "npx -y " + packageName
-		case "pypi", "pip":
-			installCmd = "pipx run " + packageName
-		case "docker":
-			installCmd = "docker run -i --rm " + packageName
-		}
-	} else if guesser != nil {
-		// If no package info available, try to guess from source_code_url
-		if sourceCodeURL, ok := itemMap["source_code_url"].(string); ok && sourceCodeURL != "" {
-			if guessResult, err := guesser.GuessRepositoryType(ctx, sourceCodeURL); err == nil {
-				if guessResult.NPM != nil && guessResult.NPM.Exists {
-					installCmd = guessResult.NPM.InstallCmd
-				}
-			}
-		}
-	}
-
-	// Extract remote connection URL if available
-	if remotesInterface, ok := itemMap["remotes"].([]interface{}); ok {
-		for _, remote := range remotesInterface {
-			if remoteMap, ok := remote.(map[string]interface{}); ok {
-				if urlDirect, ok := remoteMap["url_direct"].(string); ok && urlDirect != "" {
-					connectURL = urlDirect
-					break // Use first available direct URL
-				}
-			}
-		}
-	}
-
-	return installCmd, connectURL
-}
-
-// parseAzureMCPDemo handles Azure MCP Demo registry format (mcp/v0 protocol)
-func parseAzureMCPDemo(ctx context.Context, rawData interface{}, guesser *experiments.Guesser) []ServerEntry {
-	servers := []ServerEntry{}
-
-	data, ok := rawData.(map[string]interface{})
-	if !ok {
-		return servers
-	}
-
-	serversData, ok := data["servers"]
-	if !ok {
-		return servers
-	}
-
-	serversArray, ok := serversData.([]interface{})
-	if !ok {
-		return servers
-	}
-
-	for _, item := range serversArray {
-		itemMap, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		// Extract basic fields
-		id, _ := itemMap["id"].(string)
-		name, _ := itemMap["name"].(string)
-		description, _ := itemMap["description"].(string)
-
-		if id == "" || name == "" {
-			continue
-		}
-
-		server := ServerEntry{
-			ID:          id,
-			Name:        name,
-			Description: description,
-		}
-
-		// Extract repository information for constructing URLs
-		if repo, ok := itemMap["repository"].(map[string]interface{}); ok {
-			if repoURL, ok := repo["url"].(string); ok && repoURL != "" {
-				// Use repository URL as the primary identifier
-				server.URL = repoURL
-
-				// Try to guess npm package if this is a GitHub repository
-				if guesser != nil {
-					if guessResult, err := guesser.GuessRepositoryType(ctx, repoURL); err == nil {
-						if guessResult.NPM != nil && guessResult.NPM.Exists {
-							server.InstallCmd = guessResult.NPM.InstallCmd
-							server.RepositoryInfo = guessResult
-						}
-					}
-				}
-			}
-		}
-
-		// Extract version information for additional context
-		if versionDetail, ok := itemMap["version_detail"].(map[string]interface{}); ok {
-			if version, ok := versionDetail["version"].(string); ok && version != "" {
-				// Add version info to description if available
-				if server.Description != "" {
-					server.Description += " (v" + version + ")"
-				}
-			}
-			if releaseDate, ok := versionDetail["release_date"].(string); ok && releaseDate != "" {
-				server.UpdatedAt = releaseDate
-			}
-		}
-
-		// Set default description if empty
-		if server.Description == "" {
-			server.Description = noDescAvailable
-		}
-
-		servers = append(servers, server)
-	}
-
-	return servers
-}
-
 // parseRemoteMCPServers handles Remote MCP Servers registry format (custom/remote protocol)
 func parseRemoteMCPServers(rawData interface{}) []ServerEntry {
 	servers := []ServerEntry{}
@@ -777,4 +673,174 @@ func parseRemoteMCPServers(rawData interface{}) []ServerEntry {
 	}
 
 	return servers
+}
+
+// parsePulseWithoutGuesser handles Pulse registry format without repository guessing
+func parsePulseWithoutGuesser(rawData interface{}) []ServerEntry {
+	servers := []ServerEntry{}
+
+	data, ok := rawData.(map[string]interface{})
+	if !ok {
+		return servers
+	}
+
+	serversData, ok := data["servers"]
+	if !ok {
+		return servers
+	}
+
+	serversArray, ok := serversData.([]interface{})
+	if !ok {
+		return servers
+	}
+
+	for _, item := range serversArray {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		name, ok := itemMap["name"].(string)
+		if !ok || name == "" {
+			continue
+		}
+
+		server := ServerEntry{
+			ID:   name,
+			Name: name,
+		}
+
+		// Try to get description from multiple fields
+		if shortDesc, ok := itemMap["short_description"].(string); ok && shortDesc != "" {
+			if len(shortDesc) > 300 {
+				server.Description = shortDesc[:300]
+			} else {
+				server.Description = shortDesc
+			}
+		} else if aiDesc, ok := itemMap["EXPERIMENTAL_ai_generated_description"].(string); ok && aiDesc != "" {
+			if len(aiDesc) > 300 {
+				server.Description = aiDesc[:300]
+			} else {
+				server.Description = aiDesc
+			}
+		} else {
+			server.Description = noDescAvailable
+		}
+
+		// Extract installation command and connection URL (without guesser)
+		installCmd, connectURL := derivePulseServerDetailsWithoutGuesser(itemMap)
+		server.InstallCmd = installCmd
+		server.ConnectURL = connectURL
+
+		// Store source_code_url for later batch processing
+		if sourceCodeURL, ok := itemMap["source_code_url"].(string); ok && sourceCodeURL != "" {
+			server.URL = sourceCodeURL
+		}
+
+		servers = append(servers, server)
+	}
+
+	return servers
+}
+
+// parseAzureMCPDemoWithoutGuesser handles Azure MCP Demo registry format without repository guessing
+func parseAzureMCPDemoWithoutGuesser(rawData interface{}) []ServerEntry {
+	servers := []ServerEntry{}
+
+	data, ok := rawData.(map[string]interface{})
+	if !ok {
+		return servers
+	}
+
+	serversData, ok := data["servers"]
+	if !ok {
+		return servers
+	}
+
+	serversArray, ok := serversData.([]interface{})
+	if !ok {
+		return servers
+	}
+
+	for _, item := range serversArray {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract basic fields
+		id, _ := itemMap["id"].(string)
+		name, _ := itemMap["name"].(string)
+		description, _ := itemMap["description"].(string)
+
+		if id == "" || name == "" {
+			continue
+		}
+
+		server := ServerEntry{
+			ID:          id,
+			Name:        name,
+			Description: description,
+		}
+
+		// Extract repository information for constructing URLs
+		if repo, ok := itemMap["repository"].(map[string]interface{}); ok {
+			if repoURL, ok := repo["url"].(string); ok && repoURL != "" {
+				// Store repository URL for later batch processing
+				server.URL = repoURL
+			}
+		}
+
+		// Extract version information for additional context
+		if versionDetail, ok := itemMap["version_detail"].(map[string]interface{}); ok {
+			if version, ok := versionDetail["version"].(string); ok && version != "" {
+				// Add version info to description if available
+				if server.Description != "" {
+					server.Description += " (v" + version + ")"
+				}
+			}
+			if releaseDate, ok := versionDetail["release_date"].(string); ok && releaseDate != "" {
+				server.UpdatedAt = releaseDate
+			}
+		}
+
+		servers = append(servers, server)
+	}
+
+	return servers
+}
+
+// derivePulseServerDetailsWithoutGuesser extracts installation command and connection URL from Pulse server data
+// Does not use guesser - only uses existing package_registry and package_name data
+func derivePulseServerDetailsWithoutGuesser(itemMap map[string]interface{}) (installCmd, connectURL string) {
+	// Extract package registry and name for installation command
+	packageRegistry, _ := itemMap["package_registry"].(string)
+	packageName, _ := itemMap["package_name"].(string)
+
+	// If package registry and name are available, use them
+	if packageRegistry != "" && packageName != "" {
+		// Derive installation command based on registry type
+		switch packageRegistry {
+		case "npm":
+			installCmd = "npx -y " + packageName
+		case "pypi", "pip":
+			installCmd = "pipx run " + packageName
+		case "docker":
+			installCmd = "docker run -i --rm " + packageName
+		}
+	}
+
+	// Extract remote connection URL if available
+	if remotesInterface, ok := itemMap["remotes"].([]interface{}); ok {
+		for _, remote := range remotesInterface {
+			if remoteMap, ok := remote.(map[string]interface{}); ok {
+				if urlDirect, ok := remoteMap["url_direct"].(string); ok && urlDirect != "" {
+					connectURL = urlDirect
+					break // Use first available direct URL
+				}
+			}
+		}
+	}
+
+	return installCmd, connectURL
 }

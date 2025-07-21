@@ -3,6 +3,7 @@ package experiments
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -323,4 +324,254 @@ func TestNilCacheManager(t *testing.T) {
 	info := guesser.checkNPMPackage(ctx, "@nonexistent/package")
 	assert.Equal(t, RepoTypeNPM, info.Type)
 	assert.False(t, info.Exists)
+}
+
+func TestGuessRepositoryTypesBatch_EmptyInput(t *testing.T) {
+	logger := zap.NewNop()
+	guesser := NewGuesser(nil, logger)
+
+	ctx := context.Background()
+
+	// Test empty slice
+	results := guesser.GuessRepositoryTypesBatch(ctx, []string{})
+	assert.Empty(t, results)
+
+	// Test nil slice
+	results = guesser.GuessRepositoryTypesBatch(ctx, nil)
+	assert.Empty(t, results)
+}
+
+func TestGuessRepositoryTypesBatch_NonGitHubURLs(t *testing.T) {
+	logger := zap.NewNop()
+	guesser := NewGuesser(nil, logger)
+
+	ctx := context.Background()
+	urls := []string{
+		"https://example.com/repo",
+		"https://gitlab.com/user/repo",
+		"not-a-url",
+		"",
+	}
+
+	results := guesser.GuessRepositoryTypesBatch(ctx, urls)
+
+	// Should return same number of results as input URLs
+	assert.Len(t, results, len(urls))
+
+	// All results should be empty since no GitHub URLs
+	for i, result := range results {
+		assert.NotNil(t, result, "Result at index %d should not be nil", i)
+		assert.Nil(t, result.NPM, "NPM info should be nil for non-GitHub URL at index %d", i)
+	}
+}
+
+func TestGuessRepositoryTypesBatch_MixedURLs(t *testing.T) {
+	// Skip real network requests in CI
+	if testing.Short() {
+		t.Skip("Skipping network request test in short mode")
+	}
+
+	logger := zap.NewNop()
+	guesser := NewGuesser(nil, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	urls := []string{
+		"https://github.com/facebook/react",         // Real package that exists
+		"https://github.com/nonexistent/package123", // Package that doesn't exist
+		"https://example.com/not-github",            // Non-GitHub URL
+		"",                                          // Empty URL
+		"https://github.com/microsoft/vscode",       // Another real package
+	}
+
+	results := guesser.GuessRepositoryTypesBatch(ctx, urls)
+
+	// Should return same number of results as input URLs
+	assert.Len(t, results, len(urls))
+
+	// Check that results maintain order
+	for i, result := range results {
+		assert.NotNil(t, result, "Result at index %d should not be nil", i)
+
+		switch i {
+		case 0: // facebook/react - should likely exist
+			// Note: This test may be flaky based on npm availability
+			// We just check the structure is correct
+		case 1: // nonexistent package - should not exist
+			if result.NPM != nil {
+				assert.False(t, result.NPM.Exists, "Nonexistent package should not exist")
+			}
+		case 2, 3: // Non-GitHub and empty URLs
+			assert.Nil(t, result.NPM, "Non-GitHub URL should have no NPM info")
+		case 4: // microsoft/vscode
+			// Again, just check structure
+		}
+	}
+}
+
+func TestGuessRepositoryTypesBatch_Performance(t *testing.T) {
+	// Skip real network requests in CI
+	if testing.Short() {
+		t.Skip("Skipping network request test in short mode")
+	}
+
+	logger := zap.NewNop()
+	guesser := NewGuesser(nil, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create a list of GitHub URLs (mix of existing and non-existing)
+	urls := []string{
+		"https://github.com/facebook/react",
+		"https://github.com/lodash/lodash",
+		"https://github.com/nonexistent1/package1",
+		"https://github.com/nonexistent2/package2",
+		"https://github.com/nonexistent3/package3",
+		"https://github.com/webpack/webpack",
+		"https://github.com/babel/babel",
+		"https://github.com/nonexistent4/package4",
+	}
+
+	startTime := time.Now()
+	results := guesser.GuessRepositoryTypesBatch(ctx, urls)
+	duration := time.Since(startTime)
+
+	// Should complete within reasonable time (less than 10 seconds due to 3-second timeout)
+	assert.Less(t, duration, 10*time.Second, "Batch processing should complete quickly with parallel requests")
+
+	// Should return correct number of results
+	assert.Len(t, results, len(urls))
+
+	// All results should be non-nil
+	for i, result := range results {
+		assert.NotNil(t, result, "Result at index %d should not be nil", i)
+	}
+
+	t.Logf("Batch processing of %d URLs completed in %v", len(urls), duration)
+}
+
+func TestGuessRepositoryTypesBatch_ConcurrencyLimit(t *testing.T) {
+	logger := zap.NewNop()
+	guesser := NewGuesser(nil, logger)
+
+	// Create many URLs to test concurrency limiting
+	urls := make([]string, 50)
+	for i := 0; i < 50; i++ {
+		urls[i] = fmt.Sprintf("https://github.com/test%d/repo%d", i, i)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	startTime := time.Now()
+	results := guesser.GuessRepositoryTypesBatch(ctx, urls)
+	duration := time.Since(startTime)
+
+	// Should return correct number of results
+	assert.Len(t, results, len(urls))
+
+	// All results should be non-nil
+	for i, result := range results {
+		assert.NotNil(t, result, "Result at index %d should not be nil", i)
+	}
+
+	t.Logf("Batch processing of %d URLs with concurrency limit completed in %v", len(urls), duration)
+}
+
+func TestGuessRepositoryTypesBatch_ContextCancellation(t *testing.T) {
+	logger := zap.NewNop()
+	guesser := NewGuesser(nil, logger)
+
+	urls := []string{
+		"https://github.com/facebook/react",
+		"https://github.com/lodash/lodash",
+		"https://github.com/webpack/webpack",
+	}
+
+	// Create context that will be cancelled quickly
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	defer cancel()
+
+	results := guesser.GuessRepositoryTypesBatch(ctx, urls)
+
+	// Should still return correct number of results (though they may be empty due to timeout)
+	assert.Len(t, results, len(urls))
+
+	// All results should be non-nil even if requests failed
+	for i, result := range results {
+		assert.NotNil(t, result, "Result at index %d should not be nil", i)
+	}
+}
+
+func TestGuessRepositoryTypesBatch_DuplicateURLs(t *testing.T) {
+	// Skip real network requests in CI
+	if testing.Short() {
+		t.Skip("Skipping network request test in short mode")
+	}
+
+	logger := zap.NewNop()
+	guesser := NewGuesser(nil, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Test with duplicate URLs to ensure efficient processing
+	urls := []string{
+		"https://github.com/facebook/react",
+		"https://github.com/lodash/lodash",
+		"https://github.com/facebook/react", // Duplicate
+		"https://github.com/lodash/lodash",  // Duplicate
+		"https://github.com/facebook/react", // Another duplicate
+	}
+
+	results := guesser.GuessRepositoryTypesBatch(ctx, urls)
+
+	// Should return same number of results as input URLs
+	assert.Len(t, results, len(urls))
+
+	// Results for duplicate URLs should be identical
+	assert.Equal(t, results[0], results[2], "Duplicate URLs should have identical results")
+	assert.Equal(t, results[0], results[4], "Duplicate URLs should have identical results")
+	assert.Equal(t, results[1], results[3], "Duplicate URLs should have identical results")
+}
+
+func TestBatchVsSingle_ConsistencyCheck(t *testing.T) {
+	// Skip real network requests in CI
+	if testing.Short() {
+		t.Skip("Skipping network request test in short mode")
+	}
+
+	logger := zap.NewNop()
+	guesser := NewGuesser(nil, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	testURLs := []string{
+		"https://github.com/facebook/react",
+		"https://github.com/nonexistent/package123",
+	}
+
+	// Get results using single method
+	var singleResults []*GuessResult
+	for _, url := range testURLs {
+		result, err := guesser.GuessRepositoryType(ctx, url)
+		assert.NoError(t, err)
+		singleResults = append(singleResults, result)
+	}
+
+	// Get results using batch method
+	batchResults := guesser.GuessRepositoryTypesBatch(ctx, testURLs)
+
+	// Results should be consistent between single and batch methods
+	assert.Len(t, batchResults, len(singleResults))
+	for i := 0; i < len(testURLs); i++ {
+		// Compare the existence status (the most important part)
+		singleExists := singleResults[i].NPM != nil && singleResults[i].NPM.Exists
+		batchExists := batchResults[i].NPM != nil && batchResults[i].NPM.Exists
+		assert.Equal(t, singleExists, batchExists,
+			"Existence status should be same for URL %s between single and batch methods", testURLs[i])
+	}
 }

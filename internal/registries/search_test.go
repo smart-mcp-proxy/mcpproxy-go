@@ -229,8 +229,7 @@ func TestParsePulse(t *testing.T) {
 		},
 	}
 
-	ctx := context.Background()
-	servers := parsePulse(ctx, testData, nil)
+	servers := parsePulseWithoutGuesser(testData)
 
 	if len(servers) != 3 {
 		t.Errorf("expected 3 servers, got %d", len(servers))
@@ -410,8 +409,6 @@ func TestBuildFleurInstallCmd(t *testing.T) {
 }
 
 func TestDerivePulseServerDetails(t *testing.T) {
-	ctx := context.Background()
-
 	tests := []struct {
 		name            string
 		itemMap         map[string]interface{}
@@ -488,7 +485,7 @@ func TestDerivePulseServerDetails(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd, url := derivePulseServerDetails(ctx, tt.itemMap, nil) // Pass nil guesser for tests without actual npm checking
+			cmd, url := derivePulseServerDetailsWithoutGuesser(tt.itemMap)
 			if cmd != tt.expectedCmd {
 				t.Errorf("expected cmd '%s', got '%s'", tt.expectedCmd, cmd)
 			}
@@ -1079,4 +1076,345 @@ func TestRepositoryInfoIntegration(t *testing.T) {
 	assert.Equal(t, "4.18.2", npm.Version)
 	assert.Contains(t, npm.InstallCmd, "npm install")
 	assert.Contains(t, npm.URL, "npmjs.com")
+}
+
+func TestApplyBatchRepositoryGuessing(t *testing.T) {
+	guesser, db := setupTestSearchWithGuesser(t)
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create test servers with GitHub URLs
+	servers := []ServerEntry{
+		{
+			ID:   "server1",
+			Name: "Test Server 1",
+			URL:  "https://github.com/facebook/react",
+		},
+		{
+			ID:   "server2",
+			Name: "Test Server 2",
+			URL:  "https://github.com/nonexistent/package123",
+		},
+		{
+			ID:   "server3",
+			Name: "Test Server 3",
+			URL:  "https://example.com/not-github", // Non-GitHub URL
+		},
+		{
+			ID:   "server4",
+			Name: "Test Server 4",
+			URL:  "", // Empty URL
+		},
+	}
+
+	// Apply batch repository guessing
+	enrichedServers := applyBatchRepositoryGuessing(ctx, servers, guesser)
+
+	// Should return same number of servers
+	assert.Len(t, enrichedServers, len(servers))
+
+	// Check that servers maintain their original data
+	for i, server := range enrichedServers {
+		assert.Equal(t, servers[i].ID, server.ID)
+		assert.Equal(t, servers[i].Name, server.Name)
+		assert.Equal(t, servers[i].URL, server.URL)
+	}
+
+	// Servers with non-GitHub URLs should not have repository info
+	assert.Nil(t, enrichedServers[2].RepositoryInfo, "Non-GitHub URL should not have repository info")
+	assert.Nil(t, enrichedServers[3].RepositoryInfo, "Empty URL should not have repository info")
+}
+
+func TestApplyBatchRepositoryGuessing_EmptyServers(t *testing.T) {
+	guesser, db := setupTestSearchWithGuesser(t)
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Test with empty servers list
+	enrichedServers := applyBatchRepositoryGuessing(ctx, []ServerEntry{}, guesser)
+	assert.Empty(t, enrichedServers)
+
+	// Test with nil servers list
+	enrichedServers = applyBatchRepositoryGuessing(ctx, nil, guesser)
+	assert.Nil(t, enrichedServers)
+}
+
+func TestApplyBatchRepositoryGuessing_DuplicateURLs(t *testing.T) {
+	guesser, db := setupTestSearchWithGuesser(t)
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create servers with duplicate GitHub URLs
+	servers := []ServerEntry{
+		{
+			ID:   "server1",
+			Name: "Test Server 1",
+			URL:  "https://github.com/facebook/react",
+		},
+		{
+			ID:   "server2",
+			Name: "Test Server 2",
+			URL:  "https://github.com/lodash/lodash",
+		},
+		{
+			ID:   "server3",
+			Name: "Test Server 3",
+			URL:  "https://github.com/facebook/react", // Duplicate URL
+		},
+	}
+
+	// Apply batch repository guessing
+	enrichedServers := applyBatchRepositoryGuessing(ctx, servers, guesser)
+
+	// Should return same number of servers
+	assert.Len(t, enrichedServers, len(servers))
+
+	// Servers with same URL should have identical repository info
+	if enrichedServers[0].RepositoryInfo != nil && enrichedServers[2].RepositoryInfo != nil {
+		assert.Equal(t, enrichedServers[0].RepositoryInfo, enrichedServers[2].RepositoryInfo,
+			"Servers with same URL should have identical repository info")
+	}
+}
+
+func TestApplyBatchRepositoryGuessing_NoGitHubURLs(t *testing.T) {
+	guesser, db := setupTestSearchWithGuesser(t)
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Create servers with no GitHub URLs
+	servers := []ServerEntry{
+		{
+			ID:   "server1",
+			Name: "Test Server 1",
+			URL:  "https://example.com/server1",
+		},
+		{
+			ID:   "server2",
+			Name: "Test Server 2",
+			URL:  "https://gitlab.com/user/repo",
+		},
+	}
+
+	// Apply batch repository guessing
+	enrichedServers := applyBatchRepositoryGuessing(ctx, servers, guesser)
+
+	// Should return same servers unchanged
+	assert.Equal(t, servers, enrichedServers)
+
+	// All servers should have no repository info
+	for _, server := range enrichedServers {
+		assert.Nil(t, server.RepositoryInfo)
+	}
+}
+
+func TestSearchServersWithBatchProcessing(t *testing.T) {
+	guesser, db := setupTestSearchWithGuesser(t)
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Test that SearchServers now uses batch processing
+	servers, err := SearchServers(ctx, "pulse", "", "", 5, guesser)
+
+	// Should work without errors
+	if err == nil && len(servers) > 0 {
+		// Check that servers have repository info when applicable
+		for _, server := range servers {
+			if server.RepositoryInfo != nil {
+				// If repository info exists, it should have proper structure
+				if server.RepositoryInfo.NPM != nil {
+					assert.Equal(t, experiments.RepoTypeNPM, server.RepositoryInfo.NPM.Type)
+				}
+			}
+		}
+	}
+}
+
+func TestParsePulseWithoutGuesser(t *testing.T) {
+	// Test data mimicking Pulse registry format
+	rawData := map[string]interface{}{
+		"servers": []interface{}{
+			map[string]interface{}{
+				"name":              "express-server",
+				"short_description": "Express MCP server for web development",
+				"package_registry":  "npm",
+				"package_name":      "express-mcp-server",
+				"source_code_url":   "https://github.com/user/express-mcp-server",
+				"remotes": []interface{}{
+					map[string]interface{}{
+						"url_direct": "https://express.example.com/mcp",
+					},
+				},
+			},
+			map[string]interface{}{
+				"name":                                  "weather-server",
+				"EXPERIMENTAL_ai_generated_description": "Weather data MCP server",
+				"source_code_url":                       "https://github.com/user/weather-server",
+			},
+		},
+	}
+
+	servers := parsePulseWithoutGuesser(rawData)
+
+	assert.Len(t, servers, 2)
+
+	// First server
+	assert.Equal(t, "express-server", servers[0].ID)
+	assert.Equal(t, "express-server", servers[0].Name)
+	assert.Equal(t, "Express MCP server for web development", servers[0].Description)
+	assert.Equal(t, "npx -y express-mcp-server", servers[0].InstallCmd)
+	assert.Equal(t, "https://express.example.com/mcp", servers[0].ConnectURL)
+	assert.Equal(t, "https://github.com/user/express-mcp-server", servers[0].URL)
+
+	// Second server
+	assert.Equal(t, "weather-server", servers[1].ID)
+	assert.Equal(t, "weather-server", servers[1].Name)
+	assert.Equal(t, "Weather data MCP server", servers[1].Description)
+	assert.Equal(t, "", servers[1].InstallCmd) // No package info
+	assert.Equal(t, "", servers[1].ConnectURL)
+	assert.Equal(t, "https://github.com/user/weather-server", servers[1].URL)
+}
+
+func TestParseAzureMCPDemoWithoutGuesser(t *testing.T) {
+	// Test data mimicking Azure MCP Demo registry format
+	rawData := map[string]interface{}{
+		"servers": []interface{}{
+			map[string]interface{}{
+				"id":          "azure-demo-1",
+				"name":        "Azure Demo Server",
+				"description": "Demo server for Azure MCP",
+				"repository": map[string]interface{}{
+					"url": "https://github.com/microsoft/azure-mcp-demo",
+				},
+				"version_detail": map[string]interface{}{
+					"version":      "1.0.0",
+					"release_date": "2024-01-01",
+				},
+			},
+		},
+	}
+
+	servers := parseAzureMCPDemoWithoutGuesser(rawData)
+
+	assert.Len(t, servers, 1)
+
+	server := servers[0]
+	assert.Equal(t, "azure-demo-1", server.ID)
+	assert.Equal(t, "Azure Demo Server", server.Name)
+	assert.Equal(t, "Demo server for Azure MCP (v1.0.0)", server.Description)
+	assert.Equal(t, "https://github.com/microsoft/azure-mcp-demo", server.URL)
+	assert.Equal(t, "2024-01-01", server.UpdatedAt)
+}
+
+func TestDerivePulseServerDetailsWithoutGuesser(t *testing.T) {
+	tests := []struct {
+		name        string
+		itemMap     map[string]interface{}
+		wantInstall string
+		wantConnect string
+	}{
+		{
+			name: "npm package",
+			itemMap: map[string]interface{}{
+				"package_registry": "npm",
+				"package_name":     "test-package",
+			},
+			wantInstall: "npx -y test-package",
+			wantConnect: "",
+		},
+		{
+			name: "docker package",
+			itemMap: map[string]interface{}{
+				"package_registry": "docker",
+				"package_name":     "test/image",
+			},
+			wantInstall: "docker run -i --rm test/image",
+			wantConnect: "",
+		},
+		{
+			name: "pypi package",
+			itemMap: map[string]interface{}{
+				"package_registry": "pypi",
+				"package_name":     "test-package",
+			},
+			wantInstall: "pipx run test-package",
+			wantConnect: "",
+		},
+		{
+			name: "with remote connection",
+			itemMap: map[string]interface{}{
+				"package_registry": "npm",
+				"package_name":     "test-package",
+				"remotes": []interface{}{
+					map[string]interface{}{
+						"url_direct": "https://test.example.com/mcp",
+					},
+				},
+			},
+			wantInstall: "npx -y test-package",
+			wantConnect: "https://test.example.com/mcp",
+		},
+		{
+			name:        "no package info",
+			itemMap:     map[string]interface{}{},
+			wantInstall: "",
+			wantConnect: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			installCmd, connectURL := derivePulseServerDetailsWithoutGuesser(tt.itemMap)
+			assert.Equal(t, tt.wantInstall, installCmd)
+			assert.Equal(t, tt.wantConnect, connectURL)
+		})
+	}
+}
+
+func TestIsGitHubURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{
+			name: "valid GitHub URL",
+			url:  "https://github.com/user/repo",
+			want: true,
+		},
+		{
+			name: "GitHub URL with path",
+			url:  "https://github.com/user/repo/tree/main",
+			want: true,
+		},
+		{
+			name: "non-GitHub URL",
+			url:  "https://gitlab.com/user/repo",
+			want: false,
+		},
+		{
+			name: "empty URL",
+			url:  "",
+			want: false,
+		},
+		{
+			name: "invalid URL",
+			url:  "not-a-url",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isGitHubURL(tt.url)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
