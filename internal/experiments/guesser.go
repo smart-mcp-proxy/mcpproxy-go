@@ -174,14 +174,36 @@ func (g *Guesser) GuessRepositoryTypesBatch(ctx context.Context, githubURLs []st
 
 	for batchResult := range resultChan {
 		processedCount++
+		url := githubURLs[batchResult.Index]
+
 		if batchResult.Error != nil {
 			errorCount++
 			g.logger.Debug("Failed to guess repository type",
-				zap.String("url", githubURLs[batchResult.Index]),
+				zap.String("url", url),
 				zap.Error(batchResult.Error))
 			// Keep empty result for failed URLs
 		} else {
 			results[batchResult.Index] = batchResult.Result
+
+			// Log individual result details
+			if batchResult.Result != nil && batchResult.Result.NPM != nil {
+				npmInfo := batchResult.Result.NPM
+				if npmInfo.Exists {
+					g.logger.Debug("Repository type guessing result: npm package found",
+						zap.String("url", url),
+						zap.String("package_name", npmInfo.PackageName),
+						zap.String("version", npmInfo.Version),
+						zap.String("install_cmd", npmInfo.InstallCmd))
+				} else {
+					g.logger.Debug("Repository type guessing result: npm package not found",
+						zap.String("url", url),
+						zap.String("package_name", npmInfo.PackageName),
+						zap.String("error", npmInfo.Error))
+				}
+			} else {
+				g.logger.Debug("Repository type guessing result: no npm package info",
+					zap.String("url", url))
+			}
 		}
 	}
 
