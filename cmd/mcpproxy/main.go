@@ -40,6 +40,10 @@ var (
 	version = "v0.1.0" // This will be injected by -ldflags during build
 )
 
+const (
+	defaultLogLevel = "info"
+)
+
 // TrayInterface defines the interface for system tray functionality
 type TrayInterface interface {
 	Run(ctx context.Context) error
@@ -136,7 +140,8 @@ Examples:
 			}()
 
 			if listRegistries {
-				return listAllRegistries(logger)
+				listAllRegistries(logger)
+				return nil
 			}
 
 			if registryFlag == "" {
@@ -196,7 +201,7 @@ Examples:
 	return cmd
 }
 
-func listAllRegistries(logger *zap.Logger) error {
+func listAllRegistries(logger *zap.Logger) {
 	// Load config and initialize registries
 	cfg, err := config.LoadFromFile("")
 	if err != nil {
@@ -223,7 +228,6 @@ func listAllRegistries(logger *zap.Logger) error {
 	}
 
 	fmt.Printf("\nUse --registry <ID> to search a specific registry\n")
-	return nil
 }
 
 func runServer(cmd *cobra.Command, _ []string) error {
@@ -251,7 +255,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// Use command-specific default level (INFO for server command)
 		defaultLevel := cmdLogLevel
 		if defaultLevel == "" {
-			defaultLevel = "info" // Server command defaults to INFO
+			defaultLevel = defaultLogLevel // Server command defaults to INFO
 		}
 
 		cfg.Logging = &config.LogConfig{
@@ -270,7 +274,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		if cmdLogLevel != "" {
 			cfg.Logging.Level = cmdLogLevel
 		} else if cfg.Logging.Level == "" {
-			cfg.Logging.Level = "info" // Server command defaults to INFO
+			cfg.Logging.Level = defaultLogLevel // Server command defaults to INFO
 		}
 		cfg.Logging.EnableFile = cmdLogToFile
 		if cfg.Logging.Filename == "" || cfg.Logging.Filename == "mcpproxy.log" {

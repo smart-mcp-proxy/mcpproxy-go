@@ -162,7 +162,8 @@ func applyBatchRepositoryGuessing(ctx context.Context, servers []ServerEntry, gu
 	var githubURLs []string
 	urlToServerIndex := make(map[int][]int) // Maps URL index to server indices that use it
 
-	for i, server := range servers {
+	for i := range servers {
+		server := &servers[i]
 		var githubURL string
 
 		// Check if server has a URL that looks like a GitHub repository

@@ -150,11 +150,11 @@ func (g *Guesser) GuessRepositoryTypesBatch(ctx context.Context, githubURLs []st
 			defer func() { <-g.semaphore }()
 
 			// Process single URL with batch timeout
-			result, err := g.guessRepositoryTypeBatch(ctx, request.URL)
+			result := g.guessRepositoryTypeBatch(ctx, request.URL)
 			resultChan <- BatchGuessResult{
 				Index:  request.Index,
 				Result: result,
-				Error:  err,
+				Error:  nil,
 			}
 		}(req)
 	}
@@ -216,11 +216,11 @@ func (g *Guesser) GuessRepositoryTypesBatch(ctx context.Context, githubURLs []st
 }
 
 // guessRepositoryTypeBatch is the internal batch version that uses the batch client
-func (g *Guesser) guessRepositoryTypeBatch(ctx context.Context, githubURL string) (*GuessResult, error) {
+func (g *Guesser) guessRepositoryTypeBatch(ctx context.Context, githubURL string) *GuessResult {
 	// Check if URL matches GitHub pattern
 	matches := githubURLPattern.FindStringSubmatch(githubURL)
 	if len(matches) != 3 {
-		return &GuessResult{}, nil
+		return &GuessResult{}
 	}
 
 	author := matches[1]
@@ -237,7 +237,7 @@ func (g *Guesser) guessRepositoryTypeBatch(ctx context.Context, githubURL string
 		result.NPM = npmInfo
 	}
 
-	return result, nil
+	return result
 }
 
 // checkNPMPackage checks if a package exists on npm registry
