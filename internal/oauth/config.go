@@ -3,12 +3,15 @@ package oauth
 import (
 	"context"
 	"fmt"
-	"mcpproxy-go/internal/config"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
+
+	"mcpproxy-go/internal/config"
 
 	"github.com/mark3labs/mcp-go/client"
 	"go.uber.org/zap"
@@ -88,6 +91,20 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
 
 	// Determine the correct OAuth server metadata URL based on the server URL
 	var authServerMetadataURL string
+	if serverConfig.URL != "" {
+		// Extract base URL from server URL and construct the well-known metadata endpoint
+		if baseURL, err := parseBaseURL(serverConfig.URL); err == nil {
+			authServerMetadataURL = baseURL + "/.well-known/oauth-authorization-server"
+			logger.Debug("Setting OAuth server metadata URL",
+				zap.String("server", serverConfig.Name),
+				zap.String("auth_server_metadata_url", authServerMetadataURL))
+		} else {
+			logger.Warn("Failed to parse base URL for OAuth metadata",
+				zap.String("server", serverConfig.Name),
+				zap.String("url", serverConfig.URL),
+				zap.Error(err))
+		}
+	}
 
 	oauthConfig := &client.OAuthConfig{
 		ClientID:              "",                         // Will be obtained via Dynamic Client Registration
@@ -307,4 +324,27 @@ func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
 // This is mainly for informational purposes - we don't require pre-configuration
 func IsOAuthConfigured(serverConfig *config.ServerConfig) bool {
 	return serverConfig.OAuth != nil
+}
+
+// parseBaseURL extracts the base URL (scheme + host) from a full URL
+func parseBaseURL(fullURL string) (string, error) {
+	if fullURL == "" {
+		return "", fmt.Errorf("empty URL")
+	}
+
+	// Handle URLs that might not have a scheme
+	if !strings.HasPrefix(fullURL, "http://") && !strings.HasPrefix(fullURL, "https://") {
+		fullURL = "https://" + fullURL
+	}
+
+	u, err := url.Parse(fullURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid URL: missing scheme or host")
+	}
+
+	return fmt.Sprintf("%s://%s", u.Scheme, u.Host), nil
 }
