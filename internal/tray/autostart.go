@@ -22,6 +22,7 @@ const (
     <array>
         <string>%s</string>
         <string>--tray=true</string>
+        <string>--log-to-file=true</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

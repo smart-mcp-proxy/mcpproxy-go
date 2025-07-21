@@ -36,6 +36,9 @@ type Config struct {
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
 
+	// Repository detection settings
+	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
+
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
 }
@@ -189,7 +192,7 @@ func DefaultConfig() *Config {
 		// Default logging configuration
 		Logging: &LogConfig{
 			Level:         "info",
-			EnableFile:    true,
+			EnableFile:    false, // Changed: Console by default
 			EnableConsole: true,
 			Filename:      "main.log",
 			MaxSize:       10, // 10MB
@@ -207,6 +210,9 @@ func DefaultConfig() *Config {
 
 		// Prompts enabled by default
 		EnablePrompts: true,
+
+		// Repository detection enabled by default
+		CheckServerRepo: true,
 
 		// Default registries for MCP server discovery
 		Registries: []RegistryEntry{

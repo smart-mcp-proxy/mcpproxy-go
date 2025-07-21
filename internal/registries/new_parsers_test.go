@@ -41,7 +41,7 @@ func TestParseAzureMCPDemo(t *testing.T) {
 		},
 	}
 
-	servers := parseAzureMCPDemo(sampleData)
+	servers := parseAzureMCPDemoWithoutGuesser(sampleData)
 
 	// Verify we parsed 2 servers
 	if len(servers) != 2 {
@@ -57,8 +57,8 @@ func TestParseAzureMCPDemo(t *testing.T) {
 		if server.Name != "io.github.21st-dev/magic-mcp" {
 			t.Errorf("Expected name 'io.github.21st-dev/magic-mcp', got '%s'", server.Name)
 		}
-		if server.URL != "https://github.com/21st-dev/magic-mcp" {
-			t.Errorf("Expected URL 'https://github.com/21st-dev/magic-mcp', got '%s'", server.URL)
+		if server.SourceCodeURL != "https://github.com/21st-dev/magic-mcp" {
+			t.Errorf("Expected SourceCodeURL 'https://github.com/21st-dev/magic-mcp', got '%s'", server.SourceCodeURL)
 		}
 		if server.UpdatedAt != "2025-05-15T04:52:52Z" {
 			t.Errorf("Expected UpdatedAt '2025-05-15T04:52:52Z', got '%s'", server.UpdatedAt)
@@ -143,14 +143,14 @@ func TestParseRemoteMCPServers(t *testing.T) {
 func TestParseAzureMCPDemo_EmptyData(t *testing.T) {
 	// Test with empty data
 	emptyData := map[string]interface{}{}
-	servers := parseAzureMCPDemo(emptyData)
+	servers := parseAzureMCPDemoWithoutGuesser(emptyData)
 	if len(servers) != 0 {
 		t.Errorf("Expected 0 servers for empty data, got %d", len(servers))
 	}
 
 	// Test with invalid data
 	invalidData := "not a map"
-	servers = parseAzureMCPDemo(invalidData)
+	servers = parseAzureMCPDemoWithoutGuesser(invalidData)
 	if len(servers) != 0 {
 		t.Errorf("Expected 0 servers for invalid data, got %d", len(servers))
 	}

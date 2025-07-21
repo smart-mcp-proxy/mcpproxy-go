@@ -1217,15 +1217,28 @@ func (c *Client) performOAuthAuthorization(ctx context.Context, oauthHandler *mc
 		zap.String("server", c.config.Name),
 		zap.String("redirect_uri", callbackServer.RedirectURI))
 
-	// Step 1: Dynamic Client Registration
+	// Step 1: Dynamic Client Registration with panic recovery
 	c.logger.Info("Performing Dynamic Client Registration",
 		zap.String("server", c.config.Name))
 
-	if err := oauthHandler.RegisterClient(ctx, "mcpproxy-go"); err != nil {
+	var registrationErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.logger.Error("Dynamic Client Registration panicked",
+					zap.String("server", c.config.Name),
+					zap.Any("panic", r))
+				registrationErr = fmt.Errorf("Dynamic Client Registration failed due to invalid OAuth server metadata: %v", r)
+			}
+		}()
+		registrationErr = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
+	}()
+
+	if registrationErr != nil {
 		c.logger.Error("Dynamic Client Registration failed",
 			zap.String("server", c.config.Name),
-			zap.Error(err))
-		return fmt.Errorf("Dynamic Client Registration failed: %w", err)
+			zap.Error(registrationErr))
+		return fmt.Errorf("Dynamic Client Registration failed: %w", registrationErr)
 	}
 
 	c.logger.Info("Dynamic Client Registration successful",

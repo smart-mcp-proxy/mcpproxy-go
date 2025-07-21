@@ -10,6 +10,7 @@
         <string>/Applications/mcpproxy</string>
         <string>serve</string>
         <string>--tray=true</string>
+        <string>--log-to-file=true</string>
     </array>
     
     <key>RunAtLoad</key>

@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/server"
@@ -39,6 +40,10 @@ var (
 	version = "v0.1.0" // This will be injected by -ldflags during build
 )
 
+const (
+	defaultLogLevel = "info"
+)
+
 // TrayInterface defines the interface for system tray functionality
 type TrayInterface interface {
 	Run(ctx context.Context) error
@@ -59,8 +64,8 @@ func main() {
 	// Add global flags
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Configuration file path")
 	rootCmd.PersistentFlags().StringVarP(&dataDir, "data-dir", "d", "", "Data directory path (default: ~/.mcpproxy)")
-	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
-	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", true, "Enable logging to file in standard OS location")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "Log level (debug, info, warn, error) - defaults: server=info, other commands=warn")
+	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", false, "Enable logging to file in standard OS location (default: console only)")
 	rootCmd.PersistentFlags().StringVar(&logDir, "log-dir", "", "Custom log directory path (overrides standard OS location)")
 
 	// Add server command
@@ -101,26 +106,42 @@ func main() {
 func createSearchServersCommand() *cobra.Command {
 	var registryFlag, searchFlag, tagFlag string
 	var listRegistries bool
+	var limitFlag int
 
 	cmd := &cobra.Command{
 		Use:   "search-servers",
-		Short: "Search MCP registries for available servers",
+		Short: "Search MCP registries for available servers with repository detection",
 		Long: `Search known MCP registries for available servers that can be added as upstreams.
-This tool queries embedded registries to discover MCP servers and returns results
-that can be directly used with the 'upstream_servers add' command.
+This tool queries embedded registries to discover MCP servers and includes automatic
+npm/PyPI package detection to enhance results with install commands.
+Results can be directly used with the 'upstream_servers add' command.
 
 Examples:
   # List all known registries
   mcpproxy search-servers --list-registries
 
-  # Search for weather-related servers in the Smithery registry
-  mcpproxy search-servers --registry smithery --search weather
+  # Search for weather-related servers in the Smithery registry (limit 10 results)
+  mcpproxy search-servers --registry smithery --search weather --limit 10
 
   # Search for servers tagged as "finance" in the Pulse registry
   mcpproxy search-servers --registry pulse --tag finance`,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Setup logger for search command (non-server command = WARN level by default)
+			cmdLogLevel, _ := cmd.Flags().GetString("log-level")
+			cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
+			cmdLogDir, _ := cmd.Flags().GetString("log-dir")
+
+			logger, err := logs.SetupCommandLogger(false, cmdLogLevel, cmdLogToFile, cmdLogDir)
+			if err != nil {
+				return fmt.Errorf("failed to setup logger: %w", err)
+			}
+			defer func() {
+				_ = logger.Sync()
+			}()
+
 			if listRegistries {
-				return listAllRegistries()
+				listAllRegistries(logger)
+				return nil
 			}
 
 			if registryFlag == "" {
@@ -128,10 +149,37 @@ Examples:
 			}
 
 			ctx := context.Background()
-			servers, err := registries.SearchServers(ctx, registryFlag, tagFlag, searchFlag)
+
+			// Create config to check if repository guessing is enabled
+			cfg, err := config.LoadFromFile("")
 			if err != nil {
+				// Use default config if loading fails
+				cfg = config.DefaultConfig()
+			}
+
+			// Initialize registries from config
+			registries.SetRegistriesFromConfig(cfg)
+
+			// Create experiments guesser if repository checking is enabled
+			var guesser *experiments.Guesser
+			if cfg.CheckServerRepo {
+				// Use the proper logger instead of no-op
+				guesser = experiments.NewGuesser(nil, logger)
+			}
+
+			logger.Info("Searching servers",
+				zap.String("registry", registryFlag),
+				zap.String("search", searchFlag),
+				zap.String("tag", tagFlag),
+				zap.Int("limit", limitFlag))
+
+			servers, err := registries.SearchServers(ctx, registryFlag, tagFlag, searchFlag, limitFlag, guesser)
+			if err != nil {
+				logger.Error("Search failed", zap.Error(err))
 				return fmt.Errorf("search failed: %w", err)
 			}
+
+			logger.Info("Search completed", zap.Int("results_count", len(servers)))
 
 			// Print results as JSON
 			output, err := json.MarshalIndent(servers, "", "  ")
@@ -147,13 +195,28 @@ Examples:
 	cmd.Flags().StringVarP(&registryFlag, "registry", "r", "", "Registry ID or name to search (exact match)")
 	cmd.Flags().StringVarP(&searchFlag, "search", "s", "", "Search term for server name/description")
 	cmd.Flags().StringVarP(&tagFlag, "tag", "t", "", "Filter servers by tag/category")
+	cmd.Flags().IntVarP(&limitFlag, "limit", "l", 10, "Maximum number of results to return (default: 10, max: 50)")
 	cmd.Flags().BoolVar(&listRegistries, "list-registries", false, "List all known registries")
 
 	return cmd
 }
 
-func listAllRegistries() error {
+func listAllRegistries(logger *zap.Logger) {
+	// Load config and initialize registries
+	cfg, err := config.LoadFromFile("")
+	if err != nil {
+		// Use default config if loading fails
+		cfg = config.DefaultConfig()
+	}
+
+	logger.Info("Loading registries configuration")
+
+	// Initialize registries from config
+	registries.SetRegistriesFromConfig(cfg)
+
 	registryList := registries.ListRegistries()
+
+	logger.Info("Found registries", zap.Int("count", len(registryList)))
 
 	// Format as a simple table for CLI display
 	fmt.Printf("%-20s %-30s %s\n", "ID", "NAME", "DESCRIPTION")
@@ -165,7 +228,6 @@ func listAllRegistries() error {
 	}
 
 	fmt.Printf("\nUse --registry <ID> to search a specific registry\n")
-	return nil
 }
 
 func runServer(cmd *cobra.Command, _ []string) error {
@@ -190,8 +252,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	// Override logging settings from command line
 	if cfg.Logging == nil {
+		// Use command-specific default level (INFO for server command)
+		defaultLevel := cmdLogLevel
+		if defaultLevel == "" {
+			defaultLevel = defaultLogLevel // Server command defaults to INFO
+		}
+
 		cfg.Logging = &config.LogConfig{
-			Level:         cmdLogLevel,
+			Level:         defaultLevel,
 			EnableFile:    cmdLogToFile,
 			EnableConsole: true,
 			Filename:      "main.log",
@@ -203,7 +271,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 	} else {
 		// Override specific fields from command line
-		cfg.Logging.Level = cmdLogLevel
+		if cmdLogLevel != "" {
+			cfg.Logging.Level = cmdLogLevel
+		} else if cfg.Logging.Level == "" {
+			cfg.Logging.Level = defaultLogLevel // Server command defaults to INFO
+		}
 		cfg.Logging.EnableFile = cmdLogToFile
 		if cfg.Logging.Filename == "" || cfg.Logging.Filename == "mcpproxy.log" {
 			cfg.Logging.Filename = "main.log"
