@@ -25,7 +25,7 @@ const (
 func DefaultLogConfig() *config.LogConfig {
 	return &config.LogConfig{
 		Level:         LogLevelInfo,
-		EnableFile:    true,
+		EnableFile:    false, // Changed: Console by default, not file
 		EnableConsole: true,
 		Filename:      "main.log",
 		MaxSize:       10, // 10MB
@@ -90,6 +90,38 @@ func SetupLogger(config *config.LogConfig) (*zap.Logger, error) {
 	logger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
 
 	return logger, nil
+}
+
+// SetupCommandLogger creates a logger for console commands with appropriate default levels
+// serverCommand: if true, uses INFO level by default; if false, uses WARN level by default
+func SetupCommandLogger(serverCommand bool, logLevel string, logToFile bool, logDir string) (*zap.Logger, error) {
+	// Determine default log level based on command type
+	defaultLevel := LogLevelWarn // Other commands default to WARN
+	if serverCommand {
+		defaultLevel = LogLevelInfo // Server command defaults to INFO
+	}
+
+	// Use provided level or fall back to command-specific default
+	level := defaultLevel
+	if logLevel != "" {
+		level = logLevel
+	}
+
+	// Create config for command logger
+	config := &config.LogConfig{
+		Level:         level,
+		EnableFile:    logToFile,
+		EnableConsole: true, // Console always enabled for commands
+		Filename:      "main.log",
+		LogDir:        logDir,
+		MaxSize:       10,
+		MaxBackups:    5,
+		MaxAge:        30,
+		Compress:      true,
+		JSONFormat:    false,
+	}
+
+	return SetupLogger(config)
 }
 
 // createFileCore creates a file-based logging core

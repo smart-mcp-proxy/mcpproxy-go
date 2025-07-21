@@ -60,8 +60,8 @@ func main() {
 	// Add global flags
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Configuration file path")
 	rootCmd.PersistentFlags().StringVarP(&dataDir, "data-dir", "d", "", "Data directory path (default: ~/.mcpproxy)")
-	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
-	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", true, "Enable logging to file in standard OS location")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "Log level (debug, info, warn, error) - defaults: server=info, other commands=warn")
+	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", false, "Enable logging to file in standard OS location (default: console only)")
 	rootCmd.PersistentFlags().StringVar(&logDir, "log-dir", "", "Custom log directory path (overrides standard OS location)")
 
 	// Add server command
@@ -121,9 +121,22 @@ Examples:
 
   # Search for servers tagged as "finance" in the Pulse registry
   mcpproxy search-servers --registry pulse --tag finance`,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Setup logger for search command (non-server command = WARN level by default)
+			cmdLogLevel, _ := cmd.Flags().GetString("log-level")
+			cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
+			cmdLogDir, _ := cmd.Flags().GetString("log-dir")
+
+			logger, err := logs.SetupCommandLogger(false, cmdLogLevel, cmdLogToFile, cmdLogDir)
+			if err != nil {
+				return fmt.Errorf("failed to setup logger: %w", err)
+			}
+			defer func() {
+				_ = logger.Sync()
+			}()
+
 			if listRegistries {
-				return listAllRegistries()
+				return listAllRegistries(logger)
 			}
 
 			if registryFlag == "" {
@@ -145,15 +158,23 @@ Examples:
 			// Create experiments guesser if repository checking is enabled
 			var guesser *experiments.Guesser
 			if cfg.CheckServerRepo {
-				// For CLI, we don't have cache manager, so pass nil
-				logger := zap.NewNop() // Use no-op logger for CLI
+				// Use the proper logger instead of no-op
 				guesser = experiments.NewGuesser(nil, logger)
 			}
 
+			logger.Info("Searching servers",
+				zap.String("registry", registryFlag),
+				zap.String("search", searchFlag),
+				zap.String("tag", tagFlag),
+				zap.Int("limit", limitFlag))
+
 			servers, err := registries.SearchServers(ctx, registryFlag, tagFlag, searchFlag, limitFlag, guesser)
 			if err != nil {
+				logger.Error("Search failed", zap.Error(err))
 				return fmt.Errorf("search failed: %w", err)
 			}
+
+			logger.Info("Search completed", zap.Int("results_count", len(servers)))
 
 			// Print results as JSON
 			output, err := json.MarshalIndent(servers, "", "  ")
@@ -175,7 +196,7 @@ Examples:
 	return cmd
 }
 
-func listAllRegistries() error {
+func listAllRegistries(logger *zap.Logger) error {
 	// Load config and initialize registries
 	cfg, err := config.LoadFromFile("")
 	if err != nil {
@@ -183,10 +204,14 @@ func listAllRegistries() error {
 		cfg = config.DefaultConfig()
 	}
 
+	logger.Info("Loading registries configuration")
+
 	// Initialize registries from config
 	registries.SetRegistriesFromConfig(cfg)
 
 	registryList := registries.ListRegistries()
+
+	logger.Info("Found registries", zap.Int("count", len(registryList)))
 
 	// Format as a simple table for CLI display
 	fmt.Printf("%-20s %-30s %s\n", "ID", "NAME", "DESCRIPTION")
@@ -223,8 +248,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	// Override logging settings from command line
 	if cfg.Logging == nil {
+		// Use command-specific default level (INFO for server command)
+		defaultLevel := cmdLogLevel
+		if defaultLevel == "" {
+			defaultLevel = "info" // Server command defaults to INFO
+		}
+
 		cfg.Logging = &config.LogConfig{
-			Level:         cmdLogLevel,
+			Level:         defaultLevel,
 			EnableFile:    cmdLogToFile,
 			EnableConsole: true,
 			Filename:      "main.log",
@@ -236,7 +267,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 	} else {
 		// Override specific fields from command line
-		cfg.Logging.Level = cmdLogLevel
+		if cmdLogLevel != "" {
+			cfg.Logging.Level = cmdLogLevel
+		} else if cfg.Logging.Level == "" {
+			cfg.Logging.Level = "info" // Server command defaults to INFO
+		}
 		cfg.Logging.EnableFile = cmdLogToFile
 		if cfg.Logging.Filename == "" || cfg.Logging.Filename == "mcpproxy.log" {
 			cfg.Logging.Filename = "main.log"

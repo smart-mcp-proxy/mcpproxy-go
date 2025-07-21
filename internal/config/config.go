@@ -192,7 +192,7 @@ func DefaultConfig() *Config {
 		// Default logging configuration
 		Logging: &LogConfig{
 			Level:         "info",
-			EnableFile:    true,
+			EnableFile:    false, // Changed: Console by default
 			EnableConsole: true,
 			Filename:      "main.log",
 			MaxSize:       10, // 10MB
