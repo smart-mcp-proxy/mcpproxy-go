@@ -21,7 +21,14 @@ The search_servers functionality now includes an experimental repository detecti
 ```
 
 **Enhanced Output Format:**
-Results now include repository information when packages are detected:
+Results now include repository information when packages are detected and clearly separate MCP endpoints from source code repositories:
+
+**Field Descriptions:**
+- `url`: **MCP endpoint URL only** - Direct connection URL for remote MCP servers (e.g., `https://weather.example.com/mcp`)
+- `source_code_url`: **Source code repository URL** - Link to the source code repository (e.g., GitHub URLs)
+- `connectUrl`: Alternative connection URL for remote servers
+- `installCmd`: Command to install the server locally (npm/pip)
+
 ```json
 [
   {
@@ -29,6 +36,7 @@ Results now include repository information when packages are detected:
     "name": "Weather MCP Server",
     "description": "Provides weather data via MCP",
     "url": "https://weather.example.com/mcp",
+    "source_code_url": "https://github.com/example/weather-mcp-server",
     "installCmd": "npm install weather-mcp-server",
     "repository_info": {
       "npm": {
@@ -61,12 +69,13 @@ User Workflow:
     "id": "weather",
     "name": "WeatherInfo",
     "description": "Provides real-time weather data",
-    "url": "https://weather.mcp.run/mcp/", 
+    "url": "https://weather.mcp.run/mcp/",
+    "source_code_url": "https://github.com/mcprun/weather-service",
     "updatedAt": "2025-05-01T12:00:00Z"
   }
 ]
 
-In this example, the result indicates a server named “WeatherInfo”, with a base MCP endpoint URL. The user or agent can then call:
+In this example, the result indicates a server named “WeatherInfo”, with a base MCP endpoint URL for direct connection and a separate source code repository URL. The user or agent can then call:
 
 mcpproxy upstream_servers add --name "WeatherInfo" --url "https://weather.mcp.run/mcp/"
 
@@ -106,6 +115,7 @@ Example Output (for Example 1):
     "name": "WeatherInfo",
     "description": "Provides real-time weather data",
     "url": "https://weather.mcp.run/mcp/",
+    "source_code_url": "https://github.com/mcprun/weather-service",
     "updatedAt": "2025-05-01T12:00:00Z"
   },
   {
@@ -114,11 +124,12 @@ Example Output (for Example 1):
     "name": "ForecastPro",
     "description": "7-day weather forecast tool",
     "url": "https://forecast.mcp.run/mcp/",
+    "source_code_url": "https://github.com/mcprun/forecast-pro",
     "updatedAt": "2025-04-20T08:30:00Z"
   }
 ]
 
-In a real scenario, the above JSON could be printed to the console or returned as an MCP tool response. The user/agent sees two matching servers from MCP Run and can choose one to add. Each entry includes url (the base endpoint to connect to the MCP server) so that no additional lookup is required beyond this search.
+In a real scenario, the above JSON could be printed to the console or returned as an MCP tool response. The user/agent sees two matching servers from MCP Run and can choose one to add. Each entry includes url (the base endpoint to connect to the MCP server) and source_code_url (link to the source repository) so that no additional lookup is required beyond this search.
 
 ⚙️ Architecture & Flowchart
 

@@ -1085,22 +1085,22 @@ func TestApplyBatchRepositoryGuessing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Create test servers with GitHub URLs
+	// Create test servers with GitHub URLs in SourceCodeURL field
 	servers := []ServerEntry{
 		{
-			ID:   "server1",
-			Name: "Test Server 1",
-			URL:  "https://github.com/facebook/react",
+			ID:            "server1",
+			Name:          "Test Server 1",
+			SourceCodeURL: "https://github.com/facebook/react",
 		},
 		{
-			ID:   "server2",
-			Name: "Test Server 2",
-			URL:  "https://github.com/nonexistent/package123",
+			ID:            "server2",
+			Name:          "Test Server 2",
+			SourceCodeURL: "https://github.com/nonexistent/package123",
 		},
 		{
 			ID:   "server3",
 			Name: "Test Server 3",
-			URL:  "https://example.com/not-github", // Non-GitHub URL
+			URL:  "https://example.com/not-github", // Non-GitHub URL (this is an MCP endpoint)
 		},
 		{
 			ID:   "server4",
@@ -1149,22 +1149,22 @@ func TestApplyBatchRepositoryGuessing_DuplicateURLs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Create servers with duplicate GitHub URLs
+	// Create servers with duplicate GitHub URLs in SourceCodeURL field
 	servers := []ServerEntry{
 		{
-			ID:   "server1",
-			Name: "Test Server 1",
-			URL:  "https://github.com/facebook/react",
+			ID:            "server1",
+			Name:          "Test Server 1",
+			SourceCodeURL: "https://github.com/facebook/react",
 		},
 		{
-			ID:   "server2",
-			Name: "Test Server 2",
-			URL:  "https://github.com/lodash/lodash",
+			ID:            "server2",
+			Name:          "Test Server 2",
+			SourceCodeURL: "https://github.com/lodash/lodash",
 		},
 		{
-			ID:   "server3",
-			Name: "Test Server 3",
-			URL:  "https://github.com/facebook/react", // Duplicate URL
+			ID:            "server3",
+			Name:          "Test Server 3",
+			SourceCodeURL: "https://github.com/facebook/react", // Duplicate URL
 		},
 	}
 
@@ -1271,7 +1271,7 @@ func TestParsePulseWithoutGuesser(t *testing.T) {
 	assert.Equal(t, "Express MCP server for web development", servers[0].Description)
 	assert.Equal(t, "npx -y express-mcp-server", servers[0].InstallCmd)
 	assert.Equal(t, "https://express.example.com/mcp", servers[0].ConnectURL)
-	assert.Equal(t, "https://github.com/user/express-mcp-server", servers[0].URL)
+	assert.Equal(t, "https://github.com/user/express-mcp-server", servers[0].SourceCodeURL)
 
 	// Second server
 	assert.Equal(t, "weather-server", servers[1].ID)
@@ -1279,7 +1279,7 @@ func TestParsePulseWithoutGuesser(t *testing.T) {
 	assert.Equal(t, "Weather data MCP server", servers[1].Description)
 	assert.Equal(t, "", servers[1].InstallCmd) // No package info
 	assert.Equal(t, "", servers[1].ConnectURL)
-	assert.Equal(t, "https://github.com/user/weather-server", servers[1].URL)
+	assert.Equal(t, "https://github.com/user/weather-server", servers[1].SourceCodeURL)
 }
 
 func TestParseAzureMCPDemoWithoutGuesser(t *testing.T) {
@@ -1309,7 +1309,7 @@ func TestParseAzureMCPDemoWithoutGuesser(t *testing.T) {
 	assert.Equal(t, "azure-demo-1", server.ID)
 	assert.Equal(t, "Azure Demo Server", server.Name)
 	assert.Equal(t, "Demo server for Azure MCP (v1.0.0)", server.Description)
-	assert.Equal(t, "https://github.com/microsoft/azure-mcp-demo", server.URL)
+	assert.Equal(t, "https://github.com/microsoft/azure-mcp-demo", server.SourceCodeURL)
 	assert.Equal(t, "2024-01-01", server.UpdatedAt)
 }
 

@@ -57,8 +57,8 @@ func TestParseAzureMCPDemo(t *testing.T) {
 		if server.Name != "io.github.21st-dev/magic-mcp" {
 			t.Errorf("Expected name 'io.github.21st-dev/magic-mcp', got '%s'", server.Name)
 		}
-		if server.URL != "https://github.com/21st-dev/magic-mcp" {
-			t.Errorf("Expected URL 'https://github.com/21st-dev/magic-mcp', got '%s'", server.URL)
+		if server.SourceCodeURL != "https://github.com/21st-dev/magic-mcp" {
+			t.Errorf("Expected SourceCodeURL 'https://github.com/21st-dev/magic-mcp', got '%s'", server.SourceCodeURL)
 		}
 		if server.UpdatedAt != "2025-05-15T04:52:52Z" {
 			t.Errorf("Expected UpdatedAt '2025-05-15T04:52:52Z', got '%s'", server.UpdatedAt)

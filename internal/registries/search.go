@@ -166,9 +166,9 @@ func applyBatchRepositoryGuessing(ctx context.Context, servers []ServerEntry, gu
 		server := &servers[i]
 		var githubURL string
 
-		// Check if server has a URL that looks like a GitHub repository
-		if server.URL != "" && isGitHubURL(server.URL) {
-			githubURL = server.URL
+		// Check if server has a SourceCodeURL that looks like a GitHub repository
+		if server.SourceCodeURL != "" && isGitHubURL(server.SourceCodeURL) {
+			githubURL = server.SourceCodeURL
 		}
 
 		// Add to batch if we found a GitHub URL
@@ -735,7 +735,7 @@ func parsePulseWithoutGuesser(rawData interface{}) []ServerEntry {
 
 		// Store source_code_url for later batch processing
 		if sourceCodeURL, ok := itemMap["source_code_url"].(string); ok && sourceCodeURL != "" {
-			server.URL = sourceCodeURL
+			server.SourceCodeURL = sourceCodeURL
 		}
 
 		servers = append(servers, server)
@@ -788,7 +788,7 @@ func parseAzureMCPDemoWithoutGuesser(rawData interface{}) []ServerEntry {
 		if repo, ok := itemMap["repository"].(map[string]interface{}); ok {
 			if repoURL, ok := repo["url"].(string); ok && repoURL != "" {
 				// Store repository URL for later batch processing
-				server.URL = repoURL
+				server.SourceCodeURL = repoURL
 			}
 		}
 
