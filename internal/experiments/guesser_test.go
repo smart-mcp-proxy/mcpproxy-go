@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,8 +18,10 @@ import (
 )
 
 func setupTestGuesser(t *testing.T) (*Guesser, *bbolt.DB) {
-	// Create temporary database
-	db, err := bbolt.Open(":memory:", 0644, &bbolt.Options{Timeout: time.Second})
+	// Create temporary database file (Windows-compatible)
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	db, err := bbolt.Open(dbPath, 0644, &bbolt.Options{Timeout: time.Second})
 	require.NoError(t, err)
 
 	logger := zap.NewNop()
