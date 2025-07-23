@@ -787,7 +787,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 	if client.IsConnected() {
 		// Server is connected - retrieve actual tools for security analysis
 		// Add timeout and better error handling for broken connections
-		toolsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		toolsCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
 		tools, err := client.ListTools(toolsCtx)

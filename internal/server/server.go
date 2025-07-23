@@ -228,8 +228,8 @@ func (s *Server) backgroundConnections(ctx context.Context) {
 	// Initial connection attempt
 	s.connectAllWithRetry(ctx)
 
-	// Start periodic reconnection attempts for failed connections
-	ticker := time.NewTicker(30 * time.Second)
+	// Start periodic reconnection attempts for failed connections (less aggressive)
+	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -292,8 +292,8 @@ func (s *Server) backgroundToolIndexing(ctx context.Context) {
 		return
 	}
 
-	// Re-index every 5 minutes
-	ticker := time.NewTicker(5 * time.Minute)
+	// Re-index every 15 minutes (less aggressive)
+	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -768,10 +768,14 @@ func (s *Server) getServerToolCount(serverID string) int {
 		return 0
 	}
 
-	// Use shorter timeout for UI status updates (5 seconds instead of 30)
-	// This reduces waiting time for unresponsive servers
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Use timeout for UI status updates (30 seconds for SSE servers)
+	// This allows time for SSE servers to establish connections and respond
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	s.logger.Debug("Starting ListTools operation",
+		zap.String("server_id", serverID),
+		zap.Duration("timeout", 30*time.Second))
 
 	tools, err := client.ListTools(ctx)
 	if err != nil {
