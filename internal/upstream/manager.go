@@ -537,9 +537,12 @@ func (m *Manager) GetTotalToolCount() int {
 			continue
 		}
 
-		// Use shorter timeout for UI status updates (5 seconds instead of 30)
-		// This reduces waiting time for unresponsive servers like CoinGecko SSE
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Use timeout for UI status updates (30 seconds for SSE servers)
+		// This allows time for SSE servers to establish connections and respond
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+		m.logger.Debug("Starting ListTools for tool counting",
+			zap.Duration("timeout", 30*time.Second))
 		tools, err := client.ListTools(ctx)
 		cancel()
 		if err == nil && tools != nil {

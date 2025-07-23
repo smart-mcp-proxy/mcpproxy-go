@@ -15,6 +15,7 @@ import (
 
 // Log level constants
 const (
+	LogLevelTrace = "trace"
 	LogLevelDebug = "debug"
 	LogLevelInfo  = "info"
 	LogLevelWarn  = "warn"
@@ -45,6 +46,8 @@ func SetupLogger(config *config.LogConfig) (*zap.Logger, error) {
 	// Parse log level
 	var level zapcore.Level
 	switch config.Level {
+	case LogLevelTrace:
+		level = zap.DebugLevel - 1 // Custom trace level below debug
 	case LogLevelDebug:
 		level = zap.DebugLevel
 	case LogLevelInfo:
@@ -266,6 +269,8 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 	// Parse log level
 	var level zapcore.Level
 	switch serverConfig.Level {
+	case LogLevelTrace:
+		level = zap.DebugLevel - 1 // Custom trace level below debug
 	case LogLevelDebug:
 		level = zap.DebugLevel
 	case LogLevelInfo:

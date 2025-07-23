@@ -3,6 +3,7 @@ package transport
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"mcpproxy-go/internal/config"
 
@@ -137,7 +138,8 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		return client.NewClient(httpTransport), nil
 	}
 
-	httpTransport, err := transport.NewStreamableHTTP(cfg.URL)
+	httpTransport, err := transport.NewStreamableHTTP(cfg.URL,
+		transport.WithHTTPTimeout(120*time.Second)) // Longer timeout for HTTP connections
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP transport: %w", err)
 	}
@@ -184,7 +186,18 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	// Use regular SSE client
 	if len(cfg.Headers) > 0 {
 		logger.Debug("Adding SSE headers", zap.Int("header_count", len(cfg.Headers)))
+		// Create custom HTTP client with longer timeout for SSE
+		httpClient := &http.Client{
+			Timeout: 120 * time.Second, // Longer timeout for SSE connections
+		}
+
+		zap.L().Debug("Creating SSE MCP client with custom HTTP timeout and headers",
+			zap.String("url", cfg.URL),
+			zap.Duration("timeout", 120*time.Second),
+			zap.Int("header_count", len(cfg.Headers)))
+
 		sseClient, err := client.NewSSEMCPClient(cfg.URL,
+			client.WithHTTPClient(httpClient),
 			client.WithHeaders(cfg.Headers))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SSE client: %w", err)
@@ -192,7 +205,26 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		return sseClient, nil
 	}
 
-	sseClient, err := client.NewSSEMCPClient(cfg.URL)
+	// Create custom HTTP client with longer timeout for SSE
+	httpClient := &http.Client{
+		Timeout: 120 * time.Second, // Longer timeout for SSE connections
+	}
+
+	zap.L().Debug("Creating SSE MCP client with custom HTTP timeout",
+		zap.String("url", cfg.URL),
+		zap.Duration("timeout", 120*time.Second))
+
+	// Enhanced trace-level debugging for SSE transport
+	if zap.L().Core().Enabled(zap.DebugLevel - 1) { // Trace level
+		zap.L().Debug("TRACE SSE TRANSPORT SETUP",
+			zap.String("transport_type", "sse"),
+			zap.String("url", cfg.URL),
+			zap.Duration("http_timeout", 120*time.Second),
+			zap.String("debug_note", "SSE client will establish persistent connection for JSON-RPC over SSE"))
+	}
+
+	sseClient, err := client.NewSSEMCPClient(cfg.URL,
+		client.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SSE client: %w", err)
 	}

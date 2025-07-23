@@ -59,6 +59,10 @@ type Client struct {
 
 	// Connection state protection
 	mu sync.RWMutex
+
+	// ListTools concurrency control
+	listToolsMu         sync.Mutex
+	listToolsInProgress bool
 }
 
 // NewClient creates a new MCP client for connecting to an upstream server
@@ -115,6 +119,13 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 				zap.Error(err))
 		} else {
 			c.upstreamLogger = upstreamLogger
+
+			// Log trace level enablement
+			if logConfig.Level == "trace" {
+				c.upstreamLogger.Debug("TRACE LEVEL ENABLED - All JSON-RPC frames will be logged",
+					zap.String("server", serverConfig.Name),
+					zap.String("log_level", logConfig.Level))
+			}
 		}
 	}
 
@@ -734,13 +745,60 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		return nil, nil
 	}
 
+	// Prevent concurrent ListTools calls to the same server
+	c.listToolsMu.Lock()
+	if c.listToolsInProgress {
+		c.listToolsMu.Unlock()
+		c.logger.Debug("ListTools already in progress for server, skipping concurrent call",
+			zap.String("server", c.config.Name))
+		return nil, fmt.Errorf("ListTools operation already in progress for server %s", c.config.Name)
+	}
+	c.listToolsInProgress = true
+	c.listToolsMu.Unlock()
+
+	defer func() {
+		c.listToolsMu.Lock()
+		c.listToolsInProgress = false
+		c.listToolsMu.Unlock()
+	}()
+
+	// Debug log the context deadline
+	if deadline, ok := ctx.Deadline(); ok {
+		c.logger.Debug("ListTools called with context deadline",
+			zap.String("server", c.config.Name),
+			zap.Time("deadline", deadline),
+			zap.Duration("timeout_remaining", time.Until(deadline)))
+	}
+
 	toolsRequest := mcp.ListToolsRequest{}
+
+	// Enhanced trace-level logging for ListTools request
+	if c.upstreamLogger != nil && c.logger.Core().Enabled(zap.DebugLevel-1) { // Trace level
+		if reqBytes, err := json.MarshalIndent(toolsRequest, "", "  "); err == nil {
+			c.upstreamLogger.Debug("TRACE JSON-RPC LISTTOOLS REQUEST",
+				zap.String("method", "tools/list"),
+				zap.String("formatted_json", string(reqBytes)))
+		}
+	}
+
 	toolsResult, err := c.safeListTools(ctx, toolsRequest)
 	if err != nil {
 		c.stateManager.SetError(err)
 		c.logger.Error("ListTools failed", zap.Error(err))
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Error("ListTools failed", zap.Error(err))
+
+			// Enhanced error analysis for trace level
+			if c.logger.Core().Enabled(zap.DebugLevel - 1) { // Trace level
+				c.upstreamLogger.Debug("TRACE LISTTOOLS ERROR ANALYSIS",
+					zap.String("server", c.config.Name),
+					zap.String("protocol", c.config.Protocol),
+					zap.String("url", c.config.URL),
+					zap.String("error_type", fmt.Sprintf("%T", err)),
+					zap.String("error_msg", err.Error()),
+					zap.String("server_protocol_version", c.serverInfo.ProtocolVersion),
+					zap.String("suggested_solution", "1) Check if server supports ListTools, 2) Try different MCP server, 3) Verify SSE server implementation"))
+			}
 		}
 
 		// Check if this is a connection error
@@ -755,6 +813,16 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	}
 
 	c.logger.Debug("ListTools successful", zap.Int("tools_count", len(toolsResult.Tools)))
+
+	// Enhanced trace-level logging for ListTools response
+	if c.upstreamLogger != nil && c.logger.Core().Enabled(zap.DebugLevel-1) { // Trace level
+		if respBytes, err := json.MarshalIndent(toolsResult, "", "  "); err == nil {
+			c.upstreamLogger.Debug("TRACE JSON-RPC LISTTOOLS RESPONSE",
+				zap.String("method", "tools/list"),
+				zap.Int("tools_count", len(toolsResult.Tools)),
+				zap.String("formatted_json", string(respBytes)))
+		}
+	}
 
 	// Convert MCP tools to our metadata format
 	var tools []*config.ToolMetadata
@@ -865,7 +933,17 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		// Only log full request/response JSON if DEBUG level is enabled
 		if c.logger.Core().Enabled(zap.DebugLevel) {
 			if reqBytes, err := json.Marshal(request); err == nil {
-				c.upstreamLogger.Debug(string(reqBytes))
+				c.upstreamLogger.Debug("JSON-RPC REQUEST", zap.String("raw_json", string(reqBytes)))
+			}
+		}
+
+		// Enhanced trace-level logging with pretty formatting
+		if c.logger.Core().Enabled(zap.DebugLevel - 1) { // Trace level
+			if reqBytes, err := json.MarshalIndent(request, "", "  "); err == nil {
+				c.upstreamLogger.Debug("TRACE JSON-RPC REQUEST",
+					zap.String("method", request.Method),
+					zap.String("tool_name", toolName),
+					zap.String("formatted_json", string(reqBytes)))
 			}
 		}
 	}
@@ -926,7 +1004,18 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		// Only log full response JSON if DEBUG level is enabled
 		if c.logger.Core().Enabled(zap.DebugLevel) {
 			if respBytes, err := json.Marshal(result); err == nil {
-				c.upstreamLogger.Debug(string(respBytes))
+				c.upstreamLogger.Debug("JSON-RPC RESPONSE", zap.String("raw_json", string(respBytes)))
+			}
+		}
+
+		// Enhanced trace-level logging with pretty formatting
+		if c.logger.Core().Enabled(zap.DebugLevel - 1) { // Trace level
+			if respBytes, err := json.MarshalIndent(result, "", "  "); err == nil {
+				c.upstreamLogger.Debug("TRACE JSON-RPC RESPONSE",
+					zap.String("tool_name", toolName),
+					zap.Bool("is_error", result.IsError),
+					zap.Int("content_count", len(result.Content)),
+					zap.String("formatted_json", string(respBytes)))
 			}
 		}
 	}
