@@ -2,7 +2,7 @@
 
 **MCPProxy** is an open-source desktop application that super-charges AI agents with intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
-[![MCPProxy Demo](https://img.youtube.com/vi/56Ip-8S7PaQ/0.jpg)](https://youtu.be/56Ip-8S7PaQ)
+[![MCPProxy Demo](https://img.youtube.com/vi/l4hh6WOuSFM/0.jpg)](https://youtu.be/l4hh6WOuSFM)
 
 <a href="https://mcpproxy.app" target="_blank" rel="noopener">🌐 Visit mcpproxy.app</a>
 
