@@ -1,5 +1,9 @@
 # MCPProxy – Smart Proxy for AI Agents
 
+**MCPProxy** is an open-source desktop application that super-charges AI agents with intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
+
+[![MCPProxy Demo](https://img.youtube.com/vi/56Ip-8S7PaQ/0.jpg)](https://youtu.be/56Ip-8S7PaQ)
+
 <a href="https://mcpproxy.app" target="_blank" rel="noopener">🌐 Visit mcpproxy.app</a>
 
 <div align="center">
@@ -14,7 +18,6 @@
   <em>System Tray - Upstream Servers &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; System Tray - Quarantine Management</em>
 </div>
 
-**MCPProxy** is an open-source desktop application that super-charges AI agents with intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
 ## Why MCPProxy?
 
