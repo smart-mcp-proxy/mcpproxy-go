@@ -1,0 +1,1 @@
+"""Fake MCP registry for evaluation""" 

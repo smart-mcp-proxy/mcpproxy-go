@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcpproxy-eval"
+version = "0.1.0"
+description = "MCP Tools Evaluation Framework for mcpproxy"
+dependencies = [
+    "fastmcp==2.10.6",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "aiofiles>=23.0.0",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+    "httpx>=0.25.0",
+    "google-adk",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "typer>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.5.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+# Fake MCP Servers
+mcp-dice = "mcpproxy_eval.servers.dice:main"
+mcp-weather = "mcpproxy_eval.servers.weather:main"
+mcp-restaurant = "mcpproxy_eval.servers.restaurant:main"
+mcp-calculator = "mcpproxy_eval.servers.calculator:main"
+mcp-translator = "mcpproxy_eval.servers.translator:main"
+mcp-morse = "mcpproxy_eval.servers.morse:main"
+mcp-time = "mcpproxy_eval.servers.time:main"
+mcp-jokes = "mcpproxy_eval.servers.jokes:main"
+mcp-color = "mcpproxy_eval.servers.color:main"
+mcp-random = "mcpproxy_eval.servers.random:main"
+
+# Registry
+mcp-registry = "mcpproxy_eval.registry.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py311" 

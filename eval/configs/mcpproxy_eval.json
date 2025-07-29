@@ -1,0 +1,61 @@
+{
+  "registries": [
+    {
+      "name": "eval-registry",
+      "url": "http://localhost:8001",
+      "description": "Fake MCP registry for evaluation testing",
+      "enabled": true
+    }
+  ],
+  "upstream_servers": [
+    {
+      "name": "eval-dice",
+      "url": "stdio://uvx mcp-dice",
+      "description": "Evaluation dice rolling server",
+      "enabled": true,
+      "quarantined": false
+    },
+    {
+      "name": "eval-weather", 
+      "url": "stdio://uvx mcp-weather",
+      "description": "Evaluation weather information server",
+      "enabled": true,
+      "quarantined": false
+    }
+  ],
+  "server": {
+    "port": 8080,
+    "host": "localhost",
+    "cors_enabled": true,
+    "cors_origins": ["*"]
+  },
+  "logging": {
+    "level": "debug",
+    "file": "~/Library/Logs/mcpproxy/eval.log",
+    "console": true,
+    "structured": true
+  },
+  "security": {
+    "quarantine_new_servers": true,
+    "require_server_approval": true,
+    "max_upstream_servers": 50,
+    "security_scan_enabled": true
+  },
+  "features": {
+    "registry_search": true,
+    "server_discovery": true,
+    "log_tailing": true,
+    "quarantine_management": true,
+    "security_reports": true
+  },
+  "timeouts": {
+    "server_connect": "30s",
+    "tool_execution": "60s",
+    "registry_search": "15s"
+  },
+  "cache": {
+    "enabled": true,
+    "ttl": "300s",
+    "max_size": 1000
+  }
+} 

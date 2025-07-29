@@ -1,0 +1,15 @@
+# MCP Proxy Evaluation Environment Variables
+# Copy this content to .env file and fill in your values
+
+# Google AI API Key for ADK evaluation (REQUIRED)
+GOOGLE_AI_API_KEY=your_api_key_here
+
+# mcpproxy URL for ADK agent connection (used by StreamableHTTPConnectionParams)
+MCPPROXY_URL=http://localhost:8080
+
+# Optional: Registry URL 
+REGISTRY_URL=http://localhost:8001
+
+# Optional: Logging configuration
+LOG_LEVEL=DEBUG
+LOG_FILE=~/Library/Logs/mcpproxy/eval.log 
