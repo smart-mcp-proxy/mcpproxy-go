@@ -45,6 +45,11 @@ type CoreClient struct {
 
 // NewCoreClient creates a new core MCP client
 func NewCoreClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*CoreClient, error) {
+	return NewCoreClientWithOptions(id, serverConfig, logger, logConfig, globalConfig, false)
+}
+
+// NewCoreClientWithOptions creates a new core MCP client with additional options
+func NewCoreClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, cliDebugMode bool) (*CoreClient, error) {
 	c := &CoreClient{
 		id:     id,
 		config: serverConfig,
@@ -85,15 +90,25 @@ func NewCoreClient(id string, serverConfig *config.ServerConfig, logger *zap.Log
 
 	// Create upstream server logger if provided
 	if logConfig != nil {
-		upstreamLogger, err := logs.CreateUpstreamServerLogger(logConfig, serverConfig.Name)
+		var upstreamLogger *zap.Logger
+		var err error
+
+		// Use CLI logger for debugging or regular logger for daemon mode
+		if cliDebugMode {
+			upstreamLogger, err = logs.CreateCLIUpstreamServerLogger(logConfig, serverConfig.Name)
+		} else {
+			upstreamLogger, err = logs.CreateUpstreamServerLogger(logConfig, serverConfig.Name)
+		}
+
 		if err != nil {
 			logger.Warn("Failed to create upstream server logger",
 				zap.String("server", serverConfig.Name),
+				zap.Bool("cli_debug_mode", cliDebugMode),
 				zap.Error(err))
 		} else {
 			c.upstreamLogger = upstreamLogger
-			if logConfig.Level == "trace" {
-				c.upstreamLogger.Debug("TRACE LEVEL ENABLED - All JSON-RPC frames will be logged",
+			if logConfig.Level == "trace" && cliDebugMode {
+				c.upstreamLogger.Debug("TRACE LEVEL ENABLED - All JSON-RPC frames will be logged to console",
 					zap.String("server", serverConfig.Name))
 			}
 		}
@@ -289,13 +304,11 @@ func (c *CoreClient) initialize(ctx context.Context) error {
 	}
 	initRequest.Params.Capabilities = mcp.ClientCapabilities{}
 
-	// Log request for trace debugging
-	if c.upstreamLogger != nil {
-		if reqBytes, err := json.MarshalIndent(initRequest, "", "  "); err == nil {
-			c.upstreamLogger.Debug("TRACE JSON-RPC INITIALIZE REQUEST",
-				zap.String("method", "initialize"),
-				zap.String("formatted_json", string(reqBytes)))
-		}
+	// Log request for trace debugging - use main logger for CLI debug mode
+	if reqBytes, err := json.MarshalIndent(initRequest, "", "  "); err == nil {
+		c.logger.Debug("🔍 JSON-RPC INITIALIZE REQUEST",
+			zap.String("method", "initialize"),
+			zap.String("formatted_json", string(reqBytes)))
 	}
 
 	serverInfo, err := c.client.Initialize(ctx, initRequest)
@@ -303,13 +316,11 @@ func (c *CoreClient) initialize(ctx context.Context) error {
 		return fmt.Errorf("MCP initialize failed: %w", err)
 	}
 
-	// Log response for trace debugging
-	if c.upstreamLogger != nil {
-		if respBytes, err := json.MarshalIndent(serverInfo, "", "  "); err == nil {
-			c.upstreamLogger.Debug("TRACE JSON-RPC INITIALIZE RESPONSE",
-				zap.String("method", "initialize"),
-				zap.String("formatted_json", string(respBytes)))
-		}
+	// Log response for trace debugging - use main logger for CLI debug mode
+	if respBytes, err := json.MarshalIndent(serverInfo, "", "  "); err == nil {
+		c.logger.Debug("🔍 JSON-RPC INITIALIZE RESPONSE",
+			zap.String("method", "initialize"),
+			zap.String("formatted_json", string(respBytes)))
 	}
 
 	c.serverInfo = serverInfo
@@ -364,13 +375,11 @@ func (c *CoreClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, err
 
 	toolsRequest := mcp.ListToolsRequest{}
 
-	// Log request for trace debugging
-	if c.upstreamLogger != nil {
-		if reqBytes, err := json.MarshalIndent(toolsRequest, "", "  "); err == nil {
-			c.upstreamLogger.Debug("TRACE JSON-RPC LISTTOOLS REQUEST",
-				zap.String("method", "tools/list"),
-				zap.String("formatted_json", string(reqBytes)))
-		}
+	// Log request for trace debugging - use main logger for CLI debug mode
+	if reqBytes, err := json.MarshalIndent(toolsRequest, "", "  "); err == nil {
+		c.logger.Debug("🔍 JSON-RPC LISTTOOLS REQUEST",
+			zap.String("method", "tools/list"),
+			zap.String("formatted_json", string(reqBytes)))
 	}
 
 	toolsResult, err := client.ListTools(ctx, toolsRequest)
@@ -378,13 +387,11 @@ func (c *CoreClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, err
 		return nil, fmt.Errorf("ListTools failed: %w", err)
 	}
 
-	// Log response for trace debugging
-	if c.upstreamLogger != nil {
-		if respBytes, err := json.MarshalIndent(toolsResult, "", "  "); err == nil {
-			c.upstreamLogger.Debug("TRACE JSON-RPC LISTTOOLS RESPONSE",
-				zap.String("method", "tools/list"),
-				zap.String("formatted_json", string(respBytes)))
-		}
+	// Log response for trace debugging - use main logger for CLI debug mode
+	if respBytes, err := json.MarshalIndent(toolsResult, "", "  "); err == nil {
+		c.logger.Debug("🔍 JSON-RPC LISTTOOLS RESPONSE",
+			zap.String("method", "tools/list"),
+			zap.String("formatted_json", string(respBytes)))
 	}
 
 	// Convert to ToolMetadata

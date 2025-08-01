@@ -47,7 +47,7 @@ func SetupLogger(config *config.LogConfig) (*zap.Logger, error) {
 	var level zapcore.Level
 	switch config.Level {
 	case LogLevelTrace:
-		level = zap.DebugLevel - 1 // Custom trace level below debug
+		level = zap.DebugLevel // Map trace to debug level for maximum verbosity
 	case LogLevelDebug:
 		level = zap.DebugLevel
 	case LogLevelInfo:
@@ -270,7 +270,7 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 	var level zapcore.Level
 	switch serverConfig.Level {
 	case LogLevelTrace:
-		level = zap.DebugLevel - 1 // Custom trace level below debug
+		level = zap.DebugLevel // Map trace to debug level for maximum verbosity
 	case LogLevelDebug:
 		level = zap.DebugLevel
 	case LogLevelInfo:
@@ -291,6 +291,71 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 
 	// Create logger with server name prefix
 	logger := zap.New(fileCore, zap.AddCaller(), zap.AddCallerSkip(1))
+	logger = logger.With(zap.String("server", serverName))
+
+	return logger, nil
+}
+
+// CreateCLIUpstreamServerLogger creates a logger for CLI debugging that outputs to console
+func CreateCLIUpstreamServerLogger(config *config.LogConfig, serverName string) (*zap.Logger, error) {
+	if config == nil {
+		config = DefaultLogConfig()
+	}
+
+	// Create a copy of the config for CLI debugging
+	serverConfig := *config
+	serverConfig.Filename = fmt.Sprintf("server-%s.log", serverName)
+	serverConfig.EnableConsole = true // CLI debugging: enable console output
+	serverConfig.EnableFile = false   // CLI debugging: disable file output for simplicity
+
+	// Parse log level
+	var level zapcore.Level
+	switch serverConfig.Level {
+	case LogLevelTrace:
+		level = zap.DebugLevel // Map trace to debug level for maximum verbosity
+	case LogLevelDebug:
+		level = zap.DebugLevel
+	case LogLevelInfo:
+		level = zap.InfoLevel
+	case LogLevelWarn:
+		level = zap.WarnLevel
+	case LogLevelError:
+		level = zap.ErrorLevel
+	default:
+		level = zap.InfoLevel
+	}
+
+	var cores []zapcore.Core
+
+	// Console output for CLI debugging
+	if serverConfig.EnableConsole {
+		consoleEncoder := getConsoleEncoder()
+		consoleCore := zapcore.NewCore(
+			consoleEncoder,
+			zapcore.AddSync(os.Stderr),
+			level,
+		)
+		cores = append(cores, consoleCore)
+	}
+
+	// File output (if enabled)
+	if serverConfig.EnableFile {
+		fileCore, err := createFileCore(&serverConfig, level)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create file core for upstream server %s: %w", serverName, err)
+		}
+		cores = append(cores, fileCore)
+	}
+
+	if len(cores) == 0 {
+		return nil, fmt.Errorf("no log outputs configured for CLI upstream server logger")
+	}
+
+	// Combine cores
+	core := zapcore.NewTee(cores...)
+
+	// Create logger with server name prefix
+	logger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
 	logger = logger.With(zap.String("server", serverName))
 
 	return logger, nil

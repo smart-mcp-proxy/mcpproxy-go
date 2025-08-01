@@ -66,8 +66,8 @@ func NewCLIClient(serverName string, globalConfig *config.Config, logLevel strin
 		return nil, fmt.Errorf("failed to create logger: %w", err)
 	}
 
-	// Create core client with debug logging
-	coreClient, err := core.NewCoreClient(serverName, serverConfig, logger, logConfig, globalConfig)
+	// Create core client with CLI debug logging enabled
+	coreClient, err := core.NewCoreClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}
@@ -91,6 +91,11 @@ func (c *CLIClient) Connect(ctx context.Context) error {
 	// Add timeout for CLI operations
 	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+
+	// Enable JSON-RPC frame logging if trace level is enabled
+	if c.debugMode {
+		c.logger.Debug("🔍 TRACE MODE ENABLED - JSON-RPC frames will be logged")
+	}
 
 	// Connect core client
 	if err := c.coreClient.Connect(connectCtx); err != nil {
