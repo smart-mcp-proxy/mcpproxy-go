@@ -12,7 +12,9 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/secureenv"
 	"mcpproxy-go/internal/transport"
+	"mcpproxy-go/internal/upstream/managed"
 )
 
 func TestSecureEnvironmentIntegration(t *testing.T) {
@@ -67,14 +69,16 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 
 	// Create upstream client
 	logger := zap.NewNop()
-	client, err := NewClient("test-id", serverConfig, logger, nil, cfg)
+	client, err := managed.NewManagedClient("test-id", serverConfig, logger, nil, cfg)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	require.NotNil(t, client.envManager)
+
+	envManager := client.GetEnvManager().(*secureenv.Manager)
+	require.NotNil(t, envManager)
 
 	// Test the environment filtering
 	t.Run("environment manager filters correctly", func(t *testing.T) {
-		envVars := client.envManager.BuildSecureEnvironment()
+		envVars := envManager.BuildSecureEnvironment()
 
 		// Convert to map for easier checking
 		envMap := make(map[string]string)
@@ -109,7 +113,7 @@ func TestSecureEnvironmentIntegration(t *testing.T) {
 	})
 
 	t.Run("filtered environment count", func(t *testing.T) {
-		filteredCount, totalCount := client.envManager.GetFilteredEnvCount()
+		filteredCount, totalCount := client.GetEnvManager().(*secureenv.Manager).GetFilteredEnvCount()
 
 		// We set 5 environment variables (PATH, HOME, SECRET_API_KEY, DATABASE_PASSWORD, SAFE_TEST_VAR)
 		assert.Equal(t, 5, totalCount)
@@ -178,10 +182,10 @@ func TestServerSpecificEnvironmentVariables(t *testing.T) {
 	globalConfig.Environment.CustomVars["OVERRIDE_VAR"] = "global_value"
 
 	logger := zap.NewNop()
-	client, err := NewClient("test-id", serverConfig, logger, nil, globalConfig)
+	client, err := managed.NewManagedClient("test-id", serverConfig, logger, nil, globalConfig)
 	require.NoError(t, err)
 
-	envVars := client.envManager.BuildSecureEnvironment()
+	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
 
 	// Convert to map for checking
 	envMap := make(map[string]string)
@@ -237,10 +241,10 @@ func TestEnvironmentInheritanceDisabled(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	client, err := NewClient("test-id", serverConfig, logger, nil, cfg)
+	client, err := managed.NewManagedClient("test-id", serverConfig, logger, nil, cfg)
 	require.NoError(t, err)
 
-	envVars := client.envManager.BuildSecureEnvironment()
+	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
 
 	// Convert to map for checking
 	envMap := make(map[string]string)
@@ -288,11 +292,11 @@ func TestRealWorldNpxScenario(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	client, err := NewClient("test-id", serverConfig, logger, nil, cfg)
+	client, err := managed.NewManagedClient("test-id", serverConfig, logger, nil, cfg)
 	require.NoError(t, err)
 
 	// Verify that PATH is available in the secure environment
-	envVars := client.envManager.BuildSecureEnvironment()
+	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
 
 	foundPath := false
 	for _, envVar := range envVars {
@@ -351,10 +355,10 @@ func TestSecurityCompliance(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	client, err := NewClient("test-id", serverConfig, logger, nil, cfg)
+	client, err := managed.NewManagedClient("test-id", serverConfig, logger, nil, cfg)
 	require.NoError(t, err)
 
-	envVars := client.envManager.BuildSecureEnvironment()
+	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
 
 	// Convert to map for checking
 	envMap := make(map[string]string)
@@ -404,10 +408,10 @@ func TestWildcardMatching(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	client, err := NewClient("test-id", serverConfig, logger, nil, cfg)
+	client, err := managed.NewManagedClient("test-id", serverConfig, logger, nil, cfg)
 	require.NoError(t, err)
 
-	envVars := client.envManager.BuildSecureEnvironment()
+	envVars := client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment()
 
 	// Convert to map for checking
 	envMap := make(map[string]string)

@@ -121,8 +121,15 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 | `tools_limit` | Max tools returned to client | `15` |
 | `tool_response_limit` | Auto-truncate responses above N chars (`0` disables) | `20000` |
 
-### CLI flags
+### CLI Commands
 
+**Main Commands:**
+```bash
+mcpproxy serve                      # Start proxy server with system tray
+mcpproxy tools list --server=NAME  # Debug tool discovery for specific server
+```
+
+**Serve Command Flags:**
 ```text
 mcpproxy serve --help
   -c, --config <file>          path to mcp_config.json
@@ -134,6 +141,28 @@ mcpproxy serve --help
       --disable-management     disable upstream_servers tool
       --allow-server-add       allow adding servers (default true)
       --allow-server-remove    allow removing servers (default true)
+```
+
+**Tools Command Flags:**
+```text
+mcpproxy tools list --help
+  -s, --server <name>          upstream server name (required)
+  -l, --log-level <level>      trace|debug|info|warn|error (default: info)
+  -t, --timeout <duration>     connection timeout (default: 30s)
+  -o, --output <format>        output format: table|json|yaml (default: table)
+  -c, --config <file>          path to mcp_config.json
+```
+
+**Debug Examples:**
+```bash
+# List tools with trace logging to see all JSON-RPC frames
+mcpproxy tools list --server=github-server --log-level=trace
+
+# List tools with custom timeout for slow servers
+mcpproxy tools list --server=slow-server --timeout=60s
+
+# Output tools in JSON format for scripting
+mcpproxy tools list --server=weather-api --output=json
 ```
 
 ---

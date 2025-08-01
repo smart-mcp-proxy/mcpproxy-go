@@ -10,11 +10,13 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/upstream/managed"
+	"mcpproxy-go/internal/upstream/types"
 )
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients         map[string]*Client
+	clients         map[string]*managed.ManagedClient
 	mu              sync.RWMutex
 	logger          *zap.Logger
 	logConfig       *config.LogConfig
@@ -25,7 +27,7 @@ type Manager struct {
 // NewManager creates a new upstream manager
 func NewManager(logger *zap.Logger, globalConfig *config.Config) *Manager {
 	return &Manager{
-		clients:         make(map[string]*Client),
+		clients:         make(map[string]*managed.ManagedClient),
 		logger:          logger,
 		globalConfig:    globalConfig,
 		notificationMgr: NewNotificationManager(),
@@ -51,7 +53,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 	// Check if existing client exists and if config has changed
 	if existingClient, exists := m.clients[id]; exists {
-		existingConfig := existingClient.config
+		existingConfig := existingClient.Config
 
 		// Compare configurations to determine if reconnection is needed
 		configChanged := existingConfig.URL != serverConfig.URL ||
@@ -78,13 +80,13 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 				zap.String("current_state", existingClient.GetState().String()),
 				zap.Bool("is_connected", existingClient.IsConnected()))
 			// Update the client's config reference to the new config but don't recreate the client
-			existingClient.config = serverConfig
+			existingClient.Config = serverConfig
 			return nil
 		}
 	}
 
 	// Create new client but don't connect yet
-	client, err := NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig)
+	client, err := managed.NewManagedClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
@@ -93,8 +95,8 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	if m.notificationMgr != nil {
 		notifierCallback := StateChangeNotifier(m.notificationMgr, serverConfig.Name)
 		// Combine with existing callback if present
-		existingCallback := client.stateManager.onStateChange
-		client.stateManager.SetStateChangeCallback(func(oldState, newState ConnectionState, info ConnectionInfo) {
+		existingCallback := client.StateManager.GetStateChangeCallback()
+		client.StateManager.SetStateChangeCallback(func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
 			// Call existing callback first (for logging)
 			if existingCallback != nil {
 				existingCallback(oldState, newState, info)
@@ -188,7 +190,7 @@ func (m *Manager) RemoveServer(id string) {
 }
 
 // GetClient returns a client by ID
-func (m *Manager) GetClient(id string) (*Client, bool) {
+func (m *Manager) GetClient(id string) (*managed.ManagedClient, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	client, exists := m.clients[id]
@@ -196,11 +198,11 @@ func (m *Manager) GetClient(id string) (*Client, bool) {
 }
 
 // GetAllClients returns all clients
-func (m *Manager) GetAllClients() map[string]*Client {
+func (m *Manager) GetAllClients() map[string]*managed.ManagedClient {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	result := make(map[string]*Client)
+	result := make(map[string]*managed.ManagedClient)
 	for id, client := range m.clients {
 		result[id] = client
 	}
@@ -228,7 +230,7 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 	connectedCount := 0
 
 	for id, client := range m.clients {
-		if !client.config.Enabled {
+		if !client.Config.Enabled {
 			continue
 		}
 		if !client.IsConnected() {
@@ -272,9 +274,9 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	defer m.mu.RUnlock()
 
 	// Find the client for this server
-	var targetClient *Client
+	var targetClient *managed.ManagedClient
 	for _, client := range m.clients {
-		if client.config.Name == serverName {
+		if client.Config.Name == serverName {
 			targetClient = client
 			break
 		}
@@ -284,7 +286,7 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, fmt.Errorf("no client found for server: %s", serverName)
 	}
 
-	if !targetClient.config.Enabled {
+	if !targetClient.Config.Enabled {
 		return nil, fmt.Errorf("client for server %s is disabled", serverName)
 	}
 
@@ -359,7 +361,7 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 // ConnectAll connects to all configured servers that should retry
 func (m *Manager) ConnectAll(ctx context.Context) error {
 	m.mu.RLock()
-	clients := make(map[string]*Client)
+	clients := make(map[string]*managed.ManagedClient)
 	for id, client := range m.clients {
 		clients[id] = client
 	}
@@ -372,20 +374,20 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	for id, client := range clients {
 		m.logger.Debug("Evaluating client for connection",
 			zap.String("id", id),
-			zap.String("name", client.config.Name),
-			zap.Bool("enabled", client.config.Enabled),
+			zap.String("name", client.Config.Name),
+			zap.Bool("enabled", client.Config.Enabled),
 			zap.Bool("is_connected", client.IsConnected()),
 			zap.Bool("is_connecting", client.IsConnecting()),
 			zap.String("current_state", client.GetState().String()),
-			zap.Bool("quarantined", client.config.Quarantined))
+			zap.Bool("quarantined", client.Config.Quarantined))
 
-		if !client.config.Enabled {
+		if !client.Config.Enabled {
 			m.logger.Debug("Skipping disabled client",
 				zap.String("id", id),
-				zap.String("name", client.config.Name))
+				zap.String("name", client.Config.Name))
 
 			if client.IsConnected() {
-				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.config.Name))
+				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.Config.Name))
 				_ = client.Disconnect()
 			}
 			continue
@@ -395,38 +397,38 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		if client.IsConnected() {
 			m.logger.Debug("Client already connected, skipping",
 				zap.String("id", id),
-				zap.String("name", client.config.Name))
+				zap.String("name", client.Config.Name))
 			continue
 		}
 
 		if client.IsConnecting() {
 			m.logger.Debug("Client already connecting, skipping",
 				zap.String("id", id),
-				zap.String("name", client.config.Name))
+				zap.String("name", client.Config.Name))
 			continue
 		}
 
 		m.logger.Info("Attempting to connect client",
 			zap.String("id", id),
-			zap.String("name", client.config.Name),
-			zap.String("url", client.config.URL),
-			zap.String("command", client.config.Command),
-			zap.String("protocol", client.config.Protocol))
+			zap.String("name", client.Config.Name),
+			zap.String("url", client.Config.URL),
+			zap.String("command", client.Config.Command),
+			zap.String("protocol", client.Config.Protocol))
 
 		wg.Add(1)
-		go func(id string, c *Client) {
+		go func(id string, c *managed.ManagedClient) {
 			defer wg.Done()
 
 			if err := c.Connect(ctx); err != nil {
 				m.logger.Error("Failed to connect to upstream server",
 					zap.String("id", id),
-					zap.String("name", c.config.Name),
+					zap.String("name", c.Config.Name),
 					zap.String("state", c.GetState().String()),
 					zap.Error(err))
 			} else {
 				m.logger.Info("Successfully initiated connection to upstream server",
 					zap.String("id", id),
-					zap.String("name", c.config.Name))
+					zap.String("name", c.Config.Name))
 			}
 		}(id, client)
 	}
@@ -438,7 +440,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 // DisconnectAll disconnects from all servers
 func (m *Manager) DisconnectAll() error {
 	m.mu.RLock()
-	clients := make([]*Client, 0, len(m.clients))
+	clients := make([]*managed.ManagedClient, 0, len(m.clients))
 	for _, client := range m.clients {
 		clients = append(clients, client)
 	}
@@ -470,16 +472,16 @@ func (m *Manager) GetStats() map[string]interface{} {
 
 		status := map[string]interface{}{
 			"state":        connectionInfo.State.String(),
-			"connected":    connectionInfo.State == StateReady,
+			"connected":    connectionInfo.State == types.StateReady,
 			"connecting":   client.IsConnecting(),
 			"retry_count":  connectionInfo.RetryCount,
 			"should_retry": client.ShouldRetry(),
-			"name":         client.config.Name,
-			"url":          client.config.URL,
-			"protocol":     client.config.Protocol,
+			"name":         client.Config.Name,
+			"url":          client.Config.URL,
+			"protocol":     client.Config.Protocol,
 		}
 
-		if connectionInfo.State == StateReady {
+		if connectionInfo.State == types.StateReady {
 			connectedCount++
 		}
 
@@ -528,7 +530,7 @@ func (m *Manager) GetTotalToolCount() int {
 
 	totalTools := 0
 	for _, client := range m.clients {
-		if !client.config.Enabled || !client.IsConnected() {
+		if !client.Config.Enabled || !client.IsConnected() {
 			continue
 		}
 
@@ -560,7 +562,7 @@ func (m *Manager) ListServers() map[string]*config.ServerConfig {
 
 	servers := make(map[string]*config.ServerConfig)
 	for id, client := range m.clients {
-		servers[id] = client.config
+		servers[id] = client.Config
 	}
 	return servers
 }

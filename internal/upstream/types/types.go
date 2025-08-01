@@ -1,4 +1,4 @@
-package upstream
+package types
 
 import (
 	"fmt"
@@ -65,7 +65,7 @@ type StateManager struct {
 	serverVersion string
 
 	// Callbacks for state transitions
-	onStateChange func(oldState, newState ConnectionState, info ConnectionInfo)
+	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
 }
 
 // NewStateManager creates a new state manager
@@ -76,10 +76,17 @@ func NewStateManager() *StateManager {
 }
 
 // SetStateChangeCallback sets a callback function that will be called on state changes
-func (sm *StateManager) SetStateChangeCallback(callback func(oldState, newState ConnectionState, info ConnectionInfo)) {
+func (sm *StateManager) SetStateChangeCallback(callback func(oldState, newState ConnectionState, info *ConnectionInfo)) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.onStateChange = callback
+}
+
+// GetStateChangeCallback returns the current state change callback
+func (sm *StateManager) GetStateChangeCallback() func(oldState, newState ConnectionState, info *ConnectionInfo) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.onStateChange
 }
 
 // GetState returns the current connection state
@@ -138,7 +145,7 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 
 	// Call the callback outside the lock to avoid deadlocks
 	if callback != nil {
-		callback(oldState, newState, info)
+		callback(oldState, newState, &info)
 	}
 }
 
@@ -166,7 +173,7 @@ func (sm *StateManager) SetError(err error) {
 
 	// Call the callback outside the lock to avoid deadlocks
 	if callback != nil {
-		go callback(oldState, StateError, info)
+		go callback(oldState, StateError, &info)
 	}
 }
 
@@ -280,6 +287,6 @@ func (sm *StateManager) Reset() {
 
 	// Call the callback outside the lock to avoid deadlocks
 	if callback != nil {
-		go callback(oldState, StateDisconnected, info)
+		go callback(oldState, StateDisconnected, &info)
 	}
 }

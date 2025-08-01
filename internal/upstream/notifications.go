@@ -3,6 +3,8 @@ package upstream
 import (
 	"fmt"
 	"time"
+
+	"mcpproxy-go/internal/upstream/types"
 )
 
 // NotificationLevel represents the level of a notification
@@ -129,24 +131,24 @@ func (nm *NotificationManager) NotifyOAuthRequired(serverName string) {
 }
 
 // StateChangeNotifier creates state change notifications based on state transitions
-func StateChangeNotifier(nm *NotificationManager, serverName string) func(oldState, newState ConnectionState, info ConnectionInfo) {
-	return func(oldState, newState ConnectionState, info ConnectionInfo) {
+func StateChangeNotifier(nm *NotificationManager, serverName string) func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
+	return func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
 		// Only send notifications for significant state changes
 		switch newState {
-		case StateReady:
-			if oldState != StateReady {
+		case types.StateReady:
+			if oldState != types.StateReady {
 				nm.NotifyServerConnected(serverName)
 			}
-		case StateError:
+		case types.StateError:
 			if info.LastError != nil {
 				nm.NotifyServerError(serverName, info.LastError)
 			}
-		case StateAuthenticating:
-			if oldState == StateConnecting {
+		case types.StateAuthenticating:
+			if oldState == types.StateConnecting {
 				nm.NotifyOAuthRequired(serverName)
 			}
-		case StateDisconnected:
-			if oldState == StateReady {
+		case types.StateDisconnected:
+			if oldState == types.StateReady {
 				nm.NotifyServerDisconnected(serverName, info.LastError)
 			}
 		}
