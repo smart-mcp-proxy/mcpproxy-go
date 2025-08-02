@@ -3,8 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"time"
 
 	"mcpproxy-go/internal/config"
@@ -20,26 +18,18 @@ const (
 	transportStdio = "stdio"
 )
 
-// CLIClient provides a simple interface for CLI operations with enhanced debugging
-type CLIClient struct {
-	managedClient *managed.ManagedClient
+// Client provides a simple interface for CLI operations with enhanced debugging
+type Client struct {
+	managedClient *managed.Client
 	logger        *zap.Logger
 	config        *config.ServerConfig
 
 	// Debug output settings
-	debugMode     bool
-	stderrMonitor *StderrMonitor
+	debugMode bool
 }
 
-// StderrMonitor captures and outputs stderr for stdio processes
-type StderrMonitor struct {
-	reader io.Reader
-	done   chan struct{}
-	logger *zap.Logger
-}
-
-// NewCLIClient creates a new CLI client for debugging and simple operations
-func NewCLIClient(serverName string, globalConfig *config.Config, logLevel string) (*CLIClient, error) {
+// NewClient creates a new CLI client for debugging and simple operations
+func NewClient(serverName string, globalConfig *config.Config, logLevel string) (*Client, error) {
 	// Find server config by name
 	var serverConfig *config.ServerConfig
 	for _, server := range globalConfig.Servers {
@@ -67,12 +57,12 @@ func NewCLIClient(serverName string, globalConfig *config.Config, logLevel strin
 	}
 
 	// Create managed client (which includes Docker-specific optimizations)
-	managedClient, err := managed.NewManagedClient(serverName, serverConfig, logger, logConfig, globalConfig)
+	managedClient, err := managed.NewClient(serverName, serverConfig, logger, logConfig, globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create managed client: %w", err)
 	}
 
-	return &CLIClient{
+	return &Client{
 		managedClient: managedClient,
 		logger:        logger,
 		config:        serverConfig,
@@ -81,7 +71,7 @@ func NewCLIClient(serverName string, globalConfig *config.Config, logLevel strin
 }
 
 // Connect establishes connection with detailed progress output
-func (c *CLIClient) Connect(ctx context.Context) error {
+func (c *Client) Connect(ctx context.Context) error {
 	c.logger.Info("🔗 Starting connection to upstream server",
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.getTransportType()),
@@ -117,7 +107,7 @@ func (c *CLIClient) Connect(ctx context.Context) error {
 }
 
 // ListTools executes tools/list with detailed output
-func (c *CLIClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	c.logger.Info("🔍 Discovering tools from server...")
 
 	// Docker containers now use stateless connections with caching in core client
@@ -142,7 +132,7 @@ func (c *CLIClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, erro
 }
 
 // Disconnect closes the connection
-func (c *CLIClient) Disconnect() error {
+func (c *Client) Disconnect() error {
 	c.logger.Info("🔌 Disconnecting from server...")
 
 	// Note: Stderr monitoring not used with ManagedClient
@@ -157,7 +147,7 @@ func (c *CLIClient) Disconnect() error {
 }
 
 // displayServerInfo shows detailed server information
-func (c *CLIClient) displayServerInfo() {
+func (c *Client) displayServerInfo() {
 	// Get server info from managed client's state
 	connectionInfo := c.managedClient.StateManager.GetConnectionInfo()
 	if connectionInfo.ServerName == "" {
@@ -180,7 +170,7 @@ func (c *CLIClient) displayServerInfo() {
 }
 
 // displayTools shows the discovered tools in a formatted way
-func (c *CLIClient) displayTools(tools []*config.ToolMetadata) {
+func (c *Client) displayTools(tools []*config.ToolMetadata) {
 	if len(tools) == 0 {
 		c.logger.Warn("⚠️  No tools discovered from server")
 		return
@@ -209,23 +199,8 @@ func (c *CLIClient) displayTools(tools []*config.ToolMetadata) {
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }
 
-// startStderrMonitoring starts monitoring stderr output for stdio processes
-func (c *CLIClient) startStderrMonitoring() {
-	// Note: Stderr monitoring not available with ManagedClient
-	// ManagedClient wraps CoreClient and doesn't expose stderr directly
-	return
-}
-
-// stopStderrMonitoring stops stderr monitoring
-func (c *CLIClient) stopStderrMonitoring() {
-	if c.stderrMonitor != nil {
-		close(c.stderrMonitor.done)
-		c.stderrMonitor = nil
-	}
-}
-
 // getTransportType returns the transport type for display
-func (c *CLIClient) getTransportType() string {
+func (c *Client) getTransportType() string {
 	if c.config.Protocol != "" && c.config.Protocol != "auto" {
 		return c.config.Protocol
 	}
@@ -241,44 +216,8 @@ func (c *CLIClient) getTransportType() string {
 	return transportStdio
 }
 
-// Monitor stderr output for stdio processes
-func (m *StderrMonitor) monitor() {
-	m.logger.Info("📡 Starting stderr monitoring...")
-
-	buffer := make([]byte, 4096)
-	for {
-		select {
-		case <-m.done:
-			m.logger.Info("🛑 Stderr monitoring stopped")
-			return
-		default:
-			// Non-blocking read attempt
-			if m.reader != nil {
-				n, err := m.reader.Read(buffer)
-				if err != nil {
-					if err != io.EOF {
-						m.logger.Debug("Stderr read error", zap.Error(err))
-					}
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-
-				if n > 0 {
-					output := string(buffer[:n])
-					// Output stderr with clear marking
-					fmt.Fprintf(os.Stderr, "🔴 STDERR: %s", output)
-
-					// Also log it
-					m.logger.Debug("Stderr output captured", zap.String("content", output))
-				}
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-}
-
 // CallTool executes a tool (for future CLI extensions)
-func (c *CLIClient) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
 	c.logger.Info("🛠️  Calling tool",
 		zap.String("tool", toolName),
 		zap.Any("args", args))
@@ -299,17 +238,17 @@ func (c *CLIClient) CallTool(ctx context.Context, toolName string, args map[stri
 }
 
 // IsConnected returns connection status
-func (c *CLIClient) IsConnected() bool {
+func (c *Client) IsConnected() bool {
 	return c.managedClient.IsConnected()
 }
 
 // GetConnectionInfo returns connection information
-func (c *CLIClient) GetConnectionInfo() types.ConnectionInfo {
+func (c *Client) GetConnectionInfo() types.ConnectionInfo {
 	return c.managedClient.StateManager.GetConnectionInfo()
 }
 
 // GetServerInfo returns server information
-func (c *CLIClient) GetServerInfo() *mcp.InitializeResult {
+func (c *Client) GetServerInfo() *mcp.InitializeResult {
 	// ManagedClient doesn't expose server info directly
 	// Return nil for now as this isn't used in CLI operations
 	return nil

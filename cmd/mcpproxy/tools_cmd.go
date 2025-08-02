@@ -99,7 +99,7 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	// Create CLI client
-	cliClient, err := cli.NewCLIClient(serverName, globalConfig, toolsLogLevel)
+	cliClient, err := cli.NewClient(serverName, globalConfig, toolsLogLevel)
 	if err != nil {
 		return fmt.Errorf("failed to create CLI client: %w", err)
 	}

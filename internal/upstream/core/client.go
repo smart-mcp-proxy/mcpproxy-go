@@ -18,8 +18,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// CoreClient implements basic MCP client functionality without state management
-type CoreClient struct {
+// Client implements basic MCP client functionality without state management
+type Client struct {
 	id     string
 	config *config.ServerConfig
 	logger *zap.Logger
@@ -43,14 +43,14 @@ type CoreClient struct {
 	stderr        io.Reader
 }
 
-// NewCoreClient creates a new core MCP client
-func NewCoreClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*CoreClient, error) {
-	return NewCoreClientWithOptions(id, serverConfig, logger, logConfig, globalConfig, false)
+// NewClient creates a new core MCP client
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*Client, error) {
+	return NewClientWithOptions(id, serverConfig, logger, logConfig, globalConfig, false)
 }
 
-// NewCoreClientWithOptions creates a new core MCP client with additional options
-func NewCoreClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, cliDebugMode bool) (*CoreClient, error) {
-	c := &CoreClient{
+// NewClientWithOptions creates a new core MCP client with additional options
+func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, cliDebugMode bool) (*Client, error) {
+	c := &Client{
 		id:     id,
 		config: serverConfig,
 		logger: logger.With(
@@ -118,7 +118,7 @@ func NewCoreClientWithOptions(id string, serverConfig *config.ServerConfig, logg
 }
 
 // Connect establishes connection to the upstream server
-func (c *CoreClient) Connect(ctx context.Context) error {
+func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -205,7 +205,7 @@ func (c *CoreClient) Connect(ctx context.Context) error {
 }
 
 // connectStdio establishes stdio transport connection
-func (c *CoreClient) connectStdio(ctx context.Context) error {
+func (c *Client) connectStdio(ctx context.Context) error {
 	if c.config.Command == "" {
 		return fmt.Errorf("no command specified for stdio transport")
 	}
@@ -234,7 +234,7 @@ func (c *CoreClient) connectStdio(ctx context.Context) error {
 }
 
 // connectHTTP establishes HTTP/SSE transport connection with auth fallback
-func (c *CoreClient) connectHTTP(ctx context.Context) error {
+func (c *Client) connectHTTP(ctx context.Context) error {
 	// Try authentication strategies in order: headers -> no-auth -> OAuth
 	authStrategies := []func(context.Context) error{
 		c.tryHeadersAuth,
@@ -268,7 +268,7 @@ func (c *CoreClient) connectHTTP(ctx context.Context) error {
 }
 
 // tryHeadersAuth attempts authentication using configured headers
-func (c *CoreClient) tryHeadersAuth(ctx context.Context) error {
+func (c *Client) tryHeadersAuth(ctx context.Context) error {
 	if len(c.config.Headers) == 0 {
 		return fmt.Errorf("no headers configured")
 	}
@@ -284,7 +284,7 @@ func (c *CoreClient) tryHeadersAuth(ctx context.Context) error {
 }
 
 // tryNoAuth attempts connection without authentication
-func (c *CoreClient) tryNoAuth(ctx context.Context) error {
+func (c *Client) tryNoAuth(ctx context.Context) error {
 	// Create config without headers
 	configNoAuth := *c.config
 	configNoAuth.Headers = nil
@@ -300,14 +300,14 @@ func (c *CoreClient) tryNoAuth(ctx context.Context) error {
 }
 
 // tryOAuthAuth attempts OAuth authentication
-func (c *CoreClient) tryOAuthAuth(_ context.Context) error {
+func (c *Client) tryOAuthAuth(_ context.Context) error {
 	// This will be implemented in the auth module
 	// For now, return error
 	return fmt.Errorf("OAuth authentication not yet implemented in core client")
 }
 
 // isAuthError checks if error indicates authentication failure
-func (c *CoreClient) isAuthError(err error) bool {
+func (c *Client) isAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -321,7 +321,7 @@ func (c *CoreClient) isAuthError(err error) bool {
 }
 
 // isConfigError checks if error indicates a configuration issue that should trigger fallback
-func (c *CoreClient) isConfigError(err error) bool {
+func (c *Client) isConfigError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -334,7 +334,7 @@ func (c *CoreClient) isConfigError(err error) bool {
 }
 
 // initialize performs MCP initialization handshake
-func (c *CoreClient) initialize(ctx context.Context) error {
+func (c *Client) initialize(ctx context.Context) error {
 	initRequest := mcp.InitializeRequest{}
 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	initRequest.Params.ClientInfo = mcp.Implementation{
@@ -384,7 +384,7 @@ func (c *CoreClient) initialize(ctx context.Context) error {
 }
 
 // Disconnect closes the connection
-func (c *CoreClient) Disconnect() error {
+func (c *Client) Disconnect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -408,14 +408,14 @@ func (c *CoreClient) Disconnect() error {
 }
 
 // IsConnected returns whether the client is currently connected
-func (c *CoreClient) IsConnected() bool {
+func (c *Client) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.connected
 }
 
 // ListTools retrieves available tools from the upstream server
-func (c *CoreClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	c.mu.RLock()
 	client := c.client
 	serverInfo := c.serverInfo
@@ -509,7 +509,7 @@ func (c *CoreClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, err
 }
 
 // CallTool executes a tool on the upstream server
-func (c *CoreClient) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
 	c.mu.RLock()
 	client := c.client
 	c.mu.RUnlock()
@@ -569,7 +569,7 @@ func (c *CoreClient) CallTool(ctx context.Context, toolName string, args map[str
 }
 
 // GetConnectionInfo returns basic connection information
-func (c *CoreClient) GetConnectionInfo() types.ConnectionInfo {
+func (c *Client) GetConnectionInfo() types.ConnectionInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -585,30 +585,30 @@ func (c *CoreClient) GetConnectionInfo() types.ConnectionInfo {
 }
 
 // GetServerInfo returns server information from initialization
-func (c *CoreClient) GetServerInfo() *mcp.InitializeResult {
+func (c *Client) GetServerInfo() *mcp.InitializeResult {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.serverInfo
 }
 
 // GetTransportType returns the transport type being used
-func (c *CoreClient) GetTransportType() string {
+func (c *Client) GetTransportType() string {
 	return c.transportType
 }
 
 // GetStderr returns stderr reader for stdio transport
-func (c *CoreClient) GetStderr() io.Reader {
+func (c *Client) GetStderr() io.Reader {
 	return c.stderr
 }
 
 // GetEnvManager returns the environment manager for testing purposes
-func (c *CoreClient) GetEnvManager() interface{} {
+func (c *Client) GetEnvManager() interface{} {
 	return c.envManager
 }
 
 // Helper methods
 
-func (c *CoreClient) getServerName() string {
+func (c *Client) getServerName() string {
 	if c.serverInfo != nil {
 		return c.serverInfo.ServerInfo.Name
 	}

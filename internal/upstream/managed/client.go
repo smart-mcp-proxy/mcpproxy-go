@@ -14,11 +14,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// ManagedClient wraps a core client with state management, concurrency control, and background recovery
-type ManagedClient struct {
+const (
+	// dockerCommand represents the docker command string
+	dockerCommand = "docker"
+)
+
+// Client wraps a core client with state management, concurrency control, and background recovery
+type Client struct {
 	id           string
 	Config       *config.ServerConfig // Public field for compatibility with existing code
-	coreClient   *core.CoreClient
+	coreClient   *core.Client
 	logger       *zap.Logger
 	StateManager *types.StateManager // Public field for callback access
 
@@ -44,16 +49,16 @@ type ManagedClient struct {
 	dockerCacheTTL       time.Duration
 }
 
-// NewManagedClient creates a new managed client with state management
-func NewManagedClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*ManagedClient, error) {
+// NewClient creates a new managed client with state management
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*Client, error) {
 	// Create core client
-	coreClient, err := core.NewCoreClient(id, serverConfig, logger, logConfig, globalConfig)
+	coreClient, err := core.NewClient(id, serverConfig, logger, logConfig, globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}
 
 	// Create managed client
-	mc := &ManagedClient{
+	mc := &Client{
 		id:             id,
 		Config:         serverConfig,
 		coreClient:     coreClient,
@@ -72,7 +77,7 @@ func NewManagedClient(id string, serverConfig *config.ServerConfig, logger *zap.
 }
 
 // Connect establishes connection with state management
-func (mc *ManagedClient) Connect(ctx context.Context) error {
+func (mc *Client) Connect(ctx context.Context) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
@@ -112,7 +117,7 @@ func (mc *ManagedClient) Connect(ctx context.Context) error {
 }
 
 // Disconnect closes the connection and stops monitoring
-func (mc *ManagedClient) Disconnect() error {
+func (mc *Client) Disconnect() error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
@@ -133,38 +138,38 @@ func (mc *ManagedClient) Disconnect() error {
 }
 
 // IsConnected returns whether the client is ready for operations
-func (mc *ManagedClient) IsConnected() bool {
+func (mc *Client) IsConnected() bool {
 	return mc.StateManager.IsReady()
 }
 
 // IsConnecting returns whether the client is in a connecting state
-func (mc *ManagedClient) IsConnecting() bool {
+func (mc *Client) IsConnecting() bool {
 	return mc.StateManager.IsConnecting()
 }
 
 // GetState returns the current connection state
-func (mc *ManagedClient) GetState() types.ConnectionState {
+func (mc *Client) GetState() types.ConnectionState {
 	return mc.StateManager.GetState()
 }
 
 // GetConnectionInfo returns detailed connection information
-func (mc *ManagedClient) GetConnectionInfo() types.ConnectionInfo {
+func (mc *Client) GetConnectionInfo() types.ConnectionInfo {
 	return mc.StateManager.GetConnectionInfo()
 }
 
 // GetServerInfo returns server information
-func (mc *ManagedClient) GetServerInfo() *mcp.InitializeResult {
+func (mc *Client) GetServerInfo() *mcp.InitializeResult {
 	return mc.coreClient.GetServerInfo()
 }
 
 // GetLastError returns the last error from the state manager
-func (mc *ManagedClient) GetLastError() error {
+func (mc *Client) GetLastError() error {
 	info := mc.StateManager.GetConnectionInfo()
 	return info.LastError
 }
 
 // GetConnectionStatus returns detailed connection status information for compatibility
-func (mc *ManagedClient) GetConnectionStatus() map[string]interface{} {
+func (mc *Client) GetConnectionStatus() map[string]interface{} {
 	info := mc.StateManager.GetConnectionInfo()
 
 	status := map[string]interface{}{
@@ -188,26 +193,26 @@ func (mc *ManagedClient) GetConnectionStatus() map[string]interface{} {
 }
 
 // GetEnvManager returns the environment manager for testing purposes
-func (mc *ManagedClient) GetEnvManager() interface{} {
+func (mc *Client) GetEnvManager() interface{} {
 	// This is a wrapper method to access the core client's environment manager
 	// We use interface{} to avoid exposing internal types
 	return mc.coreClient.GetEnvManager()
 }
 
 // ShouldRetry returns whether connection should be retried
-func (mc *ManagedClient) ShouldRetry() bool {
+func (mc *Client) ShouldRetry() bool {
 	return mc.StateManager.ShouldRetry()
 }
 
 // SetStateChangeCallback sets a callback for state changes
-func (mc *ManagedClient) SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo)) {
+func (mc *Client) SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo)) {
 	mc.StateManager.SetStateChangeCallback(callback)
 }
 
 // ListTools retrieves tools with concurrency control
-func (mc *ManagedClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	// Docker containers use stateless connections - handle them specially
-	if mc.Config.Command == "docker" {
+	if mc.Config.Command == dockerCommand {
 		return mc.dockerListTools(ctx)
 	}
 
@@ -252,9 +257,9 @@ func (mc *ManagedClient) ListTools(ctx context.Context) ([]*config.ToolMetadata,
 }
 
 // CallTool executes a tool with error handling
-func (mc *ManagedClient) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
 	// Docker containers use stateless connections - handle them specially
-	if mc.Config.Command == "docker" {
+	if mc.Config.Command == dockerCommand {
 		return mc.dockerCallTool(ctx, toolName, args)
 	}
 
@@ -284,7 +289,7 @@ func (mc *ManagedClient) CallTool(ctx context.Context, toolName string, args map
 }
 
 // onStateChange handles state transition events
-func (mc *ManagedClient) onStateChange(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
+func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
 	mc.logger.Info("State transition",
 		zap.String("from", oldState.String()),
 		zap.String("to", newState.String()),
@@ -300,7 +305,7 @@ func (mc *ManagedClient) onStateChange(oldState, newState types.ConnectionState,
 }
 
 // startBackgroundMonitoring starts monitoring the connection health
-func (mc *ManagedClient) startBackgroundMonitoring() {
+func (mc *Client) startBackgroundMonitoring() {
 	mc.monitoringWG.Add(1)
 	go func() {
 		defer mc.monitoringWG.Done()
@@ -309,7 +314,7 @@ func (mc *ManagedClient) startBackgroundMonitoring() {
 }
 
 // stopBackgroundMonitoring stops the background monitoring
-func (mc *ManagedClient) stopBackgroundMonitoring() {
+func (mc *Client) stopBackgroundMonitoring() {
 	close(mc.stopMonitoring)
 	mc.monitoringWG.Wait()
 
@@ -318,7 +323,7 @@ func (mc *ManagedClient) stopBackgroundMonitoring() {
 }
 
 // backgroundHealthCheck performs periodic health checks
-func (mc *ManagedClient) backgroundHealthCheck() {
+func (mc *Client) backgroundHealthCheck() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -335,13 +340,13 @@ func (mc *ManagedClient) backgroundHealthCheck() {
 }
 
 // performHealthCheck checks if the connection is still healthy
-func (mc *ManagedClient) performHealthCheck() {
+func (mc *Client) performHealthCheck() {
 	if !mc.IsConnected() {
 		return
 	}
 
 	// Skip health checks for Docker containers - they use stateless connections
-	if mc.Config.Command == "docker" {
+	if mc.Config.Command == dockerCommand {
 		mc.logger.Debug("Skipping health check for Docker container (stateless transport)",
 			zap.String("server", mc.Config.Name))
 		return
@@ -364,7 +369,7 @@ func (mc *ManagedClient) performHealthCheck() {
 }
 
 // isConnectionError checks if an error indicates a connection problem
-func (mc *ManagedClient) isConnectionError(err error) bool {
+func (mc *Client) isConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -408,7 +413,7 @@ func containsString(str, substr string) bool {
 }
 
 // isDockerCacheValid checks if the Docker tools cache is still valid
-func (mc *ManagedClient) isDockerCacheValid() bool {
+func (mc *Client) isDockerCacheValid() bool {
 	mc.dockerToolsCacheMu.RLock()
 	defer mc.dockerToolsCacheMu.RUnlock()
 
@@ -416,7 +421,7 @@ func (mc *ManagedClient) isDockerCacheValid() bool {
 }
 
 // updateDockerCache updates the Docker tools cache
-func (mc *ManagedClient) updateDockerCache(tools []*config.ToolMetadata) {
+func (mc *Client) updateDockerCache(tools []*config.ToolMetadata) {
 	mc.dockerToolsCacheMu.Lock()
 	defer mc.dockerToolsCacheMu.Unlock()
 
@@ -425,7 +430,7 @@ func (mc *ManagedClient) updateDockerCache(tools []*config.ToolMetadata) {
 }
 
 // getDockerCachedTools returns cached Docker tools if valid
-func (mc *ManagedClient) getDockerCachedTools() []*config.ToolMetadata {
+func (mc *Client) getDockerCachedTools() []*config.ToolMetadata {
 	mc.dockerToolsCacheMu.RLock()
 	defer mc.dockerToolsCacheMu.RUnlock()
 
@@ -436,9 +441,9 @@ func (mc *ManagedClient) getDockerCachedTools() []*config.ToolMetadata {
 }
 
 // createFreshDockerConnection creates a fresh connection for Docker operations
-func (mc *ManagedClient) createFreshDockerConnection(ctx context.Context) (*core.CoreClient, error) {
+func (mc *Client) createFreshDockerConnection(ctx context.Context) (*core.Client, error) {
 	// Create a new core client with the same configuration, including upstream logger
-	freshClient, err := core.NewCoreClient(mc.id+"_docker_temp", mc.Config, mc.logger, mc.logConfig, mc.globalConfig)
+	freshClient, err := core.NewClient(mc.id+"_docker_temp", mc.Config, mc.logger, mc.logConfig, mc.globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create fresh Docker client: %w", err)
 	}
@@ -452,7 +457,7 @@ func (mc *ManagedClient) createFreshDockerConnection(ctx context.Context) (*core
 }
 
 // dockerListTools performs ListTools with a fresh Docker connection
-func (mc *ManagedClient) dockerListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+func (mc *Client) dockerListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	// Check cache first
 	if cached := mc.getDockerCachedTools(); cached != nil {
 		mc.logger.Debug("Using cached Docker tools",
@@ -469,7 +474,11 @@ func (mc *ManagedClient) dockerListTools(ctx context.Context) ([]*config.ToolMet
 	if err != nil {
 		return nil, err
 	}
-	defer freshClient.Disconnect()
+	defer func() {
+		if err := freshClient.Disconnect(); err != nil {
+			mc.logger.Warn("Failed to disconnect fresh Docker client", zap.Error(err))
+		}
+	}()
 
 	// Perform ListTools with fresh connection
 	tools, err := freshClient.ListTools(ctx)
@@ -491,7 +500,7 @@ func (mc *ManagedClient) dockerListTools(ctx context.Context) ([]*config.ToolMet
 }
 
 // dockerCallTool performs CallTool with a fresh Docker connection
-func (mc *ManagedClient) dockerCallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+func (mc *Client) dockerCallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
 	mc.logger.Debug("Creating fresh Docker connection for CallTool",
 		zap.String("server", mc.Config.Name),
 		zap.String("tool", toolName))
@@ -501,7 +510,11 @@ func (mc *ManagedClient) dockerCallTool(ctx context.Context, toolName string, ar
 	if err != nil {
 		return nil, err
 	}
-	defer freshClient.Disconnect()
+	defer func() {
+		if err := freshClient.Disconnect(); err != nil {
+			mc.logger.Warn("Failed to disconnect fresh Docker client", zap.Error(err))
+		}
+	}()
 
 	// Perform CallTool with fresh connection
 	result, err := freshClient.CallTool(ctx, toolName, args)

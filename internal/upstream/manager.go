@@ -16,7 +16,7 @@ import (
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients         map[string]*managed.ManagedClient
+	clients         map[string]*managed.Client
 	mu              sync.RWMutex
 	logger          *zap.Logger
 	logConfig       *config.LogConfig
@@ -27,7 +27,7 @@ type Manager struct {
 // NewManager creates a new upstream manager
 func NewManager(logger *zap.Logger, globalConfig *config.Config) *Manager {
 	return &Manager{
-		clients:         make(map[string]*managed.ManagedClient),
+		clients:         make(map[string]*managed.Client),
 		logger:          logger,
 		globalConfig:    globalConfig,
 		notificationMgr: NewNotificationManager(),
@@ -86,7 +86,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	}
 
 	// Create new client but don't connect yet
-	client, err := managed.NewManagedClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig)
+	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
@@ -190,7 +190,7 @@ func (m *Manager) RemoveServer(id string) {
 }
 
 // GetClient returns a client by ID
-func (m *Manager) GetClient(id string) (*managed.ManagedClient, bool) {
+func (m *Manager) GetClient(id string) (*managed.Client, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	client, exists := m.clients[id]
@@ -198,11 +198,11 @@ func (m *Manager) GetClient(id string) (*managed.ManagedClient, bool) {
 }
 
 // GetAllClients returns all clients
-func (m *Manager) GetAllClients() map[string]*managed.ManagedClient {
+func (m *Manager) GetAllClients() map[string]*managed.Client {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	result := make(map[string]*managed.ManagedClient)
+	result := make(map[string]*managed.Client)
 	for id, client := range m.clients {
 		result[id] = client
 	}
@@ -274,7 +274,7 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	defer m.mu.RUnlock()
 
 	// Find the client for this server
-	var targetClient *managed.ManagedClient
+	var targetClient *managed.Client
 	for _, client := range m.clients {
 		if client.Config.Name == serverName {
 			targetClient = client
@@ -361,7 +361,7 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 // ConnectAll connects to all configured servers that should retry
 func (m *Manager) ConnectAll(ctx context.Context) error {
 	m.mu.RLock()
-	clients := make(map[string]*managed.ManagedClient)
+	clients := make(map[string]*managed.Client)
 	for id, client := range m.clients {
 		clients[id] = client
 	}
@@ -416,7 +416,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			zap.String("protocol", client.Config.Protocol))
 
 		wg.Add(1)
-		go func(id string, c *managed.ManagedClient) {
+		go func(id string, c *managed.Client) {
 			defer wg.Done()
 
 			if err := c.Connect(ctx); err != nil {
@@ -440,7 +440,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 // DisconnectAll disconnects from all servers
 func (m *Manager) DisconnectAll() error {
 	m.mu.RLock()
-	clients := make([]*managed.ManagedClient, 0, len(m.clients))
+	clients := make([]*managed.Client, 0, len(m.clients))
 	for _, client := range m.clients {
 		clients = append(clients, client)
 	}
