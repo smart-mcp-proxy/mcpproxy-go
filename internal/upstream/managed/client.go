@@ -339,8 +339,19 @@ func (mc *Client) backgroundHealthCheck() {
 	}
 }
 
-// performHealthCheck checks if the connection is still healthy
+// performHealthCheck checks if the connection is still healthy and attempts reconnection if needed
 func (mc *Client) performHealthCheck() {
+	// Check if client is in error state and should retry connection
+	if mc.StateManager.GetState() == types.StateError && mc.ShouldRetry() {
+		mc.logger.Info("Attempting automatic reconnection with exponential backoff",
+			zap.String("server", mc.Config.Name),
+			zap.Int("retry_count", mc.StateManager.GetConnectionInfo().RetryCount))
+
+		mc.tryReconnect()
+		return
+	}
+
+	// Skip health checks if not connected or for Docker containers
 	if !mc.IsConnected() {
 		return
 	}
@@ -366,6 +377,43 @@ func (mc *Client) performHealthCheck() {
 			mc.StateManager.SetError(err)
 		}
 	}
+}
+
+// tryReconnect attempts to reconnect the client with proper error handling
+func (mc *Client) tryReconnect() {
+	// Create a timeout context for the reconnection attempt
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	mc.logger.Info("Starting reconnection attempt",
+		zap.String("server", mc.Config.Name),
+		zap.String("current_state", mc.StateManager.GetState().String()))
+
+	// First, disconnect the current client to clean up any broken connections
+	// We don't need to hold the mutex here as Disconnect() already handles it
+	if err := mc.coreClient.Disconnect(); err != nil {
+		mc.logger.Warn("Failed to disconnect during reconnection attempt",
+			zap.String("server", mc.Config.Name),
+			zap.Error(err))
+	}
+
+	// Reset state to disconnected before attempting reconnection
+	mc.StateManager.Reset()
+
+	// Attempt to reconnect using the existing Connect method
+	// The Connect method already handles state transitions and error management
+	if err := mc.Connect(ctx); err != nil {
+		mc.logger.Error("Reconnection attempt failed",
+			zap.String("server", mc.Config.Name),
+			zap.Error(err),
+			zap.Int("retry_count", mc.StateManager.GetConnectionInfo().RetryCount))
+		// Connect method already sets the error state, so we don't need to do it here
+		return
+	}
+
+	mc.logger.Info("Reconnection attempt successful",
+		zap.String("server", mc.Config.Name),
+		zap.String("new_state", mc.StateManager.GetState().String()))
 }
 
 // isConnectionError checks if an error indicates a connection problem
