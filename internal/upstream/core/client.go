@@ -135,12 +135,22 @@ func (c *CoreClient) Connect(ctx context.Context) error {
 	// Determine transport type
 	c.transportType = transport.DetermineTransportType(c.config)
 
+	// Debug: Show transport type determination
+	c.logger.Debug("🔍 Transport Type Determination",
+		zap.String("server", c.config.Name),
+		zap.String("command", c.config.Command),
+		zap.String("url", c.config.URL),
+		zap.String("protocol", c.config.Protocol),
+		zap.String("determined_transport", c.transportType))
+
 	// Create and connect client based on transport type
 	var err error
 	switch c.transportType {
 	case transport.TransportStdio:
+		c.logger.Debug("📡 Using STDIO transport")
 		err = c.connectStdio(ctx)
 	case transport.TransportHTTP, transport.TransportStreamableHTTP, transport.TransportSSE:
+		c.logger.Debug("🌐 Using HTTP/SSE transport")
 		err = c.connectHTTP(ctx)
 	default:
 		return fmt.Errorf("unsupported transport type: %s", c.transportType)

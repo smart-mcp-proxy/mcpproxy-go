@@ -38,11 +38,26 @@ func CreateStdioClient(cfg *StdioTransportConfig) (*StdioClientResult, error) {
 		return nil, fmt.Errorf("no command specified for stdio transport")
 	}
 
-	// Use secure environment manager to build filtered environment variables
-	envVars := cfg.EnvManager.BuildSecureEnvironment()
+	var command string
+	var cmdArgs []string
+	var envVars []string
 
-	// Wrap command in a shell to ensure user's PATH is respected, especially in GUI apps
-	command, cmdArgs := wrapCommandInShell(cfg.Command, cfg.Args)
+	// Handle Docker commands differently - they need minimal environment and no shell wrapping
+	if cfg.Command == "docker" {
+		command = cfg.Command
+		cmdArgs = cfg.Args
+		// Minimal environment for Docker - just PATH to find the docker binary
+		if path := os.Getenv("PATH"); path != "" {
+			envVars = []string{"PATH=" + path}
+		} else {
+			envVars = []string{}
+		}
+	} else {
+		// Use secure environment manager for non-Docker commands
+		envVars = cfg.EnvManager.BuildSecureEnvironment()
+		// Wrap command in a shell to ensure user's PATH is respected, especially in GUI apps
+		command, cmdArgs = wrapCommandInShell(cfg.Command, cfg.Args)
+	}
 
 	stdioTransport := transport.NewStdio(command, envVars, cmdArgs...)
 	mcpClient := client.NewClient(stdioTransport)

@@ -29,6 +29,9 @@ type CLIClient struct {
 	// Debug output settings
 	debugMode     bool
 	stderrMonitor *StderrMonitor
+
+	// Docker optimization - cached tools from quick ListTools
+	cachedDockerTools []*config.ToolMetadata
 }
 
 // StderrMonitor captures and outputs stderr for stdio processes
@@ -105,6 +108,22 @@ func (c *CLIClient) Connect(ctx context.Context) error {
 
 	c.logger.Info("✅ Successfully connected to server")
 
+	// For Docker containers, immediately perform a quick operation to prevent container timeout
+	if c.config.Command == "docker" {
+		c.logger.Debug("🐳 Docker container detected - performing quick ListTools to prevent timeout")
+		// Make a quick ListTools call to keep container active and cache results
+		quickCtx, quickCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer quickCancel()
+		quickTools, quickErr := c.coreClient.ListTools(quickCtx)
+		if quickErr != nil {
+			c.logger.Warn("🐳 Docker quick ListTools failed", zap.Error(quickErr))
+		} else {
+			c.logger.Debug("🐳 Docker quick ListTools succeeded", zap.Int("tool_count", len(quickTools)))
+			// Cache the tools for immediate reuse in main ListTools call
+			c.cachedDockerTools = quickTools
+		}
+	}
+
 	// Start stderr monitoring for stdio processes
 	if c.coreClient.GetTransportType() == transportStdio {
 		c.startStderrMonitoring()
@@ -119,6 +138,18 @@ func (c *CLIClient) Connect(ctx context.Context) error {
 // ListTools executes tools/list with detailed output
 func (c *CLIClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	c.logger.Info("🔍 Discovering tools from server...")
+
+	// For Docker containers, use cached results if available
+	if c.config.Command == "docker" && len(c.cachedDockerTools) > 0 {
+		c.logger.Debug("🐳 Using cached Docker tools results")
+		c.logger.Info("✅ Successfully discovered tools (from cache)",
+			zap.Int("tool_count", len(c.cachedDockerTools)))
+
+		// Display tools in a nice format
+		c.displayTools(c.cachedDockerTools)
+
+		return c.cachedDockerTools, nil
+	}
 
 	// Add timeout for tool listing
 	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
