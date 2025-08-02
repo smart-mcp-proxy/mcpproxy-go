@@ -135,6 +135,15 @@ func (c *CoreClient) Connect(ctx context.Context) error {
 	// Determine transport type
 	c.transportType = transport.DetermineTransportType(c.config)
 
+	// Log to server-specific log file as well
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Starting connection attempt",
+			zap.String("transport", c.transportType),
+			zap.String("url", c.config.URL),
+			zap.String("command", c.config.Command),
+			zap.String("protocol", c.config.Protocol))
+	}
+
 	// Debug: Show transport type determination
 	c.logger.Debug("🔍 Transport Type Determination",
 		zap.String("server", c.config.Name),
@@ -157,11 +166,22 @@ func (c *CoreClient) Connect(ctx context.Context) error {
 	}
 
 	if err != nil {
+		// Log connection failure to server-specific log
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("Connection failed",
+				zap.String("transport", c.transportType),
+				zap.Error(err))
+		}
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
 	// Initialize the MCP connection
 	if err := c.initialize(ctx); err != nil {
+		// Log initialization failure to server-specific log
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("MCP initialization failed",
+				zap.Error(err))
+		}
 		c.client.Close()
 		c.client = nil
 		return fmt.Errorf("failed to initialize: %w", err)
@@ -171,6 +191,15 @@ func (c *CoreClient) Connect(ctx context.Context) error {
 	c.logger.Info("Successfully connected to upstream MCP server",
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.transportType))
+
+	// Log successful connection to server-specific log
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Successfully connected and initialized",
+			zap.String("transport", c.transportType),
+			zap.String("server_name", c.serverInfo.ServerInfo.Name),
+			zap.String("server_version", c.serverInfo.ServerInfo.Version),
+			zap.String("protocol_version", c.serverInfo.ProtocolVersion))
+	}
 
 	return nil
 }
@@ -323,6 +352,11 @@ func (c *CoreClient) initialize(ctx context.Context) error {
 
 	serverInfo, err := c.client.Initialize(ctx, initRequest)
 	if err != nil {
+		// Log initialization failure to server-specific log
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("MCP initialize JSON-RPC call failed",
+				zap.Error(err))
+		}
 		return fmt.Errorf("MCP initialize failed: %w", err)
 	}
 
@@ -338,6 +372,14 @@ func (c *CoreClient) initialize(ctx context.Context) error {
 		zap.String("server_name", serverInfo.ServerInfo.Name),
 		zap.String("server_version", serverInfo.ServerInfo.Version))
 
+	// Log initialization success to server-specific log
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("MCP initialization completed successfully",
+			zap.String("server_name", serverInfo.ServerInfo.Name),
+			zap.String("server_version", serverInfo.ServerInfo.Version),
+			zap.String("protocol_version", serverInfo.ProtocolVersion))
+	}
+
 	return nil
 }
 
@@ -351,6 +393,12 @@ func (c *CoreClient) Disconnect() error {
 	}
 
 	c.logger.Info("Disconnecting from upstream MCP server")
+
+	// Log disconnection to server-specific log
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Disconnecting from server")
+	}
+
 	c.client.Close()
 	c.client = nil
 	c.serverInfo = nil
@@ -385,15 +433,32 @@ func (c *CoreClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, err
 
 	toolsRequest := mcp.ListToolsRequest{}
 
+	// Log to server-specific log
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Starting ListTools operation")
+	}
+
 	// Log request for trace debugging - use main logger for CLI debug mode
 	if reqBytes, err := json.MarshalIndent(toolsRequest, "", "  "); err == nil {
 		c.logger.Debug("🔍 JSON-RPC LISTTOOLS REQUEST",
 			zap.String("method", "tools/list"),
 			zap.String("formatted_json", string(reqBytes)))
+
+		// Also log to upstream logger for trace debugging
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Debug("JSON-RPC ListTools Request",
+				zap.String("method", "tools/list"),
+				zap.String("formatted_json", string(reqBytes)))
+		}
 	}
 
 	toolsResult, err := client.ListTools(ctx, toolsRequest)
 	if err != nil {
+		// Log ListTools failure to server-specific log
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("ListTools operation failed",
+				zap.Error(err))
+		}
 		return nil, fmt.Errorf("ListTools failed: %w", err)
 	}
 
@@ -402,6 +467,13 @@ func (c *CoreClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, err
 		c.logger.Debug("🔍 JSON-RPC LISTTOOLS RESPONSE",
 			zap.String("method", "tools/list"),
 			zap.String("formatted_json", string(respBytes)))
+
+		// Also log to upstream logger for trace debugging
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Debug("JSON-RPC ListTools Response",
+				zap.String("method", "tools/list"),
+				zap.String("formatted_json", string(respBytes)))
+		}
 	}
 
 	// Convert to ToolMetadata
@@ -427,6 +499,12 @@ func (c *CoreClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, err
 		zap.String("server", c.config.Name),
 		zap.Int("tool_count", len(tools)))
 
+	// Log successful ListTools to server-specific log
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("ListTools operation completed successfully",
+			zap.Int("tool_count", len(tools)))
+	}
+
 	return tools, nil
 }
 
@@ -444,10 +522,16 @@ func (c *CoreClient) CallTool(ctx context.Context, toolName string, args map[str
 	request.Params.Name = toolName
 	request.Params.Arguments = args
 
+	// Log to server-specific log
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Starting CallTool operation",
+			zap.String("tool_name", toolName))
+	}
+
 	// Log request for trace debugging
 	if c.upstreamLogger != nil {
 		if reqBytes, err := json.MarshalIndent(request, "", "  "); err == nil {
-			c.upstreamLogger.Debug("TRACE JSON-RPC CALLTOOL REQUEST",
+			c.upstreamLogger.Debug("JSON-RPC CallTool Request",
 				zap.String("method", "tools/call"),
 				zap.String("tool", toolName),
 				zap.String("formatted_json", string(reqBytes)))
@@ -456,13 +540,25 @@ func (c *CoreClient) CallTool(ctx context.Context, toolName string, args map[str
 
 	result, err := client.CallTool(ctx, request)
 	if err != nil {
+		// Log CallTool failure to server-specific log
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("CallTool operation failed",
+				zap.String("tool_name", toolName),
+				zap.Error(err))
+		}
 		return nil, fmt.Errorf("CallTool failed for '%s': %w", toolName, err)
+	}
+
+	// Log successful CallTool to server-specific log
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("CallTool operation completed successfully",
+			zap.String("tool_name", toolName))
 	}
 
 	// Log response for trace debugging
 	if c.upstreamLogger != nil {
 		if respBytes, err := json.MarshalIndent(result, "", "  "); err == nil {
-			c.upstreamLogger.Debug("TRACE JSON-RPC CALLTOOL RESPONSE",
+			c.upstreamLogger.Debug("JSON-RPC CallTool Response",
 				zap.String("method", "tools/call"),
 				zap.String("tool", toolName),
 				zap.String("formatted_json", string(respBytes)))

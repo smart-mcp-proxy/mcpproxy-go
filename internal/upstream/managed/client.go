@@ -22,6 +22,10 @@ type ManagedClient struct {
 	logger       *zap.Logger
 	StateManager *types.StateManager // Public field for callback access
 
+	// Configuration for creating fresh connections
+	logConfig    *config.LogConfig
+	globalConfig *config.Config
+
 	// Connection state protection
 	mu sync.RWMutex
 
@@ -32,6 +36,12 @@ type ManagedClient struct {
 	// Background monitoring
 	stopMonitoring chan struct{}
 	monitoringWG   sync.WaitGroup
+
+	// Docker-specific caching (for stateless operations)
+	dockerToolsCacheMu   sync.RWMutex
+	dockerToolsCache     []*config.ToolMetadata
+	dockerToolsCacheTime time.Time
+	dockerCacheTTL       time.Duration
 }
 
 // NewManagedClient creates a new managed client with state management
@@ -49,7 +59,10 @@ func NewManagedClient(id string, serverConfig *config.ServerConfig, logger *zap.
 		coreClient:     coreClient,
 		logger:         logger.With(zap.String("component", "managed_client")),
 		StateManager:   types.NewStateManager(),
+		logConfig:      logConfig,
+		globalConfig:   globalConfig,
 		stopMonitoring: make(chan struct{}),
+		dockerCacheTTL: 5 * time.Minute, // Docker tools cache for 5 minutes
 	}
 
 	// Set up state change callback
@@ -193,6 +206,11 @@ func (mc *ManagedClient) SetStateChangeCallback(callback func(oldState, newState
 
 // ListTools retrieves tools with concurrency control
 func (mc *ManagedClient) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	// Docker containers use stateless connections - handle them specially
+	if mc.Config.Command == "docker" {
+		return mc.dockerListTools(ctx)
+	}
+
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
@@ -220,6 +238,12 @@ func (mc *ManagedClient) ListTools(ctx context.Context) ([]*config.ToolMetadata,
 
 	tools, err := mc.coreClient.ListTools(listCtx)
 	if err != nil {
+		// Log the error immediately for better debugging
+		mc.logger.Error("ListTools operation failed",
+			zap.String("server", mc.Config.Name),
+			zap.Error(err))
+
+		// Always update state for ListTools failures (they indicate server issues)
 		mc.StateManager.SetError(err)
 		return nil, fmt.Errorf("ListTools failed: %w", err)
 	}
@@ -229,14 +253,28 @@ func (mc *ManagedClient) ListTools(ctx context.Context) ([]*config.ToolMetadata,
 
 // CallTool executes a tool with error handling
 func (mc *ManagedClient) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+	// Docker containers use stateless connections - handle them specially
+	if mc.Config.Command == "docker" {
+		return mc.dockerCallTool(ctx, toolName, args)
+	}
+
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
 	result, err := mc.coreClient.CallTool(ctx, toolName, args)
 	if err != nil {
-		// Check if it's a connection error
+		// Log the error immediately for better debugging
+		mc.logger.Error("Tool call failed",
+			zap.String("server", mc.Config.Name),
+			zap.String("tool", toolName),
+			zap.Error(err))
+
+		// Check if it's a connection error and update state
 		if mc.isConnectionError(err) {
+			mc.logger.Warn("Connection error detected, updating server state",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
 			mc.StateManager.SetError(err)
 		}
 		return nil, err
@@ -302,6 +340,13 @@ func (mc *ManagedClient) performHealthCheck() {
 		return
 	}
 
+	// Skip health checks for Docker containers - they use stateless connections
+	if mc.Config.Command == "docker" {
+		mc.logger.Debug("Skipping health check for Docker container (stateless transport)",
+			zap.String("server", mc.Config.Name))
+		return
+	}
+
 	// Create a short timeout for health check
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -360,4 +405,117 @@ func containsString(str, substr string) bool {
 		}
 	}
 	return false
+}
+
+// isDockerCacheValid checks if the Docker tools cache is still valid
+func (mc *ManagedClient) isDockerCacheValid() bool {
+	mc.dockerToolsCacheMu.RLock()
+	defer mc.dockerToolsCacheMu.RUnlock()
+
+	return time.Since(mc.dockerToolsCacheTime) < mc.dockerCacheTTL && mc.dockerToolsCache != nil
+}
+
+// updateDockerCache updates the Docker tools cache
+func (mc *ManagedClient) updateDockerCache(tools []*config.ToolMetadata) {
+	mc.dockerToolsCacheMu.Lock()
+	defer mc.dockerToolsCacheMu.Unlock()
+
+	mc.dockerToolsCache = tools
+	mc.dockerToolsCacheTime = time.Now()
+}
+
+// getDockerCachedTools returns cached Docker tools if valid
+func (mc *ManagedClient) getDockerCachedTools() []*config.ToolMetadata {
+	mc.dockerToolsCacheMu.RLock()
+	defer mc.dockerToolsCacheMu.RUnlock()
+
+	if mc.isDockerCacheValid() {
+		return mc.dockerToolsCache
+	}
+	return nil
+}
+
+// createFreshDockerConnection creates a fresh connection for Docker operations
+func (mc *ManagedClient) createFreshDockerConnection(ctx context.Context) (*core.CoreClient, error) {
+	// Create a new core client with the same configuration, including upstream logger
+	freshClient, err := core.NewCoreClient(mc.id+"_docker_temp", mc.Config, mc.logger, mc.logConfig, mc.globalConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create fresh Docker client: %w", err)
+	}
+
+	// Connect the fresh client
+	if err := freshClient.Connect(ctx); err != nil {
+		return nil, fmt.Errorf("failed to connect fresh Docker client: %w", err)
+	}
+
+	return freshClient, nil
+}
+
+// dockerListTools performs ListTools with a fresh Docker connection
+func (mc *ManagedClient) dockerListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	// Check cache first
+	if cached := mc.getDockerCachedTools(); cached != nil {
+		mc.logger.Debug("Using cached Docker tools",
+			zap.String("server", mc.Config.Name),
+			zap.Int("tool_count", len(cached)))
+		return cached, nil
+	}
+
+	mc.logger.Debug("Creating fresh Docker connection for ListTools",
+		zap.String("server", mc.Config.Name))
+
+	// Create fresh connection for this operation
+	freshClient, err := mc.createFreshDockerConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer freshClient.Disconnect()
+
+	// Perform ListTools with fresh connection
+	tools, err := freshClient.ListTools(ctx)
+	if err != nil {
+		mc.logger.Error("Docker ListTools with fresh connection failed",
+			zap.String("server", mc.Config.Name),
+			zap.Error(err))
+		return nil, fmt.Errorf("Docker ListTools failed: %w", err)
+	}
+
+	// Update cache
+	mc.updateDockerCache(tools)
+
+	mc.logger.Debug("Docker ListTools succeeded with fresh connection",
+		zap.String("server", mc.Config.Name),
+		zap.Int("tool_count", len(tools)))
+
+	return tools, nil
+}
+
+// dockerCallTool performs CallTool with a fresh Docker connection
+func (mc *ManagedClient) dockerCallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+	mc.logger.Debug("Creating fresh Docker connection for CallTool",
+		zap.String("server", mc.Config.Name),
+		zap.String("tool", toolName))
+
+	// Create fresh connection for this operation
+	freshClient, err := mc.createFreshDockerConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer freshClient.Disconnect()
+
+	// Perform CallTool with fresh connection
+	result, err := freshClient.CallTool(ctx, toolName, args)
+	if err != nil {
+		mc.logger.Error("Docker CallTool with fresh connection failed",
+			zap.String("server", mc.Config.Name),
+			zap.String("tool", toolName),
+			zap.Error(err))
+		return nil, fmt.Errorf("Docker CallTool failed: %w", err)
+	}
+
+	mc.logger.Debug("Docker CallTool succeeded with fresh connection",
+		zap.String("server", mc.Config.Name),
+		zap.String("tool", toolName))
+
+	return result, nil
 }
