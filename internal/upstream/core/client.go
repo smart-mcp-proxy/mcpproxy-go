@@ -88,6 +88,15 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 		envConfig = secureenv.DefaultEnvConfig()
 	}
 
+	// Enable PATH enhancement for Docker and other tools when using stdio transport
+	// This helps with Launchd scenarios where PATH is minimal
+	if serverConfig.Command != "" {
+		// Create a copy of the config to avoid modifying the original
+		envConfigCopy := *envConfig
+		envConfigCopy.EnhancePath = true
+		envConfig = &envConfigCopy
+	}
+
 	// Add server-specific environment variables
 	if len(serverConfig.Env) > 0 {
 		serverEnvConfig := *envConfig
@@ -309,10 +318,24 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		return fmt.Errorf("no command specified for stdio transport")
 	}
 
-	// Build environment variables (same as demo - full system environment)
-	envVars := os.Environ() // Start with full system environment
+	// Build environment variables using secure environment manager
+	// This ensures PATH includes proper discovery even when launched via Launchd
+	envVars := c.envManager.BuildSecureEnvironment()
+
+	// Add server-specific environment variables (these are already included via envManager,
+	// but this ensures any additional runtime variables are included)
 	for k, v := range c.config.Env {
-		envVars = append(envVars, fmt.Sprintf("%s=%s", k, v))
+		found := false
+		for i, envVar := range envVars {
+			if strings.HasPrefix(envVar, k+"=") {
+				envVars[i] = fmt.Sprintf("%s=%s", k, v) // Override existing
+				found = true
+				break
+			}
+		}
+		if !found {
+			envVars = append(envVars, fmt.Sprintf("%s=%s", k, v)) // Add new
+		}
 	}
 
 	// For Docker commands, add --cidfile to capture container ID for debugging
