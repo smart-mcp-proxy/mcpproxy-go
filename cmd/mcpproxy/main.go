@@ -93,10 +93,14 @@ func main() {
 	// Add tools command
 	toolsCmd := GetToolsCommand()
 
+	// Add call command
+	callCmd := GetCallCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(toolsCmd)
+	rootCmd.AddCommand(callCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer

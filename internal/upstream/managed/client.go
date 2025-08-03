@@ -339,6 +339,14 @@ func (mc *Client) performHealthCheck() {
 		return
 	}
 
+	// Skip health checks for Docker servers to avoid interference with container management
+	if mc.isDockerServer() {
+		mc.logger.Debug("Skipping health check for Docker server",
+			zap.String("server", mc.Config.Name),
+			zap.String("command", mc.Config.Command))
+		return
+	}
+
 	// Create a short timeout for health check
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -434,4 +442,9 @@ func containsString(str, substr string) bool {
 		}
 	}
 	return false
+}
+
+// isDockerServer checks if the server is running via Docker
+func (mc *Client) isDockerServer() bool {
+	return containsString(mc.Config.Command, "docker")
 }
