@@ -3,12 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
-	"mcpproxy-go/internal/upstream/managed"
-	"mcpproxy-go/internal/upstream/types"
+	"mcpproxy-go/internal/upstream/core"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
@@ -20,9 +20,9 @@ const (
 
 // Client provides a simple interface for CLI operations with enhanced debugging
 type Client struct {
-	managedClient *managed.Client
-	logger        *zap.Logger
-	config        *config.ServerConfig
+	coreClient *core.Client
+	logger     *zap.Logger
+	config     *config.ServerConfig
 
 	// Debug output settings
 	debugMode bool
@@ -56,17 +56,17 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		return nil, fmt.Errorf("failed to create logger: %w", err)
 	}
 
-	// Create managed client (which includes Docker-specific optimizations)
-	managedClient, err := managed.NewClient(serverName, serverConfig, logger, logConfig, globalConfig)
+	// Create core client directly for CLI operations (no DB sync manager)
+	coreClient, err := core.NewClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create managed client: %w", err)
+		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}
 
 	return &Client{
-		managedClient: managedClient,
-		logger:        logger,
-		config:        serverConfig,
-		debugMode:     logLevel == "trace" || logLevel == "debug",
+		coreClient: coreClient,
+		logger:     logger,
+		config:     serverConfig,
+		debugMode:  logLevel == "trace" || logLevel == "debug",
 	}, nil
 }
 
@@ -87,18 +87,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.logger.Debug("🔍 TRACE MODE ENABLED - JSON-RPC frames will be logged")
 	}
 
-	// Connect managed client
-	if err := c.managedClient.Connect(connectCtx); err != nil {
+	// Connect core client
+	if err := c.coreClient.Connect(connectCtx); err != nil {
 		c.logger.Error("❌ Connection failed", zap.Error(err))
 		return err
 	}
 
 	c.logger.Info("✅ Successfully connected to server")
-
-	// Docker containers now handled by stateless connections in core client
-
-	// Note: Stderr monitoring not available with ManagedClient
-	// TODO: Add stderr monitoring support if needed for debugging
 
 	// Display server information
 	c.displayServerInfo()
@@ -110,15 +105,24 @@ func (c *Client) Connect(ctx context.Context) error {
 func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	c.logger.Info("🔍 Discovering tools from server...")
 
-	// Docker containers now use stateless connections with caching in core client
+	// Use the caller-provided context (it already carries --timeout from CLI)
+	tools, err := c.coreClient.ListTools(ctx)
 
-	// Add timeout for tool listing
-	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	tools, err := c.managedClient.ListTools(listCtx)
 	if err != nil {
-		c.logger.Error("❌ Failed to list tools", zap.Error(err))
+		// Enhanced error reporting with timeout diagnostics
+		if strings.Contains(err.Error(), "context deadline exceeded") {
+			c.logger.Error("❌ Failed to list tools: TIMEOUT",
+				zap.Error(err),
+				zap.String("diagnosis", "Container may be starting slowly, unresponsive, or stuck"))
+
+			// Health check disabled to avoid concurrent RPCs
+		} else if strings.Contains(err.Error(), "broken pipe") || strings.Contains(err.Error(), "closed pipe") {
+			c.logger.Error("❌ Failed to list tools: PIPE BROKEN",
+				zap.Error(err),
+				zap.String("diagnosis", "Container process likely died or crashed"))
+		} else {
+			c.logger.Error("❌ Failed to list tools", zap.Error(err))
+		}
 		return nil, err
 	}
 
@@ -135,9 +139,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 func (c *Client) Disconnect() error {
 	c.logger.Info("🔌 Disconnecting from server...")
 
-	// Note: Stderr monitoring not used with ManagedClient
-
-	if err := c.managedClient.Disconnect(); err != nil {
+	if err := c.coreClient.Disconnect(); err != nil {
 		c.logger.Error("❌ Disconnect failed", zap.Error(err))
 		return err
 	}
@@ -148,24 +150,24 @@ func (c *Client) Disconnect() error {
 
 // displayServerInfo shows detailed server information
 func (c *Client) displayServerInfo() {
-	// Get server info from managed client's state
-	connectionInfo := c.managedClient.StateManager.GetConnectionInfo()
-	if connectionInfo.ServerName == "" {
+	// Get server info from core client
+	serverInfo := c.coreClient.GetServerInfo()
+	if serverInfo == nil {
 		return
 	}
 
 	c.logger.Info("📋 Server Information",
-		zap.String("name", connectionInfo.ServerName),
-		zap.String("version", connectionInfo.ServerVersion),
-		zap.String("protocol_version", "2024-11-05"))
+		zap.String("name", serverInfo.ServerInfo.Name),
+		zap.String("version", serverInfo.ServerInfo.Version),
+		zap.String("protocol_version", serverInfo.ProtocolVersion))
 
 	if c.debugMode {
-		// Basic capabilities info (we can't access detailed caps through ManagedClient)
+		// Display server capabilities
 		c.logger.Debug("🔧 Server Capabilities",
-			zap.Bool("tools", true),
-			zap.Bool("resources", false),
-			zap.Bool("prompts", true),
-			zap.Bool("logging", false))
+			zap.Bool("tools", serverInfo.Capabilities.Tools != nil),
+			zap.Bool("resources", serverInfo.Capabilities.Resources != nil),
+			zap.Bool("prompts", serverInfo.Capabilities.Prompts != nil),
+			zap.Bool("logging", serverInfo.Capabilities.Logging != nil))
 	}
 }
 
@@ -222,7 +224,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		zap.String("tool", toolName),
 		zap.Any("args", args))
 
-	result, err := c.managedClient.CallTool(ctx, toolName, args)
+	result, err := c.coreClient.CallTool(ctx, toolName, args)
 	if err != nil {
 		c.logger.Error("❌ Tool call failed", zap.Error(err))
 		return nil, err
@@ -239,17 +241,10 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 
 // IsConnected returns connection status
 func (c *Client) IsConnected() bool {
-	return c.managedClient.IsConnected()
-}
-
-// GetConnectionInfo returns connection information
-func (c *Client) GetConnectionInfo() types.ConnectionInfo {
-	return c.managedClient.StateManager.GetConnectionInfo()
+	return c.coreClient.IsConnected()
 }
 
 // GetServerInfo returns server information
 func (c *Client) GetServerInfo() *mcp.InitializeResult {
-	// ManagedClient doesn't expose server info directly
-	// Return nil for now as this isn't used in CLI operations
-	return nil
+	return c.coreClient.GetServerInfo()
 }

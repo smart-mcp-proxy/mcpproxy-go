@@ -1,17 +1,24 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"strings"
 	"sync"
+	"time"
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/secureenv"
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/upstream/types"
+
+	uptransport "github.com/mark3labs/mcp-go/client/transport"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -41,6 +48,17 @@ type Client struct {
 	// Transport type and stderr access (for stdio)
 	transportType string
 	stderr        io.Reader
+
+	// Stderr monitoring
+	stderrMonitoringCtx    context.Context
+	stderrMonitoringCancel context.CancelFunc
+	stderrMonitoringWG     sync.WaitGroup
+
+	// Process monitoring (for stdio transport)
+	processCmd           *exec.Cmd
+	processMonitorCtx    context.Context
+	processMonitorCancel context.CancelFunc
+	processMonitorWG     sync.WaitGroup
 }
 
 // NewClient creates a new core MCP client
@@ -210,24 +228,50 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		return fmt.Errorf("no command specified for stdio transport")
 	}
 
-	stdioConfig := &transport.StdioTransportConfig{
-		Command:    c.config.Command,
-		Args:       c.config.Args,
-		Env:        c.config.Env,
-		EnvManager: c.envManager,
+	// Build environment variables
+	envVars := c.envManager.BuildSecureEnvironment()
+	for k, v := range c.config.Env {
+		envVars = append(envVars, fmt.Sprintf("%s=%s", k, v))
 	}
 
-	result, err := transport.CreateStdioClient(stdioConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create stdio client: %w", err)
+	// For Docker commands, add --cidfile to capture container ID
+	args := c.config.Args
+	var cidFile string
+	if c.config.Command == "docker" && len(args) > 0 && args[0] == "run" {
+		// Create temp file for container ID
+		tmpFile, err := os.CreateTemp("", "mcpproxy-cid-*.txt")
+		if err == nil {
+			cidFile = tmpFile.Name()
+			tmpFile.Close()
+			// Remove the file first to avoid Docker's "file exists" error
+			os.Remove(cidFile)
+			// Insert --cidfile after "run"
+			newArgs := make([]string, 0, len(args)+2)
+			newArgs = append(newArgs, args[0], "--cidfile", cidFile) // "run" + cidfile
+			newArgs = append(newArgs, args[1:]...)
+			args = newArgs
+		}
 	}
 
-	c.client = result.Client
-	c.stderr = result.Stderr
+	// Upstream transport (same as demo)
+	stdioTransport := uptransport.NewStdio(c.config.Command, envVars, args...)
+	c.client = client.NewClient(stdioTransport)
 
-	// Start the client
 	if err := c.client.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start stdio client: %w", err)
+	}
+
+	// Capture stderr from the upstream transport
+	c.stderr = stdioTransport.Stderr()
+
+	// Start stderr monitoring for Docker containers (important for debugging)
+	if c.stderr != nil {
+		c.StartStderrMonitoring()
+	}
+
+	// Start docker logs monitoring if we have a container ID
+	if cidFile != "" {
+		go c.monitorDockerLogs(cidFile)
 	}
 
 	return nil
@@ -398,6 +442,12 @@ func (c *Client) Disconnect() error {
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Disconnecting from server")
 	}
+
+	// Stop stderr monitoring before closing client
+	c.StopStderrMonitoring()
+
+	// Stop process monitoring before closing client
+	c.StopProcessMonitoring()
 
 	c.client.Close()
 	c.client = nil
@@ -599,6 +649,316 @@ func (c *Client) GetTransportType() string {
 // GetStderr returns stderr reader for stdio transport
 func (c *Client) GetStderr() io.Reader {
 	return c.stderr
+}
+
+// StartStderrMonitoring starts monitoring stderr output and logging it
+func (c *Client) StartStderrMonitoring() {
+	if c.stderr == nil || c.transportType != transport.TransportStdio {
+		return
+	}
+
+	// Create context for stderr monitoring
+	c.stderrMonitoringCtx, c.stderrMonitoringCancel = context.WithCancel(context.Background())
+
+	c.stderrMonitoringWG.Add(1)
+	go func() {
+		defer c.stderrMonitoringWG.Done()
+		c.monitorStderr()
+	}()
+
+	c.logger.Debug("Started stderr monitoring",
+		zap.String("server", c.config.Name))
+}
+
+// StopStderrMonitoring stops stderr monitoring
+func (c *Client) StopStderrMonitoring() {
+	if c.stderrMonitoringCancel != nil {
+		c.stderrMonitoringCancel()
+		c.stderrMonitoringWG.Wait()
+		c.logger.Debug("Stopped stderr monitoring",
+			zap.String("server", c.config.Name))
+	}
+}
+
+// StartProcessMonitoring starts monitoring the underlying process
+func (c *Client) StartProcessMonitoring() {
+	if c.processCmd == nil {
+		return
+	}
+
+	// Create context for process monitoring
+	c.processMonitorCtx, c.processMonitorCancel = context.WithCancel(context.Background())
+
+	c.processMonitorWG.Add(1)
+	go func() {
+		defer c.processMonitorWG.Done()
+		c.monitorProcess()
+	}()
+
+	c.logger.Debug("Started process monitoring",
+		zap.String("server", c.config.Name),
+		zap.String("command", c.processCmd.Path))
+}
+
+// StopProcessMonitoring stops process monitoring
+func (c *Client) StopProcessMonitoring() {
+	if c.processMonitorCancel != nil {
+		c.processMonitorCancel()
+		c.processMonitorWG.Wait()
+		c.logger.Debug("Stopped process monitoring",
+			zap.String("server", c.config.Name))
+	}
+}
+
+// monitorProcess monitors the underlying process health
+func (c *Client) monitorProcess() {
+	if c.processCmd == nil {
+		return
+	}
+
+	// Check if this is a Docker command
+	isDocker := strings.Contains(c.config.Command, "docker")
+
+	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.processMonitorCtx.Done():
+			return
+		case <-ticker.C:
+			if isDocker {
+				c.checkDockerContainerHealth()
+			}
+		}
+	}
+}
+
+// checkDockerContainerHealth checks if Docker containers are still running
+func (c *Client) checkDockerContainerHealth() {
+	// For Docker commands, we can check if containers are still running
+	// This is a simplified check - in production you might want more sophisticated monitoring
+
+	// Try to run a simple docker command to check daemon connectivity
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}")
+	if err := cmd.Run(); err != nil {
+		c.logger.Warn("Docker daemon appears to be unreachable",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Warn("Docker connectivity check failed",
+				zap.Error(err))
+		}
+	}
+}
+
+// monitorStderr monitors stderr output and logs it to both main and server-specific logs
+func (c *Client) monitorStderr() {
+	scanner := bufio.NewScanner(c.stderr)
+	for scanner.Scan() {
+		select {
+		case <-c.stderrMonitoringCtx.Done():
+			return
+		default:
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+
+			// Log to main logger
+			c.logger.Info("stderr output",
+				zap.String("server", c.config.Name),
+				zap.String("message", line))
+
+			// Log to server-specific logger if available
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Info("stderr", zap.String("message", line))
+			}
+		}
+	}
+
+	// Check for scanner errors - this is crucial for detecting pipe issues
+	if err := scanner.Err(); err != nil {
+		// Distinguish between different error types
+		if strings.Contains(err.Error(), "broken pipe") || strings.Contains(err.Error(), "closed pipe") {
+			c.logger.Error("Stdin/stdout pipe closed - container may have died",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+		} else {
+			c.logger.Warn("Error reading stderr",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+		}
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Warn("stderr read error", zap.Error(err))
+		}
+	} else {
+		// If scanner ended without error, the pipe was likely closed gracefully
+		c.logger.Info("Stderr stream ended",
+			zap.String("server", c.config.Name))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("stderr stream closed")
+		}
+	}
+}
+
+// monitorDockerLogs monitors Docker container logs using `docker logs`
+func (c *Client) monitorDockerLogs(cidFile string) {
+	// Wait a bit for container to start and CID file to be written
+	time.Sleep(500 * time.Millisecond)
+
+	// Read container ID from file
+	cidBytes, err := os.ReadFile(cidFile)
+	if err != nil {
+		c.logger.Debug("Could not read container ID file",
+			zap.String("server", c.config.Name),
+			zap.String("cid_file", cidFile),
+			zap.Error(err))
+		return
+	}
+
+	containerID := strings.TrimSpace(string(cidBytes))
+	if containerID == "" {
+		return
+	}
+
+	// Clean up the temp file
+	defer os.Remove(cidFile)
+
+	c.logger.Info("Starting Docker logs monitoring",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", containerID[:12])) // Show short ID
+
+	// Start docker logs -f command
+	cmd := exec.Command("docker", "logs", "-f", "--timestamps", containerID)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		c.logger.Warn("Failed to create docker logs stdout pipe", zap.Error(err))
+		return
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		c.logger.Warn("Failed to create docker logs stderr pipe", zap.Error(err))
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		c.logger.Warn("Failed to start docker logs command", zap.Error(err))
+		return
+	}
+
+	// Monitor both stdout and stderr from docker logs
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				c.logger.Info("container logs (stdout)",
+					zap.String("server", c.config.Name),
+					zap.String("container_id", containerID[:12]),
+					zap.String("message", line))
+			}
+		}
+	}()
+
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				c.logger.Info("container logs (stderr)",
+					zap.String("server", c.config.Name),
+					zap.String("container_id", containerID[:12]),
+					zap.String("message", line))
+			}
+		}
+	}()
+
+	// Wait for docker logs command to finish (when container stops)
+	if err := cmd.Wait(); err != nil {
+		c.logger.Debug("Docker logs command ended with error", zap.Error(err))
+	}
+	c.logger.Debug("Docker logs monitoring ended",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", containerID[:12]))
+}
+
+// CheckConnectionHealth performs a health check on the connection
+func (c *Client) CheckConnectionHealth(ctx context.Context) error {
+	if !c.IsConnected() {
+		return fmt.Errorf("client not connected")
+	}
+
+	// For stdio connections, try a simple ping-like operation
+	if c.transportType == transport.TransportStdio {
+		// Use a short timeout for health check
+		checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+
+		// Try to list tools as a health check
+		_, err := c.ListTools(checkCtx)
+		if err != nil {
+			if strings.Contains(err.Error(), "context deadline exceeded") {
+				return fmt.Errorf("connection health check timed out - container may be unresponsive")
+			} else if strings.Contains(err.Error(), "broken pipe") || strings.Contains(err.Error(), "connection refused") {
+				return fmt.Errorf("connection pipe broken - container may have died")
+			}
+			return fmt.Errorf("connection health check failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// GetConnectionDiagnostics returns detailed diagnostic information about the connection
+func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	diagnostics := map[string]interface{}{
+		"connected":       c.connected,
+		"transport_type":  c.transportType,
+		"server_name":     c.config.Name,
+		"command":         c.config.Command,
+		"args":            c.config.Args,
+		"has_stderr":      c.stderr != nil,
+		"has_process_cmd": c.processCmd != nil,
+	}
+
+	if c.serverInfo != nil {
+		diagnostics["server_info"] = map[string]interface{}{
+			"name":             c.serverInfo.ServerInfo.Name,
+			"version":          c.serverInfo.ServerInfo.Version,
+			"protocol_version": c.serverInfo.ProtocolVersion,
+		}
+	}
+
+	// Add Docker-specific diagnostics
+	if strings.Contains(c.config.Command, "docker") {
+		diagnostics["is_docker"] = true
+		diagnostics["docker_args"] = c.config.Args
+
+		// Check Docker daemon connectivity
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}")
+		if err := cmd.Run(); err != nil {
+			diagnostics["docker_daemon_reachable"] = false
+			diagnostics["docker_daemon_error"] = err.Error()
+		} else {
+			diagnostics["docker_daemon_reachable"] = true
+		}
+	}
+
+	return diagnostics
 }
 
 // GetEnvManager returns the environment manager for testing purposes
