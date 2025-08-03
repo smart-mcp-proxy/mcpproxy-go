@@ -74,6 +74,14 @@ jobs:
               
               echo "Checking notarization status for $DMG_NAME (ID: $SUBMISSION_ID)"
               
+              # Validate submission ID before checking status
+              if [ -z "$SUBMISSION_ID" ] || [ "$SUBMISSION_ID" = "null" ] || [ ${#SUBMISSION_ID} -lt 10 ]; then
+                echo "❌ Invalid or empty submission ID for $DMG_NAME: '$SUBMISSION_ID'"
+                echo "Removing invalid pending file..."
+                gh release delete-asset "$RELEASE_TAG" "$(basename "$pending_file")" --yes || echo "Failed to delete pending asset"
+                continue
+              fi
+              
               # Check notarization status
               STATUS=$(xcrun notarytool info "$SUBMISSION_ID" \
                 --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \

@@ -397,12 +397,57 @@ jobs:
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
 
           echo "Submitting DMG for notarization..."
-          SUBMISSION_ID=$(xcrun notarytool submit "${DMG_NAME}" --apple-id "${{ secrets.APPLE_ID_USERNAME }}" --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --output-format json | jq -r '.id')
 
-          echo "Submission ID: ${SUBMISSION_ID}"
-          echo "${SUBMISSION_ID}" > "${DMG_NAME}.submission_id"
+          # Submit with proper error handling and retries
+          SUBMISSION_SUCCESS=false
+          for attempt in 1 2 3; do
+            echo "Notarization attempt $attempt/3..."
+            
+            # Capture both stdout and stderr
+            SUBMISSION_OUTPUT=$(xcrun notarytool submit "${DMG_NAME}" \
+              --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+              --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" \
+              --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+              --output-format json 2>&1)
+            
+            SUBMISSION_EXIT_CODE=$?
+            
+            if [ $SUBMISSION_EXIT_CODE -eq 0 ]; then
+              # Extract submission ID with validation
+              SUBMISSION_ID=$(echo "$SUBMISSION_OUTPUT" | jq -r '.id // empty')
+              
+              if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ]; then
+                echo "✅ Notarization submission successful on attempt $attempt"
+                echo "Submission ID: ${SUBMISSION_ID}"
+                
+                # Save submission ID
+                echo "${SUBMISSION_ID}" > "${DMG_NAME}.submission_id"
+                
+                SUBMISSION_SUCCESS=true
+                break
+              else
+                echo "❌ Failed to extract valid submission ID from response"
+                echo "Response: $SUBMISSION_OUTPUT"
+              fi
+            else
+              echo "❌ Notarization submission failed with exit code: $SUBMISSION_EXIT_CODE"
+              echo "Output: $SUBMISSION_OUTPUT"
+            fi
+            
+            if [ $attempt -lt 3 ]; then
+              echo "Retrying in 30 seconds..."
+              sleep 30
+            fi
+          done
 
-          echo "DMG submitted for notarization (ID: ${SUBMISSION_ID})"
+          if [ "$SUBMISSION_SUCCESS" != "true" ]; then
+            echo "❌ All notarization submission attempts failed"
+            echo "Creating empty submission ID file to skip notarization tracking"
+            # Don't create submission_id file - this will cause the DMG to be uploaded without notarization tracking
+            exit 0  # Don't fail the entire build, just skip notarization
+          fi
+
+          echo "✅ DMG submitted for notarization (ID: ${SUBMISSION_ID})"
 
       - name: Cleanup isolated keychain (macOS)
         if: matrix.goos == 'darwin' && always()
@@ -477,12 +522,15 @@ jobs:
             
             if [ -f "$submission_id_file" ]; then
               # DMG has pending notarization
-              echo "Found pending notarization for $filename"
-              cp "$dmg_file" "release-files/$filename"
-              
-              # Create pending notarization record
               SUBMISSION_ID=$(cat "$submission_id_file")
-              cat > "pending-notarizations/${filename}.pending" << EOF
+              
+              # Validate submission ID before creating pending file
+              if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ] && [ ${#SUBMISSION_ID} -gt 10 ]; then
+                echo "Found valid pending notarization for $filename (ID: $SUBMISSION_ID)"
+                cp "$dmg_file" "release-files/$filename"
+                
+                # Create pending notarization record
+                cat > "pending-notarizations/${filename}.pending" << EOF
           {
             "submission_id": "$SUBMISSION_ID",
             "dmg_name": "$filename",
@@ -490,6 +538,11 @@ jobs:
             "submitted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
+              else
+                echo "❌ Invalid submission ID for $filename: '$SUBMISSION_ID'"
+                echo "Copying DMG without notarization tracking"
+                cp "$dmg_file" "release-files/$filename"
+              fi
             else
               # No notarization submission (shouldn't happen, but handle it)
               echo "No submission ID for $filename, copying as-is"
