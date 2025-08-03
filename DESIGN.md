@@ -193,6 +193,10 @@ mcpproxy implements comprehensive per-upstream-server logging to facilitate debu
 - Main application log: `main.log`
 - Per-server logs: `server-{name}.log`
 
+**Debug Commands:**
+- `mcpproxy tools list --server=NAME --log-level=trace`: Debug individual server connections
+- Enhanced trace logging shows all JSON-RPC frames and transport details
+
 **Log Rotation:**
 - Automatic rotation based on file size (10MB default)
 - Configurable retention (5 backup files, 30 days default)
@@ -211,6 +215,136 @@ mcpproxy implements comprehensive per-upstream-server logging to facilitate debu
 * Hybrid BM25 + vector search.
 * Auto‑update channel.
 * GUI front‑end built with Wails.
+
+## 12  Client Architecture (Refactored)
+
+### 12.1 Modular Client Design
+
+The upstream client architecture has been refactored into three distinct layers for better separation of concerns, testability, and reusability:
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   CLI Client    │    │ Managed Client  │    │   Core Client   │
+│                 │    │                 │    │                 │
+│ • CLI-specific  │ ──▶│ • State mgmt    │ ──▶│ • Basic MCP     │
+│ • Debug output  │    │ • Concurrency   │    │ • Connection    │
+│ • Tool display  │    │ • Background    │    │ • Auth fallback │
+│ • Stderr monitor│    │   recovery      │    │ • No state      │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+**Core Interfaces:**
+```go
+// MCPClient - Basic MCP operations
+type MCPClient interface {
+    Connect(ctx context.Context) error
+    Disconnect() error
+    IsConnected() bool
+    ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
+    CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error)
+    GetConnectionInfo() types.ConnectionInfo
+    GetServerInfo() *mcp.InitializeResult
+}
+
+// StatefulClient - Adds state management
+type StatefulClient interface {
+    MCPClient
+    GetState() types.ConnectionState
+    IsConnecting() bool
+    ShouldRetry() bool
+    SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo))
+}
+```
+
+### 12.2 Core Client (`internal/upstream/core/`)
+
+**Purpose:** Minimal, stateless MCP client implementation
+- **Responsibility:** Direct MCP protocol communication
+- **Features:**
+  - Transport-agnostic (HTTP, SSE, stdio)
+  - Authentication fallback (headers → no-auth → OAuth)
+  - Environment variable filtering for stdio processes
+  - No background processes or state management
+
+**Key Components:**
+- `client.go`: Main client implementation
+- `auth.go`: Authentication strategies and fallback logic
+
+### 12.3 Managed Client (`internal/upstream/managed/`)
+
+**Purpose:** Stateful wrapper for daemon/long-running use
+- **Responsibility:** Production-ready client for `mcpproxy serve`
+- **Features:**
+  - Connection state machine with retry logic
+  - Background health monitoring and recovery
+  - Concurrency control for ListTools operations
+  - Exponential backoff for failed connections
+  - State change notifications
+
+**Key Features:**
+```go
+type ManagedClient struct {
+    coreClient   *core.CoreClient
+    StateManager *types.StateManager
+    // Concurrency control
+    listToolsMu sync.Mutex
+    // Background monitoring
+    stopMonitoring chan struct{}
+}
+```
+
+### 12.4 CLI Client (`internal/upstream/cli/`)
+
+**Purpose:** Specialized client for CLI debugging operations
+- **Responsibility:** Enhanced debugging for `mcpproxy tools list`
+- **Features:**
+  - Detailed output formatting with emojis
+  - JSON-RPC frame logging at trace level
+  - Stderr monitoring for stdio processes
+  - Single-shot operations (connect → list → disconnect)
+
+**Debug Output Features:**
+- **Transport Details:** All JSON-RPC request/response frames
+- **Stderr Capture:** Real-time stderr output from stdio processes
+- **Connection Events:** Detailed state transitions and timing
+- **Error Context:** Enhanced error messages with troubleshooting hints
+
+### 12.5 Shared Types (`internal/upstream/types/`)
+
+**Purpose:** Common data structures to break import cycles
+- **Connection States:** `Disconnected`, `Connecting`, `Authenticating`, `Discovering`, `Ready`, `Error`
+- **State Manager:** Handles state transitions, retry logic, and callbacks
+- **Connection Info:** Detailed connection metadata and error tracking
+
+**State Machine:**
+```
+Disconnected ──▶ Connecting ──▶ Authenticating ──▶ Discovering ──▶ Ready
+     ▲                │               │               │            │
+     └────────────────┴───────────────┴───────────────┴────────────┘
+                                   Error
+```
+
+### 12.6 Benefits of Refactored Architecture
+
+1. **Separation of Concerns:**
+   - Core: Pure MCP protocol implementation
+   - Managed: Production state management
+   - CLI: Debug-focused single operations
+
+2. **Reusability:**
+   - Core client shared between managed and CLI variants
+   - State management logic isolated and testable
+   - Transport logic decoupled from application logic
+
+3. **Testability:**
+   - Each layer can be unit tested independently
+   - Mock interfaces for integration testing
+   - Isolated state machine testing
+
+4. **Maintainability:**
+   - Clear responsibilities and boundaries
+   - Smaller, focused code files
+   - Type-safe interfaces between layers
 
 ## Upstream Server Management
 

@@ -90,9 +90,17 @@ func main() {
 	// Add search-servers command
 	searchCmd := createSearchServersCommand()
 
+	// Add tools command
+	toolsCmd := GetToolsCommand()
+
+	// Add call command
+	callCmd := GetCallCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
+	rootCmd.AddCommand(toolsCmd)
+	rootCmd.AddCommand(callCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
@@ -260,7 +268,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 		cfg.Logging = &config.LogConfig{
 			Level:         defaultLevel,
-			EnableFile:    cmdLogToFile,
+			EnableFile:    !cmd.Flags().Changed("log-to-file") || cmdLogToFile, // Default true for serve, unless explicitly disabled
 			EnableConsole: true,
 			Filename:      "main.log",
 			MaxSize:       10,
@@ -276,7 +284,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		} else if cfg.Logging.Level == "" {
 			cfg.Logging.Level = defaultLogLevel // Server command defaults to INFO
 		}
-		cfg.Logging.EnableFile = cmdLogToFile
+
+		// For serve mode: Enable file logging by default, only disable if explicitly set to false
+		if cmd.Flags().Changed("log-to-file") {
+			cfg.Logging.EnableFile = cmdLogToFile
+		} else {
+			cfg.Logging.EnableFile = true // Default to true for serve mode
+		}
+
 		if cfg.Logging.Filename == "" || cfg.Logging.Filename == "mcpproxy.log" {
 			cfg.Logging.Filename = "main.log"
 		}

@@ -358,6 +358,13 @@ mcpproxy serve --config ~/.mcpproxy/mcp_config.json --log-level debug
 - Verify upstream servers are running
 - Check MCPProxy logs for errors
 - Use the `retrieve_tools` tool in your MCP client to test tool discovery
+- Use `mcpproxy tools list --server=SERVER_NAME` to test individual servers
+
+**5. Server Connection Problems**
+- Test individual servers: `mcpproxy tools list --server=SERVER_NAME --log-level=trace`
+- Check authentication: Look for OAuth URLs in console output
+- Verify server configuration: Ensure URL, command, and protocol are correct
+- Check environment: For stdio servers, verify command and arguments are correct
 
 ### Debug Commands
 
@@ -373,6 +380,20 @@ lsof -i :8080
 mcpproxy serve --log-level debug
 ```
 
+**Debug Individual Servers:**
+```bash
+# List tools from a specific server with detailed debugging
+mcpproxy tools list --server=github-server --log-level=trace
+
+# Test slow servers with extended timeout
+mcpproxy tools list --server=slow-server --timeout=60s
+
+# Output tools in machine-readable format
+mcpproxy tools list --server=weather-api --output=json
+```
+
+**📝 Note:** The `mcpproxy tools list` command is perfect for debugging connection issues, authentication problems, or verifying that a server is working correctly. It connects directly to the server, bypasses the proxy's cache, and shows detailed logging.
+
 **📝 Note:** MCPProxy uses the MCP protocol over HTTP, not simple REST endpoints. Use MCP clients to interact with the server, not direct curl commands.
 
 **View Logs:**
@@ -382,6 +403,9 @@ tail -f ~/Library/Logs/mcpproxy/main.log
 
 # Windows
 Get-Content -Path "$env:LOCALAPPDATA\mcpproxy\logs\main.log" -Wait
+
+# Filter logs for specific server debugging
+tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 ```
 
 ## Advanced Configuration

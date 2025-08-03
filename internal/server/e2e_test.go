@@ -515,14 +515,22 @@ func TestE2E_ToolCalling(t *testing.T) {
 		}
 	}
 
-	// The content is an array of content objects, we need to extract the text from the first one
-	var contentArray []map[string]interface{}
-	err = json.Unmarshal([]byte(contentText), &contentArray)
+	// Parse the content response which has format: {"content": [{"type": "text", "text": "..."}]}
+	var contentResponse map[string]interface{}
+	err = json.Unmarshal([]byte(contentText), &contentResponse)
 	require.NoError(t, err)
+
+	// Extract the content array
+	contentArray, ok := contentResponse["content"].([]interface{})
+	require.True(t, ok)
 	require.Greater(t, len(contentArray), 0)
 
+	// Get the first content item
+	firstContent, ok := contentArray[0].(map[string]interface{})
+	require.True(t, ok)
+
 	// Extract the actual JSON response from the text field
-	actualResponseText, ok := contentArray[0]["text"].(string)
+	actualResponseText, ok := firstContent["text"].(string)
 	require.True(t, ok)
 
 	var response map[string]interface{}

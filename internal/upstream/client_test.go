@@ -15,6 +15,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/transport"
+	"mcpproxy-go/internal/upstream/managed"
 )
 
 // createTestServer creates a simple HTTP server for testing that simulates connection issues
@@ -58,7 +59,7 @@ func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create client with all required parameters
-	client, err := NewClient("test-client", cfg, logger, nil, nil)
+	client, err := managed.NewClient("test-client", cfg, logger, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
@@ -121,7 +122,7 @@ func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
 
-	client, err := NewClient("test-client", cfg, logger, nil, nil)
+	client, err := managed.NewClient("test-client", cfg, logger, nil, nil)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -211,7 +212,7 @@ func TestClient_Connect_WorkingTransports(t *testing.T) {
 			logger, err := zap.NewDevelopment()
 			require.NoError(t, err)
 
-			client, err := NewClient("test-client", cfg, logger, nil, nil)
+			client, err := managed.NewClient("test-client", cfg, logger, nil, nil)
 			require.NoError(t, err)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -302,12 +303,12 @@ func TestClient_Headers_Support(t *testing.T) {
 			logger, err := zap.NewDevelopment()
 			require.NoError(t, err)
 
-			client, err := NewClient("test-client", cfg, logger, nil, nil)
+			client, err := managed.NewClient("test-client", cfg, logger, nil, nil)
 			require.NoError(t, err)
 			require.NotNil(t, client)
 
 			// Test that headers are stored in config
-			assert.Equal(t, tt.headers, client.config.Headers)
+			assert.Equal(t, tt.headers, client.Config.Headers)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
