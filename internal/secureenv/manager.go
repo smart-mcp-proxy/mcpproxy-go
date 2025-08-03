@@ -16,6 +16,7 @@ type EnvConfig struct {
 	InheritSystemSafe bool              `json:"inherit_system_safe"`
 	AllowedSystemVars []string          `json:"allowed_system_vars"`
 	CustomVars        map[string]string `json:"custom_vars"`
+	EnhancePath       bool              `json:"enhance_path"` // Enable PATH enhancement for Launchd scenarios
 }
 
 // PathDiscovery contains auto-discovered paths for common tools
@@ -112,7 +113,83 @@ func (m *Manager) discoverPaths() *PathDiscovery {
 	discovery := &PathDiscovery{
 		AvailableTools: make(map[string]string),
 	}
+
+	// Get user home directory
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		discovery.HomePath = homeDir
+	}
+
+	// Discover platform-specific paths
+	if runtime.GOOS == osWindows {
+		discovery.DiscoveredPaths = m.discoverWindowsPaths()
+	} else {
+		discovery.DiscoveredPaths = m.discoverUnixPaths()
+	}
+
 	return discovery
+}
+
+// discoverUnixPaths discovers common Unix/macOS tool paths
+func (m *Manager) discoverUnixPaths() []string {
+	commonPaths := []string{
+		"/usr/local/bin",    // Homebrew, Docker Desktop, etc.
+		"/usr/bin",          // System binaries
+		"/bin",              // Core system binaries
+		"/opt/homebrew/bin", // Apple Silicon Homebrew
+		"/usr/local/sbin",   // System admin binaries
+		"/usr/sbin",         // System admin binaries
+		"/sbin",             // System admin binaries
+	}
+
+	// Add user-specific paths
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		commonPaths = append(commonPaths,
+			homeDir+"/.local/bin", // Local user binaries
+			homeDir+"/.npm/bin",   // NPM global binaries
+			homeDir+"/.yarn/bin",  // Yarn global binaries
+			homeDir+"/.cargo/bin", // Rust cargo binaries
+			homeDir+"/go/bin",     // Go binaries
+		)
+	}
+
+	// Filter to only include paths that actually exist
+	var existingPaths []string
+	for _, path := range commonPaths {
+		if _, err := os.Stat(path); err == nil {
+			existingPaths = append(existingPaths, path)
+		}
+	}
+
+	return existingPaths
+}
+
+// discoverWindowsPaths discovers common Windows tool paths
+func (m *Manager) discoverWindowsPaths() []string {
+	commonPaths := []string{
+		`C:\Windows\System32`,
+		`C:\Windows`,
+		`C:\Program Files\Docker\Docker\resources\bin`,
+		`C:\Program Files\Git\bin`,
+		`C:\Program Files\nodejs`,
+	}
+
+	// Add user-specific paths
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		commonPaths = append(commonPaths,
+			homeDir+`\AppData\Local\Programs\Python\Python311\Scripts`,
+			homeDir+`\AppData\Roaming\npm`,
+		)
+	}
+
+	// Filter to only include paths that actually exist
+	var existingPaths []string
+	for _, path := range commonPaths {
+		if _, err := os.Stat(path); err == nil {
+			existingPaths = append(existingPaths, path)
+		}
+	}
+
+	return existingPaths
 }
 
 // BuildSecureEnvironment builds a secure environment variable list
@@ -167,8 +244,67 @@ func (m *Manager) ensureComprehensivePath(envVars []string) []string {
 
 // buildEnhancedPath builds a comprehensive PATH by combining existing path with discovered paths
 func (m *Manager) buildEnhancedPath(existingPath string) string {
-	// With shell wrapping, we no longer need to build a complex path.
-	// We just use the existing path from the environment.
+	// If existing path is empty, use discovered paths
+	if existingPath == "" {
+		return strings.Join(m.pathDiscovery.DiscoveredPaths, string(os.PathListSeparator))
+	}
+
+	// Check if the existing PATH is missing common tool directories
+	// This indicates a Launchd-style minimal environment
+	pathParts := strings.Split(existingPath, string(os.PathListSeparator))
+
+	// Look for common tool directories that should contain Docker, etc.
+	commonToolDirs := []string{"/usr/local/bin", "/opt/homebrew/bin"}
+	if runtime.GOOS == osWindows {
+		commonToolDirs = []string{`C:\Program Files\Docker\Docker\resources\bin`}
+	}
+
+	hasCommonToolDirs := false
+	for _, toolDir := range commonToolDirs {
+		for _, pathPart := range pathParts {
+			if pathPart == toolDir {
+				hasCommonToolDirs = true
+				break
+			}
+		}
+		if hasCommonToolDirs {
+			break
+		}
+	}
+
+	// Only enhance if explicitly enabled AND we're missing common tool directories AND the path is minimal
+	// This specifically targets Launchd scenarios while preserving normal behavior by default
+	shouldEnhance := m.config.EnhancePath && !hasCommonToolDirs && len(pathParts) <= 2
+	if shouldEnhance {
+		// Start with discovered paths for better tool discovery
+		enhancedParts := make([]string, 0, len(m.pathDiscovery.DiscoveredPaths)+len(pathParts))
+
+		// Add discovered paths first (prioritize them)
+		for _, discoveredPath := range m.pathDiscovery.DiscoveredPaths {
+			// Avoid duplicates
+			found := false
+			for _, existingPart := range pathParts {
+				if existingPart == discoveredPath {
+					found = true
+					break
+				}
+			}
+			if !found {
+				enhancedParts = append(enhancedParts, discoveredPath)
+			}
+		}
+
+		// Add existing path parts
+		for _, part := range pathParts {
+			if part != "" {
+				enhancedParts = append(enhancedParts, part)
+			}
+		}
+
+		return strings.Join(enhancedParts, string(os.PathListSeparator))
+	}
+
+	// For paths that already have common tool directories or are comprehensive, use as-is
 	return existingPath
 }
 
