@@ -25,6 +25,11 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	dockerCommand = "docker"
+	dockerRunArg  = "run"
+)
+
 // Client implements basic MCP client functionality without state management
 type Client struct {
 	id     string
@@ -312,18 +317,98 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
+// buildShellWrappedCommand creates a shell wrapper that loads full user environment
+func (c *Client) buildShellWrappedCommand() (command string, args []string) {
+	// Determine shell to use
+	shell := "/bin/sh"
+	if userShell := os.Getenv("SHELL"); userShell != "" {
+		shell = userShell
+	}
+
+	// Build the command string to execute
+	var cmdString strings.Builder
+
+	// For interactive shells, source common profile files to get full environment
+	if strings.Contains(shell, "bash") {
+		cmdString.WriteString("source ~/.bash_profile 2>/dev/null || source ~/.bashrc 2>/dev/null || true; ")
+	} else if strings.Contains(shell, "zsh") {
+		cmdString.WriteString("source ~/.zshrc 2>/dev/null || source ~/.zprofile 2>/dev/null || true; ")
+	}
+
+	// Add the actual command
+	cmdString.WriteString(c.config.Command)
+
+	// Add arguments, properly quoted
+	for _, arg := range c.config.Args {
+		cmdString.WriteString(" ")
+		// Simple shell escaping - wrap in single quotes and escape existing single quotes
+		escapedArg := "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+		cmdString.WriteString(escapedArg)
+	}
+
+	// Handle Docker cidfile insertion
+	if c.config.Command == dockerCommand && len(c.config.Args) > 0 && c.config.Args[0] == dockerRunArg {
+		// Find a cidfile that might have been created earlier
+		if cidFile := c.findDockerCidFile(); cidFile != "" {
+			// Insert --cidfile after "docker run"
+			dockerCmd := c.config.Command + " " + c.config.Args[0] + " --cidfile " + cidFile
+			for i := 1; i < len(c.config.Args); i++ {
+				dockerCmd += " '" + strings.ReplaceAll(c.config.Args[i], "'", "'\"'\"'") + "'"
+			}
+
+			// Rebuild command string with cidfile
+			cmdString.Reset()
+			if strings.Contains(shell, "bash") {
+				cmdString.WriteString("source ~/.bash_profile 2>/dev/null || source ~/.bashrc 2>/dev/null || true; ")
+			} else if strings.Contains(shell, "zsh") {
+				cmdString.WriteString("source ~/.zshrc 2>/dev/null || source ~/.zprofile 2>/dev/null || true; ")
+			}
+			cmdString.WriteString(dockerCmd)
+		}
+	}
+
+	// Return shell and command
+	args = []string{"-c", cmdString.String()}
+	command = shell
+
+	c.logger.Debug("🐚 Using shell wrapper",
+		zap.String("shell", shell),
+		zap.String("command", cmdString.String()))
+
+	return
+}
+
+// findDockerCidFile looks for a recently created cidfile for Docker monitoring
+func (c *Client) findDockerCidFile() string {
+	// Look for temp files that match our pattern
+	tempDir := os.TempDir()
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		return ""
+	}
+
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "mcpproxy-cid-") && strings.HasSuffix(entry.Name(), ".txt") {
+			return tempDir + "/" + entry.Name()
+		}
+	}
+	return ""
+}
+
 // connectStdio establishes stdio transport connection
 func (c *Client) connectStdio(ctx context.Context) error {
 	if c.config.Command == "" {
 		return fmt.Errorf("no command specified for stdio transport")
 	}
 
+	// Use shell wrapper approach for better environment handling
+	command, args := c.buildShellWrappedCommand()
+
 	// Build environment variables using secure environment manager
-	// This ensures PATH includes proper discovery even when launched via Launchd
+	// This ensures safe filtering while preserving essential variables
 	envVars := c.envManager.BuildSecureEnvironment()
 
-	// Add server-specific environment variables (these are already included via envManager,
-	// but this ensures any additional runtime variables are included)
+	// Add server-specific environment variables
 	for k, v := range c.config.Env {
 		found := false
 		for i, envVar := range envVars {
@@ -339,9 +424,8 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	}
 
 	// For Docker commands, add --cidfile to capture container ID for debugging
-	args := c.config.Args
 	var cidFile string
-	if c.config.Command == "docker" && len(args) > 0 && args[0] == "run" {
+	if c.config.Command == dockerCommand && len(c.config.Args) > 0 && c.config.Args[0] == dockerRunArg {
 		// Create temp file for container ID
 		tmpFile, err := os.CreateTemp("", "mcpproxy-cid-*.txt")
 		if err == nil {
@@ -349,16 +433,12 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			tmpFile.Close()
 			// Remove the file first to avoid Docker's "file exists" error
 			os.Remove(cidFile)
-			// Insert --cidfile after "run"
-			newArgs := make([]string, 0, len(args)+2)
-			newArgs = append(newArgs, args[0], "--cidfile", cidFile) // "run" + cidfile
-			newArgs = append(newArgs, args[1:]...)
-			args = newArgs
+			// The cidfile will be handled in the shell wrapper
 		}
 	}
 
-	// Upstream transport (same as demo)
-	stdioTransport := uptransport.NewStdio(c.config.Command, envVars, args...)
+	// Upstream transport using shell wrapper with secure environment
+	stdioTransport := uptransport.NewStdio(command, envVars, args...)
 	c.client = client.NewClient(stdioTransport)
 
 	if err := c.client.Start(ctx); err != nil {
