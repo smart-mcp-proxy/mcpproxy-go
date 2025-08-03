@@ -49,6 +49,9 @@ type Client struct {
 	transportType string
 	stderr        io.Reader
 
+	// Cached tools list from successful immediate call
+	cachedTools []mcp.Tool
+
 	// Stderr monitoring
 	stderrMonitoringCtx    context.Context
 	stderrMonitoringCancel context.CancelFunc
@@ -210,6 +213,84 @@ func (c *Client) Connect(ctx context.Context) error {
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.transportType))
 
+	// Workaround: Get tools list immediately after init when transport works
+	c.logger.Debug("Attempting to cache tools immediately after initialization",
+		zap.String("server", c.config.Name),
+		zap.String("transport", c.transportType))
+
+	// Try to get tools with retry for servers that need time to initialize
+	var toolsResult *mcp.ListToolsResult
+	var listErr error
+	maxRetries := 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		listReq := mcp.ListToolsRequest{}
+		toolsResult, listErr = c.client.ListTools(ctx, listReq)
+
+		if listErr != nil {
+			c.logger.Warn("Failed to get tools during initialization attempt",
+				zap.String("server", c.config.Name),
+				zap.String("transport", c.transportType),
+				zap.Int("attempt", attempt),
+				zap.Int("max_retries", maxRetries),
+				zap.Error(listErr))
+
+			// Don't retry on connection errors
+			break
+		}
+
+		if len(toolsResult.Tools) > 0 {
+			// Got tools, break out of retry loop
+			break
+		}
+
+		// Empty tools list - retry with small delay for HTTP servers
+		if attempt < maxRetries {
+			c.logger.Debug("Empty tools list, retrying after delay",
+				zap.String("server", c.config.Name),
+				zap.String("transport", c.transportType),
+				zap.Int("attempt", attempt),
+				zap.Int("max_retries", maxRetries))
+			time.Sleep(time.Duration(attempt) * 100 * time.Millisecond) // 100ms, 200ms, 300ms
+		}
+	}
+
+	if listErr != nil {
+		c.logger.Warn("Failed to cache tools during initialization after retries",
+			zap.String("server", c.config.Name),
+			zap.String("transport", c.transportType),
+			zap.Error(listErr))
+		// Log to server-specific log for debugging
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Warn("Failed to cache tools during initialization",
+				zap.Error(listErr))
+		}
+	} else if len(toolsResult.Tools) == 0 {
+		c.logger.Warn("Server returned empty tools list after all retry attempts",
+			zap.String("server", c.config.Name),
+			zap.String("transport", c.transportType),
+			zap.Int("attempts", maxRetries))
+		// Log to server-specific log for debugging
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Warn("Server returned empty tools list after all retry attempts")
+		}
+	} else {
+		// Cache tools for the duration of this connection (until disconnect)
+		// Note: We already hold a lock from Connect(), so set directly
+		c.cachedTools = make([]mcp.Tool, len(toolsResult.Tools))
+		copy(c.cachedTools, toolsResult.Tools)
+
+		c.logger.Info("Tools list cached for connection duration",
+			zap.String("server", c.config.Name),
+			zap.String("transport", c.transportType),
+			zap.Int("tool_count", len(toolsResult.Tools)))
+
+		// Log to server-specific log for debugging
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("Tools list cached during connection initialization",
+				zap.Int("tool_count", len(toolsResult.Tools)))
+		}
+	}
+
 	// Log successful connection to server-specific log
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Successfully connected and initialized",
@@ -228,13 +309,13 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		return fmt.Errorf("no command specified for stdio transport")
 	}
 
-	// Build environment variables
-	envVars := c.envManager.BuildSecureEnvironment()
+	// Build environment variables (same as demo - full system environment)
+	envVars := os.Environ() // Start with full system environment
 	for k, v := range c.config.Env {
 		envVars = append(envVars, fmt.Sprintf("%s=%s", k, v))
 	}
 
-	// For Docker commands, add --cidfile to capture container ID
+	// For Docker commands, add --cidfile to capture container ID for debugging
 	args := c.config.Args
 	var cidFile string
 	if c.config.Command == "docker" && len(args) > 0 && args[0] == "run" {
@@ -261,15 +342,13 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		return fmt.Errorf("failed to start stdio client: %w", err)
 	}
 
-	// Capture stderr from the upstream transport
+	// Enable stderr monitoring for Docker containers
 	c.stderr = stdioTransport.Stderr()
-
-	// Start stderr monitoring for Docker containers (important for debugging)
 	if c.stderr != nil {
 		c.StartStderrMonitoring()
 	}
 
-	// Start docker logs monitoring if we have a container ID
+	// Enable Docker logs monitoring if we have a container ID
 	if cidFile != "" {
 		go c.monitorDockerLogs(cidFile)
 	}
@@ -454,6 +533,9 @@ func (c *Client) Disconnect() error {
 	c.serverInfo = nil
 	c.connected = false
 
+	// Clear cached tools on disconnect
+	c.cachedTools = nil
+
 	return nil
 }
 
@@ -481,81 +563,38 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		return nil, nil
 	}
 
-	toolsRequest := mcp.ListToolsRequest{}
+	// SOLUTION: Use cached tools from successful immediate call
+	c.mu.RLock()
+	cachedTools := c.cachedTools
+	c.mu.RUnlock()
 
-	// Log to server-specific log
-	if c.upstreamLogger != nil {
-		c.upstreamLogger.Info("Starting ListTools operation")
-	}
+	if len(cachedTools) > 0 {
+		c.logger.Info("🎯 Using cached tools list",
+			zap.Int("cached_tool_count", len(cachedTools)))
 
-	// Log request for trace debugging - use main logger for CLI debug mode
-	if reqBytes, err := json.MarshalIndent(toolsRequest, "", "  "); err == nil {
-		c.logger.Debug("🔍 JSON-RPC LISTTOOLS REQUEST",
-			zap.String("method", "tools/list"),
-			zap.String("formatted_json", string(reqBytes)))
+		// Convert cached tools to our format
+		tools := []*config.ToolMetadata{}
+		for _, tool := range cachedTools {
+			var paramsJSON string
+			if schemaBytes, err := json.Marshal(tool.InputSchema); err == nil {
+				paramsJSON = string(schemaBytes)
+			}
 
-		// Also log to upstream logger for trace debugging
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Debug("JSON-RPC ListTools Request",
-				zap.String("method", "tools/list"),
-				zap.String("formatted_json", string(reqBytes)))
-		}
-	}
-
-	toolsResult, err := client.ListTools(ctx, toolsRequest)
-	if err != nil {
-		// Log ListTools failure to server-specific log
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("ListTools operation failed",
-				zap.Error(err))
-		}
-		return nil, fmt.Errorf("ListTools failed: %w", err)
-	}
-
-	// Log response for trace debugging - use main logger for CLI debug mode
-	if respBytes, err := json.MarshalIndent(toolsResult, "", "  "); err == nil {
-		c.logger.Debug("🔍 JSON-RPC LISTTOOLS RESPONSE",
-			zap.String("method", "tools/list"),
-			zap.String("formatted_json", string(respBytes)))
-
-		// Also log to upstream logger for trace debugging
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Debug("JSON-RPC ListTools Response",
-				zap.String("method", "tools/list"),
-				zap.String("formatted_json", string(respBytes)))
-		}
-	}
-
-	// Convert to ToolMetadata
-	var tools []*config.ToolMetadata
-	for i := range toolsResult.Tools {
-		tool := &toolsResult.Tools[i]
-		// Convert input schema to JSON string
-		var paramsJSON string
-		if schemaBytes, err := json.Marshal(tool.InputSchema); err == nil {
-			paramsJSON = string(schemaBytes)
+			toolMeta := &config.ToolMetadata{
+				ServerName:  c.config.Name,
+				Name:        tool.Name,
+				Description: tool.Description,
+				ParamsJSON:  paramsJSON,
+			}
+			tools = append(tools, toolMeta)
 		}
 
-		toolMeta := &config.ToolMetadata{
-			ServerName:  c.config.Name,
-			Name:        tool.Name,
-			Description: tool.Description,
-			ParamsJSON:  paramsJSON,
-		}
-		tools = append(tools, toolMeta)
+		return tools, nil
 	}
 
-	c.logger.Info("Successfully listed tools",
-		zap.String("server", c.config.Name),
-		zap.Int("tool_count", len(tools)))
-
-	// Log successful ListTools to server-specific log
-	if c.upstreamLogger != nil {
-		c.upstreamLogger.Info("ListTools operation completed successfully",
-			zap.Int("tool_count", len(tools)))
-	}
-
-	return tools, nil
+	// Fallback if no cached tools (shouldn't happen)
+	c.logger.Warn("No cached tools available, falling back to direct call")
+	return nil, fmt.Errorf("No cached tools available and transport is broken for subsequent calls")
 }
 
 // CallTool executes a tool on the upstream server
