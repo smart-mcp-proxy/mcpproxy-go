@@ -15,6 +15,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	outputFormatJSON   = "json"
+	outputFormatPretty = "pretty"
+)
+
 var (
 	callCmd = &cobra.Command{
 		Use:   "call",
@@ -37,7 +42,7 @@ Examples:
 
 	// Command flags for call tool
 	callToolName     string
-	callJsonArgs     string
+	callJSONArgs     string
 	callLogLevel     string
 	callConfigPath   string
 	callTimeout      time.Duration
@@ -55,7 +60,7 @@ func init() {
 
 	// Define flags for call tool command
 	callToolCmd.Flags().StringVarP(&callToolName, "tool-name", "t", "", "Tool name in format server:tool_name (required)")
-	callToolCmd.Flags().StringVarP(&callJsonArgs, "json_args", "j", "{}", "JSON arguments for the tool (default: {})")
+	callToolCmd.Flags().StringVarP(&callJSONArgs, "json_args", "j", "{}", "JSON arguments for the tool (default: {})")
 	callToolCmd.Flags().StringVarP(&callLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
 	callToolCmd.Flags().StringVarP(&callConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	callToolCmd.Flags().DurationVar(&callTimeout, "timeout", 30*time.Second, "Tool call timeout")
@@ -96,7 +101,7 @@ func runCallTool(_ *cobra.Command, _ []string) error {
 
 	// Parse JSON arguments
 	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(callJsonArgs), &args); err != nil {
+	if err := json.Unmarshal([]byte(callJSONArgs), &args); err != nil {
 		return fmt.Errorf("invalid JSON arguments: %w", err)
 	}
 
@@ -115,7 +120,7 @@ func runCallTool(_ *cobra.Command, _ []string) error {
 	fmt.Printf("🚀 MCP Tool Call - Server: %s, Tool: %s\n", serverName, toolName)
 	fmt.Printf("📝 Log Level: %s\n", callLogLevel)
 	fmt.Printf("⏱️  Timeout: %v\n", callTimeout)
-	fmt.Printf("🔧 Arguments: %s\n", callJsonArgs)
+	fmt.Printf("🔧 Arguments: %s\n", callJSONArgs)
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	// Create CLI client
@@ -146,12 +151,12 @@ func runCallTool(_ *cobra.Command, _ []string) error {
 
 	// Output results based on format
 	switch callOutputFormat {
-	case "json":
+	case outputFormatJSON:
 		return outputCallResultAsJSON(result)
-	case "pretty":
+	case outputFormatPretty:
 	default:
 		fmt.Printf("✅ Tool call completed successfully!\n\n")
-		return outputCallResultPretty(result)
+		outputCallResultPretty(result)
 	}
 
 	return nil
@@ -197,7 +202,7 @@ func outputCallResultAsJSON(result interface{}) error {
 }
 
 // outputCallResultPretty outputs the result in a human-readable format
-func outputCallResultPretty(result interface{}) error {
+func outputCallResultPretty(result interface{}) {
 	fmt.Printf("📋 Tool Result:\n")
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
@@ -238,5 +243,4 @@ func outputCallResultPretty(result interface{}) error {
 	}
 
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-	return nil
 }

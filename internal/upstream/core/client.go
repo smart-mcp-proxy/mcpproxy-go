@@ -547,7 +547,7 @@ func (c *Client) IsConnected() bool {
 }
 
 // ListTools retrieves available tools from the upstream server
-func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+func (c *Client) ListTools(_ context.Context) ([]*config.ToolMetadata, error) {
 	c.mu.RLock()
 	client := c.client
 	serverInfo := c.serverInfo
@@ -574,7 +574,8 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 
 		// Convert cached tools to our format
 		tools := []*config.ToolMetadata{}
-		for _, tool := range cachedTools {
+		for i := range cachedTools {
+			tool := &cachedTools[i]
 			var paramsJSON string
 			if schemaBytes, err := json.Marshal(tool.InputSchema); err == nil {
 				paramsJSON = string(schemaBytes)
