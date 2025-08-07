@@ -252,18 +252,28 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 
 	result, err := mc.coreClient.CallTool(ctx, toolName, args)
 	if err != nil {
-		// Log the error immediately for better debugging
-		mc.logger.Error("Tool call failed",
-			zap.String("server", mc.Config.Name),
-			zap.String("tool", toolName),
-			zap.Error(err))
-
 		// Check if it's a connection error and update state
 		if mc.isConnectionError(err) {
-			mc.logger.Warn("Connection error detected, updating server state",
-				zap.String("server", mc.Config.Name),
-				zap.Error(err))
+			// Use different log levels based on error type
+			if mc.isNormalReconnectionError(err) {
+				mc.logger.Warn("Tool call failed due to connection loss, will attempt reconnection",
+					zap.String("server", mc.Config.Name),
+					zap.String("tool", toolName),
+					zap.String("error_type", "normal_reconnection"),
+					zap.Error(err))
+			} else {
+				mc.logger.Error("Tool call failed with connection error",
+					zap.String("server", mc.Config.Name),
+					zap.String("tool", toolName),
+					zap.Error(err))
+			}
 			mc.StateManager.SetError(err)
+		} else {
+			// Log non-connection errors at error level
+			mc.logger.Error("Tool call failed",
+				zap.String("server", mc.Config.Name),
+				zap.String("tool", toolName),
+				zap.Error(err))
 		}
 		return nil, err
 	}
@@ -278,12 +288,20 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 		zap.String("to", newState.String()),
 		zap.String("server", mc.Config.Name))
 
-	// Handle error states
+	// Handle error states with appropriate log levels
 	if newState == types.StateError && info.LastError != nil {
-		mc.logger.Error("Connection error",
-			zap.String("server", mc.Config.Name),
-			zap.Error(info.LastError),
-			zap.Int("retry_count", info.RetryCount))
+		if mc.isNormalReconnectionError(info.LastError) {
+			mc.logger.Warn("Connection error, will attempt automatic reconnection",
+				zap.String("server", mc.Config.Name),
+				zap.String("error_type", "normal_reconnection"),
+				zap.Error(info.LastError),
+				zap.Int("retry_count", info.RetryCount))
+		} else {
+			mc.logger.Error("Connection error",
+				zap.String("server", mc.Config.Name),
+				zap.Error(info.LastError),
+				zap.Int("retry_count", info.RetryCount))
+		}
 	}
 }
 
@@ -355,9 +373,17 @@ func (mc *Client) performHealthCheck() {
 	_, err := mc.coreClient.ListTools(ctx)
 	if err != nil {
 		if mc.isConnectionError(err) {
-			mc.logger.Warn("Health check failed, marking connection as error",
-				zap.String("server", mc.Config.Name),
-				zap.Error(err))
+			// Use different log levels based on error type
+			if mc.isNormalReconnectionError(err) {
+				mc.logger.Warn("Connection lost, will attempt reconnection",
+					zap.String("server", mc.Config.Name),
+					zap.String("error_type", "normal_reconnection"),
+					zap.Error(err))
+			} else {
+				mc.logger.Warn("Health check failed, marking connection as error",
+					zap.String("server", mc.Config.Name),
+					zap.Error(err))
+			}
 			mc.StateManager.SetError(err)
 		}
 	}
@@ -387,10 +413,20 @@ func (mc *Client) tryReconnect() {
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management
 	if err := mc.Connect(ctx); err != nil {
-		mc.logger.Error("Reconnection attempt failed",
-			zap.String("server", mc.Config.Name),
-			zap.Error(err),
-			zap.Int("retry_count", mc.StateManager.GetConnectionInfo().RetryCount))
+		retryCount := mc.StateManager.GetConnectionInfo().RetryCount
+		// Use different log levels based on error type and retry count
+		if mc.isNormalReconnectionError(err) && retryCount <= 5 {
+			mc.logger.Warn("Reconnection attempt failed, will retry with exponential backoff",
+				zap.String("server", mc.Config.Name),
+				zap.String("error_type", "normal_reconnection"),
+				zap.Error(err),
+				zap.Int("retry_count", retryCount))
+		} else {
+			mc.logger.Error("Reconnection attempt failed",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err),
+				zap.Int("retry_count", retryCount))
+		}
 		// Connect method already sets the error state, so we don't need to do it here
 		return
 	}
@@ -416,10 +452,46 @@ func (mc *Client) isConnectionError(err error) bool {
 		"timeout",
 		"deadline exceeded",
 		"context canceled",
+		// SSE and HTTP transport specific errors
+		"terminated",
+		"fetch failed",
+		"TypeError",
+		"ECONNREFUSED",
+		"SSE stream disconnected",
+		"stream disconnected",
+		"Failed to reconnect SSE stream",
+		"Maximum reconnection attempts",
+		"connect ECONNREFUSED",
 	}
 
 	for _, connErr := range connectionErrors {
 		if containsString(errStr, connErr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isNormalReconnectionError checks if error is part of normal reconnection flow
+func (mc *Client) isNormalReconnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	normalReconnectionErrors := []string{
+		"SSE stream disconnected",
+		"stream disconnected",
+		"terminated",
+		"fetch failed",
+		"Failed to reconnect SSE stream",
+		"Maximum reconnection attempts",
+		"TypeError: terminated",
+	}
+
+	for _, reconnErr := range normalReconnectionErrors {
+		if containsString(errStr, reconnErr) {
 			return true
 		}
 	}
