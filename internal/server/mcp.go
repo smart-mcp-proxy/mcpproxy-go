@@ -539,9 +539,16 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
 	}
 
-	// Call tool via upstream manager
+	// Call tool via upstream manager with circuit breaker pattern
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
 	if err != nil {
+		// Log upstream errors for debugging server stability
+		p.logger.Debug("Upstream tool call failed",
+			zap.String("server", serverName),
+			zap.String("tool", actualToolName),
+			zap.Error(err),
+			zap.String("error_type", "upstream_failure"))
+
 		// Errors are now enriched at their source with context and guidance
 		// Log error with additional context for debugging
 		p.logger.Error("Tool call failed",

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -531,9 +532,25 @@ func (s *Server) Shutdown() error {
 		return nil
 	}
 	s.shutdown = true
+	httpServer := s.httpServer
 	s.mu.Unlock()
 
 	s.logger.Info("Shutting down MCP proxy server...")
+
+	// Gracefully shutdown HTTP server first to stop accepting new connections
+	if httpServer != nil {
+		s.logger.Info("Gracefully shutting down HTTP server...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := httpServer.Shutdown(ctx); err != nil {
+			s.logger.Warn("HTTP server forced shutdown due to timeout", zap.Error(err))
+			// Force close if graceful shutdown times out
+			httpServer.Close()
+		} else {
+			s.logger.Info("HTTP server shutdown completed gracefully")
+		}
+	}
 
 	// Cancel the server context to stop all background operations
 	if s.appCancel != nil {
@@ -917,16 +934,48 @@ func (s *Server) StopServer() error {
 func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPServer) error {
 	mux := http.NewServeMux()
 
-	// Create a logging wrapper for debugging
+	// Create a logging wrapper for debugging client connections
 	loggingHandler := func(handler http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			s.logger.Info("HTTP request received",
+			start := time.Now()
+
+			// Log incoming request with connection details
+			s.logger.Debug("MCP client request received",
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
 				zap.String("remote_addr", r.RemoteAddr),
 				zap.String("user_agent", r.UserAgent()),
+				zap.String("content_type", r.Header.Get("Content-Type")),
+				zap.String("connection", r.Header.Get("Connection")),
+				zap.Int64("content_length", r.ContentLength),
 			)
-			handler.ServeHTTP(w, r)
+
+			// Create response writer wrapper to capture status and errors
+			wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: 200}
+
+			// Handle the request
+			handler.ServeHTTP(wrappedWriter, r)
+
+			duration := time.Since(start)
+
+			// Log response with timing and status
+			if wrappedWriter.statusCode >= 400 {
+				s.logger.Warn("MCP client request completed with error",
+					zap.String("method", r.Method),
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr),
+					zap.Int("status_code", wrappedWriter.statusCode),
+					zap.Duration("duration", duration),
+				)
+			} else {
+				s.logger.Debug("MCP client request completed successfully",
+					zap.String("method", r.Method),
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr),
+					zap.Int("status_code", wrappedWriter.statusCode),
+					zap.Duration("duration", duration),
+				)
+			}
 		})
 	}
 
@@ -942,14 +991,24 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	s.httpServer = &http.Server{
 		Addr:              s.config.Listen,
 		Handler:           mux,
-		ReadHeaderTimeout: 30 * time.Second,
+		ReadHeaderTimeout: 60 * time.Second,  // Increased for better client compatibility
+		ReadTimeout:       120 * time.Second, // Full request read timeout
+		WriteTimeout:      120 * time.Second, // Response write timeout
+		IdleTimeout:       180 * time.Second, // Keep-alive timeout for persistent connections
+		MaxHeaderBytes:    1 << 20,           // 1MB max header size
+		// Enable connection state tracking for better debugging
+		ConnState: s.logConnectionState,
 	}
 	s.running = true
 	s.mu.Unlock()
 
-	s.logger.Info("Starting HTTP server",
+	s.logger.Info("Starting MCP HTTP server with enhanced client stability",
 		zap.String("address", s.config.Listen),
 		zap.Strings("endpoints", []string{"/mcp", "/mcp/", "/v1/tool_code", "/v1/tool-code"}),
+		zap.Duration("read_timeout", 120*time.Second),
+		zap.Duration("write_timeout", 120*time.Second),
+		zap.Duration("idle_timeout", 180*time.Second),
+		zap.String("features", "connection_tracking,graceful_shutdown,enhanced_logging"),
 	)
 	if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		s.logger.Error("HTTP server error", zap.Error(err))
@@ -962,6 +1021,43 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 
 	s.logger.Info("HTTP server stopped")
 	return nil
+}
+
+// responseWriter wraps http.ResponseWriter to capture the status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+// logConnectionState logs HTTP connection state changes for debugging client issues
+func (s *Server) logConnectionState(conn net.Conn, state http.ConnState) {
+	switch state {
+	case http.StateNew:
+		s.logger.Debug("New client connection established",
+			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("state", "new"))
+	case http.StateActive:
+		s.logger.Debug("Client connection active",
+			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("state", "active"))
+	case http.StateIdle:
+		s.logger.Debug("Client connection idle",
+			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("state", "idle"))
+	case http.StateHijacked:
+		s.logger.Debug("Client connection hijacked (likely for upgrade)",
+			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("state", "hijacked"))
+	case http.StateClosed:
+		s.logger.Debug("Client connection closed",
+			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("state", "closed"))
+	}
 }
 
 // SaveConfiguration saves the current configuration to the persistent config file
