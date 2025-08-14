@@ -177,6 +177,16 @@ Create `.vscode/mcp.json` in your workspace:
 
 ### 🤖 Claude Desktop
 
+Claude Desktop supports two different approaches depending on your plan:
+
+**A) Free Plan — Local JSON Configuration**
+Run mcpproxy as a local process and register it in the JSON configuration file. This method uses stdio transport with a bridge package.
+
+**B) Paid Plans — Remote Custom Connector**
+Add mcpproxy as a remote MCP server via Settings → Connectors → Add Custom Connector. This method connects directly via HTTP.
+
+---
+
 **Configuration Paths:**
 
 | OS | Claude Desktop Config Path |
@@ -186,6 +196,9 @@ Create `.vscode/mcp.json` in your workspace:
 | **Linux** | `~/.config/Claude/claude_desktop_config.json` |
 
 **Setup Steps:**
+
+#### Option A: Free Plan — JSON Configuration
+
 1. Create the config file if it doesn't exist:
 
 **macOS:**
@@ -213,16 +226,26 @@ touch ~/.config/Claude/claude_desktop_config.json
   "mcpServers": {
     "mcpproxy": {
       "command": "npx",
-      "args": ["-y", "mcp-client-http", "http://localhost:8080/mcp/"]
+      "args": ["-y", "mcp-remote", "http://localhost:8080/mcp"]
     }
   }
 }
 ```
 
-**📝 Note:** Claude Desktop uses stdio transport only. The above configuration uses `mcp-client-http` to bridge HTTP to stdio.
+**📝 Note:** This approach uses `mcp-remote` to bridge HTTP to stdio transport, which is required for the JSON configuration method.
 
 3. Restart Claude Desktop
 4. Look for MCP tools in the conversation interface
+
+#### Option B: Paid Plans — Remote Custom Connector
+
+1. Open Claude Desktop
+2. Go to **Settings** → **Connectors**
+3. Click **Add Custom Connector**
+4. Enter the URL: `http://localhost:8080/mcp`
+5. Save the configuration
+
+**📝 Note:** Remote servers defined in the JSON configuration are NOT used by Claude Desktop for paid plans. You must add them through the UI, and this feature is gated by your subscription plan.
 
 **📚 Reference:** [Claude Desktop MCP Setup](https://docs.anthropic.com/claude/docs/mcp)
 
