@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"reflect"
 	"strings"
 	"time"
 
@@ -225,20 +227,107 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			newArgs = append(newArgs, args[1:]...)
 			args = newArgs
 		}
+
+		// Ensure interactive mode to keep STDIN open for MCP stdio transport
+		interactivePresent := false
+		for _, a := range args {
+			if a == "-i" || strings.HasPrefix(a, "--interactive") {
+				interactivePresent = true
+				break
+			}
+		}
+		if !interactivePresent {
+			fixedArgs := make([]string, 0, len(args)+1)
+			fixedArgs = append(fixedArgs, args[0])
+			fixedArgs = append(fixedArgs, "-i")
+			fixedArgs = append(fixedArgs, args[1:]...)
+			args = fixedArgs
+			c.logger.Warn("Docker run without -i detected; adding -i to keep STDIN open for stdio transport",
+				zap.String("server", c.config.Name),
+				zap.Strings("final_args", args))
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Warn("Docker run without -i detected; adding -i to keep STDIN open")
+			}
+		}
 	}
 
 	// Upstream transport (same as demo)
 	stdioTransport := uptransport.NewStdio(c.config.Command, envVars, args...)
 	c.client = client.NewClient(stdioTransport)
 
-	if err := c.client.Start(ctx); err != nil {
+	// Log final stdio configuration for debugging
+	c.logger.Debug("Initialized stdio transport",
+		zap.String("server", c.config.Name),
+		zap.String("command", c.config.Command),
+		zap.Strings("args", args))
+
+	// CRITICAL FIX: Use persistent context for stdio transport to prevent premature process termination
+	// The initialization context might be short-lived, but the stdio process needs to stay alive
+	persistentCtx := context.Background()
+	if err := c.client.Start(persistentCtx); err != nil {
 		return fmt.Errorf("failed to start stdio client: %w", err)
+	}
+
+	// CRITICAL FIX: Extract underlying process from mcp-go transport for lifecycle management
+	// Try to access the process via reflection
+	c.logger.Debug("Attempting to extract process from stdio transport for lifecycle management",
+		zap.String("server", c.config.Name),
+		zap.String("transport_type", fmt.Sprintf("%T", stdioTransport)))
+
+	// Use reflection to access the process field from the transport
+	transportValue := reflect.ValueOf(stdioTransport)
+	if transportValue.Kind() == reflect.Ptr {
+		transportValue = transportValue.Elem()
+	}
+
+	// Try to find a process field (common names: cmd, process, proc)
+	var processField reflect.Value
+	if transportValue.IsValid() {
+		for _, fieldName := range []string{"cmd", "process", "proc", "Cmd", "Process", "Proc"} {
+			field := transportValue.FieldByName(fieldName)
+			if field.IsValid() && field.CanInterface() {
+				if cmd, ok := field.Interface().(*exec.Cmd); ok && cmd != nil {
+					processField = field
+					break
+				}
+			}
+		}
+	}
+
+	if processField.IsValid() {
+		if cmd, ok := processField.Interface().(*exec.Cmd); ok && cmd != nil {
+			c.processCmd = cmd
+			c.logger.Info("Successfully extracted process from stdio transport for lifecycle management",
+				zap.String("server", c.config.Name),
+				zap.Int("pid", c.processCmd.Process.Pid))
+		}
+	} else {
+		c.logger.Warn("Could not extract process from stdio transport - will use alternative process tracking",
+			zap.String("server", c.config.Name),
+			zap.String("transport_type", fmt.Sprintf("%T", stdioTransport)))
+
+		// For Docker commands, we can still monitor via container ID and docker ps
+		if c.isDockerCommand {
+			c.logger.Info("Docker command detected - will monitor via container health checks",
+				zap.String("server", c.config.Name))
+		}
 	}
 
 	// Enable stderr monitoring for Docker containers
 	c.stderr = stdioTransport.Stderr()
 	if c.stderr != nil {
 		c.StartStderrMonitoring()
+	}
+
+	// Start process monitoring if we have the process reference OR it's a Docker command
+	if c.processCmd != nil {
+		c.logger.Debug("Starting process monitoring with extracted process reference",
+			zap.String("server", c.config.Name))
+		c.StartProcessMonitoring()
+	} else if c.isDockerCommand {
+		c.logger.Debug("Starting Docker container health monitoring without process reference",
+			zap.String("server", c.config.Name))
+		c.StartProcessMonitoring() // This will handle Docker-specific monitoring
 	}
 
 	// Enable Docker logs monitoring and track container ID if we have a container ID file

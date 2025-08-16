@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -253,6 +254,11 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		defer cancel()
 	}
 
+	// Extra debug before sending request through transport
+	c.logger.Debug("Starting upstream CallTool",
+		zap.String("server", c.config.Name),
+		zap.String("tool", toolName))
+
 	result, err := client.CallTool(callCtx, request)
 	if err != nil {
 		// Log CallTool failure to server-specific log
@@ -265,6 +271,15 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		// Provide more specific error context
 		if callCtx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("CallTool '%s' timed out after %v", toolName, timeout)
+		}
+
+		// Extra diagnostics for broken pipe/closed pipe
+		errStr := err.Error()
+		if strings.Contains(errStr, "broken pipe") || strings.Contains(errStr, "closed pipe") {
+			c.logger.Warn("CallTool write failed due to pipe closure",
+				zap.String("server", c.config.Name),
+				zap.String("tool", toolName),
+				zap.String("transport", c.transportType))
 		}
 
 		return nil, fmt.Errorf("CallTool failed for '%s': %w", toolName, err)

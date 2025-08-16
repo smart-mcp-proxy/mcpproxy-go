@@ -161,8 +161,9 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 			return nil
 		}
 
-		// Connect to server
-		ctx := context.Background()
+		// Connect to server with timeout to prevent hanging
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		if err := client.Connect(ctx); err != nil {
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
 		}

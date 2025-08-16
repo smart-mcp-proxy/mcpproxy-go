@@ -1099,15 +1099,25 @@ func (s *Server) ReloadConfiguration() error {
 	s.config = newConfig
 
 	// Reload configured servers (this is where the comprehensive sync happens)
+	s.logger.Debug("About to call loadConfiguredServers")
 	if err := s.loadConfiguredServers(); err != nil {
+		s.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)
 	}
+	s.logger.Debug("loadConfiguredServers completed successfully")
 
 	// Trigger immediate reconnection for servers that were disconnected during config reload
+	s.logger.Debug("Starting goroutine for immediate reconnection after config reload")
 	go func() {
 		s.mu.RLock()
-		ctx := s.serverCtx
+		ctx := s.appCtx // Use application context instead of server context
 		s.mu.RUnlock()
+
+		s.logger.Debug("Inside reconnection goroutine", zap.Bool("ctx_is_nil", ctx == nil))
+		if ctx == nil {
+			s.logger.Error("Application context is nil, cannot trigger reconnection")
+			return
+		}
 
 		s.logger.Info("Triggering immediate reconnection after config reload")
 
