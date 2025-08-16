@@ -1103,13 +1103,30 @@ func (s *Server) ReloadConfiguration() error {
 		return fmt.Errorf("failed to reload servers: %w", err)
 	}
 
-	// Trigger tool re-indexing after configuration changes
+	// Trigger immediate reconnection for servers that were disconnected during config reload
 	go func() {
 		s.mu.RLock()
 		ctx := s.serverCtx
 		s.mu.RUnlock()
-		if err := s.discoverAndIndexTools(ctx); err != nil {
-			s.logger.Error("Failed to re-index tools after config reload", zap.Error(err))
+
+		s.logger.Info("Triggering immediate reconnection after config reload")
+
+		// Connect all servers that should be connected
+		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
+			s.logger.Warn("Some servers failed to reconnect after config reload", zap.Error(err))
+		}
+
+		// Wait a bit for connections to establish, then trigger tool re-indexing
+		select {
+		case <-time.After(2 * time.Second):
+			if err := s.discoverAndIndexTools(ctx); err != nil {
+				s.logger.Error("Failed to re-index tools after config reload", zap.Error(err))
+			}
+		case <-ctx.Done():
+			s.logger.Info("Tool re-indexing cancelled during config reload")
 		}
 	}()
 

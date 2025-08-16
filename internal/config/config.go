@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"mcpproxy-go/internal/secureenv"
 	"time"
 )
@@ -9,6 +10,35 @@ import (
 const (
 	defaultPort = ":8080"
 )
+
+// Duration is a wrapper around time.Duration that can be marshaled to/from JSON
+type Duration time.Duration
+
+// MarshalJSON implements json.Marshaler interface
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+// UnmarshalJSON implements json.Unmarshaler interface
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration format: %w", err)
+	}
+
+	*d = Duration(parsed)
+	return nil
+}
+
+// Duration returns the underlying time.Duration
+func (d Duration) Duration() time.Duration {
+	return time.Duration(d)
+}
 
 // Config represents the main configuration structure
 type Config struct {
@@ -20,6 +50,7 @@ type Config struct {
 	TopK              int             `json:"top_k" mapstructure:"top-k"`
 	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
 	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
+	CallToolTimeout   Duration        `json:"call_tool_timeout" mapstructure:"call-tool-timeout"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -184,7 +215,8 @@ func DefaultConfig() *Config {
 		Servers:           []*ServerConfig{},
 		TopK:              5,
 		ToolsLimit:        15,
-		ToolResponseLimit: 20000, // Default 20000 characters
+		ToolResponseLimit: 20000,                     // Default 20000 characters
+		CallToolTimeout:   Duration(2 * time.Minute), // Default 2 minutes for tool calls
 
 		// Default secure environment configuration
 		Environment: secureenv.DefaultEnvConfig(),
@@ -278,6 +310,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ToolResponseLimit < 0 {
 		c.ToolResponseLimit = 0 // 0 means disabled
+	}
+	if c.CallToolTimeout.Duration() <= 0 {
+		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
 	}
 
 	// Ensure Environment config is not nil

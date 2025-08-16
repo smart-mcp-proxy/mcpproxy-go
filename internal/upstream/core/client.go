@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"time"
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
@@ -20,9 +21,10 @@ import (
 
 // Client implements basic MCP client functionality without state management
 type Client struct {
-	id     string
-	config *config.ServerConfig
-	logger *zap.Logger
+	id           string
+	config       *config.ServerConfig
+	globalConfig *config.Config
+	logger       *zap.Logger
 
 	// Upstream server specific logger for debugging
 	upstreamLogger *zap.Logger
@@ -69,8 +71,9 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // NewClientWithOptions creates a new core MCP client with additional options
 func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, cliDebugMode bool) (*Client, error) {
 	c := &Client{
-		id:     id,
-		config: serverConfig,
+		id:           id,
+		config:       serverConfig,
+		globalConfig: globalConfig,
 		logger: logger.With(
 			zap.String("upstream_id", id),
 			zap.String("upstream_name", serverConfig.Name),
@@ -233,7 +236,24 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		}
 	}
 
-	result, err := client.CallTool(ctx, request)
+	// Add timeout wrapper to prevent hanging indefinitely
+	// Use configured timeout or default to 2 minutes
+	var timeout time.Duration
+	if c.globalConfig != nil && c.globalConfig.CallToolTimeout.Duration() > 0 {
+		timeout = c.globalConfig.CallToolTimeout.Duration()
+	} else {
+		timeout = 2 * time.Minute // Default fallback
+	}
+
+	// If the provided context doesn't have a timeout, add one
+	callCtx := ctx
+	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > timeout {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	result, err := client.CallTool(callCtx, request)
 	if err != nil {
 		// Log CallTool failure to server-specific log
 		if c.upstreamLogger != nil {
@@ -241,6 +261,12 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 				zap.String("tool_name", toolName),
 				zap.Error(err))
 		}
+
+		// Provide more specific error context
+		if callCtx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("CallTool '%s' timed out after %v", toolName, timeout)
+		}
+
 		return nil, fmt.Errorf("CallTool failed for '%s': %w", toolName, err)
 	}
 
