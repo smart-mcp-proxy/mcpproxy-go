@@ -43,7 +43,8 @@ func (c *Client) StopStderrMonitoring() {
 
 // StartProcessMonitoring starts monitoring the underlying process
 func (c *Client) StartProcessMonitoring() {
-	if c.processCmd == nil {
+	// Start monitoring even if processCmd is nil for Docker containers
+	if c.processCmd == nil && !c.isDockerCommand {
 		return
 	}
 
@@ -56,9 +57,16 @@ func (c *Client) StartProcessMonitoring() {
 		c.monitorProcess()
 	}()
 
-	c.logger.Debug("Started process monitoring",
-		zap.String("server", c.config.Name),
-		zap.String("command", c.processCmd.Path))
+	if c.processCmd != nil {
+		c.logger.Debug("Started process monitoring",
+			zap.String("server", c.config.Name),
+			zap.String("command", c.processCmd.Path),
+			zap.Int("pid", c.processCmd.Process.Pid))
+	} else {
+		c.logger.Debug("Started Docker container monitoring",
+			zap.String("server", c.config.Name),
+			zap.String("command", c.config.Command))
+	}
 }
 
 // StopProcessMonitoring stops process monitoring
@@ -73,7 +81,8 @@ func (c *Client) StopProcessMonitoring() {
 
 // monitorProcess monitors the underlying process health
 func (c *Client) monitorProcess() {
-	if c.processCmd == nil {
+	// Only return early if we have neither processCmd nor Docker command
+	if c.processCmd == nil && !c.isDockerCommand {
 		return
 	}
 
