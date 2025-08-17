@@ -184,7 +184,7 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // connectStdio establishes stdio transport connection
-func (c *Client) connectStdio(ctx context.Context) error {
+func (c *Client) connectStdio(_ context.Context) error {
 	if c.config.Command == "" {
 		return fmt.Errorf("no command specified for stdio transport")
 	}
@@ -212,7 +212,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	// For Docker commands, add --cidfile to capture container ID for proper cleanup
 	args := c.config.Args
 	var cidFile string
-	c.isDockerCommand = c.config.Command == "docker" && len(args) > 0 && args[0] == "run"
+	c.isDockerCommand = (c.config.Command == "docker" || strings.HasSuffix(c.config.Command, "/docker")) && len(args) > 0 && args[0] == "run"
 	if c.isDockerCommand {
 		// Create temp file for container ID
 		tmpFile, err := os.CreateTemp("", "mcpproxy-cid-*.txt")
@@ -238,8 +238,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		}
 		if !interactivePresent {
 			fixedArgs := make([]string, 0, len(args)+1)
-			fixedArgs = append(fixedArgs, args[0])
-			fixedArgs = append(fixedArgs, "-i")
+			fixedArgs = append(fixedArgs, args[0], "-i")
 			fixedArgs = append(fixedArgs, args[1:]...)
 			args = fixedArgs
 			c.logger.Warn("Docker run without -i detected; adding -i to keep STDIN open for stdio transport",
