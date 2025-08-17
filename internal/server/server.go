@@ -465,6 +465,9 @@ func (s *Server) Start(ctx context.Context) error {
 		} else if !isAppContext {
 			s.logger.Info("Server context cancelled, server stop completed")
 		}
+
+		s.logger.Info("🔥 SERVER SHUTDOWN SEQUENCE COMPLETED")
+		_ = s.logger.Sync()
 	}()
 
 	// Determine transport mode based on listen address
@@ -886,6 +889,9 @@ func (s *Server) StartServer(ctx context.Context) error {
 
 // StopServer stops the server if it's running
 func (s *Server) StopServer() error {
+	s.logger.Info("🔥 STOPSERVER CALLED - STARTING SHUTDOWN SEQUENCE")
+	_ = s.logger.Sync()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -896,28 +902,64 @@ func (s *Server) StopServer() error {
 	}
 
 	// Notify about server stopping
+	s.logger.Info("🔥 STOPSERVER - Server is running, proceeding with stop")
+	_ = s.logger.Sync()
+
+	// Disconnect upstream servers FIRST to ensure Docker containers are cleaned up
+	// Do this before canceling contexts to avoid interruption
+	s.logger.Info("🔥 STOPSERVER - Disconnecting upstream servers EARLY")
+	_ = s.logger.Sync()
+	if err := s.upstreamManager.DisconnectAll(); err != nil {
+		s.logger.Error("🔥 STOPSERVER - Failed to disconnect upstream servers early", zap.Error(err))
+		_ = s.logger.Sync()
+	} else {
+		s.logger.Info("🔥 STOPSERVER - Successfully disconnected all upstream servers early")
+		_ = s.logger.Sync()
+	}
+
+	// Add a brief wait to ensure Docker containers have time to be cleaned up
+	s.logger.Info("🔥 STOPSERVER - Waiting for Docker container cleanup to complete")
+	_ = s.logger.Sync()
+	time.Sleep(3 * time.Second)
+	s.logger.Info("🔥 STOPSERVER - Docker container cleanup wait completed")
+	_ = s.logger.Sync()
+
 	s.updateStatus("Stopping", "Server is stopping...")
 
-	// Cancel the server context first
+	// Cancel the server context after cleanup
+	s.logger.Info("🔥 STOPSERVER - Cancelling server context")
+	_ = s.logger.Sync()
 	if s.serverCancel != nil {
 		s.serverCancel()
 	}
 
 	// Gracefully shutdown HTTP server if it exists
+	s.logger.Info("🔥 STOPSERVER - Shutting down HTTP server")
+	_ = s.logger.Sync()
 	if s.httpServer != nil {
 		// Give the server 5 seconds to shutdown gracefully
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			s.logger.Warn("Failed to gracefully shutdown HTTP server, forcing close", zap.Error(err))
+			s.logger.Warn("🔥 STOPSERVER - Failed to gracefully shutdown HTTP server, forcing close", zap.Error(err))
 			// Force close if graceful shutdown fails
 			if closeErr := s.httpServer.Close(); closeErr != nil {
-				s.logger.Error("Error forcing HTTP server close", zap.Error(closeErr))
+				s.logger.Error("🔥 STOPSERVER - Error forcing HTTP server close", zap.Error(closeErr))
 			}
+		} else {
+			s.logger.Info("🔥 STOPSERVER - HTTP server shutdown successfully")
+			_ = s.logger.Sync()
 		}
 		s.httpServer = nil
 	}
+
+	s.logger.Info("🔥 STOPSERVER - HTTP server cleanup completed")
+	_ = s.logger.Sync()
+
+	// Upstream servers already disconnected early in this method
+	s.logger.Info("🔥 STOPSERVER - Upstream servers already disconnected early")
+	_ = s.logger.Sync()
 
 	// Set running to false immediately after server is shut down
 	s.running = false
@@ -925,7 +967,8 @@ func (s *Server) StopServer() error {
 	// Notify about server stopped with explicit status update
 	s.updateStatus("Stopped", "Server has been stopped")
 
-	s.logger.Info("Server stop completed")
+	s.logger.Info("🔥 STOPSERVER - All operations completed successfully")
+	_ = s.logger.Sync() // Final log flush
 
 	return nil
 }

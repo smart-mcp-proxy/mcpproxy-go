@@ -12,6 +12,10 @@ import (
 
 // readContainerID reads the container ID from cidfile for tracking
 func (c *Client) readContainerID(cidFile string) {
+	c.logger.Debug("Starting container ID tracking",
+		zap.String("server", c.config.Name),
+		zap.String("cid_file", cidFile))
+
 	// Wait for container to start and write CID file - longer timeout for image pulls
 	for attempt := 0; attempt < 100; attempt++ { // Wait up to 10 seconds
 		time.Sleep(100 * time.Millisecond)
@@ -26,17 +30,26 @@ func (c *Client) readContainerID(cidFile string) {
 
 				c.logger.Info("Docker container ID captured for cleanup",
 					zap.String("server", c.config.Name),
-					zap.String("container_id", containerID[:12])) // Show short ID
+					zap.String("container_id", containerID[:12]), // Show short ID
+					zap.String("full_container_id", containerID),
+					zap.Int("attempt", attempt))
 
 				if c.upstreamLogger != nil {
 					c.upstreamLogger.Info("Container ID captured",
-						zap.String("container_id", containerID))
+						zap.String("container_id", containerID),
+						zap.Int("attempt", attempt))
 				}
 
 				// Clean up the cidfile now that we have the ID
 				os.Remove(cidFile)
 				return
 			}
+		} else if attempt%10 == 0 { // Log every 1 second
+			c.logger.Debug("Waiting for container ID file",
+				zap.String("server", c.config.Name),
+				zap.String("cid_file", cidFile),
+				zap.Int("attempt", attempt),
+				zap.Error(err))
 		}
 	}
 
@@ -47,17 +60,24 @@ func (c *Client) readContainerID(cidFile string) {
 
 // killDockerContainer kills the Docker container if one is running
 func (c *Client) killDockerContainer() {
-	if c.containerID == "" {
+	c.mu.Lock()
+	containerID := c.containerID
+	c.mu.Unlock()
+
+	if containerID == "" {
+		c.logger.Debug("No container ID available for cleanup",
+			zap.String("server", c.config.Name))
 		return
 	}
 
 	c.logger.Info("Killing Docker container during disconnect",
 		zap.String("server", c.config.Name),
-		zap.String("container_id", c.containerID[:12]))
+		zap.String("container_id", containerID[:12]),
+		zap.String("full_container_id", containerID))
 
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Killing Docker container",
-			zap.String("container_id", c.containerID))
+			zap.String("container_id", containerID))
 	}
 
 	// Use a timeout for Docker kill command
@@ -65,19 +85,27 @@ func (c *Client) killDockerContainer() {
 	defer cancel()
 
 	// First try graceful stop (SIGTERM)
-	stopCmd := exec.CommandContext(ctx, "docker", "stop", c.containerID)
+	c.logger.Debug("Attempting graceful stop",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", containerID[:12]))
+
+	stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
 	if err := stopCmd.Run(); err != nil {
 		c.logger.Warn("Failed to stop Docker container gracefully, trying force kill",
 			zap.String("server", c.config.Name),
-			zap.String("container_id", c.containerID[:12]),
+			zap.String("container_id", containerID[:12]),
 			zap.Error(err))
 
 		// Force kill (SIGKILL)
-		killCmd := exec.CommandContext(ctx, "docker", "kill", c.containerID)
+		c.logger.Debug("Attempting force kill",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", containerID[:12]))
+
+		killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
 		if err := killCmd.Run(); err != nil {
 			c.logger.Error("Failed to force kill Docker container",
 				zap.String("server", c.config.Name),
-				zap.String("container_id", c.containerID[:12]),
+				zap.String("container_id", containerID[:12]),
 				zap.Error(err))
 
 			if c.upstreamLogger != nil {
@@ -86,7 +114,7 @@ func (c *Client) killDockerContainer() {
 		} else {
 			c.logger.Info("Docker container force killed successfully",
 				zap.String("server", c.config.Name),
-				zap.String("container_id", c.containerID[:12]))
+				zap.String("container_id", containerID[:12]))
 
 			if c.upstreamLogger != nil {
 				c.upstreamLogger.Info("Container force killed successfully")
@@ -95,12 +123,17 @@ func (c *Client) killDockerContainer() {
 	} else {
 		c.logger.Info("Docker container stopped gracefully",
 			zap.String("server", c.config.Name),
-			zap.String("container_id", c.containerID[:12]))
+			zap.String("container_id", containerID[:12]))
 
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Info("Container stopped gracefully")
 		}
 	}
+
+	// Clear the container ID after cleanup attempt
+	c.mu.Lock()
+	c.containerID = ""
+	c.mu.Unlock()
 }
 
 // killDockerContainerByCommand finds and kills containers based on the docker command arguments
@@ -116,28 +149,33 @@ func (c *Client) killDockerContainerByCommand() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Try to find containers that match our command signature
-	// Look for containers with similar command patterns from our args
-	var searchPattern string
+	// Try to find containers that match our image name instead of command pattern
+	var imageName string
 	if len(c.config.Args) > 2 {
-		// Extract a unique part of the command for searching
-		for _, arg := range c.config.Args {
-			if strings.Contains(arg, "echo") || strings.Contains(arg, "Container started") {
-				searchPattern = "Container started"
+		// Look for the image name in args (typically last argument for docker run)
+		for i := len(c.config.Args) - 1; i >= 0; i-- {
+			arg := c.config.Args[i]
+			// Skip flags that start with -
+			if !strings.HasPrefix(arg, "-") && !strings.Contains(arg, "=") {
+				imageName = arg
 				break
 			}
 		}
 	}
 
-	if searchPattern == "" {
-		c.logger.Warn("No unique search pattern found in docker command args",
+	if imageName == "" {
+		c.logger.Warn("No image name found in docker command args",
 			zap.String("server", c.config.Name),
 			zap.Strings("args", c.config.Args))
 		return
 	}
 
-	// Get list of running containers with full command
-	listCmd := exec.CommandContext(ctx, "docker", "ps", "--no-trunc", "--format", "{{.ID}}\t{{.Command}}")
+	c.logger.Debug("Searching for containers by image name",
+		zap.String("server", c.config.Name),
+		zap.String("image_name", imageName))
+
+	// Get list of running containers with image and created time
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "--format", "{{.ID}}\t{{.Image}}\t{{.CreatedAt}}")
 	output, err := listCmd.Output()
 	if err != nil {
 		c.logger.Error("Failed to list Docker containers for cleanup",
@@ -154,20 +192,27 @@ func (c *Client) killDockerContainerByCommand() {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) == 2 {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) >= 2 {
 			containerID := parts[0]
-			command := parts[1]
+			image := parts[1]
 
-			// Check if this container matches our command pattern
-			if strings.Contains(command, searchPattern) {
+			// Check if this container matches our image
+			if image == imageName {
 				containersToKill = append(containersToKill, containerID)
 				c.logger.Info("Found matching container for cleanup",
 					zap.String("server", c.config.Name),
 					zap.String("container_id", containerID),
-					zap.String("command", command))
+					zap.String("image", image))
 			}
 		}
+	}
+
+	if len(containersToKill) == 0 {
+		c.logger.Debug("No matching containers found for cleanup",
+			zap.String("server", c.config.Name),
+			zap.String("image_name", imageName))
+		return
 	}
 
 	// Kill matching containers

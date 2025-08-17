@@ -214,6 +214,11 @@ func (c *Client) connectStdio(_ context.Context) error {
 	var cidFile string
 	c.isDockerCommand = (c.config.Command == "docker" || strings.HasSuffix(c.config.Command, "/docker")) && len(args) > 0 && args[0] == "run"
 	if c.isDockerCommand {
+		c.logger.Debug("Docker command detected, setting up container ID tracking",
+			zap.String("server", c.config.Name),
+			zap.String("command", c.config.Command),
+			zap.Strings("original_args", args))
+
 		// Create temp file for container ID
 		tmpFile, err := os.CreateTemp("", "mcpproxy-cid-*.txt")
 		if err == nil {
@@ -226,6 +231,15 @@ func (c *Client) connectStdio(_ context.Context) error {
 			newArgs = append(newArgs, args[0], "--cidfile", cidFile) // "run" + cidfile
 			newArgs = append(newArgs, args[1:]...)
 			args = newArgs
+
+			c.logger.Debug("Container ID file setup complete",
+				zap.String("server", c.config.Name),
+				zap.String("cid_file", cidFile),
+				zap.Strings("modified_args", args))
+		} else {
+			c.logger.Error("Failed to create container ID file",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
 		}
 
 		// Ensure interactive mode to keep STDIN open for MCP stdio transport
@@ -513,12 +527,21 @@ func (c *Client) Disconnect() error {
 
 	// For Docker containers, kill the container before closing the client
 	if c.isDockerCommand {
+		c.logger.Debug("Disconnecting Docker command, attempting container cleanup",
+			zap.String("server", c.config.Name),
+			zap.Bool("has_container_id", c.containerID != ""))
+
 		if c.containerID != "" {
 			c.killDockerContainer()
 		} else {
+			c.logger.Debug("No container ID available, using fallback cleanup method",
+				zap.String("server", c.config.Name))
 			// Fallback: try to find and kill any containers started by this command
 			c.killDockerContainerByCommand()
 		}
+	} else {
+		c.logger.Debug("Non-Docker command disconnecting, no container cleanup needed",
+			zap.String("server", c.config.Name))
 	}
 
 	c.client.Close()
