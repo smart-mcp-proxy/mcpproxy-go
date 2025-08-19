@@ -918,11 +918,17 @@ func (s *Server) StopServer() error {
 	}
 
 	// Add a brief wait to ensure Docker containers have time to be cleaned up
-	s.logger.Info("STOPSERVER - Waiting for Docker container cleanup to complete")
-	_ = s.logger.Sync()
-	time.Sleep(3 * time.Second)
-	s.logger.Info("STOPSERVER - Docker container cleanup wait completed")
-	_ = s.logger.Sync()
+	// Only wait if there are actually Docker containers running
+	if s.upstreamManager.HasDockerContainers() {
+		s.logger.Info("STOPSERVER - Docker containers detected, waiting for cleanup to complete")
+		_ = s.logger.Sync()
+		time.Sleep(3 * time.Second)
+		s.logger.Info("STOPSERVER - Docker container cleanup wait completed")
+		_ = s.logger.Sync()
+	} else {
+		s.logger.Debug("STOPSERVER - No Docker containers detected, skipping cleanup wait")
+		_ = s.logger.Sync()
+	}
 
 	s.updateStatus("Stopping", "Server is stopping...")
 

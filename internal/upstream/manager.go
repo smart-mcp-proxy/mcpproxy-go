@@ -457,6 +457,19 @@ func (m *Manager) DisconnectAll() error {
 	return lastError
 }
 
+// HasDockerContainers checks if any connected servers are running Docker containers
+func (m *Manager) HasDockerContainers() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, client := range m.clients {
+		if client.IsDockerCommand() {
+			return true
+		}
+	}
+	return false
+}
+
 // GetStats returns statistics about upstream connections
 func (m *Manager) GetStats() map[string]interface{} {
 	m.mu.RLock()

@@ -516,6 +516,11 @@ func containsString(str, substr string) bool {
 	return false
 }
 
+// IsDockerCommand returns whether this client is running a Docker command
+func (mc *Client) IsDockerCommand() bool {
+	return mc.isDockerServer()
+}
+
 // isDockerServer checks if the server is running via Docker
 func (mc *Client) isDockerServer() bool {
 	return containsString(mc.Config.Command, "docker")
