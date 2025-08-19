@@ -93,8 +93,8 @@ func (c *Client) Connect(ctx context.Context) error {
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.transportType))
 
-	// CACHING DISABLED: Don't cache tools immediately after initialization for testing
-	c.logger.Debug("Tools caching disabled - will make direct calls each time",
+	// Tools caching disabled - will make direct calls to upstream server each time
+	c.logger.Debug("Tools caching disabled - will make direct calls to upstream server",
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.transportType))
 

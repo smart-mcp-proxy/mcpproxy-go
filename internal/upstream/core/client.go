@@ -172,15 +172,14 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		return nil, nil
 	}
 
-	// CACHING DISABLED: Make direct call each time for testing
-	c.logger.Info("Making direct tools list call (caching disabled)",
+	// Always make direct call to upstream server (no caching)
+	c.logger.Info("Making direct tools list call to upstream server",
 		zap.String("server", c.config.Name))
 
-	// Make direct call to list tools
 	listReq := mcp.ListToolsRequest{}
 	toolsResult, err := client.ListTools(ctx, listReq)
 	if err != nil {
-		c.logger.Error("Failed to list tools via direct call",
+		c.logger.Error("Failed to list tools via direct call to upstream server",
 			zap.String("server", c.config.Name),
 			zap.Error(err))
 		return nil, fmt.Errorf("failed to list tools: %w", err)
@@ -204,7 +203,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		tools = append(tools, toolMeta)
 	}
 
-	c.logger.Info("Successfully retrieved tools via direct call",
+	c.logger.Info("Successfully retrieved tools via direct call to upstream server",
 		zap.String("server", c.config.Name),
 		zap.Int("tool_count", len(tools)))
 
