@@ -10,11 +10,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// readContainerID reads the container ID from cidfile for tracking
-func (c *Client) readContainerID(cidFile string) {
-	c.readContainerIDWithContext(context.Background(), cidFile)
-}
-
 // readContainerIDWithContext reads the container ID from cidfile for tracking with context cancellation
 func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string) {
 	c.logger.Debug("Starting container ID tracking",
@@ -69,13 +64,6 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 	c.logger.Warn("Failed to read Docker container ID from cidfile after 10 seconds",
 		zap.String("server", c.config.Name),
 		zap.String("cid_file", cidFile))
-}
-
-// killDockerContainer kills the Docker container if one is running
-func (c *Client) killDockerContainer() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	c.killDockerContainerWithContext(ctx)
 }
 
 // killDockerContainerWithContext kills the Docker container if one is running with context timeout
@@ -167,13 +155,6 @@ func (c *Client) killDockerContainerWithContext(ctx context.Context) {
 
 	c.logger.Debug("Container cleanup process finished",
 		zap.String("server", c.config.Name))
-}
-
-// killDockerContainerByCommand finds and kills containers based on the docker command arguments
-func (c *Client) killDockerContainerByCommand() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	c.killDockerContainerByCommandWithContext(ctx)
 }
 
 // killDockerContainerByCommandWithContext finds and kills containers based on the docker command arguments with context timeout

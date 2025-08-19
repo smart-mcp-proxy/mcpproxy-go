@@ -437,7 +437,7 @@ func (c *Client) Disconnect() error {
 }
 
 // DisconnectWithContext closes the connection with context timeout
-func (c *Client) DisconnectWithContext(ctx context.Context) error {
+func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

@@ -182,11 +182,6 @@ func (c *Client) monitorStderr() {
 	}
 }
 
-// monitorDockerLogs monitors Docker container logs using `docker logs`
-func (c *Client) monitorDockerLogs(cidFile string) {
-	c.monitorDockerLogsWithContext(context.Background(), cidFile)
-}
-
 // monitorDockerLogsWithContext monitors Docker container logs using `docker logs` with context cancellation
 func (c *Client) monitorDockerLogsWithContext(ctx context.Context, cidFile string) {
 	// Wait a bit for container to start and CID file to be written
