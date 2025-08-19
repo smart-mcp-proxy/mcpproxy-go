@@ -156,7 +156,7 @@ func (c *Client) IsConnected() bool {
 }
 
 // ListTools retrieves available tools from the upstream server
-func (c *Client) ListTools(_ context.Context) ([]*config.ToolMetadata, error) {
+func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	c.mu.RLock()
 	client := c.client
 	serverInfo := c.serverInfo
@@ -172,39 +172,43 @@ func (c *Client) ListTools(_ context.Context) ([]*config.ToolMetadata, error) {
 		return nil, nil
 	}
 
-	// SOLUTION: Use cached tools from successful immediate call
-	c.mu.RLock()
-	cachedTools := c.cachedTools
-	c.mu.RUnlock()
+	// CACHING DISABLED: Make direct call each time for testing
+	c.logger.Info("Making direct tools list call (caching disabled)",
+		zap.String("server", c.config.Name))
 
-	if len(cachedTools) > 0 {
-		c.logger.Info("🎯 Using cached tools list",
-			zap.Int("cached_tool_count", len(cachedTools)))
-
-		// Convert cached tools to our format
-		tools := []*config.ToolMetadata{}
-		for i := range cachedTools {
-			tool := &cachedTools[i]
-			var paramsJSON string
-			if schemaBytes, err := json.Marshal(tool.InputSchema); err == nil {
-				paramsJSON = string(schemaBytes)
-			}
-
-			toolMeta := &config.ToolMetadata{
-				ServerName:  c.config.Name,
-				Name:        tool.Name,
-				Description: tool.Description,
-				ParamsJSON:  paramsJSON,
-			}
-			tools = append(tools, toolMeta)
-		}
-
-		return tools, nil
+	// Make direct call to list tools
+	listReq := mcp.ListToolsRequest{}
+	toolsResult, err := client.ListTools(ctx, listReq)
+	if err != nil {
+		c.logger.Error("Failed to list tools via direct call",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+		return nil, fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	// Fallback if no cached tools (shouldn't happen)
-	c.logger.Warn("No cached tools available, falling back to direct call")
-	return nil, fmt.Errorf("No cached tools available and transport is broken for subsequent calls")
+	// Convert to our format
+	tools := []*config.ToolMetadata{}
+	for i := range toolsResult.Tools {
+		tool := &toolsResult.Tools[i]
+		var paramsJSON string
+		if schemaBytes, err := json.Marshal(tool.InputSchema); err == nil {
+			paramsJSON = string(schemaBytes)
+		}
+
+		toolMeta := &config.ToolMetadata{
+			ServerName:  c.config.Name,
+			Name:        tool.Name,
+			Description: tool.Description,
+			ParamsJSON:  paramsJSON,
+		}
+		tools = append(tools, toolMeta)
+	}
+
+	c.logger.Info("Successfully retrieved tools via direct call",
+		zap.String("server", c.config.Name),
+		zap.Int("tool_count", len(tools)))
+
+	return tools, nil
 }
 
 // CallTool executes a tool on the upstream server

@@ -93,83 +93,10 @@ func (c *Client) Connect(ctx context.Context) error {
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.transportType))
 
-	// Workaround: Get tools list immediately after init when transport works
-	c.logger.Debug("Attempting to cache tools immediately after initialization",
+	// CACHING DISABLED: Don't cache tools immediately after initialization for testing
+	c.logger.Debug("Tools caching disabled - will make direct calls each time",
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.transportType))
-
-	// Try to get tools with retry for servers that need time to initialize
-	var toolsResult *mcp.ListToolsResult
-	var listErr error
-	maxRetries := 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		listReq := mcp.ListToolsRequest{}
-		toolsResult, listErr = c.client.ListTools(ctx, listReq)
-
-		if listErr != nil {
-			c.logger.Warn("Failed to get tools during initialization attempt",
-				zap.String("server", c.config.Name),
-				zap.String("transport", c.transportType),
-				zap.Int("attempt", attempt),
-				zap.Int("max_retries", maxRetries),
-				zap.Error(listErr))
-
-			// Don't retry on connection errors
-			break
-		}
-
-		if len(toolsResult.Tools) > 0 {
-			// Got tools, break out of retry loop
-			break
-		}
-
-		// Empty tools list - retry with small delay for HTTP servers
-		if attempt < maxRetries {
-			c.logger.Debug("Empty tools list, retrying after delay",
-				zap.String("server", c.config.Name),
-				zap.String("transport", c.transportType),
-				zap.Int("attempt", attempt),
-				zap.Int("max_retries", maxRetries))
-			time.Sleep(time.Duration(attempt) * 100 * time.Millisecond) // 100ms, 200ms, 300ms
-		}
-	}
-
-	if listErr != nil {
-		c.logger.Warn("Failed to cache tools during initialization after retries",
-			zap.String("server", c.config.Name),
-			zap.String("transport", c.transportType),
-			zap.Error(listErr))
-		// Log to server-specific log for debugging
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Warn("Failed to cache tools during initialization",
-				zap.Error(listErr))
-		}
-	} else if len(toolsResult.Tools) == 0 {
-		c.logger.Warn("Server returned empty tools list after all retry attempts",
-			zap.String("server", c.config.Name),
-			zap.String("transport", c.transportType),
-			zap.Int("attempts", maxRetries))
-		// Log to server-specific log for debugging
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Warn("Server returned empty tools list after all retry attempts")
-		}
-	} else {
-		// Cache tools for the duration of this connection (until disconnect)
-		// Note: We already hold a lock from Connect(), so set directly
-		c.cachedTools = make([]mcp.Tool, len(toolsResult.Tools))
-		copy(c.cachedTools, toolsResult.Tools)
-
-		c.logger.Info("Tools list cached for connection duration",
-			zap.String("server", c.config.Name),
-			zap.String("transport", c.transportType),
-			zap.Int("tool_count", len(toolsResult.Tools)))
-
-		// Log to server-specific log for debugging
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Info("Tools list cached during connection initialization",
-				zap.Int("tool_count", len(toolsResult.Tools)))
-		}
-	}
 
 	// Log successful connection to server-specific log
 	if c.upstreamLogger != nil {
@@ -345,9 +272,10 @@ func (c *Client) connectStdio(_ context.Context) error {
 
 	// Enable Docker logs monitoring and track container ID if we have a container ID file
 	if cidFile != "" {
-		go c.monitorDockerLogs(cidFile)
+		// Use the same monitoring context as other goroutines
+		go c.monitorDockerLogsWithContext(c.stderrMonitoringCtx, cidFile)
 		// Also read container ID for cleanup purposes
-		go c.readContainerID(cidFile)
+		go c.readContainerIDWithContext(c.stderrMonitoringCtx, cidFile)
 	}
 
 	return nil
@@ -505,6 +433,11 @@ func (c *Client) initialize(ctx context.Context) error {
 
 // Disconnect closes the connection
 func (c *Client) Disconnect() error {
+	return c.DisconnectWithContext(context.Background())
+}
+
+// DisconnectWithContext closes the connection with context timeout
+func (c *Client) DisconnectWithContext(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -531,20 +464,34 @@ func (c *Client) Disconnect() error {
 			zap.String("server", c.config.Name),
 			zap.Bool("has_container_id", c.containerID != ""))
 
+		// Create a fresh context for Docker cleanup with its own timeout
+		// This ensures cleanup can complete even if the main context expires
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+
 		if c.containerID != "" {
-			c.killDockerContainer()
+			c.killDockerContainerWithContext(cleanupCtx)
+			c.logger.Debug("Docker container cleanup completed",
+				zap.String("server", c.config.Name))
 		} else {
 			c.logger.Debug("No container ID available, using fallback cleanup method",
 				zap.String("server", c.config.Name))
 			// Fallback: try to find and kill any containers started by this command
-			c.killDockerContainerByCommand()
+			c.killDockerContainerByCommandWithContext(cleanupCtx)
+			c.logger.Debug("Docker fallback cleanup completed",
+				zap.String("server", c.config.Name))
 		}
 	} else {
 		c.logger.Debug("Non-Docker command disconnecting, no container cleanup needed",
 			zap.String("server", c.config.Name))
 	}
 
+	c.logger.Debug("Closing MCP client connection",
+		zap.String("server", c.config.Name))
 	c.client.Close()
+	c.logger.Debug("MCP client connection closed",
+		zap.String("server", c.config.Name))
+
 	c.client = nil
 	c.serverInfo = nil
 	c.connected = false
@@ -552,5 +499,7 @@ func (c *Client) Disconnect() error {
 	// Clear cached tools on disconnect
 	c.cachedTools = nil
 
+	c.logger.Debug("Disconnect completed successfully",
+		zap.String("server", c.config.Name))
 	return nil
 }

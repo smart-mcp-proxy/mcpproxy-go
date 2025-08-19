@@ -12,44 +12,57 @@ import (
 
 // readContainerID reads the container ID from cidfile for tracking
 func (c *Client) readContainerID(cidFile string) {
+	c.readContainerIDWithContext(context.Background(), cidFile)
+}
+
+// readContainerIDWithContext reads the container ID from cidfile for tracking with context cancellation
+func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string) {
 	c.logger.Debug("Starting container ID tracking",
 		zap.String("server", c.config.Name),
 		zap.String("cid_file", cidFile))
 
 	// Wait for container to start and write CID file - longer timeout for image pulls
 	for attempt := 0; attempt < 100; attempt++ { // Wait up to 10 seconds
-		time.Sleep(100 * time.Millisecond)
-
-		cidBytes, err := os.ReadFile(cidFile)
-		if err == nil {
-			containerID := strings.TrimSpace(string(cidBytes))
-			if containerID != "" {
-				c.mu.Lock()
-				c.containerID = containerID
-				c.mu.Unlock()
-
-				c.logger.Info("Docker container ID captured for cleanup",
-					zap.String("server", c.config.Name),
-					zap.String("container_id", containerID[:12]), // Show short ID
-					zap.String("full_container_id", containerID),
-					zap.Int("attempt", attempt))
-
-				if c.upstreamLogger != nil {
-					c.upstreamLogger.Info("Container ID captured",
-						zap.String("container_id", containerID),
-						zap.Int("attempt", attempt))
-				}
-
-				// Clean up the cidfile now that we have the ID
-				os.Remove(cidFile)
-				return
-			}
-		} else if attempt%10 == 0 { // Log every 1 second
-			c.logger.Debug("Waiting for container ID file",
+		select {
+		case <-ctx.Done():
+			c.logger.Debug("Container ID tracking canceled",
 				zap.String("server", c.config.Name),
-				zap.String("cid_file", cidFile),
-				zap.Int("attempt", attempt),
-				zap.Error(err))
+				zap.String("cid_file", cidFile))
+			return
+		default:
+			time.Sleep(100 * time.Millisecond)
+
+			cidBytes, err := os.ReadFile(cidFile)
+			if err == nil {
+				containerID := strings.TrimSpace(string(cidBytes))
+				if containerID != "" {
+					c.mu.Lock()
+					c.containerID = containerID
+					c.mu.Unlock()
+
+					c.logger.Info("Docker container ID captured for cleanup",
+						zap.String("server", c.config.Name),
+						zap.String("container_id", containerID[:12]), // Show short ID
+						zap.String("full_container_id", containerID),
+						zap.Int("attempt", attempt))
+
+					if c.upstreamLogger != nil {
+						c.upstreamLogger.Info("Container ID captured",
+							zap.String("container_id", containerID),
+							zap.Int("attempt", attempt))
+					}
+
+					// Clean up the cidfile now that we have the ID
+					os.Remove(cidFile)
+					return
+				}
+			} else if attempt%10 == 0 { // Log every 1 second
+				c.logger.Debug("Waiting for container ID file",
+					zap.String("server", c.config.Name),
+					zap.String("cid_file", cidFile),
+					zap.Int("attempt", attempt),
+					zap.Error(err))
+			}
 		}
 	}
 
@@ -60,9 +73,19 @@ func (c *Client) readContainerID(cidFile string) {
 
 // killDockerContainer kills the Docker container if one is running
 func (c *Client) killDockerContainer() {
-	c.mu.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.killDockerContainerWithContext(ctx)
+}
+
+// killDockerContainerWithContext kills the Docker container if one is running with context timeout
+// NOTE: This function expects the caller to already hold the mutex lock
+func (c *Client) killDockerContainerWithContext(ctx context.Context) {
+	c.logger.Debug("Starting Docker container kill process",
+		zap.String("server", c.config.Name))
+
+	// Don't lock here - caller already holds the lock
 	containerID := c.containerID
-	c.mu.Unlock()
 
 	if containerID == "" {
 		c.logger.Debug("No container ID available for cleanup",
@@ -80,16 +103,16 @@ func (c *Client) killDockerContainer() {
 			zap.String("container_id", containerID))
 	}
 
-	// Use a timeout for Docker kill command
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	// First try graceful stop (SIGTERM)
 	c.logger.Debug("Attempting graceful stop",
 		zap.String("server", c.config.Name),
 		zap.String("container_id", containerID[:12]))
 
 	stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
+	c.logger.Debug("Executing docker stop command",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", containerID[:12]))
+
 	if err := stopCmd.Run(); err != nil {
 		c.logger.Warn("Failed to stop Docker container gracefully, trying force kill",
 			zap.String("server", c.config.Name),
@@ -102,6 +125,10 @@ func (c *Client) killDockerContainer() {
 			zap.String("container_id", containerID[:12]))
 
 		killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+		c.logger.Debug("Executing docker kill command",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", containerID[:12]))
+
 		if err := killCmd.Run(); err != nil {
 			c.logger.Error("Failed to force kill Docker container",
 				zap.String("server", c.config.Name),
@@ -130,24 +157,33 @@ func (c *Client) killDockerContainer() {
 		}
 	}
 
+	c.logger.Debug("Docker stop/kill commands completed, clearing container ID",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", containerID[:12]))
+
 	// Clear the container ID after cleanup attempt
-	c.mu.Lock()
+	// Note: Caller already holds the mutex lock
 	c.containerID = ""
-	c.mu.Unlock()
+
+	c.logger.Debug("Container cleanup process finished",
+		zap.String("server", c.config.Name))
 }
 
 // killDockerContainerByCommand finds and kills containers based on the docker command arguments
 func (c *Client) killDockerContainerByCommand() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.killDockerContainerByCommandWithContext(ctx)
+}
+
+// killDockerContainerByCommandWithContext finds and kills containers based on the docker command arguments with context timeout
+func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 	c.logger.Info("Container ID not available, searching for containers to clean up",
 		zap.String("server", c.config.Name))
 
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Searching for containers to clean up by command signature")
 	}
-
-	// Use a timeout for Docker operations
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
 	// Try to find containers that match our image name instead of command pattern
 	var imageName string

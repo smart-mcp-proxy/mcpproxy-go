@@ -35,9 +35,22 @@ func (c *Client) StartStderrMonitoring() {
 func (c *Client) StopStderrMonitoring() {
 	if c.stderrMonitoringCancel != nil {
 		c.stderrMonitoringCancel()
-		c.stderrMonitoringWG.Wait()
-		c.logger.Debug("Stopped stderr monitoring",
-			zap.String("server", c.config.Name))
+
+		// Use a timeout for the wait to prevent hanging
+		done := make(chan struct{})
+		go func() {
+			c.stderrMonitoringWG.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			c.logger.Debug("Stopped stderr monitoring",
+				zap.String("server", c.config.Name))
+		case <-time.After(2 * time.Second):
+			c.logger.Warn("Stderr monitoring stop timed out",
+				zap.String("server", c.config.Name))
+		}
 	}
 }
 
@@ -73,9 +86,22 @@ func (c *Client) StartProcessMonitoring() {
 func (c *Client) StopProcessMonitoring() {
 	if c.processMonitorCancel != nil {
 		c.processMonitorCancel()
-		c.processMonitorWG.Wait()
-		c.logger.Debug("Stopped process monitoring",
-			zap.String("server", c.config.Name))
+
+		// Use a timeout for the wait to prevent hanging
+		done := make(chan struct{})
+		go func() {
+			c.processMonitorWG.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			c.logger.Debug("Stopped process monitoring",
+				zap.String("server", c.config.Name))
+		case <-time.After(2 * time.Second):
+			c.logger.Warn("Process monitoring stop timed out",
+				zap.String("server", c.config.Name))
+		}
 	}
 }
 
@@ -158,8 +184,20 @@ func (c *Client) monitorStderr() {
 
 // monitorDockerLogs monitors Docker container logs using `docker logs`
 func (c *Client) monitorDockerLogs(cidFile string) {
+	c.monitorDockerLogsWithContext(context.Background(), cidFile)
+}
+
+// monitorDockerLogsWithContext monitors Docker container logs using `docker logs` with context cancellation
+func (c *Client) monitorDockerLogsWithContext(ctx context.Context, cidFile string) {
 	// Wait a bit for container to start and CID file to be written
-	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-ctx.Done():
+		c.logger.Debug("Docker logs monitoring canceled before start",
+			zap.String("server", c.config.Name),
+			zap.String("cid_file", cidFile))
+		return
+	case <-time.After(500 * time.Millisecond):
+	}
 
 	// Read container ID from file
 	cidBytes, err := os.ReadFile(cidFile)
@@ -183,8 +221,8 @@ func (c *Client) monitorDockerLogs(cidFile string) {
 		zap.String("server", c.config.Name),
 		zap.String("container_id", containerID[:12])) // Show short ID
 
-	// Start docker logs -f command
-	cmd := exec.Command("docker", "logs", "-f", "--timestamps", containerID)
+	// Start docker logs -f command with context cancellation
+	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", "--timestamps", containerID)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		c.logger.Warn("Failed to create docker logs stdout pipe", zap.Error(err))
@@ -202,16 +240,21 @@ func (c *Client) monitorDockerLogs(cidFile string) {
 		return
 	}
 
-	// Monitor both stdout and stderr from docker logs
+	// Monitor both stdout and stderr from docker logs with context cancellation
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" {
-				c.logger.Info("container logs (stdout)",
-					zap.String("server", c.config.Name),
-					zap.String("container_id", containerID[:12]),
-					zap.String("message", line))
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				line := strings.TrimSpace(scanner.Text())
+				if line != "" {
+					c.logger.Info("container logs (stdout)",
+						zap.String("server", c.config.Name),
+						zap.String("container_id", containerID[:12]),
+						zap.String("message", line))
+				}
 			}
 		}
 	}()
@@ -219,23 +262,38 @@ func (c *Client) monitorDockerLogs(cidFile string) {
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" {
-				c.logger.Info("container logs (stderr)",
-					zap.String("server", c.config.Name),
-					zap.String("container_id", containerID[:12]),
-					zap.String("message", line))
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				line := strings.TrimSpace(scanner.Text())
+				if line != "" {
+					c.logger.Info("container logs (stderr)",
+						zap.String("server", c.config.Name),
+						zap.String("container_id", containerID[:12]),
+						zap.String("message", line))
+				}
 			}
 		}
 	}()
 
-	// Wait for docker logs command to finish (when container stops)
+	// Wait for docker logs command to finish (when container stops) or context cancellation
 	if err := cmd.Wait(); err != nil {
-		c.logger.Debug("Docker logs command ended with error", zap.Error(err))
+		if ctx.Err() != nil {
+			c.logger.Debug("Docker logs command canceled",
+				zap.String("server", c.config.Name),
+				zap.String("container_id", containerID[:12]))
+		} else {
+			c.logger.Debug("Docker logs command ended with error",
+				zap.String("server", c.config.Name),
+				zap.String("container_id", containerID[:12]),
+				zap.Error(err))
+		}
+	} else {
+		c.logger.Debug("Docker logs monitoring ended",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", containerID[:12]))
 	}
-	c.logger.Debug("Docker logs monitoring ended",
-		zap.String("server", c.config.Name),
-		zap.String("container_id", containerID[:12]))
 }
 
 // CheckConnectionHealth performs a health check on the connection
