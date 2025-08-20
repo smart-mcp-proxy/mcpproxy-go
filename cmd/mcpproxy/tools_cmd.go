@@ -110,9 +110,10 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
 	}
 
-	// Ensure cleanup on exit
+	// Ensure cleanup on exit with timeout context
 	defer func() {
-		if disconnectErr := cliClient.Disconnect(); disconnectErr != nil {
+		fmt.Printf("🔌 Disconnecting from server...\n")
+		if disconnectErr := cliClient.DisconnectWithContext(ctx); disconnectErr != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
 		}
 	}()

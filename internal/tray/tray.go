@@ -500,8 +500,11 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		if actuallyRunning {
 			a.syncManager.SyncDelayed()
 		} else {
-			// Clear menus when server is stopped to avoid showing stale data
-			a.menuManager.UpdateUpstreamServersMenu([]map[string]interface{}{})
+			// When server is stopped, preserve the last known server list but update connection status
+			// This prevents the UI from showing (0/0) when the server is temporarily stopped
+			// The menu items will still be visible but will show disconnected status
+			a.logger.Debug("Server stopped, preserving menu state with disconnected status")
+			// DON'T clear menus - this causes the (0/0) flickering issue
 			// DON'T clear quarantine menu - quarantine data is persistent storage,
 			// not runtime connection data. Users should manage quarantined servers
 			// even when server is stopped.

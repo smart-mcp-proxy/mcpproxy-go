@@ -113,7 +113,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.Description("Natural language description of what you want to accomplish. Be specific about your task (e.g., 'create a new GitHub repository', 'get weather for London', 'query SQLite database for users'). The search will find the most relevant tools across all connected servers."),
 		),
 		mcp.WithNumber("limit",
-			mcp.Description("Maximum number of tools to return (default: 20, max: 100)"),
+			mcp.Description("Maximum number of tools to return (default: configured tools_limit, max: 100)"),
 		),
 		mcp.WithBoolean("include_stats",
 			mcp.Description("Include usage statistics for returned tools (default: false)"),
@@ -344,7 +344,7 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 	}
 
 	// Get optional parameters
-	limit := int(request.GetFloat("limit", 20.0))
+	limit := int(request.GetFloat("limit", float64(p.config.ToolsLimit)))
 	includeStats := request.GetBool("include_stats", false)
 	debugMode := request.GetBool("debug", false)
 	explainTool := request.GetString("explain_tool", "")
@@ -537,6 +537,19 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	if err == nil && serverConfig.Quarantined {
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
+	}
+
+	// Check connection status before attempting tool call to prevent hanging
+	if client, exists := p.upstreamManager.GetClient(serverName); exists {
+		if !client.IsConnected() {
+			state := client.GetState()
+			if client.IsConnecting() {
+				return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())), nil
+		}
+	} else {
+		return mcp.NewToolResultError(fmt.Sprintf("No client found for server: %s", serverName)), nil
 	}
 
 	// Call tool via upstream manager with circuit breaker pattern

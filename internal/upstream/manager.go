@@ -161,8 +161,9 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 			return nil
 		}
 
-		// Connect to server
-		ctx := context.Background()
+		// Connect to server with timeout to prevent hanging
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		if err := client.Connect(ctx); err != nil {
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
 		}
@@ -454,6 +455,19 @@ func (m *Manager) DisconnectAll() error {
 	}
 
 	return lastError
+}
+
+// HasDockerContainers checks if any connected servers are running Docker containers
+func (m *Manager) HasDockerContainers() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, client := range m.clients {
+		if client.IsDockerCommand() {
+			return true
+		}
+	}
+	return false
 }
 
 // GetStats returns statistics about upstream connections

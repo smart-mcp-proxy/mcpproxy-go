@@ -520,7 +520,7 @@ func TestRetrieveToolsParameters(t *testing.T) {
 		{
 			name:     "zero limit should use default",
 			limit:    0,
-			expected: 20, // default when 0 is passed
+			expected: 15, // default when 0 is passed (config.ToolsLimit)
 		},
 	}
 
@@ -529,7 +529,7 @@ func TestRetrieveToolsParameters(t *testing.T) {
 			// Test limit validation logic
 			limit := int(tt.limit)
 			if limit <= 0 {
-				limit = 20 // default
+				limit = 15 // default (config.ToolsLimit)
 			}
 			if limit > 100 {
 				limit = 100

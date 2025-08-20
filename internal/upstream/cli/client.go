@@ -148,6 +148,19 @@ func (c *Client) Disconnect() error {
 	return nil
 }
 
+// DisconnectWithContext closes the connection with context timeout
+func (c *Client) DisconnectWithContext(ctx context.Context) error {
+	c.logger.Info("🔌 Disconnecting from server...")
+
+	if err := c.coreClient.DisconnectWithContext(ctx); err != nil {
+		c.logger.Error("❌ Disconnect failed", zap.Error(err))
+		return err
+	}
+
+	c.logger.Info("✅ Successfully disconnected")
+	return nil
+}
+
 // displayServerInfo shows detailed server information
 func (c *Client) displayServerInfo() {
 	// Get server info from core client

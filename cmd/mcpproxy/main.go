@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -383,12 +384,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	shutdownFunc := func() {
 		logger.Info("Shutdown requested")
 		cancel()
+		// Don't wait here - let the main thread handle the delay
 	}
 
 	go func() {
 		sig := <-sigChan
 		logger.Info("Received signal, shutting down", zap.String("signal", sig.String()))
 		shutdownFunc()
+		// Don't exit here - let main thread handle the shutdown delay
 	}()
 
 	if cfg.EnableTray {
@@ -410,12 +413,25 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}()
 
 		// This is a blocking call that runs the tray event loop
+		logger.Info("MAIN - Starting tray event loop")
 		if err := trayApp.Run(ctx); err != nil && err != context.Canceled {
 			logger.Error("Tray application error", zap.Error(err))
 		}
+		logger.Info("MAIN - Tray event loop exited")
+
+		// If context was cancelled (shutdown requested), wait for container cleanup
+		if ctx.Err() != nil {
+			logger.Info("MAIN - Tray exited due to shutdown, waiting for container cleanup...")
+			time.Sleep(12 * time.Second)
+			logger.Info("MAIN - Container cleanup wait completed")
+		} else {
+			logger.Info("MAIN - Tray exited normally")
+		}
 
 		// Wait for server goroutine to finish
+		logger.Info("MAIN - Waiting for server goroutine to finish")
 		wg.Wait()
+		logger.Info("MAIN - Server goroutine finished, exiting")
 	} else {
 		// Without tray, run server normally and wait
 		logger.Info("Starting server without tray")

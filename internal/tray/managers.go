@@ -92,17 +92,21 @@ func (m *ServerStateManager) GetAllServers() ([]map[string]interface{}, error) {
 				m.logger.Debug("Database not available, returning cached server data")
 				return m.allServers, nil
 			}
-			// No cached data available, return empty slice
-			m.logger.Debug("Database not available and no cached data, returning empty server list")
-			return []map[string]interface{}{}, nil
+			// No cached data available, return cached data or fallback to avoid UI flickering
+			m.logger.Debug("Database not available and no cached data, preserving UI state")
+			// Return error to indicate data is not available, let caller handle gracefully
+			return nil, fmt.Errorf("database not available and no cached data: %w", err)
 		}
 		m.logger.Error("Failed to get fresh all servers data", zap.Error(err))
 		return nil, err
 	}
 
-	// Cache the fresh data
-	m.allServers = servers
-	m.lastUpdate = time.Now()
+	// Only update cache if we got valid data (non-empty or intentionally empty)
+	// This prevents overwriting good cached data with temporary empty results
+	if servers != nil {
+		m.allServers = servers
+		m.lastUpdate = time.Now()
+	}
 	return servers, nil
 }
 
@@ -125,17 +129,19 @@ func (m *ServerStateManager) GetQuarantinedServers() ([]map[string]interface{}, 
 				m.logger.Debug("Database not available, returning cached quarantine data")
 				return m.quarantinedServers, nil
 			}
-			// No cached data available, return empty slice
-			m.logger.Debug("Database not available and no cached data, returning empty quarantine list")
-			return []map[string]interface{}{}, nil
+			// No cached data available, return error to preserve UI state
+			m.logger.Debug("Database not available and no cached data, preserving quarantine UI state")
+			return nil, fmt.Errorf("database not available and no cached data: %w", err)
 		}
 		m.logger.Error("Failed to get fresh quarantined servers data", zap.Error(err))
 		return nil, err
 	}
 
-	// Cache the fresh data
-	m.quarantinedServers = servers
-	m.lastQuarantineUpdate = time.Now()
+	// Only update cache if we got valid data
+	if servers != nil {
+		m.quarantinedServers = servers
+		m.lastQuarantineUpdate = time.Now()
+	}
 	return servers, nil
 }
 
@@ -263,6 +269,13 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Stability check: Don't clear existing menus if we get empty servers and we already have servers
+	// This prevents UI flickering when database is temporarily unavailable
+	if len(servers) == 0 && len(m.serverMenuItems) > 0 {
+		m.logger.Debug("Received empty server list but existing menu items present, preserving UI state")
+		return
+	}
+
 	// --- Update Title ---
 	totalServers := len(servers)
 	connectedServers := 0
@@ -365,6 +378,17 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]interface{}) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Stability check: Don't clear existing quarantine menus if we get empty quarantine list
+	// but we already have quarantine items. This prevents UI flickering.
+	if len(quarantinedServers) == 0 && len(m.quarantineMenuItems) > 0 {
+		m.logger.Debug("Received empty quarantine list but existing menu items present, preserving UI state")
+		// Still update the title to show (0) if no quarantined servers
+		if m.quarantineMenu != nil {
+			m.quarantineMenu.SetTitle("Security Quarantine (0)")
+		}
+		return
+	}
 
 	// --- Update Title ---
 	quarantineCount := len(quarantinedServers)
@@ -690,28 +714,32 @@ func (m *SynchronizationManager) performSync() error {
 	allServers, err := m.stateManager.GetAllServers()
 	if err != nil {
 		// Check if it's a database closed error and handle gracefully
-		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
-			m.logger.Warn("DATABASE NOT AVAILABLE - skipping synchronization", zap.Error(err))
-			return nil
+		if strings.Contains(err.Error(), "database not available") {
+			m.logger.Debug("Database not available, skipping servers menu update to preserve UI state")
+			// Don't update servers menu to preserve current state
+		} else {
+			m.logger.Error("Failed to get all servers", zap.Error(err))
+			return fmt.Errorf("failed to get all servers: %w", err)
 		}
-		m.logger.Error("Failed to get all servers", zap.Error(err))
-		return fmt.Errorf("failed to get all servers: %w", err)
+	} else {
+		// Only update menu if we have valid data
+		m.menuManager.UpdateUpstreamServersMenu(allServers)
 	}
 
 	quarantinedServers, err := m.stateManager.GetQuarantinedServers()
 	if err != nil {
 		// Check if it's a database closed error and handle gracefully
-		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
-			m.logger.Warn("DATABASE NOT AVAILABLE FOR QUARANTINE - skipping synchronization", zap.Error(err))
-			return nil
+		if strings.Contains(err.Error(), "database not available") {
+			m.logger.Debug("Database not available, skipping quarantine menu update to preserve UI state")
+			// Don't update quarantine menu to preserve current state
+		} else {
+			m.logger.Error("Failed to get quarantined servers", zap.Error(err))
+			return fmt.Errorf("failed to get quarantined servers: %w", err)
 		}
-		m.logger.Error("Failed to get quarantined servers", zap.Error(err))
-		return fmt.Errorf("failed to get quarantined servers: %w", err)
+	} else {
+		// Only update menu if we have valid data
+		m.menuManager.UpdateQuarantineMenu(quarantinedServers)
 	}
-
-	// Update menus using the manager
-	m.menuManager.UpdateUpstreamServersMenu(allServers)
-	m.menuManager.UpdateQuarantineMenu(quarantinedServers)
 
 	return nil
 }

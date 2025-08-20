@@ -113,6 +113,7 @@ func TestConfigJSONSerialization(t *testing.T) {
 		TopK:              10,
 		ToolsLimit:        20,
 		ToolResponseLimit: 50000,
+		CallToolTimeout:   Duration(5 * time.Minute),
 		ReadOnlyMode:      true,
 		DisableManagement: true,
 		AllowServerAdd:    false,
@@ -146,6 +147,7 @@ func TestConfigJSONSerialization(t *testing.T) {
 	assert.Equal(t, original.TopK, restored.TopK)
 	assert.Equal(t, original.ToolsLimit, restored.ToolsLimit)
 	assert.Equal(t, original.ToolResponseLimit, restored.ToolResponseLimit)
+	assert.Equal(t, original.CallToolTimeout, restored.CallToolTimeout)
 	assert.Equal(t, original.ReadOnlyMode, restored.ReadOnlyMode)
 	assert.Equal(t, original.DisableManagement, restored.DisableManagement)
 	assert.Equal(t, original.AllowServerAdd, restored.AllowServerAdd)
