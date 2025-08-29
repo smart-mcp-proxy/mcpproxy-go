@@ -484,3 +484,4 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 
 	return cfg, nil
 }
+// Test comment
