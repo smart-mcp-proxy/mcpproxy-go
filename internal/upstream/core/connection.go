@@ -191,15 +191,22 @@ func (c *Client) connectStdio(_ context.Context) error {
 		}
 	}
 
+	// Wrap command with user shell to inherit full user environment
+	// This fixes issues when mcpproxy is launched via Launchd and doesn't inherit
+	// user's shell environment (like PATH customizations from .bashrc, .zshrc, etc.)
+	shellCommand, shellArgs := c.wrapWithUserShell(c.config.Command, args)
+
 	// Upstream transport (same as demo)
-	stdioTransport := uptransport.NewStdio(c.config.Command, envVars, args...)
+	stdioTransport := uptransport.NewStdio(shellCommand, envVars, shellArgs...)
 	c.client = client.NewClient(stdioTransport)
 
 	// Log final stdio configuration for debugging
 	c.logger.Debug("Initialized stdio transport",
 		zap.String("server", c.config.Name),
-		zap.String("command", c.config.Command),
-		zap.Strings("args", args))
+		zap.String("shell_command", shellCommand),
+		zap.Strings("shell_args", shellArgs),
+		zap.String("original_command", c.config.Command),
+		zap.Strings("original_args", args))
 
 	// CRITICAL FIX: Use persistent context for stdio transport to prevent premature process termination
 	// The initialization context might be short-lived, but the stdio process needs to stay alive
@@ -279,6 +286,56 @@ func (c *Client) connectStdio(_ context.Context) error {
 	}
 
 	return nil
+}
+
+// wrapWithUserShell wraps a command with the user's login shell to inherit full environment
+func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand string, shellArgs []string) {
+	// Get the user's default shell
+	shell, _ := c.envManager.GetSystemEnvVar("SHELL")
+	if shell == "" {
+		// Fallback to common shells based on OS
+		if strings.Contains(strings.ToLower(command), "windows") {
+			shell = "cmd"
+		} else {
+			shell = "/bin/bash" // Default fallback
+		}
+	}
+
+	// Build the command string that will be executed by the shell
+	// We need to properly escape the command and arguments for shell execution
+	var commandParts []string
+	commandParts = append(commandParts, shellescape(command))
+	for _, arg := range args {
+		commandParts = append(commandParts, shellescape(arg))
+	}
+	commandString := strings.Join(commandParts, " ")
+
+	// Log what we're doing for debugging
+	c.logger.Debug("Wrapping command with user shell for full environment inheritance",
+		zap.String("server", c.config.Name),
+		zap.String("original_command", command),
+		zap.Strings("original_args", args),
+		zap.String("shell", shell),
+		zap.String("wrapped_command", commandString))
+
+	// Return shell with -l (login) flag to load user's full environment
+	// The -c flag executes the command string
+	return shell, []string{"-l", "-c", commandString}
+}
+
+// shellescape escapes a string for safe shell execution
+func shellescape(s string) string {
+	if s == "" {
+		return "''"
+	}
+
+	// If string contains no special characters, return as-is
+	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
+		return s
+	}
+
+	// Use single quotes and escape any single quotes in the string
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
 // connectHTTP establishes HTTP/SSE transport connection with auth fallback
