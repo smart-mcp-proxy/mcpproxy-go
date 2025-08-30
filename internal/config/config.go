@@ -70,6 +70,9 @@ type Config struct {
 	// Repository detection settings
 	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
 
+	// Docker isolation settings
+	DockerIsolation *DockerIsolationConfig `json:"docker_isolation,omitempty" mapstructure:"docker-isolation"`
+
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
 }
@@ -102,6 +105,7 @@ type ServerConfig struct {
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
 	Created     time.Time         `json:"created" mapstructure:"created"`
 	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
+	Isolation   *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -111,6 +115,27 @@ type OAuthConfig struct {
 	RedirectURI  string   `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
 	Scopes       []string `json:"scopes,omitempty" mapstructure:"scopes"`
 	PKCEEnabled  bool     `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+}
+
+// DockerIsolationConfig represents global Docker isolation settings
+type DockerIsolationConfig struct {
+	Enabled       bool              `json:"enabled" mapstructure:"enabled"`                     // Global enable/disable for Docker isolation
+	DefaultImages map[string]string `json:"default_images" mapstructure:"default_images"`       // Map of runtime type to Docker image
+	Registry      string            `json:"registry,omitempty" mapstructure:"registry"`         // Custom registry (defaults to docker.io)
+	NetworkMode   string            `json:"network_mode,omitempty" mapstructure:"network_mode"` // Docker network mode (default: bridge)
+	MemoryLimit   string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"` // Memory limit for containers
+	CPULimit      string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`       // CPU limit for containers
+	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout"`           // Container startup timeout
+	ExtraArgs     []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`     // Additional docker run arguments
+}
+
+// IsolationConfig represents per-server isolation settings
+type IsolationConfig struct {
+	Enabled     bool     `json:"enabled" mapstructure:"enabled"`                     // Enable Docker isolation for this server
+	Image       string   `json:"image,omitempty" mapstructure:"image"`               // Custom Docker image (overrides default)
+	NetworkMode string   `json:"network_mode,omitempty" mapstructure:"network_mode"` // Custom network mode for this server
+	ExtraArgs   []string `json:"extra_args,omitempty" mapstructure:"extra_args"`     // Additional docker run arguments for this server
+	WorkingDir  string   `json:"working_dir,omitempty" mapstructure:"working_dir"`   // Custom working directory in container
 }
 
 // RegistryEntry represents a registry in the configuration
@@ -205,6 +230,55 @@ type ToolStatEntry struct {
 	Count    uint64 `json:"count"`
 }
 
+// DefaultDockerIsolationConfig returns default Docker isolation configuration
+func DefaultDockerIsolationConfig() *DockerIsolationConfig {
+	return &DockerIsolationConfig{
+		Enabled: false, // Disabled by default for backward compatibility
+		DefaultImages: map[string]string{
+			// Python environments
+			"python":  "python:3.11-slim",
+			"python3": "python:3.11-slim",
+			"uvx":     "python:3.11-slim",
+			"pip":     "python:3.11-slim",
+			"pipx":    "python:3.11-slim",
+
+			// Node.js environments
+			"node": "node:20-alpine",
+			"npm":  "node:20-alpine",
+			"npx":  "node:20-alpine",
+			"yarn": "node:20-alpine",
+
+			// Go binaries
+			"go": "golang:1.21-alpine",
+
+			// Rust binaries
+			"cargo": "rust:1.75-slim",
+			"rustc": "rust:1.75-slim",
+
+			// Generic binary execution
+			"binary": "alpine:3.18",
+
+			// Shell/script execution
+			"sh":   "alpine:3.18",
+			"bash": "alpine:3.18",
+
+			// Ruby
+			"ruby": "ruby:3.2-alpine",
+			"gem":  "ruby:3.2-alpine",
+
+			// PHP
+			"php":      "php:8.2-cli-alpine",
+			"composer": "php:8.2-cli-alpine",
+		},
+		Registry:    "docker.io",                // Default Docker Hub registry
+		NetworkMode: "bridge",                   // Default Docker network mode
+		MemoryLimit: "512m",                     // Default memory limit
+		CPULimit:    "1.0",                      // Default CPU limit (1 core)
+		Timeout:     Duration(30 * time.Second), // 30 second startup timeout
+		ExtraArgs:   []string{},                 // No extra args by default
+	}
+}
+
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -245,6 +319,9 @@ func DefaultConfig() *Config {
 
 		// Repository detection enabled by default
 		CheckServerRepo: true,
+
+		// Default Docker isolation settings
+		DockerIsolation: DefaultDockerIsolationConfig(),
 
 		// Default registries for MCP server discovery
 		Registries: []RegistryEntry{
@@ -318,6 +395,11 @@ func (c *Config) Validate() error {
 	// Ensure Environment config is not nil
 	if c.Environment == nil {
 		c.Environment = secureenv.DefaultEnvConfig()
+	}
+
+	// Ensure DockerIsolation config is not nil
+	if c.DockerIsolation == nil {
+		c.DockerIsolation = DefaultDockerIsolationConfig()
 	}
 
 	return nil

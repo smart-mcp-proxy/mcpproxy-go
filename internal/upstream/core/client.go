@@ -37,6 +37,9 @@ type Client struct {
 	// Environment manager for stdio transport
 	envManager *secureenv.Manager
 
+	// Isolation manager for Docker isolation
+	isolationManager *IsolationManager
+
 	// Connection state protection
 	mu        sync.RWMutex
 	connected bool
@@ -118,6 +121,11 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 	}
 
 	c.envManager = secureenv.NewManager(envConfig)
+
+	// Initialize isolation manager for Docker isolation
+	if globalConfig != nil && globalConfig.DockerIsolation != nil {
+		c.isolationManager = NewIsolationManager(globalConfig.DockerIsolation)
+	}
 
 	// Create upstream server logger if provided
 	if logConfig != nil {
