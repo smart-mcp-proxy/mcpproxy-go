@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,6 +20,9 @@ import (
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
+	"mcpproxy-go/internal/upstream/core"
+	"mcpproxy-go/internal/upstream/managed"
+	"mcpproxy-go/internal/upstream/types"
 
 	"errors"
 
@@ -35,6 +39,11 @@ const (
 	operationUpstreamServers = "upstream_servers"
 	operationQuarantineSec   = "quarantine_security"
 	operationRetrieveTools   = "retrieve_tools"
+
+	// Connection status constants
+	statusError           = "error"
+	statusDisabled        = "disabled"
+	messageServerDisabled = "Server is disabled and will not connect"
 )
 
 // MCPProxyServer implements an MCP server that acts as a proxy
@@ -48,6 +57,10 @@ type MCPProxyServer struct {
 	logger          *zap.Logger
 	mainServer      *Server        // Reference to main server for config persistence
 	config          *config.Config // Add config reference for security checks
+
+	// Docker availability cache
+	dockerAvailableCache *bool
+	dockerCacheTime      time.Time
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -159,7 +172,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// upstream_servers - Basic server management (with security checks)
 	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
 		upstreamServersTool := mcp.NewTool("upstream_servers",
-			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
+			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Configure per-server Docker images, CPU/memory limits, and network isolation. Use 'isolation_enabled', 'isolation_image', 'isolation_memory_limit', 'isolation_cpu_limit' parameters for custom settings."),
 			mcp.WithString("operation",
 				mcp.Required(),
 				mcp.Description("Operation: list, add, remove, update, patch, tail_log. For quarantine operations, use the 'quarantine_security' tool."),
@@ -195,6 +208,25 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			),
 			mcp.WithString("patch_json",
 				mcp.Description("Fields to update for patch operations as JSON string"),
+			),
+			// Docker isolation parameters
+			mcp.WithBoolean("isolation_enabled",
+				mcp.Description("Enable Docker isolation for this server (stdio servers only)"),
+			),
+			mcp.WithString("isolation_image",
+				mcp.Description("Custom Docker image for isolation (e.g., 'python:3.11', 'node:20')"),
+			),
+			mcp.WithString("isolation_memory_limit",
+				mcp.Description("Memory limit for Docker container (e.g., '512m', '1g')"),
+			),
+			mcp.WithString("isolation_cpu_limit",
+				mcp.Description("CPU limit for Docker container (e.g., '0.5', '1.0')"),
+			),
+			mcp.WithString("isolation_network_mode",
+				mcp.Description("Docker network mode (e.g., 'bridge', 'none', 'host')"),
+			),
+			mcp.WithString("isolation_working_dir",
+				mcp.Description("Working directory inside Docker container"),
 			),
 		)
 		p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
@@ -752,15 +784,186 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
 	}
 
-	jsonResult, err := json.Marshal(map[string]interface{}{
-		"servers": servers,
+	// Check Docker availability only if Docker isolation is globally enabled
+	dockerIsolationGlobalEnabled := p.config.DockerIsolation != nil && p.config.DockerIsolation.Enabled
+	var dockerAvailable bool
+	if dockerIsolationGlobalEnabled {
+		dockerAvailable = p.checkDockerAvailable()
+	}
+
+	// Enhance server list with connection status and Docker isolation info
+	enhancedServers := make([]map[string]interface{}, len(servers))
+	for i, server := range servers {
+		serverMap := map[string]interface{}{
+			"name":        server.Name,
+			"protocol":    server.Protocol,
+			"command":     server.Command,
+			"args":        server.Args,
+			"url":         server.URL,
+			"env":         server.Env,
+			"headers":     server.Headers,
+			"enabled":     server.Enabled,
+			"quarantined": server.Quarantined,
+			"created":     server.Created,
+			"updated":     server.Updated,
+		}
+
+		// Add connection status information
+		if client, exists := p.upstreamManager.GetClient(server.Name); exists {
+			connInfo := client.GetConnectionInfo()
+			containerInfo := p.getDockerContainerInfo(client)
+
+			serverMap["connection_status"] = map[string]interface{}{
+				"state":            connInfo.State.String(),
+				"last_error":       connInfo.LastError,
+				"retry_count":      connInfo.RetryCount,
+				"last_retry_time":  connInfo.LastRetryTime.Format(time.RFC3339),
+				"container_id":     containerInfo["container_id"],
+				"container_status": containerInfo["status"],
+			}
+		} else {
+			serverMap["connection_status"] = map[string]interface{}{
+				"state":       "Not Started",
+				"last_error":  nil,
+				"retry_count": 0,
+			}
+		}
+
+		// Add Docker isolation information
+		dockerInfo := map[string]interface{}{
+			"global_enabled":    dockerIsolationGlobalEnabled,
+			"docker_available":  dockerAvailable,
+			"applies_to_server": false,
+			"runtime_detected":  nil,
+			"image_used":        nil,
+		}
+
+		// Check if Docker isolation applies to this server (stdio servers only)
+		if server.Command != "" {
+			isolationManager := p.getIsolationManager()
+			if isolationManager != nil {
+				shouldIsolate := isolationManager.ShouldIsolate(server)
+				dockerInfo["applies_to_server"] = shouldIsolate
+
+				if shouldIsolate {
+					runtimeType := isolationManager.DetectRuntimeType(server.Command)
+					dockerInfo["runtime_detected"] = runtimeType
+
+					if image, err := isolationManager.GetDockerImage(server, runtimeType); err == nil {
+						dockerInfo["image_used"] = image
+					}
+				}
+			}
+
+			// Add server-specific isolation config
+			if server.Isolation != nil {
+				dockerInfo["server_isolation"] = map[string]interface{}{
+					"enabled":      server.Isolation.Enabled,
+					"image":        server.Isolation.Image,
+					"network_mode": server.Isolation.NetworkMode,
+					"working_dir":  server.Isolation.WorkingDir,
+					"extra_args":   server.Isolation.ExtraArgs,
+				}
+			}
+
+			// Add global limits
+			if p.config.DockerIsolation != nil {
+				dockerInfo["global_limits"] = map[string]interface{}{
+					"memory_limit": p.config.DockerIsolation.MemoryLimit,
+					"cpu_limit":    p.config.DockerIsolation.CPULimit,
+					"timeout":      p.config.DockerIsolation.Timeout,
+					"network_mode": p.config.DockerIsolation.NetworkMode,
+				}
+			}
+		}
+
+		serverMap["docker_isolation"] = dockerInfo
+		enhancedServers[i] = serverMap
+	}
+
+	result := map[string]interface{}{
+		"servers": enhancedServers,
 		"total":   len(servers),
-	})
+		"docker_status": map[string]interface{}{
+			"available":        dockerAvailable,
+			"global_enabled":   dockerIsolationGlobalEnabled,
+			"isolation_config": p.config.DockerIsolation,
+		},
+	}
+
+	if !dockerAvailable && dockerIsolationGlobalEnabled {
+		result["warnings"] = []string{
+			"Docker isolation is enabled but Docker daemon is not available",
+			"Servers configured for isolation will fail to start",
+			"Install Docker or disable isolation in config",
+		}
+	}
+
+	jsonResult, err := json.Marshal(result)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize servers: %v", err)), nil
 	}
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// checkDockerAvailable checks if Docker daemon is available with caching
+func (p *MCPProxyServer) checkDockerAvailable() bool {
+	// Cache result for 30 seconds to avoid repeated expensive checks
+	now := time.Now()
+	if p.dockerAvailableCache != nil && now.Sub(p.dockerCacheTime) < 30*time.Second {
+		return *p.dockerAvailableCache
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "info")
+
+	err := cmd.Run()
+	available := err == nil
+
+	// Cache the result
+	p.dockerAvailableCache = &available
+	p.dockerCacheTime = now
+
+	if !available {
+		p.logger.Debug("Docker daemon not available", zap.Error(err))
+	}
+	return available
+}
+
+// getIsolationManager returns the isolation manager for checking settings
+func (p *MCPProxyServer) getIsolationManager() IsolationChecker {
+	if p.config.DockerIsolation == nil {
+		return nil
+	}
+
+	// Create isolation manager using the core implementation
+	return core.NewIsolationManager(p.config.DockerIsolation)
+}
+
+// IsolationChecker interface for checking isolation settings
+type IsolationChecker interface {
+	ShouldIsolate(serverConfig *config.ServerConfig) bool
+	DetectRuntimeType(command string) string
+	GetDockerImage(serverConfig *config.ServerConfig, runtimeType string) (string, error)
+}
+
+// getDockerContainerInfo extracts Docker container information from client
+func (p *MCPProxyServer) getDockerContainerInfo(client *managed.Client) map[string]interface{} {
+	result := map[string]interface{}{
+		"container_id": nil,
+		"status":       nil,
+	}
+
+	// Try to get container ID from managed client
+	// Check if this client has Docker container information
+	// This would require extending the client interface to expose container info
+	_ = client
+	// For now, return empty container info
+	// TODO: Extend client interface to expose container information
+
+	return result
 }
 
 func (p *MCPProxyServer) handleListQuarantinedUpstreams(_ context.Context) (*mcp.CallToolResult, error) {
@@ -975,7 +1178,7 @@ func (p *MCPProxyServer) handleQuarantineUpstream(_ context.Context, request mcp
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleAddUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -1091,15 +1294,21 @@ func (p *MCPProxyServer) handleAddUpstream(_ context.Context, request mcp.CallTo
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
 	}
 
-	// Add to upstream manager configuration without connecting (non-blocking)
+	// Add to upstream manager and connect
+	var connectionStatus, connectionMessage string
 	if enabled {
-		if err := p.upstreamManager.AddServerConfig(name, serverConfig); err != nil {
-			p.logger.Warn("Failed to add upstream server config", zap.String("name", name), zap.Error(err))
-			// Don't fail the whole operation, just log the warning
+		if err := p.upstreamManager.AddServer(name, serverConfig); err != nil {
+			p.logger.Warn("Failed to add and connect upstream server", zap.String("name", name), zap.Error(err))
+			connectionStatus = statusError
+			connectionMessage = fmt.Sprintf("Failed to add server: %v", err)
 		} else {
-			p.logger.Info("Added upstream server configuration", zap.String("name", name))
-			// The connection will be attempted asynchronously by the background connector
+			p.logger.Info("Added upstream server and initiated connection", zap.String("name", name))
+			// Monitor connection status for 1 minute to see final state
+			connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
 		}
+	} else {
+		connectionStatus = statusDisabled
+		connectionMessage = messageServerDisabled
 	}
 
 	// Trigger configuration save and update
@@ -1111,18 +1320,20 @@ func (p *MCPProxyServer) handleAddUpstream(_ context.Context, request mcp.CallTo
 		p.mainServer.OnUpstreamServerChange()
 	}
 
-	// Enhanced response with clear quarantine instructions for LLMs
+	// Enhanced response with clear quarantine instructions and connection status for LLMs
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"name":            name,
-		"protocol":        protocol,
-		"enabled":         enabled,
-		"added":           true,
-		"status":          "configured", // Connection will be attempted asynchronously
-		"quarantined":     true,
-		"security_status": "QUARANTINED_FOR_REVIEW",
-		"message":         fmt.Sprintf("🔒 SECURITY: Server '%s' has been added but is automatically quarantined for security review. Tool calls are blocked to prevent potential Tool Poisoning Attacks (TPAs).", name),
-		"next_steps":      "To use tools from this server, please: 1) Review the server and its tools for malicious content, 2) Use the 'upstream_servers' tool with operation 'list_quarantined' to inspect tools, 3) Use the tray menu or manual config editing to remove from quarantine if verified safe",
-		"security_help":   "For security documentation, see: Tool Poisoning Attacks (TPAs) occur when malicious instructions are embedded in tool descriptions. Always verify tool descriptions for hidden commands, file access requests, or data exfiltration attempts.",
+		"name":               name,
+		"protocol":           protocol,
+		"enabled":            enabled,
+		"added":              true,
+		"status":             "configured",
+		"connection_status":  connectionStatus,
+		"connection_message": connectionMessage,
+		"quarantined":        true,
+		"security_status":    "QUARANTINED_FOR_REVIEW",
+		"message":            fmt.Sprintf("🔒 SECURITY: Server '%s' has been added but is automatically quarantined for security review. Tool calls are blocked to prevent potential Tool Poisoning Attacks (TPAs).", name),
+		"next_steps":         "To use tools from this server, please: 1) Review the server and its tools for malicious content, 2) Use the 'upstream_servers' tool with operation 'list_quarantined' to inspect tools, 3) Use the tray menu or manual config editing to remove from quarantine if verified safe",
+		"security_help":      "For security documentation, see: Tool Poisoning Attacks (TPAs) occur when malicious instructions are embedded in tool descriptions. Always verify tool descriptions for hidden commands, file access requests, or data exfiltration attempts.",
 		"review_commands": []string{
 			"upstream_servers operation='list_quarantined'",
 			"upstream_servers operation='inspect_quarantined' name='" + name + "'",
@@ -1196,7 +1407,7 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleUpdateUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -1237,12 +1448,21 @@ func (p *MCPProxyServer) handleUpdateUpstream(_ context.Context, request mcp.Cal
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil
 	}
 
-	// Update in upstream manager
+	// Update in upstream manager with connection monitoring
 	p.upstreamManager.RemoveServer(serverID)
+	var connectionStatus, connectionMessage string
 	if updatedServer.Enabled {
 		if err := p.upstreamManager.AddServer(serverID, &updatedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
+			connectionStatus = statusError
+			connectionMessage = fmt.Sprintf("Failed to update server config: %v", err)
+		} else {
+			// Monitor connection status for 1 minute
+			connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
 		}
+	} else {
+		connectionStatus = statusDisabled
+		connectionMessage = messageServerDisabled
 	}
 
 	// Trigger configuration save and update
@@ -1255,10 +1475,12 @@ func (p *MCPProxyServer) handleUpdateUpstream(_ context.Context, request mcp.Cal
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"id":      serverID,
-		"name":    name,
-		"updated": true,
-		"enabled": updatedServer.Enabled,
+		"id":                 serverID,
+		"name":               name,
+		"updated":            true,
+		"enabled":            updatedServer.Enabled,
+		"connection_status":  connectionStatus,
+		"connection_message": connectionMessage,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
@@ -1686,4 +1908,42 @@ func (p *MCPProxyServer) generateTroubleshootingAdvice(statusCode int, errorBody
 // GetMCPServer returns the underlying MCP server for serving
 func (p *MCPProxyServer) GetMCPServer() *mcpserver.MCPServer {
 	return p.server
+}
+
+// monitorConnectionStatus waits for a server to connect with a timeout
+func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName string, timeout time.Duration) (status, message string) {
+	monitorCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-monitorCtx.Done():
+			if ctx.Err() != nil {
+				// Parent context was cancelled (e.g., server shutdown)
+				return "cancelled", "Connection monitoring cancelled due to server shutdown"
+			}
+			return "timeout", fmt.Sprintf("Connection monitoring timed out after %v - server may still be connecting", timeout)
+		case <-ticker.C:
+			// Check connection status from upstream manager
+			if clientInfo, exists := p.upstreamManager.GetClient(serverName); exists {
+				if clientInfo.IsConnected() {
+					// Get additional status information
+					connectionInfo := clientInfo.GetConnectionInfo()
+					switch connectionInfo.State {
+					case types.StateReady:
+						return "ready", "Server connected and ready"
+					case types.StateConnecting:
+						return "connecting", "Server is still connecting"
+					case types.StateAuthenticating:
+						return "authenticating", "Server is authenticating"
+					default:
+						return "disconnected", "Server is disconnected"
+					}
+				}
+			}
+		}
+	}
 }

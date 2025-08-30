@@ -409,23 +409,23 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 
 	// Get the Docker command string (last argument)
 	dockerCmd := shellArgs[len(shellArgs)-1]
-	
+
 	// Insert --cidfile into the Docker command string
 	// Look for "docker run" and insert --cidfile right after
 	if strings.Contains(dockerCmd, "docker run") {
 		// Replace "docker run" with "docker run --cidfile /path/to/file"
 		dockerCmdWithCid := strings.Replace(dockerCmd, "docker run", fmt.Sprintf("docker run --cidfile %s", cidFile), 1)
-		
+
 		// Create new args with the modified command
 		newArgs := make([]string, len(shellArgs))
 		copy(newArgs, shellArgs)
 		newArgs[len(newArgs)-1] = dockerCmdWithCid
-		
+
 		c.logger.Debug("Inserted cidfile into shell-wrapped Docker command",
 			zap.String("server", c.config.Name),
 			zap.String("original_cmd", dockerCmd),
 			zap.String("modified_cmd", dockerCmdWithCid))
-		
+
 		return newArgs
 	}
 
