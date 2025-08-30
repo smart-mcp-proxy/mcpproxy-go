@@ -199,7 +199,8 @@ func (c *Client) connectStdio(_ context.Context) error {
 		if (c.config.Command == "docker" || strings.HasSuffix(c.config.Command, "/docker")) && len(args) > 0 && args[0] == "run" {
 			c.isDockerCommand = true
 			if cidFile != "" {
-				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
+				// For shell-wrapped Docker commands, we need to modify the shell command string
+				finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
 			}
 		}
 	}
@@ -393,6 +394,46 @@ func (c *Client) insertCidfileIntoDockerArgs(dockerArgs []string, cidFile string
 	}
 
 	return newArgs
+}
+
+// insertCidfileIntoShellDockerCommand inserts --cidfile into a shell-wrapped Docker command
+func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile string) []string {
+	// Shell args typically look like: ["-l", "-c", "docker run -i --rm mcp/duckduckgo"]
+	if len(shellArgs) < 3 || shellArgs[len(shellArgs)-3] != "-c" {
+		// If it's not the expected format, fall back to appending
+		c.logger.Warn("Unexpected shell command format for Docker cidfile insertion",
+			zap.String("server", c.config.Name),
+			zap.Strings("shell_args", shellArgs))
+		return append(shellArgs, "--cidfile", cidFile)
+	}
+
+	// Get the Docker command string (last argument)
+	dockerCmd := shellArgs[len(shellArgs)-1]
+	
+	// Insert --cidfile into the Docker command string
+	// Look for "docker run" and insert --cidfile right after
+	if strings.Contains(dockerCmd, "docker run") {
+		// Replace "docker run" with "docker run --cidfile /path/to/file"
+		dockerCmdWithCid := strings.Replace(dockerCmd, "docker run", fmt.Sprintf("docker run --cidfile %s", cidFile), 1)
+		
+		// Create new args with the modified command
+		newArgs := make([]string, len(shellArgs))
+		copy(newArgs, shellArgs)
+		newArgs[len(newArgs)-1] = dockerCmdWithCid
+		
+		c.logger.Debug("Inserted cidfile into shell-wrapped Docker command",
+			zap.String("server", c.config.Name),
+			zap.String("original_cmd", dockerCmd),
+			zap.String("modified_cmd", dockerCmdWithCid))
+		
+		return newArgs
+	}
+
+	// If we can't find "docker run", fall back to appending
+	c.logger.Warn("Could not find 'docker run' in shell command for cidfile insertion",
+		zap.String("server", c.config.Name),
+		zap.String("docker_cmd", dockerCmd))
+	return append(shellArgs, "--cidfile", cidFile)
 }
 
 // wrapWithUserShell wraps a command with the user's login shell to inherit full environment

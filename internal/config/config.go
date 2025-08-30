@@ -235,18 +235,18 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 	return &DockerIsolationConfig{
 		Enabled: false, // Disabled by default for backward compatibility
 		DefaultImages: map[string]string{
-			// Python environments
-			"python":  "python:3.11-slim",
-			"python3": "python:3.11-slim",
-			"uvx":     "python:3.11-slim",
-			"pip":     "python:3.11-slim",
-			"pipx":    "python:3.11-slim",
+			// Python environments - using full images for Git and build tool support
+			"python":  "python:3.11",
+			"python3": "python:3.11",
+			"uvx":     "python:3.11", // Full image needed for git+https:// installs
+			"pip":     "python:3.11",
+			"pipx":    "python:3.11",
 
-			// Node.js environments
-			"node": "node:20-alpine",
-			"npm":  "node:20-alpine",
-			"npx":  "node:20-alpine",
-			"yarn": "node:20-alpine",
+			// Node.js environments - using full images for Git and native module support
+			"node": "node:20",
+			"npm":  "node:20",
+			"npx":  "node:20", // Full image needed for git dependencies and native modules
+			"yarn": "node:20",
 
 			// Go binaries
 			"go": "golang:1.21-alpine",

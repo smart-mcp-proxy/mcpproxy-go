@@ -33,7 +33,18 @@ func (im *IsolationManager) ShouldIsolate(serverConfig *config.ServerConfig) boo
 	}
 
 	// Only isolate stdio servers (HTTP servers don't need Docker isolation)
-	return serverConfig.Command != ""
+	if serverConfig.Command == "" {
+		return false
+	}
+
+	// Skip isolation for servers that are already using Docker
+	// These are typically pre-configured Docker containers that don't need additional isolation
+	cmdName := filepath.Base(serverConfig.Command)
+	if cmdName == "docker" || strings.Contains(serverConfig.Command, "docker") {
+		return false
+	}
+
+	return true
 }
 
 // DetectRuntimeType detects the runtime type based on the command
@@ -162,6 +173,11 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 	// Add working directory if specified
 	if serverConfig.Isolation != nil && serverConfig.Isolation.WorkingDir != "" {
 		args = append(args, "--workdir", serverConfig.Isolation.WorkingDir)
+	}
+
+	// Add environment variables from server config
+	for key, value := range serverConfig.Env {
+		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
 
 	// Add global extra args
