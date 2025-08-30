@@ -120,6 +120,7 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 | `top_k` | Tools returned by `retrieve_tools` | `5` |
 | `tools_limit` | Max tools returned to client | `15` |
 | `tool_response_limit` | Auto-truncate responses above N chars (`0` disables) | `20000` |
+| `docker_isolation` | Docker security isolation settings (see below) | `enabled: false` |
 
 ### CLI Commands
 
@@ -163,6 +164,103 @@ mcpproxy tools list --server=slow-server --timeout=60s
 
 # Output tools in JSON format for scripting
 mcpproxy tools list --server=weather-api --output=json
+```
+
+---
+
+## 🐳 Docker Security Isolation
+
+MCPProxy provides **Docker isolation** for stdio MCP servers to enhance security by running each server in its own isolated container:
+
+### ✨ **Key Security Benefits**
+- **Process Isolation**: Each MCP server runs in a separate Docker container
+- **File System Isolation**: Servers cannot access host file system outside their container
+- **Network Isolation**: Configurable network modes for additional security
+- **Resource Limits**: Memory and CPU limits prevent resource exhaustion
+- **Automatic Runtime Detection**: Detects Python, Node.js, Go, Rust environments automatically
+
+### 🔧 **How It Works**
+1. **Runtime Detection**: Automatically detects server type (uvx→Python, npx→Node.js, etc.)
+2. **Container Selection**: Maps to appropriate Docker images with required tools
+3. **Environment Passing**: Passes API keys and config via secure environment variables
+4. **Git Support**: Uses full Docker images with Git for package installations from repositories
+
+### 📝 **Docker Isolation Configuration**
+
+Add to your `mcp_config.json`:
+
+```jsonc
+{
+  "docker_isolation": {
+    "enabled": true,
+    "memory_limit": "512m",
+    "cpu_limit": "1.0", 
+    "timeout": "60s",
+    "network_mode": "bridge",
+    "default_images": {
+      "python": "python:3.11",
+      "uvx": "python:3.11",
+      "node": "node:20",
+      "npx": "node:20",
+      "go": "golang:1.21-alpine"
+    }
+  },
+  "mcpServers": [
+    {
+      "name": "isolated-python-server",
+      "command": "uvx",
+      "args": ["some-python-package"],
+      "env": {
+        "API_KEY": "your-api-key"
+      },
+      "enabled": true
+      // Docker isolation applied automatically
+    },
+    {
+      "name": "custom-isolation-server", 
+      "command": "python",
+      "args": ["-m", "my_server"],
+      "isolation": {
+        "enabled": true,
+        "image": "custom-python:latest",
+        "working_dir": "/app"
+      },
+      "enabled": true
+    }
+  ]
+}
+```
+
+### 🎯 **Automatic Runtime Detection**
+
+| Command | Detected Runtime | Docker Image |
+|---------|------------------|--------------|
+| `uvx` | Python with UV package manager | `python:3.11` |
+| `npx` | Node.js with npm | `node:20` |
+| `python`, `python3` | Python | `python:3.11` |
+| `node` | Node.js | `node:20` |
+| `go` | Go language | `golang:1.21-alpine` |
+| `cargo` | Rust | `rust:1.75-slim` |
+
+### 🔐 **Security Features**
+
+- **Environment Variables**: API keys and secrets are passed securely to containers
+- **Git Support**: Full images include Git for installing packages from repositories
+- **No Docker-in-Docker**: Existing Docker servers are automatically excluded from isolation
+- **Resource Limits**: Prevents runaway processes from consuming system resources
+- **Network Isolation**: Containers run in isolated network environments
+
+### 🐛 **Docker Isolation Debugging**
+
+```bash
+# Check which servers are using Docker isolation
+mcpproxy serve --log-level=debug --tray=false | grep -i "docker isolation"
+
+# Monitor Docker containers created by MCPProxy
+docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+
+# View container logs for a specific server
+docker logs <container-id>
 ```
 
 ---

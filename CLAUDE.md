@@ -105,10 +105,11 @@ golangci-lint run ./...
 
 1. **Tool Discovery** - BM25 search across all upstream MCP server tools
 2. **Security Quarantine** - Automatic quarantine of new servers to prevent Tool Poisoning Attacks
-3. **OAuth 2.1 Support** - RFC 8252 compliant OAuth with PKCE for secure authentication
-4. **System Tray UI** - Native cross-platform tray interface for server management
-5. **Per-Server Logging** - Individual log files for each upstream server
-6. **Hot Configuration Reload** - Real-time config changes via file watching
+3. **Docker Security Isolation** - Run stdio MCP servers in isolated Docker containers for enhanced security
+4. **OAuth 2.1 Support** - RFC 8252 compliant OAuth with PKCE for secure authentication
+5. **System Tray UI** - Native cross-platform tray interface for server management
+6. **Per-Server Logging** - Individual log files for each upstream server
+7. **Hot Configuration Reload** - Real-time config changes via file watching
 
 ## Configuration
 
@@ -127,11 +128,34 @@ golangci-lint run ./...
   "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
+  "docker_isolation": {
+    "enabled": true,
+    "memory_limit": "512m",
+    "cpu_limit": "1.0",
+    "timeout": "60s",
+    "default_images": {
+      "python": "python:3.11",
+      "uvx": "python:3.11",
+      "node": "node:20",
+      "npx": "node:20"
+    }
+  },
   "mcpServers": [
     {
       "name": "github-server",
       "url": "https://api.github.com/mcp",
-      "type": "http",
+      "protocol": "http",
+      "enabled": true,
+      "quarantined": false
+    },
+    {
+      "name": "python-mcp-server",
+      "command": "uvx",
+      "args": ["some-python-package"],
+      "protocol": "stdio",
+      "env": {
+        "API_KEY": "your-api-key"
+      },
       "enabled": true,
       "quarantined": false
     }
@@ -194,6 +218,15 @@ golangci-lint run ./...
 
 ## Important Implementation Details
 
+### Docker Security Isolation
+- **Runtime Detection**: Automatically detects command type (uvx→Python, npx→Node.js, etc.)
+- **Image Selection**: Maps to appropriate Docker images with required tools and Git support
+- **Environment Passing**: API keys and config securely passed via `-e` flags
+- **Container Lifecycle**: Proper cleanup with cidfile tracking and health monitoring
+- **Conflict Avoidance**: Skips isolation for existing Docker commands to prevent nested containers
+- **Resource Limits**: Memory and CPU limits prevent resource exhaustion
+- **Full Image Support**: Uses `python:3.11` and `node:20` (not slim/alpine) for Git and build tools
+
 ### OAuth Implementation
 - Uses dynamic port allocation for callback servers
 - RFC 8252 compliant with PKCE for security
@@ -213,6 +246,7 @@ golangci-lint run ./...
 ### Logging System
 - Main application log: `main.log`
 - Per-server logs: `server-{name}.log`
+- Docker container logs automatically captured and integrated
 - Automatic log rotation and compression
 - Configurable log levels and output formats
 
@@ -220,6 +254,7 @@ golangci-lint run ./...
 - Graceful shutdown with proper resource cleanup
 - Context cancellation for background operations
 - HTTP server shutdown with timeout
+- Docker container cleanup on shutdown
 - Double shutdown protection
 
 When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
