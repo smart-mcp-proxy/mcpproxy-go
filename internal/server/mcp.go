@@ -44,9 +44,12 @@ const (
 	operationSearchServers   = "search_servers"
 
 	// Connection status constants
-	statusError           = "error"
-	statusDisabled        = "disabled"
-	messageServerDisabled = "Server is disabled and will not connect"
+	statusError                = "error"
+	statusDisabled             = "disabled"
+	statusCancelled            = "cancelled"
+	statusTimeout              = "timeout"
+	messageServerDisabled      = "Server is disabled and will not connect"
+	messageConnectionCancelled = "Connection monitoring cancelled due to server shutdown"
 )
 
 // MCPProxyServer implements an MCP server that acts as a proxy
@@ -1953,17 +1956,17 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 		case <-monitorCtx.Done():
 			if ctx.Err() != nil {
 				// Parent context was cancelled (e.g., server shutdown)
-				return "cancelled", "Connection monitoring cancelled due to server shutdown"
+				return statusCancelled, messageConnectionCancelled
 			}
-			return "timeout", fmt.Sprintf("Connection monitoring timed out after %v - server may still be connecting", timeout)
+			return statusTimeout, fmt.Sprintf("Connection monitoring timed out after %v - server may still be connecting", timeout)
 		case <-ticker.C:
 			// Always check if context is done first to handle timeout immediately
 			select {
 			case <-monitorCtx.Done():
 				if ctx.Err() != nil {
-					return "cancelled", "Connection monitoring cancelled due to server shutdown"
+					return statusCancelled, messageConnectionCancelled
 				}
-				return "timeout", fmt.Sprintf("Connection monitoring timed out after %v - server may still be connecting", timeout)
+				return statusTimeout, fmt.Sprintf("Connection monitoring timed out after %v - server may still be connecting", timeout)
 			default:
 				// Continue with status check
 			}
@@ -1971,7 +1974,7 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 			// Check if server is disabled first
 			for _, serverConfig := range p.config.Servers {
 				if serverConfig.Name == serverName && !serverConfig.Enabled {
-					return "disabled", "Server is disabled and will not connect"
+					return statusDisabled, messageServerDisabled
 				}
 			}
 
@@ -1987,7 +1990,7 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 					// If server is explicitly disconnected and enabled is false, return disabled
 					for _, serverConfig := range p.config.Servers {
 						if serverConfig.Name == serverName && !serverConfig.Enabled {
-							return "disabled", "Server is disabled and will not connect"
+							return statusDisabled, messageServerDisabled
 						}
 					}
 					// Continue monitoring for enabled but disconnected servers
@@ -2004,7 +2007,7 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 				// Client doesn't exist yet, continue monitoring (unless disabled)
 				for _, serverConfig := range p.config.Servers {
 					if serverConfig.Name == serverName && !serverConfig.Enabled {
-						return "disabled", "Server is disabled and will not connect"
+						return statusDisabled, messageServerDisabled
 					}
 				}
 				p.logger.Debug("Client not found yet, continuing to monitor", zap.String("server", serverName))

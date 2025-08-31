@@ -8,6 +8,33 @@ import (
 	"mcpproxy-go/internal/config"
 )
 
+// Command and package manager constants
+const (
+	cmdPython   = "python"
+	cmdPython3  = "python3"
+	cmdPip      = "pip"
+	cmdPipx     = "pipx"
+	cmdNode     = "node"
+	cmdNpm      = "npm"
+	cmdNpx      = "npx"
+	cmdYarn     = "yarn"
+	cmdGo       = "go"
+	cmdCargo    = "cargo"
+	cmdRustc    = "rustc"
+	cmdRuby     = "ruby"
+	cmdGem      = "gem"
+	cmdPhp      = "php"
+	cmdComposer = "composer"
+	cmdSh       = "sh"
+	cmdBash     = "bash"
+	cmdUvx      = "uvx"
+	cmdRun      = "run"
+	cmdDocker   = "docker"
+
+	pathBinBash = "/bin/bash"
+	pathBinSh   = "/bin/sh"
+)
+
 // IsolationManager handles Docker isolation logic for MCP servers
 type IsolationManager struct {
 	globalConfig *config.DockerIsolationConfig
@@ -54,47 +81,47 @@ func (im *IsolationManager) DetectRuntimeType(command string) string {
 
 	// Handle common runtime commands
 	switch cmdName {
-	case "python", "python3", "python3.11", "python3.12":
-		return "python"
-	case "uvx":
-		return "uvx"
-	case "pip", "pip3":
-		return "pip"
-	case "pipx":
-		return "pipx"
-	case "node":
-		return "node"
-	case "npm":
-		return "npm"
-	case "npx":
-		return "npx"
-	case "yarn":
-		return "yarn"
-	case "go":
-		return "go"
-	case "cargo":
-		return "cargo"
-	case "rustc":
-		return "rustc"
-	case "ruby":
-		return "ruby"
-	case "gem":
-		return "gem"
-	case "php":
-		return "php"
-	case "composer":
-		return "composer"
-	case "sh", "/bin/sh":
-		return "sh"
-	case "bash", "/bin/bash":
-		return "bash"
+	case cmdPython, cmdPython3, "python3.11", "python3.12":
+		return cmdPython
+	case cmdUvx:
+		return cmdUvx
+	case cmdPip, "pip3":
+		return cmdPip
+	case cmdPipx:
+		return cmdPipx
+	case cmdNode:
+		return cmdNode
+	case cmdNpm:
+		return cmdNpm
+	case cmdNpx:
+		return cmdNpx
+	case cmdYarn:
+		return cmdYarn
+	case cmdGo:
+		return cmdGo
+	case cmdCargo:
+		return cmdCargo
+	case cmdRustc:
+		return cmdRustc
+	case cmdRuby:
+		return cmdRuby
+	case cmdGem:
+		return cmdGem
+	case cmdPhp:
+		return cmdPhp
+	case cmdComposer:
+		return cmdComposer
+	case cmdSh, pathBinSh:
+		return cmdSh
+	case cmdBash, pathBinBash:
+		return cmdBash
 	default:
 		// Check for common patterns
 		if strings.Contains(strings.ToLower(cmdName), "python") {
 			return "python"
 		}
 		if strings.Contains(strings.ToLower(cmdName), "node") {
-			return "node"
+			return cmdNode
 		}
 
 		// Default to binary for unknown commands
@@ -197,37 +224,37 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 // TransformCommandForContainer transforms the original command to run inside the container
 func (im *IsolationManager) TransformCommandForContainer(command string, args []string, runtimeType string) (containerCommand string, containerArgs []string) {
 	switch runtimeType {
-	case "python", "python3":
+	case cmdPython, cmdPython3:
 		// For Python commands, use python directly in container
-		return "python", args
-	case "uvx":
+		return cmdPython, args
+	case cmdUvx:
 		// For uvx, we need to install it first, then run it
 		installCmd := fmt.Sprintf("pip install uv && uvx %s", strings.Join(shellescapeArgs(args), " "))
-		return "sh", []string{"-c", installCmd}
-	case "pip", "pipx":
+		return cmdSh, []string{"-c", installCmd}
+	case cmdPip, cmdPipx:
 		// Use pip directly
-		return "pip", args
-	case "node":
+		return cmdPip, args
+	case cmdNode:
 		return "node", args
-	case "npm":
+	case cmdNpm:
 		return "npm", args
-	case "npx":
+	case cmdNpx:
 		return "npx", args
-	case "yarn":
+	case cmdYarn:
 		return "yarn", args
-	case "go":
+	case cmdGo:
 		return "go", args
-	case "cargo":
+	case cmdCargo:
 		return "cargo", args
-	case "rustc":
+	case cmdRustc:
 		return "rustc", args
-	case "ruby":
+	case cmdRuby:
 		return "ruby", args
-	case "gem":
+	case cmdGem:
 		return "gem", args
-	case "php":
+	case cmdPhp:
 		return "php", args
-	case "composer":
+	case cmdComposer:
 		return "composer", args
 	case "sh", "bash":
 		// For shell commands, use the shell directly

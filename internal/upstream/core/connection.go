@@ -141,7 +141,7 @@ func (c *Client) connectStdio(_ context.Context) error {
 	var cidFile string
 
 	// Check if this will be a Docker command (either explicit or through isolation)
-	willUseDocker := (c.config.Command == "docker" || strings.HasSuffix(c.config.Command, "/docker")) && len(args) > 0 && args[0] == "run"
+	willUseDocker := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun
 	if !willUseDocker && c.isolationManager != nil {
 		willUseDocker = c.isolationManager.ShouldIsolate(c.config)
 	}
@@ -196,7 +196,7 @@ func (c *Client) connectStdio(_ context.Context) error {
 		c.isDockerCommand = false
 
 		// Handle explicit docker commands
-		if (c.config.Command == "docker" || strings.HasSuffix(c.config.Command, "/docker")) && len(args) > 0 && args[0] == "run" {
+		if (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun {
 			c.isDockerCommand = true
 			if cidFile != "" {
 				// For shell-wrapped Docker commands, we need to modify the shell command string
@@ -339,7 +339,7 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 			zap.String("container_command", containerCommand))
 	}
 
-	return "docker", finalArgs
+	return cmdDocker, finalArgs
 }
 
 // insertCidfileIntoDockerArgs inserts --cidfile option into Docker run arguments
@@ -445,7 +445,7 @@ func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand 
 		if strings.Contains(strings.ToLower(command), "windows") {
 			shell = "cmd"
 		} else {
-			shell = "/bin/bash" // Default fallback
+			shell = pathBinBash // Default fallback
 		}
 	}
 
