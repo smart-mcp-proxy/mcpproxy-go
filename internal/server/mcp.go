@@ -1960,20 +1960,35 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 		case <-ticker.C:
 			// Check connection status from upstream manager
 			if clientInfo, exists := p.upstreamManager.GetClient(serverName); exists {
-				if clientInfo.IsConnected() {
-					// Get additional status information
-					connectionInfo := clientInfo.GetConnectionInfo()
-					switch connectionInfo.State {
-					case types.StateReady:
-						return "ready", "Server connected and ready"
-					case types.StateConnecting:
-						return "connecting", "Server is still connecting"
-					case types.StateAuthenticating:
-						return "authenticating", "Server is authenticating"
-					default:
-						return "disconnected", "Server is disconnected"
-					}
+				connectionInfo := clientInfo.GetConnectionInfo()
+				switch connectionInfo.State {
+				case types.StateReady:
+					return "ready", "Server connected and ready"
+				case types.StateConnecting:
+					// Continue monitoring
+					p.logger.Debug("Server still connecting, continuing to monitor", 
+						zap.String("server", serverName),
+						zap.String("state", connectionInfo.State.String()))
+					continue
+				case types.StateAuthenticating:
+					// Continue monitoring  
+					p.logger.Debug("Server authenticating, continuing to monitor",
+						zap.String("server", serverName),
+						zap.String("state", connectionInfo.State.String()))
+					continue
+				case types.StateError:
+					return "error", fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
+				default:
+					// Continue monitoring for other states (disconnected, etc.)
+					p.logger.Debug("Server in non-ready state, continuing to monitor",
+						zap.String("server", serverName),
+						zap.String("state", connectionInfo.State.String()))
+					continue
 				}
+			} else {
+				// Client doesn't exist yet, continue monitoring
+				p.logger.Debug("Client not found yet, continuing to monitor", zap.String("server", serverName))
+				continue
 			}
 		}
 	}
