@@ -80,7 +80,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 				"command":   "npx",
 				"args":      []interface{}{"-y", "@kevinwatt/mcp-server-searxng"},
 				"env":       map[string]interface{}{"SEARXNG_INSTANCES": "https://searx.mxchange.org/"},
-				"enabled":   true,
+				"enabled":   false, // Disabled for performance test to avoid connection monitoring delays
 			},
 		},
 	}
