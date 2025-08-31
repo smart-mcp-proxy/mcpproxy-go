@@ -39,6 +39,9 @@ const (
 	operationUpstreamServers = "upstream_servers"
 	operationQuarantineSec   = "quarantine_security"
 	operationRetrieveTools   = "retrieve_tools"
+	operationReadCache       = "read_cache"
+	operationListRegistries  = "list_registries"
+	operationSearchServers   = "search_servers"
 
 	// Connection status constants
 	statusError           = "error"
@@ -536,11 +539,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			return p.handleQuarantineSecurity(ctx, proxyRequest)
 		case operationRetrieveTools:
 			return p.handleRetrieveTools(ctx, proxyRequest)
-		case "read_cache":
+		case operationReadCache:
 			return p.handleReadCache(ctx, proxyRequest)
-		case "list_registries":
+		case operationListRegistries:
 			return p.handleListRegistries(ctx, proxyRequest)
-		case "search_servers":
+		case operationSearchServers:
 			return p.handleSearchServers(ctx, proxyRequest)
 		case operationCallTool:
 			// Prevent infinite recursion
@@ -1908,6 +1911,34 @@ func (p *MCPProxyServer) generateTroubleshootingAdvice(statusCode int, errorBody
 // GetMCPServer returns the underlying MCP server for serving
 func (p *MCPProxyServer) GetMCPServer() *mcpserver.MCPServer {
 	return p.server
+}
+
+// CallBuiltInTool provides public access to built-in tools for CLI usage
+func (p *MCPProxyServer) CallBuiltInTool(ctx context.Context, toolName string, arguments map[string]interface{}) (*mcp.CallToolResult, error) {
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: arguments,
+		},
+	}
+
+	// Route to the appropriate handler
+	switch toolName {
+	case operationUpstreamServers:
+		return p.handleUpstreamServers(ctx, request)
+	case operationQuarantineSec:
+		return p.handleQuarantineSecurity(ctx, request)
+	case operationRetrieveTools:
+		return p.handleRetrieveTools(ctx, request)
+	case operationReadCache:
+		return p.handleReadCache(ctx, request)
+	case operationListRegistries:
+		return p.handleListRegistries(ctx, request)
+	case operationSearchServers:
+		return p.handleSearchServers(ctx, request)
+	default:
+		return nil, fmt.Errorf("unknown built-in tool: %s", toolName)
+	}
 }
 
 // monitorConnectionStatus waits for a server to connect with a timeout
