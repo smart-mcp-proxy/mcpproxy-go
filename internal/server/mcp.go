@@ -1305,7 +1305,6 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 			connectionStatus = statusError
 			connectionMessage = fmt.Sprintf("Failed to add server: %v", err)
 		} else {
-			p.logger.Info("Added upstream server and initiated connection", zap.String("name", name))
 			// Monitor connection status for 1 minute to see final state
 			connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
 		}

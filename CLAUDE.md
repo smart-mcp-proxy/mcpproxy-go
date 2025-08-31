@@ -260,3 +260,5 @@ golangci-lint run ./...
 When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
 - to memory 
 if u want to test tool call in mcpproxy instead of curl call, use mcpproxy call. Example  `mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'`
+- to memory
+Never use curl to interact with mcpproxy, it uses mcp protocol. USE DIRECT mcp server call
