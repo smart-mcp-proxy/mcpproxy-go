@@ -180,13 +180,13 @@ func (c *Client) connectStdio(_ context.Context) error {
 			zap.String("server", c.config.Name),
 			zap.String("original_command", c.config.Command))
 
-		// Use Docker isolation
+		// Use Docker isolation (now shell-wrapped for PATH inheritance)
 		finalCommand, finalArgs = c.setupDockerIsolation(c.config.Command, args)
 		c.isDockerCommand = true
 
-		// Add cidfile to Docker args if we have one
+		// Add cidfile to shell-wrapped Docker command if we have one
 		if cidFile != "" {
-			finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
+			finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
 		}
 	} else {
 		// Use shell wrapping for environment inheritance
@@ -339,61 +339,9 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 			zap.String("container_command", containerCommand))
 	}
 
-	return cmdDocker, finalArgs
-}
-
-// insertCidfileIntoDockerArgs inserts --cidfile option into Docker run arguments
-func (c *Client) insertCidfileIntoDockerArgs(dockerArgs []string, cidFile string) []string {
-	// Find the position after "run"
-	runIndex := -1
-	for i, arg := range dockerArgs {
-		if arg == "run" {
-			runIndex = i
-			break
-		}
-	}
-
-	if runIndex == -1 {
-		// No "run" found, just append at the end (shouldn't happen in normal cases)
-		c.logger.Warn("No 'run' command found in Docker args, appending cidfile at end",
-			zap.String("server", c.config.Name),
-			zap.Strings("docker_args", dockerArgs))
-		return append(dockerArgs, "--cidfile", cidFile)
-	}
-
-	// Insert --cidfile after "run" and before other arguments
-	newArgs := make([]string, 0, len(dockerArgs)+2)
-	newArgs = append(newArgs, dockerArgs[:runIndex+1]...) // Include "run"
-	newArgs = append(newArgs, "--cidfile", cidFile)       // Add cidfile
-	newArgs = append(newArgs, dockerArgs[runIndex+1:]...) // Add remaining args
-
-	// Ensure -i (interactive) is present for stdio transport
-	interactivePresent := false
-	for _, arg := range newArgs {
-		if arg == "-i" || strings.HasPrefix(arg, "--interactive") {
-			interactivePresent = true
-			break
-		}
-	}
-
-	if !interactivePresent {
-		// Insert -i after "run" and cidfile args
-		finalArgs := make([]string, 0, len(newArgs)+1)
-		finalArgs = append(finalArgs, newArgs[:runIndex+3]...) // Include "run", "--cidfile", cidFile
-		finalArgs = append(finalArgs, "-i")                    // Add interactive flag
-		finalArgs = append(finalArgs, newArgs[runIndex+3:]...) // Add remaining args
-
-		c.logger.Debug("Added -i flag to Docker args for stdio transport",
-			zap.String("server", c.config.Name))
-
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Debug("Added -i flag for stdio transport")
-		}
-
-		return finalArgs
-	}
-
-	return newArgs
+	// CRITICAL FIX: Wrap Docker command with user shell to inherit proper PATH
+	// This fixes issues when mcpproxy is launched via Launchpad/GUI where PATH doesn't include Docker
+	return c.wrapWithUserShell(cmdDocker, finalArgs)
 }
 
 // insertCidfileIntoShellDockerCommand inserts --cidfile into a shell-wrapped Docker command
