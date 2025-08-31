@@ -725,39 +725,44 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Test adding a command-based server (which should use stdio transport)
+	// Test adding a command-based server (using echo to avoid external dependencies)
 	addRequest := mcp.CallToolRequest{}
 	addRequest.Params.Name = "upstream_servers"
 	addRequest.Params.Arguments = map[string]interface{}{
 		"operation": "add",
 		"name":      "test-command-server",
-		"command":   "npx",
+		"command":   "echo",
 		"args": []interface{}{
-			"-y",
-			"@modelcontextprotocol/server-brave-search",
+			"test-mcp-server",
 		},
 		"env": map[string]interface{}{
-			"BRAVE_API_KEY": "test_key_123",
+			"TEST_KEY": "test_value_123",
 		},
-		"enabled": true,
+		"enabled": false, // Disabled to prevent actual connection attempts
 	}
 
 	addResult, err := mcpClient.CallTool(ctx, addRequest)
 	require.NoError(t, err)
+	if addResult.IsError {
+		t.Logf("Add operation failed with error: %v", addResult)
+	}
 	assert.False(t, addResult.IsError, "Add operation should succeed")
 
 	// Parse the result
 	require.Greater(t, len(addResult.Content), 0)
+	t.Logf("Add result content: %+v", addResult.Content)
 	var contentText string
 	if len(addResult.Content) > 0 {
 		contentBytes, err := json.Marshal(addResult.Content[0])
 		require.NoError(t, err)
+		t.Logf("Content bytes: %s", string(contentBytes))
 		var contentMap map[string]interface{}
 		err = json.Unmarshal(contentBytes, &contentMap)
 		require.NoError(t, err)
 		if text, ok := contentMap["text"].(string); ok {
 			contentText = text
 		}
+		t.Logf("Content text: %s", contentText)
 	}
 
 	var addResponse map[string]interface{}
@@ -766,7 +771,10 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 
 	// Verify the operation was successful
 	assert.Equal(t, "configured", addResponse["status"])
+	assert.Equal(t, "disabled", addResponse["connection_status"]) // Server disabled, so connection is disabled
 	assert.Contains(t, addResponse["message"], "test-command-server")
+	assert.Equal(t, true, addResponse["quarantined"]) // Server should be quarantined by default
+	assert.Equal(t, false, addResponse["enabled"])    // Server should be disabled as configured
 
 	// Verify the server configuration by listing
 	listRequest := mcp.CallToolRequest{}
@@ -806,11 +814,11 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 					// Verify key configuration properties, but not the command itself
 					// as it's now wrapped in a shell.
 					assert.Equal(t, "stdio", serverMap["protocol"])
-					assert.Equal(t, true, serverMap["enabled"])
+					assert.Equal(t, false, serverMap["enabled"]) // Server should be disabled as configured
 
 					// Verify environment variables
 					if envVars, ok := serverMap["env"].(map[string]interface{}); ok {
-						assert.Equal(t, "test_key_123", envVars["BRAVE_API_KEY"])
+						assert.Equal(t, "test_value_123", envVars["TEST_KEY"])
 					}
 					break
 				}

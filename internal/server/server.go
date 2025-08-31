@@ -1075,12 +1075,16 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 // responseWriter wraps http.ResponseWriter to capture the status code
 type responseWriter struct {
 	http.ResponseWriter
-	statusCode int
+	statusCode    int
+	headerWritten bool
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
-	rw.statusCode = code
-	rw.ResponseWriter.WriteHeader(code)
+	if !rw.headerWritten {
+		rw.statusCode = code
+		rw.headerWritten = true
+		rw.ResponseWriter.WriteHeader(code)
+	}
 }
 
 // logConnectionState logs HTTP connection state changes for debugging client issues

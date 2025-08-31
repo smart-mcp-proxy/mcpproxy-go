@@ -9,15 +9,35 @@ import (
 	"strings"
 	"time"
 
+	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/server"
+	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/truncate"
+	"mcpproxy-go/internal/upstream"
 	"mcpproxy-go/internal/upstream/cli"
 
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 const (
 	outputFormatJSON   = "json"
 	outputFormatPretty = "pretty"
+)
+
+var (
+	// Built-in tools that are handled by the MCP proxy server directly
+	builtInTools = map[string]bool{
+		"upstream_servers":    true,
+		"quarantine_security": true,
+		"retrieve_tools":      true,
+		"call_tool":           true,
+		"read_cache":          true,
+		"list_registries":     true,
+		"search_servers":      true,
+	}
 )
 
 var (
@@ -29,14 +49,20 @@ var (
 
 	callToolCmd = &cobra.Command{
 		Use:   "tool",
-		Short: "Call a specific tool on an upstream server",
-		Long: `Call a tool on an upstream server using the server:tool_name format.
-The upstream server is automatically derived from the tool name prefix.
+		Short: "Call a specific tool on an upstream server or built-in tool",
+		Long: `Call a tool on an upstream server using the server:tool_name format, or call built-in tools directly.
+The upstream server is automatically derived from the tool name prefix for external tools.
+
+Built-in tools: upstream_servers, quarantine_security, retrieve_tools, call_tool, read_cache, list_registries, search_servers
 
 Examples:
+  # Built-in tools (no server prefix)
+  mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}'
+  mcpproxy call tool --tool-name=retrieve_tools --json_args='{"query":"github repositories"}'
+  
+  # External server tools (server:tool format)
   mcpproxy call tool --tool-name=github-server:list_repos --json_args='{"owner":"user"}'
-  mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'
-  mcpproxy call tool --tool-name=local-script:run_analysis --json_args='{}'`,
+  mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'`,
 		RunE: runCallTool,
 	}
 
@@ -73,31 +99,25 @@ func init() {
 	}
 
 	// Add examples and usage help
-	callToolCmd.Example = `  # Call a GitHub server tool with JSON arguments
-  mcpproxy call tool --tool-name=github-server:list_repos --json_args='{"owner":"myorg"}'
+	callToolCmd.Example = `  # Call built-in tools (no server prefix)
+  mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}'
+  mcpproxy call tool --tool-name=retrieve_tools --json_args='{"query":"github repositories"}'
+  mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"add","name":"test","command":"uvx","args":["mcp-server-fetch"],"enabled":true}'
 
-  # Call a weather API tool 
+  # Call external server tools (server:tool format)
+  mcpproxy call tool --tool-name=github-server:list_repos --json_args='{"owner":"myorg"}'
   mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'
 
   # Call with trace logging to see all details
   mcpproxy call tool --tool-name=local-script:run_analysis --json_args='{}' --log-level=trace
 
   # Use custom config file
-  mcpproxy call tool --tool-name=custom-server:my_tool --json_args='{"param":"value"}' --config=/path/to/config.json`
+  mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}' --config=/path/to/config.json`
 }
 
 func runCallTool(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
-
-	// Parse tool name to extract server name
-	parts := strings.SplitN(callToolName, ":", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid tool name format: %s (expected server:tool_name)", callToolName)
-	}
-
-	serverName := parts[0]
-	toolName := parts[1]
 
 	// Parse JSON arguments
 	var args map[string]interface{}
@@ -111,10 +131,24 @@ func runCallTool(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
+	// Check if this is a built-in tool (no server prefix)
+	if builtInTools[callToolName] {
+		return runBuiltInTool(ctx, callToolName, args, globalConfig)
+	}
+
+	// Parse tool name to extract server name for external tools
+	parts := strings.SplitN(callToolName, ":", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid tool name format: %s (expected server:tool_name or built-in tool name)", callToolName)
+	}
+
+	serverName := parts[0]
+	toolName := parts[1]
+
 	// Validate server exists in config
-	if !serverExistsInConfig(serverName, globalConfig) {
+	if !serverExistsInConfigForCall(serverName, globalConfig) {
 		return fmt.Errorf("server '%s' not found in configuration. Available servers: %v",
-			serverName, getAvailableServerNames(globalConfig))
+			serverName, getAvailableServerNamesForCall(globalConfig))
 	}
 
 	fmt.Printf("🚀 MCP Tool Call - Server: %s, Tool: %s\n", serverName, toolName)
@@ -243,4 +277,126 @@ func outputCallResultPretty(result interface{}) {
 	}
 
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+}
+
+// runBuiltInTool handles calling built-in tools via the MCP proxy server
+func runBuiltInTool(ctx context.Context, toolName string, args map[string]interface{}, globalConfig *config.Config) error {
+	fmt.Printf("🚀 Built-in Tool Call: %s\n", toolName)
+	fmt.Printf("📝 Log Level: %s\n", callLogLevel)
+	fmt.Printf("⏱️  Timeout: %v\n", callTimeout)
+	fmt.Printf("🔧 Arguments: %s\n", callJSONArgs)
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+	// Create logger with appropriate level
+	logger, err := createLogger(callLogLevel)
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	// Create storage manager
+	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar())
+	if err != nil {
+		return fmt.Errorf("failed to create storage manager: %w", err)
+	}
+	defer storageManager.Close()
+
+	// Create index manager
+	indexManager, err := index.NewManager(globalConfig.DataDir, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create index manager: %w", err)
+	}
+	defer indexManager.Close()
+
+	// Create upstream manager
+	upstreamManager := upstream.NewManager(logger, globalConfig)
+
+	// Create cache manager
+	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
+	if err != nil {
+		return fmt.Errorf("failed to create cache manager: %w", err)
+	}
+	defer cacheManager.Close()
+
+	// Create truncator
+	truncator := truncate.NewTruncator(globalConfig.ToolResponseLimit)
+
+	// Create MCP proxy server
+	mcpProxy := server.NewMCPProxyServer(
+		storageManager,
+		indexManager,
+		upstreamManager,
+		cacheManager,
+		truncator,
+		logger,
+		nil, // mainServer not needed for CLI calls
+		false,
+		globalConfig,
+	)
+
+	fmt.Printf("🛠️  Calling built-in tool '%s'...\n", toolName)
+
+	// Call the built-in tool through the proxy server's public method
+	result, err := mcpProxy.CallBuiltInTool(ctx, toolName, args)
+	if err != nil {
+		return fmt.Errorf("failed to call built-in tool '%s': %w", toolName, err)
+	}
+
+	// Output results based on format
+	switch callOutputFormat {
+	case outputFormatJSON:
+		return outputCallResultAsJSON(result)
+	case outputFormatPretty:
+	default:
+		fmt.Printf("✅ Built-in tool call completed successfully!\n\n")
+		outputCallResultPretty(result)
+	}
+
+	return nil
+}
+
+// createLogger creates a zap logger with the specified level
+func createLogger(level string) (*zap.Logger, error) {
+	var zapLevel zap.AtomicLevel
+	switch strings.ToLower(level) {
+	case "trace", "debug":
+		zapLevel = zap.NewAtomicLevelAt(zap.DebugLevel)
+	case "info":
+		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
+	case "warn":
+		zapLevel = zap.NewAtomicLevelAt(zap.WarnLevel)
+	case "error":
+		zapLevel = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	default:
+		zapLevel = zap.NewAtomicLevelAt(zap.InfoLevel)
+	}
+
+	config := zap.Config{
+		Level:            zapLevel,
+		Development:      false,
+		Encoding:         "console",
+		EncoderConfig:    zap.NewDevelopmentEncoderConfig(),
+		OutputPaths:      []string{"stderr"},
+		ErrorOutputPaths: []string{"stderr"},
+	}
+
+	return config.Build()
+}
+
+// getAvailableServerNamesForCall returns a list of available server names from config
+func getAvailableServerNamesForCall(globalConfig *config.Config) []string {
+	var names []string
+	for _, server := range globalConfig.Servers {
+		names = append(names, server.Name)
+	}
+	return names
+}
+
+// serverExistsInConfigForCall checks if a server exists in the configuration
+func serverExistsInConfigForCall(serverName string, globalConfig *config.Config) bool {
+	for _, server := range globalConfig.Servers {
+		if server.Name == serverName {
+			return true
+		}
+	}
+	return false
 }
