@@ -1957,37 +1957,57 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 			}
 			return "timeout", fmt.Sprintf("Connection monitoring timed out after %v - server may still be connecting", timeout)
 		case <-ticker.C:
+			// Always check if context is done first to handle timeout immediately
+			select {
+			case <-monitorCtx.Done():
+				if ctx.Err() != nil {
+					return "cancelled", "Connection monitoring cancelled due to server shutdown"
+				}
+				return "timeout", fmt.Sprintf("Connection monitoring timed out after %v - server may still be connecting", timeout)
+			default:
+				// Continue with status check
+			}
+
+			// Check if server is disabled first
+			for _, serverConfig := range p.config.Servers {
+				if serverConfig.Name == serverName && !serverConfig.Enabled {
+					return "disabled", "Server is disabled and will not connect"
+				}
+			}
+
 			// Check connection status from upstream manager
 			if clientInfo, exists := p.upstreamManager.GetClient(serverName); exists {
 				connectionInfo := clientInfo.GetConnectionInfo()
 				switch connectionInfo.State {
 				case types.StateReady:
 					return "ready", "Server connected and ready"
-				case types.StateConnecting:
-					// Continue monitoring
-					p.logger.Debug("Server still connecting, continuing to monitor", 
-						zap.String("server", serverName),
-						zap.String("state", connectionInfo.State.String()))
-					continue
-				case types.StateAuthenticating:
-					// Continue monitoring  
-					p.logger.Debug("Server authenticating, continuing to monitor",
-						zap.String("server", serverName),
-						zap.String("state", connectionInfo.State.String()))
-					continue
 				case types.StateError:
 					return "error", fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
+				case types.StateDisconnected:
+					// If server is explicitly disconnected and enabled is false, return disabled
+					for _, serverConfig := range p.config.Servers {
+						if serverConfig.Name == serverName && !serverConfig.Enabled {
+							return "disabled", "Server is disabled and will not connect"
+						}
+					}
+					// Continue monitoring for enabled but disconnected servers
+					p.logger.Debug("Server disconnected, continuing to monitor",
+						zap.String("server", serverName),
+						zap.String("state", connectionInfo.State.String()))
 				default:
-					// Continue monitoring for other states (disconnected, etc.)
+					// Continue monitoring for other states (connecting, authenticating, etc.)
 					p.logger.Debug("Server in non-ready state, continuing to monitor",
 						zap.String("server", serverName),
 						zap.String("state", connectionInfo.State.String()))
-					continue
 				}
 			} else {
-				// Client doesn't exist yet, continue monitoring
+				// Client doesn't exist yet, continue monitoring (unless disabled)
+				for _, serverConfig := range p.config.Servers {
+					if serverConfig.Name == serverName && !serverConfig.Enabled {
+						return "disabled", "Server is disabled and will not connect"
+					}
+				}
 				p.logger.Debug("Client not found yet, continuing to monitor", zap.String("server", serverName))
-				continue
 			}
 		}
 	}
