@@ -255,8 +255,8 @@ func (sm *StateManager) ValidateTransition(from, to ConnectionState) error {
 	// Define valid transitions
 	validTransitions := map[ConnectionState][]ConnectionState{
 		StateDisconnected:   {StateConnecting},
-		StateConnecting:     {StateAuthenticating, StateDiscovering, StateError, StateDisconnected},
-		StateAuthenticating: {StateConnecting, StateError, StateDisconnected},
+		StateConnecting:     {StateAuthenticating, StateDiscovering, StateReady, StateError, StateDisconnected}, // Allow direct to Ready for OAuth flows
+		StateAuthenticating: {StateConnecting, StateDiscovering, StateReady, StateError, StateDisconnected},
 		StateDiscovering:    {StateReady, StateError, StateDisconnected},
 		StateReady:          {StateError, StateDisconnected},
 		StateError:          {StateConnecting, StateDisconnected},

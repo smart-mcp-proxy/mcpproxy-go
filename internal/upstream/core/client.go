@@ -45,8 +45,10 @@ type Client struct {
 	connected bool
 
 	// OAuth progress tracking (separate mutex to prevent reentrant deadlock)
-	oauthMu         sync.RWMutex
-	oauthInProgress bool
+	oauthMu            sync.RWMutex
+	oauthInProgress    bool
+	oauthCompleted     bool
+	lastOAuthTimestamp time.Time
 
 	// Transport type and stderr access (for stdio)
 	transportType string

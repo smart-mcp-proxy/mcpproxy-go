@@ -83,8 +83,14 @@ func (mc *Client) Connect(ctx context.Context) error {
 
 	// Connect core client
 	if err := mc.coreClient.Connect(ctx); err != nil {
-		// Check if this is an OAuth-related error
-		if mc.isOAuthError(err) {
+		// Check if this is an OAuth authorization requirement (not an error)
+		if mc.isOAuthAuthorizationRequired(err) {
+			mc.logger.Info("🎯 OAuth authorization required during MCP initialization",
+				zap.String("server", mc.Config.Name))
+			// Don't apply backoff for OAuth authorization requirement
+			mc.StateManager.SetError(err)
+			return fmt.Errorf("OAuth authorization during MCP init failed: %w", err)
+		} else if mc.isOAuthError(err) {
 			mc.logger.Warn("OAuth authentication failed, applying extended backoff",
 				zap.String("server", mc.Config.Name),
 				zap.Error(err))
@@ -95,8 +101,10 @@ func (mc *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("core client connection failed: %w", err)
 	}
 
-	// Transition to ready state
-	mc.StateManager.TransitionTo(types.StateReady)
+	// Transition to ready state only if not already ready
+	if mc.StateManager.GetState() != types.StateReady {
+		mc.StateManager.TransitionTo(types.StateReady)
+	}
 
 	// Update state manager with server info
 	if serverInfo := mc.coreClient.GetServerInfo(); serverInfo != nil {
@@ -106,8 +114,16 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Info("Successfully established managed connection",
 		zap.String("server", mc.Config.Name))
 
-	// Start background monitoring
-	mc.startBackgroundMonitoring()
+	// Add a small delay before starting background monitoring to let connection stabilize
+	mc.logger.Debug("🔍 Adding stabilization delay before starting background monitoring",
+		zap.String("server", mc.Config.Name))
+
+	go func() {
+		time.Sleep(2 * time.Second) // Let connection stabilize
+		mc.logger.Debug("🔍 Starting background monitoring after stabilization delay",
+			zap.String("server", mc.Config.Name))
+		mc.startBackgroundMonitoring()
+	}()
 
 	return nil
 }
@@ -207,7 +223,15 @@ func (mc *Client) SetStateChangeCallback(callback func(oldState, newState types.
 
 // ListTools retrieves tools with concurrency control
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	mc.logger.Debug("🔍 ListTools called",
+		zap.String("server", mc.Config.Name),
+		zap.String("state", mc.StateManager.GetState().String()),
+		zap.Bool("connected", mc.IsConnected()))
+
 	if !mc.IsConnected() {
+		mc.logger.Debug("🔍 ListTools rejected - client not connected",
+			zap.String("server", mc.Config.Name),
+			zap.String("state", mc.StateManager.GetState().String()))
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
@@ -215,7 +239,7 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 	mc.listToolsMu.Lock()
 	if mc.listToolsInProgress {
 		mc.listToolsMu.Unlock()
-		mc.logger.Debug("ListTools already in progress, skipping concurrent call",
+		mc.logger.Debug("🔍 ListTools already in progress, rejecting",
 			zap.String("server", mc.Config.Name))
 		return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.Config.Name)
 	}
@@ -226,6 +250,8 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		mc.listToolsMu.Lock()
 		mc.listToolsInProgress = false
 		mc.listToolsMu.Unlock()
+		mc.logger.Debug("🔍 ListTools operation completed, flag reset",
+			zap.String("server", mc.Config.Name))
 	}()
 
 	// Add timeout for tool listing
@@ -396,30 +422,39 @@ func (mc *Client) performHealthCheck() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Try a simple operation to check health
-	_, err := mc.coreClient.ListTools(ctx)
-	if err != nil {
-		if mc.isConnectionError(err) {
-			// Use different log levels based on error type
-			if mc.isNormalReconnectionError(err) {
-				mc.logger.Warn("Connection lost, will attempt reconnection",
-					zap.String("server", mc.Config.Name),
-					zap.String("error_type", "normal_reconnection"),
-					zap.Error(err))
-			} else {
-				mc.logger.Warn("Health check failed, marking connection as error",
-					zap.String("server", mc.Config.Name),
-					zap.Error(err))
-			}
-			mc.StateManager.SetError(err)
-		}
+	// Try a simple operation to check health with concurrency protection
+	if !mc.tryListTools(ctx) {
+		mc.logger.Debug("Health check skipped - ListTools already in progress",
+			zap.String("server", mc.Config.Name))
+		return
 	}
+
+	_, err := mc.coreClient.ListTools(ctx)
+	mc.listToolsInProgress = false // Reset the flag
+
+	if err != nil {
+		// Only mark as error if it's a real connection issue, not timeout during high activity
+		if mc.isConnectionError(err) {
+			mc.logger.Warn("Health check failed with connection error, marking as error",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+			mc.StateManager.SetError(err)
+		} else {
+			mc.logger.Debug("Health check failed with timeout (high activity), ignoring",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+		}
+		return
+	}
+
+	mc.logger.Debug("Health check passed successfully",
+		zap.String("server", mc.Config.Name))
 }
 
 // tryReconnect attempts to reconnect the client with proper error handling
 func (mc *Client) tryReconnect() {
-	// Create a timeout context for the reconnection attempt
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Create a timeout context for the reconnection attempt - increased for OAuth flows
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	mc.logger.Info("Starting reconnection attempt",
@@ -507,7 +542,30 @@ func (mc *Client) isConnectionError(err error) bool {
 	return false
 }
 
-// isOAuthError checks if the error is OAuth-related
+// isOAuthAuthorizationRequired checks if OAuth authorization is needed (not an error)
+func (mc *Client) isOAuthAuthorizationRequired(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	authRequiredErrors := []string{
+		"OAuth authorization during MCP init failed",
+		"OAuth authorization not implemented",
+		"OAuth authorization required",
+		"authorization required",
+	}
+
+	for _, authErr := range authRequiredErrors {
+		if containsString(errStr, authErr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isOAuthError checks if the error is OAuth-related (actual authentication failure)
 func (mc *Client) isOAuthError(err error) bool {
 	if err == nil {
 		return false
@@ -521,9 +579,9 @@ func (mc *Client) isOAuthError(err error) bool {
 		"unauthorized",
 		"401", // HTTP 401 Unauthorized
 		"Missing or invalid access token",
-		"OAuth authentication",
-		"oauth",
-		"authorization",
+		"OAuth authentication failed",
+		"oauth timeout",
+		"oauth error",
 	}
 
 	for _, oauthErr := range oauthErrors {
@@ -559,6 +617,19 @@ func (mc *Client) isNormalReconnectionError(err error) bool {
 	}
 
 	return false
+}
+
+// tryListTools attempts to acquire the ListTools lock, returns true if successful
+func (mc *Client) tryListTools(ctx context.Context) bool {
+	mc.listToolsMu.Lock()
+	defer mc.listToolsMu.Unlock()
+
+	if mc.listToolsInProgress {
+		return false
+	}
+
+	mc.listToolsInProgress = true
+	return true
 }
 
 // Helper function to check if string contains substring

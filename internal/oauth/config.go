@@ -64,30 +64,24 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
 			zap.Strings("scopes", scopes))
 	}
 
-	// EXPERIMENT #2: Don't start our callback server - let mcp-go handle everything
-	// The issue is our callback server receives the code but mcp-go never gets it
-	logger.Info("🧪 EXPERIMENT #2: Not starting custom callback server - letting mcp-go manage OAuth entirely",
+	// Start callback server first to get the exact port (as documented in successful approach)
+	logger.Info("🔧 Starting OAuth callback server with dynamic port allocation",
 		zap.String("server", serverConfig.Name),
-		zap.String("reason", "Our callback bridge didn't work - mcp-go needs direct callback control"))
+		zap.String("approach", "MCPProxy callback server coordination for exact URI matching"))
 
-	// Use a redirect URI that signals to mcp-go to handle its own callback server
-	// Use a specific port that mcp-go can allocate (not 0 which is invalid)
-	redirectURI := "http://127.0.0.1:0/oauth/callback" // Let mcp-go interpret this
-
-	// But wait, that's still 0... let me try a different approach
-	// Use a high port number that's likely to be available
-	redirectURI = "http://127.0.0.1:45123/oauth/callback"
-
-	logger.Info("Using high-port redirect URI for mcp-go to handle",
-		zap.String("server", serverConfig.Name),
-		zap.String("redirect_uri", redirectURI),
-		zap.String("approach", "mcp-go should start its own callback server on this port"))
-
-	// Create a fake callback server struct for compatibility
-	callbackServer := &CallbackServer{
-		Port:        45123,
-		RedirectURI: redirectURI,
+	// Start our own callback server to get exact port for Cloudflare OAuth
+	callbackServer, err := globalCallbackManager.StartCallbackServer(serverConfig.Name)
+	if err != nil {
+		logger.Error("Failed to start OAuth callback server",
+			zap.String("server", serverConfig.Name),
+			zap.Error(err))
+		return nil
 	}
+
+	logger.Info("Using exact redirect URI from allocated callback server",
+		zap.String("server", serverConfig.Name),
+		zap.String("redirect_uri", callbackServer.RedirectURI),
+		zap.Int("port", callbackServer.Port))
 
 	logger.Info("OAuth callback server started successfully",
 		zap.String("server", serverConfig.Name),
@@ -204,7 +198,9 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 					</body>
 				</html>
 			`, r.URL.Path, DefaultRedirectPath, serverName, port)
-			w.Write([]byte(debugPage))
+			if _, err := w.Write([]byte(debugPage)); err != nil {
+				callbackServer.logger.Error("Error writing debug page", zap.Error(err))
+			}
 		}
 	})
 

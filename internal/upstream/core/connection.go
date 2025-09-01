@@ -2,14 +2,8 @@ package core
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -26,13 +20,33 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	osLinux  = "linux"
+	osDarwin = "darwin"
+)
+
 // Connect establishes connection to the upstream server
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.connected {
+	// Allow reconnection if OAuth was recently completed (bypass "already connected" check)
+	if c.connected && !c.wasOAuthRecentlyCompleted() {
+		c.logger.Debug("Client already connected and OAuth not recent",
+			zap.String("server", c.config.Name),
+			zap.Bool("connected", c.connected))
 		return fmt.Errorf("client already connected")
+	}
+
+	// Reset connection state for fresh connection attempt
+	if c.connected {
+		c.logger.Info("🔄 Reconnecting after OAuth completion",
+			zap.String("server", c.config.Name))
+		c.connected = false
+		if c.client != nil {
+			c.client.Close()
+			c.client = nil
+		}
 	}
 
 	c.logger.Info("Connecting to upstream MCP server",
@@ -67,9 +81,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	case transportStdio:
 		c.logger.Debug("📡 Using STDIO transport")
 		err = c.connectStdio(ctx)
-	case "http", "streamable-http", "sse":
-		c.logger.Debug("🌐 Using HTTP/SSE transport")
+	case "http", "streamable-http":
+		c.logger.Debug("🌐 Using HTTP transport")
 		err = c.connectHTTP(ctx)
+	case "sse":
+		c.logger.Debug("📡 Using SSE transport")
+		err = c.connectSSE(ctx)
 	default:
 		return fmt.Errorf("unsupported transport type: %s", c.transportType)
 	}
@@ -542,7 +559,7 @@ func hasCommand(command string) bool {
 	return err == nil
 }
 
-// connectHTTP establishes HTTP/SSE transport connection with auth fallback
+// connectHTTP establishes HTTP transport connection with auth fallback
 func (c *Client) connectHTTP(ctx context.Context) error {
 	// Try authentication strategies in order: headers -> no-auth -> OAuth
 	authStrategies := []func(context.Context) error{
@@ -585,6 +602,49 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 	return fmt.Errorf("all authentication strategies failed, last error: %w", lastErr)
 }
 
+// connectSSE establishes SSE transport connection with auth fallback
+func (c *Client) connectSSE(ctx context.Context) error {
+	// Try authentication strategies in order: headers -> no-auth -> OAuth
+	authStrategies := []func(context.Context) error{
+		c.trySSEHeadersAuth,
+		c.trySSENoAuth,
+		c.trySSEOAuthAuth,
+	}
+
+	var lastErr error
+	for i, authFunc := range authStrategies {
+		strategyName := []string{"headers", "no-auth", "OAuth"}[i]
+		c.logger.Debug("🔐 Trying SSE authentication strategy",
+			zap.Int("strategy_index", i),
+			zap.String("strategy", strategyName))
+
+		if err := authFunc(ctx); err != nil {
+			lastErr = err
+			c.logger.Debug("🚫 SSE auth strategy failed",
+				zap.Int("strategy_index", i),
+				zap.String("strategy", strategyName),
+				zap.Error(err))
+
+			// For configuration errors (like no headers), always try next strategy
+			if c.isConfigError(err) {
+				continue
+			}
+
+			// If it's not an auth error, don't try fallback
+			if !c.isAuthError(err) {
+				return err
+			}
+			continue
+		}
+		c.logger.Info("✅ SSE Authentication successful",
+			zap.Int("strategy_index", i),
+			zap.String("strategy", strategyName))
+		return nil
+	}
+
+	return fmt.Errorf("all SSE authentication strategies failed, last error: %w", lastErr)
+}
+
 // tryHeadersAuth attempts authentication using configured headers
 func (c *Client) tryHeadersAuth(ctx context.Context) error {
 	if len(c.config.Headers) == 0 {
@@ -619,9 +679,25 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 
 // tryOAuthAuth attempts OAuth authentication
 func (c *Client) tryOAuthAuth(ctx context.Context) error {
+	// Check if OAuth is already in progress
+	if c.isOAuthInProgress() {
+		c.logger.Warn("⚠️ OAuth is already in progress, clearing stale state and retrying",
+			zap.String("server", c.config.Name))
+		c.clearOAuthState()
+	}
+
+	if c.wasOAuthRecentlyCompleted() {
+		c.logger.Info("🔄 OAuth was recently completed, skipping repeated OAuth attempt",
+			zap.String("server", c.config.Name))
+		return fmt.Errorf("OAuth recently completed, connection should proceed without re-auth")
+	}
+
 	c.logger.Debug("🔐 Attempting OAuth authentication",
 		zap.String("server", c.config.Name),
 		zap.String("url", c.config.URL))
+
+	// Mark OAuth as in progress
+	c.markOAuthInProgress()
 
 	// Create OAuth config using the oauth package
 	oauthConfig := oauth.CreateOAuthConfig(c.config)
@@ -687,7 +763,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	if os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != "" {
 		browserBlockingConditions = append(browserBlockingConditions, "SSH_session")
 	}
-	if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+	if runtime.GOOS == osLinux && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
 		browserBlockingConditions = append(browserBlockingConditions, "no_GUI_on_linux")
 	}
 
@@ -710,6 +786,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 			// Handle OAuth authorization manually using the example pattern
 			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+				c.clearOAuthState() // Clear state on OAuth failure
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
 
@@ -732,6 +809,187 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		zap.String("server", c.config.Name))
 
 	c.logger.Info("✅ OAuth setup complete - using proper mcp-go OAuth error handling pattern",
+		zap.String("server", c.config.Name))
+
+	return nil
+}
+
+// trySSEHeadersAuth attempts SSE authentication using configured headers
+func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
+	if len(c.config.Headers) == 0 {
+		return fmt.Errorf("no headers configured")
+	}
+
+	httpConfig := transport.CreateHTTPTransportConfig(c.config, nil)
+	sseClient, err := transport.CreateSSEClient(httpConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create SSE client with headers: %w", err)
+	}
+
+	c.client = sseClient
+	return c.client.Start(ctx)
+}
+
+// trySSENoAuth attempts SSE connection without authentication
+func (c *Client) trySSENoAuth(ctx context.Context) error {
+	// Create config without headers
+	configNoAuth := *c.config
+	configNoAuth.Headers = nil
+
+	httpConfig := transport.CreateHTTPTransportConfig(&configNoAuth, nil)
+	sseClient, err := transport.CreateSSEClient(httpConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create SSE client without auth: %w", err)
+	}
+
+	c.client = sseClient
+	return c.client.Start(ctx)
+}
+
+// trySSEOAuthAuth attempts SSE OAuth authentication
+func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
+	// Check if OAuth is already in progress
+	if c.isOAuthInProgress() {
+		c.logger.Warn("⚠️ SSE OAuth is already in progress, clearing stale state and retrying",
+			zap.String("server", c.config.Name))
+		c.clearOAuthState()
+	}
+
+	if c.wasOAuthRecentlyCompleted() {
+		c.logger.Info("🔄 SSE OAuth was recently completed, skipping repeated OAuth attempt",
+			zap.String("server", c.config.Name))
+		return fmt.Errorf("OAuth recently completed, connection should proceed without re-auth")
+	}
+
+	c.logger.Debug("🔐 Attempting SSE OAuth authentication",
+		zap.String("server", c.config.Name),
+		zap.String("url", c.config.URL))
+
+	// Mark OAuth as in progress
+	c.markOAuthInProgress()
+
+	// Create OAuth config using the oauth package
+	oauthConfig := oauth.CreateOAuthConfig(c.config)
+	if oauthConfig == nil {
+		return fmt.Errorf("failed to create OAuth config")
+	}
+
+	c.logger.Info("🌟 Starting SSE OAuth authentication flow",
+		zap.String("server", c.config.Name),
+		zap.String("redirect_uri", oauthConfig.RedirectURI),
+		zap.Strings("scopes", oauthConfig.Scopes),
+		zap.Bool("pkce_enabled", oauthConfig.PKCEEnabled))
+
+	// Create SSE transport config with OAuth
+	c.logger.Debug("🛠️ Creating SSE transport config for OAuth")
+	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+
+	c.logger.Debug("🔨 Calling transport.CreateSSEClient with OAuth config")
+	sseClient, err := transport.CreateSSEClient(httpConfig)
+	if err != nil {
+		c.logger.Error("💥 Failed to create OAuth SSE client in transport layer",
+			zap.Error(err))
+		return fmt.Errorf("failed to create OAuth SSE client: %w", err)
+	}
+
+	c.logger.Debug("✅ SSE client created, storing in c.client")
+
+	c.logger.Debug("🔗 OAuth SSE client created, starting connection")
+	c.client = sseClient
+
+	// Add detailed logging before starting the OAuth client
+	c.logger.Info("🚀 Starting OAuth SSE client - this should trigger browser opening",
+		zap.String("server", c.config.Name),
+		zap.String("callback_uri", oauthConfig.RedirectURI))
+
+	// Add debug logging to check environment and system capabilities
+	c.logger.Debug("🔍 SSE OAuth environment diagnostics",
+		zap.String("DISPLAY", os.Getenv("DISPLAY")),
+		zap.String("PATH", os.Getenv("PATH")),
+		zap.String("GOOS", runtime.GOOS),
+		zap.Bool("has_open_command", hasCommand("open")),
+		zap.Bool("has_xdg_open", hasCommand("xdg-open")),
+		zap.String("BROWSER", os.Getenv("BROWSER")),
+		zap.String("XDG_SESSION_TYPE", os.Getenv("XDG_SESSION_TYPE")),
+		zap.String("WAYLAND_DISPLAY", os.Getenv("WAYLAND_DISPLAY")),
+		zap.Bool("CI", os.Getenv("CI") != ""),
+		zap.Bool("HEADLESS", os.Getenv("HEADLESS") != ""))
+
+	// Detect conditions that might prevent browser opening
+	var browserBlockingConditions []string
+	if os.Getenv("CI") != "" {
+		browserBlockingConditions = append(browserBlockingConditions, "CI=true")
+	}
+	if os.Getenv("HEADLESS") != "" {
+		browserBlockingConditions = append(browserBlockingConditions, "HEADLESS=true")
+	}
+	if os.Getenv("NO_BROWSER") != "" {
+		browserBlockingConditions = append(browserBlockingConditions, "NO_BROWSER=true")
+	}
+	if os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != "" {
+		browserBlockingConditions = append(browserBlockingConditions, "SSH_session")
+	}
+	if runtime.GOOS == osLinux && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+		browserBlockingConditions = append(browserBlockingConditions, "no_GUI_on_linux")
+	}
+
+	if len(browserBlockingConditions) > 0 {
+		c.logger.Warn("⚠️ Detected conditions that may prevent browser opening for SSE OAuth",
+			zap.String("server", c.config.Name),
+			zap.Strings("blocking_conditions", browserBlockingConditions))
+	}
+
+	// Start the OAuth client and handle OAuth authorization errors properly
+	c.logger.Info("🚀 Starting SSE OAuth client - using proper mcp-go OAuth error handling",
+		zap.String("server", c.config.Name))
+
+	var contextStatus string
+	if ctx.Err() != nil {
+		contextStatus = "canceled"
+	} else {
+		contextStatus = "active"
+	}
+	c.logger.Debug("🔍 Starting SSE client with context",
+		zap.String("server", c.config.Name),
+		zap.String("context_status", contextStatus))
+
+	err = c.client.Start(ctx)
+	if err != nil {
+		// Check if this is an OAuth authorization error that we need to handle manually
+		if client.IsOAuthAuthorizationRequiredError(err) {
+			c.logger.Info("🎯 SSE OAuth authorization required - starting manual OAuth flow",
+				zap.String("server", c.config.Name))
+
+			// Handle OAuth authorization manually using the example pattern
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+				c.clearOAuthState() // Clear state on OAuth failure
+				return fmt.Errorf("SSE OAuth authorization failed: %w", oauthErr)
+			}
+
+			// Create a fresh context for the retry to avoid cancellation issues
+			c.logger.Info("🔄 Retrying SSE client start after OAuth authorization with fresh context",
+				zap.String("server", c.config.Name))
+
+			retryCtx := context.Background() // Use fresh context to avoid cancellation
+			err = c.client.Start(retryCtx)
+			if err != nil {
+				c.logger.Error("❌ SSE OAuth client start failed after authorization",
+					zap.String("server", c.config.Name),
+					zap.Error(err))
+				return fmt.Errorf("SSE OAuth client start failed after authorization: %w", err)
+			}
+		} else {
+			c.logger.Error("❌ SSE OAuth client start failed with non-OAuth error",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			return fmt.Errorf("SSE OAuth client start failed: %w", err)
+		}
+	}
+
+	c.logger.Info("✅ SSE OAuth client started successfully",
+		zap.String("server", c.config.Name))
+
+	c.logger.Info("✅ SSE OAuth setup complete - using proper mcp-go OAuth error handling pattern",
 		zap.String("server", c.config.Name))
 
 	return nil
@@ -886,593 +1144,8 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	return nil
 }
 
-// manuallyOpenOAuthURL constructs the OAuth authorization URL and opens it in browser
-func (c *Client) manuallyOpenOAuthURL(oauthConfig *client.OAuthConfig) error {
-	c.logger.Debug("🔍 Attempting to discover OAuth endpoints and open browser manually",
-		zap.String("server", c.config.Name),
-		zap.String("auth_server_url", oauthConfig.AuthServerMetadataURL))
-
-	// Try to discover OAuth endpoints from the authorization server metadata
-	authzEndpoint, err := c.discoverAuthorizationEndpoint(oauthConfig.AuthServerMetadataURL)
-	if err != nil {
-		c.logger.Warn("⚠️ Failed to discover OAuth authorization endpoint, falling back to instructions",
-			zap.String("server", c.config.Name),
-			zap.Error(err))
-
-		// Print fallback instructions
-		baseURL, parseErr := parseBaseURL(c.config.URL)
-		if parseErr != nil {
-			baseURL = c.config.URL
-		}
-
-		fmt.Printf("\n=== OAuth Authentication Required ===\n")
-		fmt.Printf("Server: %s\n", c.config.Name)
-		fmt.Printf("The mcp-go library should open a browser automatically.\n")
-		fmt.Printf("If it doesn't, you may need to visit the OAuth endpoint manually:\n")
-		fmt.Printf("Base URL: %s\n", baseURL)
-		fmt.Printf("Redirect URI: %s\n", oauthConfig.RedirectURI)
-		fmt.Printf("Scopes: %s\n", strings.Join(oauthConfig.Scopes, " "))
-		fmt.Printf("========================================\n\n")
-
-		return err
-	}
-
-	// Generate OAuth authorization URL with proper parameters
-	authURL, err := c.buildAuthorizationURL(authzEndpoint, oauthConfig)
-	if err != nil {
-		c.logger.Error("Failed to build authorization URL",
-			zap.String("server", c.config.Name),
-			zap.Error(err))
-		return fmt.Errorf("failed to build authorization URL: %w", err)
-	}
-
-	c.logger.Info("🌟 Opening OAuth authorization URL in browser",
-		zap.String("server", c.config.Name),
-		zap.String("auth_url", authURL),
-		zap.String("redirect_uri", oauthConfig.RedirectURI))
-
-	// Try to open browser using platform-specific commands
-	if err := c.openBrowser(authURL); err != nil {
-		c.logger.Warn("🚫 Could not open browser automatically, please visit the URL manually",
-			zap.String("server", c.config.Name),
-			zap.String("auth_url", authURL),
-			zap.Error(err))
-
-		// Output URL to console for manual access
-		fmt.Printf("\n=== OAuth Authentication Required ===\n")
-		fmt.Printf("Server: %s\n", c.config.Name)
-		fmt.Printf("Please visit this URL to authenticate:\n%s\n", authURL)
-		fmt.Printf("=====================================\n\n")
-
-		return err
-	}
-
-	c.logger.Info("✅ Browser opened successfully for OAuth authentication",
-		zap.String("server", c.config.Name))
-
-	return nil
-}
-
-// parseBaseURL extracts the base URL from a full URL
-func parseBaseURL(fullURL string) (string, error) {
-	u, err := url.Parse(fullURL)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s://%s", u.Scheme, u.Host), nil
-}
-
-// OAuthMetadata represents OAuth server metadata from discovery endpoint
-type OAuthMetadata struct {
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
-	RegistrationEndpoint  string `json:"registration_endpoint"`
-	JwksURI               string `json:"jwks_uri"`
-	Issuer                string `json:"issuer"`
-}
-
-// discoverAuthorizationEndpoint discovers OAuth authorization endpoint from metadata URL
-func (c *Client) discoverAuthorizationEndpoint(metadataURL string) (string, error) {
-	if metadataURL == "" {
-		return "", fmt.Errorf("no metadata URL provided")
-	}
-
-	c.logger.Debug("🔍 Discovering OAuth authorization endpoint",
-		zap.String("metadata_url", metadataURL))
-
-	// Create HTTP client with timeout
-	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	resp, err := httpClient.Get(metadataURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch OAuth metadata: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("OAuth metadata request failed with status %d", resp.StatusCode)
-	}
-
-	var metadata OAuthMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
-		return "", fmt.Errorf("failed to parse OAuth metadata: %w", err)
-	}
-
-	if metadata.AuthorizationEndpoint == "" {
-		return "", fmt.Errorf("no authorization_endpoint found in OAuth metadata")
-	}
-
-	c.logger.Debug("✅ Successfully discovered OAuth authorization endpoint",
-		zap.String("authorization_endpoint", metadata.AuthorizationEndpoint))
-
-	return metadata.AuthorizationEndpoint, nil
-}
-
-// generateState generates a random state parameter for OAuth
-func generateState() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.URLEncoding.EncodeToString(b), nil
-}
-
-// generateCodeVerifier generates a PKCE code verifier
-func generateCodeVerifier() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b), nil
-}
-
-// generateCodeChallenge generates a PKCE code challenge from verifier
-func generateCodeChallenge(verifier string) string {
-	h := sha256.Sum256([]byte(verifier))
-	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(h[:])
-}
-
-// buildAuthorizationURL constructs the OAuth authorization URL with proper parameters
-func (c *Client) buildAuthorizationURL(authzEndpoint string, oauthConfig *client.OAuthConfig) (string, error) {
-	if authzEndpoint == "" {
-		return "", fmt.Errorf("empty authorization endpoint")
-	}
-
-	// Parse the authorization endpoint
-	u, err := url.Parse(authzEndpoint)
-	if err != nil {
-		return "", fmt.Errorf("invalid authorization endpoint URL: %w", err)
-	}
-
-	// For now, just return the authorization endpoint with basic query parameters
-	// The mcp-go library should handle the full OAuth flow including state and PKCE
-	// We're just trying to open the browser to the right endpoint
-
-	params := url.Values{}
-	params.Set("response_type", "code")
-
-	// Only add client_id if we have one (DCR might not have happened yet)
-	if oauthConfig.ClientID != "" {
-		params.Set("client_id", oauthConfig.ClientID)
-	}
-
-	params.Set("redirect_uri", oauthConfig.RedirectURI)
-	params.Set("scope", strings.Join(oauthConfig.Scopes, " "))
-
-	// Let the mcp-go library handle state and PKCE parameters
-	// We're just providing a basic authorization URL for manual browser opening
-
-	// Construct final URL
-	u.RawQuery = params.Encode()
-	authURL := u.String()
-
-	c.logger.Debug("🔗 Built basic OAuth authorization URL for manual browser opening",
-		zap.String("auth_url", authURL),
-		zap.String("note", "mcp-go library will handle full OAuth flow with proper parameters"))
-
-	return authURL, nil
-}
-
-// openBrowser attempts to open the OAuth URL in the default browser
-func (c *Client) openBrowser(authURL string) error {
-	var cmd string
-	var args []string
-
-	c.logger.Debug("🌐 Attempting to open browser",
-		zap.String("url", authURL),
-		zap.String("os", runtime.GOOS))
-
-	switch runtime.GOOS {
-	case "windows":
-		cmd = "rundll32"
-		args = []string{"url.dll,FileProtocolHandler", authURL}
-	case "darwin":
-		cmd = "open"
-		args = []string{authURL}
-	case "linux":
-		// Try to detect if we're in a GUI environment
-		if !c.hasGUIEnvironment() {
-			return fmt.Errorf("no GUI environment detected")
-		}
-		cmd = "xdg-open"
-		args = []string{authURL}
-	default:
-		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
-	}
-
-	c.logger.Debug("🔧 Executing browser command",
-		zap.String("cmd", cmd),
-		zap.Strings("args", args))
-
-	execCmd := exec.Command(cmd, args...)
-	if err := execCmd.Start(); err != nil {
-		return fmt.Errorf("failed to open browser: %w", err)
-	}
-
-	c.logger.Debug("✅ Browser command executed successfully")
-	return nil
-}
-
-// hasGUIEnvironment checks if a GUI environment is available on Linux
-func (c *Client) hasGUIEnvironment() bool {
-	// Check for common environment variables that indicate GUI
-	envVars := []string{"DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE"}
-
-	for _, envVar := range envVars {
-		if value := os.Getenv(envVar); value != "" {
-			c.logger.Debug("🖥️ GUI environment detected",
-				zap.String("env_var", envVar),
-				zap.String("value", value))
-			return true
-		}
-	}
-
-	// Check if xdg-open is available
-	if _, err := exec.LookPath("xdg-open"); err == nil {
-		c.logger.Debug("🖥️ xdg-open command available")
-		return true
-	}
-
-	c.logger.Debug("🚫 No GUI environment detected")
-	return false
-}
-
-// provideManualOAuthInstructions provides manual OAuth instructions to the user
-func (c *Client) provideManualOAuthInstructions(oauthConfig *client.OAuthConfig) {
-	c.logger.Info("📋 Providing manual OAuth authentication instructions",
-		zap.String("server", c.config.Name))
-
-	// Try to discover OAuth endpoints for better instructions
-	authzEndpoint, err := c.discoverAuthorizationEndpoint(oauthConfig.AuthServerMetadataURL)
-	if err != nil {
-		c.logger.Debug("Could not discover OAuth endpoint for manual instructions",
-			zap.Error(err))
-
-		// Fallback to base URL
-		baseURL, parseErr := parseBaseURL(c.config.URL)
-		if parseErr != nil {
-			baseURL = c.config.URL
-		}
-		authzEndpoint = baseURL + "/oauth/authorize"
-	}
-
-	fmt.Printf("\n" + strings.Repeat("=", 80) + "\n")
-	fmt.Printf("🔐 MANUAL OAUTH AUTHENTICATION REQUIRED\n")
-	fmt.Printf(strings.Repeat("=", 80) + "\n")
-	fmt.Printf("Server: %s\n", c.config.Name)
-	fmt.Printf("URL: %s\n", c.config.URL)
-	fmt.Printf("\n")
-	fmt.Printf("The automatic OAuth flow failed. Please complete authentication manually:\n")
-	fmt.Printf("\n")
-	if oauthConfig.ClientID == "" {
-		fmt.Printf("⚠️  IMPORTANT: No client_id available yet (Dynamic Client Registration pending)\n")
-		fmt.Printf("    The OAuth server may need to register a client first.\n")
-		fmt.Printf("\n")
-	}
-	fmt.Printf("1. Open this URL in your browser:\n")
-	fmt.Printf("   %s\n", authzEndpoint)
-	fmt.Printf("\n")
-	fmt.Printf("2. If asked, use these parameters:\n")
-	fmt.Printf("   - Redirect URI: %s\n", oauthConfig.RedirectURI)
-	fmt.Printf("   - Scopes: %s\n", strings.Join(oauthConfig.Scopes, " "))
-	fmt.Printf("   - Response Type: code\n")
-	fmt.Printf("   - PKCE Enabled: %t\n", oauthConfig.PKCEEnabled)
-	if oauthConfig.ClientID != "" {
-		fmt.Printf("   - Client ID: %s\n", oauthConfig.ClientID)
-	} else {
-		fmt.Printf("   - Client ID: (not available - DCR required)\n")
-	}
-	fmt.Printf("\n")
-	fmt.Printf("3. Complete the authentication in your browser\n")
-	fmt.Printf("\n")
-	fmt.Printf("4. If the browser doesn't open automatically, copy the URL above\n")
-	fmt.Printf("   and paste it into your browser manually\n")
-	fmt.Printf("\n")
-	fmt.Printf("OAuth Metadata URL: %s\n", oauthConfig.AuthServerMetadataURL)
-	fmt.Printf(strings.Repeat("=", 80) + "\n")
-	fmt.Printf("\n")
-
-	// Try to open browser as a last resort with proper OAuth parameters
-	if runtime.GOOS == "darwin" && hasCommand("open") {
-		c.logger.Info("🌐 Attempting to open browser as fallback",
-			zap.String("server", c.config.Name))
-
-		// Build proper OAuth URL with required parameters
-		oauthURL, err := c.buildProperOAuthURL(authzEndpoint, oauthConfig)
-		if err != nil {
-			c.logger.Warn("Could not build proper OAuth URL",
-				zap.Error(err))
-			// Fallback to basic endpoint
-			oauthURL = authzEndpoint
-		}
-
-		c.logger.Info("🔗 Opening browser with complete OAuth URL",
-			zap.String("oauth_url", oauthURL))
-
-		if err := c.openBrowser(oauthURL); err != nil {
-			c.logger.Warn("Could not open browser for manual OAuth",
-				zap.Error(err))
-		} else {
-			fmt.Printf("✅ Browser opened to OAuth authorization page\n\n")
-		}
-	}
-}
-
-// buildProperOAuthURL constructs a complete OAuth authorization URL with all required parameters
-func (c *Client) buildProperOAuthURL(authzEndpoint string, oauthConfig *client.OAuthConfig) (string, error) {
-	if authzEndpoint == "" {
-		return "", fmt.Errorf("empty authorization endpoint")
-	}
-
-	// Parse the authorization endpoint
-	u, err := url.Parse(authzEndpoint)
-	if err != nil {
-		return "", fmt.Errorf("invalid authorization endpoint URL: %w", err)
-	}
-
-	// Generate OAuth parameters that we need
-	state, err := generateState()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate state: %w", err)
-	}
-
-	// Build query parameters
-	params := url.Values{}
-	params.Set("response_type", "code")
-	params.Set("redirect_uri", oauthConfig.RedirectURI)
-	params.Set("scope", strings.Join(oauthConfig.Scopes, " "))
-	params.Set("state", state)
-
-	// Add client_id if available (it might be empty if DCR hasn't happened yet)
-	if oauthConfig.ClientID != "" {
-		params.Set("client_id", oauthConfig.ClientID)
-		c.logger.Debug("✅ Using client_id from OAuth config",
-			zap.String("client_id", oauthConfig.ClientID))
-	} else {
-		c.logger.Warn("⚠️ No client_id available - Dynamic Client Registration may not have completed",
-			zap.String("server", c.config.Name))
-
-		// This URL will likely fail without client_id, but we'll try anyway
-		c.logger.Warn("🚫 OAuth URL will be incomplete without client_id",
-			zap.String("issue", "DCR must complete first to get client_id"))
-	}
-
-	// Add PKCE parameters if enabled
-	if oauthConfig.PKCEEnabled {
-		codeVerifier, err := generateCodeVerifier()
-		if err != nil {
-			c.logger.Warn("Failed to generate PKCE code verifier",
-				zap.Error(err))
-		} else {
-			codeChallenge := generateCodeChallenge(codeVerifier)
-			params.Set("code_challenge", codeChallenge)
-			params.Set("code_challenge_method", "S256")
-
-			c.logger.Debug("🔐 Added PKCE parameters to OAuth URL",
-				zap.String("code_challenge", codeChallenge))
-		}
-	}
-
-	// Construct final URL
-	u.RawQuery = params.Encode()
-	authURL := u.String()
-
-	c.logger.Debug("🔗 Built complete OAuth authorization URL",
-		zap.String("auth_url", authURL),
-		zap.String("redirect_uri", oauthConfig.RedirectURI),
-		zap.Strings("scopes", oauthConfig.Scopes),
-		zap.String("state", state))
-
-	return authURL, nil
-}
-
-// DCRRequest represents a Dynamic Client Registration request according to RFC 7591
-type DCRRequest struct {
-	ClientName              string   `json:"client_name"`
-	RedirectURIs            []string `json:"redirect_uris"`
-	Scope                   string   `json:"scope"`
-	GrantTypes              []string `json:"grant_types"`
-	ResponseTypes           []string `json:"response_types"`
-	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
-}
-
-// DCRResponse represents a Dynamic Client Registration response
-type DCRResponse struct {
-	ClientID              string `json:"client_id"`
-	ClientSecret          string `json:"client_secret,omitempty"`
-	ClientIDIssuedAt      int64  `json:"client_id_issued_at,omitempty"`
-	ClientSecretExpiresAt int64  `json:"client_secret_expires_at,omitempty"`
-}
-
-// performDynamicClientRegistration performs DCR according to RFC 7591
-func (c *Client) performDynamicClientRegistration(oauthConfig *client.OAuthConfig) (string, error) {
-	c.logger.Info("🔧 Starting Dynamic Client Registration (DCR)",
-		zap.String("server", c.config.Name),
-		zap.String("auth_metadata_url", oauthConfig.AuthServerMetadataURL))
-
-	// First discover the registration endpoint from OAuth metadata
-	registrationEndpoint, err := c.discoverRegistrationEndpoint(oauthConfig.AuthServerMetadataURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to discover registration endpoint: %w", err)
-	}
-
-	c.logger.Debug("✅ Discovered registration endpoint",
-		zap.String("registration_endpoint", registrationEndpoint))
-
-	// Prepare DCR request according to RFC 7591
-	dcrRequest := DCRRequest{
-		ClientName:              "mcpproxy-go",
-		RedirectURIs:            []string{oauthConfig.RedirectURI},
-		Scope:                   strings.Join(oauthConfig.Scopes, " "),
-		GrantTypes:              []string{"authorization_code"},
-		ResponseTypes:           []string{"code"},
-		TokenEndpointAuthMethod: "none", // PKCE flow doesn't require client secret
-	}
-
-	// Marshal request to JSON
-	requestBody, err := json.Marshal(dcrRequest)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal DCR request: %w", err)
-	}
-
-	c.logger.Debug("📤 Sending DCR request",
-		zap.String("registration_endpoint", registrationEndpoint),
-		zap.String("client_name", dcrRequest.ClientName),
-		zap.Strings("redirect_uris", dcrRequest.RedirectURIs))
-
-	// Create HTTP client with timeout
-	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	// Send DCR request
-	req, err := http.NewRequest("POST", registrationEndpoint, strings.NewReader(string(requestBody)))
-	if err != nil {
-		return "", fmt.Errorf("failed to create DCR request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send DCR request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check response status
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("DCR request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Parse DCR response
-	var dcrResponse DCRResponse
-	if err := json.NewDecoder(resp.Body).Decode(&dcrResponse); err != nil {
-		return "", fmt.Errorf("failed to parse DCR response: %w", err)
-	}
-
-	if dcrResponse.ClientID == "" {
-		return "", fmt.Errorf("DCR response missing client_id")
-	}
-
-	c.logger.Info("✅ Dynamic Client Registration successful",
-		zap.String("server", c.config.Name),
-		zap.String("client_id", dcrResponse.ClientID),
-		zap.Bool("has_client_secret", dcrResponse.ClientSecret != ""))
-
-	return dcrResponse.ClientID, nil
-}
-
-// discoverRegistrationEndpoint discovers the registration endpoint from OAuth metadata
-func (c *Client) discoverRegistrationEndpoint(metadataURL string) (string, error) {
-	if metadataURL == "" {
-		return "", fmt.Errorf("no metadata URL provided")
-	}
-
-	c.logger.Debug("🔍 Discovering registration endpoint",
-		zap.String("metadata_url", metadataURL))
-
-	// Create HTTP client with timeout
-	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	resp, err := httpClient.Get(metadataURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch OAuth metadata: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("OAuth metadata request failed with status %d", resp.StatusCode)
-	}
-
-	var metadata OAuthMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
-		return "", fmt.Errorf("failed to parse OAuth metadata: %w", err)
-	}
-
-	if metadata.RegistrationEndpoint == "" {
-		return "", fmt.Errorf("no registration_endpoint found in OAuth metadata")
-	}
-
-	c.logger.Debug("✅ Successfully discovered registration endpoint",
-		zap.String("registration_endpoint", metadata.RegistrationEndpoint))
-
-	return metadata.RegistrationEndpoint, nil
-}
-
-// OAuth progress tracking to prevent multiple concurrent flows
-func (c *Client) isOAuthInProgress() bool {
-	c.logger.Debug("🔓 Acquiring OAuth read lock for progress check",
-		zap.String("server", c.config.Name))
-	c.oauthMu.RLock()
-	defer func() {
-		c.oauthMu.RUnlock()
-		c.logger.Debug("🔓 Released OAuth read lock for progress check",
-			zap.String("server", c.config.Name))
-	}()
-
-	result := c.oauthInProgress
-	c.logger.Debug("🔍 OAuth progress check result",
-		zap.String("server", c.config.Name),
-		zap.Bool("in_progress", result))
-	return result
-}
-
-func (c *Client) markOAuthInProgress() {
-	c.logger.Debug("🔒 Acquiring OAuth write lock to mark in progress",
-		zap.String("server", c.config.Name))
-	c.oauthMu.Lock()
-	defer func() {
-		c.oauthMu.Unlock()
-		c.logger.Debug("🔒 Released OAuth write lock after marking in progress",
-			zap.String("server", c.config.Name))
-	}()
-	c.oauthInProgress = true
-	c.logger.Debug("🔒 Marked OAuth as in progress",
-		zap.String("server", c.config.Name))
-}
-
-func (c *Client) markOAuthComplete() {
-	c.logger.Debug("🔓 Acquiring OAuth write lock to mark complete",
-		zap.String("server", c.config.Name))
-	c.oauthMu.Lock()
-	defer func() {
-		c.oauthMu.Unlock()
-		c.logger.Debug("🔓 Released OAuth write lock after marking complete",
-			zap.String("server", c.config.Name))
-	}()
-	c.oauthInProgress = false
-	c.logger.Debug("🔓 Marked OAuth as complete",
-		zap.String("server", c.config.Name))
-}
-
 // handleOAuthAuthorization handles the manual OAuth flow following the mcp-go example pattern
-func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oauthConfig *client.OAuthConfig) error {
+func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ *client.OAuthConfig) error {
 	c.logger.Info("🔐 Starting manual OAuth authorization flow",
 		zap.String("server", c.config.Name))
 
@@ -1484,14 +1157,6 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 	c.logger.Info("✅ OAuth handler obtained from error",
 		zap.String("server", c.config.Name))
-
-	// Start our callback server to handle the OAuth callback
-	callbackChan := make(chan map[string]string, 1)
-	callbackServer, err := c.startOAuthCallbackServer(callbackChan)
-	if err != nil {
-		return fmt.Errorf("failed to start callback server: %w", err)
-	}
-	defer callbackServer.Close()
 
 	// Generate PKCE code verifier and challenge
 	codeVerifier, err := client.GenerateCodeVerifier()
@@ -1537,12 +1202,19 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		fmt.Printf("Please open the following URL in your browser: %s\n", authURL)
 	}
 
-	// Wait for the callback
+	// Wait for the callback using our callback server coordination system
 	c.logger.Info("⏳ Waiting for OAuth authorization callback...",
 		zap.String("server", c.config.Name))
 
+	// Get our callback server that was started in OAuth config creation
+	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
+	if !exists {
+		return fmt.Errorf("callback server not found for %s", c.config.Name)
+	}
+
+	// Wait for the authorization code with shorter timeout to prevent UI freezing
 	select {
-	case params := <-callbackChan:
+	case params := <-callbackServer.CallbackChan:
 		c.logger.Info("🎯 OAuth callback received",
 			zap.String("server", c.config.Name))
 
@@ -1570,128 +1242,125 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 		c.logger.Info("✅ OAuth authorization successful - token obtained",
 			zap.String("server", c.config.Name))
+
+		// Mark OAuth as complete to prevent retry loops
+		c.markOAuthComplete()
+
 		return nil
 
-	case <-time.After(5 * time.Minute):
-		return fmt.Errorf("OAuth authorization timeout - user did not complete authorization within 5 minutes")
+	case <-time.After(2 * time.Minute):
+		c.logger.Warn("⏱️ OAuth authorization timeout - user did not complete authorization within 2 minutes",
+			zap.String("server", c.config.Name))
+		return fmt.Errorf("OAuth authorization timeout - user did not complete authorization within 2 minutes")
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// startOAuthCallbackServer starts a local HTTP server to handle OAuth callbacks (following mcp-go example)
-func (c *Client) startOAuthCallbackServer(callbackChan chan<- map[string]string) (*http.Server, error) {
-	// Use the same redirect URI as configured
-	server := &http.Server{
-		Addr: ":45123", // Use the same port as our redirect URI
-	}
-
-	http.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
-		c.logger.Info("📨 OAuth callback received",
-			zap.String("server", c.config.Name),
-			zap.String("query", r.URL.RawQuery))
-
-		// Extract query parameters
-		params := make(map[string]string)
-		for key, values := range r.URL.Query() {
-			if len(values) > 0 {
-				params[key] = values[0]
-			}
-		}
-
-		// Send parameters to the channel
-		callbackChan <- params
-
-		// Respond to the user (same as the example)
-		w.Header().Set("Content-Type", "text/html")
-		_, err := w.Write([]byte(`
-			<html>
-				<body>
-					<h1>Authorization Successful</h1>
-					<p>You can now close this window and return to the application.</p>
-					<script>window.close();</script>
-				</body>
-			</html>
-		`))
-		if err != nil {
-			c.logger.Error("Error writing OAuth callback response", zap.Error(err))
-		}
-	})
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			c.logger.Error("OAuth callback server error", zap.Error(err))
-		}
-	}()
-
-	c.logger.Info("🚀 OAuth callback server started",
-		zap.String("server", c.config.Name),
-		zap.String("address", server.Addr))
-
-	return server, nil
+// isOAuthInProgress checks if OAuth is in progress
+func (c *Client) isOAuthInProgress() bool {
+	c.oauthMu.RLock()
+	defer c.oauthMu.RUnlock()
+	return c.oauthInProgress
 }
 
-// monitorOAuthCallback watches for OAuth callback completion and triggers connection retry
-func (c *Client) monitorOAuthCallback(oauthConfig *client.OAuthConfig) {
-	c.logger.Info("🔍 Starting OAuth callback monitor",
+// markOAuthInProgress marks OAuth as in progress
+func (c *Client) markOAuthInProgress() {
+	c.oauthMu.Lock()
+	defer c.oauthMu.Unlock()
+	c.oauthInProgress = true
+	c.lastOAuthTimestamp = time.Now()
+}
+
+// markOAuthComplete marks OAuth as complete and cleans up callback server
+func (c *Client) markOAuthComplete() {
+	c.oauthMu.Lock()
+	defer c.oauthMu.Unlock()
+
+	c.oauthInProgress = false
+	c.oauthCompleted = true
+	c.lastOAuthTimestamp = time.Now()
+
+	c.logger.Info("✅ OAuth marked as complete",
 		zap.String("server", c.config.Name),
-		zap.String("callback_uri", oauthConfig.RedirectURI))
+		zap.Time("completion_time", c.lastOAuthTimestamp))
 
-	// Get the callback server for this client
-	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-		c.logger.Info("✅ Found callback server, monitoring for OAuth completion",
-			zap.String("server", c.config.Name),
-			zap.String("redirect_uri", callbackServer.RedirectURI))
-
-		// Wait for callback with timeout (5 minutes)
-		select {
-		case params := <-callbackServer.CallbackChan:
-			codePreview := params["code"]
-			if len(codePreview) > 8 {
-				codePreview = codePreview[:8] + "..."
-			}
-			c.logger.Info("🎯 OAuth callback received! Processing authorization code",
+	// Clean up the callback server to free the port
+	if manager := oauth.GetGlobalCallbackManager(); manager != nil {
+		if err := manager.StopCallbackServer(c.config.Name); err != nil {
+			c.logger.Warn("Failed to stop OAuth callback server",
 				zap.String("server", c.config.Name),
-				zap.String("code_preview", codePreview),
-				zap.String("state", params["state"]),
-				zap.String("error", params["error"]))
-
-			if params["error"] != "" {
-				c.logger.Error("❌ OAuth authorization failed",
-					zap.String("server", c.config.Name),
-					zap.String("error", params["error"]),
-					zap.String("error_description", params["error_description"]))
-				c.markOAuthComplete() // Clear the in-progress flag
-				return
-			}
-
-			if params["code"] != "" {
-				c.logger.Info("✅ Authorization code received! OAuth flow can complete",
-					zap.String("server", c.config.Name),
-					zap.String("next_step", "mcp-go client should now be able to exchange token"))
-
-				// The authorization code is now available, mark OAuth as complete
-				// so that the next connection retry can succeed
-				c.markOAuthComplete()
-
-				c.logger.Info("🔄 OAuth callback processed - next connection attempt should succeed",
-					zap.String("server", c.config.Name))
-			} else {
-				c.logger.Warn("⚠️ OAuth callback received but no authorization code found",
-					zap.String("server", c.config.Name),
-					zap.Any("params", params))
-				c.markOAuthComplete() // Clear the in-progress flag
-			}
-
-		case <-time.After(5 * time.Minute):
-			c.logger.Warn("⏱️ OAuth callback timeout - user did not complete authorization",
-				zap.String("server", c.config.Name),
-				zap.Duration("timeout", 5*time.Minute))
-			c.markOAuthComplete() // Clear the in-progress flag so retries can happen
+				zap.Error(err))
 		}
-	} else {
-		c.logger.Error("❌ Could not find callback server for OAuth monitoring",
-			zap.String("server", c.config.Name))
-		c.markOAuthComplete() // Clear the in-progress flag
 	}
+}
+
+// wasOAuthRecentlyCompleted checks if OAuth was completed recently to prevent retry loops
+func (c *Client) wasOAuthRecentlyCompleted() bool {
+	c.oauthMu.RLock()
+	defer c.oauthMu.RUnlock()
+
+	// Consider OAuth "recently completed" if it finished within the last 10 seconds
+	return c.oauthCompleted && time.Since(c.lastOAuthTimestamp) < 10*time.Second
+}
+
+// clearOAuthState clears OAuth state (for cleaning up stale state)
+func (c *Client) clearOAuthState() {
+	c.oauthMu.Lock()
+	defer c.oauthMu.Unlock()
+
+	c.logger.Info("🧹 Clearing OAuth state",
+		zap.String("server", c.config.Name),
+		zap.Bool("was_in_progress", c.oauthInProgress),
+		zap.Bool("was_completed", c.oauthCompleted))
+
+	c.oauthInProgress = false
+	c.oauthCompleted = false
+	c.lastOAuthTimestamp = time.Time{}
+}
+
+// openBrowser attempts to open the OAuth URL in the default browser
+func (c *Client) openBrowser(authURL string) error {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "rundll32"
+		args = []string{"url.dll,FileProtocolHandler", authURL}
+	case osDarwin:
+		cmd = "open"
+		args = []string{authURL}
+	case osLinux:
+		// Try to detect if we're in a GUI environment
+		if !c.hasGUIEnvironment() {
+			return fmt.Errorf("no GUI environment detected")
+		}
+		cmd = "xdg-open"
+		args = []string{authURL}
+	default:
+		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
+	}
+
+	execCmd := exec.Command(cmd, args...)
+	return execCmd.Start()
+}
+
+// hasGUIEnvironment checks if a GUI environment is available on Linux
+func (c *Client) hasGUIEnvironment() bool {
+	// Check for common environment variables that indicate GUI
+	envVars := []string{"DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE"}
+
+	for _, envVar := range envVars {
+		if value := os.Getenv(envVar); value != "" {
+			return true
+		}
+	}
+
+	// Check if xdg-open is available
+	if _, err := exec.LookPath("xdg-open"); err == nil {
+		return true
+	}
+
+	return false
 }
