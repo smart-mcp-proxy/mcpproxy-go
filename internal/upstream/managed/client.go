@@ -83,7 +83,15 @@ func (mc *Client) Connect(ctx context.Context) error {
 
 	// Connect core client
 	if err := mc.coreClient.Connect(ctx); err != nil {
-		mc.StateManager.SetError(err)
+		// Check if this is an OAuth-related error
+		if mc.isOAuthError(err) {
+			mc.logger.Warn("OAuth authentication failed, applying extended backoff",
+				zap.String("server", mc.Config.Name),
+				zap.Error(err))
+			mc.StateManager.SetOAuthError(err)
+		} else {
+			mc.StateManager.SetError(err)
+		}
 		return fmt.Errorf("core client connection failed: %w", err)
 	}
 
@@ -342,7 +350,26 @@ func (mc *Client) backgroundHealthCheck() {
 
 // performHealthCheck checks if the connection is still healthy and attempts reconnection if needed
 func (mc *Client) performHealthCheck() {
-	// Check if client is in error state and should retry connection
+	// Handle OAuth errors with extended backoff
+	if mc.StateManager.GetState() == types.StateError && mc.StateManager.IsOAuthError() {
+		if mc.StateManager.ShouldRetryOAuth() {
+			info := mc.StateManager.GetConnectionInfo()
+			mc.logger.Info("Attempting OAuth reconnection with extended backoff",
+				zap.String("server", mc.Config.Name),
+				zap.Int("oauth_retry_count", info.OAuthRetryCount),
+				zap.Time("last_oauth_attempt", info.LastOAuthAttempt))
+			mc.tryReconnect()
+		} else {
+			info := mc.StateManager.GetConnectionInfo()
+			mc.logger.Debug("OAuth backoff period not elapsed, skipping reconnection",
+				zap.String("server", mc.Config.Name),
+				zap.Int("oauth_retry_count", info.OAuthRetryCount),
+				zap.Time("last_oauth_attempt", info.LastOAuthAttempt))
+		}
+		return
+	}
+
+	// Check if client is in error state and should retry connection (non-OAuth errors)
 	if mc.StateManager.GetState() == types.StateError && mc.ShouldRetry() {
 		mc.logger.Info("Attempting automatic reconnection with exponential backoff",
 			zap.String("server", mc.Config.Name),
@@ -413,19 +440,26 @@ func (mc *Client) tryReconnect() {
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management
 	if err := mc.Connect(ctx); err != nil {
-		retryCount := mc.StateManager.GetConnectionInfo().RetryCount
+		info := mc.StateManager.GetConnectionInfo()
+
 		// Use different log levels based on error type and retry count
-		if mc.isNormalReconnectionError(err) && retryCount <= 5 {
+		if mc.isOAuthError(err) {
+			mc.logger.Warn("OAuth reconnection attempt failed, extended backoff will apply",
+				zap.String("server", mc.Config.Name),
+				zap.String("error_type", "oauth_authentication"),
+				zap.Error(err),
+				zap.Int("oauth_retry_count", info.OAuthRetryCount))
+		} else if mc.isNormalReconnectionError(err) && info.RetryCount <= 5 {
 			mc.logger.Warn("Reconnection attempt failed, will retry with exponential backoff",
 				zap.String("server", mc.Config.Name),
 				zap.String("error_type", "normal_reconnection"),
 				zap.Error(err),
-				zap.Int("retry_count", retryCount))
+				zap.Int("retry_count", info.RetryCount))
 		} else {
 			mc.logger.Error("Reconnection attempt failed",
 				zap.String("server", mc.Config.Name),
 				zap.Error(err),
-				zap.Int("retry_count", retryCount))
+				zap.Int("retry_count", info.RetryCount))
 		}
 		// Connect method already sets the error state, so we don't need to do it here
 		return
@@ -466,6 +500,34 @@ func (mc *Client) isConnectionError(err error) bool {
 
 	for _, connErr := range connectionErrors {
 		if containsString(errStr, connErr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isOAuthError checks if the error is OAuth-related
+func (mc *Client) isOAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	oauthErrors := []string{
+		"invalid_token",
+		"invalid_grant",
+		"access_denied",
+		"unauthorized",
+		"401", // HTTP 401 Unauthorized
+		"Missing or invalid access token",
+		"OAuth authentication",
+		"oauth",
+		"authorization",
+	}
+
+	for _, oauthErr := range oauthErrors {
+		if containsString(errStr, oauthErr) {
 			return true
 		}
 	}
