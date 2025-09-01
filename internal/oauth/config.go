@@ -64,25 +64,24 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
 			zap.Strings("scopes", scopes))
 	}
 
-	// Start callback server and get the dynamic port
+	// Start callback server first to get the exact port (as documented in successful approach)
+	logger.Info("🔧 Starting OAuth callback server with dynamic port allocation",
+		zap.String("server", serverConfig.Name),
+		zap.String("approach", "MCPProxy callback server coordination for exact URI matching"))
+
+	// Start our own callback server to get exact port for Cloudflare OAuth
 	callbackServer, err := globalCallbackManager.StartCallbackServer(serverConfig.Name)
 	if err != nil {
 		logger.Error("Failed to start OAuth callback server",
 			zap.String("server", serverConfig.Name),
 			zap.Error(err))
-		// Fallback to a semi-random port if dynamic allocation fails
-		// This is a last resort and may not work with strict OAuth providers
-		redirectURI := "http://127.0.0.1:8085/oauth/callback"
-		logger.Warn("Using fallback redirect URI",
-			zap.String("server", serverConfig.Name),
-			zap.String("redirect_uri", redirectURI))
-
-		// Continue with fallback URI
-		callbackServer = &CallbackServer{
-			Port:        8085,
-			RedirectURI: redirectURI,
-		}
+		return nil
 	}
+
+	logger.Info("Using exact redirect URI from allocated callback server",
+		zap.String("server", serverConfig.Name),
+		zap.String("redirect_uri", callbackServer.RedirectURI),
+		zap.Int("port", callbackServer.Port))
 
 	logger.Info("OAuth callback server started successfully",
 		zap.String("server", serverConfig.Name),
@@ -175,6 +174,36 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 		callbackServer.handleCallback(w, r)
 	})
 
+	// Add a debug handler for the root path to see all requests
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		callbackServer.logger.Info("📥 HTTP request received on callback server",
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+			zap.String("query", r.URL.RawQuery),
+			zap.String("user_agent", r.UserAgent()),
+			zap.String("remote_addr", r.RemoteAddr))
+
+		if r.URL.Path == DefaultRedirectPath {
+			callbackServer.handleCallback(w, r)
+		} else {
+			w.Header().Set("Content-Type", "text/html")
+			debugPage := fmt.Sprintf(`
+				<html>
+					<body>
+						<h1>OAuth Callback Server Debug</h1>
+						<p>Path: %s</p>
+						<p>Expected: %s</p>
+						<p>Server: %s</p>
+						<p>Port: %d</p>
+					</body>
+				</html>
+			`, r.URL.Path, DefaultRedirectPath, serverName, port)
+			if _, err := w.Write([]byte(debugPage)); err != nil {
+				callbackServer.logger.Error("Error writing debug page", zap.Error(err))
+			}
+		}
+	})
+
 	// Start the server using the existing listener
 	go func() {
 		defer listener.Close()
@@ -198,10 +227,12 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 
 // handleCallback handles OAuth callback requests
 func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
-	c.logger.Info("OAuth callback received",
+	c.logger.Info("🎯 OAuth callback received",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
-		zap.String("query", r.URL.RawQuery))
+		zap.String("query", r.URL.RawQuery),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("user_agent", r.UserAgent()))
 
 	// Extract query parameters
 	params := make(map[string]string)
@@ -211,13 +242,22 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Log specific OAuth parameters
+	c.logger.Info("🔍 OAuth callback parameters extracted",
+		zap.String("code", params["code"]),
+		zap.String("state", params["state"]),
+		zap.String("error", params["error"]),
+		zap.String("error_description", params["error_description"]),
+		zap.Int("total_params", len(params)))
+
 	// Send parameters to the channel (non-blocking)
 	select {
 	case c.CallbackChan <- params:
-		c.logger.Info("OAuth callback parameters sent to channel",
+		c.logger.Info("✅ OAuth callback parameters sent to channel successfully",
 			zap.Any("params", params))
 	default:
-		c.logger.Warn("OAuth callback channel full, dropping parameters")
+		c.logger.Error("❌ OAuth callback channel full, dropping parameters - THIS IS BAD!",
+			zap.Any("params", params))
 	}
 
 	// Respond to the user
@@ -247,6 +287,11 @@ func (m *CallbackServerManager) GetCallbackServer(serverName string) (*CallbackS
 
 	server, exists := m.servers[serverName]
 	return server, exists
+}
+
+// GetCallbackServer is a global helper to access callback servers
+func GetCallbackServer(serverName string) (*CallbackServer, bool) {
+	return globalCallbackManager.GetCallbackServer(serverName)
 }
 
 // StopCallbackServer stops and removes the callback server for a given server name

@@ -49,18 +49,6 @@ type TransportClient interface {
 	GetStderr() io.Reader // For stdio transport
 }
 
-// AuthStrategy defines authentication methods
-type AuthStrategy interface {
-	// Attempt authentication
-	Authenticate(ctx context.Context, client MCPClient) error
-
-	// Check if error indicates auth failure
-	IsAuthError(err error) bool
-
-	// Get strategy name for logging
-	Name() string
-}
-
 // ClientFactory creates different types of clients
 type ClientFactory interface {
 	// Create core client for basic operations

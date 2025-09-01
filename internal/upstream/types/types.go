@@ -46,23 +46,29 @@ func (s ConnectionState) String() string {
 
 // ConnectionInfo holds information about the current connection state
 type ConnectionInfo struct {
-	State         ConnectionState `json:"state"`
-	LastError     error           `json:"last_error,omitempty"`
-	RetryCount    int             `json:"retry_count"`
-	LastRetryTime time.Time       `json:"last_retry_time,omitempty"`
-	ServerName    string          `json:"server_name,omitempty"`
-	ServerVersion string          `json:"server_version,omitempty"`
+	State            ConnectionState `json:"state"`
+	LastError        error           `json:"last_error,omitempty"`
+	RetryCount       int             `json:"retry_count"`
+	LastRetryTime    time.Time       `json:"last_retry_time,omitempty"`
+	ServerName       string          `json:"server_name,omitempty"`
+	ServerVersion    string          `json:"server_version,omitempty"`
+	LastOAuthAttempt time.Time       `json:"last_oauth_attempt,omitempty"`
+	OAuthRetryCount  int             `json:"oauth_retry_count"`
+	IsOAuthError     bool            `json:"is_oauth_error"`
 }
 
 // StateManager manages the state transitions for an upstream connection
 type StateManager struct {
-	mu            sync.RWMutex
-	currentState  ConnectionState
-	lastError     error
-	retryCount    int
-	lastRetryTime time.Time
-	serverName    string
-	serverVersion string
+	mu               sync.RWMutex
+	currentState     ConnectionState
+	lastError        error
+	retryCount       int
+	lastRetryTime    time.Time
+	serverName       string
+	serverVersion    string
+	lastOAuthAttempt time.Time
+	oauthRetryCount  int
+	isOAuthError     bool
 
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
@@ -102,12 +108,15 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 	defer sm.mu.RUnlock()
 
 	return ConnectionInfo{
-		State:         sm.currentState,
-		LastError:     sm.lastError,
-		RetryCount:    sm.retryCount,
-		LastRetryTime: sm.lastRetryTime,
-		ServerName:    sm.serverName,
-		ServerVersion: sm.serverVersion,
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
 	}
 }
 
@@ -132,12 +141,15 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 	}
 
 	info := ConnectionInfo{
-		State:         sm.currentState,
-		LastError:     sm.lastError,
-		RetryCount:    sm.retryCount,
-		LastRetryTime: sm.lastRetryTime,
-		ServerName:    sm.serverName,
-		ServerVersion: sm.serverVersion,
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
 	}
 
 	callback := sm.onStateChange
@@ -161,12 +173,15 @@ func (sm *StateManager) SetError(err error) {
 	sm.lastRetryTime = time.Now()
 
 	info := ConnectionInfo{
-		State:         sm.currentState,
-		LastError:     sm.lastError,
-		RetryCount:    sm.retryCount,
-		LastRetryTime: sm.lastRetryTime,
-		ServerName:    sm.serverName,
-		ServerVersion: sm.serverVersion,
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
 	}
 
 	callback := sm.onStateChange
@@ -240,8 +255,8 @@ func (sm *StateManager) ValidateTransition(from, to ConnectionState) error {
 	// Define valid transitions
 	validTransitions := map[ConnectionState][]ConnectionState{
 		StateDisconnected:   {StateConnecting},
-		StateConnecting:     {StateAuthenticating, StateDiscovering, StateError, StateDisconnected},
-		StateAuthenticating: {StateConnecting, StateError, StateDisconnected},
+		StateConnecting:     {StateAuthenticating, StateDiscovering, StateReady, StateError, StateDisconnected}, // Allow direct to Ready for OAuth flows
+		StateAuthenticating: {StateConnecting, StateDiscovering, StateReady, StateError, StateDisconnected},
 		StateDiscovering:    {StateReady, StateError, StateDisconnected},
 		StateReady:          {StateError, StateDisconnected},
 		StateError:          {StateConnecting, StateDisconnected},
@@ -273,14 +288,20 @@ func (sm *StateManager) Reset() {
 	sm.lastRetryTime = time.Time{}
 	sm.serverName = ""
 	sm.serverVersion = ""
+	sm.lastOAuthAttempt = time.Time{}
+	sm.oauthRetryCount = 0
+	sm.isOAuthError = false
 
 	info := ConnectionInfo{
-		State:         sm.currentState,
-		LastError:     sm.lastError,
-		RetryCount:    sm.retryCount,
-		LastRetryTime: sm.lastRetryTime,
-		ServerName:    sm.serverName,
-		ServerVersion: sm.serverVersion,
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
 	}
 
 	callback := sm.onStateChange
@@ -289,4 +310,75 @@ func (sm *StateManager) Reset() {
 	if callback != nil {
 		go callback(oldState, StateDisconnected, &info)
 	}
+}
+
+// SetOAuthError sets an OAuth-specific error with longer backoff periods
+func (sm *StateManager) SetOAuthError(err error) {
+	sm.mu.Lock()
+
+	oldState := sm.currentState
+	sm.currentState = StateError
+	sm.lastError = err
+	sm.isOAuthError = true
+	sm.oauthRetryCount++
+	sm.lastOAuthAttempt = time.Now()
+	sm.lastRetryTime = time.Now()
+
+	info := ConnectionInfo{
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
+	}
+
+	callback := sm.onStateChange
+	sm.mu.Unlock()
+
+	// Call the callback outside the lock to avoid deadlocks
+	if callback != nil {
+		callback(oldState, StateError, &info)
+	}
+}
+
+// ShouldRetryOAuth returns true if OAuth should be retried with much longer backoff intervals
+func (sm *StateManager) ShouldRetryOAuth() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if !sm.isOAuthError || sm.currentState != StateError {
+		return false
+	}
+
+	if sm.oauthRetryCount == 0 {
+		return true
+	}
+
+	// OAuth has much longer backoff intervals: 5min, 15min, 1h, 4h, 24h
+	var backoffDuration time.Duration
+	switch {
+	case sm.oauthRetryCount <= 1:
+		backoffDuration = 5 * time.Minute
+	case sm.oauthRetryCount <= 2:
+		backoffDuration = 15 * time.Minute
+	case sm.oauthRetryCount <= 3:
+		backoffDuration = 1 * time.Hour
+	case sm.oauthRetryCount <= 4:
+		backoffDuration = 4 * time.Hour
+	default:
+		backoffDuration = 24 * time.Hour // Max backoff for OAuth: 24 hours
+	}
+
+	return time.Since(sm.lastOAuthAttempt) >= backoffDuration
+}
+
+// IsOAuthError returns true if the last error was OAuth-related
+func (sm *StateManager) IsOAuthError() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.isOAuthError
 }
