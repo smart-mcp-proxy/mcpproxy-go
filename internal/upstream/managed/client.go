@@ -620,7 +620,7 @@ func (mc *Client) isNormalReconnectionError(err error) bool {
 }
 
 // tryListTools attempts to acquire the ListTools lock, returns true if successful
-func (mc *Client) tryListTools(ctx context.Context) bool {
+func (mc *Client) tryListTools(_ context.Context) bool {
 	mc.listToolsMu.Lock()
 	defer mc.listToolsMu.Unlock()
 
