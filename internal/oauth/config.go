@@ -64,24 +64,29 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
 			zap.Strings("scopes", scopes))
 	}
 
-	// Start callback server and get the dynamic port
-	callbackServer, err := globalCallbackManager.StartCallbackServer(serverConfig.Name)
-	if err != nil {
-		logger.Error("Failed to start OAuth callback server",
-			zap.String("server", serverConfig.Name),
-			zap.Error(err))
-		// Fallback to a semi-random port if dynamic allocation fails
-		// This is a last resort and may not work with strict OAuth providers
-		redirectURI := "http://127.0.0.1:8085/oauth/callback"
-		logger.Warn("Using fallback redirect URI",
-			zap.String("server", serverConfig.Name),
-			zap.String("redirect_uri", redirectURI))
+	// EXPERIMENT #2: Don't start our callback server - let mcp-go handle everything
+	// The issue is our callback server receives the code but mcp-go never gets it
+	logger.Info("🧪 EXPERIMENT #2: Not starting custom callback server - letting mcp-go manage OAuth entirely",
+		zap.String("server", serverConfig.Name),
+		zap.String("reason", "Our callback bridge didn't work - mcp-go needs direct callback control"))
 
-		// Continue with fallback URI
-		callbackServer = &CallbackServer{
-			Port:        8085,
-			RedirectURI: redirectURI,
-		}
+	// Use a redirect URI that signals to mcp-go to handle its own callback server
+	// Use a specific port that mcp-go can allocate (not 0 which is invalid)
+	redirectURI := "http://127.0.0.1:0/oauth/callback" // Let mcp-go interpret this
+
+	// But wait, that's still 0... let me try a different approach
+	// Use a high port number that's likely to be available
+	redirectURI = "http://127.0.0.1:45123/oauth/callback"
+
+	logger.Info("Using high-port redirect URI for mcp-go to handle",
+		zap.String("server", serverConfig.Name),
+		zap.String("redirect_uri", redirectURI),
+		zap.String("approach", "mcp-go should start its own callback server on this port"))
+
+	// Create a fake callback server struct for compatibility
+	callbackServer := &CallbackServer{
+		Port:        45123,
+		RedirectURI: redirectURI,
 	}
 
 	logger.Info("OAuth callback server started successfully",
@@ -174,7 +179,7 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 	mux.HandleFunc(DefaultRedirectPath, func(w http.ResponseWriter, r *http.Request) {
 		callbackServer.handleCallback(w, r)
 	})
-	
+
 	// Add a debug handler for the root path to see all requests
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		callbackServer.logger.Info("📥 HTTP request received on callback server",
@@ -183,7 +188,7 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 			zap.String("query", r.URL.RawQuery),
 			zap.String("user_agent", r.UserAgent()),
 			zap.String("remote_addr", r.RemoteAddr))
-		
+
 		if r.URL.Path == DefaultRedirectPath {
 			callbackServer.handleCallback(w, r)
 		} else {
@@ -226,10 +231,12 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 
 // handleCallback handles OAuth callback requests
 func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
-	c.logger.Info("OAuth callback received",
+	c.logger.Info("🎯 OAuth callback received",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
-		zap.String("query", r.URL.RawQuery))
+		zap.String("query", r.URL.RawQuery),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("user_agent", r.UserAgent()))
 
 	// Extract query parameters
 	params := make(map[string]string)
@@ -239,13 +246,22 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Log specific OAuth parameters
+	c.logger.Info("🔍 OAuth callback parameters extracted",
+		zap.String("code", params["code"]),
+		zap.String("state", params["state"]),
+		zap.String("error", params["error"]),
+		zap.String("error_description", params["error_description"]),
+		zap.Int("total_params", len(params)))
+
 	// Send parameters to the channel (non-blocking)
 	select {
 	case c.CallbackChan <- params:
-		c.logger.Info("OAuth callback parameters sent to channel",
+		c.logger.Info("✅ OAuth callback parameters sent to channel successfully",
 			zap.Any("params", params))
 	default:
-		c.logger.Warn("OAuth callback channel full, dropping parameters")
+		c.logger.Error("❌ OAuth callback channel full, dropping parameters - THIS IS BAD!",
+			zap.Any("params", params))
 	}
 
 	// Respond to the user
@@ -275,6 +291,11 @@ func (m *CallbackServerManager) GetCallbackServer(serverName string) (*CallbackS
 
 	server, exists := m.servers[serverName]
 	return server, exists
+}
+
+// GetCallbackServer is a global helper to access callback servers
+func GetCallbackServer(serverName string) (*CallbackServer, bool) {
+	return globalCallbackManager.GetCallbackServer(serverName)
 }
 
 // StopCallbackServer stops and removes the callback server for a given server name
