@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/transport"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -445,10 +446,16 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 
 	var lastErr error
 	for i, authFunc := range authStrategies {
+		strategyName := []string{"headers", "no-auth", "OAuth"}[i]
+		c.logger.Debug("🔐 Trying authentication strategy",
+			zap.Int("strategy_index", i),
+			zap.String("strategy", strategyName))
+			
 		if err := authFunc(ctx); err != nil {
 			lastErr = err
-			c.logger.Debug("Auth strategy failed",
+			c.logger.Debug("🚫 Auth strategy failed",
 				zap.Int("strategy_index", i),
+				zap.String("strategy", strategyName),
 				zap.Error(err))
 
 			// For configuration errors (like no headers), always try next strategy
@@ -462,6 +469,9 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 			}
 			continue
 		}
+		c.logger.Info("✅ Authentication successful",
+			zap.Int("strategy_index", i),
+			zap.String("strategy", strategyName))
 		return nil
 	}
 
@@ -501,10 +511,33 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 }
 
 // tryOAuthAuth attempts OAuth authentication
-func (c *Client) tryOAuthAuth(_ context.Context) error {
-	// This will be implemented in the auth module
-	// For now, return error
-	return fmt.Errorf("OAuth authentication not yet implemented in core client")
+func (c *Client) tryOAuthAuth(ctx context.Context) error {
+	c.logger.Debug("🔐 Attempting OAuth authentication",
+		zap.String("server", c.config.Name),
+		zap.String("url", c.config.URL))
+
+	// Create OAuth config using the oauth package
+	oauthConfig := oauth.CreateOAuthConfig(c.config)
+	if oauthConfig == nil {
+		return fmt.Errorf("failed to create OAuth config")
+	}
+
+	c.logger.Info("🌟 Starting OAuth authentication flow",
+		zap.String("server", c.config.Name),
+		zap.String("redirect_uri", oauthConfig.RedirectURI),
+		zap.Strings("scopes", oauthConfig.Scopes),
+		zap.Bool("pkce_enabled", oauthConfig.PKCEEnabled))
+
+	// Create HTTP transport config with OAuth
+	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+	httpClient, err := transport.CreateHTTPClient(httpConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create OAuth HTTP client: %w", err)
+	}
+
+	c.logger.Debug("🔗 OAuth HTTP client created, starting connection")
+	c.client = httpClient
+	return c.client.Start(ctx)
 }
 
 // isAuthError checks if error indicates authentication failure
@@ -530,7 +563,6 @@ func (c *Client) isConfigError(err error) bool {
 	return containsAny(errStr, []string{
 		"no headers configured",
 		"no command specified",
-		"OAuth authentication not yet implemented",
 	})
 }
 
