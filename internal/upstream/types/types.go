@@ -315,7 +315,6 @@ func (sm *StateManager) Reset() {
 // SetOAuthError sets an OAuth-specific error with longer backoff periods
 func (sm *StateManager) SetOAuthError(err error) {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	oldState := sm.currentState
 	sm.currentState = StateError
