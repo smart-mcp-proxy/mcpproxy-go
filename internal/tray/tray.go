@@ -108,6 +108,7 @@ type App struct {
 	// Menu tracking fields for dynamic updates
 	forceRefresh      bool                         // Force menu refresh flag
 	menusInitialized  bool                         // Track if menus have been initialized
+	coreMenusReady    bool                         // Track if core menu items are ready
 	lastServerList    []string                     // Track last known server list for change detection
 	serverMenus       map[string]*systray.MenuItem // Track server menu items
 	serverActionMenus map[string]*systray.MenuItem // Track server action menu items
@@ -172,7 +173,20 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 
 	// Start background status updater (every 5 seconds for more responsive UI)
+	// Wait for menu initialization to complete before starting updates
 	go func() {
+		a.logger.Debug("Waiting for core menu items to be initialized...")
+		// Wait for menu items to be initialized using the flag
+		for !a.coreMenusReady {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				time.Sleep(100 * time.Millisecond) // Check every 100ms
+			}
+		}
+
+		a.logger.Debug("Core menu items ready, starting status updater")
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -193,6 +207,18 @@ func (a *App) Run(ctx context.Context) error {
 	// Listen for real-time status updates
 	if a.server != nil {
 		go func() {
+			a.logger.Debug("Waiting for core menu items before processing real-time status updates...")
+			// Wait for menu items to be initialized using the flag
+			for !a.coreMenusReady {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					time.Sleep(100 * time.Millisecond) // Check every 100ms
+				}
+			}
+
+			a.logger.Debug("Core menu items ready, starting real-time status updates")
 			statusCh := a.server.StatusChannel()
 			for {
 				select {
@@ -305,9 +331,14 @@ func (a *App) onReady() {
 	a.updateTooltip()
 
 	// --- Initialize Menu Items ---
+	a.logger.Debug("Initializing tray menu items")
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
 	a.statusItem.Disable() // Initially disabled as it's just for display
 	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
+
+	// Mark core menu items as ready - this will release waiting goroutines
+	a.coreMenusReady = true
+	a.logger.Debug("Core menu items initialized successfully - background processes can now start")
 	systray.AddSeparator()
 
 	// --- Upstream & Quarantine Menus ---
@@ -385,7 +416,7 @@ func (a *App) onReady() {
 		}()
 	}
 
-	a.logger.Info("System tray is ready")
+	a.logger.Info("System tray is ready - menu items fully initialized")
 }
 
 // updateTooltip updates the tooltip based on the server's running state
@@ -456,9 +487,9 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		return
 	}
 
-	// Check if menu items are initialized to prevent nil pointer dereference
-	if a.statusItem == nil || a.startStopItem == nil {
-		a.logger.Debug("Menu items not initialized yet, skipping status update")
+	// Check if core menu items are ready to prevent nil pointer dereference
+	if !a.coreMenusReady {
+		a.logger.Debug("Core menu items not ready yet, skipping status update from data")
 		return
 	}
 
@@ -586,9 +617,9 @@ func (a *App) updateStatus() {
 		return
 	}
 
-	// Check if menu items are initialized
-	if a.statusItem == nil {
-		a.logger.Debug("Menu items not initialized yet, skipping status update")
+	// Check if core menu items are ready
+	if !a.coreMenusReady {
+		a.logger.Debug("Core menu items not ready yet, skipping status update")
 		return
 	}
 

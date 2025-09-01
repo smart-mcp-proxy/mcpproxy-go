@@ -694,8 +694,30 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		zap.String("redirect_uri", oauthConfig.RedirectURI),
 		zap.Bool("pkce_enabled", oauthConfig.PKCEEnabled))
 
+	c.logger.Debug("🔎 About to check if client_id is empty",
+		zap.String("server", c.config.Name),
+		zap.String("client_id_value", oauthConfig.ClientID),
+		zap.Bool("client_id_is_empty", oauthConfig.ClientID == ""))
+
 	// If client_id is still missing, perform our own DCR
 	if oauthConfig.ClientID == "" {
+		c.logger.Debug("🎯 Inside client_id empty check - proceeding to OAuth progress check",
+			zap.String("server", c.config.Name))
+		// Check if OAuth is already in progress to prevent multiple concurrent flows
+		inProgress := c.isOAuthInProgress()
+		c.logger.Debug("🔍 Checking OAuth progress status",
+			zap.String("server", c.config.Name),
+			zap.Bool("oauth_in_progress", inProgress))
+
+		if inProgress {
+			c.logger.Info("🔄 OAuth flow already in progress - skipping duplicate DCR",
+				zap.String("server", c.config.Name))
+			return fmt.Errorf("OAuth flow already in progress")
+		}
+
+		c.markOAuthInProgress()
+		defer c.markOAuthComplete()
+
 		c.logger.Warn("🔧 mcp-go library did not perform DCR - performing manual DCR",
 			zap.String("server", c.config.Name),
 			zap.String("issue", "client_id required for OAuth but not provided by mcp-go library"))
@@ -712,8 +734,67 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				zap.String("client_id", clientID))
 			// Update the OAuth config with the new client_id
 			oauthConfig.ClientID = clientID
+
+			// CRITICAL: Recreate the OAuth client with the updated config
+			// The existing client was created without client_id, so it can't complete token exchange
+			c.logger.Info("🔄 Recreating OAuth client with updated client_id",
+				zap.String("server", c.config.Name),
+				zap.String("client_id", clientID))
+
+			// Create new HTTP client with updated OAuth config
+			httpConfig := &transport.HTTPTransportConfig{
+				URL:         c.config.URL,
+				OAuthConfig: oauthConfig,
+				UseOAuth:    true,
+			}
+
+			newClient, err := transport.CreateHTTPClient(httpConfig)
+			if err != nil {
+				c.logger.Error("❌ Failed to recreate HTTP client with updated OAuth config",
+					zap.String("server", c.config.Name),
+					zap.Error(err))
+			} else {
+				c.client = newClient
+				c.logger.Info("✅ OAuth client recreated with client_id - ready for token exchange",
+					zap.String("server", c.config.Name),
+					zap.String("client_id", clientID))
+
+				// Start the OAuth client with proper client_id for token exchange
+				c.logger.Info("🔄 Starting OAuth client to enable token exchange and callback handling",
+					zap.String("server", c.config.Name))
+
+				err = c.client.Start(ctx)
+				if err != nil {
+					c.logger.Error("❌ Failed to start OAuth client with client_id",
+						zap.String("server", c.config.Name),
+						zap.Error(err))
+				} else {
+					c.logger.Info("✅ OAuth client started successfully - callback handler active",
+						zap.String("server", c.config.Name))
+
+					// Open browser for user authentication but DON'T wait for completion
+					// The OAuth flow is now asynchronous - user will authorize, callback will be processed
+					c.logger.Info("🌐 Opening browser for OAuth authorization - flow is now asynchronous",
+						zap.String("server", c.config.Name))
+					c.provideManualOAuthInstructions(oauthConfig)
+
+					// DON'T return nil here - let the connection attempt continue
+					// The first attempt will likely fail, but subsequent retries should succeed
+					// after the user completes OAuth authorization
+					c.logger.Info("⏳ OAuth flow initiated - subsequent connection attempts will succeed after user authorization",
+						zap.String("server", c.config.Name))
+				}
+			}
 		}
+	} else {
+		c.logger.Info("✅ client_id already available - skipping DCR",
+			zap.String("server", c.config.Name),
+			zap.String("client_id", oauthConfig.ClientID))
 	}
+
+	c.logger.Debug("🏁 Reached end of OAuth setup function",
+		zap.String("server", c.config.Name),
+		zap.String("final_client_id", oauthConfig.ClientID))
 
 	// The mcp-go library apparently doesn't open browser automatically, so we need to do it manually
 	c.logger.Warn("🚫 mcp-go library did not open browser - providing manual fallback",
@@ -723,6 +804,9 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 	// Provide immediate manual instructions and try to open browser
 	c.provideManualOAuthInstructions(oauthConfig)
+
+	c.logger.Debug("🔚 OAuth function returning",
+		zap.String("server", c.config.Name))
 
 	return nil
 }
@@ -1413,4 +1497,50 @@ func (c *Client) discoverRegistrationEndpoint(metadataURL string) (string, error
 		zap.String("registration_endpoint", metadata.RegistrationEndpoint))
 
 	return metadata.RegistrationEndpoint, nil
+}
+
+// OAuth progress tracking to prevent multiple concurrent flows
+func (c *Client) isOAuthInProgress() bool {
+	c.logger.Debug("🔓 Acquiring OAuth read lock for progress check",
+		zap.String("server", c.config.Name))
+	c.oauthMu.RLock()
+	defer func() {
+		c.oauthMu.RUnlock()
+		c.logger.Debug("🔓 Released OAuth read lock for progress check",
+			zap.String("server", c.config.Name))
+	}()
+
+	result := c.oauthInProgress
+	c.logger.Debug("🔍 OAuth progress check result",
+		zap.String("server", c.config.Name),
+		zap.Bool("in_progress", result))
+	return result
+}
+
+func (c *Client) markOAuthInProgress() {
+	c.logger.Debug("🔒 Acquiring OAuth write lock to mark in progress",
+		zap.String("server", c.config.Name))
+	c.oauthMu.Lock()
+	defer func() {
+		c.oauthMu.Unlock()
+		c.logger.Debug("🔒 Released OAuth write lock after marking in progress",
+			zap.String("server", c.config.Name))
+	}()
+	c.oauthInProgress = true
+	c.logger.Debug("🔒 Marked OAuth as in progress",
+		zap.String("server", c.config.Name))
+}
+
+func (c *Client) markOAuthComplete() {
+	c.logger.Debug("🔓 Acquiring OAuth write lock to mark complete",
+		zap.String("server", c.config.Name))
+	c.oauthMu.Lock()
+	defer func() {
+		c.oauthMu.Unlock()
+		c.logger.Debug("🔓 Released OAuth write lock after marking complete",
+			zap.String("server", c.config.Name))
+	}()
+	c.oauthInProgress = false
+	c.logger.Debug("🔓 Marked OAuth as complete",
+		zap.String("server", c.config.Name))
 }
