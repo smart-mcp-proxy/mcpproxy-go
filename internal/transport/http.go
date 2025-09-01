@@ -116,13 +116,17 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			zap.String("client_secret", cfg.OAuthConfig.ClientSecret),
 			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
 
+		logger.Debug("🔧 About to create OAuth client with mcp-go library",
+			zap.String("url", cfg.URL),
+			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI))
+
 		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig)
 		if err != nil {
 			logger.Error("Failed to create OAuth client", zap.Error(err))
 			return nil, fmt.Errorf("failed to create OAuth client: %w", err)
 		}
 
-		logger.Debug("OAuth-enabled HTTP client created successfully")
+		logger.Info("✨ OAuth-enabled HTTP client created successfully - browser should open when Start() is called")
 		return client, nil
 	}
 

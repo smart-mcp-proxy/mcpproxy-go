@@ -174,6 +174,34 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 	mux.HandleFunc(DefaultRedirectPath, func(w http.ResponseWriter, r *http.Request) {
 		callbackServer.handleCallback(w, r)
 	})
+	
+	// Add a debug handler for the root path to see all requests
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		callbackServer.logger.Info("📥 HTTP request received on callback server",
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+			zap.String("query", r.URL.RawQuery),
+			zap.String("user_agent", r.UserAgent()),
+			zap.String("remote_addr", r.RemoteAddr))
+		
+		if r.URL.Path == DefaultRedirectPath {
+			callbackServer.handleCallback(w, r)
+		} else {
+			w.Header().Set("Content-Type", "text/html")
+			debugPage := fmt.Sprintf(`
+				<html>
+					<body>
+						<h1>OAuth Callback Server Debug</h1>
+						<p>Path: %s</p>
+						<p>Expected: %s</p>
+						<p>Server: %s</p>
+						<p>Port: %d</p>
+					</body>
+				</html>
+			`, r.URL.Path, DefaultRedirectPath, serverName, port)
+			w.Write([]byte(debugPage))
+		}
+	})
 
 	// Start the server using the existing listener
 	go func() {
