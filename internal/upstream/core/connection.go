@@ -1255,8 +1255,8 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		return fmt.Errorf("failed to get authorization URL: %w", err)
 	}
 
-	// Check if this is a manual OAuth flow by looking at the call stack context
-	isManualFlow := strings.Contains(fmt.Sprintf("%+v", ctx), "manual") || c.isManualOAuthFlow(ctx)
+	// Check if this is a manual OAuth flow using the proper context key
+	isManualFlow := c.isManualOAuthFlow(ctx)
 
 	// Rate limit browser opening to prevent spam (CRITICAL FIX for Phase 1)
 	// Skip rate limiting for manual OAuth flows
@@ -1276,7 +1276,9 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		fmt.Printf("Please open the following URL manually in your browser: %s\n", authURL)
 	} else {
 		if isManualFlow {
-			c.logger.Info("🎯 Manual OAuth flow detected - bypassing rate limiting")
+			c.logger.Info("🎯 Manual OAuth flow detected - bypassing rate limiting",
+				zap.String("server", c.config.Name),
+				zap.Duration("time_since_last", timeSinceLastBrowser))
 		}
 
 		// Open the browser to the authorization URL
@@ -1578,7 +1580,7 @@ func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 func (c *Client) isManualOAuthFlow(ctx context.Context) bool {
 	// Check if context has manual OAuth marker
 	if ctx != nil {
-		if value := ctx.Value("manual_oauth"); value != nil {
+		if value := ctx.Value(manualOAuthKey); value != nil {
 			if manual, ok := value.(bool); ok && manual {
 				return true
 			}
