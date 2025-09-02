@@ -23,6 +23,18 @@ import (
 const (
 	osLinux  = "linux"
 	osDarwin = "darwin"
+
+	// Transport types
+	transportHTTP           = "http"
+	transportHTTPStreamable = "streamable-http"
+	transportSSE            = "sse"
+)
+
+// Context key types
+type contextKey string
+
+const (
+	manualOAuthKey contextKey = "manual_oauth"
 )
 
 // Connect establishes connection to the upstream server
@@ -81,10 +93,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	case transportStdio:
 		c.logger.Debug("📡 Using STDIO transport")
 		err = c.connectStdio(ctx)
-	case "http", "streamable-http":
+	case transportHTTP, transportHTTPStreamable:
 		c.logger.Debug("🌐 Using HTTP transport")
 		err = c.connectHTTP(ctx)
-	case "sse":
+	case transportSSE:
 		c.logger.Debug("📡 Using SSE transport")
 		err = c.connectSSE(ctx)
 	default:
@@ -1414,13 +1426,13 @@ func (c *Client) ForceOAuthFlow(ctx context.Context) error {
 	}
 
 	// Mark context as manual OAuth flow to bypass rate limiting
-	manualCtx := context.WithValue(ctx, "manual_oauth", true)
+	manualCtx := context.WithValue(ctx, manualOAuthKey, true)
 
 	// Try to create an OAuth-enabled client that will trigger the OAuth flow
 	switch c.transportType {
-	case "http", "streamable-http":
+	case transportHTTP, transportHTTPStreamable:
 		return c.forceHTTPOAuthFlow(manualCtx)
-	case "sse":
+	case transportSSE:
 		return c.forceSSEOAuthFlow(manualCtx)
 	default:
 		return fmt.Errorf("OAuth not supported for transport type: %s", c.transportType)

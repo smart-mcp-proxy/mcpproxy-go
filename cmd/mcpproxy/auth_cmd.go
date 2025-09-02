@@ -107,7 +107,7 @@ func init() {
   mcpproxy auth status --all --log-level=debug`
 }
 
-func runAuthLogin(cmd *cobra.Command, args []string) error {
+func runAuthLogin(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
 	defer cancel()
 
@@ -150,7 +150,7 @@ func runAuthLogin(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runAuthStatus(cmd *cobra.Command, args []string) error {
+func runAuthStatus(_ *cobra.Command, _ []string) error {
 	fmt.Printf("🔍 OAuth Authentication Status\n")
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 

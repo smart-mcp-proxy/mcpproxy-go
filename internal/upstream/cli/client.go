@@ -16,6 +16,7 @@ import (
 
 const (
 	transportStdio = "stdio"
+	oauthRequired  = "required"
 )
 
 // Client provides a simple interface for CLI operations with enhanced debugging
@@ -324,12 +325,12 @@ func (c *Client) GetOAuthStatus() (string, error) {
 		if strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "invalid_token") {
 			return "expired", nil
 		}
-		return "required", nil
+		return oauthRequired, nil
 	}
 
 	// Check if server supports OAuth at all
 	if c.hasOAuthConfig() {
-		return "required", nil
+		return oauthRequired, nil
 	}
 
 	return "not_required", nil
