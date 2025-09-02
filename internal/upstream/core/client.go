@@ -180,7 +180,12 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		return nil, fmt.Errorf("client not connected")
 	}
 
-	// Check if server supports tools
+	// Check if we have server info and if server supports tools
+	if serverInfo == nil {
+		c.logger.Debug("Server info not available")
+		return nil, fmt.Errorf("server info not available")
+	}
+
 	if serverInfo.Capabilities.Tools == nil {
 		c.logger.Debug("Server does not support tools")
 		return nil, nil
