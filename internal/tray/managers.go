@@ -232,6 +232,7 @@ type MenuManager struct {
 	quarantineMenuItems   map[string]*systray.MenuItem // server name -> menu item
 	serverActionItems     map[string]*systray.MenuItem // server name -> enable/disable action menu item
 	serverQuarantineItems map[string]*systray.MenuItem // server name -> quarantine action menu item
+	serverOAuthItems      map[string]*systray.MenuItem // server name -> OAuth login menu item
 	quarantineInfoEmpty   *systray.MenuItem            // "No servers" info item
 	quarantineInfoHelp    *systray.MenuItem            // "Click to unquarantine" help item
 
@@ -254,6 +255,7 @@ func NewMenuManager(upstreamMenu, quarantineMenu *systray.MenuItem, logger *zap.
 		quarantineMenuItems:   make(map[string]*systray.MenuItem),
 		serverActionItems:     make(map[string]*systray.MenuItem),
 		serverQuarantineItems: make(map[string]*systray.MenuItem),
+		serverOAuthItems:      make(map[string]*systray.MenuItem),
 	}
 }
 
@@ -322,12 +324,16 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 			if quarantineActionItem, ok := m.serverQuarantineItems[serverName]; ok {
 				quarantineActionItem.Hide()
 			}
+			if oauthItem, ok := m.serverOAuthItems[serverName]; ok {
+				oauthItem.Hide()
+			}
 		}
 
 		// Clear the tracking maps
 		m.serverMenuItems = make(map[string]*systray.MenuItem)
 		m.serverActionItems = make(map[string]*systray.MenuItem)
 		m.serverQuarantineItems = make(map[string]*systray.MenuItem)
+		m.serverOAuthItems = make(map[string]*systray.MenuItem)
 
 		// Create all servers in sorted order
 		for _, serverName := range currentServerNames {
@@ -556,7 +562,48 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	return
 }
 
-// createServerActionSubmenus creates action submenus for a server (enable/disable, quarantine)
+// serverSupportsOAuth determines if a server supports OAuth authentication
+func (m *MenuManager) serverSupportsOAuth(server map[string]interface{}) bool {
+	// Get server URL
+	serverURL, ok := server["url"].(string)
+	if !ok || serverURL == "" {
+		return false
+	}
+
+	// Check if it's an HTTP/HTTPS server (OAuth is typically used with HTTP-based APIs)
+	urlLower := strings.ToLower(serverURL)
+	if !strings.HasPrefix(urlLower, "http://") && !strings.HasPrefix(urlLower, "https://") {
+		return false
+	}
+
+	// Check for OAuth-related URLs patterns
+	if strings.Contains(urlLower, "oauth") || strings.Contains(urlLower, "auth") {
+		return true
+	}
+
+	// For common MCP servers that we know support OAuth
+	oauthDomains := []string{
+		"sentry.dev",
+		"github.com",
+		"gitlab.com",
+		"google.com",
+		"googleapis.com",
+		"microsoft.com",
+		"oauth.com",
+	}
+
+	for _, domain := range oauthDomains {
+		if strings.Contains(urlLower, domain) {
+			return true
+		}
+	}
+
+	// For any HTTP/HTTPS server, show OAuth option since it might support it
+	// Users can try it and it will fail gracefully if not supported
+	return true
+}
+
+// createServerActionSubmenus creates action submenus for a server (enable/disable, quarantine, OAuth login)
 func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuItem, server map[string]interface{}) {
 	serverName, _ := server["name"].(string)
 	if serverName == "" {
@@ -575,6 +622,22 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	}
 	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
 	m.serverActionItems[serverName] = enableItem
+
+	// OAuth Login action (only for servers that support OAuth)
+	if m.serverSupportsOAuth(server) && !quarantined {
+		oauthItem := serverMenuItem.AddSubMenuItem("🔐 OAuth Login", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+		m.serverOAuthItems[serverName] = oauthItem
+
+		// Set up OAuth login click handler
+		go func(name string, item *systray.MenuItem) {
+			for range item.ClickedCh {
+				if m.onServerAction != nil {
+					// Run in new goroutines to avoid blocking the event channel
+					go m.onServerAction(name, "oauth_login")
+				}
+			}
+		}(serverName, oauthItem)
+	}
 
 	// Quarantine action (only if not already quarantined)
 	if !quarantined {

@@ -101,119 +101,11 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	// Initialize the MCP connection
-	if err := c.initialize(ctx); err != nil {
-		// Check if this is an OAuth authorization error first
-		if client.IsOAuthAuthorizationRequiredError(err) {
-			c.logger.Info("🎯 OAuth authorization required during initial MCP initialization",
-				zap.String("server", c.config.Name))
-
-			// Create OAuth config for manual authorization
-			oauthConfig := oauth.CreateOAuthConfig(c.config)
-			if oauthConfig == nil {
-				return fmt.Errorf("failed to create OAuth config for authorization")
-			}
-
-			// Handle OAuth authorization manually
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
-				return fmt.Errorf("OAuth authorization during initial MCP init failed: %w", oauthErr)
-			}
-
-			// Retry MCP initialization after OAuth is complete
-			c.logger.Info("🔄 Retrying MCP initialization after OAuth authorization",
-				zap.String("server", c.config.Name))
-			if finalInitErr := c.initialize(ctx); finalInitErr != nil {
-				c.client.Close()
-				c.client = nil
-				return fmt.Errorf("failed to initialize even after OAuth authorization: %w", finalInitErr)
-			}
-			// Check if this is an OAuth authentication error that needs extended backoff (CRITICAL FIX)
-		} else if c.isOAuthError(err) {
-			c.logger.Warn("OAuth authentication failed during initialization, will apply extended backoff",
-				zap.String("server", c.config.Name),
-				zap.Error(err))
-
-			// Log OAuth failure to server-specific log
-			if c.upstreamLogger != nil {
-				c.upstreamLogger.Warn("OAuth authentication failed during initialization",
-					zap.Error(err))
-			}
-
-			c.client.Close()
-			c.client = nil
-			// Return OAuth error to trigger proper OAuth backoff in managed client
-			return fmt.Errorf("OAuth authentication failed: %w", err)
-			// Check if this is an auth error that should trigger OAuth retry (legacy)
-		} else if c.isAuthError(err) {
-			c.logger.Debug("🔄 MCP initialization failed with auth error, retrying with OAuth",
-				zap.Error(err))
-
-			// Log initialization failure to server-specific log
-			if c.upstreamLogger != nil {
-				c.upstreamLogger.Warn("MCP initialization failed with auth error, retrying with OAuth",
-					zap.Error(err))
-			}
-
-			// Close the current client
-			c.client.Close()
-			c.client = nil
-
-			// Try OAuth authentication
-			if oauthErr := c.tryOAuthAuth(ctx); oauthErr != nil {
-				return fmt.Errorf("failed to authenticate with OAuth after auth error: %w", oauthErr)
-			}
-
-			// Retry MCP initialization with OAuth client
-			if initErr := c.initialize(ctx); initErr != nil {
-				// Check if this is an OAuth authorization error during MCP initialization
-				if client.IsOAuthAuthorizationRequiredError(initErr) {
-					c.logger.Info("🎯 OAuth authorization required during MCP initialization",
-						zap.String("server", c.config.Name))
-
-					// Create OAuth config for manual authorization
-					oauthConfig := oauth.CreateOAuthConfig(c.config)
-					if oauthConfig == nil {
-						return fmt.Errorf("failed to create OAuth config for authorization")
-					}
-
-					// Handle OAuth authorization manually
-					if oauthErr := c.handleOAuthAuthorization(ctx, initErr, oauthConfig); oauthErr != nil {
-						return fmt.Errorf("OAuth authorization during MCP init failed: %w", oauthErr)
-					}
-
-					// Retry MCP initialization after OAuth is complete
-					c.logger.Info("🔄 Retrying MCP initialization after OAuth authorization",
-						zap.String("server", c.config.Name))
-					if finalInitErr := c.initialize(ctx); finalInitErr != nil {
-						if c.upstreamLogger != nil {
-							c.upstreamLogger.Error("MCP initialization failed even after OAuth authorization",
-								zap.Error(finalInitErr))
-						}
-						c.client.Close()
-						c.client = nil
-						return fmt.Errorf("failed to initialize even after OAuth authorization: %w", finalInitErr)
-					}
-				} else {
-					if c.upstreamLogger != nil {
-						c.upstreamLogger.Error("MCP initialization failed even with OAuth",
-							zap.Error(initErr))
-					}
-					c.client.Close()
-					c.client = nil
-					return fmt.Errorf("failed to initialize even with OAuth: %w", initErr)
-				}
-			}
-		} else {
-			// Log initialization failure to server-specific log
-			if c.upstreamLogger != nil {
-				c.upstreamLogger.Error("MCP initialization failed",
-					zap.Error(err))
-			}
-			c.client.Close()
-			c.client = nil
-			return fmt.Errorf("failed to initialize: %w", err)
-		}
-	}
+	// CRITICAL FIX: Authentication strategies now handle initialize() testing
+	// This eliminates the duplicate initialize() call that was causing OAuth strategy
+	// to never be reached when no-auth succeeded at Start() but failed at initialize()
+	// All authentication strategies (tryNoAuth, tryHeadersAuth, tryOAuthAuth) now test
+	// both client.Start() AND c.initialize() to ensure OAuth errors are properly detected
 
 	c.connected = true
 
@@ -235,11 +127,17 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Log successful connection to server-specific log
 	if c.upstreamLogger != nil {
-		c.upstreamLogger.Info("Successfully connected and initialized",
-			zap.String("transport", c.transportType),
-			zap.String("server_name", c.serverInfo.ServerInfo.Name),
-			zap.String("server_version", c.serverInfo.ServerInfo.Version),
-			zap.String("protocol_version", c.serverInfo.ProtocolVersion))
+		if c.serverInfo != nil && c.serverInfo.ServerInfo.Name != "" {
+			c.upstreamLogger.Info("Successfully connected and initialized",
+				zap.String("transport", c.transportType),
+				zap.String("server_name", c.serverInfo.ServerInfo.Name),
+				zap.String("server_version", c.serverInfo.ServerInfo.Version),
+				zap.String("protocol_version", c.serverInfo.ProtocolVersion))
+		} else {
+			c.upstreamLogger.Info("Successfully connected",
+				zap.String("transport", c.transportType),
+				zap.String("note", "serverInfo not yet available"))
+		}
 	}
 
 	return nil
@@ -603,6 +501,11 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 				continue
 			}
 
+			// For OAuth errors, continue to OAuth strategy
+			if c.isOAuthError(err) {
+				continue
+			}
+
 			// If it's not an auth error, don't try fallback
 			if !c.isAuthError(err) {
 				return err
@@ -646,6 +549,11 @@ func (c *Client) connectSSE(ctx context.Context) error {
 				continue
 			}
 
+			// For OAuth errors, continue to OAuth strategy
+			if c.isOAuthError(err) {
+				continue
+			}
+
 			// If it's not an auth error, don't try fallback
 			if !c.isAuthError(err) {
 				return err
@@ -674,7 +582,19 @@ func (c *Client) tryHeadersAuth(ctx context.Context) error {
 	}
 
 	c.client = httpClient
-	return c.client.Start(ctx)
+
+	// Start the client
+	if err := c.client.Start(ctx); err != nil {
+		return err
+	}
+
+	// CRITICAL FIX: Test initialize() to detect OAuth errors during auth strategy phase
+	// This ensures OAuth strategy will be tried if headers-auth fails during MCP initialization
+	if err := c.initialize(ctx); err != nil {
+		return fmt.Errorf("MCP initialize failed during headers-auth strategy: %w", err)
+	}
+
+	return nil
 }
 
 // tryNoAuth attempts connection without authentication
@@ -690,7 +610,19 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 	}
 
 	c.client = httpClient
-	return c.client.Start(ctx)
+
+	// Start the client
+	if err := c.client.Start(ctx); err != nil {
+		return err
+	}
+
+	// CRITICAL FIX: Test initialize() to detect OAuth errors during auth strategy phase
+	// This ensures OAuth strategy will be tried if no-auth fails during MCP initialization
+	if err := c.initialize(ctx); err != nil {
+		return fmt.Errorf("MCP initialize failed during no-auth strategy: %w", err)
+	}
+
+	return nil
 }
 
 // tryOAuthAuth attempts OAuth authentication
@@ -702,10 +634,14 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		c.clearOAuthState()
 	}
 
-	if c.wasOAuthRecentlyCompleted() {
-		c.logger.Info("🔄 OAuth was recently completed, skipping repeated OAuth attempt",
+	// Check if OAuth was recently completed by another client (e.g., tray OAuth)
+	tokenManager := oauth.GetTokenStoreManager()
+	if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+		c.logger.Info("🔄 OAuth was recently completed by another client, creating OAuth client to reuse tokens",
 			zap.String("server", c.config.Name))
-		return fmt.Errorf("OAuth recently completed, connection should proceed without re-auth")
+		// OAuth was recently completed by another client
+		// Create OAuth-enabled client that should be able to use the stored tokens
+		// Skip the browser flow since tokens should be available
 	}
 
 	c.logger.Debug("🔐 Attempting OAuth authentication",
@@ -714,6 +650,13 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 	// Mark OAuth as in progress
 	c.markOAuthInProgress()
+
+	// Check if tokens already exist for this server
+	hasExistingTokens := tokenManager.HasTokenStore(c.config.Name)
+	c.logger.Info("🔍 HTTP OAuth strategy token store status",
+		zap.String("server", c.config.Name),
+		zap.Bool("has_existing_token_store", hasExistingTokens),
+		zap.String("strategy", "HTTP OAuth"))
 
 	// Create OAuth config using the oauth package
 	oauthConfig := oauth.CreateOAuthConfig(c.config)
@@ -827,6 +770,12 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	c.logger.Info("✅ OAuth setup complete - using proper mcp-go OAuth error handling pattern",
 		zap.String("server", c.config.Name))
 
+	// CRITICAL FIX: Test initialize() to verify connection and set serverInfo
+	// This ensures consistency with other auth strategies and sets c.serverInfo for ListTools
+	if err := c.initialize(ctx); err != nil {
+		return fmt.Errorf("MCP initialize failed during OAuth strategy: %w", err)
+	}
+
 	return nil
 }
 
@@ -843,7 +792,19 @@ func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
 	}
 
 	c.client = sseClient
-	return c.client.Start(ctx)
+
+	// Start the client
+	if err := c.client.Start(ctx); err != nil {
+		return err
+	}
+
+	// CRITICAL FIX: Test initialize() to detect OAuth errors during auth strategy phase
+	// This ensures OAuth strategy will be tried if SSE headers-auth fails during MCP initialization
+	if err := c.initialize(ctx); err != nil {
+		return fmt.Errorf("MCP initialize failed during SSE headers-auth strategy: %w", err)
+	}
+
+	return nil
 }
 
 // trySSENoAuth attempts SSE connection without authentication
@@ -859,7 +820,19 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	}
 
 	c.client = sseClient
-	return c.client.Start(ctx)
+
+	// Start the client
+	if err := c.client.Start(ctx); err != nil {
+		return err
+	}
+
+	// CRITICAL FIX: Test initialize() to detect OAuth errors during auth strategy phase
+	// This ensures OAuth strategy will be tried if SSE no-auth fails during MCP initialization
+	if err := c.initialize(ctx); err != nil {
+		return fmt.Errorf("MCP initialize failed during SSE no-auth strategy: %w", err)
+	}
+
+	return nil
 }
 
 // trySSEOAuthAuth attempts SSE OAuth authentication
@@ -871,10 +844,14 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 		c.clearOAuthState()
 	}
 
-	if c.wasOAuthRecentlyCompleted() {
-		c.logger.Info("🔄 SSE OAuth was recently completed, skipping repeated OAuth attempt",
+	// Check if OAuth was recently completed by another client (e.g., tray OAuth)
+	tokenManager := oauth.GetTokenStoreManager()
+	if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+		c.logger.Info("🔄 SSE OAuth was recently completed by another client, creating OAuth client to reuse tokens",
 			zap.String("server", c.config.Name))
-		return fmt.Errorf("OAuth recently completed, connection should proceed without re-auth")
+		// OAuth was recently completed by another client
+		// Create OAuth-enabled SSE client that should be able to use the stored tokens
+		// Skip the browser flow since tokens should be available
 	}
 
 	c.logger.Debug("🔐 Attempting SSE OAuth authentication",
@@ -883,6 +860,13 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 
 	// Mark OAuth as in progress
 	c.markOAuthInProgress()
+
+	// Check if tokens already exist for this server
+	hasExistingTokens := tokenManager.HasTokenStore(c.config.Name)
+	c.logger.Info("🔍 SSE OAuth strategy token store status",
+		zap.String("server", c.config.Name),
+		zap.Bool("has_existing_token_store", hasExistingTokens),
+		zap.String("strategy", "SSE OAuth"))
 
 	// Create OAuth config using the oauth package
 	oauthConfig := oauth.CreateOAuthConfig(c.config)
@@ -1007,6 +991,12 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 
 	c.logger.Info("✅ SSE OAuth setup complete - using proper mcp-go OAuth error handling pattern",
 		zap.String("server", c.config.Name))
+
+	// CRITICAL FIX: Test initialize() to verify connection and set serverInfo
+	// This ensures consistency with other auth strategies and sets c.serverInfo for ListTools
+	if err := c.initialize(ctx); err != nil {
+		return fmt.Errorf("MCP initialize failed during SSE OAuth strategy: %w", err)
+	}
 
 	return nil
 }
@@ -1340,6 +1330,10 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		// Mark OAuth as complete to prevent retry loops
 		c.markOAuthComplete()
 
+		// Record OAuth completion in global token manager for other clients
+		tokenManager := oauth.GetTokenStoreManager()
+		tokenManager.MarkOAuthCompleted(c.config.Name)
+
 		return nil
 
 	case <-time.After(2 * time.Minute):
@@ -1410,6 +1404,14 @@ func (c *Client) ForceOAuthFlow(ctx context.Context) error {
 
 	// Clear any existing OAuth state
 	c.clearOAuthState()
+
+	// Ensure transport type is determined if not already set
+	if c.transportType == "" {
+		c.transportType = transport.DetermineTransportType(c.config)
+		c.logger.Info("Transport type determined for OAuth flow",
+			zap.String("server", c.config.Name),
+			zap.String("transport_type", c.transportType))
+	}
 
 	// Mark context as manual OAuth flow to bypass rate limiting
 	manualCtx := context.WithValue(ctx, "manual_oauth", true)
@@ -1507,21 +1509,38 @@ func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 	// Store the client temporarily
 	c.client = sseClient
 
-	c.logger.Info("🚀 Starting OAuth SSE client and triggering initialization to force authorization...")
+	c.logger.Info("🚀 Starting OAuth SSE client and triggering authorization...")
 
-	// Start the client first
+	// Start the client first - this may fail with authorization required for SSE
 	err = c.client.Start(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to start OAuth client: %w", err)
+		// Check if this is an OAuth authorization error from Start()
+		if c.isOAuthError(err) || strings.Contains(err.Error(), "authorization required") || strings.Contains(err.Error(), "no valid token") {
+			c.logger.Info("✅ OAuth authorization required from SSE Start() - triggering manual OAuth flow")
+
+			// Handle OAuth authorization manually
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
+			}
+
+			// Retry starting the client after OAuth is complete
+			c.logger.Info("🔄 Retrying SSE client start after OAuth authorization")
+			err = c.client.Start(ctx)
+			if err != nil {
+				return fmt.Errorf("SSE client start failed after OAuth authorization: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to start OAuth client: %w", err)
+		}
 	}
 
-	// Now try to initialize - this will trigger OAuth authorization requirement
-	c.logger.Info("🎯 Attempting initialize to trigger OAuth authorization requirement...")
+	// Now try to initialize to ensure connection is working
+	c.logger.Info("🎯 Attempting initialize to verify connection...")
 	err = c.initialize(ctx)
 	if err != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
-		if client.IsOAuthAuthorizationRequiredError(err) {
-			c.logger.Info("✅ OAuth authorization requirement triggered - starting manual OAuth flow")
+		if client.IsOAuthAuthorizationRequiredError(err) || c.isOAuthError(err) {
+			c.logger.Info("✅ OAuth authorization requirement from initialize - starting manual OAuth flow")
 
 			// Handle OAuth authorization manually using the example pattern
 			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {

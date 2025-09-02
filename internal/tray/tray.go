@@ -25,7 +25,9 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
+	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/server"
+	"mcpproxy-go/internal/upstream/cli"
 )
 
 const (
@@ -1066,6 +1068,9 @@ func (a *App) handleServerAction(serverName, action string) {
 		}
 		err = a.syncManager.HandleServerEnable(serverName, !serverEnabled)
 
+	case "oauth_login":
+		err = a.handleOAuthLogin(serverName)
+
 	case "quarantine":
 		err = a.syncManager.HandleServerQuarantine(serverName, true)
 
@@ -1082,6 +1087,126 @@ func (a *App) handleServerAction(serverName, action string) {
 			zap.String("action", action),
 			zap.Error(err))
 	}
+}
+
+// handleOAuthLogin handles OAuth authentication for a server from the tray menu
+func (a *App) handleOAuthLogin(serverName string) error {
+	a.logger.Info("Starting OAuth login from tray menu", zap.String("server", serverName))
+
+	// Get server information from the state manager (same source as tray menu)
+	allServers, err := a.stateManager.GetAllServers()
+	if err != nil {
+		a.logger.Error("Failed to get servers for OAuth login",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return fmt.Errorf("failed to get servers: %w", err)
+	}
+
+	// Debug: List all available servers
+	var availableServerNames []string
+	for _, server := range allServers {
+		if name, ok := server["name"].(string); ok {
+			availableServerNames = append(availableServerNames, name)
+		}
+	}
+	a.logger.Info("Available servers from state manager",
+		zap.String("requested_server", serverName),
+		zap.Strings("available_servers", availableServerNames))
+
+	// Find the requested server
+	var targetServer map[string]interface{}
+	for _, server := range allServers {
+		if name, ok := server["name"].(string); ok && name == serverName {
+			targetServer = server
+			break
+		}
+	}
+
+	if targetServer == nil {
+		err := fmt.Errorf("server '%s' not found in available servers", serverName)
+		a.logger.Error("Server not found for OAuth login",
+			zap.String("server", serverName),
+			zap.Strings("available_servers", availableServerNames))
+		return err
+	}
+
+	a.logger.Info("Found server for OAuth",
+		zap.String("server", serverName),
+		zap.Any("server_data", targetServer))
+
+	// Load the config file that mcpproxy is using
+	configPath := a.server.GetConfigPath()
+	if configPath == "" {
+		err := fmt.Errorf("config path not available")
+		a.logger.Error("Failed to get config path for OAuth login",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return err
+	}
+
+	a.logger.Info("Loading config file for OAuth",
+		zap.String("server", serverName),
+		zap.String("config_path", configPath))
+
+	globalConfig, err := config.LoadFromFile(configPath)
+	if err != nil {
+		a.logger.Error("Failed to load server configuration for OAuth login",
+			zap.String("server", serverName),
+			zap.String("config_path", configPath),
+			zap.Error(err))
+		return fmt.Errorf("failed to load server configuration: %w", err)
+	}
+
+	// Debug: Check if server exists in config
+	var serverFound bool
+	for _, server := range globalConfig.Servers {
+		if server.Name == serverName {
+			serverFound = true
+			break
+		}
+	}
+
+	a.logger.Info("Server lookup in config",
+		zap.String("server", serverName),
+		zap.Bool("found_in_config", serverFound),
+		zap.String("config_path", configPath))
+
+	a.logger.Info("Config loaded for OAuth",
+		zap.String("server", serverName),
+		zap.Int("total_servers", len(globalConfig.Servers)))
+
+	// Use the CLI client to trigger manual OAuth
+	a.logger.Info("Creating CLI client for OAuth authentication", zap.String("server", serverName))
+	cliClient, err := cli.NewClient(serverName, globalConfig, "info")
+	if err != nil {
+		a.logger.Error("Failed to create CLI client for OAuth",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return fmt.Errorf("failed to create CLI client: %w", err)
+	}
+
+	// Trigger manual OAuth flow in a goroutine to avoid blocking the UI
+	go func() {
+		// Create context with very extended timeout for OAuth discovery INSIDE goroutine
+		// This prevents the context from being canceled when the parent function returns
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+
+		a.logger.Info("Triggering FORCED manual OAuth authentication from tray", zap.String("server", serverName))
+
+		// Use force=true since user explicitly clicked OAuth Login in tray menu
+		err := cliClient.TriggerManualOAuthWithForce(ctx, true)
+		if err != nil {
+			a.logger.Error("OAuth authentication failed from tray menu",
+				zap.String("server", serverName),
+				zap.Error(err))
+		} else {
+			a.logger.Info("OAuth authentication completed successfully from tray menu",
+				zap.String("server", serverName))
+		}
+	}()
+
+	return nil
 }
 
 // stringSlicesEqual compares two string slices for equality

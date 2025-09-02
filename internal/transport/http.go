@@ -120,13 +120,26 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			zap.String("url", cfg.URL),
 			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI))
 
+		logger.Info("Creating OAuth HTTP client with context-based timeout",
+			zap.String("url", cfg.URL),
+			zap.String("note", "Using 30-minute context timeout from tray"))
+
+		// Add detailed logging about the OAuth config and token store
+		logger.Info("🔍 OAuth HTTP client creation details",
+			zap.String("url", cfg.URL),
+			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
+			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
+			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled),
+			zap.String("client_id", cfg.OAuthConfig.ClientID),
+			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
+
 		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig)
 		if err != nil {
 			logger.Error("Failed to create OAuth client", zap.Error(err))
 			return nil, fmt.Errorf("failed to create OAuth client: %w", err)
 		}
 
-		logger.Info("✨ OAuth-enabled HTTP client created successfully - browser should open when Start() is called")
+		logger.Info("✅ OAuth-enabled HTTP client created successfully")
 		return client, nil
 	}
 
@@ -176,13 +189,26 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			zap.String("client_secret", cfg.OAuthConfig.ClientSecret),
 			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
 
+		logger.Info("Creating OAuth SSE client with context-based timeout",
+			zap.String("url", cfg.URL),
+			zap.String("note", "Using 30-minute context timeout from tray"))
+
+		// Add detailed logging about the OAuth config and token store
+		logger.Info("🔍 OAuth SSE client creation details",
+			zap.String("url", cfg.URL),
+			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
+			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
+			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled),
+			zap.String("client_id", cfg.OAuthConfig.ClientID),
+			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
+
 		client, err := client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig)
 		if err != nil {
 			logger.Error("Failed to create OAuth SSE client", zap.Error(err))
 			return nil, fmt.Errorf("failed to create OAuth SSE client: %w", err)
 		}
 
-		logger.Debug("OAuth-enabled SSE client created successfully")
+		logger.Info("✅ OAuth-enabled SSE client created successfully")
 		return client, nil
 	}
 

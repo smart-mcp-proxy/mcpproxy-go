@@ -264,44 +264,46 @@ func (c *Client) GetServerInfo() *mcp.InitializeResult {
 
 // TriggerManualOAuth manually triggers OAuth authentication flow for the server
 func (c *Client) TriggerManualOAuth(ctx context.Context) error {
-	c.logger.Info("🔐 Starting manual OAuth authentication...")
+	return c.TriggerManualOAuthWithForce(ctx, false)
+}
 
-	// First, check if already authenticated by attempting a quick connection
-	quickCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+// TriggerManualOAuthWithForce manually triggers OAuth authentication flow for the server
+// If force is true, OAuth flow will be triggered even if initial errors don't seem OAuth-related
+func (c *Client) TriggerManualOAuthWithForce(ctx context.Context, force bool) error {
+	c.logger.Info("🔐 Starting manual OAuth authentication...", zap.Bool("force", force))
 
-	err := c.Connect(quickCtx)
-	if err == nil {
-		c.logger.Info("✅ Server is already authenticated or OAuth not required")
-		return nil
+	if force {
+		c.logger.Info("🚀 Force mode enabled - skipping connection check and proceeding directly to OAuth")
+	} else {
+		// First, check if already authenticated by attempting a quick connection
+		quickCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		err := c.Connect(quickCtx)
+		if err == nil {
+			c.logger.Info("✅ Server is already authenticated or OAuth not required")
+			return nil
+		}
+
+		// Check if this is an OAuth-related error (unless forced)
+		if !c.isOAuthRelatedError(err) {
+			return fmt.Errorf("server error is not OAuth-related: %w", err)
+		}
+
+		c.logger.Info("🎯 OAuth authentication required - triggering manual OAuth flow...")
 	}
-
-	// Check if this is an OAuth-related error
-	if !c.isOAuthRelatedError(err) {
-		return fmt.Errorf("server error is not OAuth-related: %w", err)
-	}
-
-	c.logger.Info("🎯 OAuth authentication required - triggering manual OAuth flow...")
 
 	// Use the new ForceOAuthFlow method that bypasses rate limiting
-	err = c.coreClient.ForceOAuthFlow(ctx)
+	err := c.coreClient.ForceOAuthFlow(ctx)
 	if err != nil {
 		return fmt.Errorf("manual OAuth authentication failed: %w", err)
 	}
 
 	c.logger.Info("✅ Manual OAuth authentication completed successfully")
 
-	// Verify authentication by connecting after OAuth
-	c.logger.Info("🔍 Verifying authentication...")
-	verifyCtx, cancel2 := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel2()
-
-	if err := c.Connect(verifyCtx); err != nil {
-		c.logger.Warn("⚠️  OAuth completed but connection still fails - server may need time", zap.Error(err))
-		return nil // Don't fail here as OAuth might have succeeded
-	}
-
-	c.logger.Info("🎉 Authentication verified - server is now accessible!")
+	// Skip verification step since OAuth flow already includes connection verification
+	// The OAuth flow performs MCP initialization which confirms the connection works
+	c.logger.Info("🎉 OAuth authentication complete - server connection verified during OAuth flow!")
 	return nil
 }
 

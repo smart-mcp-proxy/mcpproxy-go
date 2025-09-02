@@ -47,6 +47,82 @@ var globalCallbackManager = &CallbackServerManager{
 	logger:  zap.L().Named("oauth-callback"),
 }
 
+// Global token store manager to persist tokens across client instances
+type TokenStoreManager struct {
+	stores         map[string]client.TokenStore
+	completedOAuth map[string]time.Time // Track successful OAuth completions
+	mu             sync.RWMutex
+	logger         *zap.Logger
+}
+
+var globalTokenStoreManager = &TokenStoreManager{
+	stores:         make(map[string]client.TokenStore),
+	completedOAuth: make(map[string]time.Time),
+	logger:         zap.L().Named("oauth-tokens"),
+}
+
+// GetOrCreateTokenStore returns a shared token store for the given server
+func (m *TokenStoreManager) GetOrCreateTokenStore(serverName string) client.TokenStore {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if store, exists := m.stores[serverName]; exists {
+		m.logger.Info("Reusing existing token store",
+			zap.String("server", serverName),
+			zap.String("note", "tokens should be available if OAuth was completed"))
+		return store
+	}
+
+	store := client.NewMemoryTokenStore()
+	m.stores[serverName] = store
+	m.logger.Info("Created new token store", zap.String("server", serverName))
+	return store
+}
+
+// HasTokenStore checks if a token store exists for the server (for debugging)
+func (m *TokenStoreManager) HasTokenStore(serverName string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, exists := m.stores[serverName]
+	return exists
+}
+
+// GetTokenStoreManager returns the global token store manager for debugging
+func GetTokenStoreManager() *TokenStoreManager {
+	return globalTokenStoreManager
+}
+
+// MarkOAuthCompleted records that OAuth was successfully completed for a server
+func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.completedOAuth[serverName] = time.Now()
+	m.logger.Info("OAuth completion recorded",
+		zap.String("server", serverName),
+		zap.Time("completion_time", time.Now()))
+}
+
+// HasRecentOAuthCompletion checks if OAuth was recently completed for a server
+func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	completionTime, exists := m.completedOAuth[serverName]
+	if !exists {
+		return false
+	}
+
+	// Consider OAuth recent if completed within last 5 minutes
+	isRecent := time.Since(completionTime) < 5*time.Minute
+	m.logger.Debug("Checking OAuth completion status",
+		zap.String("server", serverName),
+		zap.Time("completion_time", completionTime),
+		zap.Bool("is_recent", isRecent))
+
+	return isRecent
+}
+
 // CreateOAuthConfig creates an OAuth configuration for dynamic client registration
 // This implements proper callback server coordination required for Cloudflare OAuth
 func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
@@ -88,29 +164,37 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
 		zap.String("redirect_uri", callbackServer.RedirectURI),
 		zap.Int("port", callbackServer.Port))
 
-	// Determine the correct OAuth server metadata URL based on the server URL
-	var authServerMetadataURL string
-	if serverConfig.URL != "" {
-		// Extract base URL from server URL and construct the well-known metadata endpoint
-		if baseURL, err := parseBaseURL(serverConfig.URL); err == nil {
-			authServerMetadataURL = baseURL + "/.well-known/oauth-authorization-server"
-			logger.Debug("Setting OAuth server metadata URL",
-				zap.String("server", serverConfig.Name),
-				zap.String("auth_server_metadata_url", authServerMetadataURL))
-		} else {
-			logger.Warn("Failed to parse base URL for OAuth metadata",
-				zap.String("server", serverConfig.Name),
-				zap.String("url", serverConfig.URL),
-				zap.Error(err))
-		}
+	// Try to construct explicit metadata URLs to avoid timeout issues during auto-discovery
+	// Extract base URL from server URL for .well-known endpoints
+	baseURL, err := parseBaseURL(serverConfig.URL)
+	if err != nil {
+		logger.Warn("Failed to parse base URL for OAuth metadata",
+			zap.String("server", serverConfig.Name),
+			zap.String("url", serverConfig.URL),
+			zap.Error(err))
+		baseURL = ""
 	}
+
+	var authServerMetadataURL string
+	if baseURL != "" {
+		authServerMetadataURL = baseURL + "/.well-known/oauth-authorization-server"
+		logger.Info("Using explicit OAuth metadata URL to avoid auto-discovery timeouts",
+			zap.String("server", serverConfig.Name),
+			zap.String("metadata_url", authServerMetadataURL))
+	} else {
+		logger.Info("Skipping OAuth metadata URL due to URL parsing issues",
+			zap.String("server", serverConfig.Name))
+	}
+
+	// Use shared token store to persist tokens across client instances for the same server
+	tokenStore := globalTokenStoreManager.GetOrCreateTokenStore(serverConfig.Name)
 
 	oauthConfig := &client.OAuthConfig{
 		ClientID:              "",                         // Will be obtained via Dynamic Client Registration
 		ClientSecret:          "",                         // Will be obtained via Dynamic Client Registration
 		RedirectURI:           callbackServer.RedirectURI, // Exact redirect URI with allocated port
 		Scopes:                scopes,
-		TokenStore:            client.NewMemoryTokenStore(),
+		TokenStore:            tokenStore,            // Shared token store for this server
 		PKCEEnabled:           true,                  // Always enable PKCE for security
 		AuthServerMetadataURL: authServerMetadataURL, // Explicit metadata URL for proper discovery
 	}
@@ -120,7 +204,9 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
 		zap.Strings("scopes", scopes),
 		zap.Bool("pkce_enabled", true),
 		zap.String("redirect_uri", callbackServer.RedirectURI),
-		zap.String("discovery_mode", "automatic")) // Changed from explicit metadata URL to automatic discovery
+		zap.String("auth_server_metadata_url", authServerMetadataURL),
+		zap.String("discovery_mode", "explicit metadata URL"), // Using explicit metadata URL to avoid discovery timeouts
+		zap.String("token_store", "shared"))                   // Using shared token store for token persistence
 
 	return oauthConfig
 }
@@ -158,6 +244,8 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second, // Security: prevent Slowloris attacks
+		ReadTimeout:       30 * time.Second, // Extended timeout for OAuth discovery
+		WriteTimeout:      30 * time.Second, // Extended timeout for OAuth responses
 	}
 
 	// Create callback server instance
