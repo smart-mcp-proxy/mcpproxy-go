@@ -380,3 +380,20 @@ func containsAny(str string, substrs []string) bool {
 	}
 	return false
 }
+
+// Helper function to check if string contains substring
+func containsString(str, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	if len(str) < len(substr) {
+		return false
+	}
+
+	for i := 0; i <= len(str)-len(substr); i++ {
+		if str[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

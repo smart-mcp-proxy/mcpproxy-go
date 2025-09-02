@@ -127,6 +127,22 @@ func (c *Client) Connect(ctx context.Context) error {
 				c.client = nil
 				return fmt.Errorf("failed to initialize even after OAuth authorization: %w", finalInitErr)
 			}
+		// Check if this is an OAuth authentication error that needs extended backoff (CRITICAL FIX)
+		} else if c.isOAuthError(err) {
+			c.logger.Warn("OAuth authentication failed during initialization, will apply extended backoff",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+
+			// Log OAuth failure to server-specific log
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Warn("OAuth authentication failed during initialization",
+					zap.Error(err))
+			}
+
+			c.client.Close()
+			c.client = nil
+			// Return OAuth error to trigger proper OAuth backoff in managed client
+			return fmt.Errorf("OAuth authentication failed: %w", err)
 			// Check if this is an auth error that should trigger OAuth retry (legacy)
 		} else if c.isAuthError(err) {
 			c.logger.Debug("🔄 MCP initialization failed with auth error, retrying with OAuth",
@@ -995,16 +1011,48 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	return nil
 }
 
-// isAuthError checks if error indicates authentication failure
+// isOAuthError checks if the error is OAuth-related (actual authentication failure)
+func (c *Client) isOAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	oauthErrors := []string{
+		"invalid_token",
+		"invalid_grant",
+		"access_denied",
+		"unauthorized",
+		"401", // HTTP 401 Unauthorized
+		"Missing or invalid access token",
+		"OAuth authentication failed",
+		"oauth timeout",
+		"oauth error",
+	}
+
+	for _, oauthErr := range oauthErrors {
+		if containsString(errStr, oauthErr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isAuthError checks if error indicates authentication failure (non-OAuth)
 func (c *Client) isAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
+	
+	// Don't catch OAuth errors here - they should be handled by isOAuthError() first
+	if c.isOAuthError(err) {
+		return false
+	}
+	
 	errStr := err.Error()
 	return containsAny(errStr, []string{
-		"401", "Unauthorized",
 		"403", "Forbidden",
-		"invalid_token", "token",
 		"authentication", "auth",
 	})
 }
@@ -1146,6 +1194,22 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 
 // handleOAuthAuthorization handles the manual OAuth flow following the mcp-go example pattern
 func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ *client.OAuthConfig) error {
+	// Check if OAuth is already in progress to prevent duplicate flows (CRITICAL FIX for Phase 1)
+	if c.isOAuthInProgress() {
+		c.logger.Warn("⚠️ OAuth authorization already in progress, skipping duplicate attempt",
+			zap.String("server", c.config.Name))
+		return fmt.Errorf("OAuth authorization already in progress for %s", c.config.Name)
+	}
+
+	// Mark OAuth as in progress to prevent concurrent attempts
+	c.markOAuthInProgress()
+	defer func() {
+		// Clear OAuth progress state on exit (success or failure)
+		c.oauthMu.Lock()
+		c.oauthInProgress = false
+		c.oauthMu.Unlock()
+	}()
+
 	c.logger.Info("🔐 Starting manual OAuth authorization flow",
 		zap.String("server", c.config.Name))
 
@@ -1189,17 +1253,39 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		return fmt.Errorf("failed to get authorization URL: %w", err)
 	}
 
-	// Open the browser to the authorization URL
-	c.logger.Info("🌐 Opening browser for OAuth authorization",
-		zap.String("server", c.config.Name),
-		zap.String("auth_url", authURL))
+	// Rate limit browser opening to prevent spam (CRITICAL FIX for Phase 1)
+	browserRateLimit := 5 * time.Minute
+	c.oauthMu.RLock()
+	timeSinceLastBrowser := time.Since(c.lastOAuthTimestamp)
+	c.oauthMu.RUnlock()
 
-	if err := c.openBrowser(authURL); err != nil {
-		c.logger.Warn("Failed to open browser automatically, please open manually",
+	if timeSinceLastBrowser < browserRateLimit {
+		c.logger.Warn("⏱️ Browser opening rate limited - OAuth attempt too soon after previous attempt",
 			zap.String("server", c.config.Name),
-			zap.String("url", authURL),
-			zap.Error(err))
-		fmt.Printf("Please open the following URL in your browser: %s\n", authURL)
+			zap.Duration("time_since_last", timeSinceLastBrowser),
+			zap.Duration("rate_limit", browserRateLimit),
+			zap.String("auth_url", authURL))
+		
+		fmt.Printf("OAuth authorization required for %s, but browser opening is rate limited.\n", c.config.Name)
+		fmt.Printf("Please open the following URL manually in your browser: %s\n", authURL)
+	} else {
+		// Open the browser to the authorization URL
+		c.logger.Info("🌐 Opening browser for OAuth authorization",
+			zap.String("server", c.config.Name),
+			zap.String("auth_url", authURL))
+
+		if err := c.openBrowser(authURL); err != nil {
+			c.logger.Warn("Failed to open browser automatically, please open manually",
+				zap.String("server", c.config.Name),
+				zap.String("url", authURL),
+				zap.Error(err))
+			fmt.Printf("Please open the following URL in your browser: %s\n", authURL)
+		}
+		
+		// Update the timestamp to track browser opening for rate limiting
+		c.oauthMu.Lock()
+		c.lastOAuthTimestamp = time.Now()
+		c.oauthMu.Unlock()
 	}
 
 	// Wait for the callback using our callback server coordination system
