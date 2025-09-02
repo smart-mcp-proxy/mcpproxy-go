@@ -127,7 +127,7 @@ func (c *Client) Connect(ctx context.Context) error {
 				c.client = nil
 				return fmt.Errorf("failed to initialize even after OAuth authorization: %w", finalInitErr)
 			}
-		// Check if this is an OAuth authentication error that needs extended backoff (CRITICAL FIX)
+			// Check if this is an OAuth authentication error that needs extended backoff (CRITICAL FIX)
 		} else if c.isOAuthError(err) {
 			c.logger.Warn("OAuth authentication failed during initialization, will apply extended backoff",
 				zap.String("server", c.config.Name),
@@ -1044,12 +1044,12 @@ func (c *Client) isAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Don't catch OAuth errors here - they should be handled by isOAuthError() first
 	if c.isOAuthError(err) {
 		return false
 	}
-	
+
 	errStr := err.Error()
 	return containsAny(errStr, []string{
 		"403", "Forbidden",
@@ -1253,22 +1253,30 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		return fmt.Errorf("failed to get authorization URL: %w", err)
 	}
 
+	// Check if this is a manual OAuth flow by looking at the call stack context
+	isManualFlow := strings.Contains(fmt.Sprintf("%+v", ctx), "manual") || c.isManualOAuthFlow(ctx)
+
 	// Rate limit browser opening to prevent spam (CRITICAL FIX for Phase 1)
+	// Skip rate limiting for manual OAuth flows
 	browserRateLimit := 5 * time.Minute
 	c.oauthMu.RLock()
 	timeSinceLastBrowser := time.Since(c.lastOAuthTimestamp)
 	c.oauthMu.RUnlock()
 
-	if timeSinceLastBrowser < browserRateLimit {
+	if !isManualFlow && timeSinceLastBrowser < browserRateLimit {
 		c.logger.Warn("⏱️ Browser opening rate limited - OAuth attempt too soon after previous attempt",
 			zap.String("server", c.config.Name),
 			zap.Duration("time_since_last", timeSinceLastBrowser),
 			zap.Duration("rate_limit", browserRateLimit),
 			zap.String("auth_url", authURL))
-		
+
 		fmt.Printf("OAuth authorization required for %s, but browser opening is rate limited.\n", c.config.Name)
 		fmt.Printf("Please open the following URL manually in your browser: %s\n", authURL)
 	} else {
+		if isManualFlow {
+			c.logger.Info("🎯 Manual OAuth flow detected - bypassing rate limiting")
+		}
+
 		// Open the browser to the authorization URL
 		c.logger.Info("🌐 Opening browser for OAuth authorization",
 			zap.String("server", c.config.Name),
@@ -1281,7 +1289,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 				zap.Error(err))
 			fmt.Printf("Please open the following URL in your browser: %s\n", authURL)
 		}
-		
+
 		// Update the timestamp to track browser opening for rate limiting
 		c.oauthMu.Lock()
 		c.lastOAuthTimestamp = time.Now()
@@ -1388,6 +1396,164 @@ func (c *Client) wasOAuthRecentlyCompleted() bool {
 
 	// Consider OAuth "recently completed" if it finished within the last 10 seconds
 	return c.oauthCompleted && time.Since(c.lastOAuthTimestamp) < 10*time.Second
+}
+
+// ClearOAuthState clears OAuth state (public API for manual OAuth flows)
+func (c *Client) ClearOAuthState() {
+	c.clearOAuthState()
+}
+
+// ForceOAuthFlow forces an OAuth authentication flow, bypassing rate limiting (for manual auth)
+func (c *Client) ForceOAuthFlow(ctx context.Context) error {
+	c.logger.Info("🔐 Starting forced OAuth authentication flow",
+		zap.String("server", c.config.Name))
+
+	// Clear any existing OAuth state
+	c.clearOAuthState()
+
+	// Mark context as manual OAuth flow to bypass rate limiting
+	manualCtx := context.WithValue(ctx, "manual_oauth", true)
+
+	// Try to create an OAuth-enabled client that will trigger the OAuth flow
+	switch c.transportType {
+	case "http", "streamable-http":
+		return c.forceHTTPOAuthFlow(manualCtx)
+	case "sse":
+		return c.forceSSEOAuthFlow(manualCtx)
+	default:
+		return fmt.Errorf("OAuth not supported for transport type: %s", c.transportType)
+	}
+}
+
+// forceHTTPOAuthFlow forces OAuth flow for HTTP transport
+func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
+	// Create OAuth config
+	oauthConfig := oauth.CreateOAuthConfig(c.config)
+	if oauthConfig == nil {
+		return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
+	}
+
+	c.logger.Info("🌐 Starting manual HTTP OAuth flow...",
+		zap.String("server", c.config.Name))
+
+	// Create HTTP transport config with OAuth
+	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+
+	// Create OAuth-enabled HTTP client using transport layer
+	httpClient, err := transport.CreateHTTPClient(httpConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create OAuth HTTP client: %w", err)
+	}
+
+	// Store the client temporarily
+	c.client = httpClient
+
+	c.logger.Info("🚀 Starting OAuth HTTP client and triggering initialization to force authorization...")
+
+	// Start the client first
+	err = c.client.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to start OAuth client: %w", err)
+	}
+
+	// Now try to initialize - this will trigger OAuth authorization requirement
+	c.logger.Info("🎯 Attempting initialize to trigger OAuth authorization requirement...")
+	err = c.initialize(ctx)
+	if err != nil {
+		// Check if this is an OAuth authorization error that we need to handle manually
+		if client.IsOAuthAuthorizationRequiredError(err) {
+			c.logger.Info("✅ OAuth authorization requirement triggered - starting manual OAuth flow")
+
+			// Handle OAuth authorization manually using the example pattern
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
+			}
+
+			// Retry initialization after OAuth is complete
+			c.logger.Info("🔄 Retrying initialization after OAuth authorization")
+			err = c.initialize(ctx)
+			if err != nil {
+				return fmt.Errorf("initialization failed after OAuth authorization: %w", err)
+			}
+		} else {
+			return fmt.Errorf("initialization failed with non-OAuth error: %w", err)
+		}
+	}
+
+	c.logger.Info("✅ Manual HTTP OAuth authentication completed successfully")
+	return nil
+}
+
+// forceSSEOAuthFlow forces OAuth flow for SSE transport
+func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
+	// Create OAuth config
+	oauthConfig := oauth.CreateOAuthConfig(c.config)
+	if oauthConfig == nil {
+		return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
+	}
+
+	c.logger.Info("🌐 Starting manual SSE OAuth flow...",
+		zap.String("server", c.config.Name))
+
+	// Create SSE transport config with OAuth
+	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+
+	// Create OAuth-enabled SSE client using transport layer
+	sseClient, err := transport.CreateSSEClient(httpConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create OAuth SSE client: %w", err)
+	}
+
+	// Store the client temporarily
+	c.client = sseClient
+
+	c.logger.Info("🚀 Starting OAuth SSE client and triggering initialization to force authorization...")
+
+	// Start the client first
+	err = c.client.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to start OAuth client: %w", err)
+	}
+
+	// Now try to initialize - this will trigger OAuth authorization requirement
+	c.logger.Info("🎯 Attempting initialize to trigger OAuth authorization requirement...")
+	err = c.initialize(ctx)
+	if err != nil {
+		// Check if this is an OAuth authorization error that we need to handle manually
+		if client.IsOAuthAuthorizationRequiredError(err) {
+			c.logger.Info("✅ OAuth authorization requirement triggered - starting manual OAuth flow")
+
+			// Handle OAuth authorization manually using the example pattern
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
+			}
+
+			// Retry initialization after OAuth is complete
+			c.logger.Info("🔄 Retrying initialization after OAuth authorization")
+			err = c.initialize(ctx)
+			if err != nil {
+				return fmt.Errorf("initialization failed after OAuth authorization: %w", err)
+			}
+		} else {
+			return fmt.Errorf("initialization failed with non-OAuth error: %w", err)
+		}
+	}
+
+	c.logger.Info("✅ Manual SSE OAuth authentication completed successfully")
+	return nil
+}
+
+// isManualOAuthFlow checks if this is a manual OAuth flow
+func (c *Client) isManualOAuthFlow(ctx context.Context) bool {
+	// Check if context has manual OAuth marker
+	if ctx != nil {
+		if value := ctx.Value("manual_oauth"); value != nil {
+			if manual, ok := value.(bool); ok && manual {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // clearOAuthState clears OAuth state (for cleaning up stale state)

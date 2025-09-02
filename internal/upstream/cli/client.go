@@ -261,3 +261,125 @@ func (c *Client) IsConnected() bool {
 func (c *Client) GetServerInfo() *mcp.InitializeResult {
 	return c.coreClient.GetServerInfo()
 }
+
+// TriggerManualOAuth manually triggers OAuth authentication flow for the server
+func (c *Client) TriggerManualOAuth(ctx context.Context) error {
+	c.logger.Info("🔐 Starting manual OAuth authentication...")
+
+	// First, check if already authenticated by attempting a quick connection
+	quickCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	err := c.Connect(quickCtx)
+	if err == nil {
+		c.logger.Info("✅ Server is already authenticated or OAuth not required")
+		return nil
+	}
+
+	// Check if this is an OAuth-related error
+	if !c.isOAuthRelatedError(err) {
+		return fmt.Errorf("server error is not OAuth-related: %w", err)
+	}
+
+	c.logger.Info("🎯 OAuth authentication required - triggering manual OAuth flow...")
+
+	// Use the new ForceOAuthFlow method that bypasses rate limiting
+	err = c.coreClient.ForceOAuthFlow(ctx)
+	if err != nil {
+		return fmt.Errorf("manual OAuth authentication failed: %w", err)
+	}
+
+	c.logger.Info("✅ Manual OAuth authentication completed successfully")
+
+	// Verify authentication by connecting after OAuth
+	c.logger.Info("🔍 Verifying authentication...")
+	verifyCtx, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel2()
+
+	if err := c.Connect(verifyCtx); err != nil {
+		c.logger.Warn("⚠️  OAuth completed but connection still fails - server may need time", zap.Error(err))
+		return nil // Don't fail here as OAuth might have succeeded
+	}
+
+	c.logger.Info("🎉 Authentication verified - server is now accessible!")
+	return nil
+}
+
+// GetOAuthStatus returns the OAuth authentication status for the server
+func (c *Client) GetOAuthStatus() (string, error) {
+	// Try to connect and analyze the result
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := c.Connect(ctx)
+	if err == nil {
+		// Successfully connected
+		return "authenticated", nil
+	}
+
+	// Check the error type
+	if c.isOAuthRelatedError(err) {
+		if strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "invalid_token") {
+			return "expired", nil
+		}
+		return "required", nil
+	}
+
+	// Check if server supports OAuth at all
+	if c.hasOAuthConfig() {
+		return "required", nil
+	}
+
+	return "not_required", nil
+}
+
+// isOAuthRelatedError checks if an error is OAuth-related
+func (c *Client) isOAuthRelatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	oauthErrors := []string{
+		"invalid_token",
+		"invalid_grant",
+		"access_denied",
+		"unauthorized",
+		"401", // HTTP 401 Unauthorized
+		"Missing or invalid access token",
+		"OAuth authentication failed",
+		"oauth timeout",
+		"oauth error",
+		"authorization required",
+	}
+
+	for _, oauthErr := range oauthErrors {
+		if strings.Contains(strings.ToLower(errStr), strings.ToLower(oauthErr)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasOAuthConfig checks if the server has OAuth configuration
+func (c *Client) hasOAuthConfig() bool {
+	// Check if server config has OAuth-related fields
+	if c.config.Headers != nil {
+		for key := range c.config.Headers {
+			if strings.Contains(strings.ToLower(key), "auth") {
+				return true
+			}
+		}
+	}
+
+	// Check if URL suggests OAuth (common OAuth endpoints)
+	if c.config.URL != "" {
+		url := strings.ToLower(c.config.URL)
+		if strings.Contains(url, "oauth") || strings.Contains(url, "auth") {
+			return true
+		}
+	}
+
+	return false
+}
