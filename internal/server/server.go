@@ -33,6 +33,7 @@ type Status struct {
 // Server wraps the MCP proxy server with all its dependencies
 type Server struct {
 	config          *config.Config
+	configPath      string // Store the actual config file path used
 	logger          *zap.Logger
 	storageManager  *storage.Manager
 	indexManager    *index.Manager
@@ -61,6 +62,11 @@ type Server struct {
 
 // NewServer creates a new server instance
 func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
+	return NewServerWithConfigPath(cfg, "", logger)
+}
+
+// NewServerWithConfigPath creates a new server instance with explicit config path tracking
+func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.Logger) (*Server, error) {
 	// Initialize storage manager
 	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar())
 	if err != nil {
@@ -75,7 +81,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	}
 
 	// Initialize upstream manager
-	upstreamManager := upstream.NewManager(logger, cfg)
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB())
 
 	// Set logging configuration on upstream manager for per-server logging
 	if cfg.Logging != nil {
@@ -98,6 +104,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 
 	server := &Server{
 		config:          cfg,
+		configPath:      configPath,
 		logger:          logger,
 		storageManager:  storageManager,
 		indexManager:    indexManager,
@@ -144,6 +151,20 @@ func (s *Server) GetStatus() interface{} {
 	}
 
 	return statusMap
+}
+
+// TriggerOAuthLogin starts an in-process OAuth flow for the given server name.
+// Used by the tray to avoid cross-process DB locking issues during OAuth.
+func (s *Server) TriggerOAuthLogin(serverName string) error {
+	s.logger.Info("Tray requested OAuth login", zap.String("server", serverName))
+	if s.upstreamManager == nil {
+		return fmt.Errorf("upstream manager not initialized")
+	}
+	if err := s.upstreamManager.StartManualOAuth(serverName, true); err != nil {
+		s.logger.Error("Failed to start in-process OAuth", zap.String("server", serverName), zap.Error(err))
+		return err
+	}
+	return nil
 }
 
 // StatusChannel returns a channel that receives status updates
@@ -1248,6 +1269,11 @@ func (s *Server) cleanupOrphanedIndexEntries() {
 
 // GetConfigPath returns the path to the configuration file for file watching
 func (s *Server) GetConfigPath() string {
+	// If we have the actual config path that was used, return that
+	if s.configPath != "" {
+		return s.configPath
+	}
+	// Otherwise fall back to the default path
 	return config.GetConfigPath(s.config.DataDir)
 }
 

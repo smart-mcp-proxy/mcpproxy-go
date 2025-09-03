@@ -140,6 +140,12 @@ func (m *MockServerInterface) GetLogDir() string {
 	return "/test/logs"
 }
 
+func (m *MockServerInterface) TriggerOAuthLogin(serverName string) error {
+	// Simulate successful trigger without doing anything
+	_ = serverName
+	return nil
+}
+
 // Helper methods for testing
 func (m *MockServerInterface) AddServer(name, url string, enabled, quarantined bool) {
 	server := map[string]interface{}{

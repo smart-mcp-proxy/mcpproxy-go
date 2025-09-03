@@ -13,6 +13,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/secureenv"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/types"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -25,6 +26,7 @@ type Client struct {
 	id           string
 	config       *config.ServerConfig
 	globalConfig *config.Config
+	storage      *storage.BoltDB
 	logger       *zap.Logger
 
 	// Upstream server specific logger for debugging
@@ -74,16 +76,17 @@ type Client struct {
 }
 
 // NewClient creates a new core MCP client
-func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*Client, error) {
-	return NewClientWithOptions(id, serverConfig, logger, logConfig, globalConfig, false)
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB) (*Client, error) {
+	return NewClientWithOptions(id, serverConfig, logger, logConfig, globalConfig, storage, false)
 }
 
 // NewClientWithOptions creates a new core MCP client with additional options
-func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, cliDebugMode bool) (*Client, error) {
+func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, cliDebugMode bool) (*Client, error) {
 	c := &Client{
 		id:           id,
 		config:       serverConfig,
 		globalConfig: globalConfig,
+		storage:      storage,
 		logger: logger.With(
 			zap.String("upstream_id", id),
 			zap.String("upstream_name", serverConfig.Name),
@@ -180,7 +183,12 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		return nil, fmt.Errorf("client not connected")
 	}
 
-	// Check if server supports tools
+	// Check if we have server info and if server supports tools
+	if serverInfo == nil {
+		c.logger.Debug("Server info not available")
+		return nil, fmt.Errorf("server info not available")
+	}
+
 	if serverInfo.Capabilities.Tools == nil {
 		c.logger.Debug("Server does not support tools")
 		return nil, nil
@@ -376,6 +384,23 @@ func containsAny(str string, substrs []string) bool {
 					return true
 				}
 			}
+		}
+	}
+	return false
+}
+
+// Helper function to check if string contains substring
+func containsString(str, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	if len(str) < len(substr) {
+		return false
+	}
+
+	for i := 0; i <= len(str)-len(substr); i++ {
+		if str[i:i+len(substr)] == substr {
+			return true
 		}
 	}
 	return false

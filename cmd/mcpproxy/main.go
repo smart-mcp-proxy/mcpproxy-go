@@ -97,11 +97,15 @@ func main() {
 	// Add call command
 	callCmd := GetCallCommand()
 
+	// Add auth command
+	authCmd := GetAuthCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(toolsCmd)
 	rootCmd.AddCommand(callCmd)
+	rootCmd.AddCommand(authCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
@@ -367,8 +371,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.Bool("allow_server_remove", cfg.AllowServerRemove),
 		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
-	// Create server
-	srv, err := server.NewServer(cfg, logger)
+	// Create server with the actual config path used
+	var actualConfigPath string
+	if configFile != "" {
+		actualConfigPath = configFile
+	}
+	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}

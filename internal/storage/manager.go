@@ -54,6 +54,13 @@ func (m *Manager) GetDB() *bbolt.DB {
 	return nil
 }
 
+// GetBoltDB returns the wrapped BoltDB instance for higher-level operations
+func (m *Manager) GetBoltDB() *BoltDB {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.db
+}
+
 // Upstream operations
 
 // SaveUpstreamServer saves an upstream server configuration

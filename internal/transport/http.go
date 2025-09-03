@@ -94,6 +94,11 @@ type HTTPTransportConfig struct {
 func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	logger := zap.L().Named("transport")
 
+	logger.Error("🚨 TRANSPORT HTTP CLIENT CREATION",
+		zap.String("url", cfg.URL),
+		zap.Bool("oauth_config_nil", cfg.OAuthConfig == nil),
+		zap.Bool("use_oauth", cfg.UseOAuth))
+
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("no URL specified for HTTP transport")
 	}
@@ -120,13 +125,26 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			zap.String("url", cfg.URL),
 			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI))
 
+		logger.Info("Creating OAuth HTTP client with context-based timeout",
+			zap.String("url", cfg.URL),
+			zap.String("note", "Using 30-minute context timeout from tray"))
+
+		// Add detailed logging about the OAuth config and token store
+		logger.Info("🔍 OAuth HTTP client creation details",
+			zap.String("url", cfg.URL),
+			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
+			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
+			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled),
+			zap.String("client_id", cfg.OAuthConfig.ClientID),
+			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
+
 		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig)
 		if err != nil {
 			logger.Error("Failed to create OAuth client", zap.Error(err))
 			return nil, fmt.Errorf("failed to create OAuth client: %w", err)
 		}
 
-		logger.Info("✨ OAuth-enabled HTTP client created successfully - browser should open when Start() is called")
+		logger.Info("✅ OAuth-enabled HTTP client created successfully")
 		return client, nil
 	}
 
@@ -176,13 +194,26 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			zap.String("client_secret", cfg.OAuthConfig.ClientSecret),
 			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
 
+		logger.Info("Creating OAuth SSE client with context-based timeout",
+			zap.String("url", cfg.URL),
+			zap.String("note", "Using 30-minute context timeout from tray"))
+
+		// Add detailed logging about the OAuth config and token store
+		logger.Info("🔍 OAuth SSE client creation details",
+			zap.String("url", cfg.URL),
+			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
+			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
+			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled),
+			zap.String("client_id", cfg.OAuthConfig.ClientID),
+			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
+
 		client, err := client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig)
 		if err != nil {
 			logger.Error("Failed to create OAuth SSE client", zap.Error(err))
 			return nil, fmt.Errorf("failed to create OAuth SSE client: %w", err)
 		}
 
-		logger.Debug("OAuth-enabled SSE client created successfully")
+		logger.Info("✅ OAuth-enabled SSE client created successfully")
 		return client, nil
 	}
 
@@ -251,6 +282,18 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 // CreateHTTPTransportConfig creates an HTTP transport config from server config
 func CreateHTTPTransportConfig(serverConfig *config.ServerConfig, oauthConfig *client.OAuthConfig) *HTTPTransportConfig {
+	logger := zap.L().Named("transport")
+	logger.Error("🚨 TRANSPORT CONFIG CREATION",
+		zap.String("server", serverConfig.Name),
+		zap.Bool("oauth_config_nil", oauthConfig == nil),
+		zap.Bool("use_oauth", oauthConfig != nil))
+
+	if oauthConfig != nil {
+		logger.Error("🚨 OAUTH CONFIG DETAILS",
+			zap.String("redirect_uri", oauthConfig.RedirectURI),
+			zap.Strings("scopes", oauthConfig.Scopes))
+	}
+
 	return &HTTPTransportConfig{
 		URL:         serverConfig.URL,
 		Headers:     serverConfig.Headers,

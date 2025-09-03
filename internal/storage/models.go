@@ -7,12 +7,14 @@ import (
 
 // Bucket names for bbolt database
 const (
-	UpstreamsBucket  = "upstreams"
-	ToolStatsBucket  = "toolstats"
-	ToolHashBucket   = "toolhash"
-	MetaBucket       = "meta"
-	CacheBucket      = "cache"
-	CacheStatsBucket = "cache_stats"
+	UpstreamsBucket       = "upstreams"
+	ToolStatsBucket       = "toolstats"
+	ToolHashBucket        = "toolhash"
+	OAuthTokenBucket      = "oauth_tokens" //nolint:gosec // bucket name, not a credential
+	OAuthCompletionBucket = "oauth_completion"
+	MetaBucket            = "meta"
+	CacheBucket           = "cache"
+	CacheStatsBucket      = "cache_stats"
 )
 
 // Meta keys
@@ -53,6 +55,25 @@ type ToolHashRecord struct {
 	Updated  time.Time `json:"updated"`
 }
 
+// OAuthTokenRecord represents stored OAuth tokens for a server
+type OAuthTokenRecord struct {
+	ServerName   string    `json:"server_name"`
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
+	TokenType    string    `json:"token_type"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Scopes       []string  `json:"scopes,omitempty"`
+	Created      time.Time `json:"created"`
+	Updated      time.Time `json:"updated"`
+}
+
+// OAuthCompletionEvent represents an OAuth completion event for cross-process notification
+type OAuthCompletionEvent struct {
+	ServerName  string     `json:"server_name"`
+	CompletedAt time.Time  `json:"completed_at"`
+	ProcessedAt *time.Time `json:"processed_at,omitempty"` // Nil if not yet processed by server
+}
+
 // MarshalBinary implements encoding.BinaryMarshaler
 func (u *UpstreamRecord) MarshalBinary() ([]byte, error) {
 	return json.Marshal(u)
@@ -81,4 +102,24 @@ func (h *ToolHashRecord) MarshalBinary() ([]byte, error) {
 // UnmarshalBinary implements encoding.BinaryUnmarshaler
 func (h *ToolHashRecord) UnmarshalBinary(data []byte) error {
 	return json.Unmarshal(data, h)
+}
+
+// MarshalBinary implements encoding.BinaryMarshaler
+func (o *OAuthTokenRecord) MarshalBinary() ([]byte, error) {
+	return json.Marshal(o)
+}
+
+// UnmarshalBinary implements encoding.BinaryUnmarshaler
+func (o *OAuthTokenRecord) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, o)
+}
+
+// MarshalBinary implements encoding.BinaryMarshaler
+func (e *OAuthCompletionEvent) MarshalBinary() ([]byte, error) {
+	return json.Marshal(e)
+}
+
+// UnmarshalBinary implements encoding.BinaryUnmarshaler
+func (e *OAuthCompletionEvent) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, e)
 }

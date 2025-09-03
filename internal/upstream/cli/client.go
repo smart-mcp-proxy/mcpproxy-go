@@ -8,6 +8,8 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/oauth"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/core"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -16,6 +18,7 @@ import (
 
 const (
 	transportStdio = "stdio"
+	oauthRequired  = "required"
 )
 
 // Client provides a simple interface for CLI operations with enhanced debugging
@@ -23,6 +26,7 @@ type Client struct {
 	coreClient *core.Client
 	logger     *zap.Logger
 	config     *config.ServerConfig
+	storage    *storage.BoltDB
 
 	// Debug output settings
 	debugMode bool
@@ -56,8 +60,21 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		return nil, fmt.Errorf("failed to create logger: %w", err)
 	}
 
-	// Create core client directly for CLI operations (no DB sync manager)
-	coreClient, err := core.NewClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, true)
+	// Create storage for persistent OAuth tokens (CLI should also persist tokens)
+	var db *storage.BoltDB
+	if globalConfig.DataDir != "" {
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
+		if err != nil {
+			logger.Warn("Failed to create storage for CLI OAuth tokens, falling back to in-memory",
+				zap.String("data_dir", globalConfig.DataDir),
+				zap.Error(err))
+		} else {
+			db = boltDB
+		}
+	}
+
+	// Create core client directly for CLI operations (with persistent storage for OAuth tokens)
+	coreClient, err := core.NewClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, db, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}
@@ -66,8 +83,17 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		coreClient: coreClient,
 		logger:     logger,
 		config:     serverConfig,
+		storage:    db,
 		debugMode:  logLevel == "trace" || logLevel == "debug",
 	}, nil
+}
+
+// Close cleans up the client and closes storage if it was created
+func (c *Client) Close() error {
+	if c.storage != nil {
+		return c.storage.Close()
+	}
+	return nil
 }
 
 // Connect establishes connection with detailed progress output
@@ -260,4 +286,149 @@ func (c *Client) IsConnected() bool {
 // GetServerInfo returns server information
 func (c *Client) GetServerInfo() *mcp.InitializeResult {
 	return c.coreClient.GetServerInfo()
+}
+
+// TriggerManualOAuth manually triggers OAuth authentication flow for the server
+func (c *Client) TriggerManualOAuth(ctx context.Context) error {
+	return c.TriggerManualOAuthWithForce(ctx, false)
+}
+
+// TriggerManualOAuthWithForce manually triggers OAuth authentication flow for the server
+// If force is true, OAuth flow will be triggered even if initial errors don't seem OAuth-related
+func (c *Client) TriggerManualOAuthWithForce(ctx context.Context, force bool) error {
+	c.logger.Info("🔐 Starting manual OAuth authentication...", zap.Bool("force", force))
+
+	if force {
+		c.logger.Info("🚀 Force mode enabled - skipping connection check and proceeding directly to OAuth")
+	} else {
+		// First, check if already authenticated by attempting a quick connection
+		quickCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		err := c.Connect(quickCtx)
+		if err == nil {
+			c.logger.Info("✅ Server is already authenticated or OAuth not required")
+			return nil
+		}
+
+		// Check if this is an OAuth-related error (unless forced)
+		if !c.isOAuthRelatedError(err) {
+			return fmt.Errorf("server error is not OAuth-related: %w", err)
+		}
+
+		c.logger.Info("🎯 OAuth authentication required - triggering manual OAuth flow...")
+	}
+
+	// Use the new ForceOAuthFlow method that bypasses rate limiting
+	err := c.coreClient.ForceOAuthFlow(ctx)
+	if err != nil {
+		return fmt.Errorf("manual OAuth authentication failed: %w", err)
+	}
+
+	c.logger.Info("✅ Manual OAuth authentication completed successfully")
+
+	// Notify global token manager about OAuth completion to trigger connection retries in other processes
+	tokenManager := oauth.GetTokenStoreManager()
+
+	// First try database-based notification (cross-process)
+	if c.storage != nil {
+		if err := tokenManager.MarkOAuthCompletedWithDB(c.config.Name, c.storage); err != nil {
+			c.logger.Warn("Failed to save OAuth completion to database, falling back to in-memory notification",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			tokenManager.MarkOAuthCompleted(c.config.Name)
+		} else {
+			c.logger.Info("📢 OAuth completion saved to database for cross-process notification",
+				zap.String("server", c.config.Name))
+		}
+	} else {
+		// Fall back to in-memory notification
+		tokenManager.MarkOAuthCompleted(c.config.Name)
+		c.logger.Info("📢 OAuth completion recorded in-memory (no database available)",
+			zap.String("server", c.config.Name))
+	}
+
+	// Skip verification step since OAuth flow already includes connection verification
+	// The OAuth flow performs MCP initialization which confirms the connection works
+	c.logger.Info("🎉 OAuth authentication complete - server connection verified during OAuth flow!")
+	return nil
+}
+
+// GetOAuthStatus returns the OAuth authentication status for the server
+func (c *Client) GetOAuthStatus() (string, error) {
+	// Try to connect and analyze the result
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := c.Connect(ctx)
+	if err == nil {
+		// Successfully connected
+		return "authenticated", nil
+	}
+
+	// Check the error type
+	if c.isOAuthRelatedError(err) {
+		if strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "invalid_token") {
+			return "expired", nil
+		}
+		return oauthRequired, nil
+	}
+
+	// Check if server supports OAuth at all
+	if c.hasOAuthConfig() {
+		return oauthRequired, nil
+	}
+
+	return "not_required", nil
+}
+
+// isOAuthRelatedError checks if an error is OAuth-related
+func (c *Client) isOAuthRelatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	oauthErrors := []string{
+		"invalid_token",
+		"invalid_grant",
+		"access_denied",
+		"unauthorized",
+		"401", // HTTP 401 Unauthorized
+		"Missing or invalid access token",
+		"OAuth authentication failed",
+		"oauth timeout",
+		"oauth error",
+		"authorization required",
+	}
+
+	for _, oauthErr := range oauthErrors {
+		if strings.Contains(strings.ToLower(errStr), strings.ToLower(oauthErr)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasOAuthConfig checks if the server has OAuth configuration
+func (c *Client) hasOAuthConfig() bool {
+	// Check if server config has OAuth-related fields
+	if c.config.Headers != nil {
+		for key := range c.config.Headers {
+			if strings.Contains(strings.ToLower(key), "auth") {
+				return true
+			}
+		}
+	}
+
+	// Check if URL suggests OAuth (common OAuth endpoints)
+	if c.config.URL != "" {
+		url := strings.ToLower(c.config.URL)
+		if strings.Contains(url, "oauth") || strings.Contains(url, "auth") {
+			return true
+		}
+	}
+
+	return false
 }

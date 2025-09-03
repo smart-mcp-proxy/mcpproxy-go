@@ -308,7 +308,7 @@ func runBuiltInTool(ctx context.Context, toolName string, args map[string]interf
 	defer indexManager.Close()
 
 	// Create upstream manager
-	upstreamManager := upstream.NewManager(logger, globalConfig)
+	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB())
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
