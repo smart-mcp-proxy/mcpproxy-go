@@ -12,6 +12,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/upstream/core"
 	"mcpproxy-go/internal/upstream/managed"
 	"mcpproxy-go/internal/upstream/types"
@@ -836,6 +837,14 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 		zap.String("server", cfg.Name),
 		zap.Bool("force", force))
 
+	// Preflight: if server does not appear to require OAuth, avoid starting
+	// OAuth flow and return an informative error (tray will show it).
+	// Attempt a short no-auth initialize to confirm.
+	if !oauth.ShouldUseOAuth(cfg) && !force {
+		m.logger.Info("OAuth not applicable based on config (no headers, protocol)", zap.String("server", cfg.Name))
+		return fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
+	}
+
 	// Create a transient core client that uses the daemon's storage
 	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false)
 	if err != nil {
@@ -848,6 +857,29 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 
 		if force {
 			coreClient.ClearOAuthState()
+		}
+
+		// Preflight no-auth check: try a quick connect without OAuth to
+		// determine if authorization is actually required. If initialize
+		// succeeds, inform and return early.
+		if !force {
+			cpy := *cfg
+			cpy.Headers = cfg.Headers // preserve headers
+			// Try HTTP/SSE path with no OAuth
+			noAuthTransport := transport.DetermineTransportType(&cpy)
+			if noAuthTransport == "http" || noAuthTransport == "streamable-http" || noAuthTransport == "sse" {
+				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
+				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false)
+				if err2 == nil {
+					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
+					_ = testClient.Connect(tctx)
+					tcancel()
+					if testClient.GetServerInfo() != nil {
+						m.logger.Info("Preflight succeeded without OAuth; skipping OAuth flow", zap.String("server", cfg.Name))
+						return
+					}
+				}
+			}
 		}
 
 		m.logger.Info("Triggering OAuth flow (in-process)", zap.String("server", cfg.Name))

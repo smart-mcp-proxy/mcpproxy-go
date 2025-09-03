@@ -263,19 +263,19 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		zap.Strings("original_args", args),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
-    // Start stdio transport with a persistent background context so the child
-    // process keeps running even if the connect context is short-lived.
-    persistentCtx := context.Background()
-    if err := c.client.Start(persistentCtx); err != nil {
-        return fmt.Errorf("failed to start stdio client: %w", err)
-    }
+	// Start stdio transport with a persistent background context so the child
+	// process keeps running even if the connect context is short-lived.
+	persistentCtx := context.Background()
+	if err := c.client.Start(persistentCtx); err != nil {
+		return fmt.Errorf("failed to start stdio client: %w", err)
+	}
 
-    // IMPORTANT: Perform MCP initialize() handshake for stdio transports as well,
-    // so c.serverInfo is populated and tool discovery/search can proceed.
-    // Use the caller's context with timeout to avoid hanging.
-    if err := c.initialize(ctx); err != nil {
-        return fmt.Errorf("MCP initialize failed for stdio transport: %w", err)
-    }
+	// IMPORTANT: Perform MCP initialize() handshake for stdio transports as well,
+	// so c.serverInfo is populated and tool discovery/search can proceed.
+	// Use the caller's context with timeout to avoid hanging.
+	if err := c.initialize(ctx); err != nil {
+		return fmt.Errorf("MCP initialize failed for stdio transport: %w", err)
+	}
 
 	// CRITICAL FIX: Extract underlying process from mcp-go transport for lifecycle management
 	// Try to access the process via reflection
@@ -1318,12 +1318,25 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		zap.String("server", c.config.Name),
 		zap.String("state", state))
 
-	// Register client (Dynamic Client Registration)
+	// Register client (Dynamic Client Registration) if supported. Some servers
+	// don’t provide a registration endpoint; the upstream library may panic
+	// when metadata is missing. Guard with recover and degrade gracefully.
 	c.logger.Info("📋 Performing Dynamic Client Registration",
 		zap.String("server", c.config.Name))
-	err = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
-	if err != nil {
-		return fmt.Errorf("failed to register client: %w", err)
+	var regErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.logger.Warn("OAuth RegisterClient panicked; likely no dynamic registration or metadata",
+					zap.String("server", c.config.Name),
+					zap.Any("panic", r))
+				regErr = fmt.Errorf("server does not support dynamic client registration")
+			}
+		}()
+		regErr = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
+	}()
+	if regErr != nil {
+		return fmt.Errorf("failed to register client: %w", regErr)
 	}
 
 	// Get the authorization URL
@@ -1517,6 +1530,11 @@ func (c *Client) ClearOAuthState() {
 func (c *Client) ForceOAuthFlow(ctx context.Context) error {
 	c.logger.Info("🔐 Starting forced OAuth authentication flow",
 		zap.String("server", c.config.Name))
+
+	// Fast‑fail if OAuth is clearly not applicable for this server
+	if !oauth.ShouldUseOAuth(c.config) {
+		return fmt.Errorf("OAuth is not supported or not applicable for server '%s'", c.config.Name)
+	}
 
 	// Clear any existing OAuth state
 	c.clearOAuthState()
