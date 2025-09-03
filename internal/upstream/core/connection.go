@@ -156,7 +156,7 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // connectStdio establishes stdio transport connection
-func (c *Client) connectStdio(_ context.Context) error {
+func (c *Client) connectStdio(ctx context.Context) error {
 	if c.config.Command == "" {
 		return fmt.Errorf("no command specified for stdio transport")
 	}
@@ -263,12 +263,19 @@ func (c *Client) connectStdio(_ context.Context) error {
 		zap.Strings("original_args", args),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
-	// CRITICAL FIX: Use persistent context for stdio transport to prevent premature process termination
-	// The initialization context might be short-lived, but the stdio process needs to stay alive
-	persistentCtx := context.Background()
-	if err := c.client.Start(persistentCtx); err != nil {
-		return fmt.Errorf("failed to start stdio client: %w", err)
-	}
+    // Start stdio transport with a persistent background context so the child
+    // process keeps running even if the connect context is short-lived.
+    persistentCtx := context.Background()
+    if err := c.client.Start(persistentCtx); err != nil {
+        return fmt.Errorf("failed to start stdio client: %w", err)
+    }
+
+    // IMPORTANT: Perform MCP initialize() handshake for stdio transports as well,
+    // so c.serverInfo is populated and tool discovery/search can proceed.
+    // Use the caller's context with timeout to avoid hanging.
+    if err := c.initialize(ctx); err != nil {
+        return fmt.Errorf("MCP initialize failed for stdio transport: %w", err)
+    }
 
 	// CRITICAL FIX: Extract underlying process from mcp-go transport for lifecycle management
 	// Try to access the process via reflection
