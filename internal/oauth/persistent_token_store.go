@@ -21,10 +21,10 @@ type PersistentTokenStore struct {
 }
 
 // NewPersistentTokenStore creates a new persistent token store for a server
-func NewPersistentTokenStore(serverName string, serverURL string, storage *storage.BoltDB) client.TokenStore {
+func NewPersistentTokenStore(serverName, serverURL string, storage *storage.BoltDB) client.TokenStore {
 	// Create unique key combining server name and URL to handle servers with same name but different URLs
 	serverKey := generateServerKey(serverName, serverURL)
-	
+
 	return &PersistentTokenStore{
 		serverKey: serverKey,
 		storage:   storage,
@@ -33,14 +33,14 @@ func NewPersistentTokenStore(serverName string, serverURL string, storage *stora
 }
 
 // generateServerKey creates a unique key for a server by combining name and URL
-func generateServerKey(serverName string, serverURL string) string {
+func generateServerKey(serverName, serverURL string) string {
 	// Create a unique identifier by combining server name and URL
 	combined := fmt.Sprintf("%s|%s", serverName, serverURL)
-	
+
 	// Generate SHA256 hash for consistent length and uniqueness
 	hash := sha256.Sum256([]byte(combined))
 	hashStr := hex.EncodeToString(hash[:])
-	
+
 	// Return first 16 characters of hash for readability (still highly unique)
 	return fmt.Sprintf("%s_%s", serverName, hashStr[:16])
 }

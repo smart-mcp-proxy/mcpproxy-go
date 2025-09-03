@@ -10,7 +10,7 @@ const (
 	UpstreamsBucket       = "upstreams"
 	ToolStatsBucket       = "toolstats"
 	ToolHashBucket        = "toolhash"
-	OAuthTokenBucket      = "oauth_tokens"
+	OAuthTokenBucket      = "oauth_tokens" //nolint:gosec // bucket name, not a credential
 	OAuthCompletionBucket = "oauth_completion"
 	MetaBucket            = "meta"
 	CacheBucket           = "cache"

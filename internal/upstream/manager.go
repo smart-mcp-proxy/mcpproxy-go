@@ -12,6 +12,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/upstream/core"
 	"mcpproxy-go/internal/upstream/managed"
 	"mcpproxy-go/internal/upstream/types"
 )
@@ -25,6 +26,11 @@ type Manager struct {
 	globalConfig    *config.Config
 	storage         *storage.BoltDB
 	notificationMgr *NotificationManager
+
+	// tokenReconnect keeps last reconnect trigger time per server when detecting
+	// newly available OAuth tokens without explicit DB events (e.g., when CLI
+	// cannot write due to DB lock). Prevents rapid retrigger loops.
+	tokenReconnect map[string]time.Time
 }
 
 // NewManager creates a new upstream manager
@@ -35,6 +41,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storag
 		globalConfig:    globalConfig,
 		storage:         storage,
 		notificationMgr: NewNotificationManager(),
+		tokenReconnect:  make(map[string]time.Time),
 	}
 
 	// Set up OAuth completion callback to trigger connection retries (in-process)
@@ -615,13 +622,60 @@ func (m *Manager) RetryConnection(serverName string) error {
 		return fmt.Errorf("server not found: %s", serverName)
 	}
 
+	// If the client is already connected or connecting, do not force a
+	// reconnect. This prevents Ready→Disconnected flapping when duplicate
+	// OAuth completion events arrive.
+	if client.IsConnected() {
+		m.logger.Info("Skipping retry: client already connected",
+			zap.String("server", serverName),
+			zap.String("state", client.GetState().String()))
+		return nil
+	}
+	if client.IsConnecting() {
+		m.logger.Info("Skipping retry: client already connecting",
+			zap.String("server", serverName),
+			zap.String("state", client.GetState().String()))
+		return nil
+	}
+
+	// Log detailed state prior to retry and token availability in persistent store
+	// This helps diagnose cases where the core client reports "already connected"
+	// while the managed state is Error/Disconnected.
+	state := client.GetState().String()
+	isConnected := client.IsConnected()
+	isConnecting := client.IsConnecting()
+
+	// Check persistent token presence (daemon uses BBolt-backed token store)
+	var hasToken bool
+	var tokenExpires time.Time
+	if m.storage != nil {
+		ts := oauth.NewPersistentTokenStore(client.Config.Name, client.Config.URL, m.storage)
+		if tok, err := ts.GetToken(); err == nil && tok != nil {
+			hasToken = true
+			tokenExpires = tok.ExpiresAt
+		}
+	}
+
 	m.logger.Info("Triggering connection retry after OAuth completion",
-		zap.String("server", serverName))
+		zap.String("server", serverName),
+		zap.String("state", state),
+		zap.Bool("is_connected", isConnected),
+		zap.Bool("is_connecting", isConnecting),
+		zap.Bool("has_persistent_token", hasToken),
+		zap.Time("token_expires_at", tokenExpires))
 
 	// Trigger connection attempt in background to avoid blocking
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
+
+		// Important: Ensure a clean reconnect only if not already connected.
+		// Managed state guards above should make this idempotent.
+		if derr := client.Disconnect(); derr != nil {
+			m.logger.Debug("Disconnect before retry returned",
+				zap.String("server", serverName),
+				zap.Error(derr))
+		}
 
 		if err := client.Connect(ctx); err != nil {
 			m.logger.Warn("Connection retry after OAuth failed",
@@ -643,13 +697,15 @@ func (m *Manager) startOAuthEventMonitor() {
 	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			if err := m.processOAuthEvents(); err != nil {
-				m.logger.Warn("Failed to process OAuth events", zap.Error(err))
-			}
+	for range ticker.C {
+		if err := m.processOAuthEvents(); err != nil {
+			m.logger.Warn("Failed to process OAuth events", zap.Error(err))
 		}
+
+		// Also scan for newly available tokens to handle cases where the CLI
+		// could not write a DB event due to a lock. If we see a persisted
+		// token for an errored OAuth server, trigger a reconnect once.
+		m.scanForNewTokens()
 	}
 }
 
@@ -679,14 +735,24 @@ func (m *Manager) processOAuthEvents() error {
 			zap.String("server", event.ServerName),
 			zap.Time("completed_at", event.CompletedAt))
 
-		// Trigger connection retry
-		if err := m.RetryConnection(event.ServerName); err != nil {
-			m.logger.Warn("Failed to retry connection for OAuth completion event",
+		// Skip retry if client is already connected/connecting to avoid flapping
+		m.mu.RLock()
+		c, exists := m.clients[event.ServerName]
+		m.mu.RUnlock()
+		if exists && (c.IsConnected() || c.IsConnecting()) {
+			m.logger.Info("Skipping retry for OAuth event: client already connected/connecting",
 				zap.String("server", event.ServerName),
-				zap.Error(err))
+				zap.String("state", c.GetState().String()))
 		} else {
-			m.logger.Info("Successfully triggered connection retry for OAuth completion event",
-				zap.String("server", event.ServerName))
+			// Trigger connection retry
+			if err := m.RetryConnection(event.ServerName); err != nil {
+				m.logger.Warn("Failed to retry connection for OAuth completion event",
+					zap.String("server", event.ServerName),
+					zap.Error(err))
+			} else {
+				m.logger.Info("Successfully triggered connection retry for OAuth completion event",
+					zap.String("server", event.ServerName))
+			}
 		}
 
 		// Mark event as processed
@@ -701,6 +767,105 @@ func (m *Manager) processOAuthEvents() error {
 			m.logger.Warn("Failed to cleanup old OAuth completion events", zap.Error(err))
 		}
 	}
+
+	return nil
+}
+
+// scanForNewTokens checks persistent token store for each client in Error state
+// and triggers a reconnect if a token is present. This complements DB-based
+// events and handles DB lock scenarios.
+func (m *Manager) scanForNewTokens() {
+	if m.storage == nil {
+		return
+	}
+
+	m.mu.RLock()
+	clients := make(map[string]*managed.Client, len(m.clients))
+	for id, c := range m.clients {
+		clients[id] = c
+	}
+	m.mu.RUnlock()
+
+	now := time.Now()
+	for id, c := range clients {
+		// Only consider enabled, HTTP/SSE servers not currently connected
+		if !c.Config.Enabled || c.IsConnected() {
+			continue
+		}
+
+		state := c.GetState()
+		// Focus on Error state likely due to OAuth/authorization
+		if state != types.StateError {
+			continue
+		}
+
+		// Rate-limit triggers per server
+		if last, ok := m.tokenReconnect[id]; ok && now.Sub(last) < 10*time.Second {
+			continue
+		}
+
+		// Check for a persisted token
+		ts := oauth.NewPersistentTokenStore(c.Config.Name, c.Config.URL, m.storage)
+		tok, err := ts.GetToken()
+		if err != nil || tok == nil {
+			continue
+		}
+
+		m.logger.Info("Detected persisted OAuth token; triggering reconnect",
+			zap.String("server", c.Config.Name),
+			zap.Time("token_expires_at", tok.ExpiresAt))
+
+		// Remember trigger time and retry connection
+		m.tokenReconnect[id] = now
+		_ = m.RetryConnection(c.Config.Name)
+	}
+}
+
+// StartManualOAuth performs an in-process OAuth flow for the given server.
+// This avoids cross-process DB locking by using the daemon's storage directly.
+func (m *Manager) StartManualOAuth(serverName string, force bool) error {
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("server not found: %s", serverName)
+	}
+
+	cfg := client.Config
+	m.logger.Info("Starting in-process manual OAuth",
+		zap.String("server", cfg.Name),
+		zap.Bool("force", force))
+
+	// Create a transient core client that uses the daemon's storage
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false)
+	if err != nil {
+		return fmt.Errorf("failed to create core client for OAuth: %w", err)
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+
+		if force {
+			coreClient.ClearOAuthState()
+		}
+
+		m.logger.Info("Triggering OAuth flow (in-process)", zap.String("server", cfg.Name))
+		if err := coreClient.ForceOAuthFlow(ctx); err != nil {
+			m.logger.Warn("In-process OAuth flow failed",
+				zap.String("server", cfg.Name),
+				zap.Error(err))
+			return
+		}
+		m.logger.Info("In-process OAuth flow completed successfully",
+			zap.String("server", cfg.Name))
+		// Immediately attempt reconnect with new tokens
+		if err := m.RetryConnection(cfg.Name); err != nil {
+			m.logger.Warn("Failed to trigger reconnect after in-process OAuth",
+				zap.String("server", cfg.Name),
+				zap.Error(err))
+		}
+	}()
 
 	return nil
 }

@@ -153,6 +153,20 @@ func (s *Server) GetStatus() interface{} {
 	return statusMap
 }
 
+// TriggerOAuthLogin starts an in-process OAuth flow for the given server name.
+// Used by the tray to avoid cross-process DB locking issues during OAuth.
+func (s *Server) TriggerOAuthLogin(serverName string) error {
+	s.logger.Info("Tray requested OAuth login", zap.String("server", serverName))
+	if s.upstreamManager == nil {
+		return fmt.Errorf("upstream manager not initialized")
+	}
+	if err := s.upstreamManager.StartManualOAuth(serverName, true); err != nil {
+		s.logger.Error("Failed to start in-process OAuth", zap.String("server", serverName), zap.Error(err))
+		return err
+	}
+	return nil
+}
+
 // StatusChannel returns a channel that receives status updates
 func (s *Server) StatusChannel() <-chan interface{} {
 	// Create a new channel that converts Status to interface{}

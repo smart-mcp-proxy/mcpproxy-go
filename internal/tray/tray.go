@@ -27,7 +27,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/server"
-	"mcpproxy-go/internal/upstream/cli"
+	// "mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
 )
 
 const (
@@ -72,6 +72,9 @@ type ServerInterface interface {
 	ReloadConfiguration() error
 	GetConfigPath() string
 	GetLogDir() string
+
+	// OAuth control
+	TriggerOAuthLogin(serverName string) error
 }
 
 // App represents the system tray application
@@ -1175,37 +1178,11 @@ func (a *App) handleOAuthLogin(serverName string) error {
 		zap.String("server", serverName),
 		zap.Int("total_servers", len(globalConfig.Servers)))
 
-	// Use the CLI client to trigger manual OAuth
-	a.logger.Info("Creating CLI client for OAuth authentication", zap.String("server", serverName))
-	cliClient, err := cli.NewClient(serverName, globalConfig, "info")
-	if err != nil {
-		a.logger.Error("Failed to create CLI client for OAuth",
-			zap.String("server", serverName),
-			zap.Error(err))
-		return fmt.Errorf("failed to create CLI client: %w", err)
+	// Trigger OAuth inside the running daemon to avoid DB lock conflicts
+	a.logger.Info("Triggering in-process OAuth from tray", zap.String("server", serverName))
+	if err := a.server.TriggerOAuthLogin(serverName); err != nil {
+		return fmt.Errorf("failed to trigger OAuth: %w", err)
 	}
-
-	// Trigger manual OAuth flow in a goroutine to avoid blocking the UI
-	go func() {
-		// Create context with very extended timeout for OAuth discovery INSIDE goroutine
-		// This prevents the context from being canceled when the parent function returns
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		defer cancel()
-
-		a.logger.Info("Triggering FORCED manual OAuth authentication from tray", zap.String("server", serverName))
-
-		// Use force=true since user explicitly clicked OAuth Login in tray menu
-		err := cliClient.TriggerManualOAuthWithForce(ctx, true)
-		if err != nil {
-			a.logger.Error("OAuth authentication failed from tray menu",
-				zap.String("server", serverName),
-				zap.Error(err))
-		} else {
-			a.logger.Info("OAuth authentication completed successfully from tray menu",
-				zap.String("server", serverName))
-		}
-	}()
-
 	return nil
 }
 

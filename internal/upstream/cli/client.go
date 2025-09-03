@@ -329,7 +329,7 @@ func (c *Client) TriggerManualOAuthWithForce(ctx context.Context, force bool) er
 
 	// Notify global token manager about OAuth completion to trigger connection retries in other processes
 	tokenManager := oauth.GetTokenStoreManager()
-	
+
 	// First try database-based notification (cross-process)
 	if c.storage != nil {
 		if err := tokenManager.MarkOAuthCompletedWithDB(c.config.Name, c.storage); err != nil {

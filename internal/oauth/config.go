@@ -50,10 +50,10 @@ var globalCallbackManager = &CallbackServerManager{
 
 // Global token store manager to persist tokens across client instances
 type TokenStoreManager struct {
-	stores         map[string]client.TokenStore
-	completedOAuth map[string]time.Time // Track successful OAuth completions
-	mu             sync.RWMutex
-	logger         *zap.Logger
+	stores                  map[string]client.TokenStore
+	completedOAuth          map[string]time.Time // Track successful OAuth completions
+	mu                      sync.RWMutex
+	logger                  *zap.Logger
 	oauthCompletionCallback func(serverName string) // Callback when OAuth completes
 }
 
@@ -134,7 +134,7 @@ func (m *TokenStoreManager) MarkOAuthCompletedWithDB(serverName string, storage 
 	m.mu.Unlock()
 
 	// Save to database for cross-process notification
-	event := &OAuthCompletionEvent{
+	event := &CompletionEvent{
 		ServerName:  serverName,
 		CompletedAt: completionTime,
 	}
@@ -155,11 +155,11 @@ func (m *TokenStoreManager) MarkOAuthCompletedWithDB(serverName string, storage 
 
 // DatabaseOAuthNotifier interface for database-based OAuth completion notifications
 type DatabaseOAuthNotifier interface {
-	SaveOAuthCompletionEvent(event *OAuthCompletionEvent) error
+	SaveOAuthCompletionEvent(event *CompletionEvent) error
 }
 
 // OAuthCompletionEvent represents an OAuth completion event (re-exported from storage)
-type OAuthCompletionEvent = storage.OAuthCompletionEvent
+type CompletionEvent = storage.OAuthCompletionEvent
 
 // HasRecentOAuthCompletion checks if OAuth was recently completed for a server
 func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
@@ -255,7 +255,7 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 		logger.Info("🔧 Using persistent token store for OAuth tokens",
 			zap.String("server", serverConfig.Name),
 			zap.String("storage", "BBolt database"))
-		
+
 		// Check if token exists in persistent storage
 		existingToken, err := tokenStore.GetToken()
 		if err != nil {

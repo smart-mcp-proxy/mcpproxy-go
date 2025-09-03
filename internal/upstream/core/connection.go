@@ -639,9 +639,9 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 
 // tryOAuthAuth attempts OAuth authentication
 func (c *Client) tryOAuthAuth(ctx context.Context) error {
-	c.logger.Error("🚨 OAUTH AUTH FUNCTION CALLED - START", 
+	c.logger.Error("🚨 OAUTH AUTH FUNCTION CALLED - START",
 		zap.String("server", c.config.Name))
-	
+
 	// Check if OAuth is already in progress
 	if c.isOAuthInProgress() {
 		c.logger.Warn("⚠️ OAuth is already in progress, clearing stale state and retrying",
@@ -674,13 +674,13 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		zap.String("strategy", "HTTP OAuth"))
 
 	c.logger.Error("🚨 ABOUT TO CALL oauth.CreateOAuthConfig")
-	
+
 	// Create OAuth config using the oauth package
 	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
-	
+
 	c.logger.Error("🚨 oauth.CreateOAuthConfig RETURNED",
 		zap.Bool("config_nil", oauthConfig == nil))
-	
+
 	if oauthConfig == nil {
 		c.logger.Error("🚨 OAUTH CONFIG IS NIL - RETURNING ERROR")
 		return fmt.Errorf("failed to create OAuth config")
@@ -774,7 +774,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			// Retry starting the client after OAuth is complete
 			c.logger.Info("🔄 Retrying client start after OAuth authorization",
 				zap.String("server", c.config.Name))
-			
+
 			err = c.client.Start(ctx)
 			if err != nil {
 				c.logger.Error("❌ OAuth client start failed after authorization",
@@ -782,7 +782,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 					zap.Error(err))
 				return fmt.Errorf("OAuth client start failed after authorization: %w", err)
 			}
-			
+
 			c.logger.Info("✅ OAuth client start successful after authorization",
 				zap.String("server", c.config.Name))
 		} else {
@@ -803,12 +803,12 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	// This ensures consistency with other auth strategies and sets c.serverInfo for ListTools
 	c.logger.Debug("🔍 Starting MCP initialization after OAuth setup",
 		zap.String("server", c.config.Name))
-	
+
 	if err := c.initialize(ctx); err != nil {
 		c.logger.Error("❌ MCP initialization failed after OAuth setup",
 			zap.String("server", c.config.Name),
 			zap.Error(err))
-		
+
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(err) {
 			c.logger.Info("🎯 OAuth authorization required during MCP init - deferring OAuth for background processing",
@@ -820,17 +820,17 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			if c.isDeferOAuthForTray() {
 				c.logger.Info("⏳ Deferring OAuth to prevent tray UI blocking - will retry in background",
 					zap.String("server", c.config.Name))
-				
+
 				// Log a user-friendly message about OAuth being available via tray
 				c.logger.Info("💡 OAuth login available via system tray menu",
 					zap.String("server", c.config.Name))
-				
+
 				return fmt.Errorf("OAuth authorization required - deferred for background processing")
 			}
 
 			// Clear OAuth state before starting manual flow to prevent "already in progress" errors
 			c.clearOAuthState()
-			
+
 			// Handle OAuth authorization manually using the example pattern
 			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
@@ -840,21 +840,21 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			// Retry MCP initialization after OAuth is complete
 			c.logger.Info("🔄 Retrying MCP initialization after OAuth authorization",
 				zap.String("server", c.config.Name))
-			
+
 			if retryErr := c.initialize(ctx); retryErr != nil {
 				c.logger.Error("❌ MCP initialization failed after OAuth authorization",
 					zap.String("server", c.config.Name),
 					zap.Error(retryErr))
 				return fmt.Errorf("MCP initialize failed after OAuth authorization: %w", retryErr)
 			}
-			
+
 			c.logger.Info("✅ MCP initialization successful after OAuth authorization",
 				zap.String("server", c.config.Name))
 		} else {
 			return fmt.Errorf("MCP initialize failed during OAuth strategy: %w", err)
 		}
 	}
-	
+
 	c.logger.Info("✅ MCP initialization completed successfully after OAuth",
 		zap.String("server", c.config.Name))
 
@@ -1404,7 +1404,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		c.logger.Info("🔄 Exchanging authorization code for token",
 			zap.String("server", c.config.Name),
 			zap.String("code", code[:10]+"..."))
-		
+
 		err = oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
 		if err != nil {
 			c.logger.Error("❌ Failed to process authorization response",
@@ -1461,6 +1461,26 @@ func (c *Client) markOAuthComplete() {
 	c.logger.Info("✅ OAuth marked as complete",
 		zap.String("server", c.config.Name),
 		zap.Time("completion_time", c.lastOAuthTimestamp))
+
+	// Notify global token manager so the running process (daemon) can trigger
+	// an immediate reconnect. Also persist a DB event when possible so other
+	// processes can detect completion without polling.
+	tm := oauth.GetTokenStoreManager()
+	if c.storage != nil {
+		if err := tm.MarkOAuthCompletedWithDB(c.config.Name, c.storage); err != nil {
+			c.logger.Warn("Failed to persist OAuth completion event to DB; using in-memory notification",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			tm.MarkOAuthCompleted(c.config.Name)
+		} else {
+			c.logger.Info("📢 OAuth completion recorded to DB for cross-process notification",
+				zap.String("server", c.config.Name))
+		}
+	} else {
+		tm.MarkOAuthCompleted(c.config.Name)
+		c.logger.Info("📢 OAuth completion recorded in-memory (no DB available)",
+			zap.String("server", c.config.Name))
+	}
 
 	// Clean up the callback server to free the port
 	if manager := oauth.GetGlobalCallbackManager(); manager != nil {
@@ -1729,12 +1749,12 @@ func (c *Client) hasGUIEnvironment() bool {
 func (c *Client) isDeferOAuthForTray() bool {
 	// Check if we're in tray mode by looking for tray-specific environment or configuration
 	// During initial server startup, we should defer OAuth to prevent blocking the tray UI
-	
+
 	tokenManager := oauth.GetTokenStoreManager()
 	if tokenManager == nil {
 		return false
 	}
-	
+
 	// If OAuth has been recently attempted (within last 5 minutes), don't defer
 	// This allows manual retry flows to work
 	if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
@@ -1742,11 +1762,11 @@ func (c *Client) isDeferOAuthForTray() bool {
 			zap.String("server", c.config.Name))
 		return false
 	}
-	
+
 	// Check if this is an automatic retry vs manual trigger
 	// Defer only during automatic connection attempts to prevent UI blocking
 	// Manual OAuth flows (triggered via tray menu) should proceed immediately
-	
+
 	c.logger.Debug("Deferring OAuth during automatic connection attempt",
 		zap.String("server", c.config.Name))
 	return true

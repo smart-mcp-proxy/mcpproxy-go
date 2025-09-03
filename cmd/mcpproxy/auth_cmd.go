@@ -182,11 +182,12 @@ func runAuthStatus(_ *cobra.Command, _ []string) error {
 			fmt.Printf("  ❌ Failed to create client: %v\n", err)
 			continue
 		}
-		defer cliClient.Close() // Ensure storage is closed
+		// Ensure storage is closed per-iteration (avoid defers in loop)
 
 		status, err := cliClient.GetOAuthStatus()
 		if err != nil {
 			fmt.Printf("  ❌ Failed to get OAuth status: %v\n", err)
+			_ = cliClient.Close()
 			continue
 		}
 
@@ -203,6 +204,7 @@ func runAuthStatus(_ *cobra.Command, _ []string) error {
 			fmt.Printf("  ❓ Unknown status: %s\n", status)
 		}
 		fmt.Printf("\n")
+		_ = cliClient.Close()
 	}
 
 	return nil

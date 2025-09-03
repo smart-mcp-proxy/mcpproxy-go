@@ -35,12 +35,12 @@ func (s *BoltDB) GetUnprocessedOAuthCompletionEvents() ([]*OAuthCompletionEvent,
 			return nil // No events yet
 		}
 
-		return bucket.ForEach(func(k, v []byte) error {
+		return bucket.ForEach(func(_ []byte, v []byte) error {
 			event := &OAuthCompletionEvent{}
 			if err := event.UnmarshalBinary(v); err != nil {
 				return err
 			}
-			
+
 			// Only return unprocessed events
 			if event.ProcessedAt == nil {
 				events = append(events, event)
@@ -86,7 +86,7 @@ func (s *BoltDB) MarkOAuthCompletionEventProcessed(serverName string, completedA
 // CleanupOldOAuthCompletionEvents removes OAuth completion events older than 24 hours
 func (s *BoltDB) CleanupOldOAuthCompletionEvents() error {
 	cutoff := time.Now().Add(-24 * time.Hour)
-	
+
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthCompletionBucket))
 		if bucket == nil {

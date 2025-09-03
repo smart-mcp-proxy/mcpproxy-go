@@ -287,13 +287,13 @@ func CreateHTTPTransportConfig(serverConfig *config.ServerConfig, oauthConfig *c
 		zap.String("server", serverConfig.Name),
 		zap.Bool("oauth_config_nil", oauthConfig == nil),
 		zap.Bool("use_oauth", oauthConfig != nil))
-		
+
 	if oauthConfig != nil {
 		logger.Error("🚨 OAUTH CONFIG DETAILS",
 			zap.String("redirect_uri", oauthConfig.RedirectURI),
 			zap.Strings("scopes", oauthConfig.Scopes))
 	}
-	
+
 	return &HTTPTransportConfig{
 		URL:         serverConfig.URL,
 		Headers:     serverConfig.Headers,
