@@ -88,6 +88,7 @@ func (b *BoltDB) initBuckets() error {
 			UpstreamsBucket,
 			ToolStatsBucket,
 			ToolHashBucket,
+			OAuthTokenBucket,
 			MetaBucket,
 		}
 
@@ -344,4 +345,65 @@ func copyFile(src, dst string) error {
 // removeFile safely removes a file
 func removeFile(path string) error {
 	return os.Remove(path)
+}
+
+// OAuth token operations
+
+// SaveOAuthToken saves an OAuth token record
+func (b *BoltDB) SaveOAuthToken(record *OAuthTokenRecord) error {
+	record.Updated = time.Now()
+
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		data, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(record.ServerName), data)
+	})
+}
+
+// GetOAuthToken retrieves an OAuth token record by server name
+func (b *BoltDB) GetOAuthToken(serverName string) (*OAuthTokenRecord, error) {
+	var record *OAuthTokenRecord
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		data := bucket.Get([]byte(serverName))
+		if data == nil {
+			return fmt.Errorf("oauth token not found")
+		}
+
+		record = &OAuthTokenRecord{}
+		return record.UnmarshalBinary(data)
+	})
+
+	return record, err
+}
+
+// DeleteOAuthToken deletes an OAuth token record
+func (b *BoltDB) DeleteOAuthToken(serverName string) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		return bucket.Delete([]byte(serverName))
+	})
+}
+
+// ListOAuthTokens returns all OAuth token records
+func (b *BoltDB) ListOAuthTokens() ([]*OAuthTokenRecord, error) {
+	var records []*OAuthTokenRecord
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		return bucket.ForEach(func(_, v []byte) error {
+			record := &OAuthTokenRecord{}
+			if err := record.UnmarshalBinary(v); err != nil {
+				return err
+			}
+			records = append(records, record)
+			return nil
+		})
+	})
+
+	return records, err
 }

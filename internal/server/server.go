@@ -81,7 +81,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	}
 
 	// Initialize upstream manager
-	upstreamManager := upstream.NewManager(logger, cfg)
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB())
 
 	// Set logging configuration on upstream manager for per-server logging
 	if cfg.Logging != nil {

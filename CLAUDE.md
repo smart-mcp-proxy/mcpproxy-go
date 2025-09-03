@@ -188,6 +188,192 @@ golangci-lint run ./...
 - Security analysis with comprehensive checklists
 - Protection against hidden instructions and data exfiltration attempts
 
+## Debugging Guide
+
+### Log Locations and Analysis
+
+#### Log File Structure
+- **Main log**: `~/Library/Logs/mcpproxy/main.log` (macOS) or `~/.mcpproxy/logs/main.log` (Linux/Windows)
+- **Per-server logs**: `~/Library/Logs/mcpproxy/server-{name}.log`
+- **Archived logs**: Compressed with timestamps (e.g., `main-2025-09-02T10-17-31.851.log.gz`)
+
+#### Essential Grep Commands
+```bash
+# Monitor real-time logs
+tail -f ~/Library/Logs/mcpproxy/main.log
+
+# Filter for specific issues
+tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(ERROR|WARN|oauth|OAuth|tool|Tool)"
+
+# Debug specific server
+tail -f ~/Library/Logs/mcpproxy/server-Sentry.log
+
+# Search for authentication issues
+grep -E "(auth|Auth|token|Token|401|invalid_token)" ~/Library/Logs/mcpproxy/main.log
+
+# Find tool indexing problems
+grep -E "(index|Index|tool.*list|list.*tool)" ~/Library/Logs/mcpproxy/main.log
+
+# Check OAuth flow details
+grep -E "(OAuth|oauth|browser|callback|authorization)" ~/Library/Logs/mcpproxy/main.log
+```
+
+### OAuth Debugging
+
+#### Manual Authentication Testing
+```bash
+# Test OAuth flow for specific server
+mcpproxy auth login --server=Sentry --log-level=debug
+
+# Check current authentication status
+mcpproxy auth status
+
+# Force re-authentication
+mcpproxy auth login --server=Sentry --force
+```
+
+#### OAuth Flow Diagnostics
+```bash
+# Debug OAuth with detailed logging
+tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(🔐|🌐|🚀|⏳|✅|❌|oauth|OAuth)"
+
+# Monitor callback server status
+grep -E "(callback|redirect_uri|127\.0\.0\.1)" ~/Library/Logs/mcpproxy/main.log
+
+# Check token store persistence
+grep -E "(token.*store|has_existing_token_store)" ~/Library/Logs/mcpproxy/main.log
+```
+
+#### Common OAuth Issues
+1. **Browser not opening**: Check environment variables (`DISPLAY`, `HEADLESS`, `CI`)
+2. **Token persistence**: Look for `"has_existing_token_store": false` on restart
+3. **Rate limiting**: Search for "rate limited" messages
+4. **Callback failures**: Monitor callback server logs
+
+### Tool Discovery and Indexing Debug
+
+#### Test Tool Availability
+```bash
+# List tools from specific server
+mcpproxy tools list --server=github-server --log-level=debug
+
+# Search for tools (uses BM25 index)
+mcpproxy tools search "create issue" --limit=10
+
+# Test direct tool calls
+mcpproxy call tool --tool-name=Sentry:whoami --json_args='{}'
+```
+
+#### Index Debugging
+```bash
+# Check index status and rebuilds
+grep -E "(index|Index|rebuild|BM25)" ~/Library/Logs/mcpproxy/main.log
+
+# Monitor tool discovery
+grep -E "(tool.*discovered|discovered.*tool)" ~/Library/Logs/mcpproxy/main.log
+
+# Check server connection states
+grep -E "(Ready|Connecting|Error|state.*transition)" ~/Library/Logs/mcpproxy/main.log
+```
+
+### Server Management Commands
+
+#### Upstream Server Operations
+```bash
+# List all upstream servers with status
+mcpproxy upstream list
+
+# Add new server
+mcpproxy upstream add --name="new-server" --url="https://api.example.com/mcp"
+
+# Remove server
+mcpproxy upstream remove --name="old-server"
+
+# Enable/disable server
+mcpproxy upstream update --name="test-server" --enabled=false
+```
+
+#### Quarantine Management
+```bash
+# List quarantined servers
+mcpproxy quarantine list
+
+# Review quarantined server details
+mcpproxy quarantine inspect --name="suspicious-server"
+
+# Manually quarantine server
+mcpproxy quarantine add --name="unsafe-server"
+```
+
+### Performance and Resource Debugging
+
+#### Docker Isolation Monitoring
+```bash
+# Check Docker container status
+docker ps | grep mcpproxy
+
+# Monitor container resource usage
+docker stats $(docker ps -q --filter "name=mcpproxy")
+
+# Debug isolation setup
+grep -E "(Docker|docker|isolation|container)" ~/Library/Logs/mcpproxy/main.log
+```
+
+#### Connection and Retry Analysis
+```bash
+# Monitor connection attempts and retries
+grep -E "(retry|Retry|connection.*attempt|backoff)" ~/Library/Logs/mcpproxy/main.log
+
+# Check connection state transitions
+grep -E "(state.*transition|Connecting|Ready|Error)" ~/Library/Logs/mcpproxy/main.log
+```
+
+### Running with Debug Mode
+
+#### Start mcpproxy with Enhanced Debugging
+```bash
+# Kill existing daemon
+pkill mcpproxy
+
+# Start with debug logging
+go build && ./mcpproxy --log-level=debug --tray=false
+
+# Start with trace-level logging (very verbose)
+./mcpproxy --log-level=trace --tray=false
+
+# Debug specific operations
+./mcpproxy tools list --server=github-server --log-level=trace
+```
+
+#### Environment Variables for Debugging
+```bash
+# Disable OAuth for testing
+export MCPPROXY_DISABLE_OAUTH=true
+
+# Enable additional debugging
+export MCPPROXY_DEBUG=true
+
+# Test in headless environment
+export HEADLESS=true
+```
+
+### Troubleshooting Common Issues
+
+1. **Tools not appearing in search**:
+   - Check server authentication status: `mcpproxy auth status`
+   - Verify server can list tools: `mcpproxy tools list --server=<name>`
+   - Check index rebuild: `grep -E "index.*rebuild" ~/Library/Logs/mcpproxy/main.log`
+
+2. **OAuth servers failing**:
+   - Test manual login: `mcpproxy auth login --server=<name> --log-level=debug`
+   - Check browser opening: Look for "Opening browser" in logs
+   - Verify callback server: `grep "callback" ~/Library/Logs/mcpproxy/main.log`
+
+3. **Server connection issues**:
+   - Monitor retry attempts: `grep "retry" ~/Library/Logs/mcpproxy/main.log`
+   - Check Docker isolation: `grep "Docker" ~/Library/Logs/mcpproxy/main.log`
+   - Verify server configuration: `mcpproxy upstream list`
+
 ## Development Guidelines
 
 ### File Organization

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/storage"
 
 	"github.com/mark3labs/mcp-go/client"
 	"go.uber.org/zap"
@@ -53,6 +54,7 @@ type TokenStoreManager struct {
 	completedOAuth map[string]time.Time // Track successful OAuth completions
 	mu             sync.RWMutex
 	logger         *zap.Logger
+	oauthCompletionCallback func(serverName string) // Callback when OAuth completes
 }
 
 var globalTokenStoreManager = &TokenStoreManager{
@@ -92,16 +94,72 @@ func GetTokenStoreManager() *TokenStoreManager {
 	return globalTokenStoreManager
 }
 
-// MarkOAuthCompleted records that OAuth was successfully completed for a server
-func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
+// SetOAuthCompletionCallback sets a callback function to be called when OAuth completes
+func (m *TokenStoreManager) SetOAuthCompletionCallback(callback func(serverName string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.oauthCompletionCallback = callback
+}
 
-	m.completedOAuth[serverName] = time.Now()
+// MarkOAuthCompleted records that OAuth was successfully completed for a server
+// This method is used by CLI processes to notify server processes about OAuth completion
+func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
+	m.mu.Lock()
+	callback := m.oauthCompletionCallback
+	completionTime := time.Now()
+	m.completedOAuth[serverName] = completionTime
+	m.mu.Unlock()
+
 	m.logger.Info("OAuth completion recorded",
 		zap.String("server", serverName),
-		zap.Time("completion_time", time.Now()))
+		zap.Time("completion_time", completionTime))
+
+	// Trigger in-process callback if available (for same process)
+	if callback != nil {
+		m.logger.Info("Triggering in-process OAuth completion callback",
+			zap.String("server", serverName))
+		callback(serverName)
+	} else {
+		m.logger.Info("No in-process callback registered - OAuth completion will be handled via database events",
+			zap.String("server", serverName))
+	}
 }
+
+// MarkOAuthCompletedWithDB records OAuth completion in the database for cross-process notification
+// This is the new preferred method that works across different processes
+func (m *TokenStoreManager) MarkOAuthCompletedWithDB(serverName string, storage DatabaseOAuthNotifier) error {
+	m.mu.Lock()
+	completionTime := time.Now()
+	m.completedOAuth[serverName] = completionTime
+	m.mu.Unlock()
+
+	// Save to database for cross-process notification
+	event := &OAuthCompletionEvent{
+		ServerName:  serverName,
+		CompletedAt: completionTime,
+	}
+
+	if err := storage.SaveOAuthCompletionEvent(event); err != nil {
+		m.logger.Error("Failed to save OAuth completion event to database",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return err
+	}
+
+	m.logger.Info("OAuth completion saved to database for cross-process notification",
+		zap.String("server", serverName),
+		zap.Time("completion_time", completionTime))
+
+	return nil
+}
+
+// DatabaseOAuthNotifier interface for database-based OAuth completion notifications
+type DatabaseOAuthNotifier interface {
+	SaveOAuthCompletionEvent(event *OAuthCompletionEvent) error
+}
+
+// OAuthCompletionEvent represents an OAuth completion event (re-exported from storage)
+type OAuthCompletionEvent = storage.OAuthCompletionEvent
 
 // HasRecentOAuthCompletion checks if OAuth was recently completed for a server
 func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
@@ -125,8 +183,12 @@ func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
 
 // CreateOAuthConfig creates an OAuth configuration for dynamic client registration
 // This implements proper callback server coordination required for Cloudflare OAuth
-func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
+func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltDB) *client.OAuthConfig {
 	logger := zap.L().Named("oauth")
+
+	logger.Error("🚨 OAUTH CONFIG CREATION CALLED - THIS SHOULD APPEAR IN LOGS",
+		zap.String("server", serverConfig.Name),
+		zap.String("url", serverConfig.URL))
 
 	logger.Debug("Creating OAuth config for dynamic registration",
 		zap.String("server", serverConfig.Name))
@@ -186,8 +248,32 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
 			zap.String("server", serverConfig.Name))
 	}
 
-	// Use shared token store to persist tokens across client instances for the same server
-	tokenStore := globalTokenStoreManager.GetOrCreateTokenStore(serverConfig.Name)
+	// Use persistent token store to persist tokens across daemon restarts if storage is available
+	var tokenStore client.TokenStore
+	if storage != nil {
+		tokenStore = NewPersistentTokenStore(serverConfig.Name, serverConfig.URL, storage)
+		logger.Info("🔧 Using persistent token store for OAuth tokens",
+			zap.String("server", serverConfig.Name),
+			zap.String("storage", "BBolt database"))
+		
+		// Check if token exists in persistent storage
+		existingToken, err := tokenStore.GetToken()
+		if err != nil {
+			logger.Info("🔍 No existing token found in persistent storage",
+				zap.String("server", serverConfig.Name),
+				zap.Error(err))
+		} else {
+			logger.Info("✅ Found existing token in persistent storage",
+				zap.String("server", serverConfig.Name),
+				zap.Time("expires_at", existingToken.ExpiresAt),
+				zap.Bool("expired", time.Now().After(existingToken.ExpiresAt)))
+		}
+	} else {
+		tokenStore = globalTokenStoreManager.GetOrCreateTokenStore(serverConfig.Name)
+		logger.Info("🔧 Using in-memory token store for OAuth tokens (CLI mode)",
+			zap.String("server", serverConfig.Name),
+			zap.String("storage", "memory"))
+	}
 
 	oauthConfig := &client.OAuthConfig{
 		ClientID:              "",                         // Will be obtained via Dynamic Client Registration

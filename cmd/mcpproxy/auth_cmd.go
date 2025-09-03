@@ -134,6 +134,7 @@ func runAuthLogin(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create CLI client: %w", err)
 	}
+	defer cliClient.Close() // Ensure storage is closed
 
 	// Trigger manual OAuth flow
 	fmt.Printf("🌐 Starting manual OAuth flow...\n")
@@ -181,6 +182,7 @@ func runAuthStatus(_ *cobra.Command, _ []string) error {
 			fmt.Printf("  ❌ Failed to create client: %v\n", err)
 			continue
 		}
+		defer cliClient.Close() // Ensure storage is closed
 
 		status, err := cliClient.GetOAuthStatus()
 		if err != nil {
