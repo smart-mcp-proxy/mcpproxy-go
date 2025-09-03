@@ -10,6 +10,8 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/oauth"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/managed"
 	"mcpproxy-go/internal/upstream/types"
 )
@@ -21,17 +23,38 @@ type Manager struct {
 	logger          *zap.Logger
 	logConfig       *config.LogConfig
 	globalConfig    *config.Config
+	storage         *storage.BoltDB
 	notificationMgr *NotificationManager
 }
 
 // NewManager creates a new upstream manager
-func NewManager(logger *zap.Logger, globalConfig *config.Config) *Manager {
-	return &Manager{
+func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storage.BoltDB) *Manager {
+	manager := &Manager{
 		clients:         make(map[string]*managed.Client),
 		logger:          logger,
 		globalConfig:    globalConfig,
+		storage:         storage,
 		notificationMgr: NewNotificationManager(),
 	}
+
+	// Set up OAuth completion callback to trigger connection retries (in-process)
+	tokenManager := oauth.GetTokenStoreManager()
+	tokenManager.SetOAuthCompletionCallback(func(serverName string) {
+		logger.Info("OAuth completion callback triggered, attempting connection retry",
+			zap.String("server", serverName))
+		if err := manager.RetryConnection(serverName); err != nil {
+			logger.Warn("Failed to trigger connection retry after OAuth completion",
+				zap.String("server", serverName),
+				zap.Error(err))
+		}
+	})
+
+	// Start database event monitor for cross-process OAuth completion notifications
+	if storage != nil {
+		go manager.startOAuthEventMonitor()
+	}
+
+	return manager
 }
 
 // SetLogConfig sets the logging configuration for upstream server loggers
@@ -86,7 +109,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	}
 
 	// Create new client but don't connect yet
-	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig)
+	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storage)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
@@ -579,4 +602,105 @@ func (m *Manager) ListServers() map[string]*config.ServerConfig {
 		servers[id] = client.Config
 	}
 	return servers
+}
+
+// RetryConnection triggers a connection retry for a specific server
+// This is typically called after OAuth completion to immediately use new tokens
+func (m *Manager) RetryConnection(serverName string) error {
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("server not found: %s", serverName)
+	}
+
+	m.logger.Info("Triggering connection retry after OAuth completion",
+		zap.String("server", serverName))
+
+	// Trigger connection attempt in background to avoid blocking
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		if err := client.Connect(ctx); err != nil {
+			m.logger.Warn("Connection retry after OAuth failed",
+				zap.String("server", serverName),
+				zap.Error(err))
+		} else {
+			m.logger.Info("Connection retry after OAuth succeeded",
+				zap.String("server", serverName))
+		}
+	}()
+
+	return nil
+}
+
+// startOAuthEventMonitor monitors the database for OAuth completion events from CLI processes
+func (m *Manager) startOAuthEventMonitor() {
+	m.logger.Info("Starting OAuth event monitor for cross-process notifications")
+
+	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := m.processOAuthEvents(); err != nil {
+				m.logger.Warn("Failed to process OAuth events", zap.Error(err))
+			}
+		}
+	}
+}
+
+// processOAuthEvents checks for and processes unprocessed OAuth completion events
+func (m *Manager) processOAuthEvents() error {
+	if m.storage == nil {
+		m.logger.Debug("processOAuthEvents: no storage available, skipping")
+		return nil
+	}
+
+	m.logger.Debug("processOAuthEvents: checking for OAuth completion events...")
+	events, err := m.storage.GetUnprocessedOAuthCompletionEvents()
+	if err != nil {
+		m.logger.Error("processOAuthEvents: failed to get events", zap.Error(err))
+		return fmt.Errorf("failed to get OAuth completion events: %w", err)
+	}
+
+	if len(events) == 0 {
+		m.logger.Debug("processOAuthEvents: no unprocessed events found")
+		return nil
+	}
+
+	m.logger.Info("processOAuthEvents: found unprocessed OAuth completion events", zap.Int("count", len(events)))
+
+	for _, event := range events {
+		m.logger.Info("Processing OAuth completion event from database",
+			zap.String("server", event.ServerName),
+			zap.Time("completed_at", event.CompletedAt))
+
+		// Trigger connection retry
+		if err := m.RetryConnection(event.ServerName); err != nil {
+			m.logger.Warn("Failed to retry connection for OAuth completion event",
+				zap.String("server", event.ServerName),
+				zap.Error(err))
+		} else {
+			m.logger.Info("Successfully triggered connection retry for OAuth completion event",
+				zap.String("server", event.ServerName))
+		}
+
+		// Mark event as processed
+		if err := m.storage.MarkOAuthCompletionEventProcessed(event.ServerName, event.CompletedAt); err != nil {
+			m.logger.Error("Failed to mark OAuth completion event as processed",
+				zap.String("server", event.ServerName),
+				zap.Error(err))
+		}
+
+		// Clean up old events periodically (when processing events)
+		if err := m.storage.CleanupOldOAuthCompletionEvents(); err != nil {
+			m.logger.Warn("Failed to cleanup old OAuth completion events", zap.Error(err))
+		}
+	}
+
+	return nil
 }

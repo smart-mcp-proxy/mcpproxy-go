@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/core"
 	"mcpproxy-go/internal/upstream/types"
 
@@ -25,6 +26,7 @@ type Client struct {
 	// Configuration for creating fresh connections
 	logConfig    *config.LogConfig
 	globalConfig *config.Config
+	storage      *storage.BoltDB
 
 	// Connection state protection
 	mu sync.RWMutex
@@ -39,9 +41,9 @@ type Client struct {
 }
 
 // NewClient creates a new managed client with state management
-func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config) (*Client, error) {
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB) (*Client, error) {
 	// Create core client
-	coreClient, err := core.NewClient(id, serverConfig, logger, logConfig, globalConfig)
+	coreClient, err := core.NewClient(id, serverConfig, logger, logConfig, globalConfig, storage)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}
@@ -55,6 +57,7 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		StateManager:   types.NewStateManager(),
 		logConfig:      logConfig,
 		globalConfig:   globalConfig,
+		storage:        storage,
 		stopMonitoring: make(chan struct{}),
 	}
 

@@ -8,6 +8,8 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/oauth"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/core"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -24,6 +26,7 @@ type Client struct {
 	coreClient *core.Client
 	logger     *zap.Logger
 	config     *config.ServerConfig
+	storage    *storage.BoltDB
 
 	// Debug output settings
 	debugMode bool
@@ -57,8 +60,21 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		return nil, fmt.Errorf("failed to create logger: %w", err)
 	}
 
-	// Create core client directly for CLI operations (no DB sync manager)
-	coreClient, err := core.NewClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, true)
+	// Create storage for persistent OAuth tokens (CLI should also persist tokens)
+	var db *storage.BoltDB
+	if globalConfig.DataDir != "" {
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
+		if err != nil {
+			logger.Warn("Failed to create storage for CLI OAuth tokens, falling back to in-memory",
+				zap.String("data_dir", globalConfig.DataDir),
+				zap.Error(err))
+		} else {
+			db = boltDB
+		}
+	}
+
+	// Create core client directly for CLI operations (with persistent storage for OAuth tokens)
+	coreClient, err := core.NewClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, db, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}
@@ -67,8 +83,17 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		coreClient: coreClient,
 		logger:     logger,
 		config:     serverConfig,
+		storage:    db,
 		debugMode:  logLevel == "trace" || logLevel == "debug",
 	}, nil
+}
+
+// Close cleans up the client and closes storage if it was created
+func (c *Client) Close() error {
+	if c.storage != nil {
+		return c.storage.Close()
+	}
+	return nil
 }
 
 // Connect establishes connection with detailed progress output
@@ -301,6 +326,27 @@ func (c *Client) TriggerManualOAuthWithForce(ctx context.Context, force bool) er
 	}
 
 	c.logger.Info("✅ Manual OAuth authentication completed successfully")
+
+	// Notify global token manager about OAuth completion to trigger connection retries in other processes
+	tokenManager := oauth.GetTokenStoreManager()
+	
+	// First try database-based notification (cross-process)
+	if c.storage != nil {
+		if err := tokenManager.MarkOAuthCompletedWithDB(c.config.Name, c.storage); err != nil {
+			c.logger.Warn("Failed to save OAuth completion to database, falling back to in-memory notification",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			tokenManager.MarkOAuthCompleted(c.config.Name)
+		} else {
+			c.logger.Info("📢 OAuth completion saved to database for cross-process notification",
+				zap.String("server", c.config.Name))
+		}
+	} else {
+		// Fall back to in-memory notification
+		tokenManager.MarkOAuthCompleted(c.config.Name)
+		c.logger.Info("📢 OAuth completion recorded in-memory (no database available)",
+			zap.String("server", c.config.Name))
+	}
 
 	// Skip verification step since OAuth flow already includes connection verification
 	// The OAuth flow performs MCP initialization which confirms the connection works

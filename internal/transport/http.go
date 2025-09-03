@@ -94,6 +94,11 @@ type HTTPTransportConfig struct {
 func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	logger := zap.L().Named("transport")
 
+	logger.Error("🚨 TRANSPORT HTTP CLIENT CREATION",
+		zap.String("url", cfg.URL),
+		zap.Bool("oauth_config_nil", cfg.OAuthConfig == nil),
+		zap.Bool("use_oauth", cfg.UseOAuth))
+
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("no URL specified for HTTP transport")
 	}
@@ -277,6 +282,18 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 // CreateHTTPTransportConfig creates an HTTP transport config from server config
 func CreateHTTPTransportConfig(serverConfig *config.ServerConfig, oauthConfig *client.OAuthConfig) *HTTPTransportConfig {
+	logger := zap.L().Named("transport")
+	logger.Error("🚨 TRANSPORT CONFIG CREATION",
+		zap.String("server", serverConfig.Name),
+		zap.Bool("oauth_config_nil", oauthConfig == nil),
+		zap.Bool("use_oauth", oauthConfig != nil))
+		
+	if oauthConfig != nil {
+		logger.Error("🚨 OAUTH CONFIG DETAILS",
+			zap.String("redirect_uri", oauthConfig.RedirectURI),
+			zap.Strings("scopes", oauthConfig.Scopes))
+	}
+	
 	return &HTTPTransportConfig{
 		URL:         serverConfig.URL,
 		Headers:     serverConfig.Headers,
