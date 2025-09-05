@@ -119,23 +119,29 @@ type OAuthConfig struct {
 
 // DockerIsolationConfig represents global Docker isolation settings
 type DockerIsolationConfig struct {
-	Enabled       bool              `json:"enabled" mapstructure:"enabled"`                     // Global enable/disable for Docker isolation
-	DefaultImages map[string]string `json:"default_images" mapstructure:"default_images"`       // Map of runtime type to Docker image
-	Registry      string            `json:"registry,omitempty" mapstructure:"registry"`         // Custom registry (defaults to docker.io)
-	NetworkMode   string            `json:"network_mode,omitempty" mapstructure:"network_mode"` // Docker network mode (default: bridge)
-	MemoryLimit   string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"` // Memory limit for containers
-	CPULimit      string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`       // CPU limit for containers
-	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout"`           // Container startup timeout
-	ExtraArgs     []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`     // Additional docker run arguments
+	Enabled       bool              `json:"enabled" mapstructure:"enabled"`                       // Global enable/disable for Docker isolation
+	DefaultImages map[string]string `json:"default_images" mapstructure:"default_images"`         // Map of runtime type to Docker image
+	Registry      string            `json:"registry,omitempty" mapstructure:"registry"`           // Custom registry (defaults to docker.io)
+	NetworkMode   string            `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Docker network mode (default: bridge)
+	MemoryLimit   string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"`   // Memory limit for containers
+	CPULimit      string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`         // CPU limit for containers
+	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout"`             // Container startup timeout
+	ExtraArgs     []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments
+	LogDriver     string            `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver (default: json-file)
+	LogMaxSize    string            `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files (default: 100m)
+	LogMaxFiles   string            `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files (default: 3)
 }
 
 // IsolationConfig represents per-server isolation settings
 type IsolationConfig struct {
-	Enabled     bool     `json:"enabled" mapstructure:"enabled"`                     // Enable Docker isolation for this server
-	Image       string   `json:"image,omitempty" mapstructure:"image"`               // Custom Docker image (overrides default)
-	NetworkMode string   `json:"network_mode,omitempty" mapstructure:"network_mode"` // Custom network mode for this server
-	ExtraArgs   []string `json:"extra_args,omitempty" mapstructure:"extra_args"`     // Additional docker run arguments for this server
-	WorkingDir  string   `json:"working_dir,omitempty" mapstructure:"working_dir"`   // Custom working directory in container
+	Enabled     bool     `json:"enabled" mapstructure:"enabled"`                       // Enable Docker isolation for this server
+	Image       string   `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
+	NetworkMode string   `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
+	ExtraArgs   []string `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server
+	WorkingDir  string   `json:"working_dir,omitempty" mapstructure:"working_dir"`     // Custom working directory in container
+	LogDriver   string   `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
+	LogMaxSize  string   `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
+	LogMaxFiles string   `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
 }
 
 // RegistryEntry represents a registry in the configuration
@@ -276,6 +282,9 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 		CPULimit:    "1.0",                      // Default CPU limit (1 core)
 		Timeout:     Duration(30 * time.Second), // 30 second startup timeout
 		ExtraArgs:   []string{},                 // No extra args by default
+		LogDriver:   "",                         // Use Docker system default (empty = no override)
+		LogMaxSize:  "100m",                     // Default maximum log file size (only used if json-file driver is set)
+		LogMaxFiles: "3",                        // Default maximum number of log files (only used if json-file driver is set)
 	}
 }
 
