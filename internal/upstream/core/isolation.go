@@ -183,7 +183,7 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 
 	args := []string{"run", "--rm", "-i"}
 
-	// Add logging configuration only if explicitly configured
+	// Add log driver only if explicitly configured
 	logDriver := ""
 	if serverConfig.Isolation != nil && serverConfig.Isolation.LogDriver != "" {
 		logDriver = serverConfig.Isolation.LogDriver
@@ -193,25 +193,24 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 
 	if logDriver != "" {
 		args = append(args, "--log-driver", logDriver)
+	}
 
-		// Only add log options for json-file driver
-		if logDriver == logDriverJSONFile {
-			logMaxSize := im.globalConfig.LogMaxSize
-			if serverConfig.Isolation != nil && serverConfig.Isolation.LogMaxSize != "" {
-				logMaxSize = serverConfig.Isolation.LogMaxSize
-			}
-			if logMaxSize != "" {
-				args = append(args, "--log-opt", fmt.Sprintf("max-size=%s", logMaxSize))
-			}
+	// Always add log size and file limits to prevent disk space issues
+	// These options work with Docker's default json-file driver and most other drivers
+	logMaxSize := im.globalConfig.LogMaxSize
+	if serverConfig.Isolation != nil && serverConfig.Isolation.LogMaxSize != "" {
+		logMaxSize = serverConfig.Isolation.LogMaxSize
+	}
+	if logMaxSize != "" {
+		args = append(args, "--log-opt", fmt.Sprintf("max-size=%s", logMaxSize))
+	}
 
-			logMaxFiles := im.globalConfig.LogMaxFiles
-			if serverConfig.Isolation != nil && serverConfig.Isolation.LogMaxFiles != "" {
-				logMaxFiles = serverConfig.Isolation.LogMaxFiles
-			}
-			if logMaxFiles != "" {
-				args = append(args, "--log-opt", fmt.Sprintf("max-file=%s", logMaxFiles))
-			}
-		}
+	logMaxFiles := im.globalConfig.LogMaxFiles
+	if serverConfig.Isolation != nil && serverConfig.Isolation.LogMaxFiles != "" {
+		logMaxFiles = serverConfig.Isolation.LogMaxFiles
+	}
+	if logMaxFiles != "" {
+		args = append(args, "--log-opt", fmt.Sprintf("max-file=%s", logMaxFiles))
 	}
 
 	// Add network mode

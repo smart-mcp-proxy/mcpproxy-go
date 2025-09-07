@@ -9,8 +9,8 @@ import (
 )
 
 func TestBuildDockerArgsWithLogging(t *testing.T) {
-	// Test with default global config (no log driver override)
-	t.Run("default logging config uses Docker default", func(t *testing.T) {
+	// Test with default global config (no log driver override but log limits always applied)
+	t.Run("default logging config applies log limits without driver override", func(t *testing.T) {
 		globalConfig := config.DefaultDockerIsolationConfig()
 		im := NewIsolationManager(globalConfig)
 
@@ -23,11 +23,13 @@ func TestBuildDockerArgsWithLogging(t *testing.T) {
 		args, err := im.BuildDockerArgs(serverConfig, "python")
 		assert.NoError(t, err)
 
-		// Verify NO log configuration is included (uses Docker default)
+		// Verify NO log driver is specified (uses Docker default)
 		assert.NotContains(t, args, "--log-driver")
-		assert.NotContains(t, args, "--log-opt")
-		assert.NotContains(t, args, "max-size")
-		assert.NotContains(t, args, "max-file")
+
+		// But log limits are ALWAYS applied to prevent disk space issues
+		assert.Contains(t, args, "--log-opt")
+		assert.Contains(t, args, "max-size=100m")
+		assert.Contains(t, args, "max-file=3")
 	})
 
 	// Test with custom global config
@@ -83,8 +85,8 @@ func TestBuildDockerArgsWithLogging(t *testing.T) {
 		assert.Contains(t, args, "max-file=10")
 	})
 
-	// Test with non-json-file driver (should not include log options)
-	t.Run("non-json-file driver", func(t *testing.T) {
+	// Test with non-json-file driver (log options still applied for disk space protection)
+	t.Run("non-json-file driver with log options", func(t *testing.T) {
 		globalConfig := config.DefaultDockerIsolationConfig()
 		globalConfig.LogDriver = "none"
 
@@ -99,15 +101,18 @@ func TestBuildDockerArgsWithLogging(t *testing.T) {
 		args, err := im.BuildDockerArgs(serverConfig, "python")
 		assert.NoError(t, err)
 
-		// Verify log driver is set but no log options are included
+		// Verify log driver is set
 		assert.Contains(t, args, "--log-driver")
 		assert.Contains(t, args, "none")
-		assert.NotContains(t, args, "max-size")
-		assert.NotContains(t, args, "max-file")
+
+		// Log options are still applied for disk space protection (even if driver ignores them)
+		assert.Contains(t, args, "--log-opt")
+		assert.Contains(t, args, "max-size=100m")
+		assert.Contains(t, args, "max-file=3")
 	})
 
-	// Test without log driver configuration (uses Docker system default)
-	t.Run("no log driver configuration uses Docker default", func(t *testing.T) {
+	// Test without log driver configuration (uses Docker system default but applies log limits)
+	t.Run("no log driver configuration uses Docker default with log limits", func(t *testing.T) {
 		globalConfig := config.DefaultDockerIsolationConfig()
 		// LogDriver is already "" by default now
 
@@ -122,9 +127,13 @@ func TestBuildDockerArgsWithLogging(t *testing.T) {
 		args, err := im.BuildDockerArgs(serverConfig, "python")
 		assert.NoError(t, err)
 
-		// Verify no log-related arguments are added (uses Docker system default)
+		// Verify no log driver is specified (uses Docker system default)
 		assert.NotContains(t, args, "--log-driver")
-		assert.NotContains(t, args, "--log-opt")
+
+		// But log limits are always applied
+		assert.Contains(t, args, "--log-opt")
+		assert.Contains(t, args, "max-size=100m")
+		assert.Contains(t, args, "max-file=3")
 	})
 
 	// Test explicit json-file driver with default log limits
