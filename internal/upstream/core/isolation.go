@@ -33,6 +33,9 @@ const (
 
 	pathBinBash = "/bin/bash"
 	pathBinSh   = "/bin/sh"
+
+	// Docker log driver constants
+	logDriverJSONFile = "json-file"
 )
 
 // IsolationManager handles Docker isolation logic for MCP servers
@@ -179,6 +182,36 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 	}
 
 	args := []string{"run", "--rm", "-i"}
+
+	// Add log driver only if explicitly configured
+	logDriver := ""
+	if serverConfig.Isolation != nil && serverConfig.Isolation.LogDriver != "" {
+		logDriver = serverConfig.Isolation.LogDriver
+	} else if im.globalConfig.LogDriver != "" {
+		logDriver = im.globalConfig.LogDriver
+	}
+
+	if logDriver != "" {
+		args = append(args, "--log-driver", logDriver)
+	}
+
+	// Always add log size and file limits to prevent disk space issues
+	// These options work with Docker's default json-file driver and most other drivers
+	logMaxSize := im.globalConfig.LogMaxSize
+	if serverConfig.Isolation != nil && serverConfig.Isolation.LogMaxSize != "" {
+		logMaxSize = serverConfig.Isolation.LogMaxSize
+	}
+	if logMaxSize != "" {
+		args = append(args, "--log-opt", fmt.Sprintf("max-size=%s", logMaxSize))
+	}
+
+	logMaxFiles := im.globalConfig.LogMaxFiles
+	if serverConfig.Isolation != nil && serverConfig.Isolation.LogMaxFiles != "" {
+		logMaxFiles = serverConfig.Isolation.LogMaxFiles
+	}
+	if logMaxFiles != "" {
+		args = append(args, "--log-opt", fmt.Sprintf("max-file=%s", logMaxFiles))
+	}
 
 	// Add network mode
 	networkMode := im.globalConfig.NetworkMode
