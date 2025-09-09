@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -383,7 +382,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -403,22 +401,21 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}()
 
 	if cfg.EnableTray {
-		// When tray is enabled, start tray immediately and auto-start server
+		// When tray is enabled, start server immediately and independently
 		logger.Info("Starting system tray with auto-start server")
 
-		// Create and start tray on main thread (required for macOS)
-		trayApp := createTray(srv, logger.Sugar(), version, shutdownFunc)
-
-		// Auto-start server in background
-		wg.Add(1)
+		// Start server immediately in background (no delay)
+		// Server lifecycle is independent from tray - starts immediately
 		go func() {
-			defer wg.Done()
 			logger.Info("Auto-starting server for tray mode")
 			if err := srv.StartServer(ctx); err != nil {
 				logger.Error("Failed to auto-start server", zap.Error(err))
 				// Don't cancel context here - let tray handle manual start/stop
 			}
 		}()
+
+		// Create tray application (tray is purely observational)
+		trayApp := createTray(srv, logger.Sugar(), version, shutdownFunc)
 
 		// This is a blocking call that runs the tray event loop
 		logger.Info("MAIN - Starting tray event loop")
@@ -435,11 +432,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		} else {
 			logger.Info("MAIN - Tray exited normally")
 		}
-
-		// Wait for server goroutine to finish
-		logger.Info("MAIN - Waiting for server goroutine to finish")
-		wg.Wait()
-		logger.Info("MAIN - Server goroutine finished, exiting")
 	} else {
 		// Without tray, run server normally and wait
 		logger.Info("Starting server without tray")
