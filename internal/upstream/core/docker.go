@@ -166,7 +166,12 @@ func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 		c.upstreamLogger.Info("Searching for containers to clean up by command signature")
 	}
 
-	// Try to find containers that match our image name instead of command pattern
+	// First try to find containers by name pattern
+	if c.killDockerContainersByNamePatternWithContext(ctx) {
+		return // Success, we found and cleaned up containers by name
+	}
+
+	// Fallback to finding containers by image name
 	var imageName string
 	if len(c.config.Args) > 2 {
 		// Look for the image name in args (typically last argument for docker run)
@@ -264,6 +269,94 @@ func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 				zap.String("container_id", containerID))
 		}
 	}
+}
+
+// killDockerContainersByNamePatternWithContext finds and kills containers by name pattern
+func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Context) bool {
+	// Create sanitized server name for pattern matching
+	sanitized := sanitizeServerNameForContainer(c.config.Name)
+	namePattern := "mcpproxy-" + sanitized + "-"
+
+	c.logger.Debug("Searching for containers by name pattern",
+		zap.String("server", c.config.Name),
+		zap.String("name_pattern", namePattern))
+
+	// Get list of containers with name filter
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--filter", "name="+namePattern, "--format", "{{.ID}}\t{{.Names}}")
+	output, err := listCmd.Output()
+	if err != nil {
+		c.logger.Debug("Failed to list Docker containers by name pattern",
+			zap.String("server", c.config.Name),
+			zap.String("name_pattern", namePattern),
+			zap.Error(err))
+		return false
+	}
+
+	// Parse output and find matching containers
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var containersToKill []string
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) >= 2 {
+			containerID := parts[0]
+			containerName := parts[1]
+
+			// Check if the container name starts with our pattern
+			if strings.HasPrefix(containerName, namePattern) {
+				containersToKill = append(containersToKill, containerID)
+				c.logger.Info("Found matching container by name pattern",
+					zap.String("server", c.config.Name),
+					zap.String("container_id", containerID),
+					zap.String("container_name", containerName))
+			}
+		}
+	}
+
+	if len(containersToKill) == 0 {
+		c.logger.Debug("No matching containers found by name pattern",
+			zap.String("server", c.config.Name),
+			zap.String("name_pattern", namePattern))
+		return false
+	}
+
+	// Kill matching containers
+	for _, containerID := range containersToKill {
+		c.logger.Info("Killing container by name pattern",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", containerID))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("Killing container by name pattern",
+				zap.String("container_id", containerID))
+		}
+
+		// First try graceful stop
+		stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
+		if err := stopCmd.Run(); err != nil {
+			// Force kill if graceful stop fails
+			killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+			if err := killCmd.Run(); err != nil {
+				c.logger.Error("Failed to kill container by name pattern",
+					zap.String("server", c.config.Name),
+					zap.String("container_id", containerID),
+					zap.Error(err))
+			} else {
+				c.logger.Info("Successfully force killed container by name pattern",
+					zap.String("server", c.config.Name),
+					zap.String("container_id", containerID))
+			}
+		} else {
+			c.logger.Info("Successfully stopped container by name pattern",
+				zap.String("server", c.config.Name),
+				zap.String("container_id", containerID))
+		}
+	}
+
+	return true // We found and processed containers
 }
 
 // checkDockerContainerHealth checks if Docker containers are still running

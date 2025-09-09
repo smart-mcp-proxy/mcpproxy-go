@@ -1,8 +1,11 @@
 package core
 
 import (
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"mcpproxy-go/internal/config"
@@ -183,6 +186,10 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 
 	args := []string{"run", "--rm", "-i"}
 
+	// Add container name for easier identification
+	containerName := generateContainerName(serverConfig.Name)
+	args = append(args, "--name", containerName)
+
 	// Add log driver only if explicitly configured
 	logDriver := ""
 	if serverConfig.Isolation != nil && serverConfig.Isolation.LogDriver != "" {
@@ -318,4 +325,75 @@ func shellescapeArgs(args []string) []string {
 		escaped = append(escaped, "'"+strings.ReplaceAll(arg, "'", "'\"'\"'")+"'")
 	}
 	return escaped
+}
+
+// generateContainerName creates a Docker container name from server name with random suffix
+func generateContainerName(serverName string) string {
+	// Sanitize server name for Docker container naming
+	sanitized := sanitizeServerNameForContainer(serverName)
+
+	// Generate 4-character random suffix
+	suffix := generateRandomSuffix()
+
+	return fmt.Sprintf("mcpproxy-%s-%s", sanitized, suffix)
+}
+
+// sanitizeServerNameForContainer converts server name to valid Docker container name
+func sanitizeServerNameForContainer(name string) string {
+	// Replace invalid characters with hyphens
+	// Docker container names can contain: [a-zA-Z0-9][a-zA-Z0-9_.-]*
+	reg := regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
+	sanitized := reg.ReplaceAllString(name, "-")
+
+	// Remove multiple consecutive hyphens
+	for strings.Contains(sanitized, "--") {
+		sanitized = strings.ReplaceAll(sanitized, "--", "-")
+	}
+
+	// Ensure it starts with alphanumeric character
+	if sanitized != "" && !regexp.MustCompile(`^[a-zA-Z0-9]`).MatchString(sanitized) {
+		sanitized = "server-" + sanitized
+		// Remove consecutive hyphens that might have been created by the prefix addition
+		for strings.Contains(sanitized, "--") {
+			sanitized = strings.ReplaceAll(sanitized, "--", "-")
+		}
+	}
+
+	// Remove trailing hyphens/dots
+	sanitized = strings.TrimRight(sanitized, "-.")
+
+	// Ensure minimum length
+	if sanitized == "" {
+		sanitized = "server"
+	}
+
+	// Truncate if too long (Docker limit is 253 chars, leave room for prefix and suffix)
+	maxLen := 200 // mcpproxy- (9) + sanitized (200) + - (1) + suffix (4) = 214 chars
+	if len(sanitized) > maxLen {
+		sanitized = sanitized[:maxLen]
+		sanitized = strings.TrimRight(sanitized, "-.")
+	}
+
+	return sanitized
+}
+
+// generateRandomSuffix generates a 4-character random alphanumeric suffix
+func generateRandomSuffix() string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	const suffixLength = 4
+
+	result := make([]byte, suffixLength)
+	charsetLen := big.NewInt(int64(len(charset)))
+
+	for i := range result {
+		randomIndex, err := rand.Int(rand.Reader, charsetLen)
+		if err != nil {
+			// Fallback to a simple method if crypto/rand fails
+			result[i] = charset[i%len(charset)]
+		} else {
+			result[i] = charset[randomIndex.Int64()]
+		}
+	}
+
+	return string(result)
 }
