@@ -280,7 +280,7 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 		NetworkMode: "bridge",                   // Default Docker network mode
 		MemoryLimit: "512m",                     // Default memory limit
 		CPULimit:    "1.0",                      // Default CPU limit (1 core)
-		Timeout:     Duration(30 * time.Second), // 30 second startup timeout
+		Timeout:     Duration(2 * time.Minute), // 2 minute startup timeout for container initialization
 		ExtraArgs:   []string{},                 // No extra args by default
 		LogDriver:   "",                         // Use Docker system default (empty = no override)
 		LogMaxSize:  "100m",                     // Default maximum log file size (only used if json-file driver is set)

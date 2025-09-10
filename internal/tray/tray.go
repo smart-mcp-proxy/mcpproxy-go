@@ -51,30 +51,33 @@ type GitHubRelease struct {
 
 // ServerInterface defines the interface for server control
 type ServerInterface interface {
-	IsRunning() bool
-	GetListenAddress() string
-	GetUpstreamStats() map[string]interface{}
-	StartServer(ctx context.Context) error
-	StopServer() error
-	GetStatus() interface{}            // Returns server status for display
-	StatusChannel() <-chan interface{} // Channel for status updates
+    IsRunning() bool
+    GetListenAddress() string
+    GetUpstreamStats() map[string]interface{}
+    StartServer(ctx context.Context) error
+    StopServer() error
+    GetStatus() interface{}            // Returns server status for display
+    StatusChannel() <-chan interface{} // Channel for status updates
 
-	// Quarantine management methods
-	GetQuarantinedServers() ([]map[string]interface{}, error)
-	UnquarantineServer(serverName string) error
+    // Quarantine management methods
+    GetQuarantinedServers() ([]map[string]interface{}, error)
+    UnquarantineServer(serverName string) error
 
-	// Server management methods for tray menu
-	EnableServer(serverName string, enabled bool) error
-	QuarantineServer(serverName string, quarantined bool) error
-	GetAllServers() ([]map[string]interface{}, error)
+    // Server management methods for tray menu
+    EnableServer(serverName string, enabled bool) error
+    QuarantineServer(serverName string, quarantined bool) error
+    GetAllServers() ([]map[string]interface{}, error)
 
-	// Config management for file watching
-	ReloadConfiguration() error
-	GetConfigPath() string
-	GetLogDir() string
+    // Config management for file watching
+    ReloadConfiguration() error
+    GetConfigPath() string
+    GetLogDir() string
 
-	// OAuth control
-	TriggerOAuthLogin(serverName string) error
+    // OAuth control
+    TriggerOAuthLogin(serverName string) error
+
+    // Connection control
+    ConnectAllNow() error
 }
 
 // App represents the system tray application
@@ -154,9 +157,9 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 
 // Run starts the system tray application
 func (a *App) Run(ctx context.Context) error {
-	a.logger.Info("Starting system tray application")
-	a.ctx, a.cancel = context.WithCancel(ctx)
-	defer a.cancel()
+    a.logger.Info("Starting system tray application")
+    a.ctx, a.cancel = context.WithCancel(ctx)
+    defer a.cancel()
 
 	// Initialize config file watcher
 	if err := a.initConfigWatcher(); err != nil {
@@ -181,22 +184,30 @@ func (a *App) Run(ctx context.Context) error {
 	// Wait for menu initialization to complete before starting updates
 	go func() {
 		a.logger.Debug("Waiting for core menu items to be initialized...")
-		// Wait for menu items to be initialized using the flag
+		// Wait for menu items to be initialized using the flag with timeout
+		timeout := time.After(30 * time.Second) // 30 second timeout
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		
 		for !a.coreMenusReady {
 			select {
 			case <-ctx.Done():
+				a.logger.Debug("Context cancelled while waiting for core menu items")
 				return
-			default:
-				time.Sleep(100 * time.Millisecond) // Check every 100ms
+			case <-timeout:
+				a.logger.Error("Timeout waiting for core menu items - starting anyway")
+				break
+			case <-ticker.C:
+				// Continue checking
 			}
 		}
 
 		a.logger.Debug("Core menu items ready, starting status updater")
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
+		statusTicker := time.NewTicker(5 * time.Second)
+		defer statusTicker.Stop()
 		for {
 			select {
-			case <-ticker.C:
+			case <-statusTicker.C:
 				a.updateStatus()
 			case <-ctx.Done():
 				return
@@ -213,13 +224,21 @@ func (a *App) Run(ctx context.Context) error {
 	if a.server != nil {
 		go func() {
 			a.logger.Debug("Waiting for core menu items before processing real-time status updates...")
-			// Wait for menu items to be initialized using the flag
+			// Wait for menu items to be initialized using the flag with timeout
+			timeout := time.After(30 * time.Second) // 30 second timeout
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			
 			for !a.coreMenusReady {
 				select {
 				case <-ctx.Done():
+					a.logger.Debug("Context cancelled while waiting for real-time status updates")
 					return
-				default:
-					time.Sleep(100 * time.Millisecond) // Check every 100ms
+				case <-timeout:
+					a.logger.Error("Timeout waiting for core menu items for real-time updates - starting anyway")
+					break
+				case <-ticker.C:
+					// Continue checking
 				}
 			}
 
@@ -244,8 +263,31 @@ func (a *App) Run(ctx context.Context) error {
 		systray.Quit()
 	}()
 
-	// Start systray - this is a blocking call that must run on main thread
-	systray.Run(a.onReady, a.onExit)
+    // Start systray - this is a blocking call that must run on main thread
+    a.logger.Info("Starting systray with callbacks", 
+        zap.String("onReady", fmt.Sprintf("%p", a.onReady)), 
+        zap.String("onExit", fmt.Sprintf("%p", a.onExit)))
+    
+    if a.onReady == nil {
+        a.logger.Error("onReady callback is nil!")
+        return fmt.Errorf("onReady callback is nil")
+    }
+    if a.onExit == nil {
+        a.logger.Error("onExit callback is nil!")
+        return fmt.Errorf("onExit callback is nil")
+    }
+    // On macOS, ensure we are on a locked OS thread for Cocoa
+    if runtime.GOOS == osDarwin {
+        a.logger.Debug("Locking OS thread for macOS systray")
+        runtime.LockOSThread()
+        defer func() {
+            a.logger.Debug("Unlocking OS thread after systray exit")
+            runtime.UnlockOSThread()
+        }()
+    }
+
+    systray.Run(a.onReady, a.onExit)
+    a.logger.Info("systray.Run has returned")
 
 	return ctx.Err()
 }
@@ -328,22 +370,33 @@ func (a *App) cleanup() {
 }
 
 func (a *App) onReady() {
-	systray.SetIcon(iconData)
-	// On macOS, also set as template icon for better system integration
-	if runtime.GOOS == osDarwin {
-		systray.SetTemplateIcon(iconData, iconData)
-	}
-	a.updateTooltip()
+    a.logger.Info("onReady callback called - starting tray initialization")
+    
+    // Set tray icon (use template icon and padded title on macOS for better clickability)
+    if runtime.GOOS == osDarwin {
+        systray.SetTemplateIcon(iconData, iconData)
+        // Add a small title (configurable via MCPPROXY_TRAY_TEXT) to increase clickable area on macOS
+        title := os.Getenv("MCPPROXY_TRAY_TEXT")
+        if title == "" {
+            title = " "
+        }
+        systray.SetTitle(title)
+    } else {
+        systray.SetIcon(iconData)
+    }
+    // Avoid calling updateTooltip() here to prevent potential blocking on server.GetStatus.
+    // Set an initial static tooltip; it will be updated asynchronously via updateStatus().
+    systray.SetTooltip("mcpproxy is starting…")
 
 	// --- Initialize Menu Items ---
 	a.logger.Debug("Initializing tray menu items")
-	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
-	a.statusItem.Disable() // Initially disabled as it's just for display
-	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
+    a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
+    a.statusItem.Disable() // Initially disabled as it's just for display
+    a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
 
 	// Mark core menu items as ready - this will release waiting goroutines
 	a.coreMenusReady = true
-	a.logger.Debug("Core menu items initialized successfully - background processes can now start")
+	a.logger.Info("Core menu items initialized successfully - background processes can now start")
 	systray.AddSeparator()
 
 	// --- Upstream & Quarantine Menus ---
@@ -351,19 +404,19 @@ func (a *App) onReady() {
 	a.quarantineMenu = systray.AddMenuItem("Security Quarantine", "Manage quarantined servers")
 	systray.AddSeparator()
 
-	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
-	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
+    // --- Initialize Managers ---
+    a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
+    a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
 	a.menuManager.SetActionCallback(a.handleServerAction)
 
-	// --- Other Menu Items ---
-	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
-	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
-	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
-	systray.AddSeparator()
+    // --- Other Menu Items ---
+    updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
+    openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
+    openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
+    systray.AddSeparator()
 
 	// --- Autostart Menu Item (macOS only) ---
 	if runtime.GOOS == osDarwin && a.autostartManager != nil {
@@ -372,40 +425,87 @@ func (a *App) onReady() {
 		systray.AddSeparator()
 	}
 
-	quitItem := systray.AddMenuItem("Quit", "Quit the application")
+    quitItem := systray.AddMenuItem("Quit", "Quit the application")
 
-	// --- Set Initial State & Start Sync ---
-	a.updateStatus()
+    // --- Set Initial State ---
+    a.updateStatus()
 
-	if err := a.syncManager.SyncNow(); err != nil {
-		a.logger.Error("Initial menu sync failed", zap.Error(err))
-	}
+    // IMPORTANT: Avoid blocking work inside onReady on macOS.
+    // Kick off initial sync and background sync in goroutines so the tray icon
+    // can appear immediately and menus finish populating asynchronously.
+    go func() {
+        if err := a.syncManager.SyncNow(); err != nil {
+            a.logger.Error("Initial menu sync failed", zap.Error(err))
+        }
+        a.syncManager.Start()
+    }()
 
-	a.syncManager.Start()
+    // --- Click Handlers (dedicated goroutine per item for reliability) ---
+    if a.startStopItem != nil {
+        go func() {
+            for {
+                select {
+                case <-a.startStopItem.ClickedCh:
+                    a.logger.Debug("start/stop clicked")
+                    a.handleStartStop()
+                case <-a.ctx.Done():
+                    return
+                }
+            }
+        }()
+    }
 
-	// --- Click Handlers ---
-	go func() {
-		for {
-			select {
-			case <-a.startStopItem.ClickedCh:
-				a.handleStartStop()
-			case <-updateItem.ClickedCh:
-				go a.checkForUpdates()
-			case <-openConfigItem.ClickedCh:
-				a.openConfigDir()
-			case <-openLogsItem.ClickedCh:
-				a.openLogsDir()
-			case <-quitItem.ClickedCh:
-				a.logger.Info("Quit item clicked, shutting down")
-				if a.shutdown != nil {
-					a.shutdown()
-				}
-				return
-			case <-a.ctx.Done():
-				return
-			}
-		}
-	}()
+    go func() {
+        for {
+            select {
+            case <-updateItem.ClickedCh:
+                a.logger.Debug("check for updates clicked")
+                go a.checkForUpdates()
+            case <-a.ctx.Done():
+                return
+            }
+        }
+    }()
+
+    go func() {
+        for {
+            select {
+            case <-openConfigItem.ClickedCh:
+                a.logger.Debug("open config dir clicked")
+                a.openConfigDir()
+            case <-a.ctx.Done():
+                return
+            }
+        }
+    }()
+
+    go func() {
+        for {
+            select {
+            case <-openLogsItem.ClickedCh:
+                a.logger.Debug("open logs dir clicked")
+                a.openLogsDir()
+            case <-a.ctx.Done():
+                return
+            }
+        }
+    }()
+
+    go func() {
+        for {
+            select {
+            case <-quitItem.ClickedCh:
+                a.logger.Info("Quit item clicked, quitting systray and shutting down")
+                systray.Quit()
+                if a.shutdown != nil {
+                    a.shutdown()
+                }
+                return
+            case <-a.ctx.Done():
+                return
+            }
+        }
+    }()
 
 	// --- Autostart Click Handler (separate goroutine for macOS) ---
 	if runtime.GOOS == osDarwin && a.autostartItem != nil {
@@ -421,7 +521,8 @@ func (a *App) onReady() {
 		}()
 	}
 
-	a.logger.Info("System tray is ready - menu items fully initialized")
+    // Signal readiness before any further background processing
+    a.logger.Info("System tray is ready - menu items fully initialized")
 }
 
 // updateTooltip updates the tooltip based on the server's running state
@@ -726,7 +827,7 @@ func (a *App) handleStartStop() {
 
 // onExit is called when the application is quitting
 func (a *App) onExit() {
-	a.logger.Info("Tray application exiting")
+	a.logger.Info("onExit callback called - tray application exiting")
 	a.cleanup()
 	if a.cancel != nil {
 		a.cancel()
@@ -1232,9 +1333,9 @@ func (a *App) handleAutostartToggle() {
 	a.updateAutostartMenuItem()
 
 	// Log the new state
-	if a.autostartManager.IsEnabled() {
-		a.logger.Info("Autostart enabled - mcpproxy will start automatically at login")
-	} else {
-		a.logger.Info("Autostart disabled - mcpproxy will not start automatically at login")
-	}
+    if a.autostartManager.IsEnabled() {
+        a.logger.Info("Autostart enabled - mcpproxy will start automatically at login")
+    } else {
+        a.logger.Info("Autostart disabled - mcpproxy will not start automatically at login")
+    }
 }

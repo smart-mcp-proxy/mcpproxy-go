@@ -291,6 +291,101 @@ func (c *Client) monitorDockerLogsWithContext(ctx context.Context, cidFile strin
 	}
 }
 
+// captureContainerLogsOnTimeout captures the last logs from a Docker container
+// when initialization times out, for debugging purposes
+func (c *Client) captureContainerLogsOnTimeout(containerID string) {
+	if containerID == "" {
+		c.logger.Debug("No container ID available, attempting to find container by name",
+			zap.String("server", c.config.Name))
+		
+		// Try to find container by the generated name pattern
+		containerName := fmt.Sprintf("mcpproxy-%s-", c.config.Name)
+		if foundID := c.findContainerByNamePattern(containerName); foundID != "" {
+			containerID = foundID
+			c.logger.Debug("Found container by name pattern",
+				zap.String("server", c.config.Name),
+				zap.String("container_id", containerID[:12]))
+		} else {
+			c.logger.Debug("No container found by name pattern for log capture",
+				zap.String("server", c.config.Name),
+				zap.String("pattern", containerName))
+			return
+		}
+	}
+
+	c.logger.Info("Capturing container logs for timeout debugging",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", containerID[:12]))
+
+	// Create a short timeout context for log capture (don't want this to hang)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Capture last 50 lines of container logs
+	cmd := exec.CommandContext(ctx, "docker", "logs", "--tail", "50", "--timestamps", containerID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		c.logger.Warn("Failed to capture container logs for timeout debugging",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", containerID[:12]),
+			zap.Error(err))
+		return
+	}
+
+	logLines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	
+	c.logger.Info("Container logs captured for timeout debugging",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", containerID[:12]),
+		zap.Int("log_lines", len(logLines)))
+
+	// Log to main logger and server-specific logger
+	for i, line := range logLines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		
+		c.logger.Info("container timeout log",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", containerID[:12]),
+			zap.Int("line", i+1),
+			zap.String("message", line))
+
+		// Also log to server-specific log
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("Container timeout - captured log",
+				zap.String("container_id", containerID),
+				zap.Int("line", i+1),
+				zap.String("message", line))
+		}
+	}
+}
+
+// findContainerByNamePattern finds a Docker container ID by name pattern
+func (c *Client) findContainerByNamePattern(namePattern string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Use docker ps to find containers with matching name pattern
+	cmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--filter", fmt.Sprintf("name=%s", namePattern), "--format", "{{.ID}}")
+	output, err := cmd.Output()
+	if err != nil {
+		c.logger.Debug("Failed to search for container by name pattern",
+			zap.String("server", c.config.Name),
+			zap.String("pattern", namePattern),
+			zap.Error(err))
+		return ""
+	}
+
+	containerIDs := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(containerIDs) > 0 && containerIDs[0] != "" {
+		// Return the first (most recent) matching container
+		return containerIDs[0]
+	}
+
+	return ""
+}
+
 // CheckConnectionHealth performs a health check on the connection
 func (c *Client) CheckConnectionHealth(ctx context.Context) error {
 	if !c.IsConnected() {

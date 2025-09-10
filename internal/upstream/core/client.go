@@ -42,6 +42,9 @@ type Client struct {
 	// Isolation manager for Docker isolation
 	isolationManager *IsolationManager
 
+	// State callback for notifying managed client about state changes
+	stateCallback func(state string, message string)
+
 	// Connection state protection
 	mu        sync.RWMutex
 	connected bool
@@ -59,10 +62,10 @@ type Client struct {
 	// Cached tools list from successful immediate call
 	cachedTools []mcp.Tool
 
-	// Stderr monitoring
-	stderrMonitoringCtx    context.Context
-	stderrMonitoringCancel context.CancelFunc
-	stderrMonitoringWG     sync.WaitGroup
+    // Stderr monitoring
+    stderrMonitoringCtx    context.Context
+    stderrMonitoringCancel context.CancelFunc
+    stderrMonitoringWG     sync.WaitGroup
 
 	// Process monitoring (for stdio transport)
 	processCmd           *exec.Cmd
@@ -70,9 +73,12 @@ type Client struct {
 	processMonitorCancel context.CancelFunc
 	processMonitorWG     sync.WaitGroup
 
-	// Docker container tracking
-	containerID     string
-	isDockerCommand bool
+    // Docker container tracking
+    containerID     string
+    isDockerCommand bool
+
+    // CLI mode influences startup/timeout behavior (e.g., do not use persistent Start context)
+    cliMode bool
 }
 
 // NewClient creates a new core MCP client
@@ -82,16 +88,19 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 
 // NewClientWithOptions creates a new core MCP client with additional options
 func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, cliDebugMode bool) (*Client, error) {
-	c := &Client{
-		id:           id,
-		config:       serverConfig,
-		globalConfig: globalConfig,
-		storage:      storage,
-		logger: logger.With(
-			zap.String("upstream_id", id),
-			zap.String("upstream_name", serverConfig.Name),
-		),
-	}
+    c := &Client{
+        id:           id,
+        config:       serverConfig,
+        globalConfig: globalConfig,
+        storage:      storage,
+        logger: logger.With(
+            zap.String("upstream_id", id),
+            zap.String("upstream_name", serverConfig.Name),
+        ),
+        // Treat cliDebugMode as an indicator that we are running in CLI context
+        // (tools subcommand). This enables non-persistent Start context.
+        cliMode: cliDebugMode,
+    }
 
 	// Create secure environment manager
 	var envConfig *secureenv.EnvConfig
@@ -170,6 +179,24 @@ func (c *Client) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.connected
+}
+
+// SetStateCallback sets the callback function for state updates
+func (c *Client) SetStateCallback(callback func(state string, message string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stateCallback = callback
+}
+
+// notifyStateChange calls the state callback if set
+func (c *Client) notifyStateChange(state string, message string) {
+	c.mu.RLock()
+	callback := c.stateCallback
+	c.mu.RUnlock()
+	
+	if callback != nil {
+		callback(state, message)
+	}
 }
 
 // ListTools retrieves available tools from the upstream server

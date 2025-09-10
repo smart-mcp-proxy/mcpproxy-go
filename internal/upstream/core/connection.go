@@ -225,6 +225,9 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			zap.String("server", c.config.Name),
 			zap.String("original_command", c.config.Command))
 
+		// Notify state change - container is starting
+		c.notifyStateChange("container_starting", "Starting Docker container...")
+
 		// Use Docker isolation (now shell-wrapped for PATH inheritance)
 		finalCommand, finalArgs = c.setupDockerIsolation(c.config.Command, args)
 		c.isDockerCommand = true
@@ -263,17 +266,46 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		zap.Strings("original_args", args),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
-	// Start stdio transport with a persistent background context so the child
-	// process keeps running even if the connect context is short-lived.
-	persistentCtx := context.Background()
-	if err := c.client.Start(persistentCtx); err != nil {
-		return fmt.Errorf("failed to start stdio client: %w", err)
+    // Start stdio transport. In daemon mode we want a persistent background
+    // context so the child keeps running. In CLI mode we want Start to be
+    // bound to the provided context to respect --timeout and cancel promptly.
+    persistentCtx := context.Background()
+    startCtx := persistentCtx
+    if c.cliMode {
+        startCtx = ctx
+    }
+	
+	// Notify state change - container is initializing (installing packages, etc.)
+	if c.isDockerCommand {
+		c.notifyStateChange("container_initializing", "Container initializing (installing packages)...")
 	}
+	
+    if err := c.client.Start(startCtx); err != nil {
+        return fmt.Errorf("failed to start stdio client: %w", err)
+    }
 
 	// IMPORTANT: Perform MCP initialize() handshake for stdio transports as well,
 	// so c.serverInfo is populated and tool discovery/search can proceed.
 	// Use the caller's context with timeout to avoid hanging.
 	if err := c.initialize(ctx); err != nil {
+		// If this is a Docker container and we have a container ID, capture logs for debugging
+		if c.isDockerCommand {
+			c.mu.RLock()
+			containerID := c.containerID
+			c.mu.RUnlock()
+			
+			if containerID != "" {
+				c.logger.Info("MCP initialization failed for Docker container, capturing logs",
+					zap.String("server", c.config.Name),
+					zap.String("container_id", containerID[:12]),
+					zap.Error(err))
+				c.captureContainerLogsOnTimeout(containerID)
+			} else {
+				c.logger.Warn("MCP initialization failed for Docker container, but no container ID available for log capture",
+					zap.String("server", c.config.Name),
+					zap.Error(err))
+			}
+		}
 		return fmt.Errorf("MCP initialize failed for stdio transport: %w", err)
 	}
 
@@ -398,42 +430,65 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 
 // insertCidfileIntoShellDockerCommand inserts --cidfile into a shell-wrapped Docker command
 func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile string) []string {
-	// Shell args typically look like: ["-l", "-c", "docker run -i --rm mcp/duckduckgo"]
-	if len(shellArgs) < 3 || shellArgs[len(shellArgs)-3] != "-c" {
-		// If it's not the expected format, fall back to appending
-		c.logger.Warn("Unexpected shell command format for Docker cidfile insertion",
-			zap.String("server", c.config.Name),
-			zap.Strings("shell_args", shellArgs))
-		return append(shellArgs, "--cidfile", cidFile)
-	}
+    // Find the command string passed to the shell (typically after -c)
+    cmdIdx := -1
+    for i, a := range shellArgs {
+        if a == "-c" {
+            if i+1 < len(shellArgs) {
+                cmdIdx = i + 1
+            }
+            break
+        }
+    }
+    if cmdIdx == -1 {
+        // Fallback: assume the last arg is the command string
+        cmdIdx = len(shellArgs) - 1
+        if cmdIdx < 0 {
+            c.logger.Warn("Shell args empty; cannot insert cidfile",
+                zap.String("server", c.config.Name))
+            return shellArgs
+        }
+        c.logger.Warn("'-c' not found; assuming last arg is command for cidfile insertion",
+            zap.String("server", c.config.Name),
+            zap.Strings("shell_args", shellArgs))
+    }
 
-	// Get the Docker command string (last argument)
-	dockerCmd := shellArgs[len(shellArgs)-1]
+    dockerCmd := shellArgs[cmdIdx]
 
-	// Insert --cidfile into the Docker command string
-	// Look for "docker run" and insert --cidfile right after
-	if strings.Contains(dockerCmd, "docker run") {
-		// Replace "docker run" with "docker run --cidfile /path/to/file"
-		dockerCmdWithCid := strings.Replace(dockerCmd, "docker run", fmt.Sprintf("docker run --cidfile %s", cidFile), 1)
+    // Try to insert right after "docker run"
+    if strings.Contains(dockerCmd, "docker run") {
+        dockerCmdWithCid := strings.Replace(
+            dockerCmd,
+            "docker run",
+            fmt.Sprintf("docker run --cidfile %s", shellescape(cidFile)),
+            1,
+        )
 
-		// Create new args with the modified command
-		newArgs := make([]string, len(shellArgs))
-		copy(newArgs, shellArgs)
-		newArgs[len(newArgs)-1] = dockerCmdWithCid
+        newArgs := make([]string, len(shellArgs))
+        copy(newArgs, shellArgs)
+        newArgs[cmdIdx] = dockerCmdWithCid
 
-		c.logger.Debug("Inserted cidfile into shell-wrapped Docker command",
-			zap.String("server", c.config.Name),
-			zap.String("original_cmd", dockerCmd),
-			zap.String("modified_cmd", dockerCmdWithCid))
+        c.logger.Debug("Inserted cidfile into shell-wrapped Docker command",
+            zap.String("server", c.config.Name),
+            zap.String("original_cmd", dockerCmd),
+            zap.String("modified_cmd", dockerCmdWithCid))
 
-		return newArgs
-	}
+        return newArgs
+    }
 
-	// If we can't find "docker run", fall back to appending
-	c.logger.Warn("Could not find 'docker run' in shell command for cidfile insertion",
-		zap.String("server", c.config.Name),
-		zap.String("docker_cmd", dockerCmd))
-	return append(shellArgs, "--cidfile", cidFile)
+    // If no explicit 'docker run' substring, append cidfile at the end of the command string
+    // This is less precise but still ensures Docker receives the flag
+    dockerCmdWithCid := dockerCmd + " --cidfile " + shellescape(cidFile)
+    newArgs := make([]string, len(shellArgs))
+    copy(newArgs, shellArgs)
+    newArgs[cmdIdx] = dockerCmdWithCid
+
+    c.logger.Debug("Appended cidfile to shell-wrapped command string",
+        zap.String("server", c.config.Name),
+        zap.String("original_cmd", dockerCmd),
+        zap.String("modified_cmd", dockerCmdWithCid))
+
+    return newArgs
 }
 
 // wrapWithUserShell wraps a command with the user's login shell to inherit full environment

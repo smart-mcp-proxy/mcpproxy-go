@@ -84,6 +84,21 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// Transition to connecting state
 	mc.StateManager.TransitionTo(types.StateConnecting)
 
+	// Set up state callback for Docker container state updates
+	mc.coreClient.SetStateCallback(func(state string, message string) {
+		switch state {
+		case "container_starting":
+			mc.StateManager.TransitionTo(types.StateContainerStarting)
+		case "container_initializing":
+			mc.StateManager.TransitionTo(types.StateContainerInitializing)
+		default:
+			mc.logger.Debug("Received unknown state from core client",
+				zap.String("server", mc.Config.Name),
+				zap.String("state", state),
+				zap.String("message", message))
+		}
+	})
+
 	// Connect core client
 	if err := mc.coreClient.Connect(ctx); err != nil {
 		// Check if this is an OAuth authorization requirement (not an error)

@@ -14,6 +14,10 @@ const (
 	StateDisconnected ConnectionState = iota
 	// StateConnecting indicates the upstream is attempting to connect
 	StateConnecting
+	// StateContainerStarting indicates Docker container is starting
+	StateContainerStarting
+	// StateContainerInitializing indicates Docker container is installing packages/initializing
+	StateContainerInitializing
 	// StateAuthenticating indicates the upstream is performing OAuth authentication
 	StateAuthenticating
 	// StateDiscovering indicates the upstream is discovering available tools
@@ -31,6 +35,10 @@ func (s ConnectionState) String() string {
 		return "Disconnected"
 	case StateConnecting:
 		return "Connecting"
+	case StateContainerStarting:
+		return "Container Starting"
+	case StateContainerInitializing:
+		return "Container Initializing"
 	case StateAuthenticating:
 		return "Authenticating"
 	case StateDiscovering:

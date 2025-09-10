@@ -210,6 +210,38 @@ func (s *Server) getIndexedToolCount() int {
 	return 0
 }
 
+// getConnectionTimeout returns the appropriate timeout for server connections
+// Uses longer timeout if Docker isolation is enabled, shorter for regular servers
+func (s *Server) getConnectionTimeout() time.Duration {
+	// Simple check: if Docker isolation is enabled globally, use Docker timeout
+	// This avoids calling GetStats() which might cause deadlocks during initialization
+	if s.config != nil && s.config.DockerIsolation != nil && s.config.DockerIsolation.Enabled {
+		// Check if we have any configured stdio servers (which could be Docker isolated)
+		hasStdioServers := false
+		for _, serverConfig := range s.config.Servers {
+			if serverConfig.Protocol == "stdio" || (serverConfig.Protocol == "" && serverConfig.Command != "" && serverConfig.URL == "") {
+				hasStdioServers = true
+				break
+			}
+		}
+		
+		if hasStdioServers {
+			// Use the configured Docker timeout
+			if s.config.DockerIsolation.Timeout.Duration() > 0 {
+				s.logger.Debug("Using Docker isolation timeout for connections",
+					zap.Duration("timeout", s.config.DockerIsolation.Timeout.Duration()))
+				return s.config.DockerIsolation.Timeout.Duration()
+			}
+		}
+	}
+
+	// Default timeout for regular servers (30 seconds for HTTP/SSE servers)
+	defaultTimeout := 30 * time.Second
+	s.logger.Debug("Using default timeout for connections",
+		zap.Duration("timeout", defaultTimeout))
+	return defaultTimeout
+}
+
 // backgroundInitialization handles server initialization in the background
 func (s *Server) backgroundInitialization() {
 	s.updateStatus("Loading", "Loading configuration and connecting to servers...")
@@ -293,9 +325,13 @@ func (s *Server) connectAllWithRetry(ctx context.Context) {
 			s.updateStatus("Connecting", fmt.Sprintf("Connected to %d/%d servers, retrying...", connectedCount, totalCount))
 		}
 
-		// Try to connect with timeout
-		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Use configurable timeout - longer for Docker isolated servers
+		timeout := s.getConnectionTimeout()
+		connectCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+
+		s.logger.Debug("Attempting to connect to servers with timeout",
+			zap.Duration("timeout", timeout))
 
 		if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
 			s.logger.Warn("Some upstream servers failed to connect", zap.Error(err))
@@ -334,7 +370,9 @@ func (s *Server) backgroundToolIndexing(ctx context.Context) {
 //
 //nolint:unparam // function designed to be best-effort, always returns nil by design
 func (s *Server) loadConfiguredServers() error {
-	s.logger.Info("Synchronizing servers from configuration (config as source of truth)")
+    s.logger.Info("Synchronizing servers from configuration (config as source of truth)")
+    s.logger.Info("Config servers summary",
+        zap.Int("configured_count", len(s.config.Servers)))
 
 	// Get current state for comparison
 	currentUpstreams := s.upstreamManager.GetAllServerNames()
@@ -348,12 +386,37 @@ func (s *Server) loadConfiguredServers() error {
 	configuredServers := make(map[string]*config.ServerConfig)
 	storedServerMap := make(map[string]*config.ServerConfig)
 
-	for _, serverCfg := range s.config.Servers {
+    for i, serverCfg := range s.config.Servers {
+        s.logger.Debug("Processing configured server",
+            zap.Int("index", i),
+            zap.String("name", serverCfg.Name),
+            zap.String("protocol", serverCfg.Protocol),
+            zap.String("url", serverCfg.URL),
+            zap.String("command", serverCfg.Command),
+            zap.Bool("enabled", serverCfg.Enabled),
+            zap.Bool("quarantined", serverCfg.Quarantined))
 		configuredServers[serverCfg.Name] = serverCfg
 	}
 
 	for _, storedServer := range storedServers {
 		storedServerMap[storedServer.Name] = storedServer
+	}
+
+	// Fallback: if config has no servers but storage does, adopt stored servers
+	if len(s.config.Servers) == 0 && len(storedServers) > 0 {
+		s.logger.Warn("No servers found in config; adopting servers from storage",
+			zap.Int("stored_count", len(storedServers)))
+		s.config.Servers = storedServers
+		if err := s.SaveConfiguration(); err != nil {
+			s.logger.Warn("Failed to persist adopted servers to configuration", zap.Error(err))
+		} else {
+			s.logger.Info("Adopted servers written to configuration file")
+		}
+		// Rebuild configuredServers map
+		configuredServers = make(map[string]*config.ServerConfig)
+		for _, sv := range s.config.Servers {
+			configuredServers[sv.Name] = sv
+		}
 	}
 
 	// Sync config to storage and upstream manager
@@ -381,23 +444,25 @@ func (s *Server) loadConfiguredServers() error {
 			continue
 		}
 
-		// Sync to upstream manager based on enabled status
-		if serverCfg.Enabled {
-			// Add server to upstream manager regardless of quarantine status
-			// Quarantined servers are kept connected for inspection but blocked for execution
-			if err := s.upstreamManager.AddServer(serverCfg.Name, serverCfg); err != nil {
-				s.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", serverCfg.Name))
-			}
+        // Sync to upstream manager based on enabled status
+        if serverCfg.Enabled {
+            // Register server with upstream manager WITHOUT connecting here.
+            // Connections are handled concurrently by backgroundConnections/ConnectAll.
+            s.logger.Debug("Registering server with upstream manager (no immediate connect)",
+                zap.String("server", serverCfg.Name))
+            if err := s.upstreamManager.AddServerConfig(serverCfg.Name, serverCfg); err != nil {
+                s.logger.Error("Failed to register upstream server config", zap.Error(err), zap.String("server", serverCfg.Name))
+            }
 
 			if serverCfg.Quarantined {
 				s.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", serverCfg.Name))
 			}
-		} else {
-			// Remove from upstream manager only if disabled (not quarantined)
-			s.upstreamManager.RemoveServer(serverCfg.Name)
-			s.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
-		}
-	}
+        } else {
+            // Remove from upstream manager only if disabled (not quarantined)
+            s.upstreamManager.RemoveServer(serverCfg.Name)
+            s.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
+        }
+    }
 
 	// Remove servers that are no longer in config (comprehensive cleanup)
 	serversToRemove := []string{}
@@ -452,9 +517,9 @@ func (s *Server) loadConfiguredServers() error {
 			zap.Strings("removed_servers", serversToRemove))
 	}
 
-	s.logger.Info("Server synchronization completed",
-		zap.Int("configured_servers", len(s.config.Servers)),
-		zap.Int("removed_servers", len(serversToRemove)))
+    s.logger.Info("Server synchronization completed",
+        zap.Int("configured_servers", len(s.config.Servers)),
+        zap.Int("removed_servers", len(serversToRemove)))
 
 	return nil
 }
@@ -632,6 +697,24 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 	}
 
 	return stats
+}
+
+// ConnectAllNow triggers connection attempts to all configured/eligible upstream servers
+func (s *Server) ConnectAllNow() error {
+    if s.upstreamManager == nil {
+        return fmt.Errorf("upstream manager not initialized")
+    }
+    // Use appropriate timeout depending on isolation
+    timeout := s.getConnectionTimeout()
+    s.logger.Info("Manual reconnect requested via tray",
+        zap.Duration("timeout", timeout))
+    ctx, cancel := context.WithTimeout(context.Background(), timeout)
+    defer cancel()
+    if err := s.upstreamManager.ConnectAll(ctx); err != nil {
+        s.logger.Warn("Some upstream servers failed to connect during manual reconnect", zap.Error(err))
+        return err
+    }
+    return nil
 }
 
 // GetAllServers returns information about all upstream servers for tray UI
@@ -1196,8 +1279,12 @@ func (s *Server) ReloadConfiguration() error {
 		s.logger.Info("Triggering immediate reconnection after config reload")
 
 		// Connect all servers that should be connected
-		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		timeout := s.getConnectionTimeout()
+		connectCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+
+		s.logger.Debug("Reconnecting servers after config reload with timeout",
+			zap.Duration("timeout", timeout))
 
 		if err := s.upstreamManager.ConnectAll(connectCtx); err != nil {
 			s.logger.Warn("Some servers failed to reconnect after config reload", zap.Error(err))
