@@ -222,32 +222,55 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	// Check if Docker isolation should be used
 	c.logger.Debug("Checking Docker isolation conditions",
 		zap.String("server", c.config.Name),
-		zap.Bool("has_isolation_manager", c.isolationManager != nil))
+		zap.Bool("has_isolation_manager", c.isolationManager != nil),
+		zap.Bool("cli_mode", c.cliMode))
 	
-	if c.isolationManager != nil && c.isolationManager.ShouldIsolate(c.config) {
-		c.logger.Info("Docker isolation enabled for server",
+	if c.isolationManager != nil {
+		shouldIsolate := c.isolationManager.ShouldIsolate(c.config)
+		c.logger.Debug("Docker isolation decision",
 			zap.String("server", c.config.Name),
-			zap.String("original_command", c.config.Command))
-
-		// Notify state change - container is starting (only in managed mode, not CLI)
-		if !c.cliMode {
-			c.notifyStateChange("container_starting", "Starting Docker container...")
-		}
-
-		c.logger.Debug("About to call setupDockerIsolation",
-			zap.String("server", c.config.Name))
+			zap.Bool("should_isolate", shouldIsolate))
 		
-		// Use Docker isolation (now shell-wrapped for PATH inheritance)
-		finalCommand, finalArgs = c.setupDockerIsolation(c.config.Command, args)
-		
-		c.logger.Debug("setupDockerIsolation completed",
-			zap.String("server", c.config.Name),
-			zap.String("final_command", finalCommand))
-		c.isDockerCommand = true
+		if shouldIsolate {
+			c.logger.Info("Docker isolation enabled for server",
+				zap.String("server", c.config.Name),
+				zap.String("original_command", c.config.Command))
 
-		// Add cidfile to shell-wrapped Docker command if we have one
-		if cidFile != "" {
-			finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+			// Notify state change - container is starting (only in managed mode, not CLI)
+			// Make this asynchronous to prevent deadlock during isolation setup
+			if !c.cliMode {
+				go c.notifyStateChange("container_starting", "Starting Docker container...")
+			}
+
+			c.logger.Debug("About to call setupDockerIsolation",
+				zap.String("server", c.config.Name))
+			
+			// Use Docker isolation (now shell-wrapped for PATH inheritance)
+			finalCommand, finalArgs = c.setupDockerIsolation(c.config.Command, args)
+			
+			c.logger.Debug("setupDockerIsolation completed",
+				zap.String("server", c.config.Name),
+				zap.String("final_command", finalCommand))
+			c.isDockerCommand = true
+
+			// Add cidfile to shell-wrapped Docker command if we have one
+			if cidFile != "" {
+				finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+			}
+		} else {
+			// Isolation manager exists but isolation is not needed (e.g., already Docker command)
+			// Use shell wrapping for environment inheritance
+			finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, args)
+			c.isDockerCommand = false
+
+			// Handle explicit docker commands
+			if (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun {
+				c.isDockerCommand = true
+				if cidFile != "" {
+					// For shell-wrapped Docker commands, we need to modify the shell command string
+					finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+				}
+			}
 		}
 	} else {
 		// Use shell wrapping for environment inheritance
@@ -304,8 +327,9 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		zap.String("context_type", contextType))
 	
 	// Notify state change - container is initializing (only in managed mode, not CLI)
+	// Make this asynchronous to prevent deadlock during client.Start()
 	if c.isDockerCommand && !c.cliMode {
-		c.notifyStateChange("container_initializing", "Container initializing (installing packages)...")
+		go c.notifyStateChange("container_initializing", "Container initializing (installing packages)...")
 	}
 	
 	c.logger.Debug("About to call client.Start()",
@@ -420,6 +444,9 @@ func (c *Client) connectStdio(ctx context.Context) error {
 // setupDockerIsolation sets up Docker isolation for a stdio command
 func (c *Client) setupDockerIsolation(command string, args []string) (dockerCommand string, dockerArgs []string) {
 	// Detect the runtime type from the command
+	c.logger.Debug("About to call DetectRuntimeType",
+		zap.String("server", c.config.Name),
+		zap.String("command", command))
 	runtimeType := c.isolationManager.DetectRuntimeType(command)
 	c.logger.Debug("Detected runtime type for Docker isolation",
 		zap.String("server", c.config.Name),

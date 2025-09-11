@@ -405,17 +405,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Info("Starting system tray with auto-start server")
 
 		// Create tray application first (ensures callbacks are properly registered)
+		// The tray will auto-start the server once it's fully initialized
 		trayApp := createTray(srv, logger.Sugar(), version, shutdownFunc)
-
-		// Start server immediately in background after tray is created
-		// Server lifecycle is independent from tray - starts immediately
-		go func() {
-			logger.Info("Auto-starting server for tray mode")
-			if err := srv.StartServer(ctx); err != nil {
-				logger.Error("Failed to auto-start server", zap.Error(err))
-				// Don't cancel context here - let tray handle manual start/stop
-			}
-		}()
 
 		// This is a blocking call that runs the tray event loop
 		logger.Info("MAIN - Starting tray event loop")

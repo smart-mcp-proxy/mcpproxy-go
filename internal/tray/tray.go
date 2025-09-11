@@ -523,6 +523,14 @@ func (a *App) onReady() {
 
     // Signal readiness before any further background processing
     a.logger.Info("System tray is ready - menu items fully initialized")
+    
+    // Auto-start server now that tray is fully ready
+    go func() {
+        a.logger.Info("Auto-starting server after tray initialization")
+        if err := a.server.StartServer(a.ctx); err != nil {
+            a.logger.Error("Failed to auto-start server", zap.Error(err))
+        }
+    }()
 }
 
 // updateTooltip updates the tooltip based on the server's running state
