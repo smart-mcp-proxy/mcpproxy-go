@@ -220,16 +220,29 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	var finalArgs []string
 
 	// Check if Docker isolation should be used
+	c.logger.Debug("Checking Docker isolation conditions",
+		zap.String("server", c.config.Name),
+		zap.Bool("has_isolation_manager", c.isolationManager != nil))
+	
 	if c.isolationManager != nil && c.isolationManager.ShouldIsolate(c.config) {
 		c.logger.Info("Docker isolation enabled for server",
 			zap.String("server", c.config.Name),
 			zap.String("original_command", c.config.Command))
 
-		// Notify state change - container is starting
-		c.notifyStateChange("container_starting", "Starting Docker container...")
+		// Notify state change - container is starting (only in managed mode, not CLI)
+		if !c.cliMode {
+			c.notifyStateChange("container_starting", "Starting Docker container...")
+		}
 
+		c.logger.Debug("About to call setupDockerIsolation",
+			zap.String("server", c.config.Name))
+		
 		// Use Docker isolation (now shell-wrapped for PATH inheritance)
 		finalCommand, finalArgs = c.setupDockerIsolation(c.config.Command, args)
+		
+		c.logger.Debug("setupDockerIsolation completed",
+			zap.String("server", c.config.Name),
+			zap.String("final_command", finalCommand))
 		c.isDockerCommand = true
 
 		// Add cidfile to shell-wrapped Docker command if we have one
@@ -266,23 +279,45 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		zap.Strings("original_args", args),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
-    // Start stdio transport. In daemon mode we want a persistent background
-    // context so the child keeps running. In CLI mode we want Start to be
-    // bound to the provided context to respect --timeout and cancel promptly.
-    persistentCtx := context.Background()
-    startCtx := persistentCtx
-    if c.cliMode {
-        startCtx = ctx
-    }
+	// Start stdio transport. In daemon mode we want a persistent background
+	// context so the child keeps running. In CLI mode we want Start to be
+	// bound to the provided context to respect --timeout and cancel promptly.
+	// However, Docker containers always need persistent context for startup
+	// regardless of CLI mode, to allow time for initialization.
+	persistentCtx := context.Background()
+	startCtx := persistentCtx
 	
-	// Notify state change - container is initializing (installing packages, etc.)
-	if c.isDockerCommand {
+	// Only use timeout context for non-Docker commands in CLI mode
+	if c.cliMode && !c.isDockerCommand {
+		startCtx = ctx
+	}
+	
+	// Add debug logging to track context usage
+	contextType := "background"
+	if startCtx == ctx {
+		contextType = "timeout"
+	}
+	c.logger.Debug("Starting stdio transport",
+		zap.String("server", c.config.Name),
+		zap.Bool("cli_mode", c.cliMode),
+		zap.Bool("is_docker", c.isDockerCommand),
+		zap.String("context_type", contextType))
+	
+	// Notify state change - container is initializing (only in managed mode, not CLI)
+	if c.isDockerCommand && !c.cliMode {
 		c.notifyStateChange("container_initializing", "Container initializing (installing packages)...")
 	}
 	
-    if err := c.client.Start(startCtx); err != nil {
-        return fmt.Errorf("failed to start stdio client: %w", err)
-    }
+	c.logger.Debug("About to call client.Start()",
+		zap.String("server", c.config.Name),
+		zap.Bool("is_docker", c.isDockerCommand))
+	
+	if err := c.client.Start(startCtx); err != nil {
+		return fmt.Errorf("failed to start stdio client: %w", err)
+	}
+	
+	c.logger.Debug("client.Start() completed successfully",
+		zap.String("server", c.config.Name))
 
 	// IMPORTANT: Perform MCP initialize() handshake for stdio transports as well,
 	// so c.serverInfo is populated and tool discovery/search can proceed.
