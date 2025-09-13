@@ -158,10 +158,91 @@ golangci-lint run ./...
       },
       "enabled": true,
       "quarantined": false
+    },
+    {
+      "name": "ast-grep-project-a",
+      "command": "npx",
+      "args": ["ast-grep-mcp"],
+      "working_dir": "/home/user/projects/project-a",
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": false
+    },
+    {
+      "name": "filesystem-work",
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-filesystem"],
+      "working_dir": "/home/user/work/company-repo",
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": false
     }
   ]
 }
 ```
+
+### Working Directory Configuration
+
+The `working_dir` field allows you to specify the working directory for stdio MCP servers, solving the common problem where file-based servers operate on mcpproxy's directory instead of your project directories.
+
+#### Use Cases
+- **File-based MCP servers**: `ast-grep-mcp`, `filesystem-mcp`, `git-mcp`
+- **Project isolation**: Separate work and personal project contexts
+- **Multiple instances**: Same MCP server type for different projects
+
+#### Configuration Examples
+
+**Project-specific servers**:
+```json
+{
+  "mcpServers": [
+    {
+      "name": "ast-grep-project-a",
+      "command": "npx",
+      "args": ["ast-grep-mcp"],
+      "working_dir": "/home/user/projects/project-a",
+      "enabled": true
+    },
+    {
+      "name": "ast-grep-work-repo",
+      "command": "npx", 
+      "args": ["ast-grep-mcp"],
+      "working_dir": "/home/user/work/company-repo",
+      "enabled": true
+    }
+  ]
+}
+```
+
+**Management via Tool Calls**:
+```bash
+# Add server with working directory
+mcpproxy call tool --tool-name=upstream_servers \
+  --json_args='{"operation":"add","name":"git-myproject","command":"npx","args_json":"[\"@modelcontextprotocol/server-git\"]","working_dir":"/home/user/projects/myproject","enabled":true}'
+
+# Update working directory for existing server
+mcpproxy call tool --tool-name=upstream_servers \
+  --json_args='{"operation":"update","name":"git-myproject","working_dir":"/home/user/projects/myproject-v2"}'
+
+# Add server via patch operation
+mcpproxy call tool --tool-name=upstream_servers \
+  --json_args='{"operation":"patch","name":"existing-server","patch_json":"{\"working_dir\":\"/new/project/path\"}"}'
+```
+
+#### Error Handling
+If a specified `working_dir` doesn't exist:
+- Server startup will fail with detailed error message
+- Error logged to both main log and server-specific log  
+- Server remains disabled until directory issue is resolved
+
+#### Backwards Compatibility
+- Empty or unspecified `working_dir` uses current directory (existing behavior)
+- All existing configurations continue to work unchanged
+
+#### Docker Integration
+Working directories are compatible with Docker isolation. When both are configured:
+- `working_dir` affects the host-side directory context
+- `isolation.working_dir` affects the container's internal working directory
 
 ## MCP Protocol Implementation
 

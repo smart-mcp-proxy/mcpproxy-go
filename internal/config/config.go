@@ -98,6 +98,7 @@ type ServerConfig struct {
 	Protocol    string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
 	Command     string            `json:"command,omitempty" mapstructure:"command"`
 	Args        []string          `json:"args,omitempty" mapstructure:"args"`
+	WorkingDir  string            `json:"working_dir,omitempty" mapstructure:"working_dir"` // Working directory for stdio servers
 	Env         map[string]string `json:"env,omitempty" mapstructure:"env"`
 	Headers     map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
 	OAuth       *OAuthConfig      `json:"oauth,omitempty" mapstructure:"oauth"`     // OAuth configuration

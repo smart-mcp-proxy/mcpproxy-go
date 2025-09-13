@@ -161,6 +161,23 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		return fmt.Errorf("no command specified for stdio transport")
 	}
 
+	// Validate working directory if specified
+	if err := validateWorkingDir(c.config.WorkingDir); err != nil {
+		// Log warning to both main logger and server-specific logger
+		c.logger.Error("Invalid working directory for stdio server",
+			zap.String("server", c.config.Name),
+			zap.String("working_dir", c.config.WorkingDir),
+			zap.Error(err))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("Server startup failed due to invalid working directory",
+				zap.String("working_dir", c.config.WorkingDir),
+				zap.Error(err))
+		}
+
+		return fmt.Errorf("invalid working directory for server %s: %w", c.config.Name, err)
+	}
+
 	// Build environment variables using secure environment manager
 	// This ensures PATH includes proper discovery even when launched via Launchd
 	envVars := c.envManager.BuildSecureEnvironment()
@@ -250,8 +267,18 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		}
 	}
 
-	// Upstream transport (same as demo)
-	stdioTransport := uptransport.NewStdio(finalCommand, envVars, finalArgs...)
+	// Upstream transport with working directory support
+	var stdioTransport *uptransport.Stdio
+	if c.config.WorkingDir != "" {
+		// Use custom CommandFunc to set working directory
+		commandFunc := createWorkingDirCommandFunc(c.config.WorkingDir)
+		stdioTransport = uptransport.NewStdioWithOptions(finalCommand, envVars, finalArgs,
+			uptransport.WithCommandFunc(commandFunc))
+	} else {
+		// Use default transport for backwards compatibility
+		stdioTransport = uptransport.NewStdio(finalCommand, envVars, finalArgs...)
+	}
+
 	c.client = client.NewClient(stdioTransport)
 
 	// Log final stdio configuration for debugging
@@ -261,6 +288,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		zap.Strings("final_args", finalArgs),
 		zap.String("original_command", c.config.Command),
 		zap.Strings("original_args", args),
+		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
 	// Start stdio transport with a persistent background context so the child
@@ -490,6 +518,44 @@ func shellescape(s string) string {
 func hasCommand(command string) bool {
 	_, err := exec.LookPath(command)
 	return err == nil
+}
+
+// validateWorkingDir checks if the working directory exists and is accessible
+// Returns error if directory doesn't exist or isn't accessible
+func validateWorkingDir(workingDir string) error {
+	if workingDir == "" {
+		// Empty working directory is valid (uses current directory)
+		return nil
+	}
+
+	fi, err := os.Stat(workingDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("working directory does not exist: %s", workingDir)
+		}
+		return fmt.Errorf("cannot access working directory %s: %w", workingDir, err)
+	}
+
+	if !fi.IsDir() {
+		return fmt.Errorf("working directory path is not a directory: %s", workingDir)
+	}
+
+	return nil
+}
+
+// createWorkingDirCommandFunc creates a custom CommandFunc that sets the working directory
+func createWorkingDirCommandFunc(workingDir string) uptransport.CommandFunc {
+	return func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
+		cmd := exec.CommandContext(ctx, command, args...)
+		cmd.Env = env
+
+		// Set working directory if specified
+		if workingDir != "" {
+			cmd.Dir = workingDir
+		}
+
+		return cmd, nil
+	}
 }
 
 // connectHTTP establishes HTTP transport connection with auth fallback
