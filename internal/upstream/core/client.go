@@ -43,8 +43,9 @@ type Client struct {
 	isolationManager *IsolationManager
 
 	// Connection state protection
-	mu        sync.RWMutex
-	connected bool
+	mu         sync.RWMutex
+	connected  bool
+	connecting bool // Prevent concurrent connection attempts
 
 	// OAuth progress tracking (separate mutex to prevent reentrant deadlock)
 	oauthMu            sync.RWMutex
@@ -72,6 +73,7 @@ type Client struct {
 
 	// Docker container tracking
 	containerID     string
+	containerName   string // Store container name for cleanup via docker container commands
 	isDockerCommand bool
 }
 

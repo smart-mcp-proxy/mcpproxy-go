@@ -38,6 +38,10 @@ type Client struct {
 	// Background monitoring
 	stopMonitoring chan struct{}
 	monitoringWG   sync.WaitGroup
+
+	// Reconnection protection
+	reconnectMu         sync.Mutex
+	reconnectInProgress bool
 }
 
 // NewClient creates a new managed client with state management
@@ -456,6 +460,24 @@ func (mc *Client) performHealthCheck() {
 
 // tryReconnect attempts to reconnect the client with proper error handling
 func (mc *Client) tryReconnect() {
+	// CRITICAL FIX: Prevent concurrent reconnection attempts to avoid duplicate containers
+	mc.reconnectMu.Lock()
+	if mc.reconnectInProgress {
+		mc.reconnectMu.Unlock()
+		mc.logger.Debug("Reconnection already in progress, skipping duplicate attempt",
+			zap.String("server", mc.Config.Name))
+		return
+	}
+	mc.reconnectInProgress = true
+	mc.reconnectMu.Unlock()
+
+	// Ensure we clear the reconnection flag when done
+	defer func() {
+		mc.reconnectMu.Lock()
+		mc.reconnectInProgress = false
+		mc.reconnectMu.Unlock()
+	}()
+
 	// Create a timeout context for the reconnection attempt - increased for OAuth flows
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
