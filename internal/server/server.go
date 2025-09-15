@@ -1145,6 +1145,7 @@ func (s *Server) SaveConfiguration() error {
 	s.logger.Debug("Saving configuration to file", zap.String("path", configPath))
 
 	// Ensure we have the latest server list from the storage manager
+	// Note: Storage layer now preserves all fields including Isolation, OAuth, WorkingDir
 	latestServers, err := s.storageManager.ListUpstreamServers()
 	if err != nil {
 		s.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))

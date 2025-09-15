@@ -75,12 +75,15 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		Protocol:    serverConfig.Protocol,
 		Command:     serverConfig.Command,
 		Args:        serverConfig.Args,
+		WorkingDir:  serverConfig.WorkingDir,
 		Env:         serverConfig.Env,
 		Headers:     serverConfig.Headers,
+		OAuth:       serverConfig.OAuth,
 		Enabled:     serverConfig.Enabled,
 		Quarantined: serverConfig.Quarantined,
 		Created:     serverConfig.Created,
 		Updated:     time.Now(),
+		Isolation:   serverConfig.Isolation,
 	}
 
 	return m.db.SaveUpstream(record)
@@ -102,12 +105,15 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		Protocol:    record.Protocol,
 		Command:     record.Command,
 		Args:        record.Args,
+		WorkingDir:  record.WorkingDir,
 		Env:         record.Env,
 		Headers:     record.Headers,
+		OAuth:       record.OAuth,
 		Enabled:     record.Enabled,
 		Quarantined: record.Quarantined,
 		Created:     record.Created,
 		Updated:     record.Updated,
+		Isolation:   record.Isolation,
 	}, nil
 }
 
@@ -129,12 +135,15 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			Protocol:    record.Protocol,
 			Command:     record.Command,
 			Args:        record.Args,
+			WorkingDir:  record.WorkingDir,
 			Env:         record.Env,
 			Headers:     record.Headers,
+			OAuth:       record.OAuth,
 			Enabled:     record.Enabled,
 			Quarantined: record.Quarantined,
 			Created:     record.Created,
 			Updated:     record.Updated,
+			Isolation:   record.Isolation,
 		})
 	}
 
@@ -172,12 +181,15 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 				Protocol:    record.Protocol,
 				Command:     record.Command,
 				Args:        record.Args,
+				WorkingDir:  record.WorkingDir,
 				Env:         record.Env,
 				Headers:     record.Headers,
+				OAuth:       record.OAuth,
 				Enabled:     record.Enabled,
 				Quarantined: record.Quarantined,
 				Created:     record.Created,
 				Updated:     record.Updated,
+				Isolation:   record.Isolation,
 			})
 
 			m.logger.Debugw("Added server to quarantined list",
