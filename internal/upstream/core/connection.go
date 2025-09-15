@@ -152,6 +152,21 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 		}
 
+		// CRITICAL FIX: Also cleanup process groups to prevent zombie processes on connection failure
+		if c.processGroupID > 0 {
+			c.logger.Warn("Connection failed - cleaning up process group to prevent zombie processes",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID))
+
+			if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+				c.logger.Error("Failed to clean up process group after connection failure",
+					zap.String("server", c.config.Name),
+					zap.Int("pgid", c.processGroupID),
+					zap.Error(err))
+			}
+			c.processGroupID = 0
+		}
+
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
@@ -309,16 +324,18 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		}
 	}
 
-	// Upstream transport with working directory support
+	// Upstream transport with working directory support and process group management
 	var stdioTransport *uptransport.Stdio
 	if c.config.WorkingDir != "" {
-		// Use custom CommandFunc to set working directory
-		commandFunc := createWorkingDirCommandFunc(c.config.WorkingDir)
+		// CRITICAL FIX: Use enhanced CommandFunc with process group management for proper cleanup
+		commandFunc := createEnhancedWorkingDirCommandFunc(c.config.WorkingDir, c.logger)
 		stdioTransport = uptransport.NewStdioWithOptions(finalCommand, envVars, finalArgs,
 			uptransport.WithCommandFunc(commandFunc))
 	} else {
-		// Use default transport for backwards compatibility
-		stdioTransport = uptransport.NewStdio(finalCommand, envVars, finalArgs...)
+		// CRITICAL FIX: Use enhanced CommandFunc even without working directory to ensure process groups
+		commandFunc := createEnhancedWorkingDirCommandFunc("", c.logger)
+		stdioTransport = uptransport.NewStdioWithOptions(finalCommand, envVars, finalArgs,
+			uptransport.WithCommandFunc(commandFunc))
 	}
 
 	c.client = client.NewClient(stdioTransport)
@@ -370,6 +387,21 @@ func (c *Client) connectStdio(ctx context.Context) error {
 				c.killDockerContainerByCommandWithContext(cleanupCtx)
 			}
 		}
+
+		// CRITICAL FIX: Also cleanup process groups to prevent zombie processes on initialization failure
+		if c.processGroupID > 0 {
+			c.logger.Warn("Initialization failed - cleaning up process group to prevent zombie processes",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID))
+
+			if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+				c.logger.Error("Failed to clean up process group after initialization failure",
+					zap.String("server", c.config.Name),
+					zap.Int("pgid", c.processGroupID),
+					zap.Error(err))
+			}
+			c.processGroupID = 0
+		}
 		return fmt.Errorf("MCP initialize failed for stdio transport: %w", err)
 	}
 
@@ -405,6 +437,14 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			c.logger.Info("Successfully extracted process from stdio transport for lifecycle management",
 				zap.String("server", c.config.Name),
 				zap.Int("pid", c.processCmd.Process.Pid))
+
+			// CRITICAL FIX: Extract process group ID for proper cleanup
+			c.processGroupID = extractProcessGroupID(cmd, c.logger, c.config.Name)
+			if c.processGroupID > 0 {
+				c.logger.Info("Process group ID tracked for cleanup",
+					zap.String("server", c.config.Name),
+					zap.Int("pgid", c.processGroupID))
+			}
 		}
 	} else {
 		c.logger.Warn("Could not extract process from stdio transport - will use alternative process tracking",
@@ -651,6 +691,11 @@ func createWorkingDirCommandFunc(workingDir string) uptransport.CommandFunc {
 
 		return cmd, nil
 	}
+}
+
+// createEnhancedWorkingDirCommandFunc creates a custom CommandFunc with process group management
+func createEnhancedWorkingDirCommandFunc(workingDir string, logger *zap.Logger) uptransport.CommandFunc {
+	return createProcessGroupCommandFunc(workingDir, logger)
 }
 
 // connectHTTP establishes HTTP transport connection with auth fallback
@@ -1433,6 +1478,27 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	} else {
 		c.logger.Debug("Non-Docker command disconnecting, no container cleanup needed",
 			zap.String("server", c.config.Name))
+	}
+
+	// CRITICAL FIX: Clean up process group to prevent zombie processes
+	if c.processGroupID > 0 {
+		c.logger.Info("Cleaning up process group to prevent zombie processes",
+			zap.String("server", c.config.Name),
+			zap.Int("pgid", c.processGroupID))
+
+		if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+			c.logger.Error("Failed to clean up process group",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID),
+				zap.Error(err))
+		} else {
+			c.logger.Info("Process group cleanup completed successfully",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID))
+		}
+
+		// Reset process group ID after cleanup
+		c.processGroupID = 0
 	}
 
 	c.logger.Debug("Closing MCP client connection",
