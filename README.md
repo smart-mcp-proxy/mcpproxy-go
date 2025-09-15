@@ -324,6 +324,47 @@ Check logs for OAuth flow details:
 tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(oauth|OAuth)"
 ```
 
+### 📂 **Working Directory Configuration**
+
+Solve project context issues by specifying working directories for stdio MCP servers:
+
+```jsonc
+{
+  "mcpServers": [
+    {
+      "name": "ast-grep-project-a",
+      "command": "npx",
+      "args": ["ast-grep-mcp"],
+      "working_dir": "/home/user/projects/project-a",
+      "enabled": true
+    },
+    {
+      "name": "git-work-repo",
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-git"],
+      "working_dir": "/home/user/work/company-repo",
+      "enabled": true
+    }
+  ]
+}
+```
+
+**Benefits**:
+- **Project isolation**: File-based servers operate in correct directory context
+- **Multiple projects**: Same MCP server type for different projects  
+- **Context separation**: Work and personal project isolation
+
+**Tool-based Management**:
+```bash
+# Add server with working directory
+mcpproxy call tool --tool-name=upstream_servers \
+  --json_args='{"operation":"add","name":"git-myproject","command":"npx","args_json":"[\"@modelcontextprotocol/server-git\"]","working_dir":"/home/user/projects/myproject","enabled":true}'
+
+# Update existing server working directory
+mcpproxy call tool --tool-name=upstream_servers \
+  --json_args='{"operation":"update","name":"git-myproject","working_dir":"/new/project/path"}'
+```
+
 ## Learn More
 
 * Documentation: [Configuration](https://mcpproxy.app/docs/configuration), [Features](https://mcpproxy.app/docs/features), [Usage](https://mcpproxy.app/docs/usage)

@@ -1270,6 +1270,9 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
+	// Get working directory parameter
+	workingDir := request.GetString("working_dir", "")
+
 	// Auto-detect protocol
 	protocol := request.GetString("protocol", "")
 	if protocol == "" {
@@ -1287,6 +1290,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		URL:         url,
 		Command:     command,
 		Args:        args,
+		WorkingDir:  workingDir,
 		Env:         env,
 		Headers:     headers,
 		Protocol:    protocol,
@@ -1446,6 +1450,9 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	if protocol := request.GetString("protocol", ""); protocol != "" {
 		updatedServer.Protocol = protocol
 	}
+	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
+		updatedServer.WorkingDir = workingDir
+	}
 	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
 
 	// Update in storage
@@ -1527,6 +1534,9 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	}
 	if protocol := request.GetString("protocol", ""); protocol != "" {
 		updatedServer.Protocol = protocol
+	}
+	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
+		updatedServer.WorkingDir = workingDir
 	}
 	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
 
