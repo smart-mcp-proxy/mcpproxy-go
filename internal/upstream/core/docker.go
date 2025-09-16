@@ -359,6 +359,69 @@ func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Contex
 	return true // We found and processed containers
 }
 
+// killDockerContainerByNameWithContext kills a specific Docker container by its exact name
+func (c *Client) killDockerContainerByNameWithContext(ctx context.Context, containerName string) bool {
+	c.logger.Debug("Searching for container by exact name",
+		zap.String("server", c.config.Name),
+		zap.String("container_name", containerName))
+
+	// Get container ID by exact name match
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--filter", "name=^"+containerName+"$", "--format", "{{.ID}}")
+	output, err := listCmd.Output()
+	if err != nil {
+		c.logger.Debug("Failed to find Docker container by name",
+			zap.String("server", c.config.Name),
+			zap.String("container_name", containerName),
+			zap.Error(err))
+		return false
+	}
+
+	containerID := strings.TrimSpace(string(output))
+	if containerID == "" {
+		c.logger.Debug("No container found with exact name",
+			zap.String("server", c.config.Name),
+			zap.String("container_name", containerName))
+		return false
+	}
+
+	c.logger.Info("Found container by name, attempting to kill",
+		zap.String("server", c.config.Name),
+		zap.String("container_name", containerName),
+		zap.String("container_id", containerID))
+
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Killing container by name",
+			zap.String("container_name", containerName),
+			zap.String("container_id", containerID))
+	}
+
+	// First try graceful stop
+	stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
+	if err := stopCmd.Run(); err != nil {
+		// Force kill if graceful stop fails
+		killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+		if err := killCmd.Run(); err != nil {
+			c.logger.Error("Failed to kill container by name",
+				zap.String("server", c.config.Name),
+				zap.String("container_name", containerName),
+				zap.String("container_id", containerID),
+				zap.Error(err))
+			return false
+		}
+		c.logger.Info("Successfully force killed container by name",
+			zap.String("server", c.config.Name),
+			zap.String("container_name", containerName),
+			zap.String("container_id", containerID))
+		return true
+	}
+	c.logger.Info("Successfully stopped container by name",
+		zap.String("server", c.config.Name),
+		zap.String("container_name", containerName),
+		zap.String("container_id", containerID))
+
+	return true
+}
+
 // checkDockerContainerHealth checks if Docker containers are still running
 func (c *Client) checkDockerContainerHealth() {
 	// For Docker commands, we can check if containers are still running

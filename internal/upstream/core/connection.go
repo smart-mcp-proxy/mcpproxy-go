@@ -42,6 +42,13 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// CRITICAL FIX: Check for concurrent connection attempts to prevent duplicate containers
+	if c.connecting {
+		c.logger.Debug("Connection already in progress, rejecting concurrent attempt",
+			zap.String("server", c.config.Name))
+		return fmt.Errorf("connection already in progress")
+	}
+
 	// Allow reconnection if OAuth was recently completed (bypass "already connected" check)
 	if c.connected && !c.wasOAuthRecentlyCompleted() {
 		c.logger.Debug("Client already connected and OAuth not recent",
@@ -49,6 +56,12 @@ func (c *Client) Connect(ctx context.Context) error {
 			zap.Bool("connected", c.connected))
 		return fmt.Errorf("client already connected")
 	}
+
+	// Set connecting flag to prevent concurrent attempts
+	c.connecting = true
+	defer func() {
+		c.connecting = false
+	}()
 
 	// Reset connection state for fresh connection attempt
 	if c.connected {
@@ -110,6 +123,50 @@ func (c *Client) Connect(ctx context.Context) error {
 				zap.String("transport", c.transportType),
 				zap.Error(err))
 		}
+
+		// CRITICAL FIX: Cleanup Docker containers when any connection type fails
+		// This prevents container accumulation when connections fail after Docker setup
+		if c.isDockerCommand {
+			c.logger.Warn("Connection failed for Docker command - cleaning up container",
+				zap.String("server", c.config.Name),
+				zap.String("transport", c.transportType),
+				zap.String("container_name", c.containerName),
+				zap.String("container_id", c.containerID),
+				zap.Error(err))
+
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cleanupCancel()
+
+			// Try to cleanup using container name first, then ID, then pattern matching
+			if c.containerName != "" {
+				c.logger.Debug("Attempting container cleanup by name after connection failure")
+				if success := c.killDockerContainerByNameWithContext(cleanupCtx, c.containerName); success {
+					c.logger.Info("Successfully cleaned up container by name after connection failure")
+				}
+			} else if c.containerID != "" {
+				c.logger.Debug("Attempting container cleanup by ID after connection failure")
+				c.killDockerContainerWithContext(cleanupCtx)
+			} else {
+				c.logger.Debug("Attempting container cleanup by pattern matching after connection failure")
+				c.killDockerContainerByCommandWithContext(cleanupCtx)
+			}
+		}
+
+		// CRITICAL FIX: Also cleanup process groups to prevent zombie processes on connection failure
+		if c.processGroupID > 0 {
+			c.logger.Warn("Connection failed - cleaning up process group to prevent zombie processes",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID))
+
+			if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+				c.logger.Error("Failed to clean up process group after connection failure",
+					zap.String("server", c.config.Name),
+					zap.Int("pgid", c.processGroupID),
+					zap.Error(err))
+			}
+			c.processGroupID = 0
+		}
+
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
@@ -159,6 +216,23 @@ func (c *Client) Connect(ctx context.Context) error {
 func (c *Client) connectStdio(ctx context.Context) error {
 	if c.config.Command == "" {
 		return fmt.Errorf("no command specified for stdio transport")
+	}
+
+	// Validate working directory if specified
+	if err := validateWorkingDir(c.config.WorkingDir); err != nil {
+		// Log warning to both main logger and server-specific logger
+		c.logger.Error("Invalid working directory for stdio server",
+			zap.String("server", c.config.Name),
+			zap.String("working_dir", c.config.WorkingDir),
+			zap.Error(err))
+
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("Server startup failed due to invalid working directory",
+				zap.String("working_dir", c.config.WorkingDir),
+				zap.Error(err))
+		}
+
+		return fmt.Errorf("invalid working directory for server %s: %w", c.config.Name, err)
 	}
 
 	// Build environment variables using secure environment manager
@@ -250,8 +324,20 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		}
 	}
 
-	// Upstream transport (same as demo)
-	stdioTransport := uptransport.NewStdio(finalCommand, envVars, finalArgs...)
+	// Upstream transport with working directory support and process group management
+	var stdioTransport *uptransport.Stdio
+	if c.config.WorkingDir != "" {
+		// CRITICAL FIX: Use enhanced CommandFunc with process group management for proper cleanup
+		commandFunc := createEnhancedWorkingDirCommandFunc(c.config.WorkingDir, c.logger)
+		stdioTransport = uptransport.NewStdioWithOptions(finalCommand, envVars, finalArgs,
+			uptransport.WithCommandFunc(commandFunc))
+	} else {
+		// CRITICAL FIX: Use enhanced CommandFunc even without working directory to ensure process groups
+		commandFunc := createEnhancedWorkingDirCommandFunc("", c.logger)
+		stdioTransport = uptransport.NewStdioWithOptions(finalCommand, envVars, finalArgs,
+			uptransport.WithCommandFunc(commandFunc))
+	}
+
 	c.client = client.NewClient(stdioTransport)
 
 	// Log final stdio configuration for debugging
@@ -261,6 +347,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		zap.Strings("final_args", finalArgs),
 		zap.String("original_command", c.config.Command),
 		zap.Strings("original_args", args),
+		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
 	// Start stdio transport with a persistent background context so the child
@@ -274,6 +361,47 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	// so c.serverInfo is populated and tool discovery/search can proceed.
 	// Use the caller's context with timeout to avoid hanging.
 	if err := c.initialize(ctx); err != nil {
+		// CRITICAL FIX: Cleanup Docker containers when initialization fails
+		// This prevents container accumulation when servers timeout during startup
+		if c.isDockerCommand {
+			c.logger.Warn("Initialization failed for Docker command - cleaning up container",
+				zap.String("server", c.config.Name),
+				zap.String("container_name", c.containerName),
+				zap.String("container_id", c.containerID),
+				zap.Error(err))
+
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cleanupCancel()
+
+			// Try to cleanup using container name first, then ID, then pattern matching
+			if c.containerName != "" {
+				c.logger.Debug("Attempting container cleanup by name after init failure")
+				if success := c.killDockerContainerByNameWithContext(cleanupCtx, c.containerName); success {
+					c.logger.Info("Successfully cleaned up container by name after initialization failure")
+				}
+			} else if c.containerID != "" {
+				c.logger.Debug("Attempting container cleanup by ID after init failure")
+				c.killDockerContainerWithContext(cleanupCtx)
+			} else {
+				c.logger.Debug("Attempting container cleanup by pattern matching after init failure")
+				c.killDockerContainerByCommandWithContext(cleanupCtx)
+			}
+		}
+
+		// CRITICAL FIX: Also cleanup process groups to prevent zombie processes on initialization failure
+		if c.processGroupID > 0 {
+			c.logger.Warn("Initialization failed - cleaning up process group to prevent zombie processes",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID))
+
+			if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+				c.logger.Error("Failed to clean up process group after initialization failure",
+					zap.String("server", c.config.Name),
+					zap.Int("pgid", c.processGroupID),
+					zap.Error(err))
+			}
+			c.processGroupID = 0
+		}
 		return fmt.Errorf("MCP initialize failed for stdio transport: %w", err)
 	}
 
@@ -309,6 +437,14 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			c.logger.Info("Successfully extracted process from stdio transport for lifecycle management",
 				zap.String("server", c.config.Name),
 				zap.Int("pid", c.processCmd.Process.Pid))
+
+			// CRITICAL FIX: Extract process group ID for proper cleanup
+			c.processGroupID = extractProcessGroupID(cmd, c.logger, c.config.Name)
+			if c.processGroupID > 0 {
+				c.logger.Info("Process group ID tracked for cleanup",
+					zap.String("server", c.config.Name),
+					zap.Int("pgid", c.processGroupID))
+			}
 		}
 	} else {
 		c.logger.Warn("Could not extract process from stdio transport - will use alternative process tracking",
@@ -368,6 +504,9 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 		return c.wrapWithUserShell(command, args)
 	}
 
+	// Extract container name from Docker args for tracking
+	c.containerName = c.extractContainerNameFromArgs(dockerRunArgs)
+
 	// Transform the command for container execution
 	containerCommand, containerArgs := c.isolationManager.TransformCommandForContainer(command, args, runtimeType)
 
@@ -380,6 +519,7 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	c.logger.Info("Docker isolation setup completed",
 		zap.String("server", c.config.Name),
 		zap.String("runtime_type", runtimeType),
+		zap.String("container_name", c.containerName),
 		zap.String("container_command", containerCommand),
 		zap.Strings("container_args", containerArgs),
 		zap.Strings("docker_run_args", dockerRunArgs))
@@ -388,6 +528,7 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Docker isolation configured",
 			zap.String("runtime_type", runtimeType),
+			zap.String("container_name", c.containerName),
 			zap.String("container_command", containerCommand))
 	}
 
@@ -399,12 +540,15 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 // insertCidfileIntoShellDockerCommand inserts --cidfile into a shell-wrapped Docker command
 func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile string) []string {
 	// Shell args typically look like: ["-l", "-c", "docker run -i --rm mcp/duckduckgo"]
-	if len(shellArgs) < 3 || shellArgs[len(shellArgs)-3] != "-c" {
-		// If it's not the expected format, fall back to appending
-		c.logger.Warn("Unexpected shell command format for Docker cidfile insertion",
+	// Fix: Check for correct shell format - args can be 2 or 3 elements
+	if len(shellArgs) < 2 || shellArgs[len(shellArgs)-2] != "-c" {
+		// If it's not the expected format, log error and fall back
+		c.logger.Error("Unexpected shell command format for Docker cidfile insertion - cannot track container ID",
 			zap.String("server", c.config.Name),
-			zap.Strings("shell_args", shellArgs))
-		return append(shellArgs, "--cidfile", cidFile)
+			zap.Strings("shell_args", shellArgs),
+			zap.String("expected_format", "[shell, -c, docker_command] or [-l, -c, docker_command]"))
+		// Don't append cidfile to shell args as it won't work
+		return shellArgs
 	}
 
 	// Get the Docker command string (last argument)
@@ -434,6 +578,25 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 		zap.String("server", c.config.Name),
 		zap.String("docker_cmd", dockerCmd))
 	return append(shellArgs, "--cidfile", cidFile)
+}
+
+// extractContainerNameFromArgs extracts the container name from Docker run arguments
+func (c *Client) extractContainerNameFromArgs(dockerArgs []string) string {
+	// Look for --name flag in the arguments
+	for i, arg := range dockerArgs {
+		if arg == "--name" && i+1 < len(dockerArgs) {
+			containerName := dockerArgs[i+1]
+			c.logger.Debug("Extracted container name from Docker args",
+				zap.String("server", c.config.Name),
+				zap.String("container_name", containerName))
+			return containerName
+		}
+	}
+
+	c.logger.Warn("Could not extract container name from Docker args - cleanup may be limited",
+		zap.String("server", c.config.Name),
+		zap.Strings("docker_args", dockerArgs))
+	return ""
 }
 
 // wrapWithUserShell wraps a command with the user's login shell to inherit full environment
@@ -490,6 +653,49 @@ func shellescape(s string) string {
 func hasCommand(command string) bool {
 	_, err := exec.LookPath(command)
 	return err == nil
+}
+
+// validateWorkingDir checks if the working directory exists and is accessible
+// Returns error if directory doesn't exist or isn't accessible
+func validateWorkingDir(workingDir string) error {
+	if workingDir == "" {
+		// Empty working directory is valid (uses current directory)
+		return nil
+	}
+
+	fi, err := os.Stat(workingDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("working directory does not exist: %s", workingDir)
+		}
+		return fmt.Errorf("cannot access working directory %s: %w", workingDir, err)
+	}
+
+	if !fi.IsDir() {
+		return fmt.Errorf("working directory path is not a directory: %s", workingDir)
+	}
+
+	return nil
+}
+
+// createWorkingDirCommandFunc creates a custom CommandFunc that sets the working directory
+func createWorkingDirCommandFunc(workingDir string) uptransport.CommandFunc {
+	return func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
+		cmd := exec.CommandContext(ctx, command, args...)
+		cmd.Env = env
+
+		// Set working directory if specified
+		if workingDir != "" {
+			cmd.Dir = workingDir
+		}
+
+		return cmd, nil
+	}
+}
+
+// createEnhancedWorkingDirCommandFunc creates a custom CommandFunc with process group management
+func createEnhancedWorkingDirCommandFunc(workingDir string, logger *zap.Logger) uptransport.CommandFunc {
+	return createProcessGroupCommandFunc(workingDir, logger)
 }
 
 // connectHTTP establishes HTTP transport connection with auth fallback
@@ -1172,6 +1378,17 @@ func (c *Client) initialize(ctx context.Context) error {
 			c.upstreamLogger.Error("MCP initialize JSON-RPC call failed",
 				zap.Error(err))
 		}
+
+		// CRITICAL FIX: Additional cleanup for direct initialize() calls
+		// This handles cases where initialize() is called independently
+		if c.isDockerCommand {
+			c.logger.Debug("Direct initialization failed for Docker command - cleanup may be handled by caller",
+				zap.String("server", c.config.Name),
+				zap.String("container_name", c.containerName),
+				zap.String("container_id", c.containerID),
+				zap.Error(err))
+		}
+
 		return fmt.Errorf("MCP initialize failed: %w", err)
 	}
 
@@ -1237,11 +1454,21 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		defer cleanupCancel()
 
 		if c.containerID != "" {
+			c.logger.Debug("Cleaning up Docker container by ID",
+				zap.String("server", c.config.Name),
+				zap.String("container_id", c.containerID))
 			c.killDockerContainerWithContext(cleanupCtx)
-			c.logger.Debug("Docker container cleanup completed",
+			c.logger.Debug("Docker container cleanup by ID completed",
+				zap.String("server", c.config.Name))
+		} else if c.containerName != "" {
+			c.logger.Debug("Cleaning up Docker container by name",
+				zap.String("server", c.config.Name),
+				zap.String("container_name", c.containerName))
+			c.killDockerContainerByNameWithContext(cleanupCtx, c.containerName)
+			c.logger.Debug("Docker container cleanup by name completed",
 				zap.String("server", c.config.Name))
 		} else {
-			c.logger.Debug("No container ID available, using fallback cleanup method",
+			c.logger.Debug("No container ID or name available, using pattern-based cleanup method",
 				zap.String("server", c.config.Name))
 			// Fallback: try to find and kill any containers started by this command
 			c.killDockerContainerByCommandWithContext(cleanupCtx)
@@ -1251,6 +1478,27 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	} else {
 		c.logger.Debug("Non-Docker command disconnecting, no container cleanup needed",
 			zap.String("server", c.config.Name))
+	}
+
+	// CRITICAL FIX: Clean up process group to prevent zombie processes
+	if c.processGroupID > 0 {
+		c.logger.Info("Cleaning up process group to prevent zombie processes",
+			zap.String("server", c.config.Name),
+			zap.Int("pgid", c.processGroupID))
+
+		if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+			c.logger.Error("Failed to clean up process group",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID),
+				zap.Error(err))
+		} else {
+			c.logger.Info("Process group cleanup completed successfully",
+				zap.String("server", c.config.Name),
+				zap.Int("pgid", c.processGroupID))
+		}
+
+		// Reset process group ID after cleanup
+		c.processGroupID = 0
 	}
 
 	c.logger.Debug("Closing MCP client connection",
