@@ -42,6 +42,21 @@ export MCPPROXY_UPDATE_NOTIFY_ONLY=true
 ./mcpproxy serve --tray=true
 ```
 
+### 🧪 Prerelease/Canary Mode
+
+- **Prerelease Updates**: Allows updates to RC and development versions
+- **Latest Available**: Gets the newest version regardless of prerelease status
+- **For Testing**: Ideal for early adopters and testing new features
+
+```bash
+# Enable prerelease updates (canary behavior)
+export MCPPROXY_ALLOW_PRERELEASE_UPDATES=true
+./mcpproxy serve --tray=true
+
+# Or add to shell profile for permanent setting
+echo 'export MCPPROXY_ALLOW_PRERELEASE_UPDATES=true' >> ~/.zshrc
+```
+
 ## Package Manager Integration
 
 ### 🍺 Homebrew (macOS)
@@ -101,6 +116,7 @@ The system detects common package manager paths and disables auto-update accordi
 |----------|---------|-------------|
 | `MCPPROXY_DISABLE_AUTO_UPDATE` | `true`/`false` | Completely disable auto-update |
 | `MCPPROXY_UPDATE_NOTIFY_ONLY` | `true`/`false` | Check for updates but don't download |
+| `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | `true`/`false` | Allow auto-updates to prerelease versions (default: false) |
 
 ### System Tray Menu
 

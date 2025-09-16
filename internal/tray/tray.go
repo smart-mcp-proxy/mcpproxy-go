@@ -42,8 +42,9 @@ var iconData []byte
 
 // GitHubRelease represents a GitHub release
 type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
+	TagName    string `json:"tag_name"`
+	Prerelease bool   `json:"prerelease"`
+	Assets     []struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 	} `json:"assets"`
@@ -789,6 +790,15 @@ func (a *App) checkForUpdates() {
 
 // getLatestRelease fetches the latest release information from GitHub
 func (a *App) getLatestRelease() (*GitHubRelease, error) {
+	// Check if prerelease updates are allowed
+	allowPrerelease := os.Getenv("MCPPROXY_ALLOW_PRERELEASE_UPDATES") == trueStr
+
+	if allowPrerelease {
+		// Get all releases and find the latest (including prereleases)
+		return a.getLatestReleaseIncludingPrereleases()
+	}
+
+	// Default behavior: get latest stable release only
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 	resp, err := http.Get(url) // #nosec G107 -- URL is constructed from known repo constant
 	if err != nil {
@@ -801,6 +811,28 @@ func (a *App) getLatestRelease() (*GitHubRelease, error) {
 		return nil, err
 	}
 	return &release, nil
+}
+
+// getLatestReleaseIncludingPrereleases fetches the latest release including prereleases
+func (a *App) getLatestReleaseIncludingPrereleases() (*GitHubRelease, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases", repo)
+	resp, err := http.Get(url) // #nosec G107 -- URL is constructed from known repo constant
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var releases []GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, err
+	}
+
+	if len(releases) == 0 {
+		return nil, fmt.Errorf("no releases found")
+	}
+
+	// Return the first release (GitHub returns them sorted by creation date, newest first)
+	return &releases[0], nil
 }
 
 // findAssetURL finds the correct asset URL for the current system
