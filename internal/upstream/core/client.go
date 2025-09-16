@@ -67,6 +67,7 @@ type Client struct {
 
 	// Process monitoring (for stdio transport)
 	processCmd           *exec.Cmd
+	processGroupID       int // Process group ID for proper cleanup
 	processMonitorCtx    context.Context
 	processMonitorCancel context.CancelFunc
 	processMonitorWG     sync.WaitGroup
