@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"mcpproxy-go/internal/api"
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/httpapi"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/storage"
@@ -1058,7 +1060,12 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	mux.Handle("/v1/tool_code", loggingHandler(streamableServer))
 	mux.Handle("/v1/tool-code", loggingHandler(streamableServer)) // Alias for python client
 
-	// API endpoints for tray communication
+	// API v1 endpoints with chi router for REST API and SSE
+	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar())
+	mux.Handle("/api/", httpAPIServer)
+	mux.Handle("/events", httpAPIServer)
+
+	// Legacy API endpoints for backward compatibility (existing tray)
 	api.SetupRoutes(mux, s, s.logger.Sugar())
 
 	s.mu.Lock()
@@ -1293,4 +1300,113 @@ func (s *Server) GetLogDir() string {
 	}
 	// Last resort fallback to data directory
 	return s.config.DataDir
+}
+
+// GetServerTools returns tools for a specific server
+func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	s.logger.Debug("GetServerTools called", zap.String("server", serverName))
+
+	if s.upstreamManager == nil {
+		return nil, fmt.Errorf("upstream manager not initialized")
+	}
+
+	// Get client for the server
+	client, exists := s.upstreamManager.GetClient(serverName)
+	if !exists {
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
+
+	if !client.IsConnected() {
+		return nil, fmt.Errorf("server not connected: %s", serverName)
+	}
+
+	// Get tools from client
+	ctx := context.Background()
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		s.logger.Error("Failed to get server tools", zap.String("server", serverName), zap.Error(err))
+		return nil, err
+	}
+
+	// Convert to map format for API
+	var result []map[string]interface{}
+	for _, tool := range tools {
+		toolMap := map[string]interface{}{
+			"name":        tool.Name,
+			"description": tool.Description,
+			"server":      tool.ServerName,
+		}
+		// Note: ListTools returns ToolMetadata which doesn't have InputSchema
+		// We'd need to get that from the actual tool definition
+		result = append(result, toolMap)
+	}
+
+	s.logger.Debug("Retrieved server tools", zap.String("server", serverName), zap.Int("count", len(result)))
+	return result, nil
+}
+
+// SearchTools searches for tools using the index
+func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{}, error) {
+	s.logger.Debug("SearchTools called", zap.String("query", query), zap.Int("limit", limit))
+
+	if s.indexManager == nil {
+		return nil, fmt.Errorf("index manager not initialized")
+	}
+
+	// Search tools in the index
+	results, err := s.indexManager.SearchTools(query, limit)
+	if err != nil {
+		s.logger.Error("Failed to search tools", zap.String("query", query), zap.Error(err))
+		return nil, err
+	}
+
+	// Convert to map format for API
+	var resultMaps []map[string]interface{}
+	for _, result := range results {
+		if result.Tool != nil {
+			resultMap := map[string]interface{}{
+				"name":        result.Tool.Name,
+				"description": result.Tool.Description,
+				"server":      result.Tool.ServerName,
+				"score":       result.Score,
+			}
+			// Parse params JSON as input schema if available
+			if result.Tool.ParamsJSON != "" {
+				var inputSchema map[string]interface{}
+				if err := json.Unmarshal([]byte(result.Tool.ParamsJSON), &inputSchema); err == nil {
+					resultMap["input_schema"] = inputSchema
+				}
+			}
+			resultMaps = append(resultMaps, resultMap)
+		}
+	}
+
+	s.logger.Debug("Search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
+	return resultMaps, nil
+}
+
+// GetServerLogs returns recent log lines for a specific server
+func (s *Server) GetServerLogs(serverName string, tail int) ([]string, error) {
+	s.logger.Debug("GetServerLogs called", zap.String("server", serverName), zap.Int("tail", tail))
+
+	if s.upstreamManager == nil {
+		return nil, fmt.Errorf("upstream manager not initialized")
+	}
+
+	// Check if server exists
+	_, exists := s.upstreamManager.GetClient(serverName)
+	if !exists {
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
+
+	// For now, return a placeholder indicating logs are not yet implemented
+	// TODO: Implement actual log reading from server-specific log files
+	logs := []string{
+		fmt.Sprintf("Log viewing for server '%s' is not yet implemented", serverName),
+		"This feature will be added in a future release",
+		"Check the main application logs for server activity",
+	}
+
+	s.logger.Debug("Retrieved server logs", zap.String("server", serverName), zap.Int("lines", len(logs)))
+	return logs, nil
 }
