@@ -12,6 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/api"
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
@@ -1056,6 +1057,9 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	// Legacy endpoints for backward compatibility
 	mux.Handle("/v1/tool_code", loggingHandler(streamableServer))
 	mux.Handle("/v1/tool-code", loggingHandler(streamableServer)) // Alias for python client
+
+	// API endpoints for tray communication
+	api.SetupRoutes(mux, s, s.logger.Sugar())
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
