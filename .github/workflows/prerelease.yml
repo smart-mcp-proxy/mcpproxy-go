@@ -1,21 +1,22 @@
-name: Release
+name: Prerelease
 
 on:
   push:
-    tags: ["v*"]
+    branches: [next]
+    tags: ["v*-rc.*", "v*-next.*"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 env:
-  GITHUB_ENVIRONMENT: production
+  GITHUB_ENVIRONMENT: staging
 
 jobs:
   build:
-    environment: production
-    # Only run on tags from main branch
-    if: startsWith(github.ref, 'refs/tags/v') && (github.event.base_ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[main]'))
+    environment: staging
+    # Run on pushes to next branch or prerelease tags
+    if: github.ref == 'refs/heads/next' || startsWith(github.ref, 'refs/tags/v') && (contains(github.ref, '-rc.') || contains(github.ref, '-next.'))
     strategy:
       matrix:
         include:
@@ -97,21 +98,21 @@ jobs:
             echo "✅ Standard OpenSSL extraction succeeded"
           else
             echo "❌ Standard OpenSSL failed, installing OpenSSL 3.x with legacy provider..."
-            
+
             # Install OpenSSL 3.x with legacy provider support
             brew install openssl@3
             export PATH="/opt/homebrew/bin:$PATH"
-            
+
             # Verify OpenSSL version
             openssl version
-            
+
             # Extract with legacy provider support
             openssl pkcs12 -in legacy_cert.p12 \
               -passin pass:"${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
               -provider legacy -provider default \
               -nodes \
               -out temp_cert_and_key.pem
-            
+
             echo "✅ Legacy provider extraction succeeded"
           fi
 
@@ -183,7 +184,15 @@ jobs:
           CGO_CFLAGS: "-mmacosx-version-min=12.0"
           CGO_LDFLAGS: "-mmacosx-version-min=12.0"
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
+          # For prerelease, determine version differently
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # For branch pushes, create a version with commit hash
+            VERSION="v0.0.0-next.$(git rev-parse --short HEAD)"
+          fi
+
+          echo "Building version: ${VERSION}"
           LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION}"
 
           # Determine clean binary name
@@ -199,14 +208,14 @@ jobs:
           # Code sign macOS binaries
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             echo "Code signing macOS binary..."
-            
+
             # Debug: List all available certificates
             echo "Available certificates:"
             security find-identity -v -p codesigning
-            
+
             # Find the Developer ID certificate identity
             CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
-            
+
             # Verify we found a valid certificate
             if [ -n "${CERT_IDENTITY}" ]; then
               echo "✅ Found Developer ID certificate: ${CERT_IDENTITY}"
@@ -215,7 +224,7 @@ jobs:
               CERT_IDENTITY="${{ secrets.APPLE_TEAM_ID }}"
               echo "⚠️  Using fallback identity: ${CERT_IDENTITY}"
             fi
-            
+
             # Validate entitlements file formatting (Apple's recommendation)
             echo "=== Validating entitlements file ==="
             if [ -f "scripts/entitlements.plist" ]; then
@@ -226,17 +235,17 @@ jobs:
                 echo "❌ Entitlements file has formatting issues"
                 exit 1
               fi
-              
+
               # Convert to XML format if needed (Apple's recommendation)
               plutil -convert xml1 scripts/entitlements.plist
               echo "✅ Entitlements converted to XML format"
             else
               echo "⚠️  No entitlements file found"
             fi
-            
-            # Sign with proper Developer ID certificate, hardened runtime, and timestamp  
+
+            # Sign with proper Developer ID certificate, hardened runtime, and timestamp
             echo "=== Signing binary with hardened runtime ==="
-            
+
             # Install GNU coreutils for timeout command (macOS compatibility)
             if ! command -v timeout &> /dev/null; then
               echo "Installing GNU coreutils for timeout command..."
@@ -246,12 +255,12 @@ jobs:
             else
               TIMEOUT_CMD="timeout"
             fi
-            
+
             # Add timeout and retry logic for signing to prevent hanging
             SIGN_SUCCESS=false
             for attempt in 1 2 3; do
               echo "Signing attempt $attempt/3..."
-              
+
               # Use timeout command to prevent hanging (max 5 minutes per attempt)
               if $TIMEOUT_CMD 300 codesign --force \
                 --options runtime \
@@ -259,7 +268,7 @@ jobs:
                 --sign "${CERT_IDENTITY}" \
                 --timestamp \
                 ${CLEAN_BINARY}; then
-                
+
                 SIGN_SUCCESS=true
                 echo "✅ Signing succeeded on attempt $attempt"
                 break
@@ -271,10 +280,10 @@ jobs:
                 fi
               fi
             done
-            
+
             if [ "$SIGN_SUCCESS" != "true" ]; then
               echo "❌ All signing attempts failed"
-              
+
               # Try signing without timestamp as fallback
               echo "Attempting fallback signing without timestamp..."
               if $TIMEOUT_CMD 120 codesign --force \
@@ -289,14 +298,14 @@ jobs:
                 exit 1
               fi
             fi
-            
+
             # Verify signing, hardened runtime, and timestamp using Apple's recommended methods
             echo "=== Verifying binary signature (Apple's recommended verification) ==="
-            
+
             # Basic verification
             codesign --verify --verbose ${CLEAN_BINARY}
             echo "Basic verification: $?"
-            
+
             # Apple's recommended strict verification for notarization
             echo "=== Strict verification (matches notarization requirements) ==="
             if codesign -vvv --deep --strict ${CLEAN_BINARY}; then
@@ -305,7 +314,7 @@ jobs:
               echo "❌ Strict verification FAILED - will not pass notarization"
               exit 1
             fi
-            
+
             # Check for secure timestamp (Apple's recommended check)
             echo "=== Checking for secure timestamp ==="
             TIMESTAMP_CHECK=$(codesign -dvv ${CLEAN_BINARY} 2>&1)
@@ -317,14 +326,14 @@ jobs:
               echo "Full output:"
               echo "$TIMESTAMP_CHECK"
             fi
-            
+
             # Display detailed signature info
             codesign --display --verbose=4 ${CLEAN_BINARY}
-            
+
             # Check entitlements formatting (Apple's recommendation)
             echo "=== Checking entitlements formatting ==="
             codesign --display --entitlements - ${CLEAN_BINARY} | head -10
-            
+
             # Verify with spctl (Gatekeeper assessment) - expected to fail before notarization
             echo "=== Gatekeeper assessment (expected to fail before notarization) ==="
             if spctl --assess --verbose ${CLEAN_BINARY}; then
@@ -333,24 +342,19 @@ jobs:
               echo "⚠️  Gatekeeper assessment: REJECTED (expected - binary needs notarization)"
               echo "This is normal - the binary will pass after Apple completes notarization"
             fi
-            
+
             echo "✅ Binary signed successfully with hardened runtime and timestamp"
           fi
 
-          # Create archive with version info
+          # Create archive with version info - DO NOT create "latest" archives for prereleases
           ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          LATEST_ARCHIVE_BASE="mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}"
 
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
-            # Create versioned archive
+            # Create only versioned archive (no latest for prereleases)
             zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
-            # Create latest archive
-            zip "${LATEST_ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
           else
-            # Create versioned archive
+            # Create only versioned archive (no latest for prereleases)
             tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
-            # Create latest archive  
-            tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
           fi
 
       - name: Create .icns icon (macOS)
@@ -367,7 +371,14 @@ jobs:
           CGO_CFLAGS: "-mmacosx-version-min=12.0"
           CGO_LDFLAGS: "-mmacosx-version-min=12.0"
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
+          # For prerelease, determine version differently
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # For branch pushes, create a version with commit hash
+            VERSION="v0.0.0-next.$(git rev-parse --short HEAD)"
+          fi
+
           chmod +x scripts/create-dmg.sh
 
           # Determine binary name
@@ -380,7 +391,7 @@ jobs:
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
           echo "Signing DMG: ${DMG_NAME}"
 
-                    # Find the Developer ID certificate identity
+          # Find the Developer ID certificate identity
           CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
 
           # Verify we found a valid certificate
@@ -410,7 +421,14 @@ jobs:
       - name: Submit for notarization (macOS)
         if: matrix.goos == 'darwin'
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
+          # For prerelease, determine version differently
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # For branch pushes, create a version with commit hash
+            VERSION="v0.0.0-next.$(git rev-parse --short HEAD)"
+          fi
+
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
 
           echo "Submitting DMG for notarization..."
@@ -419,27 +437,27 @@ jobs:
           SUBMISSION_SUCCESS=false
           for attempt in 1 2 3; do
             echo "Notarization attempt $attempt/3..."
-            
+
             # Capture both stdout and stderr
             SUBMISSION_OUTPUT=$(xcrun notarytool submit "${DMG_NAME}" \
               --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
               --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" \
               --team-id "${{ secrets.APPLE_TEAM_ID }}" \
               --output-format json 2>&1)
-            
+
             SUBMISSION_EXIT_CODE=$?
-            
+
             if [ $SUBMISSION_EXIT_CODE -eq 0 ]; then
               # Extract submission ID with validation
               SUBMISSION_ID=$(echo "$SUBMISSION_OUTPUT" | jq -r '.id // empty')
-              
+
               if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ]; then
                 echo "✅ Notarization submission successful on attempt $attempt"
                 echo "Submission ID: ${SUBMISSION_ID}"
-                
+
                 # Save submission ID
                 echo "${SUBMISSION_ID}" > "${DMG_NAME}.submission_id"
-                
+
                 SUBMISSION_SUCCESS=true
                 break
               else
@@ -450,7 +468,7 @@ jobs:
               echo "❌ Notarization submission failed with exit code: $SUBMISSION_EXIT_CODE"
               echo "Output: $SUBMISSION_OUTPUT"
             fi
-            
+
             if [ $attempt -lt 3 ]; then
               echo "Retrying in 30 seconds..."
               sleep 30
@@ -473,7 +491,7 @@ jobs:
           if [ -f .keychain_name ]; then
             TEMP_KEYCHAIN=$(cat .keychain_name)
             echo "Cleaning up keychain: ${TEMP_KEYCHAIN}"
-            
+
             # Remove from search list and delete
             security delete-keychain "$TEMP_KEYCHAIN" 2>/dev/null || echo "Keychain already cleaned up"
             rm -f .keychain_name
@@ -488,12 +506,6 @@ jobs:
           name: versioned-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
-      - name: Upload latest archive artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: latest-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
-
       - name: Upload DMG installer (macOS)
         if: matrix.goos == 'darwin'
         uses: actions/upload-artifact@v4
@@ -506,7 +518,9 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    environment: production
+    environment: staging
+    # Only create releases for tag pushes, not branch pushes
+    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref, '-rc.') || contains(github.ref, '-next.'))
 
     steps:
       - name: Checkout
@@ -525,7 +539,7 @@ jobs:
           # Create a flat structure to avoid duplicates
           mkdir -p release-files
 
-          # Copy archives (tar.gz and zip files)
+          # Copy archives (tar.gz and zip files) - only versioned, no latest for prereleases
           find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
             filename=$(basename "$file")
             cp "$file" "release-files/$filename"
@@ -537,16 +551,16 @@ jobs:
           find dist -path "*/dmg-*" -name "*.dmg" | while read dmg_file; do
             filename=$(basename "$dmg_file")
             submission_id_file="${dmg_file}.submission_id"
-            
+
             if [ -f "$submission_id_file" ]; then
               # DMG has pending notarization
               SUBMISSION_ID=$(cat "$submission_id_file")
-              
+
               # Validate submission ID before creating pending file
               if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ] && [ ${#SUBMISSION_ID} -gt 10 ]; then
                 echo "Found valid pending notarization for $filename (ID: $SUBMISSION_ID)"
                 cp "$dmg_file" "release-files/$filename"
-                
+
                 # Create pending notarization record
                 cat > "pending-notarizations/${filename}.pending" << EOF
           {
@@ -580,36 +594,31 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
 
-      - name: Create release with binaries
+      - name: Create prerelease with binaries
         uses: softprops/action-gh-release@v2
         with:
           files: release-files/*
+          prerelease: true
           body: |
-            ## mcpproxy ${{ github.ref_name }}
+            ## mcpproxy ${{ github.ref_name }} (Prerelease)
+
+            ⚠️ **This is a prerelease version** - Use at your own risk!
 
             Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
 
             ### Download Links
 
-            **Latest Version (auto-updates):**
-            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) 
-            - [Linux ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
-            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.zip)
-            - [Windows ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-arm64.zip)
-            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz)
-            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
-
-            **macOS Installers (Recommended):**
-            - [macOS Universal DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.dmg) (Apple Silicon)
-            - [macOS Intel DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.dmg) (Intel)
-
-            **This Version (${{ github.ref_name }}):**
+            **This Prerelease (${{ github.ref_name }}):**
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz)
             - [Linux ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-arm64.tar.gz)
             - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-amd64.zip)
             - [Windows ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-arm64.zip)
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.tar.gz)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.tar.gz)
+
+            **macOS Installers (Recommended):**
+            - [macOS Universal DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.dmg) (Apple Silicon)
+            - [macOS Intel DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.dmg) (Intel)
 
             ### Installation
 
@@ -629,7 +638,7 @@ jobs:
             ### Platform Support
 
             - **macOS**: Full system tray support with menu and icons
-            - **Windows**: Full system tray support with menu and icons  
+            - **Windows**: Full system tray support with menu and icons
             - **Linux**: Headless mode only (no system tray due to compatibility)
 
             ### Usage
@@ -637,6 +646,12 @@ jobs:
             - With tray: `./mcpproxy serve` (default)
             - Custom port (default: 8080): `./mcpproxy serve --listen :8081`
             - Headless: `./mcpproxy serve --tray=false`
+
+            ### ⚠️ Prerelease Notes
+
+            - This is a development version and may contain bugs
+            - Not recommended for production use
+            - Auto-updater will NOT automatically update to this version unless `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` is set
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -652,89 +667,3 @@ jobs:
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  update-homebrew:
-    needs: release
-    runs-on: ubuntu-latest
-    environment: production
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-      - name: Checkout tap repository
-        uses: actions/checkout@v4
-        with:
-          repository: smart-mcp-proxy/homebrew-mcpproxy
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: tap
-
-      - name: Update Homebrew formula
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Processing version: ${VERSION}"
-
-          cd tap
-
-          # Add debugging and retry logic
-          ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz"
-          echo "Downloading from: ${ARCHIVE_URL}"
-
-          # Wait a bit for GitHub to generate the archive
-          sleep 10
-
-          # Try downloading with retries
-          for i in {1..5}; do
-            echo "Download attempt ${i}/5..."
-            if wget -q "${ARCHIVE_URL}" -O "v${VERSION}.tar.gz"; then
-              echo "Download successful"
-              break
-            else
-              echo "Download failed, retrying in 10 seconds..."
-              sleep 10
-            fi
-            
-            if [ $i -eq 5 ]; then
-              echo "All download attempts failed"
-              echo "Checking if file exists at URL..."
-              curl -I "${ARCHIVE_URL}" || true
-              exit 1
-            fi
-          done
-
-          # Verify file was downloaded
-          if [ ! -f "v${VERSION}.tar.gz" ]; then
-            echo "Archive file not found after download"
-            ls -la
-            exit 1
-          fi
-
-          # Calculate SHA256
-          SOURCE_SHA=$(sha256sum "v${VERSION}.tar.gz" | cut -d' ' -f1)
-          echo "Calculated SHA256: ${SOURCE_SHA}"
-
-          # Create formula directory
-          mkdir -p Formula
-
-          # Create formula file
-          printf 'class Mcpproxy < Formula\n  desc "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers"\n  homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"\n  url "https://github.com/smart-mcp-proxy/mcpproxy-go/archive/refs/tags/v%s.tar.gz"\n  sha256 "%s"\n  license "MIT"\n  head "https://github.com/smart-mcp-proxy/mcpproxy-go.git"\n\n  depends_on "go" => :build\n\n  def install\n    system "go", "build", "-ldflags", "-s -w -X mcpproxy-go/cmd/mcpproxy.version=v%s -X main.version=v%s", "-o", "mcpproxy", "./cmd/mcpproxy"\n    bin.install "mcpproxy"\n  end\n\n  test do\n    assert_match version.to_s, shell_output("#{bin}/mcpproxy --version")\n  end\nend\n' "${VERSION}" "${SOURCE_SHA}" "${VERSION}" "${VERSION}" > Formula/mcpproxy.rb
-
-                    echo "Formula created successfully"
-          cat Formula/mcpproxy.rb
-
-          # Clean up
-          rm -f *.tar.gz
-
-      - name: Commit and push changes
-        run: |
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/mcpproxy.rb
-
-          # Check if there are changes to commit
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Update mcpproxy to ${GITHUB_REF#refs/tags/v}"
-            git push
-            echo "Changes committed and pushed successfully"
-          fi
