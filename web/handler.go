@@ -26,12 +26,10 @@ func NewHandler(logger *zap.SugaredLogger) *Handler {
 
 // ServeHTTP handles HTTP requests for the web UI
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Clean the path and remove leading slash
-	uiPath := strings.TrimPrefix(path.Clean(r.URL.Path), "/ui")
-	if uiPath == "" || uiPath == "/" {
+	// Clean the path (StripPrefix already removed /ui prefix)
+	uiPath := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+	if uiPath == "" {
 		uiPath = "index.html"
-	} else {
-		uiPath = strings.TrimPrefix(uiPath, "/")
 	}
 
 	// Try to open the file
