@@ -55,11 +55,11 @@ type APIResponse struct {
 
 // StatusUpdate represents a status update from SSE
 type StatusUpdate struct {
-	Running        bool                   `json:"running"`
-	ListenAddr     string                 `json:"listen_addr"`
-	UpstreamStats  map[string]interface{} `json:"upstream_stats"`
-	Status         map[string]interface{} `json:"status"`
-	Timestamp      int64                  `json:"timestamp"`
+	Running       bool                   `json:"running"`
+	ListenAddr    string                 `json:"listen_addr"`
+	UpstreamStats map[string]interface{} `json:"upstream_stats"`
+	Status        map[string]interface{} `json:"status"`
+	Timestamp     int64                  `json:"timestamp"`
 }
 
 // Client provides access to the mcpproxy API

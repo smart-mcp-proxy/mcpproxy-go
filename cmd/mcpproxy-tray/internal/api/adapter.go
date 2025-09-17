@@ -91,8 +91,8 @@ func (a *ServerAdapter) GetStatus() interface{} {
 	}
 
 	return map[string]interface{}{
-		"phase":   "Running",
-		"message": fmt.Sprintf("API connected - %d servers", len(servers)),
+		"phase":             "Running",
+		"message":           fmt.Sprintf("API connected - %d servers", len(servers)),
 		"connected_servers": connectedCount,
 		"total_servers":     len(servers),
 	}
@@ -108,12 +108,12 @@ func (a *ServerAdapter) StatusChannel() <-chan interface{} {
 		for update := range a.client.StatusChannel() {
 			// Convert StatusUpdate to the format expected by tray
 			status := map[string]interface{}{
-				"phase":            "Running",
-				"message":          "Connected via API",
-				"running":          update.Running,
-				"listen_addr":      update.ListenAddr,
-				"upstream_stats":   update.UpstreamStats,
-				"timestamp":        update.Timestamp,
+				"phase":          "Running",
+				"message":        "Connected via API",
+				"running":        update.Running,
+				"listen_addr":    update.ListenAddr,
+				"upstream_stats": update.UpstreamStats,
+				"timestamp":      update.Timestamp,
 			}
 
 			select {

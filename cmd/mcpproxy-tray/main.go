@@ -17,8 +17,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"mcpproxy-go/internal/tray"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
+	"mcpproxy-go/internal/tray"
 )
 
 var version = "development" // Set by build flags
@@ -229,11 +229,11 @@ func startCoreServer() error {
 func findMcpproxyBinary() (string, error) {
 	// Try different possible locations
 	candidates := []string{
-		"mcpproxy",                    // In PATH
-		"./mcpproxy",                  // Current directory
-		"../mcpproxy/mcpproxy",        // Development setup
-		"/usr/local/bin/mcpproxy",     // Homebrew location
-		"/opt/homebrew/bin/mcpproxy",  // Apple Silicon Homebrew
+		"mcpproxy",                   // In PATH
+		"./mcpproxy",                 // Current directory
+		"../mcpproxy/mcpproxy",       // Development setup
+		"/usr/local/bin/mcpproxy",    // Homebrew location
+		"/opt/homebrew/bin/mcpproxy", // Apple Silicon Homebrew
 	}
 
 	for _, path := range candidates {

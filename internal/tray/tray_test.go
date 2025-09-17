@@ -701,11 +701,11 @@ func TestPrereleaseUpdateFlag(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                string
-		envVar              string
-		mockLatestResponse  *GitHubRelease // What /releases/latest returns
-		mockAllReleases     []*GitHubRelease // What /releases returns (sorted newest first)
-		expectPrerelease    bool
+		name               string
+		envVar             string
+		mockLatestResponse *GitHubRelease   // What /releases/latest returns
+		mockAllReleases    []*GitHubRelease // What /releases returns (sorted newest first)
+		expectPrerelease   bool
 	}{
 		{
 			name:               "default behavior - stable only",

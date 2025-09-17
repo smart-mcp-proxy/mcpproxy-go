@@ -30,7 +30,7 @@ func createProcessGroupCommandFunc(workingDir string, logger *zap.Logger) func(c
 		// TODO: Implement Windows-specific process group management
 		// Windows uses Job Objects instead of process groups
 		// For now, we'll use the standard command creation
-		
+
 		logger.Debug("Process group configuration applied (Windows)",
 			zap.String("command", command),
 			zap.Strings("args", args),
@@ -46,11 +46,11 @@ func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
 	// TODO: Implement proper Windows process termination
 	// For now, this is a placeholder that does nothing
 	// Windows process management would require Win32 API calls or Job Objects
-	
+
 	logger.Debug("Process group termination requested (Windows placeholder)",
 		zap.String("server", serverName),
 		zap.Int("pgid", pgid))
-	
+
 	return nil
 }
 

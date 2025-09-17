@@ -75,11 +75,11 @@ func (h *handlers) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Convert to a consistent format
 	response := map[string]interface{}{
-		"running":       h.server.IsRunning(),
-		"listen_addr":   h.server.GetListenAddress(),
+		"running":        h.server.IsRunning(),
+		"listen_addr":    h.server.GetListenAddress(),
 		"upstream_stats": h.server.GetUpstreamStats(),
-		"status":        status,
-		"timestamp":     time.Now().Unix(),
+		"status":         status,
+		"timestamp":      time.Now().Unix(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -113,11 +113,11 @@ func (h *handlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial status
 	initialStatus := map[string]interface{}{
-		"running":       h.server.IsRunning(),
-		"listen_addr":   h.server.GetListenAddress(),
+		"running":        h.server.IsRunning(),
+		"listen_addr":    h.server.GetListenAddress(),
 		"upstream_stats": h.server.GetUpstreamStats(),
-		"status":        h.server.GetStatus(),
-		"timestamp":     time.Now().Unix(),
+		"status":         h.server.GetStatus(),
+		"timestamp":      time.Now().Unix(),
 	}
 
 	if err := h.writeSSEEvent(w, "status", initialStatus); err != nil {
@@ -137,11 +137,11 @@ func (h *handlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 
 			response := map[string]interface{}{
-				"running":       h.server.IsRunning(),
-				"listen_addr":   h.server.GetListenAddress(),
+				"running":        h.server.IsRunning(),
+				"listen_addr":    h.server.GetListenAddress(),
 				"upstream_stats": h.server.GetUpstreamStats(),
-				"status":        status,
-				"timestamp":     time.Now().Unix(),
+				"status":         status,
+				"timestamp":      time.Now().Unix(),
 			}
 
 			if err := h.writeSSEEvent(w, "status", response); err != nil {

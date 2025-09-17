@@ -257,7 +257,7 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, map[string]interface{}{
-		"server":       serverID,
+		"server":          serverID,
 		"login_triggered": true,
 	})
 }

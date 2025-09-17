@@ -624,3 +624,74 @@ MCPProxy leverages the `mark3labs/mcp-go` library's native OAuth support:
 3. **Localhost Binding**: Callback servers bind only to `127.0.0.1` loopback
 4. **Token Storage**: In-memory token storage with automatic refresh
 5. **Exact URI Matching**: Perfect URI consistency for Cloudflare OAuth compliance
+
+## 13  Interface Architecture & Dependency Injection (P7)
+
+### 13.1  Facades & Interfaces
+
+To stabilize the codebase architecture and enable comprehensive testing, MCPProxy implements a clean interface layer using dependency injection patterns. This prevents accidental breakage during AI-assisted code modifications while enabling mock implementations for testing.
+
+**Core Interfaces:**
+- `UpstreamManager`: Manages MCP server connections and tool routing
+- `IndexManager`: Handles BM25 search indexing and tool discovery
+- `StorageManager`: Provides unified storage operations (BBolt + tool stats)
+- `OAuthTokenManager`: Manages OAuth token lifecycle and persistence
+- `DockerIsolationManager`: Controls Docker isolation for stdio servers
+- `LogManager`: Provides per-server logging and log management
+- `CacheManager`: Handles response caching with TTL management
+
+### 13.2  Application Context (`internal/appctx`)
+
+The application context provides clean dependency injection through interfaces:
+
+```go
+type ApplicationContext struct {
+    UpstreamManager        UpstreamManager
+    IndexManager           IndexManager
+    StorageManager         StorageManager
+    OAuthTokenManager      OAuthTokenManager
+    DockerIsolationManager DockerIsolationManager
+    LogManager             LogManager
+    CacheManager           CacheManager
+}
+```
+
+**Benefits:**
+- **Interface Stability**: Contract tests lock method signatures to prevent breaking changes
+- **Testability**: All dependencies can be mocked for unit testing
+- **Modularity**: Clear separation of concerns between components
+- **AI-Safe Architecture**: Interface constraints prevent LLM from accidentally breaking module contracts
+
+### 13.3  Contract Testing
+
+Comprehensive contract tests verify interface stability:
+- **489 method signature assertions** across all interfaces
+- **Compile-time verification** that implementations match interfaces
+- **Runtime contract validation** to catch signature changes
+- **Golden tests** that lock interface method sets
+
+Example contract verification:
+```go
+// Contract tests will FAIL if this interface changes
+type UpstreamManager interface {
+    ConnectAll(ctx context.Context) error
+    DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error)
+    // ... other methods with locked signatures
+}
+```
+
+### 13.4  Adapter Pattern Implementation
+
+Adapters bridge legacy concrete implementations to new interfaces:
+- `UpstreamManagerAdapter`: Wraps `upstream.Manager` with notification handling
+- `CacheManagerAdapter`: Adapts `cache.Manager` to standardized cache interface
+- `OAuthTokenManagerImpl`: Provides OAuth token management abstraction
+- `DockerIsolationManagerImpl`: Abstracts Docker container lifecycle
+
+## 14  Future Roadmap
+
+* Complete migration of HTTP/MCP/CLI layers to interface-based architecture
+* Incremental index updates on `tool_hash` diff
+* Hybrid BM25 + vector search
+* Auto‑update channel
+* GUI front‑end built with Wails

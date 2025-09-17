@@ -42,7 +42,6 @@ const (
 	defaultLogLevel = "info"
 )
 
-
 func main() {
 	// Set up registries initialization callback to avoid circular imports
 	config.SetRegistriesInitCallback(registries.SetRegistriesFromConfig)
