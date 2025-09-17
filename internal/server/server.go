@@ -22,6 +22,7 @@ import (
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
+	"mcpproxy-go/web"
 )
 
 // Status represents the current status of the server
@@ -1064,6 +1065,18 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar())
 	mux.Handle("/api/", httpAPIServer)
 	mux.Handle("/events", httpAPIServer)
+
+	// Web UI endpoints (serves embedded Vue.js frontend)
+	webUIHandler := web.NewHandler(s.logger.Sugar())
+	mux.Handle("/ui/", http.StripPrefix("/ui", webUIHandler))
+	// Redirect root to web UI
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/ui/", http.StatusFound)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
 
 	// Legacy API endpoints for backward compatibility (existing tray)
 	api.SetupRoutes(mux, s, s.logger.Sugar())

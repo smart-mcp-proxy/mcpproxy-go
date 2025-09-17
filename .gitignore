@@ -57,6 +57,26 @@ build/
 dist/
 bin/
 
+# Frontend dependencies and build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.vitest/
+
+# Package manager files
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Frontend cache and temp files
+frontend/.nuxt/
+frontend/.output/
+frontend/.cache/
+frontend/coverage/
+
+# Embedded frontend assets (auto-generated)
+web/frontend/
+
 # Test coverage
 coverage.out
 coverage.html

@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles */
+@layer components {
+  .btn-primary {
+    @apply btn bg-primary text-primary-content hover:opacity-90;
+  }
+
+  .card-compact {
+    @apply card bg-base-100 shadow-md;
+  }
+
+  .status-badge {
+    @apply badge font-medium;
+  }
+
+  .status-online {
+    @apply status-badge badge-success;
+  }
+
+  .status-offline {
+    @apply status-badge badge-error;
+  }
+
+  .status-connecting {
+    @apply status-badge badge-warning;
+  }
+
+  .status-unknown {
+    @apply status-badge badge-neutral;
+  }
+}
+
+/* Animations */
+@layer utilities {
+  .animate-pulse-slow {
+    animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .loading-dots::after {
+    content: '';
+    animation: dots 1.5s steps(5, end) infinite;
+  }
+
+  @keyframes dots {
+    0%, 20% { content: ''; }
+    40% { content: '.'; }
+    60% { content: '..'; }
+    80%, 100% { content: '...'; }
+  }
+}
