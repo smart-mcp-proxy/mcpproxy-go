@@ -80,10 +80,11 @@ type ServerInterface interface {
 
 // App represents the system tray application
 type App struct {
-	server   ServerInterface
-	logger   *zap.SugaredLogger
-	version  string
-	shutdown func()
+	server    ServerInterface
+	apiClient interface{ OpenWebUI() error } // API client for web UI access (optional)
+	logger    *zap.SugaredLogger
+	version   string
+	shutdown  func()
 
 	// Menu items for dynamic updates
 	statusItem          *systray.MenuItem
@@ -126,11 +127,17 @@ type App struct {
 
 // New creates a new tray application
 func New(server ServerInterface, logger *zap.SugaredLogger, version string, shutdown func()) *App {
+	return NewWithAPIClient(server, nil, logger, version, shutdown)
+}
+
+// NewWithAPIClient creates a new tray application with an API client for web UI access
+func NewWithAPIClient(server ServerInterface, apiClient interface{ OpenWebUI() error }, logger *zap.SugaredLogger, version string, shutdown func()) *App {
 	app := &App{
-		server:   server,
-		logger:   logger,
-		version:  version,
-		shutdown: shutdown,
+		server:    server,
+		apiClient: apiClient,
+		logger:    logger,
+		version:   version,
+		shutdown:  shutdown,
 	}
 
 	// Initialize managers (will be fully set up in onReady)
@@ -364,6 +371,12 @@ func (a *App) onReady() {
 	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
 	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
 	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
+
+	// Add Web Control Panel menu item if API client is available
+	var openWebUIItem *systray.MenuItem
+	if a.apiClient != nil {
+		openWebUIItem = systray.AddMenuItem("Open Web Control Panel", "Open the web control panel in your browser")
+	}
 	systray.AddSeparator()
 
 	// --- Autostart Menu Item (macOS only) ---
@@ -407,6 +420,20 @@ func (a *App) onReady() {
 			}
 		}
 	}()
+
+	// --- Web UI Click Handler (separate goroutine if available) ---
+	if openWebUIItem != nil {
+		go func() {
+			for {
+				select {
+				case <-openWebUIItem.ClickedCh:
+					a.handleOpenWebUI()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	// --- Autostart Click Handler (separate goroutine for macOS) ---
 	if runtime.GOOS == osDarwin && a.autostartItem != nil {
@@ -1268,5 +1295,21 @@ func (a *App) handleAutostartToggle() {
 		a.logger.Info("Autostart enabled - mcpproxy will start automatically at login")
 	} else {
 		a.logger.Info("Autostart disabled - mcpproxy will not start automatically at login")
+	}
+}
+
+// handleOpenWebUI opens the web control panel in the default browser
+func (a *App) handleOpenWebUI() {
+	if a.apiClient == nil {
+		a.logger.Warn("API client not available, cannot open web UI")
+		return
+	}
+
+	a.logger.Info("Opening web control panel from tray menu")
+
+	if err := a.apiClient.OpenWebUI(); err != nil {
+		a.logger.Error("Failed to open web control panel", zap.Error(err))
+	} else {
+		a.logger.Info("Successfully opened web control panel")
 	}
 }

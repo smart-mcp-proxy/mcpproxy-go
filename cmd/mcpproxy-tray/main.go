@@ -10,17 +10,46 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/tray"
+	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
 )
 
 var version = "development" // Set by build flags
+
+// getLogDir returns the standard log directory for the current OS
+func getLogDir() (string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Join(os.TempDir(), "mcpproxy", "logs"), nil
+		}
+		return filepath.Join(homeDir, "Library", "Logs", "mcpproxy"), nil
+	case "windows":
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			userProfile := os.Getenv("USERPROFILE")
+			if userProfile == "" {
+				return filepath.Join(os.TempDir(), "mcpproxy", "logs"), nil
+			}
+			localAppData = filepath.Join(userProfile, "AppData", "Local")
+		}
+		return filepath.Join(localAppData, "mcpproxy", "logs"), nil
+	default: // linux and others
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Join(os.TempDir(), "mcpproxy", "logs"), nil
+		}
+		return filepath.Join(homeDir, ".mcpproxy", "logs"), nil
+	}
+}
 
 func main() {
 	// Setup logging
@@ -57,17 +86,26 @@ func main() {
 		logger.Info("Core mcpproxy server already running")
 	}
 
-	// Create HTTP client adapter for server interface
-	httpClient := NewHTTPServerClient(coreURL, logger.Sugar())
+	// Create API client for modern REST API
+	apiClient := api.NewClient(coreURL, logger.Sugar())
+
+	// Start SSE connection for real-time updates
+	if err := apiClient.StartSSE(ctx); err != nil {
+		logger.Error("Failed to start SSE connection", zap.Error(err))
+	}
+
+	// Create adapter to make API client compatible with ServerInterface
+	serverAdapter := api.NewServerAdapter(apiClient)
 
 	// Create shutdown function
 	shutdownFunc := func() {
 		logger.Info("Tray shutdown requested")
+		apiClient.StopSSE()
 		cancel()
 	}
 
-	// Create tray application
-	trayApp := tray.New(httpClient, logger.Sugar(), version, shutdownFunc)
+	// Create tray application using the API adapter and pass the API client for web UI access
+	trayApp := tray.NewWithAPIClient(serverAdapter, apiClient, logger.Sugar(), version, shutdownFunc)
 
 	// Handle shutdown signal
 	go func() {
@@ -88,7 +126,7 @@ func main() {
 // setupLogging configures the logger with appropriate settings for the tray
 func setupLogging() (*zap.Logger, error) {
 	// Get log directory
-	logDir, err := logs.GetLogDir()
+	logDir, err := getLogDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get log directory: %w", err)
 	}
