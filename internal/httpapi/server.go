@@ -163,7 +163,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 
 // API v1 handlers
 
-func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGetServers(w http.ResponseWriter, _ *http.Request) {
 	servers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.logger.Error("Failed to get servers", "error", err)

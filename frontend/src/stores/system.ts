@@ -31,7 +31,10 @@ export const useSystemStore = defineStore('system', () => {
   ]
 
   // Computed
-  const isRunning = computed(() => status.value?.running ?? false)
+  const isRunning = computed(() => {
+    // The SSE event structure has running at the top level, not in the nested status
+    return status.value?.running ?? false
+  })
   const listenAddr = computed(() => status.value?.listen_addr ?? '')
   const upstreamStats = computed(() => status.value?.upstream_stats ?? {
     connected_servers: 0,

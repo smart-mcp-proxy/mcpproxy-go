@@ -61,7 +61,7 @@ func (o *OAuthTokenManagerImpl) GetToken(serverName string) (interface{}, error)
 }
 
 // SaveToken saves a token for the given server
-func (o *OAuthTokenManagerImpl) SaveToken(serverName string, token interface{}) error {
+func (o *OAuthTokenManagerImpl) SaveToken(serverName string, _ interface{}) error {
 	if o.storage == nil {
 		return fmt.Errorf("no storage available")
 	}
@@ -111,7 +111,7 @@ func (d *DockerIsolationManagerImpl) IsDockerAvailable() bool {
 }
 
 // StartIsolatedCommand starts a command in Docker isolation
-func (d *DockerIsolationManagerImpl) StartIsolatedCommand(ctx context.Context, command string, args []string, env map[string]string, workingDir string) (interface{}, error) {
+func (d *DockerIsolationManagerImpl) StartIsolatedCommand(_ context.Context, command string, args []string, env map[string]string, workingDir string) (interface{}, error) {
 	if d.isolationManager == nil {
 		return nil, fmt.Errorf("isolation manager not available")
 	}
@@ -147,7 +147,7 @@ func (d *DockerIsolationManagerImpl) SetResourceLimits(memory, cpu string) error
 }
 
 // GetContainerStats retrieves container statistics
-func (d *DockerIsolationManagerImpl) GetContainerStats(containerID string) (map[string]interface{}, error) {
+func (d *DockerIsolationManagerImpl) GetContainerStats(_ string) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
@@ -188,7 +188,7 @@ func (l *LogManagerImpl) GetMainLogger() *zap.Logger {
 }
 
 // CreateLogger creates a logger with the given configuration
-func (l *LogManagerImpl) CreateLogger(name string, config *config.LogConfig) *zap.Logger {
+func (l *LogManagerImpl) CreateLogger(name string, _ *config.LogConfig) *zap.Logger {
 	return l.logger.Named(name)
 }
 
@@ -204,7 +204,7 @@ func (l *LogManagerImpl) GetLogFiles() ([]string, error) {
 }
 
 // GetLogContent returns content of a log file
-func (l *LogManagerImpl) GetLogContent(logFile string, lines int) ([]string, error) {
+func (l *LogManagerImpl) GetLogContent(_ string, lines int) ([]string, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
@@ -272,14 +272,14 @@ func (c *CacheManagerAdapter) Get(key string) (interface{}, bool) {
 }
 
 // Set adapts the cache manager to implement our interface
-func (c *CacheManagerAdapter) Set(key string, value interface{}, ttl time.Duration) error {
+func (c *CacheManagerAdapter) Set(key string, value interface{}, _ time.Duration) error {
 	// The cache manager has a different Store signature, so we adapt it
 	valueStr := fmt.Sprintf("%v", value)
 	return c.Manager.Store(key, "generic_tool", map[string]interface{}{}, valueStr, "", 0)
 }
 
 // Delete removes a cache entry
-func (c *CacheManagerAdapter) Delete(key string) error {
+func (c *CacheManagerAdapter) Delete(_ string) error {
 	// Cache manager doesn't have a direct delete, but we can implement it
 	return fmt.Errorf("delete not implemented in cache manager")
 }
@@ -312,17 +312,17 @@ func (c *CacheManagerAdapter) GetHitRate() float64 {
 }
 
 // SetTTL sets TTL for a cache entry
-func (c *CacheManagerAdapter) SetTTL(key string, ttl time.Duration) error {
+func (c *CacheManagerAdapter) SetTTL(_ string, _ time.Duration) error {
 	return fmt.Errorf("SetTTL not implemented in cache manager")
 }
 
 // GetTTL gets TTL for a cache entry
-func (c *CacheManagerAdapter) GetTTL(key string) (time.Duration, error) {
+func (c *CacheManagerAdapter) GetTTL(_ string) (time.Duration, error) {
 	return 0, fmt.Errorf("GetTTL not implemented in cache manager")
 }
 
 // Expire expires a cache entry
-func (c *CacheManagerAdapter) Expire(key string) error {
+func (c *CacheManagerAdapter) Expire(_ string) error {
 	return fmt.Errorf("Expire not implemented in cache manager")
 }
 
