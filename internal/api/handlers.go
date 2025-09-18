@@ -74,12 +74,12 @@ func (h *handlers) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := h.server.GetStatus()
 
 	// Convert to a consistent format
+	// Note: status already contains upstream_stats, so we don't need to call GetUpstreamStats() again
 	response := map[string]interface{}{
-		"running":        h.server.IsRunning(),
-		"listen_addr":    h.server.GetListenAddress(),
-		"upstream_stats": h.server.GetUpstreamStats(),
-		"status":         status,
-		"timestamp":      time.Now().Unix(),
+		"running":     h.server.IsRunning(),
+		"listen_addr": h.server.GetListenAddress(),
+		"status":      status,
+		"timestamp":   time.Now().Unix(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -138,20 +138,26 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 // GetStatus returns the current server status
 func (s *Server) GetStatus() interface{} {
-	s.statusMu.RLock()
-	defer s.statusMu.RUnlock()
+	// Avoid holding multiple locks simultaneously to prevent deadlock
+	// Get running state separately
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	running := s.running
+	s.mu.RUnlock()
+
+	// Get status separately
+	s.statusMu.RLock()
+	status := s.status
+	s.statusMu.RUnlock()
 
 	// Create a map representation of the status for the tray
 	statusMap := map[string]interface{}{
-		"running":        s.running,
+		"running":        running,
 		"listen_addr":    s.GetListenAddress(),
-		"phase":          s.status.Phase,
-		"message":        s.status.Message,
-		"upstream_stats": s.status.UpstreamStats,
-		"tools_indexed":  s.status.ToolsIndexed,
-		"last_updated":   s.status.LastUpdated,
+		"phase":          status.Phase,
+		"message":        status.Message,
+		"upstream_stats": status.UpstreamStats,
+		"tools_indexed":  status.ToolsIndexed,
+		"last_updated":   status.LastUpdated,
 	}
 
 	return statusMap

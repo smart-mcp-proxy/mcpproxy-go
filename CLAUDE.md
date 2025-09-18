@@ -21,15 +21,30 @@ scripts/build.sh
 ```
 
 ### Testing
+
+**IMPORTANT: Always run tests before committing changes!**
+
 ```bash
+# Quick API E2E test (required before commits)
+./scripts/test-api-e2e.sh
+
+# Full test suite (recommended before major commits)
+./scripts/run-all-tests.sh
+
 # Run unit tests
 go test ./internal/... -v
 
 # Run unit tests with race detection
 go test -race ./internal/... -v
 
-# Run E2E tests
+# Run original E2E tests (internal mocks)
 ./scripts/run-e2e-tests.sh
+
+# Run binary E2E tests (with built mcpproxy)
+go test ./internal/server -run TestBinary -v
+
+# Run MCP protocol E2E tests
+go test ./internal/server -run TestMCP -v
 
 # Run specific test package
 go test ./internal/server -v
@@ -38,6 +53,25 @@ go test ./internal/server -v
 go test -coverprofile=coverage.out ./internal/...
 go tool cover -html=coverage.out
 ```
+
+#### E2E Test Requirements
+
+The E2E tests use `@modelcontextprotocol/server-everything` which provides:
+- **Echo tools** for testing basic functionality
+- **Math operations** for complex calculations
+- **String manipulation** for text processing
+- **File operations** (sandboxed)
+- **Error simulation** for error handling tests
+
+**Prerequisites for E2E tests:**
+- Node.js and npm installed (for everything server)
+- `jq` installed for JSON parsing
+- Built mcpproxy binary: `go build -o mcpproxy ./cmd/mcpproxy`
+
+**Test failure investigation:**
+- Check `/tmp/mcpproxy_e2e.log` for server logs
+- Verify everything server is connecting: look for "Everything server is connected!"
+- Ensure no port conflicts on 8081
 
 ### Linting
 ```bash

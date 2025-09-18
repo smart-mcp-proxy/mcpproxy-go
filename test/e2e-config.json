@@ -1,0 +1,149 @@
+{
+  "listen": ":8081",
+  "data_dir": "./test-data",
+  "enable_tray": false,
+  "debug_search": false,
+  "mcpServers": [
+    {
+      "name": "everything",
+      "protocol": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-everything"
+      ],
+      "enabled": true,
+      "quarantined": false,
+      "created": "2025-01-01T00:00:00Z",
+      "updated": "2025-09-18T18:09:22.451399+03:00"
+    }
+  ],
+  "top_k": 10,
+  "tools_limit": 50,
+  "tool_response_limit": 20000,
+  "call_tool_timeout": "30s",
+  "environment": {
+    "inherit_system_safe": true,
+    "allowed_system_vars": [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "TEMP",
+      "TMP",
+      "NODE_PATH",
+      "NPM_CONFIG_PREFIX"
+    ],
+    "custom_vars": {},
+    "enhance_path": false
+  },
+  "logging": {
+    "level": "info",
+    "enable_file": true,
+    "enable_console": true,
+    "filename": "main.log",
+    "max_size": 10,
+    "max_backups": 5,
+    "max_age": 30,
+    "compress": true,
+    "json_format": false
+  },
+  "read_only_mode": false,
+  "disable_management": false,
+  "allow_server_add": true,
+  "allow_server_remove": true,
+  "enable_prompts": true,
+  "check_server_repo": true,
+  "docker_isolation": {
+    "enabled": false,
+    "default_images": {
+      "bash": "alpine:3.18",
+      "binary": "alpine:3.18",
+      "cargo": "rust:1.75-slim",
+      "composer": "php:8.2-cli-alpine",
+      "gem": "ruby:3.2-alpine",
+      "go": "golang:1.21-alpine",
+      "node": "node:20",
+      "npm": "node:20",
+      "npx": "node:20",
+      "php": "php:8.2-cli-alpine",
+      "pip": "python:3.11",
+      "pipx": "python:3.11",
+      "python": "python:3.11",
+      "python3": "python:3.11",
+      "ruby": "ruby:3.2-alpine",
+      "rustc": "rust:1.75-slim",
+      "sh": "alpine:3.18",
+      "uvx": "python:3.11",
+      "yarn": "node:20"
+    },
+    "registry": "docker.io",
+    "network_mode": "bridge",
+    "memory_limit": "512m",
+    "cpu_limit": "1.0",
+    "timeout": "30s",
+    "log_max_size": "100m",
+    "log_max_files": "3"
+  },
+  "registries": [
+    {
+      "id": "pulse",
+      "name": "Pulse MCP",
+      "description": "Browse and discover MCP use-cases, servers, clients, and news",
+      "url": "https://www.pulsemcp.com/",
+      "servers_url": "https://api.pulsemcp.com/v0beta/servers",
+      "tags": [
+        "verified"
+      ],
+      "protocol": "custom/pulse"
+    },
+    {
+      "id": "docker-mcp-catalog",
+      "name": "Docker MCP Catalog",
+      "description": "A collection of secure, high-quality MCP servers as docker images",
+      "url": "https://hub.docker.com/catalogs/mcp",
+      "servers_url": "https://hub.docker.com/v2/repositories/mcp/",
+      "tags": [
+        "verified"
+      ],
+      "protocol": "custom/docker"
+    },
+    {
+      "id": "fleur",
+      "name": "Fleur",
+      "description": "Fleur is the app store for Claude",
+      "url": "https://www.fleurmcp.com/",
+      "servers_url": "https://raw.githubusercontent.com/fleuristes/app-registry/refs/heads/main/apps.json",
+      "tags": [
+        "verified"
+      ],
+      "protocol": "custom/fleur"
+    },
+    {
+      "id": "azure-mcp-demo",
+      "name": "Azure MCP Registry Demo",
+      "description": "A reference implementation of MCP registry using Azure API Center",
+      "url": "https://demo.registry.azure-mcp.net/",
+      "servers_url": "https://demo.registry.azure-mcp.net/v0/servers",
+      "tags": [
+        "verified",
+        "demo",
+        "azure",
+        "reference"
+      ],
+      "protocol": "mcp/v0"
+    },
+    {
+      "id": "remote-mcp-servers",
+      "name": "Remote MCP Servers",
+      "description": "Community-maintained list of remote Model Context Protocol servers",
+      "url": "https://remote-mcp-servers.com/",
+      "servers_url": "https://remote-mcp-servers.com/api/servers",
+      "tags": [
+        "verified",
+        "community",
+        "remote"
+      ],
+      "protocol": "custom/remote"
+    }
+  ]
+}
