@@ -1,0 +1,15 @@
+{
+  "data": {
+    "count": 1,
+    "server_name": "test-server",
+    "tools": [
+      {
+        "description": "A simple echo tool for testing",
+        "name": "echo_tool",
+        "server_name": "test-server",
+        "usage": 10
+      }
+    ]
+  },
+  "success": true
+}

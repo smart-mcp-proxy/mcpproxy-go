@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/contracts"
+	internalRuntime "mcpproxy-go/internal/runtime"
 )
+
+const asyncToggleTimeout = 5 * time.Second
 
 // ServerController defines the interface for core server functionality
 type ServerController interface {
@@ -23,6 +27,7 @@ type ServerController interface {
 	StopServer() error
 	GetStatus() interface{}
 	StatusChannel() <-chan interface{}
+	EventsChannel() <-chan internalRuntime.Event
 
 	// Server management
 	GetAllServers() ([]map[string]interface{}, error)
@@ -113,31 +118,9 @@ func (s *Server) setupRoutes() {
 	// SSE events
 	s.router.Get("/events", s.handleSSEEvents)
 
-	// Legacy API compatibility (for existing tray)
-	s.router.Route("/api", func(r chi.Router) {
-		r.Get("/status", s.handleLegacyStatus)
-		r.Get("/events", s.handleSSEEvents)
-		r.Get("/servers", s.handleLegacyGetServers)
-		r.Route("/servers/{name}", func(r chi.Router) {
-			r.Post("/enable", s.handleLegacyServerAction)
-			r.Post("/quarantine", s.handleLegacyServerAction)
-		})
-		r.Route("/control", func(r chi.Router) {
-			r.Post("/start", s.handleLegacyStart)
-			r.Post("/stop", s.handleLegacyStop)
-			r.Post("/reload", s.handleLegacyReload)
-		})
-		r.Post("/oauth/{name}", s.handleLegacyOAuth)
-	})
 }
 
 // JSON response helpers
-
-type APIResponse struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
-}
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -148,33 +131,33 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) 
 }
 
 func (s *Server) writeError(w http.ResponseWriter, status int, message string) {
-	s.writeJSON(w, status, APIResponse{
-		Success: false,
-		Error:   message,
-	})
+	s.writeJSON(w, status, contracts.NewErrorResponse(message))
 }
 
 func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
-	s.writeJSON(w, http.StatusOK, APIResponse{
-		Success: true,
-		Data:    data,
-	})
+	s.writeJSON(w, http.StatusOK, contracts.NewSuccessResponse(data))
 }
 
 // API v1 handlers
 
 func (s *Server) handleGetServers(w http.ResponseWriter, _ *http.Request) {
-	servers, err := s.controller.GetAllServers()
+	genericServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.logger.Error("Failed to get servers", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "Failed to get servers")
 		return
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"servers": servers,
-		"stats":   s.controller.GetUpstreamStats(),
-	})
+	// Convert to typed servers
+	servers := contracts.ConvertGenericServersToTyped(genericServers)
+	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
+
+	response := contracts.GetServersResponse{
+		Servers: servers,
+		Stats:   stats,
+	}
+
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
@@ -184,16 +167,27 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.controller.EnableServer(serverID, true); err != nil {
+	async, err := s.toggleServerAsync(serverID, true)
+	if err != nil {
 		s.logger.Error("Failed to enable server", "server", serverID, "error", err)
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
 		return
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"server":  serverID,
-		"enabled": true,
-	})
+	if async {
+		s.logger.Debug("Server enable dispatched asynchronously", "server", serverID)
+	} else {
+		s.logger.Debug("Server enable completed synchronously", "server", serverID)
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "enable",
+		Success: true,
+		Async:   async,
+	}
+
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
@@ -203,16 +197,27 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.controller.EnableServer(serverID, false); err != nil {
+	async, err := s.toggleServerAsync(serverID, false)
+	if err != nil {
 		s.logger.Error("Failed to disable server", "server", serverID, "error", err)
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
 		return
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"server":  serverID,
-		"enabled": false,
-	})
+	if async {
+		s.logger.Debug("Server disable dispatched asynchronously", "server", serverID)
+	} else {
+		s.logger.Debug("Server disable completed synchronously", "server", serverID)
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "disable",
+		Success: true,
+		Async:   async,
+	}
+
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
@@ -222,25 +227,60 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Restart = disable then enable
-	if err := s.controller.EnableServer(serverID, false); err != nil {
-		s.logger.Error("Failed to disable server for restart", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
-		return
+	done := make(chan error, 1)
+	go func() {
+		if err := s.controller.EnableServer(serverID, false); err != nil {
+			done <- err
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+		done <- s.controller.EnableServer(serverID, true)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			s.logger.Error("Failed to restart server", "server", serverID, "error", err)
+			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
+			return
+		}
+		s.logger.Debug("Server restart completed synchronously", "server", serverID)
+	case <-time.After(asyncToggleTimeout):
+		s.logger.Debug("Server restart executing asynchronously", "server", serverID)
+		go func() {
+			if err := <-done; err != nil {
+				s.logger.Error("Asynchronous server restart failed", "server", serverID, "error", err)
+			}
+		}()
 	}
 
-	time.Sleep(100 * time.Millisecond) // Brief pause
-
-	if err := s.controller.EnableServer(serverID, true); err != nil {
-		s.logger.Error("Failed to re-enable server for restart", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
-		return
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "restart",
+		Success: true,
+		Async:   false, // restart is handled synchronously
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"server":    serverID,
-		"restarted": true,
-	})
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.controller.EnableServer(serverID, enabled)
+	}()
+
+	select {
+	case err := <-errCh:
+		return false, err
+	case <-time.After(asyncToggleTimeout):
+		go func() {
+			if err := <-errCh; err != nil {
+				s.logger.Error("Asynchronous server toggle failed", "server", serverID, "enabled", enabled, "error", err)
+			}
+		}()
+		return true, nil
+	}
 }
 
 func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
@@ -256,10 +296,13 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"server":          serverID,
-		"login_triggered": true,
-	})
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "login",
+		Success: true,
+	}
+
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
@@ -276,10 +319,16 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"server": serverID,
-		"tools":  tools,
-	})
+	// Convert to typed tools
+	typedTools := contracts.ConvertGenericToolsToTyped(tools)
+
+	response := contracts.GetServerToolsResponse{
+		ServerName: serverID,
+		Tools:      typedTools,
+		Count:      len(typedTools),
+	}
+
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
@@ -304,11 +353,19 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"server": serverID,
-		"logs":   logs,
-		"tail":   tail,
-	})
+	// Convert log strings to typed log entries
+	logEntries := make([]contracts.LogEntry, len(logs))
+	for i, logLine := range logs {
+		logEntries[i] = *contracts.ConvertLogEntry(logLine, serverID)
+	}
+
+	response := contracts.GetServerLogsResponse{
+		ServerName: serverID,
+		Logs:       logEntries,
+		Count:      len(logEntries),
+	}
+
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
@@ -333,11 +390,17 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"query":   query,
-		"limit":   limit,
-		"results": results,
-	})
+	// Convert to typed search results
+	typedResults := contracts.ConvertGenericSearchResultsToTyped(results)
+
+	response := contracts.SearchToolsResponse{
+		Query:   query,
+		Results: typedResults,
+		Total:   len(typedResults),
+		Took:    "0ms", // TODO: Add timing measurement
+	}
+
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
@@ -353,8 +416,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get status channel
+	// Get status & event channels
 	statusCh := s.controller.StatusChannel()
+	eventsCh := s.controller.EventsChannel()
 
 	// Send initial status
 	initialStatus := map[string]interface{}{
@@ -394,6 +458,22 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
+		case evt, ok := <-eventsCh:
+			if !ok {
+				eventsCh = nil
+				continue
+			}
+
+			eventPayload := map[string]interface{}{
+				"payload":   evt.Payload,
+				"timestamp": evt.Timestamp.Unix(),
+			}
+
+			if err := s.writeSSEEvent(w, string(evt.Type), eventPayload); err != nil {
+				s.logger.Error("Failed to write runtime SSE event", "error", err)
+				return
+			}
+			flusher.Flush()
 		}
 	}
 }
@@ -426,169 +506,4 @@ func (s *Server) handleLegacyStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, response)
-}
-
-func (s *Server) handleLegacyGetServers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	servers, err := s.controller.GetAllServers()
-	if err != nil {
-		s.logger.Error("Failed to get servers", "error", err)
-		http.Error(w, "Failed to get servers", http.StatusInternalServerError)
-		return
-	}
-
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"servers": servers,
-	})
-}
-
-func (s *Server) handleLegacyServerAction(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	serverName := chi.URLParam(r, "name")
-	action := strings.TrimPrefix(r.URL.Path, "/api/servers/"+serverName+"/")
-
-	var err error
-	var result map[string]interface{}
-
-	switch action {
-	case "enable":
-		var req struct {
-			Enabled bool `json:"enabled"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-		err = s.controller.EnableServer(serverName, req.Enabled)
-		result = map[string]interface{}{
-			"success": err == nil,
-			"action":  "enable",
-			"enabled": req.Enabled,
-		}
-
-	case "quarantine":
-		var req struct {
-			Quarantined bool `json:"quarantined"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-		if req.Quarantined {
-			err = s.controller.QuarantineServer(serverName, true)
-		} else {
-			err = s.controller.UnquarantineServer(serverName)
-		}
-		result = map[string]interface{}{
-			"success":     err == nil,
-			"action":      "quarantine",
-			"quarantined": req.Quarantined,
-		}
-
-	default:
-		http.Error(w, "Unknown action", http.StatusBadRequest)
-		return
-	}
-
-	if err != nil {
-		s.logger.Error("Server action failed", "server", serverName, "action", action, "error", err)
-		result["error"] = err.Error()
-	}
-
-	s.writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleLegacyStart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	err := s.controller.StartServer(r.Context())
-	result := map[string]interface{}{
-		"success": err == nil,
-		"action":  "start",
-	}
-
-	if err != nil {
-		result["error"] = err.Error()
-		s.logger.Error("Failed to start server", "error", err)
-	}
-
-	s.writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleLegacyStop(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	err := s.controller.StopServer()
-	result := map[string]interface{}{
-		"success": err == nil,
-		"action":  "stop",
-	}
-
-	if err != nil {
-		result["error"] = err.Error()
-		s.logger.Error("Failed to stop server", "error", err)
-	}
-
-	s.writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleLegacyReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	err := s.controller.ReloadConfiguration()
-	result := map[string]interface{}{
-		"success": err == nil,
-		"action":  "reload",
-	}
-
-	if err != nil {
-		result["error"] = err.Error()
-		s.logger.Error("Failed to reload configuration", "error", err)
-	}
-
-	s.writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleLegacyOAuth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	serverName := chi.URLParam(r, "name")
-	if serverName == "" {
-		http.Error(w, "Server name required", http.StatusBadRequest)
-		return
-	}
-
-	err := s.controller.TriggerOAuthLogin(serverName)
-	result := map[string]interface{}{
-		"success": err == nil,
-		"action":  "oauth",
-		"server":  serverName,
-	}
-
-	if err != nil {
-		result["error"] = err.Error()
-		s.logger.Error("Failed to trigger OAuth", "server", serverName, "error", err)
-	}
-
-	s.writeJSON(w, http.StatusOK, result)
 }
