@@ -14,9 +14,10 @@ import (
 
 // Manager provides a unified interface for storage operations
 type Manager struct {
-	db     *BoltDB
-	mu     sync.RWMutex
-	logger *zap.SugaredLogger
+	db         *BoltDB
+	mu         sync.RWMutex
+	logger     *zap.SugaredLogger
+	asyncMgr   *AsyncManager
 }
 
 // NewManager creates a new storage manager
@@ -26,9 +27,13 @@ func NewManager(dataDir string, logger *zap.SugaredLogger) (*Manager, error) {
 		return nil, fmt.Errorf("failed to create bolt database: %w", err)
 	}
 
+	asyncMgr := NewAsyncManager(db, logger)
+	asyncMgr.Start()
+
 	return &Manager{
-		db:     db,
-		logger: logger,
+		db:       db,
+		logger:   logger,
+		asyncMgr: asyncMgr,
 	}, nil
 }
 
@@ -36,6 +41,11 @@ func NewManager(dataDir string, logger *zap.SugaredLogger) (*Manager, error) {
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Stop async manager first to ensure all operations complete
+	if m.asyncMgr != nil {
+		m.asyncMgr.Stop()
+	}
 
 	if m.db != nil {
 		return m.db.Close()
@@ -245,54 +255,29 @@ func (m *Manager) DeleteUpstreamServer(name string) error {
 	return m.db.DeleteUpstream(name)
 }
 
-// EnableUpstreamServer enables/disables an upstream server
+// EnableUpstreamServer enables/disables an upstream server using async operations
 func (m *Manager) EnableUpstreamServer(name string, enabled bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	record, err := m.db.GetUpstream(name)
-	if err != nil {
-		return err
-	}
-
-	record.Enabled = enabled
-	return m.db.SaveUpstream(record)
+	// Use async manager to avoid deadlocks
+	return m.asyncMgr.EnableServerSync(name, enabled)
 }
 
-// QuarantineUpstreamServer sets the quarantine status of an upstream server
+// QuarantineUpstreamServer sets the quarantine status of an upstream server using async operations
 func (m *Manager) QuarantineUpstreamServer(name string, quarantined bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.logger.Debugw("QuarantineUpstreamServer called",
 		"server", name,
 		"quarantined", quarantined)
 
-	record, err := m.db.GetUpstream(name)
+	// Use async manager to avoid deadlocks
+	err := m.asyncMgr.QuarantineServerSync(name, quarantined)
 	if err != nil {
-		m.logger.Errorw("Failed to get upstream record for quarantine operation",
-			"server", name,
-			"error", err)
-		return err
-	}
-
-	m.logger.Debugw("Retrieved upstream record for quarantine",
-		"server", name,
-		"current_quarantined", record.Quarantined,
-		"new_quarantined", quarantined)
-
-	record.Quarantined = quarantined
-	record.Updated = time.Now()
-
-	if err := m.db.SaveUpstream(record); err != nil {
-		m.logger.Errorw("Failed to save quarantine status to database",
+		m.logger.Errorw("Failed to quarantine server via async manager",
 			"server", name,
 			"quarantined", quarantined,
 			"error", err)
 		return err
 	}
 
-	m.logger.Debugw("Successfully saved quarantine status to database",
+	m.logger.Debugw("Successfully queued quarantine operation",
 		"server", name,
 		"quarantined", quarantined)
 

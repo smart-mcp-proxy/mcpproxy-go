@@ -110,9 +110,18 @@ golangci-lint run ./...
   - `call_cmd.go` - Tool execution commands
   - `tray_gui.go`/`tray_stub.go` - System tray interface (build-tagged)
 
-- **`internal/server/`** - Core server implementation
-  - `server.go` - Main server lifecycle and HTTP server management
+- **`internal/runtime/`** - Core runtime lifecycle management (Phase 1-3 refactoring)
+  - `runtime.go` - Non-HTTP lifecycle, configuration, and state management
+  - `event_bus.go` - Event system for real-time updates and SSE integration
+  - `lifecycle.go` - Background initialization, connection management, and tool indexing
+  - `events.go` - Event type definitions and payload structures
+
+- **`internal/server/`** - HTTP server and MCP proxy implementation
+  - `server.go` - HTTP server management and delegation to runtime
   - `mcp.go` - MCP protocol implementation and tool routing
+
+- **`internal/httpapi/`** - REST API endpoints with chi router
+  - `server.go` - `/api/v1` endpoints, SSE events, and server controls
 
 - **`internal/upstream/`** - Modular client architecture (3-layer design)
   - `core/` - Basic MCP client (stateless, transport-agnostic)
@@ -143,7 +152,8 @@ golangci-lint run ./...
 4. **OAuth 2.1 Support** - RFC 8252 compliant OAuth with PKCE for secure authentication
 5. **System Tray UI** - Native cross-platform tray interface for server management
 6. **Per-Server Logging** - Individual log files for each upstream server
-7. **Hot Configuration Reload** - Real-time config changes via file watching
+7. **Real-time Event System** - Event bus with SSE integration for live updates (Phase 3 refactoring)
+8. **Hot Configuration Reload** - Real-time config changes with event notifications
 
 ## Configuration
 
@@ -289,6 +299,25 @@ Working directories are compatible with Docker isolation. When both are configur
 ### Tool Name Format
 - Format: `<serverName>:<originalToolName>` (e.g., `github:create_issue`)
 - Tools are automatically prefixed with server names to prevent conflicts
+
+### HTTP API Endpoints
+
+The HTTP API provides REST endpoints for server management and monitoring:
+
+**Base Path**: `/api/v1` (legacy `/api` routes removed in Phase 4)
+
+**Core Endpoints**:
+- `GET /api/v1/status` - Server status and statistics
+- `GET /api/v1/servers` - List all upstream servers with connection status
+- `POST /api/v1/servers/{name}/enable` - Enable/disable server
+- `POST /api/v1/servers/{name}/quarantine` - Quarantine/unquarantine server
+- `GET /api/v1/tools` - Search tools across all servers
+- `GET /api/v1/servers/{name}/tools` - List tools for specific server
+
+**Real-time Updates**:
+- `GET /events` - Server-Sent Events (SSE) stream for live updates
+- Streams both status changes and runtime events (`servers.changed`, `config.reloaded`)
+- Used by web UI and tray for real-time synchronization
 
 ## Security Model
 
@@ -517,6 +546,54 @@ export HEADLESS=true
 - File watcher triggers automatic config reloads
 - Validate configuration on load and provide sensible defaults
 
+## Runtime Architecture (Phase 1-3 Refactoring)
+
+### Runtime Package (`internal/runtime/`)
+
+The runtime package provides the core non-HTTP lifecycle management, separating concerns from the HTTP server layer:
+
+- **Configuration Management**: Centralized config loading, validation, and hot-reload
+- **Background Services**: Connection management, tool indexing, and health monitoring
+- **State Management**: Thread-safe status tracking and upstream server state
+- **Event System**: Real-time event broadcasting for UI and SSE consumers
+
+### Event Bus System
+
+The event bus enables real-time communication between runtime and UI components:
+
+**Event Types**:
+- `servers.changed` - Server configuration or state changes
+- `config.reloaded` - Configuration file reloaded from disk
+
+**Event Flow**:
+1. Runtime operations trigger events via `emitServersChanged()` and `emitConfigReloaded()`
+2. Events are broadcast to subscribers through buffered channels
+3. Server forwards events to tray UI and SSE endpoints
+4. Tray menus refresh automatically without file watching
+5. Web UI receives live updates via `/events` SSE endpoint
+
+**SSE Integration**:
+- `/events` endpoint streams both status updates and runtime events
+- Automatic connection management with proper cleanup
+- JSON-formatted event payloads for easy consumption
+
+### Runtime Lifecycle
+
+**Initialization**:
+1. Runtime created with config, logger, and manager dependencies
+2. Background initialization starts server connections and tool indexing
+3. Status updates broadcast through event system
+
+**Background Services**:
+- **Connection Management**: Periodic reconnection attempts with exponential backoff
+- **Tool Indexing**: Automatic discovery and search index updates every 15 minutes
+- **Configuration Sync**: File-based config changes trigger runtime resync
+
+**Shutdown**:
+- Graceful context cancellation cascades to all background services
+- Upstream servers disconnected with proper Docker container cleanup
+- Resources closed in dependency order (upstream → cache → index → storage)
+
 ## Important Implementation Details
 
 ### Docker Security Isolation
@@ -559,6 +636,14 @@ export HEADLESS=true
 - Double shutdown protection
 
 When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
+
+### Known Issues
+
+**Potential Deadlock Patterns**:
+- `server.go:156-159` and `server.go:163`: Nested locking in shutdown sequence could cause deadlock if multiple goroutines trigger shutdown simultaneously
+- `lifecycle.go:274-275`: Runtime lock held during configuration save operations may conflict with storage callbacks
+
+These issues require careful review and should be addressed with proper lock ordering and timeout mechanisms.
 - to memory 
 if u want to test tool call in mcpproxy instead of curl call, use mcpproxy call. Example  `mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'`
 - to memory
