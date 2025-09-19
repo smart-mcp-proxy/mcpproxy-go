@@ -34,6 +34,8 @@ echo -e "${YELLOW}Building mcpproxy binary...${NC}"
 go build -o mcpproxy ./cmd/mcpproxy
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Build successful${NC}"
+    export MCPPROXY_BINARY_PATH="$(pwd)/mcpproxy"
+    export MCPPROXY_BINARY="$MCPPROXY_BINARY_PATH"
 else
     echo -e "${RED}✗ Build failed${NC}"
     exit 1

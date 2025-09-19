@@ -46,8 +46,8 @@ type SearchResult struct {
 	InputSchema map[string]interface{} `json:"input_schema,omitempty"`
 }
 
-// APIResponse represents the standard API response format
-type APIResponse struct {
+// Response represents the standard API response format
+type Response struct {
 	Success bool                   `json:"success"`
 	Data    map[string]interface{} `json:"data,omitempty"`
 	Error   string                 `json:"error,omitempty"`
@@ -133,7 +133,7 @@ func (c *Client) StatusChannel() <-chan StatusUpdate {
 
 // connectSSE establishes the SSE connection and processes events
 func (c *Client) connectSSE(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/events", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/events", http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -386,10 +386,10 @@ func (c *Client) OpenWebUI() error {
 }
 
 // makeRequest makes an HTTP request to the API
-func (c *Client) makeRequest(method, path string, body interface{}) (*APIResponse, error) {
+func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, error) {
 	url := c.baseURL + path
 
-	req, err := http.NewRequest(method, url, nil)
+	req, err := http.NewRequest(method, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -406,7 +406,7 @@ func (c *Client) makeRequest(method, path string, body interface{}) (*APIRespons
 		return nil, fmt.Errorf("API call failed with status %d", resp.StatusCode)
 	}
 
-	var apiResp APIResponse
+	var apiResp Response
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}

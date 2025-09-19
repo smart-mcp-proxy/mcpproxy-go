@@ -6,6 +6,8 @@ import (
 	"context"
 
 	"go.uber.org/zap"
+
+	internalRuntime "mcpproxy-go/internal/runtime"
 )
 
 // ServerInterface defines the interface for server control (stub version)
@@ -17,6 +19,7 @@ type ServerInterface interface {
 	StopServer() error
 	GetStatus() interface{}
 	StatusChannel() <-chan interface{}
+	EventsChannel() <-chan internalRuntime.Event
 
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)

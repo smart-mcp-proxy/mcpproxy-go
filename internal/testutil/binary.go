@@ -1,17 +1,22 @@
 package testutil
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"mcpproxy-go/internal/config"
 )
 
 // BinaryTestEnv manages a test environment with the actual mcpproxy binary
@@ -25,6 +30,54 @@ type BinaryTestEnv struct {
 	apiURL     string
 	cmd        *exec.Cmd
 	cleanup    func()
+}
+
+const (
+	binaryEnvPreferred = "MCPPROXY_BINARY_PATH"
+	binaryEnvLegacy    = "MCPPROXY_BINARY"
+)
+
+// resolveBinaryPath determines where the mcpproxy binary lives.
+// Preference order:
+//  1. Explicit absolute path via MCPPROXY_BINARY_PATH
+//  2. Legacy MCPPROXY_BINARY environment variable
+//  3. A discovered mcpproxy binary in the current or parent directories
+func resolveBinaryPath() string {
+	if path, ok := os.LookupEnv(binaryEnvPreferred); ok && path != "" {
+		return ensureAbsolute(path)
+	}
+
+	if path, ok := os.LookupEnv(binaryEnvLegacy); ok && path != "" {
+		return ensureAbsolute(path)
+	}
+
+	searchDirs := []string{"."}
+
+	if cwd, err := os.Getwd(); err == nil {
+		for dir := cwd; dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+			searchDirs = append(searchDirs, dir)
+		}
+	}
+
+	for _, dir := range searchDirs {
+		candidate := filepath.Join(dir, "mcpproxy")
+		absCandidate := ensureAbsolute(candidate)
+		if info, err := os.Stat(absCandidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+			return absCandidate
+		}
+	}
+
+	return ensureAbsolute("./mcpproxy")
+}
+
+func ensureAbsolute(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 // NewBinaryTestEnv creates a new binary test environment
@@ -46,7 +99,7 @@ func NewBinaryTestEnv(t *testing.T) *BinaryTestEnv {
 
 	env := &BinaryTestEnv{
 		t:          t,
-		binaryPath: "./mcpproxy", // Relative to project root
+		binaryPath: resolveBinaryPath(),
 		configPath: configPath,
 		dataDir:    dataDir,
 		port:       port,
@@ -86,7 +139,7 @@ func NewBinaryTestEnv(t *testing.T) *BinaryTestEnv {
 func (env *BinaryTestEnv) Start() {
 	// Check if binary exists
 	if _, err := os.Stat(env.binaryPath); os.IsNotExist(err) {
-		env.t.Fatalf("mcpproxy binary not found at %s. Please run: go build -o mcpproxy ./cmd/mcpproxy", env.binaryPath)
+		env.t.Fatalf("mcpproxy binary not found at %s. Set %s to the built binary or run: go build -o mcpproxy ./cmd/mcpproxy", env.binaryPath, binaryEnvPreferred)
 	}
 
 	// Start the binary
@@ -177,6 +230,8 @@ func (env *BinaryTestEnv) isEverythingServerReady() bool {
 			Servers []struct {
 				Name             string `json:"name"`
 				ConnectionStatus string `json:"connection_status"`
+				Connected        bool   `json:"connected"`
+				Connecting       bool   `json:"connecting"`
 			} `json:"servers"`
 		} `json:"data"`
 	}
@@ -187,7 +242,8 @@ func (env *BinaryTestEnv) isEverythingServerReady() bool {
 
 	// Look for everything server
 	for _, server := range response.Data.Servers {
-		if server.Name == "everything" && server.ConnectionStatus == "Ready" {
+		ready := server.ConnectionStatus == "Ready" || (server.Connected && !server.Connecting)
+		if server.Name == "everything" && ready {
 			return true
 		}
 	}
@@ -219,7 +275,7 @@ func (env *BinaryTestEnv) GetPort() int {
 
 // findAvailablePort finds an available port for testing
 func findAvailablePort(t *testing.T) int {
-	listener, err := net.Listen("tcp", ":0")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer listener.Close()
 
@@ -282,7 +338,8 @@ type MCPCallRequest struct {
 // CallMCPTool calls an MCP tool through the proxy using the mcpproxy binary
 func (env *BinaryTestEnv) CallMCPTool(toolName string, args map[string]interface{}) ([]byte, error) {
 	// Use the mcpproxy binary to call the tool
-	cmdArgs := []string{"call", "tool", "--tool-name=" + toolName}
+	cliConfigPath := env.prepareIsolatedConfig()
+	cmdArgs := []string{"call", "tool", "--tool-name=" + toolName, "--output=json", "--config=" + cliConfigPath}
 
 	if len(args) > 0 {
 		argsJSON, err := ParseJSONToString(args)
@@ -305,7 +362,65 @@ func (env *BinaryTestEnv) CallMCPTool(toolName string, args map[string]interface
 		return nil, err
 	}
 
-	return output, nil
+	lines := strings.Split(string(output), "\n")
+	var candidate string
+	for i, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
+			continue
+		}
+		firstRune := []rune(trimmedLine)[0]
+		if firstRune == '{' || firstRune == '[' {
+			candidate = strings.Join(lines[i:], "\n")
+			break
+		}
+	}
+	if candidate == "" {
+		candidate = string(output)
+	}
+
+	trimmed := bytes.TrimSpace([]byte(candidate))
+	if len(trimmed) == 0 {
+		return trimmed, nil
+	}
+
+	end := bytes.LastIndexAny(trimmed, "}]")
+	if end >= 0 && end < len(trimmed)-1 {
+		trimmed = trimmed[:end+1]
+	}
+
+	var envelope struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err == nil {
+		if len(envelope.Content) > 0 {
+			inner := strings.TrimSpace(envelope.Content[0].Text)
+			if inner != "" {
+				var raw json.RawMessage
+				if json.Unmarshal([]byte(inner), &raw) == nil {
+					return []byte(inner), nil
+				}
+			}
+		}
+	}
+
+	return trimmed, nil
+}
+
+func (env *BinaryTestEnv) prepareIsolatedConfig() string {
+	cfg, err := config.LoadFromFile(env.configPath)
+	require.NoError(env.t, err)
+
+	cliTempDir := env.t.TempDir()
+	cfgCopy := *cfg
+	cfgCopy.DataDir = ""
+
+	cliConfigPath := filepath.Join(cliTempDir, "config.json")
+	require.NoError(env.t, config.SaveConfig(&cfgCopy, cliConfigPath))
+
+	return cliConfigPath
 }
 
 // TestServerList represents a simplified server list response
@@ -322,7 +437,11 @@ type TestServer struct {
 	Protocol         string `json:"protocol"`
 	Enabled          bool   `json:"enabled"`
 	Quarantined      bool   `json:"quarantined"`
-	ConnectionStatus string `json:"connection_status"`
+	Connected        bool   `json:"connected"`
+	Connecting       bool   `json:"connecting"`
+	ToolCount        int    `json:"tool_count"`
+	LastError        string `json:"last_error"`
+	ConnectionStatus string `json:"connection_status,omitempty"`
 }
 
 // TestToolList represents a tool list response

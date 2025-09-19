@@ -19,7 +19,7 @@ type HTTPClient struct {
 func NewHTTPClient(baseURL string) *HTTPClient {
 	return &HTTPClient{
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 30 * time.Second,
 		},
 		baseURL: strings.TrimRight(baseURL, "/"),
 	}

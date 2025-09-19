@@ -366,21 +366,21 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	assert.False(t, result.IsError)
 
 	// Unquarantine the server for testing (bypassing security restrictions)
-	serverConfig, err := env.proxyServer.storageManager.GetUpstreamServer("testserver")
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("testserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
-	err = env.proxyServer.storageManager.SaveUpstreamServer(serverConfig)
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
 	// Trigger connection to the unquarantined server
-	err = env.proxyServer.upstreamManager.ConnectAll(ctx)
+	err = env.proxyServer.runtime.UpstreamManager().ConnectAll(ctx)
 	require.NoError(t, err)
 
 	// Wait for connection to establish
 	time.Sleep(1 * time.Second)
 
 	// Manually trigger tool discovery and indexing
-	_ = env.proxyServer.discoverAndIndexTools(ctx)
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
 
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)
@@ -467,21 +467,21 @@ func TestE2E_ToolCalling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Unquarantine the server for testing (bypassing security restrictions)
-	serverConfig, err := env.proxyServer.storageManager.GetUpstreamServer("echoserver")
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("echoserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
-	err = env.proxyServer.storageManager.SaveUpstreamServer(serverConfig)
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
 	// Trigger connection to the unquarantined server
-	err = env.proxyServer.upstreamManager.ConnectAll(ctx)
+	err = env.proxyServer.runtime.UpstreamManager().ConnectAll(ctx)
 	require.NoError(t, err)
 
 	// Wait for connection to establish
 	time.Sleep(1 * time.Second)
 
 	// Manually trigger tool discovery and indexing
-	_ = env.proxyServer.discoverAndIndexTools(ctx)
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
 
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)

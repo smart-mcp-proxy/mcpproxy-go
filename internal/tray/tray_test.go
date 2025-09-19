@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap/zaptest"
+
+	internalRuntime "mcpproxy-go/internal/runtime"
 )
 
 // MockServerInterface provides a mock implementation for testing
@@ -66,6 +68,10 @@ func (m *MockServerInterface) GetStatus() interface{} {
 
 func (m *MockServerInterface) StatusChannel() <-chan interface{} {
 	return m.statusCh
+}
+
+func (m *MockServerInterface) EventsChannel() <-chan internalRuntime.Event {
+	return nil
 }
 
 func (m *MockServerInterface) GetQuarantinedServers() ([]map[string]interface{}, error) {

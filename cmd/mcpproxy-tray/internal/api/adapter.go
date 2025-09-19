@@ -5,6 +5,8 @@ package api
 import (
 	"context"
 	"fmt"
+
+	internalRuntime "mcpproxy-go/internal/runtime"
 )
 
 // ServerAdapter adapts the API client to the ServerInterface expected by the tray
@@ -21,13 +23,12 @@ func NewServerAdapter(client *Client) *ServerAdapter {
 
 // IsRunning checks if the server is running via API
 func (a *ServerAdapter) IsRunning() bool {
-	servers, err := a.client.GetServers()
-	if err != nil {
+	if _, err := a.client.GetServers(); err != nil {
 		return false
 	}
 
-	// If we can fetch servers, the API is responsive
-	return len(servers) >= 0
+	// If we can fetch servers, the API is responsive regardless of count
+	return true
 }
 
 // GetListenAddress returns the listen address (hardcoded since API is available)
@@ -64,7 +65,7 @@ func (a *ServerAdapter) GetUpstreamStats() map[string]interface{} {
 }
 
 // StartServer is not supported via API (server is already running)
-func (a *ServerAdapter) StartServer(ctx context.Context) error {
+func (a *ServerAdapter) StartServer(_ context.Context) error {
 	return fmt.Errorf("StartServer not supported via API - server is already running")
 }
 
@@ -127,6 +128,11 @@ func (a *ServerAdapter) StatusChannel() <-chan interface{} {
 	return ch
 }
 
+// EventsChannel returns nil as the remote API does not yet proxy runtime events.
+func (a *ServerAdapter) EventsChannel() <-chan internalRuntime.Event {
+	return nil
+}
+
 // GetQuarantinedServers returns quarantined servers
 func (a *ServerAdapter) GetQuarantinedServers() ([]map[string]interface{}, error) {
 	servers, err := a.client.GetServers()
@@ -155,7 +161,7 @@ func (a *ServerAdapter) GetQuarantinedServers() ([]map[string]interface{}, error
 func (a *ServerAdapter) UnquarantineServer(serverName string) error {
 	// This functionality is not available in the current API
 	// Would need to be added to the API first
-	return fmt.Errorf("UnquarantineServer not yet supported via API")
+	return fmt.Errorf("UnquarantineServer not yet supported via API for %s", serverName)
 }
 
 // EnableServer enables or disables a server
@@ -167,7 +173,7 @@ func (a *ServerAdapter) EnableServer(serverName string, enabled bool) error {
 func (a *ServerAdapter) QuarantineServer(serverName string, quarantined bool) error {
 	// This functionality is not available in the current API
 	// Would need to be added to the API first
-	return fmt.Errorf("QuarantineServer not yet supported via API")
+	return fmt.Errorf("QuarantineServer not yet supported via API for %s (quarantined=%t)", serverName, quarantined)
 }
 
 // GetAllServers returns all servers

@@ -111,7 +111,7 @@ func (d *DockerIsolationManagerImpl) IsDockerAvailable() bool {
 }
 
 // StartIsolatedCommand starts a command in Docker isolation
-func (d *DockerIsolationManagerImpl) StartIsolatedCommand(_ context.Context, command string, args []string, env map[string]string, workingDir string) (interface{}, error) {
+func (d *DockerIsolationManagerImpl) StartIsolatedCommand(_ context.Context, command string, args []string, _ map[string]string, workingDir string) (interface{}, error) {
 	if d.isolationManager == nil {
 		return nil, fmt.Errorf("isolation manager not available")
 	}
@@ -204,7 +204,7 @@ func (l *LogManagerImpl) GetLogFiles() ([]string, error) {
 }
 
 // GetLogContent returns content of a log file
-func (l *LogManagerImpl) GetLogContent(_ string, lines int) ([]string, error) {
+func (l *LogManagerImpl) GetLogContent(_ string, _ int) ([]string, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 

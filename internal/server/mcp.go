@@ -1740,8 +1740,10 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 
 	// Get log configuration from main server
 	var logConfig *config.LogConfig
-	if p.mainServer != nil && p.mainServer.config.Logging != nil {
-		logConfig = p.mainServer.config.Logging
+	if p.mainServer != nil {
+		if cfg := p.mainServer.runtime.Config(); cfg != nil {
+			logConfig = cfg.Logging
+		}
 	}
 
 	// Read log tail

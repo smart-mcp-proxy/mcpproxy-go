@@ -20,21 +20,24 @@ import (
 	"time"
 
 	"fyne.io/systray"
-	"github.com/fsnotify/fsnotify"
 	"github.com/inconshreveable/go-update"
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
 	"mcpproxy-go/internal/config"
+	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/server"
 	// "mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
 )
 
 const (
-	repo      = "smart-mcp-proxy/mcpproxy-go" // Actual repository
-	osDarwin  = "darwin"
-	osWindows = "windows"
-	trueStr   = "true"
+	repo          = "smart-mcp-proxy/mcpproxy-go" // Actual repository
+	osDarwin      = "darwin"
+	osWindows     = "windows"
+	osLinux       = "linux"
+	assetZipExt   = ".zip"
+	assetTarGzExt = ".tar.gz"
+	trueStr       = "true"
 )
 
 //go:embed icon-mono-44.png
@@ -59,6 +62,7 @@ type ServerInterface interface {
 	StopServer() error
 	GetStatus() interface{}            // Returns server status for display
 	StatusChannel() <-chan interface{} // Channel for status updates
+	EventsChannel() <-chan internalRuntime.Event
 
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)
@@ -101,9 +105,8 @@ type App struct {
 	autostartManager *AutostartManager
 	autostartItem    *systray.MenuItem
 
-	// Config file watching
-	configWatcher *fsnotify.Watcher
-	configPath    string
+	// Config path for opening from menu
+	configPath string
 
 	// Context for background operations
 	ctx    context.Context
@@ -113,7 +116,6 @@ type App struct {
 	lastRunningState bool // Track last known server running state
 
 	// Menu tracking fields for dynamic updates
-	forceRefresh      bool                         // Force menu refresh flag
 	menusInitialized  bool                         // Track if menus have been initialized
 	coreMenusReady    bool                         // Track if core menu items are ready
 	lastServerList    []string                     // Track last known server list for change detection
@@ -166,9 +168,8 @@ func (a *App) Run(ctx context.Context) error {
 	a.ctx, a.cancel = context.WithCancel(ctx)
 	defer a.cancel()
 
-	// Initialize config file watcher
-	if err := a.initConfigWatcher(); err != nil {
-		a.logger.Warn("Failed to initialize config file watcher", zap.Error(err))
+	if a.server != nil {
+		a.configPath = a.server.GetConfigPath()
 	}
 
 	// Start background auto-update checker (daily)
@@ -212,36 +213,15 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Start config file watcher
-	if a.configWatcher != nil {
-		go a.watchConfigFile()
-	}
-
 	// Listen for real-time status updates
 	if a.server != nil {
 		go func() {
-			a.logger.Debug("Waiting for core menu items before processing real-time status updates...")
-			// Wait for menu items to be initialized using the flag
-			for !a.coreMenusReady {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					time.Sleep(100 * time.Millisecond) // Check every 100ms
-				}
-			}
-
-			a.logger.Debug("Core menu items ready, starting real-time status updates")
-			statusCh := a.server.StatusChannel()
-			for {
-				select {
-				case status := <-statusCh:
-					a.updateStatusFromData(status)
-				case <-ctx.Done():
-					return
-				}
-			}
+			a.consumeStatusUpdates()
 		}()
+
+		if eventsCh := a.server.EventsChannel(); eventsCh != nil {
+			go a.consumeRuntimeEvents(eventsCh)
+		}
 	}
 
 	// Monitor context cancellation and quit systray when needed
@@ -258,81 +238,94 @@ func (a *App) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// initConfigWatcher initializes the config file watcher
-func (a *App) initConfigWatcher() error {
-	if a.server == nil {
-		return fmt.Errorf("server interface not available")
-	}
-
-	configPath := a.server.GetConfigPath()
-	if configPath == "" {
-		return fmt.Errorf("config path not available")
-	}
-
-	a.configPath = configPath
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return fmt.Errorf("failed to create file watcher: %w", err)
-	}
-
-	a.configWatcher = watcher
-
-	// Watch the config file
-	if err := a.configWatcher.Add(configPath); err != nil {
-		a.configWatcher.Close()
-		return fmt.Errorf("failed to watch config file %s: %w", configPath, err)
-	}
-
-	a.logger.Info("Config file watcher initialized", zap.String("path", configPath))
-	return nil
+// cleanup performs cleanup operations
+func (a *App) cleanup() {
+	a.cancel()
 }
 
-// watchConfigFile watches for config file changes and reloads configuration
-func (a *App) watchConfigFile() {
-	defer a.configWatcher.Close()
+func (a *App) consumeStatusUpdates() {
+	statusCh := a.server.StatusChannel()
+	if statusCh == nil {
+		return
+	}
 
+	a.logger.Debug("Waiting for core menu items before processing real-time status updates...")
+	for !a.coreMenusReady {
+		select {
+		case <-a.ctx.Done():
+			return
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	a.logger.Debug("Core menu items ready, starting real-time status updates")
 	for {
 		select {
-		case event, ok := <-a.configWatcher.Events:
+		case status, ok := <-statusCh:
 			if !ok {
+				a.logger.Debug("Status channel closed; stopping status updates listener")
 				return
 			}
-
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				a.logger.Debug("Config file changed, reloading configuration", zap.String("event", event.String()))
-
-				// Add a small delay to ensure file write is complete
-				time.Sleep(500 * time.Millisecond)
-
-				if err := a.server.ReloadConfiguration(); err != nil {
-					a.logger.Error("Failed to reload configuration", zap.Error(err))
-				} else {
-					a.logger.Debug("Configuration reloaded successfully")
-					// Force a menu refresh after config reload
-					a.forceRefresh = true
-					a.refreshMenusImmediate()
-				}
-			}
-
-		case err, ok := <-a.configWatcher.Errors:
-			if !ok {
-				return
-			}
-			a.logger.Error("Config file watcher error", zap.Error(err))
-
+			a.updateStatusFromData(status)
 		case <-a.ctx.Done():
 			return
 		}
 	}
 }
 
-// cleanup performs cleanup operations
-func (a *App) cleanup() {
-	if a.configWatcher != nil {
-		a.configWatcher.Close()
+func (a *App) consumeRuntimeEvents(eventsCh <-chan internalRuntime.Event) {
+	if eventsCh == nil {
+		return
 	}
-	a.cancel()
+
+	a.logger.Debug("Waiting for core menu items before processing runtime events...")
+	for !a.coreMenusReady {
+		select {
+		case <-a.ctx.Done():
+			return
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	a.logger.Debug("Core menu items ready, starting runtime event listener")
+	for {
+		select {
+		case evt, ok := <-eventsCh:
+			if !ok {
+				a.logger.Debug("Runtime events channel closed; stopping listener")
+				return
+			}
+			a.handleRuntimeEvent(evt)
+		case <-a.ctx.Done():
+			return
+		}
+	}
+}
+
+func (a *App) handleRuntimeEvent(evt internalRuntime.Event) {
+	switch evt.Type {
+	case internalRuntime.EventTypeServersChanged, internalRuntime.EventTypeConfigReloaded:
+		if evt.Payload != nil {
+			a.logger.Debug("Processing runtime event",
+				zap.String("type", string(evt.Type)),
+				zap.Any("payload", evt.Payload))
+		} else {
+			a.logger.Debug("Processing runtime event", zap.String("type", string(evt.Type)))
+		}
+
+		if a.syncManager != nil {
+			if err := a.syncManager.SyncNow(); err != nil {
+				a.logger.Error("Failed to synchronize menus after runtime event", zap.Error(err))
+			}
+		}
+
+		a.updateStatus()
+	default:
+		// Ignore other event types for now but log at debug for visibility
+		a.logger.Debug("Ignoring runtime event", zap.String("type", string(evt.Type)))
+	}
 }
 
 func (a *App) onReady() {
@@ -873,9 +866,9 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 	var extension string
 	switch runtime.GOOS {
 	case osWindows:
-		extension = ".zip"
+		extension = assetZipExt
 	default: // macOS, Linux
-		extension = ".tar.gz"
+		extension = assetTarGzExt
 	}
 
 	// Try latest assets first (for website integration)
@@ -933,9 +926,9 @@ func (a *App) downloadAndApplyUpdate(url string) error {
 	}
 	defer resp.Body.Close()
 
-	if strings.HasSuffix(url, ".zip") {
+	if strings.HasSuffix(url, assetZipExt) {
 		return a.applyZipUpdate(resp.Body)
-	} else if strings.HasSuffix(url, ".tar.gz") {
+	} else if strings.HasSuffix(url, assetTarGzExt) {
 		return a.applyTarGzUpdate(resp.Body)
 	}
 
@@ -944,7 +937,7 @@ func (a *App) downloadAndApplyUpdate(url string) error {
 
 // applyZipUpdate extracts and applies an update from a zip archive
 func (a *App) applyZipUpdate(body io.Reader) error {
-	tmpfile, err := os.CreateTemp("", "update-*.zip")
+	tmpfile, err := os.CreateTemp("", fmt.Sprintf("update-*%s", assetZipExt))
 	if err != nil {
 		return err
 	}
@@ -987,7 +980,7 @@ func (a *App) applyZipUpdate(body io.Reader) error {
 // applyTarGzUpdate extracts and applies an update from a tar.gz archive
 func (a *App) applyTarGzUpdate(body io.Reader) error {
 	// For tar.gz files, we need to extract and find the binary
-	tmpfile, err := os.CreateTemp("", "update-*.tar.gz")
+	tmpfile, err := os.CreateTemp("", fmt.Sprintf("update-*%s", assetTarGzExt))
 	if err != nil {
 		return err
 	}
@@ -1067,7 +1060,7 @@ func (a *App) openDirectory(dirPath, dirType string) {
 	switch runtime.GOOS {
 	case osDarwin:
 		cmd = exec.Command("open", dirPath)
-	case "linux":
+	case osLinux:
 		cmd = exec.Command("xdg-open", dirPath)
 	case osWindows:
 		cmd = exec.Command("explorer", dirPath)

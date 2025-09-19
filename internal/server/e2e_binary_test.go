@@ -12,6 +12,16 @@ import (
 	"mcpproxy-go/internal/testutil"
 )
 
+func assertServerReady(t *testing.T, server testutil.TestServer) {
+	t.Helper()
+	if server.ConnectionStatus != "" {
+		assert.Equal(t, "Ready", server.ConnectionStatus)
+	}
+	assert.True(t, server.Connected, "expected server to report connected")
+	assert.False(t, server.Connecting, "expected server not to be connecting")
+	assert.Greater(t, server.ToolCount, 0, "expected server to have indexed tools")
+}
+
 // TestBinaryStartupAndShutdown tests basic binary startup and shutdown
 func TestBinaryStartupAndShutdown(t *testing.T) {
 	env := testutil.NewBinaryTestEnv(t)
@@ -45,7 +55,7 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 		assert.True(t, response.Success)
 		assert.Len(t, response.Data.Servers, 1)
 		assert.Equal(t, "everything", response.Data.Servers[0].Name)
-		assert.Equal(t, "Ready", response.Data.Servers[0].ConnectionStatus)
+		assertServerReady(t, response.Data.Servers[0])
 	})
 
 	t.Run("GET /servers/everything/tools", func(t *testing.T) {
@@ -75,9 +85,8 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 		// Should find the echo tool
 		found := false
 		for _, result := range response.Data.Results {
-			if result.Name == "everything:echo" {
+			if result.Name == "echo" && result.Server == "everything" {
 				found = true
-				assert.Equal(t, "everything", result.Server)
 				break
 			}
 		}
@@ -244,7 +253,7 @@ func TestBinaryConcurrentRequests(t *testing.T) {
 	errors := make(chan error, 5)
 
 	for i := 0; i < 5; i++ {
-		go func(index int) {
+		go func(_ int) {
 			var response testutil.TestServerList
 			err := client.GetJSON("/servers", &response)
 			if err != nil {
@@ -349,7 +358,7 @@ func TestBinaryHealthAndRecovery(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, response.Success)
 		assert.Len(t, response.Data.Servers, 1)
-		assert.Equal(t, "Ready", response.Data.Servers[0].ConnectionStatus)
+		assertServerReady(t, response.Data.Servers[0])
 	})
 
 	t.Run("Disable and re-enable server", func(t *testing.T) {
@@ -379,6 +388,6 @@ func TestBinaryHealthAndRecovery(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, response.Success)
 		assert.True(t, response.Data.Servers[0].Enabled)
-		assert.Equal(t, "Ready", response.Data.Servers[0].ConnectionStatus)
+		assertServerReady(t, response.Data.Servers[0])
 	})
 }

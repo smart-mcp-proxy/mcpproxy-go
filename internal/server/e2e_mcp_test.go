@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,6 +31,7 @@ func TestMCPProtocolWithBinary(t *testing.T) {
 		var result map[string]interface{}
 		err = json.Unmarshal(output, &result)
 		require.NoError(t, err)
+		t.Logf("retrieve_tools output: %s", string(output))
 
 		// Check that we have tools
 		tools, ok := result["tools"].([]interface{})
@@ -41,9 +43,11 @@ func TestMCPProtocolWithBinary(t *testing.T) {
 		for _, tool := range tools {
 			toolMap, ok := tool.(map[string]interface{})
 			require.True(t, ok)
-			if name, ok := toolMap["name"].(string); ok && strings.Contains(name, "echo") {
+			name, _ := toolMap["name"].(string)
+			server, _ := toolMap["server"].(string)
+			if strings.Contains(strings.ToLower(name), "echo") {
 				found = true
-				assert.Contains(t, name, "everything:", "Tool name should be prefixed with server name")
+				assert.Equal(t, "everything", server, "Tool should report its upstream server")
 				break
 			}
 		}
@@ -73,6 +77,11 @@ func TestMCPProtocolWithBinary(t *testing.T) {
 				err = json.Unmarshal(output, &result)
 				require.NoError(t, err)
 
+				if result["tools"] == nil {
+					assert.Equal(t, 0, tc.minTools, "Query '%s' returned no tools", tc.query)
+					return
+				}
+
 				tools, ok := result["tools"].([]interface{})
 				require.True(t, ok)
 				assert.GreaterOrEqual(t, len(tools), tc.minTools, "Query '%s' should find at least %d tools", tc.query, tc.minTools)
@@ -97,24 +106,29 @@ func TestMCPProtocolWithBinary(t *testing.T) {
 		require.Greater(t, len(tools), 0)
 
 		// Find echo tool
-		var echoToolName string
+		var (
+			echoToolName   string
+			echoToolServer string
+		)
 		for _, tool := range tools {
 			toolMap, ok := tool.(map[string]interface{})
 			require.True(t, ok)
-			if name, ok := toolMap["name"].(string); ok && strings.Contains(strings.ToLower(name), "echo") {
+			name, _ := toolMap["name"].(string)
+			server, _ := toolMap["server"].(string)
+			if strings.Contains(strings.ToLower(name), "echo") {
 				echoToolName = name
+				echoToolServer = server
 				break
 			}
 		}
 		require.NotEmpty(t, echoToolName, "Should find echo tool")
+		require.NotEmpty(t, echoToolServer, "Echo tool should report its server")
 
 		// Now call the echo tool
 		testMessage := "Hello from E2E test!"
-		output, err = env.CallMCPTool("call_tool", map[string]interface{}{
-			"name": echoToolName,
-			"args": map[string]interface{}{
-				"message": testMessage,
-			},
+		toolIdentifier := fmt.Sprintf("%s:%s", echoToolServer, echoToolName)
+		output, err = env.CallMCPTool(toolIdentifier, map[string]interface{}{
+			"message": testMessage,
 		})
 		require.NoError(t, err)
 
@@ -125,10 +139,7 @@ func TestMCPProtocolWithBinary(t *testing.T) {
 
 	t.Run("call_tool - error handling", func(t *testing.T) {
 		// Test calling non-existent tool
-		_, err := env.CallMCPTool("call_tool", map[string]interface{}{
-			"name": "nonexistent:tool",
-			"args": map[string]interface{}{},
-		})
+		_, err := env.CallMCPTool("nonexistent:tool", map[string]interface{}{})
 		assert.Error(t, err, "Should fail when calling non-existent tool")
 	})
 
@@ -271,6 +282,11 @@ func TestMCPProtocolToolCalling(t *testing.T) {
 
 		toolName, ok := toolMap["name"].(string)
 		require.True(t, ok)
+		toolServer, _ := toolMap["server"].(string)
+		targetTool := toolName
+		if toolServer != "" {
+			targetTool = fmt.Sprintf("%s:%s", toolServer, toolName)
+		}
 
 		t.Run("call_tool_"+strings.ReplaceAll(toolName, ":", "_"), func(t *testing.T) {
 			// Test basic tool calling with appropriate args based on tool name
@@ -296,10 +312,7 @@ func TestMCPProtocolToolCalling(t *testing.T) {
 				args = map[string]interface{}{}
 			}
 
-			output, err := env.CallMCPTool("call_tool", map[string]interface{}{
-				"name": toolName,
-				"args": args,
-			})
+			output, err := env.CallMCPTool(targetTool, args)
 
 			// We don't require success for all tools since some might need specific args
 			// But we should not get a panic or system error

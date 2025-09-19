@@ -16,6 +16,8 @@ type Handler struct {
 	fs     fs.FS
 }
 
+const indexFile = "index.html"
+
 // NewHandler creates a new web UI handler
 func NewHandler(logger *zap.SugaredLogger) *Handler {
 	return &Handler{
@@ -29,15 +31,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Clean the path (StripPrefix already removed /ui prefix)
 	uiPath := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 	if uiPath == "" {
-		uiPath = "index.html"
+		uiPath = indexFile
 	}
 
 	// Try to open the file
 	file, err := h.fs.Open(uiPath)
 	if err != nil {
 		// If file not found, serve index.html (SPA routing)
-		if uiPath != "index.html" {
-			file, err = h.fs.Open("index.html")
+		if uiPath != indexFile {
+			file, err = h.fs.Open(indexFile)
 			if err != nil {
 				h.logger.Error("Failed to open index.html", zap.Error(err))
 				http.Error(w, "Internal Server Error", http.StatusInternalServerError)

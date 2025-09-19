@@ -6,11 +6,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,32 +25,30 @@ import (
 
 var version = "development" // Set by build flags
 
-// getLogDir returns the standard log directory for the current OS
-func getLogDir() (string, error) {
+// getLogDir returns the standard log directory for the current OS.
+// Falls back to a temporary directory when a platform path cannot be resolved.
+func getLogDir() string {
+	fallback := filepath.Join(os.TempDir(), "mcpproxy", "logs")
+
 	switch runtime.GOOS {
 	case "darwin":
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return filepath.Join(os.TempDir(), "mcpproxy", "logs"), nil
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(homeDir, "Library", "Logs", "mcpproxy")
 		}
-		return filepath.Join(homeDir, "Library", "Logs", "mcpproxy"), nil
 	case "windows":
-		localAppData := os.Getenv("LOCALAPPDATA")
-		if localAppData == "" {
-			userProfile := os.Getenv("USERPROFILE")
-			if userProfile == "" {
-				return filepath.Join(os.TempDir(), "mcpproxy", "logs"), nil
-			}
-			localAppData = filepath.Join(userProfile, "AppData", "Local")
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			return filepath.Join(localAppData, "mcpproxy", "logs")
 		}
-		return filepath.Join(localAppData, "mcpproxy", "logs"), nil
+		if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
+			return filepath.Join(userProfile, "AppData", "Local", "mcpproxy", "logs")
+		}
 	default: // linux and others
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return filepath.Join(os.TempDir(), "mcpproxy", "logs"), nil
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(homeDir, ".mcpproxy", "logs")
 		}
-		return filepath.Join(homeDir, ".mcpproxy", "logs"), nil
 	}
+
+	return fallback
 }
 
 func main() {
@@ -57,7 +57,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to setup logging: %v", err)
 	}
-	defer logger.Sync()
+	defer func() {
+		if syncErr := logger.Sync(); syncErr != nil {
+			logger.Error("Failed to sync logger", zap.Error(syncErr))
+		}
+	}()
 
 	logger.Info("Starting mcpproxy-tray", zap.String("version", version))
 
@@ -126,10 +130,7 @@ func main() {
 // setupLogging configures the logger with appropriate settings for the tray
 func setupLogging() (*zap.Logger, error) {
 	// Get log directory
-	logDir, err := getLogDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get log directory: %w", err)
-	}
+	logDir := getLogDir()
 
 	// Ensure log directory exists
 	if err := os.MkdirAll(logDir, 0755); err != nil {
@@ -182,17 +183,12 @@ func setupLogging() (*zap.Logger, error) {
 
 // isServerRunning checks if the core mcpproxy server is running
 func isServerRunning(baseURL string) bool {
-	client := NewHTTPServerClient(baseURL, nil)
-	status := client.GetStatus()
-
-	// Check if we got a valid response
-	if statusMap, ok := status.(map[string]interface{}); ok {
-		if running, ok := statusMap["running"].(bool); ok {
-			return running
-		}
+	resp, err := http.Get(strings.TrimSuffix(baseURL, "/") + "/api/v1/servers")
+	if err != nil {
+		return false
 	}
-
-	return false
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
 // startCoreServer starts the core mcpproxy server process
@@ -204,9 +200,10 @@ func startCoreServer() error {
 	}
 
 	// Start the server in background
-	cmd := exec.Command(mcpproxyPath, "serve", "--tray=false")
+	cmd := exec.Command(mcpproxyPath, "serve")
 	cmd.Stdout = nil // Don't capture output to avoid blocking
 	cmd.Stderr = nil
+	cmd.Env = append(os.Environ(), "MCPP_ENABLE_TRAY=false")
 
 	// Start the process in a new process group
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -219,7 +216,9 @@ func startCoreServer() error {
 
 	// Don't wait for the process - let it run independently
 	go func() {
-		cmd.Wait() // Clean up zombie process
+		if waitErr := cmd.Wait(); waitErr != nil {
+			log.Printf("mcpproxy server process exited with error: %v", waitErr)
+		}
 	}()
 
 	return nil

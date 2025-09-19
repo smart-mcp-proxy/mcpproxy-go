@@ -118,7 +118,7 @@ func (m *MockServerController) TriggerOAuthLogin(serverName string) error { retu
 func TestAPIContractCompliance(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()
 	controller := &MockServerController{}
-	server := NewServer(controller, logger)
+	server := NewServer(controller, logger, nil)
 
 	tests := []struct {
 		name         string
@@ -280,7 +280,7 @@ func compareWithGoldenFile(t *testing.T, filename string, actual []byte) {
 func TestEndpointResponseTypes(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()
 	controller := &MockServerController{}
-	server := NewServer(controller, logger)
+	server := NewServer(controller, logger, nil)
 
 	// Test server action endpoints
 	actionTests := []struct {
@@ -325,7 +325,7 @@ func TestEndpointResponseTypes(t *testing.T) {
 func BenchmarkAPIResponseMarshaling(b *testing.B) {
 	logger := zaptest.NewLogger(b).Sugar()
 	controller := &MockServerController{}
-	server := NewServer(controller, logger)
+	server := NewServer(controller, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/servers", nil)
 

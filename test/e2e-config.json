@@ -12,10 +12,10 @@
         "-y",
         "@modelcontextprotocol/server-everything"
       ],
-      "enabled": true,
+      "enabled": false,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-09-18T18:09:22.451399+03:00"
+      "updated": "2025-09-19T13:00:35.208264+03:00"
     }
   ],
   "top_k": 10,

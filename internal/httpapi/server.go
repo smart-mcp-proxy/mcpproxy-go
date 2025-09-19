@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/contracts"
+	"mcpproxy-go/internal/observability"
 	internalRuntime "mcpproxy-go/internal/runtime"
 )
 
@@ -52,17 +53,19 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller ServerController
-	logger     *zap.SugaredLogger
-	router     *chi.Mux
+	controller     ServerController
+	logger         *zap.SugaredLogger
+	router         *chi.Mux
+	observability  *observability.Manager
 }
 
 // NewServer creates a new HTTP API server
-func NewServer(controller ServerController, logger *zap.SugaredLogger) *Server {
+func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *observability.Manager) *Server {
 	s := &Server{
-		controller: controller,
-		logger:     logger,
-		router:     chi.NewRouter(),
+		controller:    controller,
+		logger:        logger,
+		router:        chi.NewRouter(),
+		observability: obs,
 	}
 
 	s.setupRoutes()
@@ -76,7 +79,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
-	// Middleware
+	// Observability middleware (if available)
+	if s.observability != nil {
+		s.router.Use(s.observability.HTTPMiddleware())
+	}
+
+	// Core middleware
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.RequestID)
@@ -97,6 +105,17 @@ func (s *Server) setupRoutes() {
 			next.ServeHTTP(w, r)
 		})
 	})
+
+	// Observability endpoints
+	if s.observability != nil {
+		if health := s.observability.Health(); health != nil {
+			s.router.Get("/healthz", health.HealthzHandler())
+			s.router.Get("/readyz", health.ReadyzHandler())
+		}
+		if metrics := s.observability.Metrics(); metrics != nil {
+			s.router.Handle("/metrics", metrics.Handler())
+		}
+	}
 
 	// API v1 routes
 	s.router.Route("/api/v1", func(r chi.Router) {

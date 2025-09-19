@@ -14,6 +14,9 @@ MCPPROXY_BINARY="./mcpproxy"
 COVERAGE_FILE="coverage.out"
 COVERAGE_HTML="coverage.html"
 
+export MCPPROXY_BINARY_PATH="$(pwd)/mcpproxy"
+export MCPPROXY_BINARY="$MCPPROXY_BINARY_PATH"
+
 # Test results tracking
 TOTAL_TESTS=0
 PASSED_TESTS=0
