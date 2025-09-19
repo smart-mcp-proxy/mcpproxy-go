@@ -31,32 +31,41 @@
 - [x] `TestBinaryAPIEndpoints` timeouts resolved via queue-based AsyncManager
 - [x] Tests now pass consistently
 
-### 🚧 IN PROGRESS / PARTIALLY COMPLETED
+#### Phase 5 ✅ — Observability Module
+- [x] Create `internal/observability` package
+- [x] Implement `/healthz`, `/readyz`, `/metrics` endpoints
+- [x] Add Prometheus metrics and optional OpenTelemetry tracing
+- [x] Component health checkers for database, index, upstream servers
+- [x] HTTP middleware integration for metrics and tracing
 
-#### Phase 2 🚧 — Shared Contracts Package
+#### Phase 2 ✅ — Shared Contracts Package
 - [x] `internal/appctx` with interfaces created
-- [x] Basic contract structure in place
-- [ ] **TODO**: Full typed DTOs replacing `map[string]interface{}` payloads
-- [ ] **TODO**: TypeScript type generation for frontend
+- [x] Full typed DTOs replacing `map[string]interface{}` payloads
+- [x] `internal/contracts/types.go` with comprehensive data structures
+- [x] `internal/contracts/converters.go` for type conversion utilities
+- [x] TypeScript type generation for frontend via `cmd/generate-types`
+- [x] Generated types available at `web/frontend/src/types/contracts.ts`
 
-#### Phase 6 🚧 — Web UI & Contract Tests
+#### Phase 6 ✅ — Web UI & Contract Tests
 - [x] Web UI embedded via `go:embed` at `/ui/`
 - [x] Frontend built with Vite + TypeScript
 - [x] Basic Playwright smoke tests implemented
-- [ ] **TODO**: Full contract tests with golden responses
-- [ ] **TODO**: Comprehensive API coverage
+- [x] Full contract tests with golden responses via `internal/httpapi/contracts_test.go`
+- [x] Comprehensive API coverage for all major endpoints
+- [x] Golden file validation for API contract stability
+
+#### Phase 7 ✅ — Follow-up Hardening
+- [x] Expand runtime interfaces for future extensibility
+- [x] Feature flags for module isolation via `internal/config/features.go`
+- [x] Document module boundaries in `ARCHITECTURE.md`
+- [x] Feature flag validation and dependency checking
+- [x] Graceful degradation patterns documented
+
+### 🚧 IN PROGRESS / PARTIALLY COMPLETED
 
 ### 📋 TODO PHASES
 
-#### Phase 5 — Observability Module
-- [ ] Create `internal/observability` package
-- [ ] Implement `/healthz`, `/readyz`, `/metrics` endpoints
-- [ ] Add Prometheus metrics and optional OpenTelemetry tracing
-
-#### Phase 7 — Follow-up Hardening
-- [ ] Expand runtime interfaces for future extensibility
-- [ ] Feature flags for module isolation
-- [ ] Document module boundaries
+*All core refactoring phases (0-7) are now complete! Remaining items are future enhancements:*
 
 ---
 

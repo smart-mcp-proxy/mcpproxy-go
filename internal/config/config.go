@@ -75,6 +75,9 @@ type Config struct {
 
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
+
+	// Feature flags for modular functionality
+	Features *FeatureFlags `json:"features,omitempty" mapstructure:"features"`
 }
 
 // LogConfig represents logging configuration
@@ -381,6 +384,12 @@ func DefaultConfig() *Config {
 				Protocol:    "custom/remote",
 			},
 		},
+
+		// Default feature flags
+		Features: func() *FeatureFlags {
+			flags := DefaultFeatureFlags()
+			return &flags
+		}(),
 	}
 }
 
@@ -410,6 +419,16 @@ func (c *Config) Validate() error {
 	// Ensure DockerIsolation config is not nil
 	if c.DockerIsolation == nil {
 		c.DockerIsolation = DefaultDockerIsolationConfig()
+	}
+
+	// Ensure Features config is not nil and validate dependencies
+	if c.Features == nil {
+		flags := DefaultFeatureFlags()
+		c.Features = &flags
+	} else {
+		if err := c.Features.ValidateFeatureFlags(); err != nil {
+			return fmt.Errorf("feature flag validation failed: %w", err)
+		}
 	}
 
 	return nil

@@ -7,6 +7,16 @@
 /mcpproxy
 __debug_bin*
 
+# Go build cache
+.gocache/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Bleve search index directories
+index.bleve/
+*.bleve/
+
 # Test binary, built with `go test -c`
 *.test
 
