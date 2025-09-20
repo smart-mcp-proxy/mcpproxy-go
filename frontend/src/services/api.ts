@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis } from '@/types'
 
 class APIService {
   private baseUrl = ''
@@ -81,6 +81,17 @@ class APIService {
   // Server-Sent Events
   createEventSource(): EventSource {
     return new EventSource(`${this.baseUrl}/events`)
+  }
+
+  // Secret endpoints
+  async getSecretRefs(): Promise<APIResponse<{ refs: SecretRef[] }>> {
+    return this.request<{ refs: SecretRef[] }>('/api/v1/secrets/refs')
+  }
+
+  async runMigrationAnalysis(): Promise<APIResponse<{ analysis: MigrationAnalysis }>> {
+    return this.request<{ analysis: MigrationAnalysis }>('/api/v1/secrets/migrate', {
+      method: 'POST',
+    })
   }
 
   // Utility methods

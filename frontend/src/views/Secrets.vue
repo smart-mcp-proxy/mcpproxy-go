@@ -149,26 +149,8 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { apiClient } from '@/services/api'
-
-interface SecretRef {
-  type: string
-  name: string
-  original: string
-}
-
-interface MigrationCandidate {
-  field: string
-  value: string
-  suggested: string
-  confidence: number
-  migrating?: boolean
-}
-
-interface MigrationAnalysis {
-  candidates: MigrationCandidate[]
-  total_found: number
-}
+import apiClient from '@/services/api'
+import type { SecretRef, MigrationCandidate, MigrationAnalysis } from '@/types'
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -187,10 +169,14 @@ const loadSecrets = async () => {
   error.value = null
 
   try {
-    const response = await apiClient.get('/api/v1/secrets/refs')
-    secretRefs.value = response.data.data.refs || []
+    const response = await apiClient.getSecretRefs()
+    if (response.success && response.data) {
+      secretRefs.value = response.data.refs || []
+    } else {
+      error.value = response.error || 'Failed to load secrets'
+    }
   } catch (err: any) {
-    error.value = err.response?.data?.message || 'Failed to load secrets'
+    error.value = err.message || 'Failed to load secrets'
     console.error('Failed to load secrets:', err)
   } finally {
     loading.value = false
@@ -201,11 +187,14 @@ const runMigrationAnalysis = async () => {
   analysisLoading.value = true
 
   try {
-    const response = await apiClient.post('/api/v1/secrets/migrate')
-    const analysis: MigrationAnalysis = response.data.data.analysis
-    migrationCandidates.value = analysis.candidates || []
+    const response = await apiClient.runMigrationAnalysis()
+    if (response.success && response.data) {
+      migrationCandidates.value = response.data.analysis.candidates || []
+    } else {
+      error.value = response.error || 'Failed to run migration analysis'
+    }
   } catch (err: any) {
-    error.value = err.response?.data?.message || 'Failed to run migration analysis'
+    error.value = err.message || 'Failed to run migration analysis'
     console.error('Failed to run migration analysis:', err)
   } finally {
     analysisLoading.value = false

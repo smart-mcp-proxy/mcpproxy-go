@@ -67,3 +67,23 @@ export interface DashboardStats {
     memory_usage?: string
   }
 }
+
+// Secret management types
+export interface SecretRef {
+  type: string      // "env", "keyring", etc.
+  name: string      // The secret name/key
+  original: string  // Original reference string like "${env:API_KEY}"
+}
+
+export interface MigrationCandidate {
+  field: string      // Field path in configuration
+  value: string      // Masked value for display
+  suggested: string  // Suggested secret reference
+  confidence: number // Confidence score (0.0 to 1.0)
+  migrating?: boolean // UI state for migration in progress
+}
+
+export interface MigrationAnalysis {
+  candidates: MigrationCandidate[]
+  total_found: number
+}
