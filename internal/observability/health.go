@@ -50,10 +50,10 @@ type ReadinessResponse struct {
 
 // HealthManager manages health and readiness checks
 type HealthManager struct {
-	logger           *zap.SugaredLogger
-	healthCheckers   []HealthChecker
+	logger            *zap.SugaredLogger
+	healthCheckers    []HealthChecker
 	readinessCheckers []ReadinessChecker
-	timeout          time.Duration
+	timeout           time.Duration
 }
 
 // NewHealthManager creates a new health manager

@@ -81,16 +81,16 @@ func (ihc *IndexHealthChecker) ReadinessCheck(ctx context.Context) error {
 
 // UpstreamHealthChecker checks the health of upstream servers
 type UpstreamHealthChecker struct {
-	name        string
-	getStats    func() map[string]interface{}
+	name         string
+	getStats     func() map[string]interface{}
 	minConnected int
 }
 
 // NewUpstreamHealthChecker creates a new upstream health checker
 func NewUpstreamHealthChecker(name string, getStats func() map[string]interface{}, minConnected int) *UpstreamHealthChecker {
 	return &UpstreamHealthChecker{
-		name:        name,
-		getStats:    getStats,
+		name:         name,
+		getStats:     getStats,
 		minConnected: minConnected,
 	}
 }

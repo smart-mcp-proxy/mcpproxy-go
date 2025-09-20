@@ -5,9 +5,9 @@ import "fmt"
 // FeatureFlags represents feature toggles for mcpproxy functionality
 type FeatureFlags struct {
 	// Runtime features
-	EnableRuntime     bool `json:"enable_runtime" mapstructure:"enable_runtime"`
-	EnableEventBus    bool `json:"enable_event_bus" mapstructure:"enable_event_bus"`
-	EnableSSE         bool `json:"enable_sse" mapstructure:"enable_sse"`
+	EnableRuntime  bool `json:"enable_runtime" mapstructure:"enable_runtime"`
+	EnableEventBus bool `json:"enable_event_bus" mapstructure:"enable_event_bus"`
+	EnableSSE      bool `json:"enable_sse" mapstructure:"enable_sse"`
 
 	// Observability features
 	EnableObservability bool `json:"enable_observability" mapstructure:"enable_observability"`
@@ -16,18 +16,18 @@ type FeatureFlags struct {
 	EnableTracing       bool `json:"enable_tracing" mapstructure:"enable_tracing"`
 
 	// Security features
-	EnableOAuth         bool `json:"enable_oauth" mapstructure:"enable_oauth"`
-	EnableQuarantine    bool `json:"enable_quarantine" mapstructure:"enable_quarantine"`
+	EnableOAuth           bool `json:"enable_oauth" mapstructure:"enable_oauth"`
+	EnableQuarantine      bool `json:"enable_quarantine" mapstructure:"enable_quarantine"`
 	EnableDockerIsolation bool `json:"enable_docker_isolation" mapstructure:"enable_docker_isolation"`
 
 	// Storage features
-	EnableSearch        bool `json:"enable_search" mapstructure:"enable_search"`
-	EnableCaching       bool `json:"enable_caching" mapstructure:"enable_caching"`
-	EnableAsyncStorage  bool `json:"enable_async_storage" mapstructure:"enable_async_storage"`
+	EnableSearch       bool `json:"enable_search" mapstructure:"enable_search"`
+	EnableCaching      bool `json:"enable_caching" mapstructure:"enable_caching"`
+	EnableAsyncStorage bool `json:"enable_async_storage" mapstructure:"enable_async_storage"`
 
 	// UI features
-	EnableWebUI         bool `json:"enable_web_ui" mapstructure:"enable_web_ui"`
-	EnableTray          bool `json:"enable_tray" mapstructure:"enable_tray"`
+	EnableWebUI bool `json:"enable_web_ui" mapstructure:"enable_web_ui"`
+	EnableTray  bool `json:"enable_tray" mapstructure:"enable_tray"`
 
 	// Development features
 	EnableDebugLogging  bool `json:"enable_debug_logging" mapstructure:"enable_debug_logging"`
@@ -38,9 +38,9 @@ type FeatureFlags struct {
 func DefaultFeatureFlags() FeatureFlags {
 	return FeatureFlags{
 		// Runtime features (core functionality)
-		EnableRuntime:     true,
-		EnableEventBus:    true,
-		EnableSSE:         true,
+		EnableRuntime:  true,
+		EnableEventBus: true,
+		EnableSSE:      true,
 
 		// Observability features
 		EnableObservability: true,

@@ -333,13 +333,13 @@ func extractToolCount(stats map[string]interface{}) int {
 }
 
 // GetSecretResolver returns the secret resolver instance
-func (rt *Runtime) GetSecretResolver() *secret.Resolver {
-	return rt.secretResolver
+func (r *Runtime) GetSecretResolver() *secret.Resolver {
+	return r.secretResolver
 }
 
 // GetCurrentConfig returns the current configuration
-func (rt *Runtime) GetCurrentConfig() interface{} {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
-	return rt.cfg
+func (r *Runtime) GetCurrentConfig() interface{} {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cfg
 }

@@ -15,18 +15,18 @@ type MetricsManager struct {
 	registry *prometheus.Registry
 
 	// Core metrics
-	uptime         prometheus.Gauge
-	httpRequests   *prometheus.CounterVec
-	httpDuration   *prometheus.HistogramVec
-	serversTotal   prometheus.Gauge
-	serversConnected prometheus.Gauge
+	uptime             prometheus.Gauge
+	httpRequests       *prometheus.CounterVec
+	httpDuration       *prometheus.HistogramVec
+	serversTotal       prometheus.Gauge
+	serversConnected   prometheus.Gauge
 	serversQuarantined prometheus.Gauge
-	toolsTotal     prometheus.Gauge
-	toolCalls      *prometheus.CounterVec
-	toolDuration   *prometheus.HistogramVec
-	indexSize      prometheus.Gauge
-	storageOps     *prometheus.CounterVec
-	dockerContainers prometheus.Gauge
+	toolsTotal         prometheus.Gauge
+	toolCalls          *prometheus.CounterVec
+	toolDuration       *prometheus.HistogramVec
+	indexSize          prometheus.Gauge
+	storageOps         *prometheus.CounterVec
+	dockerContainers   prometheus.Gauge
 }
 
 // NewMetricsManager creates a new metrics manager

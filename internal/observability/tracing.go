@@ -18,11 +18,11 @@ import (
 
 // TracingConfig holds configuration for OpenTelemetry tracing
 type TracingConfig struct {
-	Enabled      bool   `json:"enabled"`
-	ServiceName  string `json:"service_name"`
-	ServiceVersion string `json:"service_version"`
-	JaegerEndpoint string `json:"jaeger_endpoint"`
-	SampleRate   float64 `json:"sample_rate"`
+	Enabled        bool    `json:"enabled"`
+	ServiceName    string  `json:"service_name"`
+	ServiceVersion string  `json:"service_version"`
+	JaegerEndpoint string  `json:"jaeger_endpoint"`
+	SampleRate     float64 `json:"sample_rate"`
 }
 
 // TracingManager manages OpenTelemetry tracing

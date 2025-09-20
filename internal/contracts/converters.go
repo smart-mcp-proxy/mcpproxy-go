@@ -10,23 +10,23 @@ import (
 // ConvertServerConfig converts a config.ServerConfig to a contracts.Server
 func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool, toolCount int) *Server {
 	server := &Server{
-		ID:              cfg.Name,
-		Name:            cfg.Name,
-		URL:             cfg.URL,
-		Protocol:        cfg.Protocol,
-		Command:         cfg.Command,
-		Args:            cfg.Args,
-		WorkingDir:      cfg.WorkingDir,
-		Env:             cfg.Env,
-		Headers:         cfg.Headers,
-		Enabled:         cfg.Enabled,
-		Quarantined:     cfg.Quarantined,
-		Connected:       connected,
-		Status:          status,
-		ToolCount:       toolCount,
-		Created:         cfg.Created,
-		Updated:         cfg.Updated,
-		ReconnectCount:  0, // TODO: Get from runtime status
+		ID:             cfg.Name,
+		Name:           cfg.Name,
+		URL:            cfg.URL,
+		Protocol:       cfg.Protocol,
+		Command:        cfg.Command,
+		Args:           cfg.Args,
+		WorkingDir:     cfg.WorkingDir,
+		Env:            cfg.Env,
+		Headers:        cfg.Headers,
+		Enabled:        cfg.Enabled,
+		Quarantined:    cfg.Quarantined,
+		Connected:      connected,
+		Status:         status,
+		ToolCount:      toolCount,
+		Created:        cfg.Created,
+		Updated:        cfg.Updated,
+		ReconnectCount: 0, // TODO: Get from runtime status
 	}
 
 	// Convert OAuth config if present

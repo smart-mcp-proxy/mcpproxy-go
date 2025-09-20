@@ -70,40 +70,40 @@ type Tool struct {
 
 // SearchResult represents a search result for tools
 type SearchResult struct {
-	Tool     Tool    `json:"tool"`
-	Score    float64 `json:"score"`
-	Snippet  string  `json:"snippet,omitempty"`
-	Matches  int     `json:"matches"`
+	Tool    Tool    `json:"tool"`
+	Score   float64 `json:"score"`
+	Snippet string  `json:"snippet,omitempty"`
+	Matches int     `json:"matches"`
 }
 
 // ServerStats represents aggregated statistics about servers
 type ServerStats struct {
-	TotalServers      int `json:"total_servers"`
-	ConnectedServers  int `json:"connected_servers"`
+	TotalServers       int `json:"total_servers"`
+	ConnectedServers   int `json:"connected_servers"`
 	QuarantinedServers int `json:"quarantined_servers"`
-	TotalTools        int `json:"total_tools"`
-	DockerContainers  int `json:"docker_containers"`
+	TotalTools         int `json:"total_tools"`
+	DockerContainers   int `json:"docker_containers"`
 }
 
 // LogEntry represents a single log entry
 type LogEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	Level     string    `json:"level"`
-	Message   string    `json:"message"`
-	Server    string    `json:"server,omitempty"`
+	Timestamp time.Time              `json:"timestamp"`
+	Level     string                 `json:"level"`
+	Message   string                 `json:"message"`
+	Server    string                 `json:"server,omitempty"`
 	Fields    map[string]interface{} `json:"fields,omitempty"`
 }
 
 // SystemStatus represents the overall system status
 type SystemStatus struct {
-	Phase       string            `json:"phase"`
-	Message     string            `json:"message"`
-	Uptime      time.Duration     `json:"uptime"`
-	StartedAt   time.Time         `json:"started_at"`
-	ConfigPath  string            `json:"config_path"`
-	LogDir      string            `json:"log_dir"`
-	Runtime     RuntimeStatus     `json:"runtime"`
-	Servers     ServerStats       `json:"servers"`
+	Phase      string        `json:"phase"`
+	Message    string        `json:"message"`
+	Uptime     time.Duration `json:"uptime"`
+	StartedAt  time.Time     `json:"started_at"`
+	ConfigPath string        `json:"config_path"`
+	LogDir     string        `json:"log_dir"`
+	Runtime    RuntimeStatus `json:"runtime"`
+	Servers    ServerStats   `json:"servers"`
 }
 
 // RuntimeStatus represents runtime-specific status information
@@ -183,4 +183,37 @@ type ServerActionResponse struct {
 type QuarantinedServersResponse struct {
 	Servers []Server `json:"servers"`
 	Count   int      `json:"count"`
+}
+
+// Secret management DTOs
+
+// SecretRef represents a reference to a secret value
+type SecretRef struct {
+	Type     string `json:"type"`     // "env", "keyring", etc.
+	Name     string `json:"name"`     // The secret name/key
+	Original string `json:"original"` // Original reference string like "${env:API_KEY}"
+}
+
+// MigrationCandidate represents a potential secret that could be migrated to secure storage
+type MigrationCandidate struct {
+	Field      string  `json:"field"`      // Field path in configuration
+	Value      string  `json:"value"`      // Masked value for display
+	Suggested  string  `json:"suggested"`  // Suggested secret reference
+	Confidence float64 `json:"confidence"` // Confidence score (0.0 to 1.0)
+}
+
+// MigrationAnalysis represents the result of analyzing configuration for potential secrets
+type MigrationAnalysis struct {
+	Candidates []MigrationCandidate `json:"candidates"`
+	TotalFound int                  `json:"total_found"`
+}
+
+// GetSecretRefsResponse is the response for GET /api/v1/secrets/refs
+type GetSecretRefsResponse struct {
+	Refs []SecretRef `json:"refs"`
+}
+
+// GetMigrationAnalysisResponse is the response for POST /api/v1/secrets/migrate
+type GetMigrationAnalysisResponse struct {
+	Analysis MigrationAnalysis `json:"analysis"`
 }
