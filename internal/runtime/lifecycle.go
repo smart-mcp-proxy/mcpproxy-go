@@ -24,7 +24,11 @@ func (r *Runtime) backgroundInitialization() {
 		return
 	}
 
-	r.UpdatePhase("Connecting", "Connecting to upstream servers...")
+	// Only transition to "Connecting" if the server is not yet running
+	// If the server is running, keep it as "Running" while upstream connections happen in background
+	if !r.IsRunning() {
+		r.UpdatePhase("Connecting", "Connecting to upstream servers...")
+	}
 
 	appCtx := r.AppContext()
 	go r.backgroundConnections(appCtx)
@@ -386,7 +390,7 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 		"enabled": enabled,
 	})
 
-	r.HandleUpstreamServerChange(nil)
+	r.HandleUpstreamServerChange(context.TODO())
 
 	return nil
 }
@@ -418,7 +422,7 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		"quarantined": quarantined,
 	})
 
-	r.HandleUpstreamServerChange(nil)
+	r.HandleUpstreamServerChange(context.TODO())
 
 	r.logger.Info("Successfully persisted server quarantine state change",
 		zap.String("server", serverName),

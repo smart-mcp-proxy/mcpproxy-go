@@ -66,7 +66,7 @@ func TestRuntimeUpdateStatusBroadcasts(t *testing.T) {
 		t.Fatal("did not receive status update on channel")
 	}
 
-	rendered := rt.StatusSnapshot()
+	rendered := rt.StatusSnapshot(false)
 	if rendered["phase"] != phase {
 		t.Fatalf("expected snapshot phase %q, got %v", phase, rendered["phase"])
 	}
@@ -84,7 +84,7 @@ func TestRuntimeStatusSnapshotReflectsRunningAndListen(t *testing.T) {
 	rt.SetRunning(true)
 	rt.UpdateStatus("Ready", "listening", nil, 0)
 
-	snapshot := rt.StatusSnapshot()
+	snapshot := rt.StatusSnapshot(true)
 
 	if snapshot["running"] != true {
 		t.Fatalf("expected running true, got %v", snapshot["running"])

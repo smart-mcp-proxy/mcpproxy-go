@@ -183,13 +183,13 @@ func (r *Runtime) UpdatePhase(phase, message string) {
 }
 
 // StatusSnapshot returns the latest status as a map for API responses.
-func (r *Runtime) StatusSnapshot() map[string]interface{} {
+// The serverRunning parameter should come from the authoritative server running state.
+func (r *Runtime) StatusSnapshot(serverRunning bool) map[string]interface{} {
 	r.statusMu.RLock()
 	status := r.status
 	r.statusMu.RUnlock()
 
 	r.mu.RLock()
-	running := r.running
 	listen := ""
 	if r.cfg != nil {
 		listen = r.cfg.Listen
@@ -197,7 +197,7 @@ func (r *Runtime) StatusSnapshot() map[string]interface{} {
 	r.mu.RUnlock()
 
 	return map[string]interface{}{
-		"running":        running,
+		"running":        serverRunning,
 		"listen_addr":    listen,
 		"phase":          status.Phase,
 		"message":        status.Message,

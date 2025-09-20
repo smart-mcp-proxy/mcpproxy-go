@@ -89,7 +89,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 // GetStatus returns the current server status
 func (s *Server) GetStatus() interface{} {
-	return s.runtime.StatusSnapshot()
+	return s.runtime.StatusSnapshot(s.IsRunning())
 }
 
 // TriggerOAuthLogin starts an in-process OAuth flow for the given server name.
@@ -124,7 +124,7 @@ func (s *Server) updateStatus(phase, message string) {
 
 func (s *Server) enqueueStatusSnapshot() {
 	select {
-	case s.statusCh <- s.runtime.StatusSnapshot():
+	case s.statusCh <- s.runtime.StatusSnapshot(s.IsRunning()):
 	default:
 	}
 }
