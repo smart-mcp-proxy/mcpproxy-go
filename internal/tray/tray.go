@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/systray"
@@ -90,6 +91,14 @@ type App struct {
 	version   string
 	shutdown  func()
 
+	connectionState   ConnectionState
+	connectionStateMu sync.RWMutex
+	instrumentation   instrumentation
+
+	statusMu      sync.RWMutex
+	statusTitle   string
+	statusTooltip string
+
 	// Menu items for dynamic updates
 	statusItem          *systray.MenuItem
 	startStopItem       *systray.MenuItem
@@ -135,12 +144,17 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 // NewWithAPIClient creates a new tray application with an API client for web UI access
 func NewWithAPIClient(server ServerInterface, apiClient interface{ OpenWebUI() error }, logger *zap.SugaredLogger, version string, shutdown func()) *App {
 	app := &App{
-		server:    server,
-		apiClient: apiClient,
-		logger:    logger,
-		version:   version,
-		shutdown:  shutdown,
+		server:          server,
+		apiClient:       apiClient,
+		logger:          logger,
+		version:         version,
+		shutdown:        shutdown,
+		connectionState: ConnectionStateInitializing,
+		statusTitle:     "Status: Initializing...",
+		statusTooltip:   "mcpproxy tray is starting",
 	}
+
+	app.instrumentation = newInstrumentation(app)
 
 	// Initialize managers (will be fully set up in onReady)
 	app.stateManager = NewServerStateManager(server, logger)
@@ -162,11 +176,115 @@ func NewWithAPIClient(server ServerInterface, apiClient interface{ OpenWebUI() e
 	return app
 }
 
+// SetConnectionState updates the tray's view of the core connectivity status.
+func (a *App) SetConnectionState(state ConnectionState) {
+	a.connectionStateMu.Lock()
+	a.connectionState = state
+	a.connectionStateMu.Unlock()
+	a.logger.Debug("Updated connection state", zap.String("state", string(state)))
+	a.instrumentation.NotifyConnectionState(state)
+
+	if !a.coreMenusReady || a.statusItem == nil {
+		return
+	}
+
+	a.applyConnectionStateToUI(state)
+}
+
+// getConnectionState returns the last observed connection state.
+func (a *App) getConnectionState() ConnectionState {
+	a.connectionStateMu.RLock()
+	defer a.connectionStateMu.RUnlock()
+	return a.connectionState
+}
+
+func (a *App) getStatusSnapshot() (string, string) {
+	a.statusMu.RLock()
+	defer a.statusMu.RUnlock()
+	return a.statusTitle, a.statusTooltip
+}
+
+func (a *App) getMenuSnapshot() ([]map[string]interface{}, []map[string]interface{}) {
+	if a.menuManager == nil {
+		return nil, nil
+	}
+	return a.menuManager.LatestServersSnapshot(), a.menuManager.LatestQuarantineSnapshot()
+}
+
+// ObserveConnectionState wires a channel of connection states into the tray UI.
+func (a *App) ObserveConnectionState(ctx context.Context, states <-chan ConnectionState) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case state, ok := <-states:
+				if !ok {
+					a.SetConnectionState(ConnectionStateDisconnected)
+					return
+				}
+				a.SetConnectionState(state)
+			}
+		}
+	}()
+}
+
+// applyConnectionStateToUI mutates tray widgets to reflect the provided connection state.
+func (a *App) applyConnectionStateToUI(state ConnectionState) {
+	if a.statusItem == nil {
+		return
+	}
+
+	var statusText string
+	var tooltip string
+
+	switch state {
+	case ConnectionStateInitializing:
+		statusText = "Status: Initializing..."
+		tooltip = "mcpproxy tray is starting"
+	case ConnectionStateStartingCore:
+		statusText = "Status: Launching core..."
+		tooltip = "Starting mcpproxy core process"
+	case ConnectionStateConnecting:
+		statusText = "Status: Connecting to core..."
+		tooltip = "Waiting for core API to become reachable"
+	case ConnectionStateReconnecting:
+		statusText = "Status: Reconnecting..."
+		tooltip = "Reconnecting to the core runtime"
+	case ConnectionStateDisconnected:
+		statusText = "Status: Core unavailable"
+		tooltip = "Tray cannot reach the core runtime"
+	case ConnectionStateConnected:
+		statusText = "Status: Connected"
+		tooltip = "Core runtime is responding"
+	default:
+		statusText = "Status: Unknown"
+		tooltip = "Core connection state is unknown"
+	}
+
+	a.statusItem.SetTitle(statusText)
+	a.statusItem.SetTooltip(tooltip)
+	systray.SetTooltip(tooltip)
+	a.statusMu.Lock()
+	a.statusTitle = statusText
+	a.statusTooltip = tooltip
+	a.statusMu.Unlock()
+
+	if a.startStopItem != nil {
+		a.startStopItem.SetTitle("Core managed by tray")
+		a.startStopItem.Disable()
+	}
+
+	a.instrumentation.NotifyConnectionState(state)
+	a.instrumentation.NotifyStatus()
+}
+
 // Run starts the system tray application
 func (a *App) Run(ctx context.Context) error {
 	a.logger.Info("Starting system tray application")
 	a.ctx, a.cancel = context.WithCancel(ctx)
 	defer a.cancel()
+	a.instrumentation.Start(a.ctx)
 
 	if a.server != nil {
 		a.configPath = a.server.GetConfigPath()
@@ -240,6 +358,7 @@ func (a *App) Run(ctx context.Context) error {
 
 // cleanup performs cleanup operations
 func (a *App) cleanup() {
+	a.instrumentation.Shutdown()
 	a.cancel()
 }
 
@@ -341,6 +460,7 @@ func (a *App) onReady() {
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
 	a.statusItem.Disable() // Initially disabled as it's just for display
 	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
+	a.applyConnectionStateToUI(a.getConnectionState())
 
 	// Mark core menu items as ready - this will release waiting goroutines
 	a.coreMenusReady = true
@@ -355,6 +475,10 @@ func (a *App) onReady() {
 	// --- Initialize Managers ---
 	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
+	a.syncManager.SetOnSync(func() {
+		a.instrumentation.NotifyMenus()
+	})
+	a.instrumentation.NotifyMenus()
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
@@ -447,8 +571,13 @@ func (a *App) onReady() {
 
 // updateTooltip updates the tooltip based on the server's running state
 func (a *App) updateTooltip() {
+	if a.getConnectionState() != ConnectionStateConnected {
+		// Connection state handler already set an appropriate tooltip.
+		return
+	}
+
 	if a.server == nil {
-		systray.SetTooltip("mcpproxy is stopped")
+		systray.SetTooltip("mcpproxy core not attached")
 		return
 	}
 
@@ -519,6 +648,11 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		return
 	}
 
+	if a.getConnectionState() != ConnectionStateConnected {
+		a.logger.Debug("Skipping runtime status update; core not in connected state")
+		return
+	}
+
 	// Debug logging to track status updates
 	running, _ := status["running"].(bool)
 	phase, _ := status["phase"].(string)
@@ -536,21 +670,34 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	// Update running status and start/stop button
 	if actuallyRunning {
 		listenAddr, _ := status["listen_addr"].(string)
+		title := "Status: Running"
 		if listenAddr != "" {
-			a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
-		} else {
-			a.statusItem.SetTitle("Status: Running")
+			title = fmt.Sprintf("Status: Running (%s)", listenAddr)
 		}
-		a.startStopItem.SetTitle("Stop Server")
+		a.statusItem.SetTitle(title)
+		a.statusMu.Lock()
+		a.statusTitle = title
+		a.statusMu.Unlock()
+		if a.startStopItem != nil {
+			a.startStopItem.SetTitle("Core running")
+			a.startStopItem.Disable()
+		}
 		a.logger.Debug("Set tray to running state")
 	} else {
 		a.statusItem.SetTitle("Status: Stopped")
-		a.startStopItem.SetTitle("Start Server")
+		a.statusMu.Lock()
+		a.statusTitle = "Status: Stopped"
+		a.statusMu.Unlock()
+		if a.startStopItem != nil {
+			a.startStopItem.SetTitle("Core stopped")
+			a.startStopItem.Disable()
+		}
 		a.logger.Debug("Set tray to stopped state")
 	}
 
 	// Update tooltip
 	a.updateTooltipFromStatusData(status)
+	a.instrumentation.NotifyStatus()
 
 	// Update server menus using the manager (only if server is running)
 	if a.syncManager != nil {
@@ -572,10 +719,17 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 
 // updateTooltipFromStatusData updates the tray tooltip from status data map
 func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
+	if a.getConnectionState() != ConnectionStateConnected {
+		return
+	}
+
 	running, _ := status["running"].(bool)
 
 	if !running {
 		systray.SetTooltip("mcpproxy is stopped")
+		a.statusMu.Lock()
+		a.statusTooltip = "mcpproxy is stopped"
+		a.statusMu.Unlock()
 		return
 	}
 
@@ -625,6 +779,9 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 
 	tooltip := strings.Join(tooltipLines, "\n")
 	systray.SetTooltip(tooltip)
+	a.statusMu.Lock()
+	a.statusTooltip = tooltip
+	a.statusMu.Unlock()
 }
 
 // updateServersMenuFromStatusData is a legacy method, functionality is now in MenuManager

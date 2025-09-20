@@ -4,7 +4,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -23,7 +25,11 @@ import (
 	"mcpproxy-go/internal/tray"
 )
 
-var version = "development" // Set by build flags
+var (
+	version          = "development" // Set by build flags
+	defaultCoreURL   = "http://localhost:8080"
+	errNoBundledCore = errors.New("no bundled core binary found")
+)
 
 // getLogDir returns the standard log directory for the current OS.
 // Falls back to a temporary directory when a platform path cannot be resolved.
@@ -65,60 +71,40 @@ func main() {
 
 	logger.Info("Starting mcpproxy-tray", zap.String("version", version))
 
-	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup signal handling
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	// Resolve core configuration up front
+	coreURL := resolveCoreURL()
+	logger.Info("Resolved core URL", zap.String("core_url", coreURL))
 
-	// Start core mcpproxy if not running
-	coreURL := "http://localhost:8080"
-	if !isServerRunning(coreURL) {
-		logger.Info("Core mcpproxy server not running, starting it...")
-		if err := startCoreServer(); err != nil {
-			logger.Fatal("Failed to start core server", zap.Error(err))
-		}
-
-		// Wait for server to be ready
-		if !waitForServer(coreURL, 30*time.Second) {
-			logger.Fatal("Core server failed to start within timeout")
-		}
-		logger.Info("Core server started successfully")
-	} else {
-		logger.Info("Core mcpproxy server already running")
-	}
-
-	// Create API client for modern REST API
+	// Prepare API client and tray adapters immediately so the icon appears before the core is ready
 	apiClient := api.NewClient(coreURL, logger.Sugar())
-
-	// Start SSE connection for real-time updates
 	if err := apiClient.StartSSE(ctx); err != nil {
 		logger.Error("Failed to start SSE connection", zap.Error(err))
 	}
 
-	// Create adapter to make API client compatible with ServerInterface
-	serverAdapter := api.NewServerAdapter(apiClient)
-
-	// Create shutdown function
 	shutdownFunc := func() {
 		logger.Info("Tray shutdown requested")
 		apiClient.StopSSE()
 		cancel()
 	}
 
-	// Create tray application using the API adapter and pass the API client for web UI access
-	trayApp := tray.NewWithAPIClient(serverAdapter, apiClient, logger.Sugar(), version, shutdownFunc)
+	trayApp := tray.NewWithAPIClient(api.NewServerAdapter(apiClient), apiClient, logger.Sugar(), version, shutdownFunc)
+	trayApp.ObserveConnectionState(ctx, apiClient.ConnectionStateChannel())
 
-	// Handle shutdown signal
+	// Handle signals for graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
 		logger.Info("Received shutdown signal")
 		cancel()
 	}()
 
-	// This is a blocking call that runs the tray event loop
+	// Launch core management loop in the background so the tray can appear immediately
+	go manageCoreProcess(ctx, logger, trayApp, coreURL)
+
 	logger.Info("Starting tray event loop")
 	if err := trayApp.Run(ctx); err != nil && err != context.Canceled {
 		logger.Error("Tray application error", zap.Error(err))
@@ -181,9 +167,61 @@ func setupLogging() (*zap.Logger, error) {
 	return logger, nil
 }
 
+func resolveCoreURL() string {
+	if override := strings.TrimSpace(os.Getenv("MCPPROXY_CORE_URL")); override != "" {
+		return override
+	}
+	return defaultCoreURL
+}
+
+func shouldSkipCoreLaunch() bool {
+	value := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_SKIP_CORE"))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.App, coreURL string) {
+	if shouldSkipCoreLaunch() {
+		logger.Info("Skipping core auto-launch due to MCPPROXY_TRAY_SKIP_CORE")
+		trayApp.SetConnectionState(tray.ConnectionStateConnecting)
+		return
+	}
+
+	if isServerRunning(coreURL) {
+		logger.Info("Core mcpproxy server already running", zap.String("core_url", coreURL))
+		trayApp.SetConnectionState(tray.ConnectionStateConnecting)
+		return
+	}
+
+	trayApp.SetConnectionState(tray.ConnectionStateStartingCore)
+	logger.Info("Core mcpproxy server not running, starting it", zap.String("core_url", coreURL))
+
+	coreBinary, err := resolveCoreBinary(logger)
+	if err != nil {
+		logger.Error("Failed to resolve core binary", zap.Error(err))
+		trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
+		return
+	}
+
+	if err := startCoreServer(logger, coreBinary); err != nil {
+		logger.Error("Failed to start core server", zap.String("binary", coreBinary), zap.Error(err))
+		trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
+		return
+	}
+
+	if !waitForServer(ctx, coreURL, 30*time.Second) {
+		logger.Error("Core server failed to start within timeout", zap.String("core_url", coreURL))
+		trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
+		return
+	}
+
+	logger.Info("Core server started successfully", zap.String("core_url", coreURL))
+	trayApp.SetConnectionState(tray.ConnectionStateConnecting)
+}
+
 // isServerRunning checks if the core mcpproxy server is running
 func isServerRunning(baseURL string) bool {
-	resp, err := http.Get(strings.TrimSuffix(baseURL, "/") + "/api/v1/servers")
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/api/v1/servers")
 	if err != nil {
 		return false
 	}
@@ -192,20 +230,12 @@ func isServerRunning(baseURL string) bool {
 }
 
 // startCoreServer starts the core mcpproxy server process
-func startCoreServer() error {
-	// Find the mcpproxy binary
-	mcpproxyPath, err := findMcpproxyBinary()
-	if err != nil {
-		return fmt.Errorf("failed to find mcpproxy binary: %w", err)
-	}
-
-	// Start the server in background
-	cmd := exec.Command(mcpproxyPath, "serve")
+func startCoreServer(logger *zap.Logger, binaryPath string) error {
+	cmd := exec.Command(binaryPath, "serve")
 	cmd.Stdout = nil // Don't capture output to avoid blocking
 	cmd.Stderr = nil
 	cmd.Env = append(os.Environ(), "MCPP_ENABLE_TRAY=false")
 
-	// Start the process in a new process group
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true, // Create new process group
 	}
@@ -214,14 +244,154 @@ func startCoreServer() error {
 		return fmt.Errorf("failed to start mcpproxy server: %w", err)
 	}
 
-	// Don't wait for the process - let it run independently
 	go func() {
 		if waitErr := cmd.Wait(); waitErr != nil {
-			log.Printf("mcpproxy server process exited with error: %v", waitErr)
+			if logger != nil {
+				logger.Error("mcpproxy server process exited with error", zap.Error(waitErr))
+			}
 		}
 	}()
 
 	return nil
+}
+
+// resolveCoreBinary locates or stages the core binary for launching.
+func resolveCoreBinary(logger *zap.Logger) (string, error) {
+	if override := strings.TrimSpace(os.Getenv("MCPPROXY_CORE_PATH")); override != "" {
+		if info, err := os.Stat(override); err == nil && !info.IsDir() {
+			return override, nil
+		}
+		return "", fmt.Errorf("MCPPROXY_CORE_PATH does not point to a valid binary: %s", override)
+	}
+
+	if managedPath, err := ensureManagedCoreBinary(logger); err == nil {
+		return managedPath, nil
+	} else if !errors.Is(err, errNoBundledCore) {
+		return "", err
+	}
+
+	return findMcpproxyBinary()
+}
+
+// ensureManagedCoreBinary copies the bundled core binary into a writable location if necessary.
+func ensureManagedCoreBinary(logger *zap.Logger) (string, error) {
+	bundled, err := discoverBundledCore()
+	if err != nil {
+		return "", err
+	}
+
+	targetDir, err := getManagedBinDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create managed binary directory: %w", err)
+	}
+
+	targetPath := filepath.Join(targetDir, "mcpproxy")
+	copyNeeded, err := shouldCopyBinary(bundled, targetPath)
+	if err != nil {
+		return "", err
+	}
+	if copyNeeded {
+		if err := copyFile(bundled, targetPath); err != nil {
+			return "", fmt.Errorf("failed to stage bundled core binary: %w", err)
+		}
+		if err := os.Chmod(targetPath, 0755); err != nil {
+			return "", fmt.Errorf("failed to set permissions on managed core binary: %w", err)
+		}
+		if logger != nil {
+			logger.Info("Staged bundled core binary", zap.String("source", bundled), zap.String("target", targetPath))
+		}
+	}
+
+	return targetPath, nil
+}
+
+func discoverBundledCore() (string, error) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve executable path: %w", err)
+	}
+
+	macOSDir := filepath.Dir(execPath)
+	contentsDir := filepath.Dir(macOSDir)
+	if !strings.HasSuffix(contentsDir, "Contents") {
+		return "", errNoBundledCore
+	}
+
+	resourcesDir := filepath.Join(contentsDir, "Resources")
+	candidate := filepath.Join(resourcesDir, "bin", "mcpproxy")
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		return candidate, nil
+	}
+
+	return "", errNoBundledCore
+}
+
+func getManagedBinDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(homeDir, "Library", "Application Support", "mcpproxy", "bin"), nil
+	}
+
+	return filepath.Join(homeDir, ".mcpproxy", "bin"), nil
+}
+
+func shouldCopyBinary(source, target string) (bool, error) {
+	srcInfo, err := os.Stat(source)
+	if err != nil {
+		return false, fmt.Errorf("failed to stat source binary: %w", err)
+	}
+
+	dstInfo, err := os.Stat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to stat target binary: %w", err)
+	}
+
+	if srcInfo.Size() != dstInfo.Size() {
+		return true, nil
+	}
+
+	if srcInfo.ModTime().After(dstInfo.ModTime()) {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func copyFile(source, target string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = out.Close()
+	}()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+
+	return out.Sync()
 }
 
 // findMcpproxyBinary finds the mcpproxy binary in various locations
@@ -231,15 +401,16 @@ func findMcpproxyBinary() (string, error) {
 		"mcpproxy",                   // In PATH
 		"./mcpproxy",                 // Current directory
 		"../mcpproxy/mcpproxy",       // Development setup
+		"../../mcpproxy",             // Nested dev setups
 		"/usr/local/bin/mcpproxy",    // Homebrew location
 		"/opt/homebrew/bin/mcpproxy", // Apple Silicon Homebrew
 	}
 
 	for _, path := range candidates {
-		if _, err := exec.LookPath(path); err == nil {
-			return path, nil
+		if resolved, err := exec.LookPath(path); err == nil {
+			return resolved, nil
 		}
-		if _, err := os.Stat(path); err == nil {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			absPath, err := filepath.Abs(path)
 			if err == nil {
 				return absPath, nil
@@ -250,16 +421,25 @@ func findMcpproxyBinary() (string, error) {
 	return "", fmt.Errorf("mcpproxy binary not found in any of the expected locations")
 }
 
-// waitForServer waits for the server to become available
-func waitForServer(baseURL string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
+// waitForServer waits for the server to become available or until timeout/context cancellation occurs.
+func waitForServer(ctx context.Context, baseURL string, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 
-	for time.Now().Before(deadline) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		if isServerRunning(baseURL) {
 			return true
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
 
-	return false
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return isServerRunning(baseURL)
+		case <-ticker.C:
+		}
+	}
 }

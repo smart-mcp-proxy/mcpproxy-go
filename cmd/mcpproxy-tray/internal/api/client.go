@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/tray"
 )
 
 // Server represents a server from the API
@@ -64,11 +66,12 @@ type StatusUpdate struct {
 
 // Client provides access to the mcpproxy API
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	logger     *zap.SugaredLogger
-	statusCh   chan StatusUpdate
-	sseCancel  context.CancelFunc
+	baseURL           string
+	httpClient        *http.Client
+	logger            *zap.SugaredLogger
+	statusCh          chan StatusUpdate
+	sseCancel         context.CancelFunc
+	connectionStateCh chan tray.ConnectionState
 }
 
 // NewClient creates a new API client
@@ -76,10 +79,11 @@ func NewClient(baseURL string, logger *zap.SugaredLogger) *Client {
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 0,
 		},
-		logger:   logger,
-		statusCh: make(chan StatusUpdate, 10),
+		logger:            logger,
+		statusCh:          make(chan StatusUpdate, 10),
+		connectionStateCh: make(chan tray.ConnectionState, 8),
 	}
 }
 
@@ -92,26 +96,34 @@ func (c *Client) StartSSE(ctx context.Context) error {
 
 	go func() {
 		defer close(c.statusCh)
+		defer close(c.connectionStateCh)
 
 		for {
+			if sseCtx.Err() != nil {
+				c.publishConnectionState(tray.ConnectionStateDisconnected)
+				return
+			}
+
+			c.publishConnectionState(tray.ConnectionStateConnecting)
+
+			if err := c.connectSSE(sseCtx); err != nil {
+				if c.logger != nil {
+					c.logger.Error("SSE connection error", "error", err)
+				}
+			}
+
+			if sseCtx.Err() != nil {
+				c.publishConnectionState(tray.ConnectionStateDisconnected)
+				return
+			}
+
+			c.publishConnectionState(tray.ConnectionStateReconnecting)
+
 			select {
 			case <-sseCtx.Done():
-				c.logger.Info("SSE connection stopped")
+				c.publishConnectionState(tray.ConnectionStateDisconnected)
 				return
-			default:
-				if err := c.connectSSE(sseCtx); err != nil {
-					if c.logger != nil {
-						c.logger.Error("SSE connection error", "error", err)
-					}
-
-					// Retry after delay
-					select {
-					case <-sseCtx.Done():
-						return
-					case <-time.After(5 * time.Second):
-						continue
-					}
-				}
+			case <-time.After(5 * time.Second):
 			}
 		}
 	}()
@@ -129,6 +141,11 @@ func (c *Client) StopSSE() {
 // StatusChannel returns the channel for status updates
 func (c *Client) StatusChannel() <-chan StatusUpdate {
 	return c.statusCh
+}
+
+// ConnectionStateChannel exposes connectivity updates for tray consumers.
+func (c *Client) ConnectionStateChannel() <-chan tray.ConnectionState {
+	return c.connectionStateCh
 }
 
 // connectSSE establishes the SSE connection and processes events
@@ -150,6 +167,8 @@ func (c *Client) connectSSE(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("SSE connection failed with status: %d", resp.StatusCode)
 	}
+
+	c.publishConnectionState(tray.ConnectionStateConnected)
 
 	scanner := bufio.NewScanner(resp.Body)
 	var eventType string
@@ -195,6 +214,17 @@ func (c *Client) processSSEEvent(eventType, data string) {
 		case c.statusCh <- statusUpdate:
 		default:
 			// Channel full, skip this update
+		}
+	}
+}
+
+// publishConnectionState attempts to deliver a connection state update without blocking the SSE loop.
+func (c *Client) publishConnectionState(state tray.ConnectionState) {
+	select {
+	case c.connectionStateCh <- state:
+	default:
+		if c.logger != nil {
+			c.logger.Debug("Dropping connection state update", "state", state)
 		}
 	}
 }
