@@ -358,7 +358,22 @@ func (mc *Client) startBackgroundMonitoring() {
 // stopBackgroundMonitoring stops the background monitoring
 func (mc *Client) stopBackgroundMonitoring() {
 	close(mc.stopMonitoring)
-	mc.monitoringWG.Wait()
+
+	// Use a timeout for the wait to prevent hanging during shutdown
+	done := make(chan struct{})
+	go func() {
+		mc.monitoringWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		mc.logger.Debug("Background monitoring stopped successfully",
+			zap.String("server", mc.Config.Name))
+	case <-time.After(1 * time.Second):
+		mc.logger.Warn("Background monitoring stop timed out after 1s, forcing shutdown",
+			zap.String("server", mc.Config.Name))
+	}
 
 	// Recreate the channel for potential reuse
 	mc.stopMonitoring = make(chan struct{})
