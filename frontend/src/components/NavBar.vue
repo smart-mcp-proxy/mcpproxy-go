@@ -98,6 +98,7 @@ const DashboardIcon = 'svg'
 const ServersIcon = 'svg'
 const ToolsIcon = 'svg'
 const SearchIcon = 'svg'
+const SecretsIcon = 'svg'
 const SettingsIcon = 'svg'
 
 const route = useRoute()
@@ -108,6 +109,7 @@ const menuItems = [
   { name: 'Servers', path: '/servers', icon: ServersIcon },
   { name: 'Tools', path: '/tools', icon: ToolsIcon },
   { name: 'Search', path: '/search', icon: SearchIcon },
+  { name: 'Secrets', path: '/secrets', icon: SecretsIcon },
   { name: 'Settings', path: '/settings', icon: SettingsIcon },
 ]
 

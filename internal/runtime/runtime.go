@@ -12,6 +12,7 @@ import (
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
@@ -47,6 +48,7 @@ type Runtime struct {
 	upstreamManager *upstream.Manager
 	cacheManager    *cache.Manager
 	truncator       *truncate.Truncator
+	secretResolver  *secret.Resolver
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -83,6 +85,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
 
+	// Initialize secret resolver
+	secretResolver := secret.NewResolver()
+
 	appCtx, appCancel := context.WithCancel(context.Background())
 
 	rt := &Runtime{
@@ -94,6 +99,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		upstreamManager: upstreamManager,
 		cacheManager:    cacheManager,
 		truncator:       truncator,
+		secretResolver:  secretResolver,
 		appCtx:          appCtx,
 		appCancel:       appCancel,
 		status: Status{
@@ -324,4 +330,16 @@ func extractToolCount(stats map[string]interface{}) int {
 		}
 	}
 	return result
+}
+
+// GetSecretResolver returns the secret resolver instance
+func (rt *Runtime) GetSecretResolver() *secret.Resolver {
+	return rt.secretResolver
+}
+
+// GetCurrentConfig returns the current configuration
+func (rt *Runtime) GetCurrentConfig() interface{} {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	return rt.cfg
 }

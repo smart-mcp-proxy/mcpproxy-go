@@ -54,6 +54,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/secrets',
+      name: 'secrets',
+      component: () => import('@/views/Secrets.vue'),
+      meta: {
+        title: 'Secrets',
+      },
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'not-found',
       component: () => import('@/views/NotFound.vue'),

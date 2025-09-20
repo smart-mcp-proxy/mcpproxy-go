@@ -17,6 +17,7 @@ import (
 	"mcpproxy-go/internal/httpapi"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/runtime"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/web"
 )
 
@@ -930,4 +931,14 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]string, error) {
 
 	s.logger.Debug("Retrieved server logs", zap.String("server", serverName), zap.Int("lines", len(logs)))
 	return logs, nil
+}
+
+// GetSecretResolver returns the secret resolver instance
+func (s *Server) GetSecretResolver() *secret.Resolver {
+	return s.runtime.GetSecretResolver()
+}
+
+// GetCurrentConfig returns the current configuration
+func (s *Server) GetCurrentConfig() interface{} {
+	return s.runtime.GetCurrentConfig()
 }

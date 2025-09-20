@@ -90,12 +90,16 @@ func main() {
 	// Add auth command
 	authCmd := GetAuthCommand()
 
+	// Add secrets command
+	secretsCmd := GetSecretsCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(toolsCmd)
 	rootCmd.AddCommand(callCmd)
 	rootCmd.AddCommand(authCmd)
+	rootCmd.AddCommand(secretsCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer

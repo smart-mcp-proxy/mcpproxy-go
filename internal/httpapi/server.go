@@ -15,6 +15,7 @@ import (
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/observability"
 	internalRuntime "mcpproxy-go/internal/runtime"
+	"mcpproxy-go/internal/secret"
 )
 
 const asyncToggleTimeout = 5 * time.Second
@@ -49,6 +50,10 @@ type ServerController interface {
 	GetConfigPath() string
 	GetLogDir() string
 	TriggerOAuthLogin(serverName string) error
+
+	// Secrets management
+	GetSecretResolver() *secret.Resolver
+	GetCurrentConfig() interface{}
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -134,6 +139,12 @@ func (s *Server) setupRoutes() {
 
 		// Search
 		r.Get("/index/search", s.handleSearchTools)
+
+		// Secrets management
+		r.Route("/secrets", func(r chi.Router) {
+			r.Get("/refs", s.handleGetSecretRefs)
+			r.Post("/migrate", s.handleMigrateSecrets)
+		})
 	})
 
 	// SSE events
@@ -541,4 +552,78 @@ func (s *Server) handleLegacyStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, response)
+}
+
+// Secrets management handlers
+
+func (s *Server) handleGetSecretRefs(w http.ResponseWriter, r *http.Request) {
+	resolver := s.controller.GetSecretResolver()
+	if resolver == nil {
+		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// Get all secret references from available providers
+	refs, err := resolver.ListAll(ctx)
+	if err != nil {
+		s.logger.Error("Failed to list secret references", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to list secret references")
+		return
+	}
+
+	// Mask the response for security - never return actual secret values
+	maskedRefs := make([]map[string]interface{}, len(refs))
+	for i, ref := range refs {
+		maskedRefs[i] = map[string]interface{}{
+			"type":     ref.Type,
+			"name":     ref.Name,
+			"original": ref.Original,
+		}
+	}
+
+	response := map[string]interface{}{
+		"refs":  maskedRefs,
+		"count": len(refs),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleMigrateSecrets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	resolver := s.controller.GetSecretResolver()
+	if resolver == nil {
+		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		return
+	}
+
+	// Get current configuration
+	cfg := s.controller.GetCurrentConfig()
+	if cfg == nil {
+		s.writeError(w, http.StatusInternalServerError, "Configuration not available")
+		return
+	}
+
+	// Analyze configuration for potential secrets
+	analysis := resolver.AnalyzeForMigration(cfg)
+
+	// Mask actual values in the response for security
+	for i := range analysis.Candidates {
+		analysis.Candidates[i].Value = secret.MaskSecretValue(analysis.Candidates[i].Value)
+	}
+
+	response := map[string]interface{}{
+		"analysis":  analysis,
+		"dry_run":   true, // Always dry run via API for security
+		"timestamp": time.Now().Unix(),
+	}
+
+	s.writeSuccess(w, response)
 }
