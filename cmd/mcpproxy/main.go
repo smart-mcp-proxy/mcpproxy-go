@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -369,11 +370,27 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Setup signal handling for graceful shutdown
+	// Setup signal handling for graceful shutdown with force quit on second signal
 	go func() {
 		sig := <-sigChan
 		logger.Info("Received signal, shutting down", zap.String("signal", sig.String()))
+		logger.Info("Press Ctrl+C again within 10 seconds to force quit")
 		cancel()
+
+		// Start a timer for force quit
+		forceQuitTimer := time.NewTimer(10 * time.Second)
+		defer forceQuitTimer.Stop()
+
+		// Wait for second signal or timeout
+		select {
+		case sig2 := <-sigChan:
+			logger.Warn("Received second signal, forcing immediate exit", zap.String("signal", sig2.String()))
+			_ = logger.Sync()
+			os.Exit(1)
+		case <-forceQuitTimer.C:
+			// Normal shutdown timeout - continue with graceful shutdown
+			logger.Debug("Force quit timer expired, continuing with graceful shutdown")
+		}
 	}()
 
 	// Start the server

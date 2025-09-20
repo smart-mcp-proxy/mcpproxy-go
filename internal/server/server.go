@@ -192,7 +192,7 @@ func (s *Server) Start(ctx context.Context) error {
 		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServer())
 
 		// Create custom HTTP server for handling multiple routes
-		if err := s.startCustomHTTPServer(streamableServer); err != nil {
+		if err := s.startCustomHTTPServer(ctx, streamableServer); err != nil {
 			return fmt.Errorf("MCP Streamable HTTP server error: %w", err)
 		}
 	} else {
@@ -575,28 +575,8 @@ func (s *Server) StopServer() error {
 		s.serverCancel()
 	}
 
-	// Gracefully shutdown HTTP server if it exists
-	s.logger.Info("STOPSERVER - Shutting down HTTP server")
-	_ = s.logger.Sync()
-	if s.httpServer != nil {
-		// Give the server 5 seconds to shutdown gracefully
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			s.logger.Warn("STOPSERVER - Failed to gracefully shutdown HTTP server, forcing close", zap.Error(err))
-			// Force close if graceful shutdown fails
-			if closeErr := s.httpServer.Close(); closeErr != nil {
-				s.logger.Error("STOPSERVER - Error forcing HTTP server close", zap.Error(closeErr))
-			}
-		} else {
-			s.logger.Info("STOPSERVER - HTTP server shutdown successfully")
-			_ = s.logger.Sync()
-		}
-		s.httpServer = nil
-	}
-
-	s.logger.Info("STOPSERVER - HTTP server cleanup completed")
+	// HTTP server shutdown is now handled by context cancellation in startCustomHTTPServer
+	s.logger.Info("STOPSERVER - HTTP server shutdown is handled by context cancellation")
 	_ = s.logger.Sync()
 
 	// Upstream servers already disconnected early in this method
@@ -617,7 +597,7 @@ func (s *Server) StopServer() error {
 }
 
 // startCustomHTTPServer creates a custom HTTP server that handles MCP endpoints
-func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPServer) error {
+func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
 	mux := http.NewServeMux()
 
 	// Create a logging wrapper for debugging client connections
@@ -720,18 +700,42 @@ func (s *Server) startCustomHTTPServer(streamableServer *server.StreamableHTTPSe
 		zap.Duration("idle_timeout", 180*time.Second),
 		zap.String("features", "connection_tracking,graceful_shutdown,enhanced_logging"),
 	)
-	if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-		s.logger.Error("HTTP server error", zap.Error(err))
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-		s.runtime.SetRunning(false)
-		s.updateStatus("Error", fmt.Sprintf("Server failed: %v", err))
+
+	// Run the HTTP server in a goroutine to enable graceful shutdown
+	serverErrCh := make(chan error, 1)
+	go func() {
+		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+			s.logger.Error("HTTP server error", zap.Error(err))
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+			s.runtime.SetRunning(false)
+			s.updateStatus("Error", fmt.Sprintf("Server failed: %v", err))
+			serverErrCh <- err
+		} else {
+			s.logger.Info("HTTP server stopped gracefully")
+			serverErrCh <- nil
+		}
+	}()
+
+	// Wait for either context cancellation or server error
+	select {
+	case <-ctx.Done():
+		s.logger.Info("Server context cancelled, initiating graceful shutdown")
+		// Gracefully shutdown the HTTP server
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			s.logger.Warn("HTTP server forced shutdown due to timeout", zap.Error(err))
+			s.httpServer.Close()
+		} else {
+			s.logger.Info("HTTP server shutdown completed gracefully")
+		}
+		return ctx.Err()
+	case err := <-serverErrCh:
 		return err
 	}
-
-	s.logger.Info("HTTP server stopped")
-	return nil
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code

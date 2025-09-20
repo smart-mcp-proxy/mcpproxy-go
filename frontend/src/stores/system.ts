@@ -32,8 +32,15 @@ export const useSystemStore = defineStore('system', () => {
 
   // Computed
   const isRunning = computed(() => {
-    // The SSE event structure has running at the top level, not in the nested status
-    return status.value?.running ?? false
+    // Priority: Top-level running field, then nested status.running, default false
+    if (status.value?.running !== undefined) {
+      return status.value.running
+    }
+    // Fallback to nested status.running if top-level is undefined
+    if (status.value?.status?.running !== undefined) {
+      return status.value.status.running
+    }
+    return false
   })
   const listenAddr = computed(() => status.value?.listen_addr ?? '')
   const upstreamStats = computed(() => status.value?.upstream_stats ?? {
@@ -64,6 +71,15 @@ export const useSystemStore = defineStore('system', () => {
       try {
         const data = JSON.parse(event.data) as StatusUpdate
         status.value = data
+
+        // Debug logging to help diagnose status issues
+        console.log('SSE Status Update:', {
+          topLevelRunning: data.running,
+          nestedStatusRunning: data.status?.running,
+          listen_addr: data.listen_addr,
+          timestamp: data.timestamp,
+          finalRunningValue: data.running !== undefined ? data.running : (data.status?.running ?? false)
+        })
 
         // You could emit events here for other stores to listen to
         // For example, update server statuses
