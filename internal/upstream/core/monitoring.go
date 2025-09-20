@@ -47,8 +47,8 @@ func (c *Client) StopStderrMonitoring() {
 		case <-done:
 			c.logger.Debug("Stopped stderr monitoring",
 				zap.String("server", c.config.Name))
-		case <-time.After(2 * time.Second):
-			c.logger.Warn("Stderr monitoring stop timed out",
+		case <-time.After(500 * time.Millisecond):
+			c.logger.Warn("Stderr monitoring stop timed out after 500ms, forcing shutdown",
 				zap.String("server", c.config.Name))
 		}
 	}
@@ -98,8 +98,8 @@ func (c *Client) StopProcessMonitoring() {
 		case <-done:
 			c.logger.Debug("Stopped process monitoring",
 				zap.String("server", c.config.Name))
-		case <-time.After(2 * time.Second):
-			c.logger.Warn("Process monitoring stop timed out",
+		case <-time.After(500 * time.Millisecond):
+			c.logger.Warn("Process monitoring stop timed out after 500ms, forcing shutdown",
 				zap.String("server", c.config.Name))
 		}
 	}

@@ -32,10 +32,15 @@ type Manager struct {
 	// newly available OAuth tokens without explicit DB events (e.g., when CLI
 	// cannot write due to DB lock). Prevents rapid retrigger loops.
 	tokenReconnect map[string]time.Time
+
+	// Context for shutdown coordination
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 // NewManager creates a new upstream manager
 func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storage.BoltDB) *Manager {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		clients:         make(map[string]*managed.Client),
 		logger:          logger,
@@ -43,6 +48,8 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storag
 		storage:         storage,
 		notificationMgr: NewNotificationManager(),
 		tokenReconnect:  make(map[string]time.Time),
+		shutdownCtx:     shutdownCtx,
+		shutdownCancel:  shutdownCancel,
 	}
 
 	// Set up OAuth completion callback to trigger connection retries (in-process)
@@ -59,7 +66,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storag
 
 	// Start database event monitor for cross-process OAuth completion notifications
 	if storage != nil {
-		go manager.startOAuthEventMonitor()
+		go manager.startOAuthEventMonitor(shutdownCtx)
 	}
 
 	return manager
@@ -471,6 +478,11 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 // DisconnectAll disconnects from all servers
 func (m *Manager) DisconnectAll() error {
+	// Cancel shutdown context to stop OAuth event monitor
+	if m.shutdownCancel != nil {
+		m.shutdownCancel()
+	}
+
 	m.mu.RLock()
 	clients := make([]*managed.Client, 0, len(m.clients))
 	for _, client := range m.clients {
@@ -482,6 +494,9 @@ func (m *Manager) DisconnectAll() error {
 	for _, client := range clients {
 		if err := client.Disconnect(); err != nil {
 			lastError = err
+			m.logger.Warn("Client disconnect failed",
+				zap.String("server", client.Config.Name),
+				zap.Error(err))
 		}
 	}
 
@@ -692,21 +707,27 @@ func (m *Manager) RetryConnection(serverName string) error {
 }
 
 // startOAuthEventMonitor monitors the database for OAuth completion events from CLI processes
-func (m *Manager) startOAuthEventMonitor() {
+func (m *Manager) startOAuthEventMonitor(ctx context.Context) {
 	m.logger.Info("Starting OAuth event monitor for cross-process notifications")
 
 	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
 	defer ticker.Stop()
 
-	for range ticker.C {
-		if err := m.processOAuthEvents(); err != nil {
-			m.logger.Warn("Failed to process OAuth events", zap.Error(err))
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Info("OAuth event monitor stopped due to context cancellation")
+			return
+		case <-ticker.C:
+			if err := m.processOAuthEvents(); err != nil {
+				m.logger.Warn("Failed to process OAuth events", zap.Error(err))
+			}
 
-		// Also scan for newly available tokens to handle cases where the CLI
-		// could not write a DB event due to a lock. If we see a persisted
-		// token for an errored OAuth server, trigger a reconnect once.
-		m.scanForNewTokens()
+			// Also scan for newly available tokens to handle cases where the CLI
+			// could not write a DB event due to a lock. If we see a persisted
+			// token for an errored OAuth server, trigger a reconnect once.
+			m.scanForNewTokens()
+		}
 	}
 }
 
