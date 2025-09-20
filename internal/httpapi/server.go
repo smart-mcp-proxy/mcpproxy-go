@@ -88,7 +88,6 @@ func (s *Server) setupRoutes() {
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.RequestID)
-	s.router.Use(middleware.Timeout(60 * time.Second))
 
 	// CORS headers for browser access
 	s.router.Use(func(next http.Handler) http.Handler {
@@ -117,8 +116,11 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
-	// API v1 routes
+	// API v1 routes with timeout middleware
 	s.router.Route("/api/v1", func(r chi.Router) {
+		// Apply timeout middleware to API routes only
+		r.Use(middleware.Timeout(60 * time.Second))
+
 		// Server management
 		r.Get("/servers", s.handleGetServers)
 		r.Route("/servers/{id}", func(r chi.Router) {
@@ -439,6 +441,10 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	statusCh := s.controller.StatusChannel()
 	eventsCh := s.controller.EventsChannel()
 
+	// Create heartbeat ticker to keep connection alive
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+
 	// Send initial status
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
@@ -459,6 +465,16 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			// Send heartbeat ping to keep connection alive
+			pingData := map[string]interface{}{
+				"timestamp": time.Now().Unix(),
+			}
+			if err := s.writeSSEEvent(w, "ping", pingData); err != nil {
+				s.logger.Error("Failed to write SSE heartbeat", "error", err)
+				return
+			}
+			flusher.Flush()
 		case status, ok := <-statusCh:
 			if !ok {
 				return
