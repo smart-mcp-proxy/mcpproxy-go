@@ -109,3 +109,4 @@ data/
 .cursor/
 assets/mcpproxy.icns
 build-info.json
+.gocache/
