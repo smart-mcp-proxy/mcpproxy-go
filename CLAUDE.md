@@ -518,6 +518,16 @@ export HEADLESS=true
    - Check Docker isolation: `grep "Docker" ~/Library/Logs/mcpproxy/main.log`
    - Verify server configuration: `mcpproxy upstream list`
 
+4. **UI showing 'Stopped 0/0 servers' when server is running**:
+   - Fixed in latest version - frontend now properly reads status from SSE events
+   - If issue persists, check browser console for SSE connection errors
+   - Verify server is accessible: `curl http://localhost:8080/mcp`
+
+5. **Ctrl+C doesn't free shell / server hangs on shutdown**:
+   - Fixed in latest version with proper HTTP server shutdown handling
+   - Force quit available: Press Ctrl+C twice within 10 seconds
+   - Check for hanging processes: `ps aux | grep mcpproxy`
+
 ## Development Guidelines
 
 ### File Organization

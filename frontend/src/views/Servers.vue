@@ -114,7 +114,7 @@
       </svg>
       <h3 class="text-xl font-semibold mb-2">No servers found</h3>
       <p class="text-base-content/70 mb-4">
-        {{ searchQuery ? 'No servers match your search criteria' : `No ${filter} servers available` }}
+        {{ searchQuery ? 'No servers match your search criteria' : `No ${filter === 'all' ? '' : filter} servers available`.replace(/\s+/g, ' ').trim() }}
       </p>
       <button v-if="searchQuery" @click="searchQuery = ''" class="btn btn-outline">
         Clear Search
