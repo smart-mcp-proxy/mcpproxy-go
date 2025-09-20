@@ -21,9 +21,7 @@
       <!-- Logo and brand -->
       <router-link to="/" class="btn btn-ghost text-xl">
         <div class="flex items-center space-x-2">
-          <div class="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
-            <span class="text-primary-content font-bold text-sm">MCP</span>
-          </div>
+          <img src="/src/assets/logo.svg" alt="MCPProxy Logo" class="w-8 h-8" />
           <span class="hidden sm:inline">MCPProxy</span>
         </div>
       </router-link>
