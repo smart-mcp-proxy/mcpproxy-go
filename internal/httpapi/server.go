@@ -58,10 +58,10 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller     ServerController
-	logger         *zap.SugaredLogger
-	router         *chi.Mux
-	observability  *observability.Manager
+	controller    ServerController
+	logger        *zap.SugaredLogger
+	router        *chi.Mux
+	observability *observability.Manager
 }
 
 // NewServer creates a new HTTP API server

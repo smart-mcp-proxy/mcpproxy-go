@@ -47,9 +47,9 @@ type ResolveResult struct {
 
 // MigrationCandidate represents a potential secret that could be migrated
 type MigrationCandidate struct {
-	Field     string `json:"field"`     // Field path in config
-	Value     string `json:"value"`     // Current plaintext value (masked in responses)
-	Suggested string `json:"suggested"` // Suggested SecretRef
+	Field      string  `json:"field"`      // Field path in config
+	Value      string  `json:"value"`      // Current plaintext value (masked in responses)
+	Suggested  string  `json:"suggested"`  // Suggested SecretRef
 	Confidence float64 `json:"confidence"` // Confidence this is a secret (0-1)
 }
 

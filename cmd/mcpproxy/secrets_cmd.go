@@ -265,10 +265,10 @@ func getSecretsListCommand() *cobra.Command {
 // getSecretsMigrateCommand returns the secrets migrate command
 func getSecretsMigrateCommand() *cobra.Command {
 	var (
-		dryRun     bool
+		dryRun      bool
 		autoApprove bool
-		fromType   string
-		toType     string
+		fromType    string
+		toType      string
 	)
 
 	cmd := &cobra.Command{

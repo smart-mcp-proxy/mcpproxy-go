@@ -120,10 +120,10 @@ func TestEnvProvider_List(t *testing.T) {
 
 	// Set some test environment variables
 	testVars := map[string]string{
-		"TEST_API_KEY":    "sk-1234567890abcdef",
-		"TEST_PASSWORD":   "secretpassword123",
-		"TEST_REGULAR":    "localhost",
-		"TEST_SHORT":      "abc",
+		"TEST_API_KEY":  "sk-1234567890abcdef",
+		"TEST_PASSWORD": "secretpassword123",
+		"TEST_REGULAR":  "localhost",
+		"TEST_SHORT":    "abc",
 	}
 
 	for key, value := range testVars {

@@ -15,12 +15,13 @@ import (
 
 	"mcpproxy-go/internal/contracts"
 	internalRuntime "mcpproxy-go/internal/runtime"
+	"mcpproxy-go/internal/secret"
 )
 
 // MockServerController implements ServerController for testing
 type MockServerController struct{}
 
-func (m *MockServerController) IsRunning() bool { return true }
+func (m *MockServerController) IsRunning() bool          { return true }
 func (m *MockServerController) GetListenAddress() string { return ":8080" }
 func (m *MockServerController) GetUpstreamStats() map[string]interface{} {
 	return map[string]interface{}{
@@ -34,7 +35,7 @@ func (m *MockServerController) GetUpstreamStats() map[string]interface{} {
 	}
 }
 func (m *MockServerController) StartServer(ctx context.Context) error { return nil }
-func (m *MockServerController) StopServer() error { return nil }
+func (m *MockServerController) StopServer() error                     { return nil }
 func (m *MockServerController) GetStatus() interface{} {
 	return map[string]interface{}{
 		"phase":   "Ready",
@@ -73,8 +74,12 @@ func (m *MockServerController) GetAllServers() ([]map[string]interface{}, error)
 }
 
 func (m *MockServerController) EnableServer(serverName string, enabled bool) error { return nil }
-func (m *MockServerController) QuarantineServer(serverName string, quarantined bool) error { return nil }
-func (m *MockServerController) GetQuarantinedServers() ([]map[string]interface{}, error) { return []map[string]interface{}{}, nil }
+func (m *MockServerController) QuarantineServer(serverName string, quarantined bool) error {
+	return nil
+}
+func (m *MockServerController) GetQuarantinedServers() ([]map[string]interface{}, error) {
+	return []map[string]interface{}{}, nil
+}
 func (m *MockServerController) UnquarantineServer(serverName string) error { return nil }
 
 func (m *MockServerController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
@@ -109,10 +114,14 @@ func (m *MockServerController) GetServerLogs(serverName string, tail int) ([]str
 	}, nil
 }
 
-func (m *MockServerController) ReloadConfiguration() error { return nil }
-func (m *MockServerController) GetConfigPath() string { return "/test/config.json" }
-func (m *MockServerController) GetLogDir() string { return "/test/logs" }
+func (m *MockServerController) ReloadConfiguration() error                { return nil }
+func (m *MockServerController) GetConfigPath() string                     { return "/test/config.json" }
+func (m *MockServerController) GetLogDir() string                         { return "/test/logs" }
 func (m *MockServerController) TriggerOAuthLogin(serverName string) error { return nil }
+
+// Secrets management methods
+func (m *MockServerController) GetSecretResolver() *secret.Resolver { return nil }
+func (m *MockServerController) GetCurrentConfig() interface{}       { return map[string]interface{}{} }
 
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {
