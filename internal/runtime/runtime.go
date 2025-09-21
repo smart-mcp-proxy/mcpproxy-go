@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,6 +138,29 @@ func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
 		r.cfgPath = cfgPath
 	}
 	r.mu.Unlock()
+}
+
+// UpdateListenAddress mutates the in-memory listen address used by the runtime.
+func (r *Runtime) UpdateListenAddress(addr string) error {
+	if addr == "" {
+		return fmt.Errorf("listen address cannot be empty")
+	}
+
+	if !strings.Contains(addr, ":") {
+		return fmt.Errorf("listen address %q must include a port", addr)
+	}
+
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", addr, err)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cfg == nil {
+		return fmt.Errorf("runtime configuration is not available")
+	}
+	r.cfg.Listen = addr
+	return nil
 }
 
 // SetRunning records whether the server HTTP layer is active.

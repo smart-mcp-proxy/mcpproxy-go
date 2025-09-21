@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -39,6 +40,7 @@ type Server struct {
 	// Server control
 	httpServer *http.Server
 	running    bool
+	listenAddr string
 	mu         sync.RWMutex
 
 	serverCtx    context.Context
@@ -90,7 +92,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 // GetStatus returns the current server status
 func (s *Server) GetStatus() interface{} {
-	return s.runtime.StatusSnapshot(s.IsRunning())
+	status := s.runtime.StatusSnapshot(s.IsRunning())
+	if status != nil {
+		status["listen_addr"] = s.GetListenAddress()
+	}
+	return status
 }
 
 // TriggerOAuthLogin starts an in-process OAuth flow for the given server name.
@@ -185,17 +191,26 @@ func (s *Server) Start(ctx context.Context) error {
 			zap.String("transport", "streamable-http"),
 			zap.String("listen", listenAddr))
 
-		// Update status to show server is now running
-		s.updateStatus("Running", fmt.Sprintf("Server is running on %s", listenAddr))
-		s.runtime.SetRunning(true)
-
 		// Create Streamable HTTP server with custom routing
 		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServer())
 
 		// Create custom HTTP server for handling multiple routes
 		if err := s.startCustomHTTPServer(ctx, streamableServer); err != nil {
+			var portErr *PortInUseError
+			if errors.As(err, &portErr) {
+				return err
+			}
 			return fmt.Errorf("MCP Streamable HTTP server error: %w", err)
 		}
+
+		actualAddr := s.GetListenAddress()
+		if actualAddr == "" {
+			actualAddr = listenAddr
+		}
+
+		// Update status to show server is now running
+		s.updateStatus("Running", fmt.Sprintf("Server is running on %s", actualAddr))
+		s.runtime.SetRunning(true)
 	} else {
 		// Start the MCP server in stdio mode
 		s.logger.Info("Starting MCP server", zap.String("transport", "stdio"))
@@ -264,10 +279,46 @@ func (s *Server) IsRunning() bool {
 
 // GetListenAddress returns the address the server is listening on
 func (s *Server) GetListenAddress() string {
+	s.mu.RLock()
+	addr := s.listenAddr
+	s.mu.RUnlock()
+	if addr != "" {
+		return addr
+	}
 	if cfg := s.runtime.Config(); cfg != nil {
 		return cfg.Listen
 	}
 	return ""
+}
+
+// SetListenAddress updates the configured listen address and optionally persists it to disk.
+func (s *Server) SetListenAddress(addr string, persist bool) error {
+	if _, _, err := splitListenAddress(addr); err != nil {
+		return err
+	}
+
+	if err := s.runtime.UpdateListenAddress(addr); err != nil {
+		return err
+	}
+
+	if persist {
+		if err := s.runtime.SaveConfiguration(); err != nil {
+			return fmt.Errorf("failed to save configuration: %w", err)
+		}
+	}
+
+	s.logger.Info("Listen address updated",
+		zap.String("listen", addr),
+		zap.Bool("persisted", persist))
+
+	return nil
+}
+
+const defaultPortSuggestionAttempts = 20
+
+// SuggestAlternateListen attempts to find an available listen address near baseAddr.
+func (s *Server) SuggestAlternateListen(baseAddr string) (string, error) {
+	return findAvailableListenAddress(baseAddr, defaultPortSuggestionAttempts)
 }
 
 // GetUpstreamStats returns statistics about upstream servers
@@ -496,6 +547,7 @@ func (s *Server) StartServer(ctx context.Context) error {
 		defer func() {
 			s.mu.Lock()
 			s.running = false
+			s.listenAddr = ""
 			s.mu.Unlock()
 			s.runtime.SetRunning(false)
 
@@ -586,6 +638,7 @@ func (s *Server) StopServer() error {
 
 	// Set running to false immediately after server is shut down
 	s.running = false
+	s.listenAddr = ""
 	s.runtime.SetRunning(false)
 
 	// Notify about server stopped with explicit status update
@@ -677,6 +730,15 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		listenAddr = cfg.Listen
 	}
 
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		if isAddrInUseError(err) {
+			return &PortInUseError{Address: listenAddr, Err: err}
+		}
+		return fmt.Errorf("failed to bind to %s: %w", listenAddr, err)
+	}
+	actualAddr := listener.Addr().String()
+
 	s.mu.Lock()
 	s.httpServer = &http.Server{
 		Addr:              listenAddr,
@@ -691,10 +753,12 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	}
 	s.running = true
 	s.runtime.SetRunning(true)
+	s.listenAddr = actualAddr
 	s.mu.Unlock()
 
 	s.logger.Info("Starting MCP HTTP server with enhanced client stability",
-		zap.String("address", listenAddr),
+		zap.String("address", actualAddr),
+		zap.String("requested_address", listenAddr),
 		zap.Strings("endpoints", []string{"/mcp", "/mcp/", "/v1/tool_code", "/v1/tool-code"}),
 		zap.Duration("read_timeout", 120*time.Second),
 		zap.Duration("write_timeout", 120*time.Second),
@@ -705,16 +769,20 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Run the HTTP server in a goroutine to enable graceful shutdown
 	serverErrCh := make(chan error, 1)
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			s.logger.Error("HTTP server error", zap.Error(err))
 			s.mu.Lock()
 			s.running = false
+			s.listenAddr = ""
 			s.mu.Unlock()
 			s.runtime.SetRunning(false)
 			s.updateStatus("Error", fmt.Sprintf("Server failed: %v", err))
 			serverErrCh <- err
 		} else {
 			s.logger.Info("HTTP server stopped gracefully")
+			s.mu.Lock()
+			s.listenAddr = ""
+			s.mu.Unlock()
 			serverErrCh <- nil
 		}
 	}()

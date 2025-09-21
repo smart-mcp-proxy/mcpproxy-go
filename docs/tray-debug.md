@@ -93,6 +93,32 @@ The `traydebug` build tag exposes an HTTP inspector (see `/state`, `/action`) so
 - Combine `MCPPROXY_DISABLE_OAUTH` with test configs to avoid OAuth popups in CI or when running unit tests.
 - When running against non-default ports, update your MCP clients (Cursor, VS Code, etc.) to use the same port.
 
+### Resolving Port Conflicts
+
+If another process already uses the configured listen port, the tray now surfaces a **Resolve port conflict** sub-menu directly beneath the status indicator. From there you can:
+
+- Retry the existing port once you have freed it.
+- Automatically switch to the next available port (the tray persists the new value and restarts the core for you).
+- Copy the MCP connection URL to the clipboard for quick use in clients.
+- Jump straight to the configuration directory if you prefer manual edits.
+
+For scripted verification on macOS you can drive the new menu via `osascript`:
+
+```applescript
+osascript <<'EOF'
+tell application "System Events"
+  tell process "mcpproxy-tray"
+    click menu bar item 1 of menu bar 1
+    click menu item "Resolve port conflict" of menu 1 of menu bar item 1 of menu bar 1
+    delay 0.2
+    click menu item "Use available port" of menu 1 of menu item "Resolve port conflict" of menu bar item 1 of menu bar 1
+  end tell
+end tell
+EOF
+```
+
+Adjust the inner menu titles if you localise the app; the defaults above match the English build.
+
 ## Further Reading
 
 - [docs/setup.md](./setup.md) – full installation and configuration walkthrough.

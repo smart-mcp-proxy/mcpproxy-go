@@ -23,6 +23,7 @@ type MockServerInterface struct {
 	statusCh                  chan interface{}
 	configPath                string
 	reloadConfigurationCalled bool
+	suggestedAddress          string
 }
 
 func NewMockServer() *MockServerInterface {
@@ -133,6 +134,18 @@ func (m *MockServerInterface) QuarantineServer(serverName string, quarantined bo
 
 func (m *MockServerInterface) GetAllServers() ([]map[string]interface{}, error) {
 	return m.allServers, nil
+}
+
+func (m *MockServerInterface) SetListenAddress(addr string, _ bool) error {
+	m.listenAddress = addr
+	return nil
+}
+
+func (m *MockServerInterface) SuggestAlternateListen(baseAddr string) (string, error) {
+	if m.suggestedAddress != "" {
+		return m.suggestedAddress, nil
+	}
+	return baseAddr, nil
 }
 
 func (m *MockServerInterface) ReloadConfiguration() error {
@@ -852,4 +865,35 @@ func TestReleaseVersionComparison(t *testing.T) {
 				currentVer, releaseVer, tt.shouldUpdate)
 		})
 	}
+}
+
+func TestBuildConnectionURL(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	app := &App{
+		logger: logger.Sugar(),
+	}
+
+	t.Run("defaults to localhost", func(t *testing.T) {
+		if got := app.buildConnectionURL(":8080"); got != "http://localhost:8080/mcp" {
+			t.Fatalf("expected localhost substitution, got %s", got)
+		}
+	})
+
+	t.Run("preserves explicit IPv4 host", func(t *testing.T) {
+		if got := app.buildConnectionURL("127.0.0.1:9090"); got != "http://127.0.0.1:9090/mcp" {
+			t.Fatalf("unexpected connection URL: %s", got)
+		}
+	})
+
+	t.Run("supports IPv6 with brackets", func(t *testing.T) {
+		if got := app.buildConnectionURL("[::1]:7777"); got != "http://[::1]:7777/mcp" {
+			t.Fatalf("unexpected IPv6 URL: %s", got)
+		}
+	})
+
+	t.Run("invalid input returns empty", func(t *testing.T) {
+		if got := app.buildConnectionURL("bad-address"); got != "" {
+			t.Fatalf("expected empty string for invalid listen address, got %s", got)
+		}
+	})
 }

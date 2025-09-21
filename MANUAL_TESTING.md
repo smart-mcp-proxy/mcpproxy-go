@@ -158,6 +158,35 @@ curl "http://localhost:8080/api/v1/index/search?q=math&limit=5" | jq .
   --json_args='{"path":"./test-data/test.txt","content":"Test file content"}'
 ```
 
+### 6. Port Conflict Recovery (Tray)
+
+1. Hold the default port to simulate a conflict:
+
+   ```bash
+   # Terminal A
+   python3 -m http.server 8080
+   ```
+
+2. Launch the tray build and allow it to start the core. The status menu displays **Port conflict** with a dedicated submenu.
+3. Use **Resolve port conflict → Use available port …** to switch the core to an automatically selected free port. The tray persists the new value in `mcp_config.json` and restarts the server.
+4. Alternatively choose **Retry start** once you have released the original port or **Open config directory** to edit the listen address manually.
+5. On macOS you can automate the interaction with the new submenu via `osascript`:
+
+   ```applescript
+   osascript <<'EOF'
+   tell application "System Events"
+     tell process "mcpproxy-tray"
+       click menu bar item 1 of menu bar 1
+       click menu item "Resolve port conflict" of menu 1 of menu bar item 1 of menu bar 1
+       delay 0.2
+       click menu item "Use available port" of menu 1 of menu item "Resolve port conflict" of menu bar item 1 of menu bar 1
+     end tell
+   end tell
+   EOF
+   ```
+
+6. Verify the new port by inspecting the tray tooltip (now shows the bound address) and by calling `curl http://localhost:<new-port>/healthz`.
+
 ### 6. Server Management
 
 ```bash

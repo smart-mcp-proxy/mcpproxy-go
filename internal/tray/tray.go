@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -73,6 +74,8 @@ type ServerInterface interface {
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string, quarantined bool) error
 	GetAllServers() ([]map[string]interface{}, error)
+	SetListenAddress(addr string, persist bool) error
+	SuggestAlternateListen(baseAddr string) (string, error)
 
 	// Config management for file watching
 	ReloadConfiguration() error
@@ -104,6 +107,12 @@ type App struct {
 	startStopItem       *systray.MenuItem
 	upstreamServersMenu *systray.MenuItem
 	quarantineMenu      *systray.MenuItem
+	portConflictMenu    *systray.MenuItem
+	portConflictInfo    *systray.MenuItem
+	portConflictRetry   *systray.MenuItem
+	portConflictAuto    *systray.MenuItem
+	portConflictCopy    *systray.MenuItem
+	portConflictConfig  *systray.MenuItem
 
 	// Managers for proper synchronization
 	stateManager *ServerStateManager
@@ -134,6 +143,9 @@ type App struct {
 	// Quarantine menu tracking fields
 	lastQuarantineList    []string                     // Track last known quarantine list for change detection
 	quarantineServerMenus map[string]*systray.MenuItem // Track quarantine server menu items
+	portConflictActive    bool
+	portConflictAddress   string
+	portConflictSuggested string
 }
 
 // New creates a new tray application
@@ -270,9 +282,20 @@ func (a *App) applyConnectionStateToUI(state ConnectionState) {
 	a.statusTooltip = tooltip
 	a.statusMu.Unlock()
 
+	if state != ConnectionStateConnected {
+		a.hidePortConflictMenu()
+	}
+
 	if a.startStopItem != nil {
-		a.startStopItem.SetTitle("Core managed by tray")
-		a.startStopItem.Disable()
+		if state == ConnectionStateConnected {
+			a.startStopItem.Enable()
+			if !a.portConflictActive {
+				a.startStopItem.SetTitle("Start core")
+			}
+		} else {
+			a.startStopItem.SetTitle("Core managed by tray")
+			a.startStopItem.Disable()
+		}
 	}
 
 	a.instrumentation.NotifyConnectionState(state)
@@ -462,6 +485,20 @@ func (a *App) onReady() {
 	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
 	a.applyConnectionStateToUI(a.getConnectionState())
 
+	// Port conflict resolution submenu (hidden until needed)
+	a.portConflictMenu = systray.AddMenuItem("Resolve port conflict", "Actions to resolve listen port issues")
+	a.portConflictInfo = a.portConflictMenu.AddSubMenuItem("Waiting for status...", "Port conflict details")
+	a.portConflictInfo.Disable()
+	a.portConflictRetry = a.portConflictMenu.AddSubMenuItem("Retry starting core", "Attempt to start the core on the configured port")
+	a.portConflictAuto = a.portConflictMenu.AddSubMenuItem("Use next available port", "Automatically select an available port")
+	a.portConflictCopy = a.portConflictMenu.AddSubMenuItem("Copy MCP URL", "Copy the MCP connection URL to the clipboard")
+	a.portConflictConfig = a.portConflictMenu.AddSubMenuItem("Open config directory", "Edit the configuration manually")
+	a.portConflictMenu.Hide()
+	a.portConflictRetry.Disable()
+	a.portConflictAuto.Disable()
+	a.portConflictCopy.Disable()
+	a.portConflictConfig.Disable()
+
 	// Mark core menu items as ready - this will release waiting goroutines
 	a.coreMenusReady = true
 	a.logger.Debug("Core menu items initialized successfully - background processes can now start")
@@ -520,6 +557,14 @@ func (a *App) onReady() {
 			select {
 			case <-a.startStopItem.ClickedCh:
 				a.handleStartStop()
+			case <-a.portConflictRetry.ClickedCh:
+				go a.handlePortConflictRetry()
+			case <-a.portConflictAuto.ClickedCh:
+				go a.handlePortConflictAuto()
+			case <-a.portConflictCopy.ClickedCh:
+				go a.handlePortConflictCopy()
+			case <-a.portConflictConfig.ClickedCh:
+				a.openConfigDir()
 			case <-updateItem.ClickedCh:
 				go a.checkForUpdates()
 			case <-openConfigItem.ClickedCh:
@@ -656,20 +701,30 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	// Debug logging to track status updates
 	running, _ := status["running"].(bool)
 	phase, _ := status["phase"].(string)
+	message, _ := status["message"].(string)
+	listenAddr, _ := status["listen_addr"].(string)
 	serverRunning := a.server != nil && a.server.IsRunning()
+
+	lowerMessage := strings.ToLower(message)
+	portConflict := phase == "Error" && strings.Contains(lowerMessage, "port") && strings.Contains(lowerMessage, "in use")
 
 	a.logger.Debug("Updating tray status",
 		zap.Bool("status_running", running),
 		zap.Bool("server_is_running", serverRunning),
 		zap.String("phase", phase),
+		zap.Bool("port_conflict", portConflict),
 		zap.Any("status_data", status))
 
 	// Use the actual server running state as the authoritative source
 	actuallyRunning := serverRunning
 
-	// Update running status and start/stop button
+	if portConflict {
+		a.showPortConflictMenu(listenAddr, message)
+	} else {
+		a.hidePortConflictMenu()
+	}
+
 	if actuallyRunning {
-		listenAddr, _ := status["listen_addr"].(string)
 		title := "Status: Running"
 		if listenAddr != "" {
 			title = fmt.Sprintf("Status: Running (%s)", listenAddr)
@@ -679,20 +734,35 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		a.statusTitle = title
 		a.statusMu.Unlock()
 		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Core running")
-			a.startStopItem.Disable()
+			a.startStopItem.SetTitle("Stop core")
+			a.startStopItem.Enable()
 		}
 		a.logger.Debug("Set tray to running state")
 	} else {
-		a.statusItem.SetTitle("Status: Stopped")
+		title := "Status: Stopped"
+		if phase == "Error" {
+			title = "Status: Error"
+			if portConflict && listenAddr != "" {
+				title = fmt.Sprintf("Status: Port conflict (%s)", listenAddr)
+			}
+		}
+		a.statusItem.SetTitle(title)
 		a.statusMu.Lock()
-		a.statusTitle = "Status: Stopped"
+		a.statusTitle = title
 		a.statusMu.Unlock()
 		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Core stopped")
-			a.startStopItem.Disable()
+			a.startStopItem.Enable()
+			if phase == "Error" {
+				if portConflict {
+					a.startStopItem.SetTitle("Retry start")
+				} else {
+					a.startStopItem.SetTitle("Retry core start")
+				}
+			} else {
+				a.startStopItem.SetTitle("Start core")
+			}
 		}
-		a.logger.Debug("Set tray to stopped state")
+		a.logger.Debug("Set tray to non-running state", zap.String("phase", phase))
 	}
 
 	// Update tooltip
@@ -704,15 +774,7 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		if actuallyRunning {
 			a.syncManager.SyncDelayed()
 		} else {
-			// When server is stopped, preserve the last known server list but update connection status
-			// This prevents the UI from showing (0/0) when the server is temporarily stopped
-			// The menu items will still be visible but will show disconnected status
 			a.logger.Debug("Server stopped, preserving menu state with disconnected status")
-			// DON'T clear menus - this causes the (0/0) flickering issue
-			// DON'T clear quarantine menu - quarantine data is persistent storage,
-			// not runtime connection data. Users should manage quarantined servers
-			// even when server is stopped.
-			// a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
 		}
 	}
 }
@@ -724,18 +786,27 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 	}
 
 	running, _ := status["running"].(bool)
+	phase, _ := status["phase"].(string)
+	message, _ := status["message"].(string)
 
 	if !running {
-		systray.SetTooltip("mcpproxy is stopped")
+		tooltip := "mcpproxy is stopped"
+		if phase == "Error" {
+			if strings.TrimSpace(message) != "" {
+				tooltip = fmt.Sprintf("mcpproxy error: %s", message)
+			} else {
+				tooltip = "mcpproxy encountered an error while starting"
+			}
+		}
+		systray.SetTooltip(tooltip)
 		a.statusMu.Lock()
-		a.statusTooltip = "mcpproxy is stopped"
+		a.statusTooltip = tooltip
 		a.statusMu.Unlock()
 		return
 	}
 
 	// Build comprehensive tooltip for running server
 	listenAddr, _ := status["listen_addr"].(string)
-	phase, _ := status["phase"].(string)
 	toolsIndexed, _ := status["tools_indexed"].(int)
 
 	// Get upstream stats for connected servers and total tools
@@ -1231,6 +1302,231 @@ func (a *App) openDirectory(dirPath, dirType string) {
 	} else {
 		a.logger.Info("Successfully opened directory", zap.String("dir_type", dirType), zap.String("path", dirPath))
 	}
+}
+
+func (a *App) showPortConflictMenu(listenAddr, message string) {
+	if a.portConflictMenu == nil {
+		return
+	}
+
+	if listenAddr == "" && a.server != nil {
+		listenAddr = a.server.GetListenAddress()
+	}
+
+	a.portConflictActive = true
+	a.portConflictAddress = listenAddr
+
+	headline := "Resolve port conflict"
+	if listenAddr != "" {
+		headline = fmt.Sprintf("Resolve port conflict (%s)", listenAddr)
+	}
+	a.portConflictMenu.SetTitle(headline)
+
+	info := message
+	if strings.TrimSpace(info) == "" {
+		info = "Another process is using the configured port."
+	}
+	if a.portConflictInfo != nil {
+		a.portConflictInfo.SetTitle(info)
+		a.portConflictInfo.Disable()
+	}
+
+	if a.portConflictRetry != nil {
+		a.portConflictRetry.Enable()
+	}
+
+	if a.portConflictConfig != nil {
+		a.portConflictConfig.Enable()
+	}
+
+	suggestion := ""
+	var err error
+	if a.server != nil {
+		suggestion, err = a.server.SuggestAlternateListen(listenAddr)
+	}
+	if err != nil {
+		a.logger.Warn("Failed to suggest alternate listen address", zap.Error(err))
+		a.portConflictSuggested = ""
+		if a.portConflictAuto != nil {
+			a.portConflictAuto.SetTitle("Find available port (retry)")
+			a.portConflictAuto.Enable()
+		}
+	} else {
+		a.portConflictSuggested = suggestion
+		if a.portConflictAuto != nil {
+			label := "Use next available port"
+			if suggestion != "" {
+				label = fmt.Sprintf("Use available port %s", suggestion)
+			}
+			a.portConflictAuto.SetTitle(label)
+			a.portConflictAuto.Enable()
+		}
+	}
+
+	if a.portConflictCopy != nil {
+		connectionURL := a.buildConnectionURL(listenAddr)
+		if connectionURL != "" {
+			a.portConflictCopy.SetTitle(fmt.Sprintf("Copy MCP URL (%s)", connectionURL))
+			a.portConflictCopy.Enable()
+			a.portConflictCopy.SetTooltip("Copy the MCP connection URL to the clipboard")
+		} else {
+			a.portConflictCopy.SetTitle("Copy MCP URL (unavailable)")
+			a.portConflictCopy.Disable()
+		}
+	}
+
+	a.portConflictMenu.Show()
+}
+
+func (a *App) hidePortConflictMenu() {
+	if !a.portConflictActive {
+		return
+	}
+
+	a.portConflictActive = false
+	a.portConflictAddress = ""
+	a.portConflictSuggested = ""
+
+	if a.portConflictMenu != nil {
+		a.portConflictMenu.Hide()
+		// Reset headline to default for next time
+		a.portConflictMenu.SetTitle("Resolve port conflict")
+	}
+
+	if a.portConflictInfo != nil {
+		a.portConflictInfo.SetTitle("Waiting for status...")
+	}
+
+	if a.portConflictRetry != nil {
+		a.portConflictRetry.Disable()
+	}
+
+	if a.portConflictAuto != nil {
+		a.portConflictAuto.Disable()
+	}
+
+	if a.portConflictCopy != nil {
+		a.portConflictCopy.Disable()
+	}
+
+	if a.portConflictConfig != nil {
+		a.portConflictConfig.Disable()
+	}
+}
+
+func (a *App) handlePortConflictRetry() {
+	if !a.portConflictActive {
+		return
+	}
+	if a.startStopItem != nil {
+		a.startStopItem.SetTitle("Retrying start...")
+		a.startStopItem.Disable()
+	}
+	a.logger.Info("Retrying server start after port conflict")
+	a.handleStartStop()
+}
+
+func (a *App) handlePortConflictAuto() {
+	if a.server == nil {
+		a.logger.Warn("Port conflict auto action requested without server interface")
+		return
+	}
+
+	listen := a.portConflictAddress
+	if listen == "" {
+		listen = a.server.GetListenAddress()
+	}
+
+	suggestion := a.portConflictSuggested
+	var err error
+	if suggestion == "" {
+		suggestion, err = a.server.SuggestAlternateListen(listen)
+		if err != nil {
+			a.logger.Error("Failed to calculate alternate listen address", zap.Error(err))
+			return
+		}
+	}
+
+	a.logger.Info("Applying alternate listen address",
+		zap.String("requested", listen),
+		zap.String("alternate", suggestion))
+
+	if err := a.server.SetListenAddress(suggestion, true); err != nil {
+		a.logger.Error("Failed to update listen address", zap.Error(err), zap.String("listen", suggestion))
+		return
+	}
+
+	a.hidePortConflictMenu()
+
+	if a.startStopItem != nil {
+		a.startStopItem.SetTitle("Starting on alternate port...")
+		a.startStopItem.Disable()
+	}
+
+	a.handleStartStop()
+}
+
+func (a *App) handlePortConflictCopy() {
+	if !a.portConflictActive {
+		return
+	}
+
+	listen := a.portConflictAddress
+	if listen == "" && a.server != nil {
+		listen = a.server.GetListenAddress()
+	}
+
+	connectionURL := a.buildConnectionURL(listen)
+	if connectionURL == "" {
+		a.logger.Warn("Unable to build connection URL for clipboard", zap.String("listen", listen))
+		return
+	}
+
+	if err := copyToClipboard(connectionURL); err != nil {
+		a.logger.Error("Failed to copy connection URL to clipboard",
+			zap.String("url", connectionURL),
+			zap.Error(err))
+		return
+	}
+
+	a.logger.Info("Copied connection URL to clipboard", zap.String("url", connectionURL))
+}
+
+func (a *App) buildConnectionURL(listenAddr string) string {
+	if listenAddr == "" {
+		return ""
+	}
+
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		a.logger.Debug("Failed to parse listen address for connection URL", zap.String("listen", listenAddr), zap.Error(err))
+		return ""
+	}
+
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+
+	return fmt.Sprintf("http://%s/mcp", net.JoinHostPort(host, port))
+}
+
+func copyToClipboard(text string) error {
+	switch runtime.GOOS {
+	case osDarwin:
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	case osWindows:
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", fmt.Sprintf("Set-Clipboard -Value %s", quoteForPowerShell(text)))
+		return cmd.Run()
+	default:
+		return fmt.Errorf("clipboard copy not supported on %s", runtime.GOOS)
+	}
+}
+
+func quoteForPowerShell(text string) string {
+	escaped := strings.ReplaceAll(text, "'", "''")
+	return "'" + escaped + "'"
 }
 
 // refreshMenusDelayed refreshes menus after a delay using the synchronization manager

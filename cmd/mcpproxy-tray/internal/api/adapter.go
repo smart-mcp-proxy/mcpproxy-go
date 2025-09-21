@@ -202,6 +202,16 @@ func (a *ServerAdapter) GetAllServers() ([]map[string]interface{}, error) {
 	return result, nil
 }
 
+// SetListenAddress is not supported via API control surfaces.
+func (a *ServerAdapter) SetListenAddress(_ string, _ bool) error {
+	return fmt.Errorf("SetListenAddress not supported via API")
+}
+
+// SuggestAlternateListen cannot operate through the remote API adapter.
+func (a *ServerAdapter) SuggestAlternateListen(baseAddr string) (string, error) {
+	return baseAddr, fmt.Errorf("SuggestAlternateListen not supported via API")
+}
+
 // ReloadConfiguration reloads the configuration
 func (a *ServerAdapter) ReloadConfiguration() error {
 	// This functionality is not available in the current API
