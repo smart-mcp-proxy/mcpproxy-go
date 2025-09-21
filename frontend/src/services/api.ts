@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse } from '@/types'
 
 class APIService {
   private baseUrl = ''
@@ -86,6 +86,10 @@ class APIService {
   // Secret endpoints
   async getSecretRefs(): Promise<APIResponse<{ refs: SecretRef[] }>> {
     return this.request<{ refs: SecretRef[] }>('/api/v1/secrets/refs')
+  }
+
+  async getConfigSecrets(): Promise<APIResponse<ConfigSecretsResponse>> {
+    return this.request<ConfigSecretsResponse>('/api/v1/secrets/config')
   }
 
   async runMigrationAnalysis(): Promise<APIResponse<{ analysis: MigrationAnalysis }>> {

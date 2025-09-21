@@ -1,9 +1,9 @@
 <template>
   <div class="secrets-page">
     <div class="page-header">
-      <h1 class="page-title">Secrets Management</h1>
+      <h1 class="page-title">Secrets & Environment Variables</h1>
       <p class="page-description">
-        Manage secrets stored in your system's secure keyring. Secrets are never displayed in full for security.
+        Manage secrets stored in your system's secure keyring and environment variables referenced in your configuration.
       </p>
     </div>
 
@@ -26,12 +26,16 @@
       <!-- Statistics -->
       <div class="stats-section">
         <div class="stat-card">
-          <div class="stat-number">{{ secretRefs.length }}</div>
-          <div class="stat-label">Total Secrets</div>
+          <div class="stat-number">{{ configSecrets?.total_secrets || 0 }}</div>
+          <div class="stat-label">Keyring Secrets</div>
         </div>
         <div class="stat-card">
-          <div class="stat-number">{{ unresolvedCount }}</div>
-          <div class="stat-label">Unresolved References</div>
+          <div class="stat-number">{{ configSecrets?.total_env_vars || 0 }}</div>
+          <div class="stat-label">Environment Variables</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-number">{{ missingEnvVars }}</div>
+          <div class="stat-label">Missing Env Vars</div>
         </div>
         <div class="stat-card">
           <div class="stat-number">{{ migrationCandidates.length }}</div>
@@ -41,7 +45,7 @@
 
       <!-- Actions Bar -->
       <div class="actions-bar">
-        <button @click="loadSecrets" class="action-button secondary">
+        <button @click="loadConfigSecrets" class="action-button secondary">
           🔄 Refresh
         </button>
         <button @click="runMigrationAnalysis" class="action-button secondary" :disabled="analysisLoading">
@@ -49,25 +53,77 @@
         </button>
       </div>
 
-      <!-- Secret References -->
-      <div class="section">
-        <h2 class="section-title">Stored Secret References</h2>
-        <div v-if="secretRefs.length === 0" class="empty-state">
-          <div class="empty-icon">🔐</div>
-          <h3>No Secrets Found</h3>
-          <p>No secret references are currently stored in your keyring.</p>
-          <p>Use the CLI to store secrets: <code>mcpproxy secrets set &lt;name&gt;</code></p>
+      <!-- Tabs -->
+      <div class="tabs-container">
+        <div class="tabs-header">
+          <button
+            @click="activeTab = 'secrets'"
+            :class="['tab-button', { active: activeTab === 'secrets' }]"
+          >
+            Secrets ({{ configSecrets?.total_secrets || 0 }})
+          </button>
+          <button
+            @click="activeTab = 'envs'"
+            :class="['tab-button', { active: activeTab === 'envs' }]"
+          >
+            Environment Variables ({{ configSecrets?.total_env_vars || 0 }})
+          </button>
         </div>
-        <div v-else class="secrets-list">
-          <div v-for="ref in secretRefs" :key="ref.name" class="secret-item">
-            <div class="secret-info">
-              <div class="secret-name">{{ ref.name }}</div>
-              <div class="secret-type">{{ ref.type }}</div>
-              <div class="secret-ref">{{ ref.original }}</div>
+
+        <div class="tabs-content">
+          <!-- Secrets Tab -->
+          <div v-if="activeTab === 'secrets'" class="tab-panel">
+            <div class="section">
+              <h2 class="section-title">Keyring Secrets Referenced in Configuration</h2>
+              <div v-if="!configSecrets?.secrets?.length" class="empty-state">
+                <div class="empty-icon">🔐</div>
+                <h3>No Keyring Secrets Referenced</h3>
+                <p>No keyring secret references are currently used in your configuration.</p>
+                <p>Use the CLI to store secrets: <code>mcpproxy secrets set &lt;name&gt;</code></p>
+                <p>Then reference them in config: <code>${keyring:name}</code></p>
+              </div>
+              <div v-else class="secrets-list">
+                <div v-for="ref in configSecrets.secrets" :key="ref.name" class="secret-item">
+                  <div class="secret-info">
+                    <div class="secret-name">{{ ref.name }}</div>
+                    <div class="secret-type">{{ ref.type }}</div>
+                    <div class="secret-ref">{{ ref.original }}</div>
+                  </div>
+                  <div class="secret-actions">
+                    <button @click="testSecret(ref)" class="action-button small">Test</button>
+                    <button @click="deleteSecret(ref)" class="action-button small danger">Delete</button>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="secret-actions">
-              <button @click="testSecret(ref)" class="action-button small">Test</button>
-              <button @click="deleteSecret(ref)" class="action-button small danger">Delete</button>
+          </div>
+
+          <!-- Environment Variables Tab -->
+          <div v-if="activeTab === 'envs'" class="tab-panel">
+            <div class="section">
+              <h2 class="section-title">Environment Variables Referenced in Configuration</h2>
+              <div v-if="!configSecrets?.environment_vars?.length" class="empty-state">
+                <div class="empty-icon">🌍</div>
+                <h3>No Environment Variables Referenced</h3>
+                <p>No environment variables are currently referenced in your configuration.</p>
+                <p>Reference them in config: <code>${env:VARIABLE_NAME}</code></p>
+              </div>
+              <div v-else class="env-vars-list">
+                <div v-for="envVar in configSecrets.environment_vars" :key="envVar.secret_ref.name" class="env-var-item" :class="{ 'missing': !envVar.is_set }">
+                  <div class="env-var-info">
+                    <div class="env-var-name">{{ envVar.secret_ref.name }}</div>
+                    <div class="env-var-status">
+                      <span v-if="envVar.is_set" class="status-badge set">✅ Set</span>
+                      <span v-else class="status-badge missing">❌ Missing</span>
+                    </div>
+                    <div class="env-var-ref">{{ envVar.secret_ref.original }}</div>
+                  </div>
+                  <div class="env-var-actions">
+                    <button @click="testEnvVar(envVar)" class="action-button small">Test</button>
+                    <button v-if="!envVar.is_set" @click="setEnvVarHelp(envVar)" class="action-button small warning">Help</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -150,38 +206,39 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import apiClient from '@/services/api'
-import type { SecretRef, MigrationCandidate, MigrationAnalysis } from '@/types'
+import type { SecretRef, MigrationCandidate, MigrationAnalysis, ConfigSecretsResponse, EnvVarStatus } from '@/types'
 
 const loading = ref(true)
 const error = ref<string | null>(null)
-const secretRefs = ref<SecretRef[]>([])
+const configSecrets = ref<ConfigSecretsResponse | null>(null)
 const migrationCandidates = ref<MigrationCandidate[]>([])
 const analysisLoading = ref(false)
+const activeTab = ref('secrets')
 
-const unresolvedCount = computed(() => {
-  // This would need to be determined by checking if secrets can be resolved
-  // For now, we'll assume all are resolved since they're in the keyring
-  return 0
+const missingEnvVars = computed(() => {
+  return configSecrets.value?.environment_vars?.filter(env => !env.is_set).length || 0
 })
 
-const loadSecrets = async () => {
+const loadConfigSecrets = async () => {
   loading.value = true
   error.value = null
 
   try {
-    const response = await apiClient.getSecretRefs()
+    const response = await apiClient.getConfigSecrets()
     if (response.success && response.data) {
-      secretRefs.value = response.data.refs || []
+      configSecrets.value = response.data
     } else {
-      error.value = response.error || 'Failed to load secrets'
+      error.value = response.error || 'Failed to load config secrets'
     }
   } catch (err: any) {
-    error.value = err.message || 'Failed to load secrets'
-    console.error('Failed to load secrets:', err)
+    error.value = err.message || 'Failed to load config secrets'
+    console.error('Failed to load config secrets:', err)
   } finally {
     loading.value = false
   }
 }
+
+const loadSecrets = loadConfigSecrets // Alias for compatibility
 
 const runMigrationAnalysis = async () => {
   analysisLoading.value = true
@@ -249,8 +306,33 @@ const getConfidenceClass = (confidence: number): string => {
   return 'low-confidence'
 }
 
+const testEnvVar = async (envVar: EnvVarStatus) => {
+  if (envVar.is_set) {
+    alert(`Environment variable "${envVar.secret_ref.name}" is set`)
+  } else {
+    alert(`Environment variable "${envVar.secret_ref.name}" is NOT set`)
+  }
+}
+
+const setEnvVarHelp = async (envVar: EnvVarStatus) => {
+  const instructions = `To set the environment variable "${envVar.secret_ref.name}":
+
+On macOS/Linux:
+export ${envVar.secret_ref.name}="your-value"
+
+On Windows (PowerShell):
+$env:${envVar.secret_ref.name}="your-value"
+
+On Windows (CMD):
+set ${envVar.secret_ref.name}=your-value
+
+To make it permanent, add it to your shell profile or use your system's environment variable settings.`
+
+  alert(instructions)
+}
+
 onMounted(() => {
-  loadSecrets()
+  loadConfigSecrets()
 })
 </script>
 
@@ -466,6 +548,113 @@ onMounted(() => {
 
 .migration-item.low-confidence {
   border-left: 4px solid #ef4444;
+}
+
+/* Tabs */
+.tabs-container {
+  margin-top: 2rem;
+}
+
+.tabs-header {
+  display: flex;
+  border-bottom: 2px solid var(--border-color);
+  margin-bottom: 1.5rem;
+}
+
+.tab-button {
+  background: none;
+  border: none;
+  padding: 1rem 1.5rem;
+  font-size: 1rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  transition: all 0.2s;
+}
+
+.tab-button:hover {
+  color: var(--text-primary);
+  background: var(--hover-color);
+}
+
+.tab-button.active {
+  color: var(--primary-color);
+  border-bottom-color: var(--primary-color);
+  font-weight: 600;
+}
+
+.tab-panel {
+  min-height: 300px;
+}
+
+/* Environment Variables */
+.env-vars-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.env-var-item {
+  background: var(--card-background);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.env-var-item.missing {
+  border-left: 4px solid #ef4444;
+  background: #fef2f2;
+}
+
+.env-var-info {
+  flex: 1;
+}
+
+.env-var-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.env-var-status {
+  margin-bottom: 0.5rem;
+}
+
+.status-badge {
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.status-badge.set {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.status-badge.missing {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.env-var-ref {
+  font-family: 'Courier New', monospace;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.env-var-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: 1rem;
+}
+
+.action-button.warning {
+  background: #f59e0b;
+  color: white;
 }
 
 .secret-info, .migration-info {

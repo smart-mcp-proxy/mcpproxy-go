@@ -87,3 +87,15 @@ export interface MigrationAnalysis {
   candidates: MigrationCandidate[]
   total_found: number
 }
+
+export interface EnvVarStatus {
+  secret_ref: SecretRef
+  is_set: boolean
+}
+
+export interface ConfigSecretsResponse {
+  secrets: SecretRef[]
+  environment_vars: EnvVarStatus[]
+  total_secrets: number
+  total_env_vars: number
+}

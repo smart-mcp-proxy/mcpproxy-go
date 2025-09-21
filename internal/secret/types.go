@@ -58,3 +58,17 @@ type MigrationAnalysis struct {
 	Candidates []MigrationCandidate `json:"candidates"`
 	TotalFound int                  `json:"total_found"`
 }
+
+// EnvVarStatus represents the status of an environment variable reference
+type EnvVarStatus struct {
+	SecretRef SecretRef `json:"secret_ref"`
+	IsSet     bool      `json:"is_set"`
+}
+
+// ConfigSecretsResponse contains secrets and environment variables referenced in config
+type ConfigSecretsResponse struct {
+	Secrets         []SecretRef    `json:"secrets"`
+	EnvironmentVars []EnvVarStatus `json:"environment_vars"`
+	TotalSecrets    int            `json:"total_secrets"`
+	TotalEnvVars    int            `json:"total_env_vars"`
+}

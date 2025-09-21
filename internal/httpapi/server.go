@@ -143,6 +143,7 @@ func (s *Server) setupRoutes() {
 		// Secrets management
 		r.Route("/secrets", func(r chi.Router) {
 			r.Get("/refs", s.handleGetSecretRefs)
+			r.Get("/config", s.handleGetConfigSecrets)
 			r.Post("/migrate", s.handleMigrateSecrets)
 		})
 	})
@@ -626,4 +627,32 @@ func (s *Server) handleMigrateSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) {
+	resolver := s.controller.GetSecretResolver()
+	if resolver == nil {
+		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		return
+	}
+
+	// Get current configuration
+	cfg := s.controller.GetCurrentConfig()
+	if cfg == nil {
+		s.writeError(w, http.StatusInternalServerError, "Configuration not available")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// Extract config-referenced secrets and environment variables
+	configSecrets, err := resolver.ExtractConfigSecrets(ctx, cfg)
+	if err != nil {
+		s.logger.Error("Failed to extract config secrets", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to extract config secrets")
+		return
+	}
+
+	s.writeSuccess(w, configSecrets)
 }

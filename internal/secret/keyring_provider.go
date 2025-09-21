@@ -44,7 +44,7 @@ func (p *KeyringProvider) Resolve(ctx context.Context, ref SecretRef) (string, e
 	return secret, nil
 }
 
-// Store saves a secret to the OS keyring
+// Store saves a secret to the OS keyring and updates the registry
 func (p *KeyringProvider) Store(ctx context.Context, ref SecretRef, value string) error {
 	if !p.CanResolve(ref.Type) {
 		return fmt.Errorf("keyring provider cannot store secret type: %s", ref.Type)
@@ -55,10 +55,16 @@ func (p *KeyringProvider) Store(ctx context.Context, ref SecretRef, value string
 		return fmt.Errorf("failed to store secret %s in keyring: %w", ref.Name, err)
 	}
 
+	// Add to registry so it appears in list
+	err = p.addToRegistry(ref.Name)
+	if err != nil {
+		return fmt.Errorf("failed to update secret registry: %w", err)
+	}
+
 	return nil
 }
 
-// Delete removes a secret from the OS keyring
+// Delete removes a secret from the OS keyring and updates the registry
 func (p *KeyringProvider) Delete(ctx context.Context, ref SecretRef) error {
 	if !p.CanResolve(ref.Type) {
 		return fmt.Errorf("keyring provider cannot delete secret type: %s", ref.Type)
@@ -67,6 +73,12 @@ func (p *KeyringProvider) Delete(ctx context.Context, ref SecretRef) error {
 	err := keyring.Delete(p.serviceName, ref.Name)
 	if err != nil {
 		return fmt.Errorf("failed to delete secret %s from keyring: %w", ref.Name, err)
+	}
+
+	// Remove from registry
+	err = p.removeFromRegistry(ref.Name)
+	if err != nil {
+		return fmt.Errorf("failed to update secret registry: %w", err)
 	}
 
 	return nil

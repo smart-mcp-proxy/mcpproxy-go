@@ -179,6 +179,109 @@ func (r *Resolver) expandValue(ctx context.Context, v reflect.Value) error {
 	return nil
 }
 
+// ExtractConfigSecrets extracts all secret and environment references from a config structure
+func (r *Resolver) ExtractConfigSecrets(ctx context.Context, v interface{}) (*ConfigSecretsResponse, error) {
+	allRefs := []SecretRef{}
+	r.extractSecretRefs(reflect.ValueOf(v), "", &allRefs)
+
+	// Separate secrets by type
+	var keyringRefs []SecretRef
+	var envRefs []SecretRef
+	var envStatus []EnvVarStatus
+
+	for _, ref := range allRefs {
+		switch ref.Type {
+		case "keyring":
+			keyringRefs = append(keyringRefs, ref)
+		case "env":
+			envRefs = append(envRefs, ref)
+
+			// Check if environment variable exists
+			provider, exists := r.providers["env"]
+			isSet := false
+			if exists && provider.IsAvailable() {
+				_, err := provider.Resolve(ctx, ref)
+				isSet = err == nil
+			}
+
+			envStatus = append(envStatus, EnvVarStatus{
+				SecretRef: ref,
+				IsSet:     isSet,
+			})
+		}
+	}
+
+	return &ConfigSecretsResponse{
+		Secrets:         keyringRefs,
+		EnvironmentVars: envStatus,
+		TotalSecrets:    len(keyringRefs),
+		TotalEnvVars:    len(envRefs),
+	}, nil
+}
+
+// extractSecretRefs recursively extracts secret references from a struct
+func (r *Resolver) extractSecretRefs(v reflect.Value, path string, refs *[]SecretRef) {
+	if !v.IsValid() {
+		return
+	}
+
+	// Handle pointers
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return
+		}
+		r.extractSecretRefs(v.Elem(), path, refs)
+		return
+	}
+
+	switch v.Kind() {
+	case reflect.String:
+		value := v.String()
+		if value != "" && IsSecretRef(value) {
+			if secretRef, err := ParseSecretRef(value); err == nil {
+				*refs = append(*refs, *secretRef)
+			}
+		}
+
+	case reflect.Struct:
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Field(i)
+			if !field.CanInterface() {
+				continue
+			}
+
+			fieldType := t.Field(i)
+			fieldName := fieldType.Name
+
+			// Skip unexported fields
+			if !fieldType.IsExported() {
+				continue
+			}
+
+			newPath := fieldName
+			if path != "" {
+				newPath = path + "." + fieldName
+			}
+
+			r.extractSecretRefs(field, newPath, refs)
+		}
+
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			newPath := fmt.Sprintf("%s[%d]", path, i)
+			r.extractSecretRefs(v.Index(i), newPath, refs)
+		}
+
+	case reflect.Map:
+		for _, key := range v.MapKeys() {
+			keyStr := fmt.Sprintf("%v", key.Interface())
+			newPath := fmt.Sprintf("%s[%s]", path, keyStr)
+			r.extractSecretRefs(v.MapIndex(key), newPath, refs)
+		}
+	}
+}
+
 // AnalyzeForMigration analyzes a struct for potential secrets that could be migrated
 func (r *Resolver) AnalyzeForMigration(v interface{}) *MigrationAnalysis {
 	candidates := []MigrationCandidate{}
