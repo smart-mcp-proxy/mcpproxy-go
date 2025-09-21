@@ -29,7 +29,7 @@ import (
 
 var (
 	version          = "development" // Set by build flags
-	defaultCoreURL   = "http://localhost:8080"
+	defaultCoreURL   = "http://127.0.0.1:8080"
 	errNoBundledCore = errors.New("no bundled core binary found")
 )
 
@@ -175,11 +175,11 @@ func resolveCoreURL() string {
 	}
 
 	if listen := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listen != "" {
-		return "http://localhost" + listen
+		return "http://127.0.0.1" + listen
 	}
 
 	if port := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_PORT")); port != "" {
-		return fmt.Sprintf("http://localhost:%s", port)
+		return fmt.Sprintf("http://127.0.0.1:%s", port)
 	}
 
 	return defaultCoreURL
