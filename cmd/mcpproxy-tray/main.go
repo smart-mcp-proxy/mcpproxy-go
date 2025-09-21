@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -171,6 +173,15 @@ func resolveCoreURL() string {
 	if override := strings.TrimSpace(os.Getenv("MCPPROXY_CORE_URL")); override != "" {
 		return override
 	}
+
+	if listen := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listen != "" {
+		return "http://localhost" + listen
+	}
+
+	if port := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_PORT")); port != "" {
+		return fmt.Sprintf("http://localhost:%s", port)
+	}
+
 	return defaultCoreURL
 }
 
@@ -202,14 +213,35 @@ func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.Ap
 		return
 	}
 
-	if err := startCoreServer(logger, coreBinary); err != nil {
+	args := buildCoreArgs(coreURL)
+	cmd, waitCh, err := startCoreServer(logger, coreBinary, args)
+	if err != nil {
 		logger.Error("Failed to start core server", zap.String("binary", coreBinary), zap.Error(err))
 		trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
 		return
 	}
 
+	go func() {
+		select {
+		case err := <-waitCh:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("mcpproxy server process exited", zap.Error(err))
+			}
+			trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
+		case <-ctx.Done():
+			killTimer := terminateProcess(logger, cmd)
+			if err := <-waitCh; err != nil && !errors.Is(err, context.Canceled) {
+				logger.Info("mcpproxy server process terminated", zap.Error(err))
+			}
+			if killTimer != nil {
+				killTimer.Stop()
+			}
+		}
+	}()
+
 	if !waitForServer(ctx, coreURL, 30*time.Second) {
 		logger.Error("Core server failed to start within timeout", zap.String("core_url", coreURL))
+		terminateProcess(logger, cmd)
 		trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
 		return
 	}
@@ -230,8 +262,8 @@ func isServerRunning(baseURL string) bool {
 }
 
 // startCoreServer starts the core mcpproxy server process
-func startCoreServer(logger *zap.Logger, binaryPath string) error {
-	cmd := exec.Command(binaryPath, "serve")
+func startCoreServer(logger *zap.Logger, binaryPath string, args []string) (*exec.Cmd, <-chan error, error) {
+	cmd := exec.Command(binaryPath, args...)
 	cmd.Stdout = nil // Don't capture output to avoid blocking
 	cmd.Stderr = nil
 	cmd.Env = append(os.Environ(), "MCPP_ENABLE_TRAY=false")
@@ -240,19 +272,23 @@ func startCoreServer(logger *zap.Logger, binaryPath string) error {
 		Setpgid: true, // Create new process group
 	}
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start mcpproxy server: %w", err)
+	if logger != nil {
+		logger.Info("Launching mcpproxy core",
+			zap.String("binary", binaryPath),
+			zap.Strings("args", args))
 	}
 
+	if err := cmd.Start(); err != nil {
+		return nil, nil, fmt.Errorf("failed to start mcpproxy server: %w", err)
+	}
+
+	waitCh := make(chan error, 1)
 	go func() {
-		if waitErr := cmd.Wait(); waitErr != nil {
-			if logger != nil {
-				logger.Error("mcpproxy server process exited with error", zap.Error(waitErr))
-			}
-		}
+		waitCh <- cmd.Wait()
+		close(waitCh)
 	}()
 
-	return nil
+	return cmd, waitCh, nil
 }
 
 // resolveCoreBinary locates or stages the core binary for launching.
@@ -442,4 +478,91 @@ func waitForServer(ctx context.Context, baseURL string, timeout time.Duration) b
 		case <-ticker.C:
 		}
 	}
+}
+
+func buildCoreArgs(coreURL string) []string {
+	args := []string{"serve"}
+
+	if cfg := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_CONFIG_PATH")); cfg != "" {
+		args = append(args, "--config", cfg)
+	}
+
+	if listen := listenArgFromURL(coreURL); listen != "" {
+		args = append(args, "--listen", listen)
+	} else if listenEnv := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listenEnv != "" {
+		args = append(args, "--listen", listenEnv)
+	}
+
+	if extra := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_EXTRA_ARGS")); extra != "" {
+		args = append(args, strings.Fields(extra)...)
+	}
+
+	return args
+}
+
+func listenArgFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+
+	port := u.Port()
+	if port == "" {
+		return ""
+	}
+
+	host := u.Hostname()
+	if host == "" || host == "localhost" || host == "127.0.0.1" {
+		return ":" + port
+	}
+
+	return net.JoinHostPort(host, port)
+}
+
+func normalizeListen(listen string) string {
+	if listen == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(listen, "localhost:") {
+		return strings.TrimPrefix(listen, "localhost")
+	}
+
+	if strings.HasPrefix(listen, "127.0.0.1:") {
+		return strings.TrimPrefix(listen, "127.0.0.1")
+	}
+
+	if strings.HasPrefix(listen, ":") {
+		return listen
+	}
+
+	if !strings.Contains(listen, ":") {
+		return ":" + listen
+	}
+
+	return listen
+}
+
+func terminateProcess(logger *zap.Logger, cmd *exec.Cmd) *time.Timer {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+
+	pid := cmd.Process.Pid
+	if logger != nil {
+		logger.Info("Sending SIGTERM to core process", zap.Int("pid", pid))
+	}
+
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if logger != nil {
+			logger.Warn("Failed to send SIGTERM to core process", zap.Error(err))
+		}
+	}
+
+	return time.AfterFunc(5*time.Second, func() {
+		if logger != nil {
+			logger.Warn("Force killing core process", zap.Int("pid", pid))
+		}
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	})
 }

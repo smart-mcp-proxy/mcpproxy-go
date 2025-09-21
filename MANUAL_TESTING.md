@@ -187,7 +187,20 @@ curl "http://localhost:8080/api/v1/index/search?q=math&limit=5" | jq .
 
 6. Verify the new port by inspecting the tray tooltip (now shows the bound address) and by calling `curl http://localhost:<new-port>/healthz`.
 
-### 6. Server Management
+### 7. Tray Environment Overrides
+
+1. Export custom overrides before launching the tray:
+
+   ```bash
+   export MCPPROXY_TRAY_LISTEN=:9090
+   export MCPPROXY_TRAY_CONFIG_PATH="$PWD/test-data/config.json"
+   ```
+
+2. Start `mcpproxy-tray` and confirm the tooltip reports the `:9090` port while the logs show `--config` pointing to the chosen file.
+3. Repeat with `MCPPROXY_TRAY_EXTRA_ARGS="--log-level debug"` to verify additional flags are forwarded.
+4. Set `MCPPROXY_TRAY_SKIP_CORE=1`, start the tray while a separate `mcpproxy serve` is already running, and ensure the tray connects without spawning a new process.
+
+### 8. Server Management
 
 ```bash
 # List all servers

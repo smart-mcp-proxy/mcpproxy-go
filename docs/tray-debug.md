@@ -119,6 +119,35 @@ EOF
 
 Adjust the inner menu titles if you localise the app; the defaults above match the English build.
 
+### Launcher Configuration
+
+The tray launches `mcpproxy serve` when it detects that no core is running. You can steer that subprocess with the following environment variables before starting the tray:
+
+- `MCPPROXY_CORE_URL` – full base URL the tray should connect to (e.g. `http://localhost:8085`). This also controls the health checks.
+- `MCPPROXY_TRAY_LISTEN` / `MCPPROXY_TRAY_PORT` – override the port passed to `--listen` when the tray launches the core (formats accepted: `:8085` or `8085`).
+- `MCPPROXY_TRAY_CONFIG_PATH` – absolute path to the `mcp_config.json` the tray should hand to the core via `--config`.
+- `MCPPROXY_TRAY_EXTRA_ARGS` – optional additional CLI arguments (whitespace separated) appended after `serve`.
+- `MCPPROXY_TRAY_SKIP_CORE` – set to `1` to prevent the tray from launching the core automatically (useful when attaching to an external instance).
+
+The tray’s status tooltip reflects the active listen address; when you change any of the variables above, restart the tray so it relaunches the core with the new settings.
+
+### Building a DMG with Both Binaries
+
+Use the updated packaging script to bundle the tray and core into a single notarizable DMG:
+
+```bash
+GOOS=darwin GOARCH=arm64 go build -o dist/mcpproxy-tray ./cmd/mcpproxy-tray
+GOOS=darwin GOARCH=arm64 go build -o dist/mcpproxy ./cmd/mcpproxy
+./scripts/create-dmg.sh dist/mcpproxy-tray dist/mcpproxy v1.0.0 arm64
+```
+
+The resulting `mcpproxy.app` contains:
+
+- `Contents/MacOS/mcpproxy` – the tray executable.
+- `Contents/Resources/bin/mcpproxy` – the CLI core binary that the tray stages at runtime.
+
+When the DMG is mounted the user only needs to drag the app bundle to `/Applications`; the tray will manage the core automatically from that embedded location.
+
 ## Further Reading
 
 - [docs/setup.md](./setup.md) – full installation and configuration walkthrough.
