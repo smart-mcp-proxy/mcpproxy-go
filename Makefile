@@ -17,6 +17,7 @@ help:
 build: frontend-build
 	@echo "🔨 Building Go binary with embedded frontend..."
 	go build -o mcpproxy ./cmd/mcpproxy
+	go build -o mcpproxy-tray ./cmd/mcpproxy-tray
 	@echo "✅ Build completed! Run: ./mcpproxy serve"
 	@echo "🌐 Web UI: http://localhost:8080/ui/"
 
@@ -46,7 +47,7 @@ backend-dev:
 # Clean build artifacts
 clean:
 	@echo "🧹 Cleaning build artifacts..."
-	rm -f mcpproxy mcpproxy-dev
+	rm -f mcpproxy mcpproxy-dev mcpproxy-tray
 	rm -rf frontend/dist frontend/node_modules web/frontend
 	go clean
 	@echo "✅ Cleanup completed"
