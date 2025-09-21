@@ -88,6 +88,25 @@ export const useSystemStore = defineStore('system', () => {
       }
     }
 
+    // Listen specifically for status events
+    es.addEventListener('status', (event) => {
+      try {
+        const data = JSON.parse(event.data) as StatusUpdate
+        status.value = data
+
+        // Debug logging to help diagnose status issues
+        console.log('SSE Status Event Update:', {
+          topLevelRunning: data.running,
+          nestedStatusRunning: data.status?.running,
+          listen_addr: data.listen_addr,
+          timestamp: data.timestamp,
+          finalRunningValue: data.running !== undefined ? data.running : (data.status?.running ?? false)
+        })
+      } catch (error) {
+        console.error('Failed to parse SSE status event:', error)
+      }
+    })
+
     es.onerror = () => {
       connected.value = false
       console.error('EventSource error')

@@ -126,6 +126,9 @@ func (s *Server) setupRoutes() {
 		// Apply timeout middleware to API routes only
 		r.Use(middleware.Timeout(60 * time.Second))
 
+		// Status endpoint
+		r.Get("/status", s.handleGetStatus)
+
 		// Server management
 		r.Get("/servers", s.handleGetServers)
 		r.Route("/servers/{id}", func(r chi.Router) {
@@ -172,6 +175,18 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 }
 
 // API v1 handlers
+
+func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
+	response := map[string]interface{}{
+		"running":        s.controller.IsRunning(),
+		"listen_addr":    s.controller.GetListenAddress(),
+		"upstream_stats": s.controller.GetUpstreamStats(),
+		"status":         s.controller.GetStatus(),
+		"timestamp":      time.Now().Unix(),
+	}
+
+	s.writeSuccess(w, response)
+}
 
 func (s *Server) handleGetServers(w http.ResponseWriter, _ *http.Request) {
 	genericServers, err := s.controller.GetAllServers()
@@ -535,25 +550,6 @@ func (s *Server) writeSSEEvent(w http.ResponseWriter, event string, data interfa
 	return err
 }
 
-// Legacy API handlers for backward compatibility with existing tray
-
-func (s *Server) handleLegacyStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	status := s.controller.GetStatus()
-	response := map[string]interface{}{
-		"running":        s.controller.IsRunning(),
-		"listen_addr":    s.controller.GetListenAddress(),
-		"upstream_stats": s.controller.GetUpstreamStats(),
-		"status":         status,
-		"timestamp":      time.Now().Unix(),
-	}
-
-	s.writeJSON(w, http.StatusOK, response)
-}
 
 // Secrets management handlers
 

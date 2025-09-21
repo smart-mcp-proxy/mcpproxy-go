@@ -440,6 +440,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import type { Server } from '@/types/api'
+import { useServersStore } from '@/stores/servers'
+import { useSystemStore } from '@/stores/system'
+
+// Store references
+const serversStore = useServersStore()
+const systemStore = useSystemStore()
 
 // Active tab state
 const activeTab = ref('general')
@@ -456,15 +462,15 @@ const tabs = [
 const loading = ref(false)
 const saving = ref(false)
 
-// System information (mock data for now)
-const systemInfo = ref({
+// System information - get from store
+const systemInfo = computed(() => ({
   version: 'v0.1.0',
-  status: 'Running',
-  listen: ':8080',
+  status: systemStore.isRunning ? 'Running' : 'Stopped',
+  listen: systemStore.listenAddr || ':8080',
   dataDir: '~/.mcpproxy',
   logDir: 'Auto',
   configPath: 'Default'
-})
+}))
 
 // Settings data
 const settings = ref({
@@ -480,8 +486,8 @@ const settings = ref({
   enableConsoleLogging: true
 })
 
-// Server management
-const servers = ref<Server[]>([])
+// Server management - use store data
+const servers = computed(() => serversStore.servers)
 const showAddServer = ref(false)
 const newServer = ref({
   name: '',
@@ -509,8 +515,8 @@ const canAddServer = computed(() => {
 async function refreshSettings() {
   loading.value = true
   try {
-    // TODO: Implement actual API calls
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    // Refresh servers data from API
+    await serversStore.fetchServers()
   } catch (error) {
     console.error('Failed to refresh settings:', error)
   } finally {
@@ -545,18 +551,27 @@ function resetSettings() {
   }
 }
 
-function toggleServer(server: Server) {
-  // TODO: Implement server toggle
-  console.log('Toggle server:', server.name)
+async function toggleServer(server: Server) {
+  try {
+    if (server.enabled) {
+      await serversStore.disableServer(server.name)
+    } else {
+      await serversStore.enableServer(server.name)
+    }
+    // Refresh data after toggle
+    await serversStore.fetchServers()
+  } catch (error) {
+    console.error('Failed to toggle server:', error)
+  }
 }
 
 function unquarantineServer(server: Server) {
-  // TODO: Implement unquarantine
+  // TODO: Implement unquarantine API
   console.log('Unquarantine server:', server.name)
 }
 
 function removeServer(server: Server) {
-  // TODO: Implement server removal
+  // TODO: Implement server removal API
   console.log('Remove server:', server.name)
 }
 
