@@ -15,7 +15,7 @@
       "enabled": false,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-09-19T13:00:35.208264+03:00"
+      "updated": "2025-09-21T22:25:02.694458+03:00"
     }
   ],
   "top_k": 10,
@@ -145,5 +145,24 @@
       ],
       "protocol": "custom/remote"
     }
-  ]
+  ],
+  "features": {
+    "enable_runtime": true,
+    "enable_event_bus": true,
+    "enable_sse": true,
+    "enable_observability": true,
+    "enable_health_checks": true,
+    "enable_metrics": true,
+    "enable_tracing": false,
+    "enable_oauth": true,
+    "enable_quarantine": true,
+    "enable_docker_isolation": false,
+    "enable_search": true,
+    "enable_caching": true,
+    "enable_async_storage": true,
+    "enable_web_ui": true,
+    "enable_tray": true,
+    "enable_debug_logging": false,
+    "enable_contract_tests": false
+  }
 }
