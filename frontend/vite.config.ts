@@ -12,7 +12,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist',
+    outDir: '../web/frontend/dist',
     emptyOutDir: true,
     rollupOptions: {
       output: {
