@@ -193,8 +193,14 @@ jobs:
             CLEAN_BINARY="mcpproxy"
           fi
 
-          # Create clean binary for archive
+          # Create clean core binary for archive
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
+
+          # Build tray binary for macOS
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "Building mcpproxy-tray for macOS..."
+            go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
+          fi
 
           # Code sign macOS binaries
           if [ "${{ matrix.goos }}" = "darwin" ]; then
@@ -234,9 +240,9 @@ jobs:
               echo "⚠️  No entitlements file found"
             fi
             
-            # Sign with proper Developer ID certificate, hardened runtime, and timestamp  
-            echo "=== Signing binary with hardened runtime ==="
-            
+            # Sign both binaries with proper Developer ID certificate, hardened runtime, and timestamp
+            echo "=== Signing binaries with hardened runtime ==="
+
             # Install GNU coreutils for timeout command (macOS compatibility)
             if ! command -v timeout &> /dev/null; then
               echo "Installing GNU coreutils for timeout command..."
@@ -246,12 +252,13 @@ jobs:
             else
               TIMEOUT_CMD="timeout"
             fi
-            
-            # Add timeout and retry logic for signing to prevent hanging
+
+            # Sign core binary
+            echo "Signing core binary: ${CLEAN_BINARY}"
             SIGN_SUCCESS=false
             for attempt in 1 2 3; do
-              echo "Signing attempt $attempt/3..."
-              
+              echo "Core binary signing attempt $attempt/3..."
+
               # Use timeout command to prevent hanging (max 5 minutes per attempt)
               if $TIMEOUT_CMD 300 codesign --force \
                 --options runtime \
@@ -259,48 +266,81 @@ jobs:
                 --sign "${CERT_IDENTITY}" \
                 --timestamp \
                 ${CLEAN_BINARY}; then
-                
+
                 SIGN_SUCCESS=true
-                echo "✅ Signing succeeded on attempt $attempt"
+                echo "✅ Core binary signing succeeded on attempt $attempt"
                 break
               else
-                echo "❌ Signing attempt $attempt failed or timed out"
+                echo "❌ Core binary signing attempt $attempt failed or timed out"
                 if [ $attempt -lt 3 ]; then
                   echo "Retrying in 10 seconds..."
                   sleep 10
                 fi
               fi
             done
-            
+
             if [ "$SIGN_SUCCESS" != "true" ]; then
-              echo "❌ All signing attempts failed"
-              
-              # Try signing without timestamp as fallback
-              echo "Attempting fallback signing without timestamp..."
-              if $TIMEOUT_CMD 120 codesign --force \
+              echo "❌ All core binary signing attempts failed"
+              exit 1
+            fi
+
+            # Sign tray binary
+            echo "Signing tray binary: mcpproxy-tray"
+            TRAY_SIGN_SUCCESS=false
+            for attempt in 1 2 3; do
+              echo "Tray binary signing attempt $attempt/3..."
+
+              # Use timeout command to prevent hanging (max 5 minutes per attempt)
+              if $TIMEOUT_CMD 300 codesign --force \
                 --options runtime \
                 --entitlements scripts/entitlements.plist \
                 --sign "${CERT_IDENTITY}" \
-                ${CLEAN_BINARY}; then
-                echo "⚠️  Fallback signing succeeded (without timestamp)"
-                echo "NOTE: This binary may not pass notarization without timestamp"
+                --timestamp \
+                mcpproxy-tray; then
+
+                TRAY_SIGN_SUCCESS=true
+                echo "✅ Tray binary signing succeeded on attempt $attempt"
+                break
               else
-                echo "❌ Even fallback signing failed - cannot proceed"
-                exit 1
+                echo "❌ Tray binary signing attempt $attempt failed or timed out"
+                if [ $attempt -lt 3 ]; then
+                  echo "Retrying in 10 seconds..."
+                  sleep 10
+                fi
               fi
+            done
+
+            if [ "$TRAY_SIGN_SUCCESS" != "true" ]; then
+              echo "❌ All tray binary signing attempts failed"
+              exit 1
             fi
             
             # Verify signing, hardened runtime, and timestamp using Apple's recommended methods
-            echo "=== Verifying binary signature (Apple's recommended verification) ==="
-            
-            # Basic verification
+            echo "=== Verifying binary signatures (Apple's recommended verification) ==="
+
+            # Verify core binary
+            echo "=== Core binary verification ==="
             codesign --verify --verbose ${CLEAN_BINARY}
-            echo "Basic verification: $?"
-            
+            echo "Core binary basic verification: $?"
+
             # Apple's recommended strict verification for notarization
-            echo "=== Strict verification (matches notarization requirements) ==="
+            echo "=== Core binary strict verification (matches notarization requirements) ==="
             if codesign -vvv --deep --strict ${CLEAN_BINARY}; then
-              echo "✅ Strict verification PASSED - ready for notarization"
+              echo "✅ Core binary strict verification PASSED - ready for notarization"
+            else
+              echo "❌ Core binary strict verification FAILED - will not pass notarization"
+              exit 1
+            fi
+
+            # Verify tray binary
+            echo "=== Tray binary verification ==="
+            codesign --verify --verbose mcpproxy-tray
+            echo "Tray binary basic verification: $?"
+
+            # Apple's recommended strict verification for notarization
+            echo "=== Tray binary strict verification (matches notarization requirements) ==="
+            if codesign -vvv --deep --strict mcpproxy-tray; then
+              echo "✅ Tray binary strict verification PASSED - ready for notarization"
             else
               echo "❌ Strict verification FAILED - will not pass notarization"
               exit 1
@@ -370,11 +410,12 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/}
           chmod +x scripts/create-dmg.sh
 
-          # Determine binary name
-          CLEAN_BINARY="mcpproxy"
+          # Determine binary names
+          TRAY_BINARY="mcpproxy-tray"
+          CORE_BINARY="mcpproxy"
 
-          # Create DMG
-          ./scripts/create-dmg.sh ${CLEAN_BINARY} ${VERSION} ${{ matrix.goarch }}
+          # Create DMG with both tray and core binaries
+          ./scripts/create-dmg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
 
           # Sign DMG
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
