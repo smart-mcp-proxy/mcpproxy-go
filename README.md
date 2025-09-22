@@ -48,6 +48,20 @@ brew install smart-mcp-proxy/mcpproxy/mcpproxy
 Manual download (all platforms):
 - **Linux**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
 - **Windows**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-amd64.zip) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-arm64.zip)
+
+**Prerelease Builds (Latest Features):**
+
+Want to try the newest features? Download prerelease builds from the `next` branch:
+
+1. Go to [GitHub Actions](https://github.com/smart-mcp-proxy/mcpproxy-go/actions)
+2. Click the latest successful "Prerelease" workflow run
+3. Download from **Artifacts**:
+   - `dmg-darwin-arm64` (Apple Silicon Macs)
+   - `dmg-darwin-amd64` (Intel Macs)
+   - `versioned-linux-amd64`, `versioned-windows-amd64` (other platforms)
+
+> **Note**: Prerelease builds are signed and notarized for macOS but contain cutting-edge features that may be unstable.
+
 - **macOS**: [Intel](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz) | [Apple Silicon](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
 Anywhere with Go 1.22+:
