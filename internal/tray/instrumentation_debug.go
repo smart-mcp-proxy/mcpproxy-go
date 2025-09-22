@@ -1,4 +1,4 @@
-//go:build traydebug
+//go:build traydebug && !linux
 
 package tray
 
