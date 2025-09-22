@@ -73,8 +73,7 @@ frontend/dist/
 frontend/.vite/
 frontend/.vitest/
 
-# Package manager files
-package-lock.json
+# Package manager files (exclude npm's package-lock.json for reproducible builds)
 pnpm-lock.yaml
 yarn.lock
 
