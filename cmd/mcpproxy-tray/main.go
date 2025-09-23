@@ -535,42 +535,58 @@ func findMcpproxyBinary() (string, error) {
 }
 
 
-// waitForServerAndCheckAuth waits for server and checks authentication status
-func waitForServerAndCheckAuth(ctx context.Context, baseURL, apiKey string, timeout time.Duration, trayApp *tray.App, logger *zap.Logger) bool {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+// isServerReady checks if the server is fully initialized and ready to serve requests
+func isServerReady(baseURL string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/readyz")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
 
+// waitForServerAndCheckAuth waits for the server to start and become ready, then checks authentication
+func waitForServerAndCheckAuth(ctx context.Context, baseURL, apiKey string, timeout time.Duration, trayApp *tray.App, logger *zap.Logger) bool {
+	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		if isServerRunning(baseURL) {
-			// Server is running, now check authentication
-			if checkAPIAuthentication(baseURL, apiKey) {
-				logger.Info("Server is running and authentication is working")
-				return true
-			} else {
-				logger.Warn("Server is running but API authentication failed")
+		select {
+		case <-ctx.Done():
+			logger.Info("Context cancelled while waiting for server")
+			return false
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				logger.Error("Timeout waiting for server to start and become ready")
+				trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
+				return false
+			}
+
+			// First check if server is running (liveness)
+			if !isServerRunning(baseURL) {
+				continue // Server not yet running, keep waiting
+			}
+
+			// Server is running, check if it's ready (readiness)
+			if !isServerReady(baseURL) {
+				// Server is running but not ready yet (still initializing)
+				trayApp.SetConnectionState(tray.ConnectionStateStartingCore)
+				logger.Debug("Server is running but not ready yet, continuing to wait")
+				continue
+			}
+
+			// Server is running and ready, now check authentication
+			if !checkAPIAuthentication(baseURL, apiKey) {
+				logger.Error("Server is ready but authentication failed")
 				trayApp.SetConnectionState(tray.ConnectionStateAuthError)
 				return false
 			}
-		}
 
-		select {
-		case <-ctx.Done():
-			return false
-		case <-deadline.C:
-			// Final check on timeout
-			if isServerRunning(baseURL) {
-				if checkAPIAuthentication(baseURL, apiKey) {
-					return true
-				} else {
-					trayApp.SetConnectionState(tray.ConnectionStateAuthError)
-					return false
-				}
-			}
-			return false
-		case <-ticker.C:
+			// Everything is good
+			logger.Info("Server is running, ready, and authentication successful")
+			return true
 		}
 	}
 }

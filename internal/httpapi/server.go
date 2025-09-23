@@ -24,6 +24,7 @@ const asyncToggleTimeout = 5 * time.Second
 // ServerController defines the interface for core server functionality
 type ServerController interface {
 	IsRunning() bool
+	IsReady() bool
 	GetListenAddress() string
 	GetUpstreamStats() map[string]interface{}
 	StartServer(ctx context.Context) error
@@ -168,6 +169,18 @@ func (s *Server) setupRoutes() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// Readiness endpoint (checks if server is fully initialized)
+	s.router.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if s.controller.IsReady() {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true}`))
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"ready":false}`))
+		}
 	})
 
 	// Observability endpoints

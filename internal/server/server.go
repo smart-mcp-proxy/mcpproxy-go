@@ -318,6 +318,12 @@ func (s *Server) IsRunning() bool {
 	return s.running
 }
 
+// IsReady returns whether the server is fully initialized and ready to serve requests
+func (s *Server) IsReady() bool {
+	status := s.runtime.CurrentStatus()
+	return status.Phase == "Ready"
+}
+
 // GetListenAddress returns the address the server is listening on
 func (s *Server) GetListenAddress() string {
 	s.mu.RLock()
