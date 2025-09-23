@@ -605,7 +605,7 @@ func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand 
 	shell, _ := c.envManager.GetSystemEnvVar("SHELL")
 	if shell == "" {
 		// Fallback to common shells based on OS
-		if strings.Contains(strings.ToLower(command), "windows") {
+		if runtime.GOOS == "windows" {
 			shell = "cmd"
 		} else {
 			shell = pathBinBash // Default fallback
@@ -629,24 +629,42 @@ func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand 
 		zap.String("shell", shell),
 		zap.String("wrapped_command", commandString))
 
-	// Return shell with -l (login) flag to load user's full environment
-	// The -c flag executes the command string
-	return shell, []string{"-l", "-c", commandString}
+	// Return shell with appropriate flags for the OS
+	if runtime.GOOS == "windows" {
+		// Windows cmd.exe uses /c flag to execute command string
+		return shell, []string{"/c", commandString}
+	} else {
+		// Unix shells use -l (login) flag to load user's full environment
+		// The -c flag executes the command string
+		return shell, []string{"-l", "-c", commandString}
+	}
 }
 
 // shellescape escapes a string for safe shell execution
 func shellescape(s string) string {
 	if s == "" {
+		if runtime.GOOS == "windows" {
+			return `""`
+		}
 		return "''"
 	}
 
 	// If string contains no special characters, return as-is
-	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
-		return s
+	if runtime.GOOS == "windows" {
+		// Windows cmd.exe special characters
+		if !strings.ContainsAny(s, " \t\n\r\"&|<>()^%") {
+			return s
+		}
+		// For Windows, use double quotes and escape internal double quotes
+		return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+	} else {
+		// Unix shell special characters
+		if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
+			return s
+		}
+		// Use single quotes and escape any single quotes in the string
+		return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 	}
-
-	// Use single quotes and escape any single quotes in the string
-	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
 // hasCommand checks if a command is available in PATH
