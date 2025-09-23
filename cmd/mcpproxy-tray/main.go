@@ -93,8 +93,18 @@ func main() {
 	coreURL := resolveCoreURL()
 	logger.Info("Resolved core URL", zap.String("core_url", coreURL))
 
+	// Generate API key for secure communication between tray and core
+	if trayAPIKey == "" {
+		trayAPIKey = generateAPIKey()
+		logger.Info("Generated API key for tray-core communication")
+	}
+
 	// Prepare API client and tray adapters immediately so the icon appears before the core is ready
 	apiClient := api.NewClient(coreURL, logger.Sugar())
+	// Set the API key BEFORE any API calls
+	apiClient.SetAPIKey(trayAPIKey)
+	logger.Info("API key configured for tray-core communication")
+
 	if err := apiClient.StartSSE(ctx); err != nil {
 		logger.Error("Failed to start SSE connection", zap.Error(err))
 	}
@@ -212,7 +222,15 @@ func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.Ap
 
 	if isServerRunning(coreURL) {
 		logger.Info("Core mcpproxy server already running", zap.String("core_url", coreURL))
-		trayApp.SetConnectionState(tray.ConnectionStateConnecting)
+		// Check authentication for external core server
+		if checkAPIAuthentication(coreURL, trayAPIKey) {
+			logger.Info("External core server authentication successful")
+			apiClient.SetAPIKey(trayAPIKey)
+			trayApp.SetConnectionState(tray.ConnectionStateConnecting)
+		} else {
+			logger.Warn("External core server requires different API key")
+			trayApp.SetConnectionState(tray.ConnectionStateAuthError)
+		}
 		return
 	}
 
@@ -252,14 +270,14 @@ func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.Ap
 		}
 	}()
 
-	if !waitForServer(ctx, coreURL, 30*time.Second) {
-		logger.Error("Core server failed to start within timeout", zap.String("core_url", coreURL))
+	if !waitForServerAndCheckAuth(ctx, coreURL, trayAPIKey, 30*time.Second, trayApp, logger) {
+		logger.Error("Core server failed to start within timeout or authentication failed", zap.String("core_url", coreURL))
 		terminateProcess(logger, cmd)
-		trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
+		// Connection state already set by waitForServerAndCheckAuth
 		return
 	}
 
-	logger.Info("Core server started successfully", zap.String("core_url", coreURL))
+	logger.Info("Core server started successfully with authentication", zap.String("core_url", coreURL))
 
 	// Set the API key in the client for secure communication
 	if trayAPIKey != "" {
@@ -270,15 +288,36 @@ func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.Ap
 	trayApp.SetConnectionState(tray.ConnectionStateConnecting)
 }
 
-// isServerRunning checks if the core mcpproxy server is running
+// isServerRunning checks if the core mcpproxy server is running using the unauthenticated health endpoint
 func isServerRunning(baseURL string) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/api/v1/servers")
+	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/health")
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode >= 200 && resp.StatusCode < 400
+}
+
+// checkAPIAuthentication verifies if API authentication is working
+func checkAPIAuthentication(baseURL, apiKey string) bool {
+	if apiKey == "" {
+		return true // No authentication required
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequest("GET", strings.TrimSuffix(baseURL, "/")+"/api/v1/servers", http.NoBody)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-API-Key", apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode != 401
 }
 
 // startCoreServer starts the core mcpproxy server process
@@ -292,9 +331,19 @@ func startCoreServer(logger *zap.Logger, binaryPath string, args []string) (*exe
 	cmd := exec.Command(binaryPath, args...)
 	cmd.Stdout = nil // Don't capture output to avoid blocking
 	cmd.Stderr = nil
-	cmd.Env = append(os.Environ(),
+
+	// Build clean environment - filter out any existing MCPP_API_KEY to avoid conflicts
+	env := []string{}
+	for _, envVar := range os.Environ() {
+		if !strings.HasPrefix(envVar, "MCPP_API_KEY=") {
+			env = append(env, envVar)
+		}
+	}
+	// Add our environment variables
+	env = append(env,
 		"MCPP_ENABLE_TRAY=false",
 		fmt.Sprintf("MCPP_API_KEY=%s", trayAPIKey))
+	cmd.Env = env
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true, // Create new process group
@@ -485,8 +534,9 @@ func findMcpproxyBinary() (string, error) {
 	return "", fmt.Errorf("mcpproxy binary not found in any of the expected locations")
 }
 
-// waitForServer waits for the server to become available or until timeout/context cancellation occurs.
-func waitForServer(ctx context.Context, baseURL string, timeout time.Duration) bool {
+
+// waitForServerAndCheckAuth waits for server and checks authentication status
+func waitForServerAndCheckAuth(ctx context.Context, baseURL, apiKey string, timeout time.Duration, trayApp *tray.App, logger *zap.Logger) bool {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
@@ -495,14 +545,31 @@ func waitForServer(ctx context.Context, baseURL string, timeout time.Duration) b
 
 	for {
 		if isServerRunning(baseURL) {
-			return true
+			// Server is running, now check authentication
+			if checkAPIAuthentication(baseURL, apiKey) {
+				logger.Info("Server is running and authentication is working")
+				return true
+			} else {
+				logger.Warn("Server is running but API authentication failed")
+				trayApp.SetConnectionState(tray.ConnectionStateAuthError)
+				return false
+			}
 		}
 
 		select {
 		case <-ctx.Done():
 			return false
 		case <-deadline.C:
-			return isServerRunning(baseURL)
+			// Final check on timeout
+			if isServerRunning(baseURL) {
+				if checkAPIAuthentication(baseURL, apiKey) {
+					return true
+				} else {
+					trayApp.SetConnectionState(tray.ConnectionStateAuthError)
+					return false
+				}
+			}
+			return false
 		case <-ticker.C:
 		}
 	}
@@ -541,7 +608,8 @@ func listenArgFromURL(raw string) string {
 
 	host := u.Hostname()
 	if host == "" || host == "localhost" || host == "127.0.0.1" {
-		return ":" + port
+		// Always use localhost binding for security, never bind to all interfaces
+		return "127.0.0.1:" + port
 	}
 
 	return net.JoinHostPort(host, port)

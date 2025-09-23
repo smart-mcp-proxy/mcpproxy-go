@@ -266,6 +266,9 @@ func (a *App) applyConnectionStateToUI(state ConnectionState) {
 	case ConnectionStateDisconnected:
 		statusText = "Status: Core unavailable"
 		tooltip = "Tray cannot reach the core runtime"
+	case ConnectionStateAuthError:
+		statusText = "Status: Authentication error"
+		tooltip = "Core is running but API key authentication failed"
 	case ConnectionStateConnected:
 		statusText = "Status: Connected"
 		tooltip = "Core runtime is responding"

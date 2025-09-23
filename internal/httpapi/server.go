@@ -163,6 +163,13 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
+	// Simple health endpoint (always available, no authentication required)
+	s.router.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
 	// Observability endpoints
 	if s.observability != nil {
 		if health := s.observability.Health(); health != nil {
