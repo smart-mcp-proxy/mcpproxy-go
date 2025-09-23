@@ -344,7 +344,7 @@ test_api "POST /api/v1/servers/everything/enable" "POST" "${API_BASE}/servers/ev
 
 # Test 8: Restart server
 test_api "POST /api/v1/servers/everything/restart" "POST" "${API_BASE}/servers/everything/restart" "200" "" \
-    "jq -e '.success == true and .data.restarted == true' < '$TEST_RESULTS_FILE' >/dev/null"
+    "jq -e '.success == true and .data.success == true' < '$TEST_RESULTS_FILE' >/dev/null"
 
 # Test 9: SSE Events
 test_sse "GET /events (SSE)"
@@ -376,7 +376,7 @@ echo ""
 log_test "Concurrent API requests"
 
 # Start concurrent requests
-local curl_base="curl -s --max-time 10"
+curl_base="curl -s --max-time 10"
 if [ ! -z "$API_KEY" ]; then
     curl_base="$curl_base -H \"X-API-Key: $API_KEY\""
 fi
