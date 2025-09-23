@@ -37,6 +37,7 @@ type UpstreamManager interface {
 	// Tool operations
 	DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error)
 	CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error)
+	InvalidateAllToolCountCaches()
 
 	// Status and statistics
 	GetStats() map[string]interface{}

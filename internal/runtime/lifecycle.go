@@ -135,6 +135,9 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 		return fmt.Errorf("failed to index tools: %w", err)
 	}
 
+	// Invalidate tool count caches since tools may have changed
+	r.upstreamManager.InvalidateAllToolCountCaches()
+
 	r.logger.Info("Successfully indexed tools", zap.Int("count", len(tools)))
 	return nil
 }

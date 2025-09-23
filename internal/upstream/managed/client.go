@@ -42,6 +42,11 @@ type Client struct {
 	// Reconnection protection
 	reconnectMu         sync.Mutex
 	reconnectInProgress bool
+
+	// Tool count caching to reduce upstream ListTools calls
+	toolCountMu    sync.RWMutex
+	toolCount      int
+	toolCountTime  time.Time
 }
 
 // NewClient creates a new managed client with state management
@@ -657,6 +662,107 @@ func (mc *Client) isNormalReconnectionError(err error) bool {
 	}
 
 	return false
+}
+
+// GetCachedToolCount returns the cached tool count or fetches fresh count if cache is expired
+// Uses a 2-minute cache TTL to reduce frequent ListTools calls
+func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
+	const cacheTimeout = 2 * time.Minute
+
+	mc.toolCountMu.RLock()
+	cachedCount := mc.toolCount
+	cachedTime := mc.toolCountTime
+	mc.toolCountMu.RUnlock()
+
+	// Check if cache is valid and not expired
+	if !cachedTime.IsZero() && time.Since(cachedTime) < cacheTimeout {
+		mc.logger.Debug("🔍 Tool count cache hit",
+			zap.String("server", mc.Config.Name),
+			zap.Int("cached_count", cachedCount),
+			zap.Duration("cache_age", time.Since(cachedTime)))
+		return cachedCount, nil
+	}
+
+	// Cache miss or expired - need to fetch fresh count
+	if !mc.IsConnected() {
+		mc.logger.Debug("🔍 Tool count fetch skipped - client not connected",
+			zap.String("server", mc.Config.Name),
+			zap.String("state", mc.StateManager.GetState().String()))
+		return 0, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+	}
+
+	// Prevent concurrent ListTools calls for tool counting
+	mc.listToolsMu.Lock()
+	if mc.listToolsInProgress {
+		mc.listToolsMu.Unlock()
+		mc.logger.Debug("🔍 Tool count fetch skipped - ListTools already in progress",
+			zap.String("server", mc.Config.Name))
+		// Return cached count even if expired rather than causing another concurrent call
+		return cachedCount, nil
+	}
+	mc.listToolsInProgress = true
+	mc.listToolsMu.Unlock()
+
+	defer func() {
+		mc.listToolsMu.Lock()
+		mc.listToolsInProgress = false
+		mc.listToolsMu.Unlock()
+	}()
+
+	mc.logger.Debug("🔍 Tool count cache miss - fetching fresh count",
+		zap.String("server", mc.Config.Name),
+		zap.Bool("cache_expired", !cachedTime.IsZero()),
+		zap.Duration("cache_age", time.Since(cachedTime)))
+
+	// Fetch fresh tool count with timeout
+	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	tools, err := mc.coreClient.ListTools(listCtx)
+	if err != nil {
+		mc.logger.Debug("Tool count fetch failed, returning cached value",
+			zap.String("server", mc.Config.Name),
+			zap.Error(err),
+			zap.Int("cached_count", cachedCount))
+
+		// Check if it's a connection error and update state
+		if mc.isConnectionError(err) {
+			mc.StateManager.SetError(err)
+		}
+
+		// Return cached count if available, even if stale
+		if !cachedTime.IsZero() {
+			return cachedCount, nil
+		}
+		return 0, fmt.Errorf("tool count fetch failed: %w", err)
+	}
+
+	freshCount := len(tools)
+
+	// Update cache
+	mc.toolCountMu.Lock()
+	mc.toolCount = freshCount
+	mc.toolCountTime = time.Now()
+	mc.toolCountMu.Unlock()
+
+	mc.logger.Debug("🔍 Tool count cache updated",
+		zap.String("server", mc.Config.Name),
+		zap.Int("fresh_count", freshCount),
+		zap.Int("previous_count", cachedCount))
+
+	return freshCount, nil
+}
+
+// InvalidateToolCountCache clears the tool count cache
+// Should be called when tools are known to have changed
+func (mc *Client) InvalidateToolCountCache() {
+	mc.toolCountMu.Lock()
+	mc.toolCount = 0
+	mc.toolCountTime = time.Time{}
+	mc.toolCountMu.Unlock()
+
+	mc.logger.Debug("🔍 Tool count cache invalidated",
+		zap.String("server", mc.Config.Name))
 }
 
 // tryListTools attempts to acquire the ListTools lock, returns true if successful

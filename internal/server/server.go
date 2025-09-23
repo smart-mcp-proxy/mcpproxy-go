@@ -467,46 +467,42 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 }
 
 // getServerToolCount returns the number of tools for a specific server
-// Uses shorter timeout and better error handling for UI status display
+// Uses cached tool counts with 2-minute TTL to reduce frequent ListTools calls
 func (s *Server) getServerToolCount(serverID string) int {
 	client, exists := s.runtime.UpstreamManager().GetClient(serverID)
 	if !exists || !client.IsConnected() {
 		return 0
 	}
 
-	// Use timeout for UI status updates (30 seconds for SSE servers)
-	// This allows time for SSE servers to establish connections and respond
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Use a shorter timeout for tool count requests to avoid blocking SSE updates
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	s.logger.Debug("Starting ListTools operation",
-		zap.String("server_id", serverID),
-		zap.Duration("timeout", 30*time.Second))
-
-	tools, err := client.ListTools(ctx)
+	// Use the cached tool count to reduce ListTools calls
+	count, err := client.GetCachedToolCount(ctx)
 	if err != nil {
 		// Classify errors to reduce noise from expected failures
 		if isTimeoutError(err) {
 			// Timeout errors are common for servers that don't support tool listing
 			// Log at debug level to reduce noise
-			s.logger.Debug("Tool listing timeout for server (server may not support tools)",
+			s.logger.Debug("Tool count timeout for server (server may not support tools)",
 				zap.String("server_id", serverID),
 				zap.String("error_type", "timeout"))
 		} else if isConnectionError(err) {
 			// Connection errors suggest the server is actually disconnected
-			s.logger.Debug("Connection error during tool listing",
+			s.logger.Debug("Connection error during tool count retrieval",
 				zap.String("server_id", serverID),
 				zap.String("error_type", "connection"))
 		} else {
 			// Other errors might be more significant
-			s.logger.Warn("Failed to get tool count for server",
+			s.logger.Debug("Failed to get tool count for server",
 				zap.String("server_id", serverID),
 				zap.Error(err))
 		}
 		return 0
 	}
 
-	return len(tools)
+	return count
 }
 
 // Helper functions for error classification

@@ -922,3 +922,17 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 
 	return nil
 }
+
+// InvalidateAllToolCountCaches invalidates tool count caches for all clients
+// This should be called when tools are known to have changed (e.g., after indexing)
+func (m *Manager) InvalidateAllToolCountCaches() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, client := range m.clients {
+		client.InvalidateToolCountCache()
+	}
+
+	m.logger.Debug("Invalidated tool count caches for all clients",
+		zap.Int("client_count", len(m.clients)))
+}
