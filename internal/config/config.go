@@ -1,14 +1,17 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"mcpproxy-go/internal/secureenv"
+	"os"
 	"time"
 )
 
 const (
-	defaultPort = ":8080"
+	defaultPort = "127.0.0.1:8080" // Localhost-only binding by default for security
 )
 
 // Duration is a wrapper around time.Duration that can be marshaled to/from JSON
@@ -59,10 +62,11 @@ type Config struct {
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
 
 	// Security settings
-	ReadOnlyMode      bool `json:"read_only_mode" mapstructure:"read-only-mode"`
-	DisableManagement bool `json:"disable_management" mapstructure:"disable-management"`
-	AllowServerAdd    bool `json:"allow_server_add" mapstructure:"allow-server-add"`
-	AllowServerRemove bool `json:"allow_server_remove" mapstructure:"allow-server-remove"`
+	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
+	ReadOnlyMode      bool   `json:"read_only_mode" mapstructure:"read-only-mode"`
+	DisableManagement bool   `json:"disable_management" mapstructure:"disable-management"`
+	AllowServerAdd    bool   `json:"allow_server_add" mapstructure:"allow-server-add"`
+	AllowServerRemove bool   `json:"allow_server_remove" mapstructure:"allow-server-remove"`
 
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
@@ -393,6 +397,34 @@ func DefaultConfig() *Config {
 	}
 }
 
+// generateAPIKey creates a cryptographically secure random API key
+func generateAPIKey() string {
+	bytes := make([]byte, 32) // 32 bytes = 256 bits
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to less secure method if crypto/rand fails
+		return fmt.Sprintf("mcpproxy_%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(bytes)
+}
+
+// EnsureAPIKey ensures the API key is set, generating one if needed
+// Returns the API key and whether it was auto-generated
+func (c *Config) EnsureAPIKey() (string, bool) {
+	if c.APIKey != "" {
+		return c.APIKey, false // User-provided or explicitly disabled
+	}
+
+	// Check environment variable for API key first
+	if envAPIKey := os.Getenv("MCPP_API_KEY"); envAPIKey != "" {
+		c.APIKey = envAPIKey
+		return c.APIKey, false
+	}
+
+	// Generate a new API key
+	c.APIKey = generateAPIKey()
+	return c.APIKey, true
+}
+
 // Validate validates the configuration
 func (c *Config) Validate() error {
 	if c.Listen == "" {
@@ -409,6 +441,16 @@ func (c *Config) Validate() error {
 	}
 	if c.CallToolTimeout.Duration() <= 0 {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
+	}
+
+	// Handle API key generation if not configured
+	// Empty string means authentication disabled, nil means auto-generate
+	if c.APIKey == "" {
+		// Check environment variable for API key
+		if envAPIKey := os.Getenv("MCPP_API_KEY"); envAPIKey != "" {
+			c.APIKey = envAPIKey
+		}
+		// Note: Empty string explicitly disables authentication
 	}
 
 	// Ensure Environment config is not nil

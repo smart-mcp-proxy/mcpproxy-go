@@ -358,6 +358,18 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.Bool("allow_server_remove", cfg.AllowServerRemove),
 		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
+	// Ensure API key is configured
+	apiKey, wasGenerated := cfg.EnsureAPIKey()
+	if apiKey == "" {
+		logger.Info("API key authentication disabled")
+	} else if wasGenerated {
+		logger.Warn("API key was auto-generated for security. To access the Web UI and REST API, use this key:",
+			zap.String("api_key", apiKey),
+			zap.String("web_ui_url", fmt.Sprintf("http://%s/ui/?apikey=%s", cfg.Listen, apiKey)))
+	} else {
+		logger.Info("API key authentication enabled (using configured key)")
+	}
+
 	// Create server with the actual config path used
 	var actualConfigPath string
 	if configFile != "" {

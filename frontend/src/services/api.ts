@@ -2,20 +2,45 @@ import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, 
 
 class APIService {
   private baseUrl = ''
+  private apiKey = ''
 
   constructor() {
     // In development, Vite proxy handles API calls
     // In production, the frontend is served from the same origin as the API
     this.baseUrl = import.meta.env.DEV ? '' : ''
+
+    // Extract API key from URL parameters on initialization
+    this.initializeAPIKey()
+  }
+
+  private initializeAPIKey() {
+    // Check if API key is provided in URL parameters
+    const urlParams = new URLSearchParams(window.location.search)
+    const apiKeyFromURL = urlParams.get('apikey')
+
+    if (apiKeyFromURL) {
+      this.apiKey = apiKeyFromURL
+      // Clean the URL by removing the API key parameter for security
+      urlParams.delete('apikey')
+      const newURL = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '')
+      window.history.replaceState({}, '', newURL)
+    }
   }
 
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<APIResponse<T>> {
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      }
+
+      // Add API key header if available
+      if (this.apiKey) {
+        headers['X-API-Key'] = this.apiKey
+      }
+
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
+        headers,
         ...options,
       })
 
@@ -80,7 +105,10 @@ class APIService {
 
   // Server-Sent Events
   createEventSource(): EventSource {
-    return new EventSource(`${this.baseUrl}/events`)
+    const url = this.apiKey
+      ? `${this.baseUrl}/events?apikey=${encodeURIComponent(this.apiKey)}`
+      : `${this.baseUrl}/events`
+    return new EventSource(url)
   }
 
   // Secret endpoints

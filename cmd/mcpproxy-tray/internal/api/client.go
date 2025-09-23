@@ -67,6 +67,7 @@ type StatusUpdate struct {
 // Client provides access to the mcpproxy API
 type Client struct {
 	baseURL           string
+	apiKey            string
 	httpClient        *http.Client
 	logger            *zap.SugaredLogger
 	statusCh          chan StatusUpdate
@@ -85,6 +86,11 @@ func NewClient(baseURL string, logger *zap.SugaredLogger) *Client {
 		statusCh:          make(chan StatusUpdate, 10),
 		connectionStateCh: make(chan tray.ConnectionState, 8),
 	}
+}
+
+// SetAPIKey sets the API key for authentication
+func (c *Client) SetAPIKey(apiKey string) {
+	c.apiKey = apiKey
 }
 
 // StartSSE starts the Server-Sent Events connection for real-time updates
@@ -150,7 +156,12 @@ func (c *Client) ConnectionStateChannel() <-chan tray.ConnectionState {
 
 // connectSSE establishes the SSE connection and processes events
 func (c *Client) connectSSE(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/events", http.NoBody)
+	url := c.baseURL + "/events"
+	if c.apiKey != "" {
+		url += "?apikey=" + c.apiKey
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -409,7 +420,10 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 // OpenWebUI opens the web control panel in the default browser
 func (c *Client) OpenWebUI() error {
 	url := c.baseURL + "/ui/"
-	c.logger.Info("Opening web control panel", "url", url)
+	if c.apiKey != "" {
+		url += "?apikey=" + c.apiKey
+	}
+	c.logger.Info("Opening web control panel", "url", c.baseURL+"/ui/")
 
 	cmd := exec.Command("open", url)
 	return cmd.Run()
@@ -425,6 +439,11 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+
+	// Add API key header if available
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

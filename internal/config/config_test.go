@@ -15,7 +15,7 @@ func TestDefaultConfig(t *testing.T) {
 	config := DefaultConfig()
 
 	// Test default values
-	assert.Equal(t, ":8080", config.Listen)
+	assert.Equal(t, "127.0.0.1:8080", config.Listen)
 	assert.Equal(t, "", config.DataDir)
 	assert.True(t, config.EnableTray)
 	assert.False(t, config.DebugSearch)
@@ -48,7 +48,7 @@ func TestConfigValidation(t *testing.T) {
 				Listen: "",
 			},
 			expected: &Config{
-				Listen:            ":8080",
+				Listen:            "127.0.0.1:8080",
 				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 0,
@@ -60,7 +60,7 @@ func TestConfigValidation(t *testing.T) {
 				TopK: 0,
 			},
 			expected: &Config{
-				Listen:            ":8080",
+				Listen:            "127.0.0.1:8080",
 				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 0,
@@ -72,7 +72,7 @@ func TestConfigValidation(t *testing.T) {
 				ToolsLimit: -5,
 			},
 			expected: &Config{
-				Listen:            ":8080",
+				Listen:            "127.0.0.1:8080",
 				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 0,
@@ -84,7 +84,7 @@ func TestConfigValidation(t *testing.T) {
 				ToolResponseLimit: -100,
 			},
 			expected: &Config{
-				Listen:            ":8080",
+				Listen:            "127.0.0.1:8080",
 				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 0,
@@ -469,8 +469,8 @@ func TestCreateSampleConfig(t *testing.T) {
 	}
 
 	// Check that it has expected structure
-	if loaded.Listen != ":8080" {
-		t.Errorf("Expected sample config Listen to be :8080, got %s", loaded.Listen)
+	if loaded.Listen != "127.0.0.1:8080" {
+		t.Errorf("Expected sample config Listen to be 127.0.0.1:8080, got %s", loaded.Listen)
 	}
 
 	if len(loaded.Servers) != 2 {

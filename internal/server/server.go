@@ -90,6 +90,47 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	return server, nil
 }
 
+// createAPIKeyProtectedHandler wraps an HTTP handler with API key authentication
+func (s *Server) createAPIKeyProtectedHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.runtime.Config()
+		if cfg == nil {
+			s.logger.Error("No configuration available for API key validation")
+			http.Error(w, "Server configuration error", http.StatusInternalServerError)
+			return
+		}
+
+		// If API key is empty, authentication is disabled
+		if cfg.APIKey == "" {
+			handler.ServeHTTP(w, r)
+			return
+		}
+
+		// Validate API key
+		if !s.validateAPIKey(r, cfg.APIKey) {
+			http.Error(w, "Invalid or missing API key", http.StatusUnauthorized)
+			return
+		}
+
+		handler.ServeHTTP(w, r)
+	})
+}
+
+// validateAPIKey checks if the request contains a valid API key
+func (s *Server) validateAPIKey(r *http.Request, expectedKey string) bool {
+	// Check X-API-Key header
+	if key := r.Header.Get("X-API-Key"); key != "" {
+		return key == expectedKey
+	}
+
+	// Check query parameter (for Web UI initial load)
+	if key := r.URL.Query().Get("apikey"); key != "" {
+		return key == expectedKey
+	}
+
+	return false
+}
+
 // GetStatus returns the current server status
 func (s *Server) GetStatus() interface{} {
 	status := s.runtime.StatusSnapshot(s.IsRunning())
@@ -709,9 +750,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/api/", httpAPIServer)
 	mux.Handle("/events", httpAPIServer)
 
-	// Web UI endpoints (serves embedded Vue.js frontend)
+	// Web UI endpoints (serves embedded Vue.js frontend) with API key protection
 	webUIHandler := web.NewHandler(s.logger.Sugar())
-	mux.Handle("/ui/", http.StripPrefix("/ui", webUIHandler))
+	protectedWebUIHandler := s.createAPIKeyProtectedHandler(http.StripPrefix("/ui", webUIHandler))
+	mux.Handle("/ui/", protectedWebUIHandler)
 	// Redirect root to web UI
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {

@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/observability"
 	internalRuntime "mcpproxy-go/internal/runtime"
@@ -77,6 +78,58 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 	return s
 }
 
+// apiKeyAuthMiddleware creates middleware for API key authentication
+func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Get config from controller
+			configInterface := s.controller.GetCurrentConfig()
+			if configInterface == nil {
+				// No config available (testing scenario) - allow through
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Cast to config type
+			cfg, ok := configInterface.(*config.Config)
+			if !ok {
+				// Config is not the expected type (testing scenario) - allow through
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// If API key is empty, authentication is disabled
+			if cfg.APIKey == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Validate API key
+			if !s.validateAPIKey(r, cfg.APIKey) {
+				s.writeError(w, http.StatusUnauthorized, "Invalid or missing API key")
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// validateAPIKey checks if the request contains a valid API key
+func (s *Server) validateAPIKey(r *http.Request, expectedKey string) bool {
+	// Check X-API-Key header
+	if key := r.Header.Get("X-API-Key"); key != "" {
+		return key == expectedKey
+	}
+
+	// Check query parameter (for SSE and Web UI initial load)
+	if key := r.URL.Query().Get("apikey"); key != "" {
+		return key == expectedKey
+	}
+
+	return false
+}
+
 // ServeHTTP implements http.Handler
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
@@ -99,7 +152,7 @@ func (s *Server) setupRoutes() {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(http.StatusOK)
@@ -121,10 +174,11 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
-	// API v1 routes with timeout middleware
+	// API v1 routes with timeout and authentication middleware
 	s.router.Route("/api/v1", func(r chi.Router) {
-		// Apply timeout middleware to API routes only
+		// Apply timeout and API key authentication middleware to API routes only
 		r.Use(middleware.Timeout(60 * time.Second))
+		r.Use(s.apiKeyAuthMiddleware())
 
 		// Status endpoint
 		r.Get("/status", s.handleGetStatus)
@@ -151,8 +205,8 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
-	// SSE events
-	s.router.Get("/events", s.handleSSEEvents)
+	// SSE events (protected by API key)
+	s.router.With(s.apiKeyAuthMiddleware()).Get("/events", s.handleSSEEvents)
 
 }
 

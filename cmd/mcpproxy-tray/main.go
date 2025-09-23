@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +33,7 @@ var (
 	version          = "development" // Set by build flags
 	defaultCoreURL   = "http://127.0.0.1:8080"
 	errNoBundledCore = errors.New("no bundled core binary found")
+	trayAPIKey       = ""            // API key generated for core communication
 )
 
 // getLogDir returns the standard log directory for the current OS.
@@ -57,6 +60,16 @@ func getLogDir() string {
 	}
 
 	return fallback
+}
+
+// generateAPIKey creates a cryptographically secure random API key
+func generateAPIKey() string {
+	bytes := make([]byte, 32) // 32 bytes = 256 bits
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to less secure method if crypto/rand fails
+		return fmt.Sprintf("tray_%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(bytes)
 }
 
 func main() {
@@ -105,7 +118,7 @@ func main() {
 	}()
 
 	// Launch core management loop in the background so the tray can appear immediately
-	go manageCoreProcess(ctx, logger, trayApp, coreURL)
+	go manageCoreProcess(ctx, logger, trayApp, apiClient, coreURL)
 
 	logger.Info("Starting tray event loop")
 	if err := trayApp.Run(ctx); err != nil && err != context.Canceled {
@@ -190,7 +203,7 @@ func shouldSkipCoreLaunch() bool {
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
-func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.App, coreURL string) {
+func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.App, apiClient *api.Client, coreURL string) {
 	if shouldSkipCoreLaunch() {
 		logger.Info("Skipping core auto-launch due to MCPPROXY_TRAY_SKIP_CORE")
 		trayApp.SetConnectionState(tray.ConnectionStateConnecting)
@@ -247,6 +260,13 @@ func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.Ap
 	}
 
 	logger.Info("Core server started successfully", zap.String("core_url", coreURL))
+
+	// Set the API key in the client for secure communication
+	if trayAPIKey != "" {
+		apiClient.SetAPIKey(trayAPIKey)
+		logger.Info("API key configured for tray-core communication")
+	}
+
 	trayApp.SetConnectionState(tray.ConnectionStateConnecting)
 }
 
@@ -263,10 +283,18 @@ func isServerRunning(baseURL string) bool {
 
 // startCoreServer starts the core mcpproxy server process
 func startCoreServer(logger *zap.Logger, binaryPath string, args []string) (*exec.Cmd, <-chan error, error) {
+	// Generate API key for secure communication between tray and core
+	if trayAPIKey == "" {
+		trayAPIKey = generateAPIKey()
+		logger.Info("Generated API key for tray-core communication")
+	}
+
 	cmd := exec.Command(binaryPath, args...)
 	cmd.Stdout = nil // Don't capture output to avoid blocking
 	cmd.Stderr = nil
-	cmd.Env = append(os.Environ(), "MCPP_ENABLE_TRAY=false")
+	cmd.Env = append(os.Environ(),
+		"MCPP_ENABLE_TRAY=false",
+		fmt.Sprintf("MCPP_API_KEY=%s", trayAPIKey))
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true, // Create new process group

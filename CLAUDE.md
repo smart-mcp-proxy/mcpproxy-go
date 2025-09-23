@@ -6,6 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MCPProxy is a Go-based desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
+## Architecture: Core + Tray Split
+
+**Current Architecture** (Next Branch):
+- **Core Server** (`mcpproxy`): Headless HTTP API server with MCP proxy functionality
+- **Tray Application** (`mcpproxy-tray`): Standalone GUI application that manages the core server
+
+**Key Benefits**:
+- **Auto-start**: Tray automatically starts core server if not running
+- **Port conflict resolution**: Built-in detection and handling
+- **Independent operation**: Core can run without tray (headless mode)
+- **Real-time sync**: Tray updates via SSE connection to core API
+
 ## Development Commands
 
 ### Build
@@ -129,12 +141,30 @@ golangci-lint run ./...
 ```
 
 ### Running the Application
+
+#### Core + Tray Architecture (Current)
+
+MCPProxy is split into two separate applications:
+
+1. **Core Server** (`mcpproxy`): Headless API server
+2. **Tray Application** (`mcpproxy-tray`): GUI management interface
+
 ```bash
-# Start server with system tray (default)
+# Build both applications
+CGO_ENABLED=0 go build -o mcpproxy ./cmd/mcpproxy          # Core server
+GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray app
+
+# Start core server (required) - binds to localhost by default for security
 ./mcpproxy serve
 
-# Start without tray
-./mcpproxy serve --tray=false
+# Start core server on all interfaces (CAUTION: Network exposure)
+./mcpproxy serve --listen :8080
+
+# Start with custom API key
+./mcpproxy serve --api-key="your-secret-key"
+
+# Start tray application (optional, connects to core via API with auto-generated API key)
+./mcpproxy-tray
 
 # Custom configuration
 ./mcpproxy serve --config=/path/to/config.json
@@ -145,6 +175,13 @@ golangci-lint run ./...
 # Debug specific server tools
 ./mcpproxy tools list --server=github-server --log-level=trace
 ```
+
+#### Tray Application Features
+- **Auto-starts core server** if not running
+- **Port conflict resolution** built-in
+- **Real-time updates** via SSE connection to core API
+- **Cross-platform** system tray integration
+- **Server management** via GUI menus
 
 ## Architecture Overview
 
@@ -187,7 +224,7 @@ golangci-lint run ./...
   - Server configurations and quarantine status
 
 - **`internal/cache/`** - Response caching layer
-- **`internal/tray/`** - Cross-platform system tray UI
+- **`cmd/mcpproxy-tray/`** - Standalone system tray application (separate binary)
 - **`internal/logs/`** - Structured logging with per-server log files
 
 ### Key Features
@@ -212,9 +249,10 @@ golangci-lint run ./...
 ### Example Configuration
 ```json
 {
-  "listen": ":8080",
+  "listen": "127.0.0.1:8080",
   "data_dir": "~/.mcpproxy",
-  "enable_tray": true,
+  "api_key": "your-secret-api-key-here",
+  "enable_web_ui": true,
   "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
@@ -269,6 +307,39 @@ golangci-lint run ./...
     }
   ]
 }
+```
+
+### Environment Variables
+
+MCPProxy supports several environment variables for configuration and security:
+
+**Security Configuration**:
+- `MCPP_LISTEN` - Override network binding (e.g., `127.0.0.1:8080`, `:8080`)
+- `MCPP_API_KEY` - Set API key for REST API authentication
+- `MCPP_ENABLE_TRAY` - Enable/disable tray functionality (`true`/`false`)
+
+**Debugging**:
+- `MCPPROXY_DEBUG` - Enable debug mode
+- `MCPPROXY_DISABLE_OAUTH` - Disable OAuth for testing
+- `HEADLESS` - Run in headless mode (no browser launching)
+
+**Examples**:
+```bash
+# Start with custom network binding
+export MCPP_LISTEN=":8080"
+./mcpproxy serve
+
+# Start with custom API key
+export MCPP_API_KEY="my-secret-key"
+./mcpproxy serve
+
+# Disable authentication for testing
+export MCPP_API_KEY=""
+./mcpproxy serve
+
+# Run in headless mode
+export HEADLESS=true
+./mcpproxy serve
 ```
 
 ### Working Directory Configuration
@@ -365,7 +436,41 @@ The HTTP API provides REST endpoints for server management and monitoring:
 - Streams both status changes and runtime events (`servers.changed`, `config.reloaded`)
 - Used by web UI and tray for real-time synchronization
 
+**API Authentication Examples**:
+```bash
+# Using X-API-Key header (recommended for curl)
+curl -H "X-API-Key: your-api-key" http://127.0.0.1:8080/api/v1/servers
+
+# Using query parameter (for browser/SSE)
+curl "http://127.0.0.1:8080/api/v1/servers?apikey=your-api-key"
+
+# SSE with API key
+curl "http://127.0.0.1:8080/events?apikey=your-api-key"
+
+# Open Web UI with API key (tray app does this automatically)
+open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
+```
+
+**Security Notes**:
+- **MCP endpoints (`/mcp`, `/mcp/`)** remain **unprotected** for client compatibility
+- **REST API** requires authentication when API key is configured
+- **Empty API key** disables authentication (useful for testing)
+
 ## Security Model
+
+### Network Security
+- **Localhost-only binding by default**: Core server binds to `127.0.0.1:8080` by default to prevent network exposure
+- **Override options**: Can be changed via `--listen` flag, `MCPP_LISTEN` environment variable, or config file
+- **API key authentication**: REST API endpoints protected with optional API key authentication
+- **MCP endpoints open**: MCP protocol endpoints (`/mcp`, `/mcp/`) remain unprotected for client compatibility
+
+### API Key Authentication
+- **Automatic generation**: API key generated if not provided and logged for easy access
+- **Multiple authentication methods**: Supports `X-API-Key` header and `?apikey=` query parameter
+- **Tray integration**: Tray app automatically generates and manages API keys for core communication
+- **Configuration options**: Set via `--api-key` flag, `MCPP_API_KEY` environment variable, or config file
+- **Optional protection**: Empty API key disables authentication (useful for testing)
+- **Protected endpoints**: `/api/v1/*` and `/events` (SSE) require authentication when enabled
 
 ### Quarantine System
 - **All new servers** added via LLM tools are automatically quarantined
@@ -526,10 +631,10 @@ grep -E "(state.*transition|Connecting|Ready|Error)" ~/Library/Logs/mcpproxy/mai
 pkill mcpproxy
 
 # Start with debug logging
-go build && ./mcpproxy --log-level=debug --tray=false
+go build && ./mcpproxy serve --log-level=debug
 
 # Start with trace-level logging (very verbose)
-./mcpproxy --log-level=trace --tray=false
+./mcpproxy serve --log-level=trace
 
 # Debug specific operations
 ./mcpproxy tools list --server=github-server --log-level=trace
