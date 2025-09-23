@@ -114,6 +114,11 @@ func TestUpstreamManagerContract(t *testing.T) {
 			in:   []reflect.Type{reflect.TypeOf((*NotificationHandler)(nil)).Elem()},
 			out:  []reflect.Type{},
 		},
+		"InvalidateAllToolCountCaches": {
+			name: "InvalidateAllToolCountCaches",
+			in:   []reflect.Type{},
+			out:  []reflect.Type{},
+		},
 	}
 
 	verifyInterfaceContract(t, interfaceType, expectedMethods)

@@ -33,7 +33,7 @@ var (
 	version          = "development" // Set by build flags
 	defaultCoreURL   = "http://127.0.0.1:8080"
 	errNoBundledCore = errors.New("no bundled core binary found")
-	trayAPIKey       = ""            // API key generated for core communication
+	trayAPIKey       = "" // API key generated for core communication
 )
 
 // getLogDir returns the standard log directory for the current OS.

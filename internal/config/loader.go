@@ -192,6 +192,18 @@ func loadConfigFile(path string, cfg *Config) error {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	// First check if api_key is present in the JSON to distinguish between
+	// "not set" vs "explicitly set to empty"
+	var rawConfig map[string]interface{}
+	if err := json.Unmarshal(data, &rawConfig); err != nil {
+		return fmt.Errorf("failed to parse config file for api_key detection: %w", err)
+	}
+
+	// Check if api_key is explicitly set in the config file
+	if _, exists := rawConfig["api_key"]; exists {
+		cfg.apiKeyExplicitlySet = true
+	}
+
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("failed to parse config file: %w", err)
 	}

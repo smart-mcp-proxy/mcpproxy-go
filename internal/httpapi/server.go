@@ -604,7 +604,6 @@ func (s *Server) writeSSEEvent(w http.ResponseWriter, event string, data interfa
 	return err
 }
 
-
 // Secrets management handlers
 
 func (s *Server) handleGetSecretRefs(w http.ResponseWriter, r *http.Request) {

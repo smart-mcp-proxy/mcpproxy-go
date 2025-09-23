@@ -11,6 +11,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 MCPPROXY_BINARY="./mcpproxy"
+CONFIG_TEMPLATE="./test/e2e-config.template.json"
 CONFIG_FILE="./test/e2e-config.json"
 LISTEN_PORT="8081"
 BASE_URL="http://localhost:${LISTEN_PORT}"
@@ -18,6 +19,7 @@ API_BASE="${BASE_URL}/api/v1"
 TEST_DATA_DIR="./test-data"
 MCPPROXY_PID=""
 TEST_RESULTS_FILE="/tmp/mcpproxy_e2e_results.json"
+API_KEY=""
 
 # Test counters
 TESTS_RUN=0
@@ -91,6 +93,16 @@ log_fail() {
     TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
+# Extract API key from server logs
+extract_api_key() {
+    if [ -f "/tmp/mcpproxy_e2e.log" ]; then
+        API_KEY=$(grep -o '"api_key": "[^"]*"' "/tmp/mcpproxy_e2e.log" | sed 's/.*"api_key": "\([^"]*\)".*/\1/' | head -1)
+        if [ ! -z "$API_KEY" ]; then
+            echo "Extracted API key: ${API_KEY:0:8}..."
+        fi
+    fi
+}
+
 # Wait for server to be ready
 wait_for_server() {
     local max_attempts=30
@@ -99,7 +111,17 @@ wait_for_server() {
     echo "Waiting for server to be ready..."
 
     while [ $attempt -le $max_attempts ]; do
-        if curl -s -f "${BASE_URL}/api/v1/servers" > /dev/null 2>&1; then
+        # First extract API key from logs if available
+        extract_api_key
+
+        # Build curl command with API key if available
+        local curl_cmd="curl -s -f"
+        if [ ! -z "$API_KEY" ]; then
+            curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
+        fi
+        curl_cmd="$curl_cmd \"${BASE_URL}/api/v1/servers\""
+
+        if eval $curl_cmd > /dev/null 2>&1; then
             echo "Server is ready!"
             return 0
         fi
@@ -122,7 +144,13 @@ wait_for_everything_server() {
 
     while [ $attempt -le $max_attempts ]; do
         # Check if everything server is connected
-        local connected=$(curl -s "${API_BASE}/servers" | jq -r '.data.servers[0].connected // false' 2>/dev/null)
+        local curl_cmd="curl -s"
+        if [ ! -z "$API_KEY" ]; then
+            curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
+        fi
+        curl_cmd="$curl_cmd \"${API_BASE}/servers\""
+
+        local connected=$(eval $curl_cmd | jq -r '.data.servers[0].connected // false' 2>/dev/null)
 
         if [ "$connected" = "true" ]; then
             echo "Everything server is connected!"
@@ -152,6 +180,11 @@ test_api() {
     log_test "$test_name"
 
     local curl_args=("-s" "-w" "%{http_code}" "-o" "$TEST_RESULTS_FILE")
+
+    # Add API key header if available
+    if [ ! -z "$API_KEY" ]; then
+        curl_args+=("-H" "X-API-Key: $API_KEY")
+    fi
 
     if [ "$method" = "POST" ]; then
         curl_args+=("-X" "POST" "-H" "Content-Type: application/json")
@@ -194,7 +227,13 @@ test_sse() {
     log_test "$test_name"
 
     # Test SSE endpoint by connecting and reading first few events
-    timeout 5s curl -s -N "${BASE_URL}/events" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
+    local curl_cmd="timeout 5s curl -s -N"
+    if [ ! -z "$API_KEY" ]; then
+        curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
+    fi
+    curl_cmd="$curl_cmd \"${BASE_URL}/events\""
+
+    eval "$curl_cmd" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
 
     if [ -s "$TEST_RESULTS_FILE" ] && grep -q "data:" "$TEST_RESULTS_FILE"; then
         log_pass "$test_name"
@@ -215,9 +254,9 @@ if [ ! -f "$MCPPROXY_BINARY" ]; then
     exit 1
 fi
 
-# Check if config file exists
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo -e "${RED}Error: Config file not found at $CONFIG_FILE${NC}"
+# Check if config template exists
+if [ ! -f "$CONFIG_TEMPLATE" ]; then
+    echo -e "${RED}Error: Config template not found at $CONFIG_TEMPLATE${NC}"
     exit 1
 fi
 
@@ -243,6 +282,10 @@ echo -e "${YELLOW}Starting mcpproxy server...${NC}"
 
 # Create test data directory
 mkdir -p "$TEST_DATA_DIR"
+
+# Copy fresh config from template to ensure clean state
+echo "Copying fresh config from template..."
+cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
 
 # Start server in background
 $MCPPROXY_BINARY serve --config="$CONFIG_FILE" --log-level=info > "/tmp/mcpproxy_e2e.log" 2>&1 &
@@ -293,11 +336,11 @@ test_api "GET /api/v1/servers/everything/logs" "GET" "${API_BASE}/servers/everyt
 
 # Test 6: Disable server
 test_api "POST /api/v1/servers/everything/disable" "POST" "${API_BASE}/servers/everything/disable" "200" "" \
-    "jq -e '.success == true and .data.enabled == false' < '$TEST_RESULTS_FILE' >/dev/null"
+    "jq -e '.success == true and .data.success == true' < '$TEST_RESULTS_FILE' >/dev/null"
 
 # Test 7: Enable server
 test_api "POST /api/v1/servers/everything/enable" "POST" "${API_BASE}/servers/everything/enable" "200" "" \
-    "jq -e '.success == true and .data.enabled == true' < '$TEST_RESULTS_FILE' >/dev/null"
+    "jq -e '.success == true and .data.success == true' < '$TEST_RESULTS_FILE' >/dev/null"
 
 # Test 8: Restart server
 test_api "POST /api/v1/servers/everything/restart" "POST" "${API_BASE}/servers/everything/restart" "200" "" \
@@ -333,11 +376,16 @@ echo ""
 log_test "Concurrent API requests"
 
 # Start concurrent requests
-curl -s --max-time 10 "${API_BASE}/servers" > /dev/null &
+local curl_base="curl -s --max-time 10"
+if [ ! -z "$API_KEY" ]; then
+    curl_base="$curl_base -H \"X-API-Key: $API_KEY\""
+fi
+
+eval "$curl_base \"${API_BASE}/servers\"" > /dev/null &
 PID1=$!
-curl -s --max-time 10 "${API_BASE}/index/search?q=test" > /dev/null &
+eval "$curl_base \"${API_BASE}/index/search?q=test\"" > /dev/null &
 PID2=$!
-curl -s --max-time 10 "${API_BASE}/servers/everything/tools" > /dev/null &
+eval "$curl_base \"${API_BASE}/servers/everything/tools\"" > /dev/null &
 PID3=$!
 
 # Wait for all requests with timeout

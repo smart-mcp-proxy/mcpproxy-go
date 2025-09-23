@@ -24,12 +24,12 @@ type StorageResult struct {
 
 // AsyncManager handles asynchronous storage operations to prevent deadlocks
 type AsyncManager struct {
-	logger    *zap.SugaredLogger
-	db        *BoltDB
-	opQueue   chan StorageOperation
-	ctx       context.Context
-	cancel    context.CancelFunc
-	started   bool
+	logger  *zap.SugaredLogger
+	db      *BoltDB
+	opQueue chan StorageOperation
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool
 }
 
 // NewAsyncManager creates a new async storage manager

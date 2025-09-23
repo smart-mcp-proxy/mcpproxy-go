@@ -62,11 +62,14 @@ type Config struct {
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
 
 	// Security settings
-	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
+	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"` // API key for REST API authentication
 	ReadOnlyMode      bool   `json:"read_only_mode" mapstructure:"read-only-mode"`
 	DisableManagement bool   `json:"disable_management" mapstructure:"disable-management"`
 	AllowServerAdd    bool   `json:"allow_server_add" mapstructure:"allow-server-add"`
 	AllowServerRemove bool   `json:"allow_server_remove" mapstructure:"allow-server-remove"`
+
+	// Internal field to track if API key was explicitly set in config
+	apiKeyExplicitlySet bool `json:"-"`
 
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
@@ -410,18 +413,20 @@ func generateAPIKey() string {
 // EnsureAPIKey ensures the API key is set, generating one if needed
 // Returns the API key and whether it was auto-generated
 func (c *Config) EnsureAPIKey() (string, bool) {
-	if c.APIKey != "" {
-		return c.APIKey, false // User-provided or explicitly disabled
-	}
-
-	// Check environment variable for API key first
+	// Check environment variable for API key first - this overrides config file
 	if envAPIKey := os.Getenv("MCPP_API_KEY"); envAPIKey != "" {
 		c.APIKey = envAPIKey
 		return c.APIKey, false
 	}
 
-	// Generate a new API key
+	// If API key was explicitly set in config (including empty string), respect it
+	if c.apiKeyExplicitlySet {
+		return c.APIKey, false // User-provided or explicitly disabled
+	}
+
+	// Generate a new API key only if not explicitly set
 	c.APIKey = generateAPIKey()
+	c.apiKeyExplicitlySet = true
 	return c.APIKey, true
 }
 

@@ -44,9 +44,9 @@ type Client struct {
 	reconnectInProgress bool
 
 	// Tool count caching to reduce upstream ListTools calls
-	toolCountMu    sync.RWMutex
-	toolCount      int
-	toolCountTime  time.Time
+	toolCountMu   sync.RWMutex
+	toolCount     int
+	toolCountTime time.Time
 }
 
 // NewClient creates a new managed client with state management

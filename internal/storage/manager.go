@@ -14,10 +14,10 @@ import (
 
 // Manager provides a unified interface for storage operations
 type Manager struct {
-	db         *BoltDB
-	mu         sync.RWMutex
-	logger     *zap.SugaredLogger
-	asyncMgr   *AsyncManager
+	db       *BoltDB
+	mu       sync.RWMutex
+	logger   *zap.SugaredLogger
+	asyncMgr *AsyncManager
 }
 
 // NewManager creates a new storage manager
