@@ -25,7 +25,7 @@ func (p *EnvProvider) CanResolve(secretType string) bool {
 }
 
 // Resolve retrieves the secret value from environment variables
-func (p *EnvProvider) Resolve(ctx context.Context, ref SecretRef) (string, error) {
+func (p *EnvProvider) Resolve(_ context.Context, ref SecretRef) (string, error) {
 	if !p.CanResolve(ref.Type) {
 		return "", fmt.Errorf("env provider cannot resolve secret type: %s", ref.Type)
 	}
@@ -39,12 +39,12 @@ func (p *EnvProvider) Resolve(ctx context.Context, ref SecretRef) (string, error
 }
 
 // Store is not supported for environment variables
-func (p *EnvProvider) Store(ctx context.Context, ref SecretRef, value string) error {
+func (p *EnvProvider) Store(_ context.Context, ref SecretRef, value string) error {
 	return fmt.Errorf("env provider does not support storing secrets")
 }
 
 // Delete is not supported for environment variables
-func (p *EnvProvider) Delete(ctx context.Context, ref SecretRef) error {
+func (p *EnvProvider) Delete(_ context.Context, ref SecretRef) error {
 	return fmt.Errorf("env provider does not support deleting secrets")
 }
 

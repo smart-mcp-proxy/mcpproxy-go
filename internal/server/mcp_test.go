@@ -480,7 +480,7 @@ func TestDefaultConfigSettings(t *testing.T) {
 	config := config.DefaultConfig()
 
 	// Test default values
-	assert.Equal(t, ":8080", config.Listen)
+	assert.Equal(t, "127.0.0.1:8080", config.Listen)
 	assert.Equal(t, "", config.DataDir)
 	assert.True(t, config.EnableTray)
 	assert.False(t, config.DebugSearch)

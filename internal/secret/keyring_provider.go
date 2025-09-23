@@ -10,9 +10,9 @@ import (
 
 const (
 	// ServiceName for keyring entries
-	ServiceName           = "mcpproxy"
-	SecretTypeKeyring     = "keyring"
-	RegistryKey           = "_mcpproxy_secret_registry"
+	ServiceName       = "mcpproxy"
+	SecretTypeKeyring = "keyring"
+	RegistryKey       = "_mcpproxy_secret_registry"
 )
 
 // KeyringProvider resolves secrets from OS keyring (Keychain, Secret Service, WinCred)
@@ -33,7 +33,7 @@ func (p *KeyringProvider) CanResolve(secretType string) bool {
 }
 
 // Resolve retrieves the secret value from the OS keyring
-func (p *KeyringProvider) Resolve(ctx context.Context, ref SecretRef) (string, error) {
+func (p *KeyringProvider) Resolve(_ context.Context, ref SecretRef) (string, error) {
 	if !p.CanResolve(ref.Type) {
 		return "", fmt.Errorf("keyring provider cannot resolve secret type: %s", ref.Type)
 	}
@@ -47,7 +47,7 @@ func (p *KeyringProvider) Resolve(ctx context.Context, ref SecretRef) (string, e
 }
 
 // Store saves a secret to the OS keyring and updates the registry
-func (p *KeyringProvider) Store(ctx context.Context, ref SecretRef, value string) error {
+func (p *KeyringProvider) Store(_ context.Context, ref SecretRef, value string) error {
 	if !p.CanResolve(ref.Type) {
 		return fmt.Errorf("keyring provider cannot store secret type: %s", ref.Type)
 	}
@@ -67,7 +67,7 @@ func (p *KeyringProvider) Store(ctx context.Context, ref SecretRef, value string
 }
 
 // Delete removes a secret from the OS keyring and updates the registry
-func (p *KeyringProvider) Delete(ctx context.Context, ref SecretRef) error {
+func (p *KeyringProvider) Delete(_ context.Context, ref SecretRef) error {
 	if !p.CanResolve(ref.Type) {
 		return fmt.Errorf("keyring provider cannot delete secret type: %s", ref.Type)
 	}
@@ -88,7 +88,7 @@ func (p *KeyringProvider) Delete(ctx context.Context, ref SecretRef) error {
 
 // List returns all secret references stored in the keyring
 // Note: go-keyring doesn't provide a list function, so we'll track them differently
-func (p *KeyringProvider) List(ctx context.Context) ([]SecretRef, error) {
+func (p *KeyringProvider) List(_ context.Context) ([]SecretRef, error) {
 	// Since go-keyring doesn't provide a list function, we maintain a special
 	// registry entry that tracks all our secret names
 	registryKey := RegistryKey
