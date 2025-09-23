@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+const (
+	SecretTypeEnv = "env"
+)
+
 // EnvProvider resolves secrets from environment variables
 type EnvProvider struct{}
 
@@ -17,7 +21,7 @@ func NewEnvProvider() *EnvProvider {
 
 // CanResolve returns true if this provider can handle the given secret type
 func (p *EnvProvider) CanResolve(secretType string) bool {
-	return secretType == "env"
+	return secretType == SecretTypeEnv
 }
 
 // Resolve retrieves the secret value from environment variables

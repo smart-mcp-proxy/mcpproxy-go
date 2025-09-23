@@ -10,6 +10,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// Health status constants
+const (
+	StatusHealthy   = "healthy"
+	StatusUnhealthy = "unhealthy"
+	StatusReady     = "ready"
+	StatusNotReady  = "not_ready"
+)
+
 // HealthChecker defines an interface for components that can report their health status
 type HealthChecker interface {
 	// HealthCheck returns nil if healthy, error if unhealthy
@@ -91,7 +99,7 @@ func (hm *HealthManager) HealthzHandler() http.HandlerFunc {
 
 		// Set appropriate status code
 		statusCode := http.StatusOK
-		if response.Status != "healthy" {
+		if response.Status != StatusHealthy {
 			statusCode = http.StatusServiceUnavailable
 		}
 
@@ -109,7 +117,7 @@ func (hm *HealthManager) ReadyzHandler() http.HandlerFunc {
 
 		// Set appropriate status code
 		statusCode := http.StatusOK
-		if response.Status != "ready" {
+		if response.Status != StatusReady {
 			statusCode = http.StatusServiceUnavailable
 		}
 
@@ -120,7 +128,7 @@ func (hm *HealthManager) ReadyzHandler() http.HandlerFunc {
 // checkHealth performs all health checks
 func (hm *HealthManager) checkHealth(ctx context.Context) HealthResponse {
 	response := HealthResponse{
-		Status:     "healthy",
+		Status:     StatusHealthy,
 		Timestamp:  time.Now(),
 		Components: make([]HealthStatus, 0, len(hm.healthCheckers)),
 	}
@@ -129,13 +137,13 @@ func (hm *HealthManager) checkHealth(ctx context.Context) HealthResponse {
 		start := time.Now()
 		status := HealthStatus{
 			Name:   checker.Name(),
-			Status: "healthy",
+			Status: StatusHealthy,
 		}
 
 		if err := checker.HealthCheck(ctx); err != nil {
-			status.Status = "unhealthy"
+			status.Status = StatusUnhealthy
 			status.Error = err.Error()
-			response.Status = "unhealthy"
+			response.Status = StatusUnhealthy
 			hm.logger.Warnw("Health check failed",
 				"component", checker.Name(),
 				"error", err)
@@ -151,7 +159,7 @@ func (hm *HealthManager) checkHealth(ctx context.Context) HealthResponse {
 // checkReadiness performs all readiness checks
 func (hm *HealthManager) checkReadiness(ctx context.Context) ReadinessResponse {
 	response := ReadinessResponse{
-		Status:     "ready",
+		Status:     StatusReady,
 		Timestamp:  time.Now(),
 		Components: make([]HealthStatus, 0, len(hm.readinessCheckers)),
 	}
@@ -160,13 +168,13 @@ func (hm *HealthManager) checkReadiness(ctx context.Context) ReadinessResponse {
 		start := time.Now()
 		status := HealthStatus{
 			Name:   checker.Name(),
-			Status: "ready",
+			Status: StatusReady,
 		}
 
 		if err := checker.ReadinessCheck(ctx); err != nil {
-			status.Status = "not_ready"
+			status.Status = StatusNotReady
 			status.Error = err.Error()
-			response.Status = "not_ready"
+			response.Status = StatusNotReady
 			hm.logger.Warnw("Readiness check failed",
 				"component", checker.Name(),
 				"error", err)
@@ -205,10 +213,10 @@ func (hm *HealthManager) GetReadinessStatus() ReadinessResponse {
 
 // IsHealthy returns true if all health checks pass
 func (hm *HealthManager) IsHealthy() bool {
-	return hm.GetHealthStatus().Status == "healthy"
+	return hm.GetHealthStatus().Status == StatusHealthy
 }
 
 // IsReady returns true if all readiness checks pass
 func (hm *HealthManager) IsReady() bool {
-	return hm.GetReadinessStatus().Status == "ready"
+	return hm.GetReadinessStatus().Status == StatusReady
 }

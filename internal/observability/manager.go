@@ -8,6 +8,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// Tool call status constants
+const (
+	StatusSuccess = "success"
+	StatusError   = "error"
+)
+
 // Config holds configuration for observability features
 type Config struct {
 	Health  HealthConfig  `json:"health"`
@@ -197,9 +203,9 @@ func (m *Manager) IsReady() bool {
 
 // RecordToolCall is a convenience method to record tool call metrics and tracing
 func (m *Manager) RecordToolCall(ctx context.Context, serverName, toolName string, duration time.Duration, err error) {
-	status := "success"
+	status := StatusSuccess
 	if err != nil {
-		status = "error"
+		status = StatusError
 	}
 
 	// Record metrics
@@ -215,9 +221,9 @@ func (m *Manager) RecordToolCall(ctx context.Context, serverName, toolName strin
 
 // RecordStorageOperation is a convenience method to record storage operations
 func (m *Manager) RecordStorageOperation(operation string, err error) {
-	status := "success"
+	status := StatusSuccess
 	if err != nil {
-		status = "error"
+		status = StatusError
 	}
 
 	if m.metrics != nil {

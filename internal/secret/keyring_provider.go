@@ -10,7 +10,9 @@ import (
 
 const (
 	// ServiceName for keyring entries
-	ServiceName = "mcpproxy"
+	ServiceName           = "mcpproxy"
+	SecretTypeKeyring     = "keyring"
+	RegistryKey           = "_mcpproxy_secret_registry"
 )
 
 // KeyringProvider resolves secrets from OS keyring (Keychain, Secret Service, WinCred)
@@ -27,7 +29,7 @@ func NewKeyringProvider() *KeyringProvider {
 
 // CanResolve returns true if this provider can handle the given secret type
 func (p *KeyringProvider) CanResolve(secretType string) bool {
-	return secretType == "keyring"
+	return secretType == SecretTypeKeyring
 }
 
 // Resolve retrieves the secret value from the OS keyring
@@ -89,7 +91,7 @@ func (p *KeyringProvider) Delete(ctx context.Context, ref SecretRef) error {
 func (p *KeyringProvider) List(ctx context.Context) ([]SecretRef, error) {
 	// Since go-keyring doesn't provide a list function, we maintain a special
 	// registry entry that tracks all our secret names
-	registryKey := "_mcpproxy_secret_registry"
+	registryKey := RegistryKey
 
 	registry, err := keyring.Get(p.serviceName, registryKey)
 	if err != nil {
@@ -139,7 +141,7 @@ func (p *KeyringProvider) IsAvailable() bool {
 
 // addToRegistry adds a secret name to our internal registry
 func (p *KeyringProvider) addToRegistry(secretName string) error {
-	registryKey := "_mcpproxy_secret_registry"
+	registryKey := RegistryKey
 
 	// Get current registry
 	registry, err := keyring.Get(p.serviceName, registryKey)
@@ -167,7 +169,7 @@ func (p *KeyringProvider) addToRegistry(secretName string) error {
 
 // removeFromRegistry removes a secret name from our internal registry
 func (p *KeyringProvider) removeFromRegistry(secretName string) error {
-	registryKey := "_mcpproxy_secret_registry"
+	registryKey := RegistryKey
 
 	// Get current registry
 	registry, err := keyring.Get(p.serviceName, registryKey)

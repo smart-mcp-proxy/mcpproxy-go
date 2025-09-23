@@ -27,13 +27,13 @@ func (dhc *DatabaseHealthChecker) Name() string {
 }
 
 // HealthCheck performs a database health check
-func (dhc *DatabaseHealthChecker) HealthCheck(ctx context.Context) error {
+func (dhc *DatabaseHealthChecker) HealthCheck(_ context.Context) error {
 	if dhc.db == nil {
 		return fmt.Errorf("database is nil")
 	}
 
 	// Try to perform a simple read transaction
-	return dhc.db.View(func(tx *bbolt.Tx) error {
+	return dhc.db.View(func(_ *bbolt.Tx) error {
 		// Just verify we can start a transaction
 		return nil
 	})
@@ -64,7 +64,7 @@ func (ihc *IndexHealthChecker) Name() string {
 }
 
 // HealthCheck performs an index health check
-func (ihc *IndexHealthChecker) HealthCheck(ctx context.Context) error {
+func (ihc *IndexHealthChecker) HealthCheck(_ context.Context) error {
 	if ihc.getDocCount == nil {
 		return fmt.Errorf("getDocCount function is nil")
 	}
@@ -101,7 +101,7 @@ func (uhc *UpstreamHealthChecker) Name() string {
 }
 
 // HealthCheck performs an upstream servers health check
-func (uhc *UpstreamHealthChecker) HealthCheck(ctx context.Context) error {
+func (uhc *UpstreamHealthChecker) HealthCheck(_ context.Context) error {
 	if uhc.getStats == nil {
 		return fmt.Errorf("getStats function is nil")
 	}
@@ -111,7 +111,7 @@ func (uhc *UpstreamHealthChecker) HealthCheck(ctx context.Context) error {
 }
 
 // ReadinessCheck performs an upstream servers readiness check
-func (uhc *UpstreamHealthChecker) ReadinessCheck(ctx context.Context) error {
+func (uhc *UpstreamHealthChecker) ReadinessCheck(_ context.Context) error {
 	if uhc.getStats == nil {
 		return fmt.Errorf("getStats function is nil")
 	}
@@ -174,7 +174,7 @@ func (chc *ComponentHealthChecker) Name() string {
 }
 
 // HealthCheck performs a component health check
-func (chc *ComponentHealthChecker) HealthCheck(ctx context.Context) error {
+func (chc *ComponentHealthChecker) HealthCheck(_ context.Context) error {
 	if chc.isHealthy == nil {
 		return fmt.Errorf("isHealthy function is nil")
 	}
@@ -187,7 +187,7 @@ func (chc *ComponentHealthChecker) HealthCheck(ctx context.Context) error {
 }
 
 // ReadinessCheck performs a component readiness check
-func (chc *ComponentHealthChecker) ReadinessCheck(ctx context.Context) error {
+func (chc *ComponentHealthChecker) ReadinessCheck(_ context.Context) error {
 	if chc.isReady == nil {
 		return fmt.Errorf("isReady function is nil")
 	}
