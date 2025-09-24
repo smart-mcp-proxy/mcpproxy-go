@@ -181,14 +181,7 @@ func (s *Server) setupRoutes() {
 		_, _ = w.Write([]byte(`{"ready":false}`))
 	}
 
-	for _, path := range []string{"/livez", "/healthz", "/health"} {
-		s.router.Get(path, livenessHandler)
-	}
-	for _, path := range []string{"/readyz", "/ready"} {
-		s.router.Get(path, readinessHandler)
-	}
-
-	// Observability endpoints
+	// Observability endpoints (registered first to avoid conflicts)
 	if s.observability != nil {
 		if health := s.observability.Health(); health != nil {
 			s.router.Get("/healthz", health.HealthzHandler())
@@ -197,7 +190,18 @@ func (s *Server) setupRoutes() {
 		if metrics := s.observability.Metrics(); metrics != nil {
 			s.router.Handle("/metrics", metrics.Handler())
 		}
+	} else {
+		// Register custom health endpoints only if observability is not available
+		for _, path := range []string{"/livez", "/healthz", "/health"} {
+			s.router.Get(path, livenessHandler)
+		}
+		for _, path := range []string{"/readyz", "/ready"} {
+			s.router.Get(path, readinessHandler)
+		}
 	}
+
+	// Always register /ready as backup endpoint for tray compatibility
+	s.router.Get("/ready", readinessHandler)
 
 	// API v1 routes with timeout and authentication middleware
 	s.router.Route("/api/v1", func(r chi.Router) {

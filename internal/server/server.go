@@ -319,9 +319,49 @@ func (s *Server) IsRunning() bool {
 }
 
 // IsReady returns whether the server is fully initialized and ready to serve requests
+// Uses relaxed criteria: ready if at least one upstream server is connected,
+// or if no servers are configured/enabled
 func (s *Server) IsReady() bool {
 	status := s.runtime.CurrentStatus()
-	return status.Phase == "Ready"
+
+	// If server is in error or stopped state, not ready
+	if status.Phase == "Error" || status.Phase == "Stopped" {
+		return false
+	}
+
+	// Get upstream manager to check server connections
+	upstreamManager := s.runtime.UpstreamManager()
+	if upstreamManager == nil {
+		// If no upstream manager, consider ready if server is running
+		return status.Phase != "Loading"
+	}
+
+	// Check all configured servers
+	allClients := upstreamManager.GetAllClients()
+	enabledCount := 0
+	connectedCount := 0
+
+	for _, client := range allClients {
+		if client.Config.Enabled {
+			enabledCount++
+			if client.IsConnected() {
+				connectedCount++
+			}
+		}
+	}
+
+	// Ready if no enabled servers (all disabled or none configured)
+	if enabledCount == 0 {
+		return true
+	}
+
+	// Ready if at least one server is connected
+	if connectedCount > 0 {
+		return true
+	}
+
+	// Still connecting - only ready if we've moved past initial loading
+	return status.Phase == "Ready" || status.Phase == "Starting"
 }
 
 // GetListenAddress returns the address the server is listening on

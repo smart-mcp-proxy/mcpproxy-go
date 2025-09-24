@@ -123,6 +123,9 @@ func (m *MockServerController) TriggerOAuthLogin(serverName string) error { retu
 func (m *MockServerController) GetSecretResolver() *secret.Resolver { return nil }
 func (m *MockServerController) GetCurrentConfig() interface{}       { return map[string]interface{}{} }
 
+// Readiness method
+func (m *MockServerController) IsReady() bool { return true }
+
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()
