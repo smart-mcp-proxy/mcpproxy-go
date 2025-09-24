@@ -361,6 +361,48 @@ func CreateCLIUpstreamServerLogger(config *config.LogConfig, serverName string) 
 	return logger, nil
 }
 
+// CreateHTTPLogger creates a logger specifically for HTTP API requests
+func CreateHTTPLogger(config *config.LogConfig) (*zap.Logger, error) {
+	if config == nil {
+		config = DefaultLogConfig()
+	}
+
+	// Create a copy of the config for HTTP logging
+	httpConfig := *config
+	httpConfig.Filename = "http.log"
+	httpConfig.EnableConsole = false // HTTP logs only go to file
+	httpConfig.EnableFile = true
+
+	// Parse log level
+	var level zapcore.Level
+	switch httpConfig.Level {
+	case LogLevelTrace:
+		level = zap.DebugLevel
+	case LogLevelDebug:
+		level = zap.DebugLevel
+	case LogLevelInfo:
+		level = zap.InfoLevel
+	case LogLevelWarn:
+		level = zap.WarnLevel
+	case LogLevelError:
+		level = zap.ErrorLevel
+	default:
+		level = zap.InfoLevel
+	}
+
+	// Create file core for HTTP logging
+	fileCore, err := createFileCore(&httpConfig, level)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file core for HTTP logger: %w", err)
+	}
+
+	// Create logger without caller info for cleaner HTTP logs
+	logger := zap.New(fileCore)
+	logger = logger.With(zap.String("component", "http_api"))
+
+	return logger, nil
+}
+
 // ReadUpstreamServerLogTail reads the last N lines from an upstream server log file
 func ReadUpstreamServerLogTail(config *config.LogConfig, serverName string, lines int) ([]string, error) {
 	if lines <= 0 {

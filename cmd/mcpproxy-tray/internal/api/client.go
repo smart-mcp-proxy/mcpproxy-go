@@ -104,18 +104,37 @@ func (c *Client) StartSSE(ctx context.Context) error {
 		defer close(c.statusCh)
 		defer close(c.connectionStateCh)
 
+		attemptCount := 0
 		for {
 			if sseCtx.Err() != nil {
 				c.publishConnectionState(tray.ConnectionStateDisconnected)
 				return
 			}
 
+			attemptCount++
+			if attemptCount > 1 && c.logger != nil {
+				c.logger.Info("SSE reconnection attempt",
+					"attempt", attemptCount,
+					"base_url", c.baseURL)
+			}
+
 			c.publishConnectionState(tray.ConnectionStateConnecting)
 
 			if err := c.connectSSE(sseCtx); err != nil {
 				if c.logger != nil {
-					c.logger.Error("SSE connection error", "error", err)
+					c.logger.Error("SSE connection error",
+						"error", err,
+						"attempt", attemptCount,
+						"base_url", c.baseURL)
 				}
+			} else {
+				// Reset attempt count on successful connection
+				if attemptCount > 1 && c.logger != nil {
+					c.logger.Info("SSE connection established successfully",
+						"after_attempts", attemptCount,
+						"base_url", c.baseURL)
+				}
+				attemptCount = 0
 			}
 
 			if sseCtx.Err() != nil {
@@ -124,6 +143,12 @@ func (c *Client) StartSSE(ctx context.Context) error {
 			}
 
 			c.publishConnectionState(tray.ConnectionStateReconnecting)
+
+			if c.logger != nil {
+				c.logger.Info("SSE waiting before reconnection attempt",
+					"retry_delay", "5s",
+					"next_attempt", attemptCount+1)
+			}
 
 			select {
 			case <-sseCtx.Done():

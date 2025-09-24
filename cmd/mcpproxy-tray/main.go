@@ -613,20 +613,33 @@ func waitForServerAndCheckAuth(ctx context.Context, baseURL, apiKey string, time
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	attemptCount := 0
+	lastState := ""
+
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("Context cancelled while waiting for server")
 			return false
 		case <-ticker.C:
+			attemptCount++
+
 			if time.Now().After(deadline) {
-				logger.Error("Timeout waiting for server to start and become ready")
+				logger.Error("Timeout waiting for server to start and become ready",
+					zap.Int("total_attempts", attemptCount),
+					zap.Duration("timeout", timeout))
 				trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
 				return false
 			}
 
 			// First check if server is running (liveness)
 			if !isServerRunning(baseURL) {
+				if lastState != "waiting_start" {
+					logger.Info("Waiting for server to start",
+						zap.Int("attempt", attemptCount),
+						zap.String("base_url", baseURL))
+					lastState = "waiting_start"
+				}
 				continue // Server not yet running, keep waiting
 			}
 
@@ -634,19 +647,28 @@ func waitForServerAndCheckAuth(ctx context.Context, baseURL, apiKey string, time
 			if !isServerReady(baseURL) {
 				// Server is running but not ready yet (still initializing)
 				trayApp.SetConnectionState(tray.ConnectionStateStartingCore)
-				logger.Debug("Server is running but not ready yet, continuing to wait")
+				if lastState != "waiting_ready" {
+					logger.Info("Server is running but not ready yet, waiting for initialization",
+						zap.Int("attempt", attemptCount),
+						zap.String("base_url", baseURL))
+					lastState = "waiting_ready"
+				}
 				continue
 			}
 
 			// Server is running and ready, now check authentication
 			if !checkAPIAuthentication(baseURL, apiKey) {
-				logger.Error("Server is ready but authentication failed")
+				logger.Error("Server is ready but authentication failed",
+					zap.Int("attempt", attemptCount),
+					zap.String("base_url", baseURL))
 				trayApp.SetConnectionState(tray.ConnectionStateAuthError)
 				return false
 			}
 
 			// Everything is good
-			logger.Info("Server is running, ready, and authentication successful")
+			logger.Info("Server is running, ready, and authentication successful",
+				zap.Int("total_attempts", attemptCount),
+				zap.Duration("time_taken", time.Since(deadline.Add(-timeout))))
 			return true
 		}
 	}

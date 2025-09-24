@@ -14,6 +14,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
+	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/observability"
 	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
@@ -62,15 +63,24 @@ type ServerController interface {
 type Server struct {
 	controller    ServerController
 	logger        *zap.SugaredLogger
+	httpLogger    *zap.Logger // Separate logger for HTTP requests
 	router        *chi.Mux
 	observability *observability.Manager
 }
 
 // NewServer creates a new HTTP API server
 func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *observability.Manager) *Server {
+	// Create HTTP logger for API request logging
+	httpLogger, err := logs.CreateHTTPLogger(nil) // Use default config
+	if err != nil {
+		logger.Warnf("Failed to create HTTP logger: %v", err)
+		httpLogger = zap.NewNop() // Use no-op logger as fallback
+	}
+
 	s := &Server{
 		controller:    controller,
 		logger:        logger,
+		httpLogger:    httpLogger,
 		router:        chi.NewRouter(),
 		observability: obs,
 	}
@@ -138,15 +148,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
+	s.logger.Debug("Setting up HTTP API routes")
+
 	// Observability middleware (if available)
 	if s.observability != nil {
 		s.router.Use(s.observability.HTTPMiddleware())
+		s.logger.Debug("Observability middleware configured")
 	}
 
 	// Core middleware
-	s.router.Use(middleware.Logger)
+	s.router.Use(s.httpLoggingMiddleware()) // Custom HTTP API logging
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.RequestID)
+	s.logger.Debug("Core middleware configured (logging, recovery, request ID)")
 
 	// CORS headers for browser access
 	s.router.Use(func(next http.Handler) http.Handler {
@@ -237,6 +251,51 @@ func (s *Server) setupRoutes() {
 	// SSE events (protected by API key)
 	s.router.With(s.apiKeyAuthMiddleware()).Get("/events", s.handleSSEEvents)
 
+	s.logger.Debug("HTTP API routes setup completed",
+		"api_routes", "/api/v1/*",
+		"sse_route", "/events",
+		"health_routes", "/healthz,/readyz,/livez,/ready")
+}
+
+// httpLoggingMiddleware creates custom HTTP request logging middleware
+func (s *Server) httpLoggingMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+
+			// Create a response writer wrapper to capture status code
+			ww := &responseWriter{ResponseWriter: w, statusCode: 200}
+
+			// Process request
+			next.ServeHTTP(ww, r)
+
+			duration := time.Since(start)
+
+			// Log request details to http.log
+			s.httpLogger.Info("HTTP API Request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.String("query", r.URL.RawQuery),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("user_agent", r.UserAgent()),
+				zap.Int("status", ww.statusCode),
+				zap.Duration("duration", duration),
+				zap.String("referer", r.Referer()),
+				zap.Int64("content_length", r.ContentLength),
+			)
+		})
+	}
+}
+
+// responseWriter wraps http.ResponseWriter to capture status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
 }
 
 // JSON response helpers

@@ -796,6 +796,15 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/api/", httpAPIServer)
 	mux.Handle("/events", httpAPIServer)
 
+	// Mount health endpoints directly on main mux at root level
+	healthEndpoints := []string{"/healthz", "/readyz", "/livez", "/ready", "/health"}
+	for _, endpoint := range healthEndpoints {
+		mux.Handle(endpoint, httpAPIServer)
+	}
+
+	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
+	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
+
 	// Web UI endpoints (serves embedded Vue.js frontend) with API key protection
 	webUIHandler := web.NewHandler(s.logger.Sugar())
 	protectedWebUIHandler := s.createAPIKeyProtectedHandler(http.StripPrefix("/ui", webUIHandler))
@@ -808,6 +817,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			http.NotFound(w, r)
 		}
 	})
+	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
 	listenAddr := ""
 	if cfg := s.runtime.Config(); cfg != nil {
@@ -840,10 +850,19 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	s.listenAddr = actualAddr
 	s.mu.Unlock()
 
+	// List all registered endpoints for visibility
+	allEndpoints := []string{
+		"/mcp", "/mcp/", // MCP protocol endpoints
+		"/v1/tool_code", "/v1/tool-code", // Legacy MCP endpoints
+		"/api/v1/*", "/events", // REST API and SSE endpoints
+		"/ui/", "/", // Web UI endpoints
+		"/healthz", "/readyz", "/livez", "/ready", "/health", // Health endpoints (at root level)
+	}
+
 	s.logger.Info("Starting MCP HTTP server with enhanced client stability",
 		zap.String("address", actualAddr),
 		zap.String("requested_address", listenAddr),
-		zap.Strings("endpoints", []string{"/mcp", "/mcp/", "/v1/tool_code", "/v1/tool-code"}),
+		zap.Strings("endpoints", allEndpoints),
 		zap.Duration("read_timeout", 120*time.Second),
 		zap.Duration("write_timeout", 120*time.Second),
 		zap.Duration("idle_timeout", 180*time.Second),
