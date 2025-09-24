@@ -290,13 +290,9 @@ func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.Ap
 
 // isServerRunning checks if the core mcpproxy server is running using the unauthenticated health endpoint
 func isServerRunning(baseURL string) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/health")
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 400
+	return probeServer(baseURL, []string{"/livez", "/healthz", "/health"}, func(status int) bool {
+		return status >= 200 && status < 400
+	})
 }
 
 // checkAPIAuthentication verifies if API authentication is working
@@ -507,43 +503,108 @@ func copyFile(source, target string) error {
 	return out.Sync()
 }
 
-// findMcpproxyBinary finds the mcpproxy binary in various locations
+// findMcpproxyBinary resolves the core binary deterministically, preferring
+// well-known locations before falling back to PATH lookups.
 func findMcpproxyBinary() (string, error) {
-	// Try different possible locations
-	candidates := []string{
-		"mcpproxy",                   // In PATH
-		"./mcpproxy",                 // Current directory
-		"../mcpproxy/mcpproxy",       // Development setup
-		"../../mcpproxy",             // Nested dev setups
-		"/usr/local/bin/mcpproxy",    // Homebrew location
-		"/opt/homebrew/bin/mcpproxy", // Apple Silicon Homebrew
+	var candidates []string
+	seen := make(map[string]struct{})
+	addCandidate := func(path string) {
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		candidates = append(candidates, clean)
 	}
 
-	for _, path := range candidates {
-		if resolved, err := exec.LookPath(path); err == nil {
+	// 1. Paths derived from the tray executable (common during development builds).
+	if execPath, err := os.Executable(); err == nil {
+		if resolvedExec, err := filepath.EvalSymlinks(execPath); err == nil {
+			execDir := filepath.Dir(resolvedExec)
+			addCandidate(filepath.Join(execDir, "mcpproxy"))
+			addCandidate(filepath.Join(filepath.Dir(execDir), "mcpproxy"))
+			addCandidate(filepath.Join(filepath.Dir(filepath.Dir(execDir)), "mcpproxy"))
+			addCandidate(filepath.Join(filepath.Dir(execDir), "mcpproxy", "mcpproxy"))
+		}
+	}
+
+	// 2. Working-directory relative binary (local dev workflow).
+	addCandidate(filepath.Join(".", "mcpproxy"))
+
+	// 3. Managed installation directories (Application Support on macOS).
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		addCandidate(filepath.Join(homeDir, ".mcpproxy", "bin", "mcpproxy"))
+		if runtime.GOOS == "darwin" {
+			addCandidate(filepath.Join(homeDir, "Library", "Application Support", "mcpproxy", "bin", "mcpproxy"))
+		}
+	}
+
+	// 4. Common package manager locations.
+	addCandidate("/opt/homebrew/bin/mcpproxy")
+	addCandidate("/usr/local/bin/mcpproxy")
+
+	for _, candidate := range candidates {
+		if resolved, ok := resolveExecutableCandidate(candidate); ok {
 			return resolved, nil
 		}
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			absPath, err := filepath.Abs(path)
-			if err == nil {
-				return absPath, nil
-			}
+	}
+
+	// 5. Final fallback to PATH search.
+	if resolved, err := exec.LookPath("mcpproxy"); err == nil {
+		return resolved, nil
+	}
+
+	return "", fmt.Errorf("mcpproxy binary not found; checked %v and PATH", candidates)
+}
+
+func resolveExecutableCandidate(path string) (string, bool) {
+	var abs string
+	if filepath.IsAbs(path) {
+		abs = path
+	} else {
+		var err error
+		abs, err = filepath.Abs(path)
+		if err != nil {
+			return "", false
 		}
 	}
 
-	return "", fmt.Errorf("mcpproxy binary not found in any of the expected locations")
-}
+	info, err := os.Stat(abs)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
 
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
+		return "", false
+	}
+
+	return abs, true
+}
 
 // isServerReady checks if the server is fully initialized and ready to serve requests
 func isServerReady(baseURL string) bool {
+	return probeServer(baseURL, []string{"/readyz", "/ready"}, func(status int) bool {
+		return status == http.StatusOK
+	})
+}
+
+func probeServer(baseURL string, paths []string, ok func(int) bool) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/ready")
-	if err != nil {
-		return false
+	trimmed := strings.TrimSuffix(baseURL, "/")
+	for _, path := range paths {
+		resp, err := client.Get(trimmed + path)
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+		if ok(resp.StatusCode) {
+			return true
+		}
 	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200
+	return false
 }
 
 // waitForServerAndCheckAuth waits for the server to start and become ready, then checks authentication

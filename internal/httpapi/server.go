@@ -164,24 +164,29 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
-	// Simple health endpoint (always available, no authentication required)
-	s.router.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+	// Health and readiness endpoints (Kubernetes-compatible with legacy aliases)
+	livenessHandler := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-
-	// Simple readiness endpoint (checks if server is fully initialized)
-	s.router.Get("/ready", func(w http.ResponseWriter, _ *http.Request) {
+	}
+	readinessHandler := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if s.controller.IsReady() {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"ready":true}`))
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"ready":false}`))
+			return
 		}
-	})
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"ready":false}`))
+	}
+
+	for _, path := range []string{"/livez", "/healthz", "/health"} {
+		s.router.Get(path, livenessHandler)
+	}
+	for _, path := range []string{"/readyz", "/ready"} {
+		s.router.Get(path, readinessHandler)
+	}
 
 	// Observability endpoints
 	if s.observability != nil {
