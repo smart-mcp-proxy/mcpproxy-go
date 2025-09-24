@@ -538,7 +538,7 @@ func findMcpproxyBinary() (string, error) {
 // isServerReady checks if the server is fully initialized and ready to serve requests
 func isServerReady(baseURL string) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/readyz")
+	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/ready")
 	if err != nil {
 		return false
 	}

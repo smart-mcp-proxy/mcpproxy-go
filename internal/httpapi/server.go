@@ -171,8 +171,8 @@ func (s *Server) setupRoutes() {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Readiness endpoint (checks if server is fully initialized)
-	s.router.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+	// Simple readiness endpoint (checks if server is fully initialized)
+	s.router.Get("/ready", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if s.controller.IsReady() {
 			w.WriteHeader(http.StatusOK)
