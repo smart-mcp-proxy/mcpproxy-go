@@ -15,19 +15,28 @@ class APIService {
   }
 
   private initializeAPIKey() {
-    // Check if API key is provided in URL parameters
     const urlParams = new URLSearchParams(window.location.search)
     const apiKeyFromURL = urlParams.get('apikey')
 
     if (apiKeyFromURL) {
+      // URL param always takes priority (for backend restarts with new keys)
       this.apiKey = apiKeyFromURL
-      console.log('API key extracted from URL:', this.apiKey.substring(0, 8) + '...')
+      // Store the new API key for future navigation/refreshes
+      localStorage.setItem('mcpproxy-api-key', apiKeyFromURL)
+      console.log('API key from URL (updating storage):', this.apiKey.substring(0, 8) + '...')
       // Clean the URL by removing the API key parameter for security
       urlParams.delete('apikey')
       const newURL = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '')
       window.history.replaceState({}, '', newURL)
     } else {
-      console.log('No API key found in URL parameters')
+      // No URL param - check localStorage as fallback
+      const storedApiKey = localStorage.getItem('mcpproxy-api-key')
+      if (storedApiKey) {
+        this.apiKey = storedApiKey
+        console.log('API key from localStorage:', this.apiKey.substring(0, 8) + '...')
+      } else {
+        console.log('No API key found in URL or localStorage')
+      }
     }
     this.initialized = true
   }
@@ -46,6 +55,40 @@ class APIService {
   // Get API key (for debugging purposes)
   public getAPIKeyPreview(): string {
     return this.apiKey ? this.apiKey.substring(0, 8) + '...' : 'none'
+  }
+
+  // Clear API key from both memory and localStorage
+  public clearAPIKey(): void {
+    this.apiKey = ''
+    localStorage.removeItem('mcpproxy-api-key')
+    console.log('API key cleared from memory and localStorage')
+  }
+
+  // Set API key programmatically and store it
+  public setAPIKey(key: string): void {
+    this.apiKey = key
+    if (key) {
+      localStorage.setItem('mcpproxy-api-key', key)
+      console.log('API key set and stored:', key.substring(0, 8) + '...')
+    } else {
+      localStorage.removeItem('mcpproxy-api-key')
+      console.log('API key cleared')
+    }
+  }
+
+  // Validate the current API key by making a test request
+  public async validateAPIKey(): Promise<boolean> {
+    if (!this.apiKey) {
+      return false
+    }
+
+    try {
+      const response = await this.getServers()
+      return response.success
+    } catch (error) {
+      console.warn('API key validation failed:', error)
+      return false
+    }
   }
 
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<APIResponse<T>> {
