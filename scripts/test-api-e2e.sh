@@ -244,6 +244,75 @@ test_sse() {
     fi
 }
 
+# Enhanced SSE test with query parameter
+test_sse_with_query_param() {
+    local test_name="$1"
+    log_test "$test_name"
+
+    # Test SSE endpoint with API key as query parameter
+    local sse_url="${BASE_URL}/events"
+    if [ ! -z "$API_KEY" ]; then
+        sse_url="${sse_url}?apikey=${API_KEY}"
+    fi
+
+    timeout 5s curl -s -N "$sse_url" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
+
+    if [ -s "$TEST_RESULTS_FILE" ] && grep -q "data:" "$TEST_RESULTS_FILE"; then
+        log_pass "$test_name"
+        return 0
+    else
+        log_fail "$test_name - No SSE events received with query parameter"
+        return 1
+    fi
+}
+
+# Test SSE connection establishment
+test_sse_connection() {
+    local test_name="$1"
+    log_test "$test_name"
+
+    # Test that SSE endpoint establishes proper connection headers
+    local curl_cmd="curl -s -I --max-time 3"
+    if [ ! -z "$API_KEY" ]; then
+        curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
+    fi
+    curl_cmd="$curl_cmd \"${BASE_URL}/events\""
+
+    eval "$curl_cmd" > "$TEST_RESULTS_FILE" 2>/dev/null || true
+
+    if [ -s "$TEST_RESULTS_FILE" ] && grep -q "text/event-stream" "$TEST_RESULTS_FILE" && grep -q "Cache-Control: no-cache" "$TEST_RESULTS_FILE"; then
+        log_pass "$test_name"
+        return 0
+    else
+        log_fail "$test_name - Improper SSE headers"
+        echo "Headers received:"
+        cat "$TEST_RESULTS_FILE"
+        return 1
+    fi
+}
+
+# Test SSE authentication failure
+test_sse_auth_failure() {
+    local test_name="$1"
+    log_test "$test_name"
+
+    # Test SSE with wrong API key (if API key is configured)
+    if [ -z "$API_KEY" ]; then
+        log_pass "$test_name (skipped - no API key configured)"
+        return 0
+    fi
+
+    local status_code=$(curl -s -w "%{http_code}" -o /dev/null -H "X-API-Key: wrong-api-key" "${BASE_URL}/events")
+
+    if [ "$status_code" = "401" ]; then
+        log_pass "$test_name"
+        return 0
+    else
+        log_fail "$test_name - Expected 401, got $status_code"
+        return 1
+    fi
+}
+
 # Prerequisites check
 echo -e "${YELLOW}Checking prerequisites...${NC}"
 
@@ -346,16 +415,25 @@ test_api "POST /api/v1/servers/everything/enable" "POST" "${API_BASE}/servers/ev
 test_api "POST /api/v1/servers/everything/restart" "POST" "${API_BASE}/servers/everything/restart" "200" "" \
     "jq -e '.success == true and .data.success == true' < '$TEST_RESULTS_FILE' >/dev/null"
 
-# Test 9: SSE Events
-test_sse "GET /events (SSE)"
+# Test 9: SSE Events (Header authentication)
+test_sse "GET /events (SSE with header auth)"
 
-# Test 10: Error handling - invalid server
+# Test 10: SSE Events (Query parameter authentication)
+test_sse_with_query_param "GET /events (SSE with query param auth)"
+
+# Test 11: SSE Connection headers
+test_sse_connection "GET /events (SSE connection headers)"
+
+# Test 12: SSE Authentication failure
+test_sse_auth_failure "GET /events (SSE auth failure)"
+
+# Test 13: Error handling - invalid server
 test_api "GET /api/v1/servers/nonexistent/tools" "GET" "${API_BASE}/servers/nonexistent/tools" "500" ""
 
-# Test 11: Error handling - invalid search query
+# Test 14: Error handling - invalid search query
 test_api "GET /api/v1/index/search (missing query)" "GET" "${API_BASE}/index/search" "400" ""
 
-# Test 12: Error handling - invalid server action
+# Test 15: Error handling - invalid server action
 test_api "POST /api/v1/servers/nonexistent/enable" "POST" "${API_BASE}/servers/nonexistent/enable" "500" ""
 
 # Wait for everything server to reconnect after restart
@@ -367,11 +445,11 @@ else
     echo -e "${YELLOW}Warning: Everything server didn't reconnect, but tests can continue${NC}"
 fi
 
-# Test 13: Verify server is working after restart
+# Test 16: Verify server is working after restart
 test_api "GET /api/v1/servers (after restart)" "GET" "${API_BASE}/servers" "200" "" \
     "jq -e '.success == true and (.data.servers | length) > 0' < '$TEST_RESULTS_FILE' >/dev/null"
 
-# Test 14: Test concurrent requests
+# Test 17: Test concurrent requests
 echo ""
 log_test "Concurrent API requests"
 

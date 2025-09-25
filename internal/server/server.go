@@ -90,9 +90,26 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	return server, nil
 }
 
-// createAPIKeyProtectedHandler wraps an HTTP handler with API key authentication
-func (s *Server) createAPIKeyProtectedHandler(handler http.Handler) http.Handler {
+// createSelectiveWebUIProtectedHandler wraps a Web UI handler with API key authentication
+// that only applies to HTML pages, not static assets
+func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow static assets (CSS, JS, images, etc.) without authentication
+		if strings.HasPrefix(r.URL.Path, "/ui/assets/") ||
+			strings.HasSuffix(r.URL.Path, ".css") ||
+			strings.HasSuffix(r.URL.Path, ".js") ||
+			strings.HasSuffix(r.URL.Path, ".png") ||
+			strings.HasSuffix(r.URL.Path, ".jpg") ||
+			strings.HasSuffix(r.URL.Path, ".jpeg") ||
+			strings.HasSuffix(r.URL.Path, ".svg") ||
+			strings.HasSuffix(r.URL.Path, ".ico") ||
+			strings.HasSuffix(r.URL.Path, ".woff") ||
+			strings.HasSuffix(r.URL.Path, ".woff2") {
+			handler.ServeHTTP(w, r)
+			return
+		}
+
+		// For HTML pages and root paths, require API key authentication
 		cfg := s.runtime.Config()
 		if cfg == nil {
 			s.logger.Error("No configuration available for API key validation")
@@ -805,10 +822,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
 	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
 
-	// Web UI endpoints (serves embedded Vue.js frontend) with API key protection
+	// Web UI endpoints (serves embedded Vue.js frontend) with selective API key protection
 	webUIHandler := web.NewHandler(s.logger.Sugar())
-	protectedWebUIHandler := s.createAPIKeyProtectedHandler(http.StripPrefix("/ui", webUIHandler))
-	mux.Handle("/ui/", protectedWebUIHandler)
+	selectiveProtectedWebUIHandler := s.createSelectiveWebUIProtectedHandler(http.StripPrefix("/ui", webUIHandler))
+	mux.Handle("/ui/", selectiveProtectedWebUIHandler)
 	// Redirect root to web UI
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {

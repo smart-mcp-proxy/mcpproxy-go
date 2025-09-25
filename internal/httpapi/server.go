@@ -594,21 +594,28 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
-	// Set SSE headers
+	// Set SSE headers first
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering
 
+	// Check if flushing is supported
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		s.writeError(w, http.StatusInternalServerError, "Streaming not supported")
-		return
+		s.logger.Warn("ResponseWriter does not support flushing, SSE may not work properly")
+		// Continue anyway for testing/development environments
+		flusher = nil
 	}
 
 	// Get status & event channels
 	statusCh := s.controller.StatusChannel()
 	eventsCh := s.controller.EventsChannel()
+
+	s.logger.Debug("SSE connection established",
+		"status_channel_nil", statusCh == nil,
+		"events_channel_nil", eventsCh == nil)
 
 	// Create heartbeat ticker to keep connection alive
 	heartbeat := time.NewTicker(30 * time.Second)
@@ -623,11 +630,15 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"timestamp":      time.Now().Unix(),
 	}
 
+	s.logger.Debug("Sending initial SSE status event", "data", initialStatus)
 	if err := s.writeSSEEvent(w, "status", initialStatus); err != nil {
 		s.logger.Error("Failed to write initial SSE event", "error", err)
 		return
 	}
-	flusher.Flush()
+	if flusher != nil {
+		flusher.Flush()
+	}
+	s.logger.Debug("Initial SSE status event sent successfully")
 
 	// Stream updates
 	for {
@@ -643,7 +654,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error("Failed to write SSE heartbeat", "error", err)
 				return
 			}
-			flusher.Flush()
+			if flusher != nil {
+				flusher.Flush()
+			}
 		case status, ok := <-statusCh:
 			if !ok {
 				return
@@ -661,7 +674,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error("Failed to write SSE event", "error", err)
 				return
 			}
-			flusher.Flush()
+			if flusher != nil {
+				flusher.Flush()
+			}
 		case evt, ok := <-eventsCh:
 			if !ok {
 				eventsCh = nil
@@ -677,7 +692,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error("Failed to write runtime SSE event", "error", err)
 				return
 			}
-			flusher.Flush()
+			if flusher != nil {
+				flusher.Flush()
+			}
 		}
 	}
 }
@@ -688,8 +705,18 @@ func (s *Server) writeSSEEvent(w http.ResponseWriter, event string, data interfa
 		return err
 	}
 
+	// Write SSE formatted event
 	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(jsonData))
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Force flush by trying to flush the connection
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	return nil
 }
 
 // Secrets management handlers
