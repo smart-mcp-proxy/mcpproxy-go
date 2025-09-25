@@ -3,6 +3,7 @@ import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, 
 class APIService {
   private baseUrl = ''
   private apiKey = ''
+  private initialized = false
 
   constructor() {
     // In development, Vite proxy handles API calls
@@ -20,11 +21,31 @@ class APIService {
 
     if (apiKeyFromURL) {
       this.apiKey = apiKeyFromURL
+      console.log('API key extracted from URL:', this.apiKey.substring(0, 8) + '...')
       // Clean the URL by removing the API key parameter for security
       urlParams.delete('apikey')
       const newURL = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '')
       window.history.replaceState({}, '', newURL)
+    } else {
+      console.log('No API key found in URL parameters')
     }
+    this.initialized = true
+  }
+
+  // Public method to reinitialize API key if needed
+  public reinitializeAPIKey() {
+    this.initialized = false
+    this.initializeAPIKey()
+  }
+
+  // Check if API key is available
+  public hasAPIKey(): boolean {
+    return !!this.apiKey
+  }
+
+  // Get API key (for debugging purposes)
+  public getAPIKeyPreview(): string {
+    return this.apiKey ? this.apiKey.substring(0, 8) + '...' : 'none'
   }
 
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<APIResponse<T>> {
@@ -51,6 +72,9 @@ class APIService {
       // Add API key header if available
       if (this.apiKey) {
         headers['X-API-Key'] = this.apiKey
+        console.log(`API request to ${endpoint} with API key: ${this.getAPIKeyPreview()}`)
+      } else {
+        console.log(`API request to ${endpoint} without API key`)
       }
 
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
@@ -59,10 +83,19 @@ class APIService {
       })
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        const errorMsg = `HTTP ${response.status}: ${response.statusText}`
+        console.error(`API request failed: ${errorMsg}`)
+
+        // Special handling for authentication errors
+        if (response.status === 401 || response.status === 403) {
+          console.error('Authentication failed - API key may be invalid or missing')
+        }
+
+        throw new Error(errorMsg)
       }
 
       const data = await response.json()
+      console.log(`API request to ${endpoint} succeeded`)
       return data as APIResponse<T>
     } catch (error) {
       console.error('API request failed:', error)
@@ -122,6 +155,13 @@ class APIService {
     const url = this.apiKey
       ? `${this.baseUrl}/events?apikey=${encodeURIComponent(this.apiKey)}`
       : `${this.baseUrl}/events`
+
+    console.log('Creating EventSource:', {
+      hasApiKey: !!this.apiKey,
+      apiKeyPreview: this.getAPIKeyPreview(),
+      url: this.apiKey ? url.replace(this.apiKey, this.getAPIKeyPreview()) : url
+    })
+
     return new EventSource(url)
   }
 

@@ -298,6 +298,13 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+// Flush implements http.Flusher interface by delegating to the underlying ResponseWriter
+func (rw *responseWriter) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 // JSON response helpers
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) {

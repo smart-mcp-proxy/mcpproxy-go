@@ -59,12 +59,18 @@ export const useSystemStore = defineStore('system', () => {
       eventSource.value.close()
     }
 
+    console.log('Attempting to connect EventSource...')
+    console.log('API key status:', {
+      hasApiKey: api.hasAPIKey(),
+      apiKeyPreview: api.getAPIKeyPreview()
+    })
+
     const es = api.createEventSource()
     eventSource.value = es
 
     es.onopen = () => {
       connected.value = true
-      console.log('EventSource connected')
+      console.log('EventSource connected successfully')
     }
 
     es.onmessage = (event) => {
@@ -107,12 +113,24 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
-    es.onerror = () => {
+    es.onerror = (event) => {
       connected.value = false
-      console.error('EventSource error')
+      console.error('EventSource error occurred:', event)
+
+      // Check if this might be an authentication error
+      if (es.readyState === EventSource.CLOSED) {
+        console.error('EventSource connection closed - possible authentication failure')
+
+        // If we have an API key but still failed, try reinitializing
+        if (api.hasAPIKey()) {
+          console.log('Attempting to reinitialize API key and retry connection...')
+          api.reinitializeAPIKey()
+        }
+      }
 
       // Retry connection after a delay
       setTimeout(() => {
+        console.log('Retrying EventSource connection in 5 seconds...')
         connectEventSource()
       }, 5000)
     }

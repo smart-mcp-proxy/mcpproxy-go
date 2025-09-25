@@ -30,6 +30,9 @@ go build -o mcpproxy ./cmd/mcpproxy
 
 # Quick local build
 scripts/build.sh
+
+#Build frontend and backend
+make build
 ```
 
 ### Prerelease Builds
@@ -316,7 +319,6 @@ MCPProxy supports several environment variables for configuration and security:
 **Security Configuration**:
 - `MCPP_LISTEN` - Override network binding (e.g., `127.0.0.1:8080`, `:8080`)
 - `MCPP_API_KEY` - Set API key for REST API authentication
-- `MCPP_ENABLE_TRAY` - Enable/disable tray functionality (`true`/`false`)
 
 **Debugging**:
 - `MCPPROXY_DEBUG` - Enable debug mode
@@ -527,49 +529,7 @@ mcpproxy auth status
 mcpproxy auth login --server=Sentry --force
 ```
 
-#### OAuth Flow Diagnostics
-```bash
-# Debug OAuth with detailed logging
-tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(🔐|🌐|🚀|⏳|✅|❌|oauth|OAuth)"
 
-# Monitor callback server status
-grep -E "(callback|redirect_uri|127\.0\.0\.1)" ~/Library/Logs/mcpproxy/main.log
-
-# Check token store persistence
-grep -E "(token.*store|has_existing_token_store)" ~/Library/Logs/mcpproxy/main.log
-```
-
-#### Common OAuth Issues
-1. **Browser not opening**: Check environment variables (`DISPLAY`, `HEADLESS`, `CI`)
-2. **Token persistence**: Look for `"has_existing_token_store": false` on restart
-3. **Rate limiting**: Search for "rate limited" messages
-4. **Callback failures**: Monitor callback server logs
-
-### Tool Discovery and Indexing Debug
-
-#### Test Tool Availability
-```bash
-# List tools from specific server
-mcpproxy tools list --server=github-server --log-level=debug
-
-# Search for tools (uses BM25 index)
-mcpproxy tools search "create issue" --limit=10
-
-# Test direct tool calls
-mcpproxy call tool --tool-name=Sentry:whoami --json_args='{}'
-```
-
-#### Index Debugging
-```bash
-# Check index status and rebuilds
-grep -E "(index|Index|rebuild|BM25)" ~/Library/Logs/mcpproxy/main.log
-
-# Monitor tool discovery
-grep -E "(tool.*discovered|discovered.*tool)" ~/Library/Logs/mcpproxy/main.log
-
-# Check server connection states
-grep -E "(Ready|Connecting|Error|state.*transition)" ~/Library/Logs/mcpproxy/main.log
-```
 
 ### Server Management Commands
 
@@ -586,18 +546,6 @@ mcpproxy upstream remove --name="old-server"
 
 # Enable/disable server
 mcpproxy upstream update --name="test-server" --enabled=false
-```
-
-#### Quarantine Management
-```bash
-# List quarantined servers
-mcpproxy quarantine list
-
-# Review quarantined server details
-mcpproxy quarantine inspect --name="suspicious-server"
-
-# Manually quarantine server
-mcpproxy quarantine add --name="unsafe-server"
 ```
 
 ### Performance and Resource Debugging
@@ -640,44 +588,6 @@ go build && ./mcpproxy serve --log-level=debug
 ./mcpproxy tools list --server=github-server --log-level=trace
 ```
 
-#### Environment Variables for Debugging
-```bash
-# Disable OAuth for testing
-export MCPPROXY_DISABLE_OAUTH=true
-
-# Enable additional debugging
-export MCPPROXY_DEBUG=true
-
-# Test in headless environment
-export HEADLESS=true
-```
-
-### Troubleshooting Common Issues
-
-1. **Tools not appearing in search**:
-   - Check server authentication status: `mcpproxy auth status`
-   - Verify server can list tools: `mcpproxy tools list --server=<name>`
-   - Check index rebuild: `grep -E "index.*rebuild" ~/Library/Logs/mcpproxy/main.log`
-
-2. **OAuth servers failing**:
-   - Test manual login: `mcpproxy auth login --server=<name> --log-level=debug`
-   - Check browser opening: Look for "Opening browser" in logs
-   - Verify callback server: `grep "callback" ~/Library/Logs/mcpproxy/main.log`
-
-3. **Server connection issues**:
-   - Monitor retry attempts: `grep "retry" ~/Library/Logs/mcpproxy/main.log`
-   - Check Docker isolation: `grep "Docker" ~/Library/Logs/mcpproxy/main.log`
-   - Verify server configuration: `mcpproxy upstream list`
-
-4. **UI showing 'Stopped 0/0 servers' when server is running**:
-   - Fixed in latest version - frontend now properly reads status from SSE events
-   - If issue persists, check browser console for SSE connection errors
-   - Verify server is accessible: `curl http://localhost:8080/mcp`
-
-5. **Ctrl+C doesn't free shell / server hangs on shutdown**:
-   - Fixed in latest version with proper HTTP server shutdown handling
-   - Force quit available: Press Ctrl+C twice within 10 seconds
-   - Check for hanging processes: `ps aux | grep mcpproxy`
 
 ## Development Guidelines
 
@@ -698,9 +608,6 @@ export HEADLESS=true
 - Handle context cancellation properly in long-running operations
 - Graceful degradation for non-critical failures
 
-### Build Tags
-- System tray functionality uses build tags (`tray_gui.go` vs `tray_stub.go`)
-- Platform-specific code should use appropriate build constraints
 
 ### Configuration Management
 - Config changes should update both storage and file system
@@ -797,21 +704,4 @@ The event bus enables real-time communication between runtime and UI components:
 - Double shutdown protection
 
 When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
-
-### Known Issues
-
-**Potential Deadlock Patterns**:
-- `server.go:156-159` and `server.go:163`: Nested locking in shutdown sequence could cause deadlock if multiple goroutines trigger shutdown simultaneously
-- `lifecycle.go:274-275`: Runtime lock held during configuration save operations may conflict with storage callbacks
-
-These issues require careful review and should be addressed with proper lock ordering and timeout mechanisms.
-
-**Resolved Issues**:
-- ✅ **GitHub Workflows**: All build and test workflows now function correctly
-- ✅ **Linux Build Constraints**: Fixed tray package build issues on Linux (GitHub Actions)
-- ✅ **Frontend Build Integration**: All workflows now properly build frontend assets
-- ✅ **Prerelease Pipeline**: Automated signed DMG generation working for `next` branch
-- to memory 
-if u want to test tool call in mcpproxy instead of curl call, use mcpproxy call. Example  `mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'`
-- to memory
-Never use curl to interact with mcpproxy, it uses mcp protocol. USE DIRECT mcp server call
+- remember before running mcpproxy core u need to kill all mcpproxy instances, because it locks DB
