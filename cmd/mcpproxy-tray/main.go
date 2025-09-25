@@ -11,13 +11,13 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +26,8 @@ import (
 	"go.uber.org/zap/zapcore"
 
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
+	"mcpproxy-go/cmd/mcpproxy-tray/internal/monitor"
+	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
 	"mcpproxy-go/internal/tray"
 )
 
@@ -46,7 +48,7 @@ func getLogDir() string {
 		if homeDir, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(homeDir, "Library", "Logs", "mcpproxy")
 		}
-	case "windows":
+	case "windows": // This case will never be reached due to build constraints, but kept for clarity
 		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
 			return filepath.Join(localAppData, "mcpproxy", "logs")
 		}
@@ -86,6 +88,21 @@ func main() {
 
 	logger.Info("Starting mcpproxy-tray", zap.String("version", version))
 
+	// Check environment variables for configuration
+	coreTimeout := getCoreTimeout()
+	retryDelay := getRetryDelay()
+	stateDebug := getStateDebug()
+
+	if stateDebug {
+		logger.Info("State machine debug mode enabled")
+	}
+
+	logger.Info("Tray configuration",
+		zap.Duration("core_timeout", coreTimeout),
+		zap.Duration("retry_delay", retryDelay),
+		zap.Bool("state_debug", stateDebug),
+		zap.Bool("skip_core", shouldSkipCoreLaunch()))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -96,27 +113,40 @@ func main() {
 	// Generate API key for secure communication between tray and core
 	if trayAPIKey == "" {
 		trayAPIKey = generateAPIKey()
-		logger.Info("Generated API key for tray-core communication")
+		logger.Info("Generated API key for tray-core communication",
+			zap.String("api_key_prefix", maskAPIKey(trayAPIKey)))
 	}
 
-	// Prepare API client and tray adapters immediately so the icon appears before the core is ready
+	// Create state machine
+	stateMachine := state.NewMachine(logger.Sugar())
+
+	// Create enhanced API client with better connection management
 	apiClient := api.NewClient(coreURL, logger.Sugar())
-	// Set the API key BEFORE any API calls
 	apiClient.SetAPIKey(trayAPIKey)
-	logger.Info("API key configured for tray-core communication")
 
-	if err := apiClient.StartSSE(ctx); err != nil {
-		logger.Error("Failed to start SSE connection", zap.Error(err))
-	}
-
+	// Create tray application early so icon appears
 	shutdownFunc := func() {
 		logger.Info("Tray shutdown requested")
-		apiClient.StopSSE()
+		stateMachine.Shutdown()
 		cancel()
 	}
 
 	trayApp := tray.NewWithAPIClient(api.NewServerAdapter(apiClient), apiClient, logger.Sugar(), version, shutdownFunc)
-	trayApp.ObserveConnectionState(ctx, apiClient.ConnectionStateChannel())
+
+	// Start the state machine
+	stateMachine.Start()
+
+	// Launch core management with state machine
+	launcher := NewCoreProcessLauncher(
+		coreURL,
+		logger.Sugar(),
+		stateMachine,
+		apiClient,
+		trayApp,
+		coreTimeout,
+	)
+
+	go launcher.Start(ctx)
 
 	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -124,16 +154,17 @@ func main() {
 	go func() {
 		<-sigCh
 		logger.Info("Received shutdown signal")
+		stateMachine.SendEvent(state.EventShutdown)
 		cancel()
 	}()
-
-	// Launch core management loop in the background so the tray can appear immediately
-	go manageCoreProcess(ctx, logger, trayApp, apiClient, coreURL)
 
 	logger.Info("Starting tray event loop")
 	if err := trayApp.Run(ctx); err != nil && err != context.Canceled {
 		logger.Error("Tray application error", zap.Error(err))
 	}
+
+	// Wait for state machine to shut down gracefully
+	stateMachine.Shutdown()
 
 	logger.Info("mcpproxy-tray shutdown complete")
 }
@@ -213,156 +244,7 @@ func shouldSkipCoreLaunch() bool {
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
-func manageCoreProcess(ctx context.Context, logger *zap.Logger, trayApp *tray.App, apiClient *api.Client, coreURL string) {
-	if shouldSkipCoreLaunch() {
-		logger.Info("Skipping core auto-launch due to MCPPROXY_TRAY_SKIP_CORE")
-		trayApp.SetConnectionState(tray.ConnectionStateConnecting)
-		return
-	}
-
-	if isServerRunning(coreURL) {
-		logger.Info("Core mcpproxy server already running", zap.String("core_url", coreURL))
-		// Check authentication for external core server
-		if checkAPIAuthentication(coreURL, trayAPIKey) {
-			logger.Info("External core server authentication successful")
-			apiClient.SetAPIKey(trayAPIKey)
-			trayApp.SetConnectionState(tray.ConnectionStateConnecting)
-		} else {
-			logger.Warn("External core server requires different API key")
-			trayApp.SetConnectionState(tray.ConnectionStateAuthError)
-		}
-		return
-	}
-
-	trayApp.SetConnectionState(tray.ConnectionStateStartingCore)
-	logger.Info("Core mcpproxy server not running, starting it", zap.String("core_url", coreURL))
-
-	coreBinary, err := resolveCoreBinary(logger)
-	if err != nil {
-		logger.Error("Failed to resolve core binary", zap.Error(err))
-		trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
-		return
-	}
-
-	args := buildCoreArgs(coreURL)
-	cmd, waitCh, err := startCoreServer(logger, coreBinary, args)
-	if err != nil {
-		logger.Error("Failed to start core server", zap.String("binary", coreBinary), zap.Error(err))
-		trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
-		return
-	}
-
-	go func() {
-		select {
-		case err := <-waitCh:
-			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("mcpproxy server process exited", zap.Error(err))
-			}
-			trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
-		case <-ctx.Done():
-			killTimer := terminateProcess(logger, cmd)
-			if err := <-waitCh; err != nil && !errors.Is(err, context.Canceled) {
-				logger.Info("mcpproxy server process terminated", zap.Error(err))
-			}
-			if killTimer != nil {
-				killTimer.Stop()
-			}
-		}
-	}()
-
-	if !waitForServerAndCheckAuth(ctx, coreURL, trayAPIKey, 30*time.Second, trayApp, logger) {
-		logger.Error("Core server failed to start within timeout or authentication failed", zap.String("core_url", coreURL))
-		terminateProcess(logger, cmd)
-		// Connection state already set by waitForServerAndCheckAuth
-		return
-	}
-
-	logger.Info("Core server started successfully with authentication", zap.String("core_url", coreURL))
-
-	// Set the API key in the client for secure communication
-	if trayAPIKey != "" {
-		apiClient.SetAPIKey(trayAPIKey)
-		logger.Info("API key configured for tray-core communication")
-	}
-
-	trayApp.SetConnectionState(tray.ConnectionStateConnecting)
-}
-
-// isServerRunning checks if the core mcpproxy server is running using the unauthenticated health endpoint
-func isServerRunning(baseURL string) bool {
-	return probeServer(baseURL, []string{"/livez", "/healthz", "/health"}, func(status int) bool {
-		return status >= 200 && status < 400
-	})
-}
-
-// checkAPIAuthentication verifies if API authentication is working
-func checkAPIAuthentication(baseURL, apiKey string) bool {
-	if apiKey == "" {
-		return true // No authentication required
-	}
-
-	client := &http.Client{Timeout: 2 * time.Second}
-	req, err := http.NewRequest("GET", strings.TrimSuffix(baseURL, "/")+"/api/v1/servers", http.NoBody)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("X-API-Key", apiKey)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode != 401
-}
-
-// startCoreServer starts the core mcpproxy server process
-func startCoreServer(logger *zap.Logger, binaryPath string, args []string) (*exec.Cmd, <-chan error, error) {
-	// Generate API key for secure communication between tray and core
-	if trayAPIKey == "" {
-		trayAPIKey = generateAPIKey()
-		logger.Info("Generated API key for tray-core communication")
-	}
-
-	cmd := exec.Command(binaryPath, args...)
-	cmd.Stdout = nil // Don't capture output to avoid blocking
-	cmd.Stderr = nil
-
-	// Build clean environment - filter out any existing MCPP_API_KEY to avoid conflicts
-	env := []string{}
-	for _, envVar := range os.Environ() {
-		if !strings.HasPrefix(envVar, "MCPP_API_KEY=") {
-			env = append(env, envVar)
-		}
-	}
-	// Add our environment variables
-	env = append(env,
-		"MCPP_ENABLE_TRAY=false",
-		fmt.Sprintf("MCPP_API_KEY=%s", trayAPIKey))
-	cmd.Env = env
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true, // Create new process group
-	}
-
-	if logger != nil {
-		logger.Info("Launching mcpproxy core",
-			zap.String("binary", binaryPath),
-			zap.Strings("args", args))
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, nil, fmt.Errorf("failed to start mcpproxy server: %w", err)
-	}
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-		close(waitCh)
-	}()
-
-	return cmd, waitCh, nil
-}
+// Legacy functions removed - replaced by state machine architecture
 
 // resolveCoreBinary locates or stages the core binary for launching.
 func resolveCoreBinary(logger *zap.Logger) (string, error) {
@@ -584,95 +466,7 @@ func resolveExecutableCandidate(path string) (string, bool) {
 	return abs, true
 }
 
-// isServerReady checks if the server is fully initialized and ready to serve requests
-func isServerReady(baseURL string) bool {
-	return probeServer(baseURL, []string{"/readyz", "/ready"}, func(status int) bool {
-		return status == http.StatusOK
-	})
-}
-
-func probeServer(baseURL string, paths []string, ok func(int) bool) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
-	trimmed := strings.TrimSuffix(baseURL, "/")
-	for _, path := range paths {
-		resp, err := client.Get(trimmed + path)
-		if err != nil {
-			continue
-		}
-		resp.Body.Close()
-		if ok(resp.StatusCode) {
-			return true
-		}
-	}
-	return false
-}
-
-// waitForServerAndCheckAuth waits for the server to start and become ready, then checks authentication
-func waitForServerAndCheckAuth(ctx context.Context, baseURL, apiKey string, timeout time.Duration, trayApp *tray.App, logger *zap.Logger) bool {
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	attemptCount := 0
-	lastState := ""
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Info("Context cancelled while waiting for server")
-			return false
-		case <-ticker.C:
-			attemptCount++
-
-			if time.Now().After(deadline) {
-				logger.Error("Timeout waiting for server to start and become ready",
-					zap.Int("total_attempts", attemptCount),
-					zap.Duration("timeout", timeout))
-				trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
-				return false
-			}
-
-			// First check if server is running (liveness)
-			if !isServerRunning(baseURL) {
-				if lastState != "waiting_start" {
-					logger.Info("Waiting for server to start",
-						zap.Int("attempt", attemptCount),
-						zap.String("base_url", baseURL))
-					lastState = "waiting_start"
-				}
-				continue // Server not yet running, keep waiting
-			}
-
-			// Server is running, check if it's ready (readiness)
-			if !isServerReady(baseURL) {
-				// Server is running but not ready yet (still initializing)
-				trayApp.SetConnectionState(tray.ConnectionStateStartingCore)
-				if lastState != "waiting_ready" {
-					logger.Info("Server is running but not ready yet, waiting for initialization",
-						zap.Int("attempt", attemptCount),
-						zap.String("base_url", baseURL))
-					lastState = "waiting_ready"
-				}
-				continue
-			}
-
-			// Server is running and ready, now check authentication
-			if !checkAPIAuthentication(baseURL, apiKey) {
-				logger.Error("Server is ready but authentication failed",
-					zap.Int("attempt", attemptCount),
-					zap.String("base_url", baseURL))
-				trayApp.SetConnectionState(tray.ConnectionStateAuthError)
-				return false
-			}
-
-			// Everything is good
-			logger.Info("Server is running, ready, and authentication successful",
-				zap.Int("total_attempts", attemptCount),
-				zap.Duration("time_taken", time.Since(deadline.Add(-timeout))))
-			return true
-		}
-	}
-}
+// Legacy health check functions removed - replaced by monitor.HealthMonitor
 
 func buildCoreArgs(coreURL string) []string {
 	args := []string{"serve"}
@@ -738,26 +532,364 @@ func normalizeListen(listen string) string {
 	return listen
 }
 
-func terminateProcess(logger *zap.Logger, cmd *exec.Cmd) *time.Timer {
-	if cmd == nil || cmd.Process == nil {
-		return nil
+// Legacy process termination removed - replaced by monitor.ProcessMonitor
+
+// getCoreTimeout returns the configured core startup timeout
+func getCoreTimeout() time.Duration {
+	if timeoutStr := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_CORE_TIMEOUT")); timeoutStr != "" {
+		if timeout, err := strconv.Atoi(timeoutStr); err == nil && timeout > 0 {
+			return time.Duration(timeout) * time.Second
+		}
+	}
+	return 30 * time.Second // Default timeout
+}
+
+// getRetryDelay returns the configured retry delay
+func getRetryDelay() time.Duration {
+	if delayStr := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_RETRY_DELAY")); delayStr != "" {
+		if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
+			return time.Duration(delay) * time.Second
+		}
+	}
+	return 5 * time.Second // Default delay
+}
+
+// getStateDebug returns whether state machine debug mode is enabled
+func getStateDebug() bool {
+	value := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_STATE_DEBUG"))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+// maskAPIKey masks an API key for logging (shows first and last 4 chars)
+func maskAPIKey(apiKey string) string {
+	if len(apiKey) <= 8 {
+		return "****"
+	}
+	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
+}
+
+// CoreProcessLauncher manages the mcpproxy core process with state machine integration
+type CoreProcessLauncher struct {
+	coreURL      string
+	logger       *zap.SugaredLogger
+	stateMachine *state.Machine
+	apiClient    *api.Client
+	trayApp      *tray.App
+	coreTimeout  time.Duration
+
+	processMonitor *monitor.ProcessMonitor
+	healthMonitor  *monitor.HealthMonitor
+}
+
+// NewCoreProcessLauncher creates a new core process launcher
+func NewCoreProcessLauncher(
+	coreURL string,
+	logger *zap.SugaredLogger,
+	stateMachine *state.Machine,
+	apiClient *api.Client,
+	trayApp *tray.App,
+	coreTimeout time.Duration,
+) *CoreProcessLauncher {
+	return &CoreProcessLauncher{
+		coreURL:      coreURL,
+		logger:       logger,
+		stateMachine: stateMachine,
+		apiClient:    apiClient,
+		trayApp:      trayApp,
+		coreTimeout:  coreTimeout,
+	}
+}
+
+// Start starts the core process launcher and state machine integration
+func (cpl *CoreProcessLauncher) Start(ctx context.Context) {
+	cpl.logger.Info("Core process launcher starting")
+
+	// Subscribe to state machine transitions
+	transitionsCh := cpl.stateMachine.Subscribe()
+
+	// Handle state transitions
+	go cpl.handleStateTransitions(ctx, transitionsCh)
+
+	// Check if we should skip core launch
+	if shouldSkipCoreLaunch() {
+		cpl.logger.Info("Skipping core launch, connecting to existing core")
+		cpl.stateMachine.SendEvent(state.EventSkipCore)
+		return
 	}
 
-	pid := cmd.Process.Pid
-	if logger != nil {
-		logger.Info("Sending SIGTERM to core process", zap.Int("pid", pid))
+	// Start with launching core
+	cpl.handleLaunchCore(ctx)
+}
+
+// handleStateTransitions processes state machine transitions
+func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, transitionsCh <-chan state.StateTransition) {
+	for {
+		select {
+		case <-ctx.Done():
+			cpl.logger.Debug("State transition handler context cancelled")
+			return
+
+		case transition := <-transitionsCh:
+			cpl.logger.Info("State transition",
+				"from", transition.From,
+				"to", transition.To,
+				"event", transition.Event,
+				"timestamp", transition.Timestamp.Format(time.RFC3339))
+
+			// Update tray connection state based on machine state
+			cpl.updateTrayConnectionState(transition.To)
+
+			// Handle specific state entries
+			switch transition.To {
+			case state.StateLaunchingCore:
+				go cpl.handleLaunchCore(ctx)
+
+			case state.StateWaitingForCore:
+				go cpl.handleWaitForCore(ctx)
+
+			case state.StateConnectingAPI:
+				go cpl.handleConnectAPI(ctx)
+
+			case state.StateConnected:
+				cpl.handleConnected()
+
+			case state.StateReconnecting:
+				go cpl.handleReconnecting(ctx)
+
+			case state.StateCoreErrorPortConflict:
+				cpl.handlePortConflictError()
+
+			case state.StateCoreErrorDBLocked:
+				cpl.handleDBLockedError()
+
+			case state.StateCoreErrorConfig:
+				cpl.handleConfigError()
+
+			case state.StateCoreErrorGeneral:
+				cpl.handleGeneralError()
+
+			case state.StateShuttingDown:
+				cpl.handleShutdown()
+			}
+		}
+	}
+}
+
+// updateTrayConnectionState updates the tray app's connection state based on the state machine state
+func (cpl *CoreProcessLauncher) updateTrayConnectionState(machineState state.State) {
+	var trayState tray.ConnectionState
+
+	switch machineState {
+	case state.StateInitializing:
+		trayState = tray.ConnectionStateInitializing
+	case state.StateLaunchingCore:
+		trayState = tray.ConnectionStateStartingCore
+	case state.StateWaitingForCore:
+		trayState = tray.ConnectionStateStartingCore
+	case state.StateConnectingAPI:
+		trayState = tray.ConnectionStateConnecting
+	case state.StateConnected:
+		trayState = tray.ConnectionStateConnected
+	case state.StateReconnecting:
+		trayState = tray.ConnectionStateReconnecting
+	case state.StateCoreErrorPortConflict, state.StateCoreErrorDBLocked, state.StateCoreErrorConfig, state.StateCoreErrorGeneral:
+		trayState = tray.ConnectionStateDisconnected
+	default:
+		trayState = tray.ConnectionStateDisconnected
 	}
 
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		if logger != nil {
-			logger.Warn("Failed to send SIGTERM to core process", zap.Error(err))
+	cpl.trayApp.SetConnectionState(trayState)
+}
+
+// handleLaunchCore handles launching the core process
+func (cpl *CoreProcessLauncher) handleLaunchCore(ctx context.Context) {
+	cpl.logger.Info("Launching mcpproxy core process")
+
+	// Stop existing process monitor if running
+	if cpl.processMonitor != nil {
+		cpl.processMonitor.Shutdown()
+		cpl.processMonitor = nil
+	}
+
+	// Resolve core binary path
+	coreBinary, err := resolveCoreBinary(cpl.logger.Desugar())
+	if err != nil {
+		cpl.logger.Error("Failed to resolve core binary", "error", err)
+		cpl.stateMachine.SetError(err)
+		cpl.stateMachine.SendEvent(state.EventGeneralError)
+		return
+	}
+
+	// Build command arguments and environment
+	args := buildCoreArgs(cpl.coreURL)
+	env := cpl.buildCoreEnvironment()
+
+	cpl.logger.Info("Starting core process",
+		"binary", coreBinary,
+		"args", cpl.maskSensitiveArgs(args),
+		"env_count", len(env))
+
+	// Create process configuration
+	processConfig := monitor.ProcessConfig{
+		Binary:        coreBinary,
+		Args:          args,
+		Env:           env,
+		StartTimeout:  cpl.coreTimeout,
+		CaptureOutput: true,
+	}
+
+	// Create process monitor
+	cpl.processMonitor = monitor.NewProcessMonitor(processConfig, cpl.logger, cpl.stateMachine)
+
+	// Start the process
+	if err := cpl.processMonitor.Start(); err != nil {
+		cpl.logger.Error("Failed to start core process", "error", err)
+		cpl.stateMachine.SetError(err)
+		cpl.stateMachine.SendEvent(state.EventGeneralError)
+		return
+	}
+
+	// The process monitor will send EventCoreStarted when the process starts successfully
+}
+
+// handleWaitForCore handles waiting for the core to become ready
+func (cpl *CoreProcessLauncher) handleWaitForCore(ctx context.Context) {
+	cpl.logger.Info("Waiting for core to become ready")
+
+	// Create health monitor if not exists
+	if cpl.healthMonitor == nil {
+		cpl.healthMonitor = monitor.NewHealthMonitor(cpl.coreURL, cpl.logger, cpl.stateMachine)
+		cpl.healthMonitor.Start()
+	}
+
+	// Wait for core to become ready
+	go func() {
+		if err := cpl.healthMonitor.WaitForReady(); err != nil {
+			cpl.logger.Error("Core failed to become ready", "error", err)
+			cpl.stateMachine.SetError(err)
+			cpl.stateMachine.SendEvent(state.EventTimeout)
+		}
+		// If successful, the health monitor will send EventCoreReady
+	}()
+}
+
+// handleConnectAPI handles connecting to the core API
+func (cpl *CoreProcessLauncher) handleConnectAPI(ctx context.Context) {
+	cpl.logger.Info("Connecting to core API")
+
+	// Start SSE connection
+	if err := cpl.apiClient.StartSSE(ctx); err != nil {
+		cpl.logger.Error("Failed to start SSE connection", "error", err)
+		cpl.stateMachine.SetError(err)
+		cpl.stateMachine.SendEvent(state.EventConnectionLost)
+		return
+	}
+
+	// Subscribe to API client connection state changes
+	go cpl.monitorAPIConnection(ctx)
+}
+
+// monitorAPIConnection monitors the API client connection state
+func (cpl *CoreProcessLauncher) monitorAPIConnection(ctx context.Context) {
+	connectionStateCh := cpl.apiClient.ConnectionStateChannel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case connState := <-connectionStateCh:
+			switch connState {
+			case tray.ConnectionStateConnected:
+				cpl.stateMachine.SendEvent(state.EventAPIConnected)
+			case tray.ConnectionStateReconnecting, tray.ConnectionStateDisconnected:
+				cpl.stateMachine.SendEvent(state.EventConnectionLost)
+			}
+		}
+	}
+}
+
+// handleConnected handles the connected state
+func (cpl *CoreProcessLauncher) handleConnected() {
+	cpl.logger.Info("Core process fully connected and operational")
+}
+
+// handleReconnecting handles reconnection attempts
+func (cpl *CoreProcessLauncher) handleReconnecting(_ context.Context) {
+	cpl.logger.Info("Attempting to reconnect to core")
+	// The state machine will handle retry logic automatically
+}
+
+// handlePortConflictError handles port conflict errors
+func (cpl *CoreProcessLauncher) handlePortConflictError() {
+	cpl.logger.Warn("Core failed due to port conflict")
+	// Could implement automatic port resolution here
+}
+
+// handleDBLockedError handles database locked errors
+func (cpl *CoreProcessLauncher) handleDBLockedError() {
+	cpl.logger.Warn("Core failed due to database lock")
+	// Could implement automatic stale lock cleanup here
+}
+
+// handleConfigError handles configuration errors
+func (cpl *CoreProcessLauncher) handleConfigError() {
+	cpl.logger.Error("Core failed due to configuration error")
+	// Configuration errors are usually not recoverable without user intervention
+}
+
+// handleGeneralError handles general errors
+func (cpl *CoreProcessLauncher) handleGeneralError() {
+	cpl.logger.Error("Core failed with general error")
+}
+
+// handleShutdown handles graceful shutdown
+func (cpl *CoreProcessLauncher) handleShutdown() {
+	cpl.logger.Info("Core process launcher shutting down")
+
+	if cpl.processMonitor != nil {
+		cpl.processMonitor.Shutdown()
+	}
+
+	if cpl.healthMonitor != nil {
+		cpl.healthMonitor.Stop()
+	}
+
+	cpl.apiClient.StopSSE()
+}
+
+// buildCoreEnvironment builds the environment for the core process
+func (cpl *CoreProcessLauncher) buildCoreEnvironment() []string {
+	env := os.Environ()
+
+	// Filter out any existing MCPP_API_KEY to avoid conflicts
+	filtered := make([]string, 0, len(env))
+	for _, envVar := range env {
+		if !strings.HasPrefix(envVar, "MCPP_API_KEY=") {
+			filtered = append(filtered, envVar)
 		}
 	}
 
-	return time.AfterFunc(5*time.Second, func() {
-		if logger != nil {
-			logger.Warn("Force killing core process", zap.Int("pid", pid))
+	// Add our environment variables
+	filtered = append(filtered,
+		"MCPP_ENABLE_TRAY=false",
+		fmt.Sprintf("MCPP_API_KEY=%s", trayAPIKey))
+
+	return filtered
+}
+
+// maskSensitiveArgs masks sensitive command line arguments
+func (cpl *CoreProcessLauncher) maskSensitiveArgs(args []string) []string {
+	masked := make([]string, len(args))
+	copy(masked, args)
+
+	for i, arg := range masked {
+		if strings.Contains(strings.ToLower(arg), "key") ||
+			strings.Contains(strings.ToLower(arg), "secret") ||
+			strings.Contains(strings.ToLower(arg), "token") ||
+			strings.Contains(strings.ToLower(arg), "password") {
+			masked[i] = maskAPIKey(arg)
 		}
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-	})
+	}
+
+	return masked
 }

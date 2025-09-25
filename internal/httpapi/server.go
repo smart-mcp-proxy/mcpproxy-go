@@ -248,8 +248,9 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
-	// SSE events (protected by API key)
-	s.router.With(s.apiKeyAuthMiddleware()).Get("/events", s.handleSSEEvents)
+	// SSE events (protected by API key) - support both GET and HEAD
+	s.router.With(s.apiKeyAuthMiddleware()).Method("GET", "/events", http.HandlerFunc(s.handleSSEEvents))
+	s.router.With(s.apiKeyAuthMiddleware()).Method("HEAD", "/events", http.HandlerFunc(s.handleSSEEvents))
 
 	s.logger.Debug("HTTP API routes setup completed",
 		"api_routes", "/api/v1/*",
@@ -607,6 +608,12 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering
+
+	// For HEAD requests, just return headers without body
+	if r.Method == "HEAD" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
 	// Write headers explicitly to establish response
 	w.WriteHeader(http.StatusOK)

@@ -13,6 +13,20 @@ import (
 	"go.uber.org/zap"
 )
 
+// DatabaseLockedError indicates that the database is locked by another process
+type DatabaseLockedError struct {
+	Path string
+	Err  error
+}
+
+func (e *DatabaseLockedError) Error() string {
+	return fmt.Sprintf("database %s is locked by another process", e.Path)
+}
+
+func (e *DatabaseLockedError) Unwrap() error {
+	return e.Err
+}
+
 // BoltDB wraps bolt database operations
 type BoltDB struct {
 	db     *bbolt.DB
@@ -57,6 +71,13 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 		}
 
 		if err != nil {
+			// Wrap timeout errors with a more specific error for exit code classification
+			if err == errors.ErrTimeout {
+				return nil, &DatabaseLockedError{
+					Path: dbPath,
+					Err:  err,
+				}
+			}
 			return nil, fmt.Errorf("failed to open bolt database after recovery attempt: %w", err)
 		}
 	}

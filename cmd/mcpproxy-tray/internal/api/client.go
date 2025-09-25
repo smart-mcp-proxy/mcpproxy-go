@@ -93,9 +93,9 @@ func (c *Client) SetAPIKey(apiKey string) {
 	c.apiKey = apiKey
 }
 
-// StartSSE starts the Server-Sent Events connection for real-time updates
+// StartSSE starts the Server-Sent Events connection for real-time updates with enhanced retry logic
 func (c *Client) StartSSE(ctx context.Context) error {
-	c.logger.Info("Starting SSE connection for real-time updates")
+	c.logger.Info("Starting enhanced SSE connection for real-time updates")
 
 	sseCtx, cancel := context.WithCancel(ctx)
 	c.sseCancel = cancel
@@ -105,6 +105,10 @@ func (c *Client) StartSSE(ctx context.Context) error {
 		defer close(c.connectionStateCh)
 
 		attemptCount := 0
+		maxRetries := 10
+		baseDelay := 2 * time.Second
+		maxDelay := 30 * time.Second
+
 		for {
 			if sseCtx.Err() != nil {
 				c.publishConnectionState(tray.ConnectionStateDisconnected)
@@ -112,10 +116,42 @@ func (c *Client) StartSSE(ctx context.Context) error {
 			}
 
 			attemptCount++
-			if attemptCount > 1 && c.logger != nil {
-				c.logger.Info("SSE reconnection attempt",
-					"attempt", attemptCount,
-					"base_url", c.baseURL)
+
+			// Calculate exponential backoff delay
+			backoffFactor := 1 << uint(min(attemptCount-1, 4))
+			delay := time.Duration(int64(baseDelay) * int64(backoffFactor))
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+
+			if attemptCount > 1 {
+				if c.logger != nil {
+					c.logger.Info("SSE reconnection attempt",
+						"attempt", attemptCount,
+						"max_retries", maxRetries,
+						"delay", delay,
+						"base_url", c.baseURL)
+				}
+
+				// Wait before reconnecting (except first attempt)
+				select {
+				case <-sseCtx.Done():
+					c.publishConnectionState(tray.ConnectionStateDisconnected)
+					return
+				case <-time.After(delay):
+				}
+			}
+
+			// Check if we've exceeded max retries
+			if attemptCount > maxRetries {
+				if c.logger != nil {
+					c.logger.Error("SSE connection failed after max retries",
+						"attempts", attemptCount,
+						"max_retries", maxRetries,
+						"base_url", c.baseURL)
+				}
+				c.publishConnectionState(tray.ConnectionStateDisconnected)
+				return
 			}
 
 			c.publishConnectionState(tray.ConnectionStateConnecting)
@@ -125,41 +161,39 @@ func (c *Client) StartSSE(ctx context.Context) error {
 					c.logger.Error("SSE connection error",
 						"error", err,
 						"attempt", attemptCount,
+						"max_retries", maxRetries,
 						"base_url", c.baseURL)
 				}
-			} else {
-				// Reset attempt count on successful connection
-				if attemptCount > 1 && c.logger != nil {
-					c.logger.Info("SSE connection established successfully",
-						"after_attempts", attemptCount,
-						"base_url", c.baseURL)
+
+				// Check if it's a context cancellation
+				if sseCtx.Err() != nil {
+					c.publishConnectionState(tray.ConnectionStateDisconnected)
+					return
 				}
-				attemptCount = 0
+
+				c.publishConnectionState(tray.ConnectionStateReconnecting)
+				continue
 			}
 
-			if sseCtx.Err() != nil {
-				c.publishConnectionState(tray.ConnectionStateDisconnected)
-				return
+			// Successful connection - reset attempt count
+			if attemptCount > 1 && c.logger != nil {
+				c.logger.Info("SSE connection established successfully",
+					"after_attempts", attemptCount,
+					"base_url", c.baseURL)
 			}
-
-			c.publishConnectionState(tray.ConnectionStateReconnecting)
-
-			if c.logger != nil {
-				c.logger.Info("SSE waiting before reconnection attempt",
-					"retry_delay", "5s",
-					"next_attempt", attemptCount+1)
-			}
-
-			select {
-			case <-sseCtx.Done():
-				c.publishConnectionState(tray.ConnectionStateDisconnected)
-				return
-			case <-time.After(5 * time.Second):
-			}
+			attemptCount = 0
 		}
 	}()
 
 	return nil
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // StopSSE stops the SSE connection
@@ -454,38 +488,95 @@ func (c *Client) OpenWebUI() error {
 	return cmd.Run()
 }
 
-// makeRequest makes an HTTP request to the API
+// makeRequest makes an HTTP request to the API with enhanced error handling and retry logic
 func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, error) {
 	url := c.baseURL + path
+	maxRetries := 3
+	baseDelay := 1 * time.Second
 
-	req, err := http.NewRequest(method, url, http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest(method, url, http.NoBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "mcpproxy-tray/1.0")
+
+		// Add API key header if available
+		if c.apiKey != "" {
+			req.Header.Set("X-API-Key", c.apiKey)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if attempt < maxRetries {
+				delay := time.Duration(attempt) * baseDelay
+				if c.logger != nil {
+					c.logger.Debug("Request failed, retrying",
+						"attempt", attempt,
+						"max_retries", maxRetries,
+						"delay", delay,
+						"error", err)
+				}
+				time.Sleep(delay)
+				continue
+			}
+			return nil, fmt.Errorf("request failed after %d attempts: %w", maxRetries, err)
+		}
+		defer resp.Body.Close()
+
+		// Handle specific HTTP status codes
+		switch resp.StatusCode {
+		case 401:
+			return nil, fmt.Errorf("authentication failed: invalid or missing API key")
+		case 403:
+			return nil, fmt.Errorf("authorization failed: insufficient permissions")
+		case 404:
+			return nil, fmt.Errorf("endpoint not found: %s", path)
+		case 429:
+			// Rate limited - retry with exponential backoff
+			if attempt < maxRetries {
+				delay := time.Duration(attempt*attempt) * baseDelay
+				if c.logger != nil {
+					c.logger.Warn("Rate limited, retrying",
+						"attempt", attempt,
+						"delay", delay,
+						"status", resp.StatusCode)
+				}
+				time.Sleep(delay)
+				continue
+			}
+			return nil, fmt.Errorf("rate limited after %d attempts", maxRetries)
+		case 500, 502, 503, 504:
+			// Server errors - retry
+			if attempt < maxRetries {
+				delay := time.Duration(attempt) * baseDelay
+				if c.logger != nil {
+					c.logger.Warn("Server error, retrying",
+						"attempt", attempt,
+						"status", resp.StatusCode,
+						"delay", delay)
+				}
+				time.Sleep(delay)
+				continue
+			}
+			return nil, fmt.Errorf("server error after %d attempts: status %d", maxRetries, resp.StatusCode)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("API call failed with status %d", resp.StatusCode)
+		}
+
+		var apiResp Response
+		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		return &apiResp, nil
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-
-	// Add API key header if available
-	if c.apiKey != "" {
-		req.Header.Set("X-API-Key", c.apiKey)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API call failed with status %d", resp.StatusCode)
-	}
-
-	var apiResp Response
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &apiResp, nil
+	return nil, fmt.Errorf("unexpected error in request retry loop")
 }
 
 // Helper functions to safely extract values from maps

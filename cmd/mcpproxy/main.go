@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
@@ -17,6 +20,7 @@ import (
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/server"
+	"mcpproxy-go/internal/storage"
 )
 
 var (
@@ -105,8 +109,10 @@ func main() {
 	rootCmd.RunE = runServer
 
 	if err := rootCmd.Execute(); err != nil {
+		// Check for specific error types to return appropriate exit codes
+		exitCode := classifyError(err)
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCode)
 	}
 }
 
@@ -402,7 +408,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		case sig2 := <-sigChan:
 			logger.Warn("Received second signal, forcing immediate exit", zap.String("signal", sig2.String()))
 			_ = logger.Sync()
-			os.Exit(1)
+			os.Exit(ExitCodeGeneralError)
 		case <-forceQuitTimer.C:
 			// Normal shutdown timeout - continue with graceful shutdown
 			logger.Debug("Force quit timer expired, continuing with graceful shutdown")
@@ -458,4 +464,61 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// classifyError categorizes errors to return appropriate exit codes
+func classifyError(err error) int {
+	if err == nil {
+		return ExitCodeSuccess
+	}
+
+	// Check for port conflict errors
+	var portErr *server.PortInUseError
+	if errors.As(err, &portErr) {
+		return ExitCodePortConflict
+	}
+
+	// Check for database lock errors (specific type first, then generic bbolt timeout)
+	var dbLockedErr *storage.DatabaseLockedError
+	if errors.As(err, &dbLockedErr) {
+		return ExitCodeDBLocked
+	}
+
+	if errors.Is(err, bbolterrors.ErrTimeout) {
+		return ExitCodeDBLocked
+	}
+
+	// Check for string-based error messages from various sources
+	errMsg := strings.ToLower(err.Error())
+
+	// Port conflict indicators
+	if strings.Contains(errMsg, "address already in use") ||
+		strings.Contains(errMsg, "port") && strings.Contains(errMsg, "in use") ||
+		strings.Contains(errMsg, "bind: address already in use") {
+		return ExitCodePortConflict
+	}
+
+	// Database lock indicators
+	if strings.Contains(errMsg, "database is locked") ||
+		strings.Contains(errMsg, "database locked") ||
+		strings.Contains(errMsg, "bolt") && strings.Contains(errMsg, "timeout") {
+		return ExitCodeDBLocked
+	}
+
+	// Configuration error indicators
+	if strings.Contains(errMsg, "invalid configuration") ||
+		strings.Contains(errMsg, "config") && (strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "error")) ||
+		strings.Contains(errMsg, "failed to load configuration") {
+		return ExitCodeConfigError
+	}
+
+	// Permission error indicators
+	if strings.Contains(errMsg, "permission denied") ||
+		strings.Contains(errMsg, "access denied") ||
+		strings.Contains(errMsg, "operation not permitted") {
+		return ExitCodePermissionError
+	}
+
+	// Default to general error
+	return ExitCodeGeneralError
 }

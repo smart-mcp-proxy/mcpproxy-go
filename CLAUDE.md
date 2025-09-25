@@ -186,6 +186,32 @@ GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray 
 - **Cross-platform** system tray integration
 - **Server management** via GUI menus
 
+#### Tray Application Architecture (Refactored)
+
+The tray application uses a robust state machine architecture for reliable core management:
+
+**State Machine States**:
+- `StateInitializing` → `StateLaunchingCore` → `StateWaitingForCore` → `StateConnectingAPI` → `StateConnected`
+- Error states: `StateCoreErrorPortConflict`, `StateCoreErrorDBLocked`, `StateCoreErrorGeneral`, `StateCoreErrorConfig`
+- Recovery states: `StateReconnecting`, `StateFailed`, `StateShuttingDown`
+
+**Key Components**:
+- **Process Monitor** (`cmd/mcpproxy-tray/internal/monitor/process.go`): Monitors core subprocess lifecycle
+- **Health Monitor** (`cmd/mcpproxy-tray/internal/monitor/health.go`): Performs HTTP health checks on core API
+- **State Machine** (`cmd/mcpproxy-tray/internal/state/machine.go`): Manages state transitions and retry logic
+
+**Error Classification**:
+Core process exit codes are mapped to specific state machine events:
+- Exit code 2 (port conflict) → `EventPortConflict`
+- Exit code 3 (database locked) → `EventDBLocked`
+- Exit code 4 (config error) → `EventConfigError`
+- Other errors → `EventGeneralError`
+
+**Development Environment Variables**:
+- `MCPPROXY_TRAY_SKIP_CORE=1` - Skip core launch (for development)
+- `MCPPROXY_CORE_URL=http://localhost:8085` - Custom core URL
+- `MCPPROXY_TRAY_PORT=8090` - Custom tray port
+
 ## Architecture Overview
 
 ### Core Components
@@ -228,6 +254,10 @@ GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray 
 
 - **`internal/cache/`** - Response caching layer
 - **`cmd/mcpproxy-tray/`** - Standalone system tray application (separate binary)
+  - `main.go` - Core process launcher with state machine integration
+  - `internal/state/` - State machine for core lifecycle management
+  - `internal/monitor/` - Process and health monitoring systems
+  - `internal/api/` - Enhanced API client with exponential backoff
 - **`internal/logs/`** - Structured logging with per-server log files
 
 ### Key Features
@@ -484,6 +514,21 @@ open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
 - Automatic detection of malicious tool descriptions
 - Security analysis with comprehensive checklists
 - Protection against hidden instructions and data exfiltration attempts
+
+### Core Process Exit Codes
+
+The core mcpproxy process uses specific exit codes to communicate failure reasons to the tray application:
+
+**Exit Codes** (`cmd/mcpproxy/exit_codes.go`):
+- `0` - Success (normal termination)
+- `1` - General error (default for unclassified errors)
+- `2` - Port conflict (listen address already in use)
+- `3` - Database locked (another mcpproxy instance running)
+- `4` - Configuration error (invalid config file)
+- `5` - Permission error (insufficient file/port access)
+
+**Tray Integration**:
+The tray application's process monitor (`cmd/mcpproxy-tray/internal/monitor/process.go`) maps these exit codes to state machine events, enabling intelligent retry strategies and user-friendly error reporting.
 
 ## Debugging Guide
 
