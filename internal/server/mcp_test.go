@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/upstream"
 )
 
@@ -545,7 +546,7 @@ func TestHandleCallToolErrorRecovery(t *testing.T) {
 	// This test verifies the core issue mentioned in the error logs
 
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil),
+		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil, secret.NewResolver()),
 		logger:          zap.NewNop(),
 	}
 
@@ -587,7 +588,7 @@ func TestHandleCallToolCompleteErrorHandling(t *testing.T) {
 	// Test comprehensive error handling scenarios including self-referential calls
 
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil),
+		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil, secret.NewResolver()),
 		logger:          zap.NewNop(),
 		config:          &config.Config{}, // Add minimal config for testing
 	}

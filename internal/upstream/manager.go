@@ -11,6 +11,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/oauth"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/upstream/core"
@@ -27,6 +28,7 @@ type Manager struct {
 	globalConfig    *config.Config
 	storage         *storage.BoltDB
 	notificationMgr *NotificationManager
+	secretResolver  *secret.Resolver
 
 	// tokenReconnect keeps last reconnect trigger time per server when detecting
 	// newly available OAuth tokens without explicit DB events (e.g., when CLI
@@ -39,7 +41,7 @@ type Manager struct {
 }
 
 // NewManager creates a new upstream manager
-func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storage.BoltDB) *Manager {
+func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) *Manager {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		clients:         make(map[string]*managed.Client),
@@ -47,6 +49,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storag
 		globalConfig:    globalConfig,
 		storage:         storage,
 		notificationMgr: NewNotificationManager(),
+		secretResolver:  secretResolver,
 		tokenReconnect:  make(map[string]time.Time),
 		shutdownCtx:     shutdownCtx,
 		shutdownCancel:  shutdownCancel,
@@ -124,7 +127,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	}
 
 	// Create new client but don't connect yet
-	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storage)
+	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storage, m.secretResolver)
 	if err != nil {
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
@@ -867,7 +870,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}
 
 	// Create a transient core client that uses the daemon's storage
-	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false)
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
 	if err != nil {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -890,7 +893,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 			noAuthTransport := transport.DetermineTransportType(&cpy)
 			if noAuthTransport == "http" || noAuthTransport == "streamable-http" || noAuthTransport == "sse" {
 				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
-				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false)
+				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
 				if err2 == nil {
 					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 					_ = testClient.Connect(tctx)

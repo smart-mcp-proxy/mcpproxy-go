@@ -7,6 +7,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/oauth"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream"
 	"mcpproxy-go/internal/upstream/core"
@@ -55,7 +56,8 @@ func NewApplicationContext(cfg *config.Config, logConfig *config.LogConfig, logg
 	}
 
 	// Initialize upstream manager
-	baseUpstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB())
+	secretResolver := secret.NewResolver()
+	baseUpstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver)
 	upstreamManager := &UpstreamManagerAdapter{Manager: baseUpstreamManager}
 
 	// Initialize cache manager

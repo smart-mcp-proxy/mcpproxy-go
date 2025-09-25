@@ -11,6 +11,7 @@ import (
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
@@ -45,7 +46,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 	defer indexManager.Close()
 
 	// Create upstream manager
-	upstreamManager := upstream.NewManager(zap.NewNop(), cfg, nil)
+	upstreamManager := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewResolver())
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), zap.NewNop())
@@ -144,7 +145,7 @@ func TestUpstreamServersListOperation(t *testing.T) {
 	defer indexManager.Close()
 
 	// Create upstream manager
-	upstreamManager := upstream.NewManager(zap.NewNop(), cfg, nil)
+	upstreamManager := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewResolver())
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), zap.NewNop())

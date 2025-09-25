@@ -73,7 +73,10 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("failed to initialize index manager: %w", err)
 	}
 
-	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB())
+	// Initialize secret resolver
+	secretResolver := secret.NewResolver()
+
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver)
 	if cfg.Logging != nil {
 		upstreamManager.SetLogConfig(cfg.Logging)
 	}
@@ -86,9 +89,6 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 
 	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
-
-	// Initialize secret resolver
-	secretResolver := secret.NewResolver()
 
 	appCtx, appCancel := context.WithCancel(context.Background())
 

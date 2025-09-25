@@ -9,6 +9,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/oauth"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/core"
 
@@ -73,8 +74,11 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		}
 	}
 
+	// Create secret resolver for CLI operations
+	secretResolver := secret.NewResolver()
+
 	// Create core client directly for CLI operations (with persistent storage for OAuth tokens)
-	coreClient, err := core.NewClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, db, true)
+	coreClient, err := core.NewClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, db, true, secretResolver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}

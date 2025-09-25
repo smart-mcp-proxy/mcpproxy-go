@@ -12,6 +12,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/secureenv"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/types"
@@ -38,6 +39,9 @@ type Client struct {
 
 	// Environment manager for stdio transport
 	envManager *secureenv.Manager
+
+	// Secret resolver for keyring/env placeholder expansion
+	secretResolver *secret.Resolver
 
 	// Isolation manager for Docker isolation
 	isolationManager *IsolationManager
@@ -79,17 +83,61 @@ type Client struct {
 }
 
 // NewClient creates a new core MCP client
-func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB) (*Client, error) {
-	return NewClientWithOptions(id, serverConfig, logger, logConfig, globalConfig, storage, false)
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
+	return NewClientWithOptions(id, serverConfig, logger, logConfig, globalConfig, storage, false, secretResolver)
 }
 
 // NewClientWithOptions creates a new core MCP client with additional options
-func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, cliDebugMode bool) (*Client, error) {
+func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, cliDebugMode bool, secretResolver *secret.Resolver) (*Client, error) {
+	// Resolve secrets in server config before using it
+	resolvedServerConfig := *serverConfig // Create a copy
+	if secretResolver != nil {
+		// Create a context for secret resolution
+		ctx := context.Background()
+
+		// Resolve secrets in environment variables
+		if len(resolvedServerConfig.Env) > 0 {
+			resolvedEnv := make(map[string]string)
+			for k, v := range resolvedServerConfig.Env {
+				resolvedValue, err := secretResolver.ExpandSecretRefs(ctx, v)
+				if err != nil {
+					logger.Warn("Failed to resolve secret in environment variable",
+						zap.String("server", serverConfig.Name),
+						zap.String("key", k),
+						zap.String("value", v),
+						zap.Error(err))
+					resolvedValue = v // Use original value on error
+				}
+				resolvedEnv[k] = resolvedValue
+			}
+			resolvedServerConfig.Env = resolvedEnv
+		}
+
+		// Resolve secrets in arguments
+		if len(resolvedServerConfig.Args) > 0 {
+			resolvedArgs := make([]string, len(resolvedServerConfig.Args))
+			for i, arg := range resolvedServerConfig.Args {
+				resolvedValue, err := secretResolver.ExpandSecretRefs(ctx, arg)
+				if err != nil {
+					logger.Warn("Failed to resolve secret in argument",
+						zap.String("server", serverConfig.Name),
+						zap.Int("arg_index", i),
+						zap.String("value", arg),
+						zap.Error(err))
+					resolvedValue = arg // Use original value on error
+				}
+				resolvedArgs[i] = resolvedValue
+			}
+			resolvedServerConfig.Args = resolvedArgs
+		}
+	}
+
 	c := &Client{
-		id:           id,
-		config:       serverConfig,
-		globalConfig: globalConfig,
-		storage:      storage,
+		id:             id,
+		config:         &resolvedServerConfig, // Use resolved config
+		globalConfig:   globalConfig,
+		storage:        storage,
+		secretResolver: secretResolver, // Store resolver for future use
 		logger: logger.With(
 			zap.String("upstream_id", id),
 			zap.String("upstream_name", serverConfig.Name),

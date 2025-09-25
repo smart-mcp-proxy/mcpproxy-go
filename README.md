@@ -182,6 +182,170 @@ mcpproxy tools list --server=weather-api --output=json
 
 ---
 
+## 🔐 Secrets Management
+
+MCPProxy provides secure secrets management using your operating system's native keyring to store sensitive information like API keys, tokens, and credentials.
+
+### ✨ **Key Features**
+- **OS-native security**: Uses macOS Keychain, Linux Secret Service, or Windows Credential Manager
+- **Placeholder expansion**: Automatically resolves `${keyring:secret_name}` placeholders in config files
+- **Global access**: Secrets are shared across all MCPProxy configurations and data directories
+- **CLI management**: Full command-line interface for storing, retrieving, and managing secrets
+
+### 🔧 **Managing Secrets**
+
+**Store a secret:**
+```bash
+# Interactive prompt (recommended for sensitive values)
+mcpproxy secrets set github_token
+
+# From command line (less secure - visible in shell history)
+mcpproxy secrets set github_token "ghp_abcd1234..."
+
+# From environment variable
+mcpproxy secrets set github_token --from-env GITHUB_TOKEN
+```
+
+**List all secrets:**
+```bash
+mcpproxy secrets list
+# Output: Found 3 secrets in keyring:
+#   github_token
+#   openai_api_key
+#   database_password
+```
+
+**Retrieve a secret:**
+```bash
+mcpproxy secrets get github_token
+```
+
+**Delete a secret:**
+```bash
+mcpproxy secrets delete github_token
+```
+
+### 📝 **Using Placeholders in Configuration**
+
+Use `${keyring:secret_name}` placeholders in your `mcp_config.json`:
+
+```jsonc
+{
+  "mcpServers": [
+    {
+      "name": "github-mcp",
+      "command": "uvx",
+      "args": ["mcp-server-github"],
+      "protocol": "stdio",
+      "env": {
+        "GITHUB_TOKEN": "${keyring:github_token}",
+        "OPENAI_API_KEY": "${keyring:openai_api_key}"
+      },
+      "enabled": true
+    },
+    {
+      "name": "database-server",
+      "command": "python",
+      "args": ["-m", "my_db_server", "--password", "${keyring:database_password}"],
+      "protocol": "stdio",
+      "enabled": true
+    }
+  ]
+}
+```
+
+**Placeholder expansion works in:**
+- ✅ Environment variables (`env` field)
+- ✅ Command arguments (`args` field)
+- ❌ Server names, commands, URLs (static fields)
+
+### 🏗️ **Secret Storage Architecture**
+
+**Storage Location:**
+- **macOS**: Keychain Access (`/Applications/Utilities/Keychain Access.app`)
+- **Linux**: Secret Service (GNOME Keyring, KDE Wallet, etc.)
+- **Windows**: Windows Credential Manager
+
+**Service Name:** All secrets are stored under the service name `"mcpproxy"`
+
+**Global Scope:**
+- ✅ Secrets are **shared across all MCPProxy instances** regardless of:
+  - Configuration file location (`--config` flag)
+  - Data directory (`--data-dir` flag)
+  - Working directory
+- ✅ Same secrets work across different projects and setups
+- ⚠️ **No isolation** - all MCPProxy instances access the same keyring
+
+### 🎯 **Best Practices for Multiple Projects**
+
+If you use MCPProxy with multiple projects or environments, use descriptive secret names:
+
+```bash
+# Environment-specific secrets
+mcpproxy secrets set prod_database_url
+mcpproxy secrets set dev_database_url
+mcpproxy secrets set staging_api_key
+
+# Project-specific secrets
+mcpproxy secrets set work_github_token
+mcpproxy secrets set personal_github_token
+mcpproxy secrets set client_a_api_key
+```
+
+Then reference them in your configs:
+```jsonc
+{
+  "mcpServers": [
+    {
+      "name": "work-github",
+      "env": {
+        "GITHUB_TOKEN": "${keyring:work_github_token}"
+      }
+    },
+    {
+      "name": "personal-github",
+      "env": {
+        "GITHUB_TOKEN": "${keyring:personal_github_token}"
+      }
+    }
+  ]
+}
+```
+
+### 🔍 **Security Considerations**
+
+- **Encrypted storage**: Secrets are encrypted by the OS keyring
+- **Process isolation**: Other applications cannot access MCPProxy secrets without appropriate permissions
+- **No file storage**: Secrets are never written to config files or logs
+- **Audit trail**: OS keyring may provide access logs (varies by platform)
+
+### 🐛 **Troubleshooting**
+
+**Secret not found:**
+```bash
+# Verify secret exists
+mcpproxy secrets list
+
+# Check the exact secret name (case-sensitive)
+mcpproxy secrets get your_secret_name
+```
+
+**Keyring access denied:**
+- **macOS**: Grant MCPProxy access in `System Preferences > Security & Privacy > Privacy > Accessibility`
+- **Linux**: Ensure your desktop session has an active keyring service
+- **Windows**: Run MCPProxy with appropriate user permissions
+
+**Placeholder not resolving:**
+```bash
+# Test secret resolution
+mcpproxy secrets get your_secret_name
+
+# Check logs for secret resolution errors
+mcpproxy serve --log-level=debug
+```
+
+---
+
 ## 🐳 Docker Security Isolation
 
 MCPProxy provides **Docker isolation** for stdio MCP servers to enhance security by running each server in its own isolated container:

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream/core"
 	"mcpproxy-go/internal/upstream/types"
@@ -50,9 +51,9 @@ type Client struct {
 }
 
 // NewClient creates a new managed client with state management
-func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB) (*Client, error) {
+func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
 	// Create core client
-	coreClient, err := core.NewClient(id, serverConfig, logger, logConfig, globalConfig, storage)
+	coreClient, err := core.NewClient(id, serverConfig, logger, logConfig, globalConfig, storage, secretResolver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client: %w", err)
 	}

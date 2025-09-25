@@ -12,6 +12,7 @@ import (
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/server"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
@@ -307,8 +308,11 @@ func runBuiltInTool(ctx context.Context, toolName string, args map[string]interf
 	}
 	defer indexManager.Close()
 
+	// Create secret resolver for command execution
+	secretResolver := secret.NewResolver()
+
 	// Create upstream manager
-	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB())
+	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB(), secretResolver)
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
