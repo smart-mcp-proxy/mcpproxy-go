@@ -556,12 +556,52 @@ jobs:
 
       - name: Upload DMG installer (macOS)
         if: matrix.goos == 'darwin'
+        run: |
+          # For prerelease, determine version to create exact DMG name (reuse from build step)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Get last tag on any branch for base version
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            COMMIT_HASH=$(git rev-parse --short HEAD)
+            VERSION="${LAST_TAG}-next.${COMMIT_HASH}"
+          fi
+
+          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
+          SUBMISSION_ID_FILE="${DMG_NAME}.submission_id"
+
+          echo "Looking for DMG: ${DMG_NAME}"
+          echo "Looking for submission ID: ${SUBMISSION_ID_FILE}"
+
+          # Verify files exist before upload
+          if [ -f "${DMG_NAME}" ]; then
+            echo "✅ Found DMG: ${DMG_NAME}"
+          else
+            echo "❌ DMG not found: ${DMG_NAME}"
+            exit 1
+          fi
+
+          # Create artifact directory
+          mkdir -p dmg-artifact
+          cp "${DMG_NAME}" dmg-artifact/
+
+          # Copy submission ID file if it exists
+          if [ -f "${SUBMISSION_ID_FILE}" ]; then
+            echo "✅ Found submission ID file: ${SUBMISSION_ID_FILE}"
+            cp "${SUBMISSION_ID_FILE}" dmg-artifact/
+          else
+            echo "⚠️  No submission ID file found: ${SUBMISSION_ID_FILE}"
+          fi
+
+          echo "Files to upload:"
+          ls -la dmg-artifact/
+
+      - name: Upload DMG artifact (macOS)
+        if: matrix.goos == 'darwin'
         uses: actions/upload-artifact@v4
         with:
           name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
-            mcpproxy-*-darwin-${{ matrix.goarch }}.dmg.submission_id
+          path: dmg-artifact/*
 
   release:
     needs: build
