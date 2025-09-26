@@ -128,6 +128,12 @@ class APIService {
   }
 
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<APIResponse<T>> {
+    // Ensure API key initialization is complete
+    if (!this.initialized) {
+      console.log('API service not initialized, initializing now...')
+      this.initializeAPIKey()
+    }
+
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -153,12 +159,14 @@ class APIService {
         headers['X-API-Key'] = this.apiKey
         console.log(`API request to ${endpoint} with API key: ${this.getAPIKeyPreview()}`)
       } else {
-        console.log(`API request to ${endpoint} without API key`)
+        console.log(`API request to ${endpoint} without API key - initialized: ${this.initialized}`)
+        console.log('Current URL search params:', window.location.search)
+        console.log('LocalStorage API key:', localStorage.getItem('mcpproxy-api-key')?.substring(0, 8) + '...')
       }
 
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
-        headers,
         ...options,
+        headers,
       })
 
       if (!response.ok) {
@@ -257,6 +265,29 @@ class APIService {
   async runMigrationAnalysis(): Promise<APIResponse<{ analysis: MigrationAnalysis }>> {
     return this.request<{ analysis: MigrationAnalysis }>('/api/v1/secrets/migrate', {
       method: 'POST',
+    })
+  }
+
+  async setSecret(name: string, value: string, type: string = 'keyring'): Promise<APIResponse<{
+    message: string
+    name: string
+    type: string
+    reference: string
+  }>> {
+    return this.request('/api/v1/secrets', {
+      method: 'POST',
+      body: JSON.stringify({ name, value, type })
+    })
+  }
+
+  async deleteSecret(name: string, type: string = 'keyring'): Promise<APIResponse<{
+    message: string
+    name: string
+    type: string
+  }>> {
+    const url = `/api/v1/secrets/${encodeURIComponent(name)}?type=${encodeURIComponent(type)}`
+    return this.request(url, {
+      method: 'DELETE'
     })
   }
 

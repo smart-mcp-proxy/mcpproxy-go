@@ -245,6 +245,8 @@ func (s *Server) setupRoutes() {
 			r.Get("/refs", s.handleGetSecretRefs)
 			r.Get("/config", s.handleGetConfigSecrets)
 			r.Post("/migrate", s.handleMigrateSecrets)
+			r.Post("/", s.handleSetSecret)
+			r.Delete("/{name}", s.handleDeleteSecret)
 		})
 	})
 
@@ -833,4 +835,123 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.writeSuccess(w, configSecrets)
+}
+
+func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	resolver := s.controller.GetSecretResolver()
+	if resolver == nil {
+		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		return
+	}
+
+	var request struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+		Type  string `json:"type"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	if request.Name == "" {
+		s.writeError(w, http.StatusBadRequest, "Secret name is required")
+		return
+	}
+
+	if request.Value == "" {
+		s.writeError(w, http.StatusBadRequest, "Secret value is required")
+		return
+	}
+
+	// Default to keyring if type not specified
+	if request.Type == "" {
+		request.Type = "keyring"
+	}
+
+	// Only allow keyring type for security
+	if request.Type != "keyring" {
+		s.writeError(w, http.StatusBadRequest, "Only keyring type is supported")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	ref := secret.SecretRef{
+		Type: request.Type,
+		Name: request.Name,
+	}
+
+	err := resolver.Store(ctx, ref, request.Value)
+	if err != nil {
+		s.logger.Error("Failed to store secret", "name", request.Name, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to store secret: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, map[string]interface{}{
+		"message":   fmt.Sprintf("Secret '%s' stored successfully in %s", request.Name, request.Type),
+		"name":      request.Name,
+		"type":      request.Type,
+		"reference": fmt.Sprintf("${%s:%s}", request.Type, request.Name),
+	})
+}
+
+func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	resolver := s.controller.GetSecretResolver()
+	if resolver == nil {
+		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		s.writeError(w, http.StatusBadRequest, "Secret name is required")
+		return
+	}
+
+	// Get optional type from query parameter, default to keyring
+	secretType := r.URL.Query().Get("type")
+	if secretType == "" {
+		secretType = "keyring"
+	}
+
+	// Only allow keyring type for security
+	if secretType != "keyring" {
+		s.writeError(w, http.StatusBadRequest, "Only keyring type is supported")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	ref := secret.SecretRef{
+		Type: secretType,
+		Name: name,
+	}
+
+	err := resolver.Delete(ctx, ref)
+	if err != nil {
+		s.logger.Error("Failed to delete secret", "name", name, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete secret: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, map[string]interface{}{
+		"message": fmt.Sprintf("Secret '%s' deleted successfully from %s", name, secretType),
+		"name":    name,
+		"type":    secretType,
+	})
 }

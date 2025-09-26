@@ -51,6 +51,57 @@
         <button @click="runMigrationAnalysis" class="action-button secondary" :disabled="analysisLoading">
           🔍 {{ analysisLoading ? 'Analyzing...' : 'Analyze Configuration' }}
         </button>
+        <button @click="showAddSecretForm = !showAddSecretForm" class="action-button">
+          {{ showAddSecretForm ? '✕ Cancel' : '➕ Add Secret' }}
+        </button>
+      </div>
+
+      <!-- Add Secret Form -->
+      <div v-if="showAddSecretForm" class="add-secret-form">
+        <h3>Add New Secret</h3>
+        <form @submit.prevent="addSecret">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="secret-name">Secret Name</label>
+              <input
+                id="secret-name"
+                v-model="newSecret.name"
+                type="text"
+                placeholder="e.g. my-api-key"
+                required
+                class="form-input"
+              />
+              <small class="form-hint">Use only letters, numbers, and hyphens</small>
+            </div>
+            <div class="form-group">
+              <label for="secret-value">Secret Value</label>
+              <input
+                id="secret-value"
+                v-model="newSecret.value"
+                type="password"
+                placeholder="Enter secret value"
+                required
+                class="form-input"
+              />
+            </div>
+          </div>
+          <div class="form-actions">
+            <button
+              type="submit"
+              class="action-button"
+              :disabled="addingSecret || !newSecret.name || !newSecret.value"
+            >
+              {{ addingSecret ? 'Adding...' : 'Add Secret' }}
+            </button>
+            <button type="button" @click="cancelAddSecret" class="action-button secondary">
+              Cancel
+            </button>
+          </div>
+          <div class="form-preview" v-if="newSecret.name">
+            <strong>Configuration reference:</strong>
+            <code>${keyring:{{ newSecret.name }}}</code>
+          </div>
+        </form>
       </div>
 
       <!-- Tabs -->
@@ -75,11 +126,11 @@
           <div v-if="activeTab === 'secrets'" class="tab-panel">
             <div class="section">
               <h2 class="section-title">Keyring Secrets Referenced in Configuration</h2>
-              <div v-if="!configSecrets?.secrets?.length" class="empty-state">
+              <div v-if="!configSecrets?.secrets || configSecrets.secrets.length === 0" class="empty-state">
                 <div class="empty-icon">🔐</div>
                 <h3>No Keyring Secrets Referenced</h3>
                 <p>No keyring secret references are currently used in your configuration.</p>
-                <p>Use the CLI to store secrets: <code>mcpproxy secrets set &lt;name&gt;</code></p>
+                <p>Use the form below to store secrets or use the CLI: <code>mcpproxy secrets set &lt;name&gt;</code></p>
                 <p>Then reference them in config: <code>${keyring:name}</code></p>
               </div>
               <div v-else class="secrets-list">
@@ -214,6 +265,12 @@ const configSecrets = ref<ConfigSecretsResponse | null>(null)
 const migrationCandidates = ref<MigrationCandidate[]>([])
 const analysisLoading = ref(false)
 const activeTab = ref('secrets')
+const showAddSecretForm = ref(false)
+const addingSecret = ref(false)
+const newSecret = ref({
+  name: '',
+  value: ''
+})
 
 const missingEnvVars = computed(() => {
   return configSecrets.value?.environment_vars?.filter(env => !env.is_set).length || 0
@@ -225,8 +282,10 @@ const loadConfigSecrets = async () => {
 
   try {
     const response = await apiClient.getConfigSecrets()
+    console.log('Config secrets response:', response) // Debug log
     if (response.success && response.data) {
       configSecrets.value = response.data
+      console.log('Loaded config secrets:', configSecrets.value) // Debug log
     } else {
       error.value = response.error || 'Failed to load config secrets'
     }
@@ -264,14 +323,58 @@ const testSecret = async (ref: SecretRef) => {
   alert(`Secret "${ref.name}" is available in ${ref.type}`)
 }
 
-const deleteSecret = async (ref: SecretRef) => {
-  if (confirm(`Are you sure you want to delete secret "${ref.name}"?`)) {
-    try {
-      // This would call the CLI or API to delete the secret
-      alert('Secret deletion via UI is not yet implemented. Use the CLI: mcpproxy secrets del ' + ref.name)
-    } catch (err: any) {
-      alert('Failed to delete secret: ' + err.message)
+const addSecret = async () => {
+  if (!newSecret.value.name || !newSecret.value.value) {
+    return
+  }
+
+  addingSecret.value = true
+
+  try {
+    const response = await apiClient.setSecret(newSecret.value.name, newSecret.value.value)
+    if (response.success) {
+      // Show success message
+      alert(`Secret "${newSecret.value.name}" added successfully!\nUse in config: ${response.data?.reference}`)
+
+      // Reset form and hide it
+      cancelAddSecret()
+
+      // Reload secrets to show the new one
+      await loadConfigSecrets()
+    } else {
+      alert('Failed to add secret: ' + (response.error || 'Unknown error'))
     }
+  } catch (err: any) {
+    alert('Failed to add secret: ' + err.message)
+    console.error('Failed to add secret:', err)
+  } finally {
+    addingSecret.value = false
+  }
+}
+
+const cancelAddSecret = () => {
+  showAddSecretForm.value = false
+  newSecret.value.name = ''
+  newSecret.value.value = ''
+}
+
+const deleteSecret = async (ref: SecretRef) => {
+  if (!confirm(`Are you sure you want to delete secret "${ref.name}"?`)) {
+    return
+  }
+
+  try {
+    const response = await apiClient.deleteSecret(ref.name, ref.type)
+    if (response.success) {
+      alert(`Secret "${ref.name}" deleted successfully!`)
+      // Reload secrets to update the list
+      await loadConfigSecrets()
+    } else {
+      alert('Failed to delete secret: ' + (response.error || 'Unknown error'))
+    }
+  } catch (err: any) {
+    alert('Failed to delete secret: ' + err.message)
+    console.error('Failed to delete secret:', err)
   }
 }
 
@@ -331,7 +434,13 @@ To make it permanent, add it to your shell profile or use your system's environm
   alert(instructions)
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // Give the API service time to initialize the API key from URL params
+  await new Promise(resolve => setTimeout(resolve, 100))
+
+  // Debug: Check if API key is available
+  console.log('API key available on secrets mount:', apiClient.hasAPIKey(), apiClient.getAPIKeyPreview())
+
   loadConfigSecrets()
 })
 </script>
@@ -725,6 +834,88 @@ onMounted(() => {
   border-radius: 4px;
   font-family: 'Courier New', monospace;
   font-size: 0.875rem;
+}
+
+/* Add Secret Form Styles */
+.add-secret-form {
+  background: var(--card-background);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.add-secret-form h3 {
+  margin: 0 0 1rem 0;
+  color: var(--text-primary);
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.form-group label {
+  margin-bottom: 0.5rem;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.form-input {
+  padding: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--card-background);
+  color: var(--text-primary);
+  font-size: 1rem;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px var(--primary-color)20;
+}
+
+.form-hint {
+  margin-top: 0.25rem;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.form-actions {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.form-preview {
+  padding: 0.75rem;
+  background: var(--code-background);
+  border-radius: 4px;
+  border-left: 3px solid var(--primary-color);
+}
+
+.form-preview code {
+  background: transparent;
+  color: var(--primary-color);
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .form-actions {
+    flex-direction: column;
+  }
 }
 
 /* CSS Variables (these would typically be defined in your main CSS) */
