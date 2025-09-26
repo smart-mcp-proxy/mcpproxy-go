@@ -39,17 +39,17 @@ func (p *EnvProvider) Resolve(_ context.Context, ref SecretRef) (string, error) 
 }
 
 // Store is not supported for environment variables
-func (p *EnvProvider) Store(_ context.Context, ref SecretRef, value string) error {
+func (p *EnvProvider) Store(_ context.Context, _ SecretRef, _ string) error {
 	return fmt.Errorf("env provider does not support storing secrets")
 }
 
 // Delete is not supported for environment variables
-func (p *EnvProvider) Delete(_ context.Context, ref SecretRef) error {
+func (p *EnvProvider) Delete(_ context.Context, _ SecretRef) error {
 	return fmt.Errorf("env provider does not support deleting secrets")
 }
 
 // List returns all environment variables that look like secrets
-func (p *EnvProvider) List(ctx context.Context) ([]SecretRef, error) {
+func (p *EnvProvider) List(_ context.Context) ([]SecretRef, error) {
 	var refs []SecretRef
 
 	for _, env := range os.Environ() {

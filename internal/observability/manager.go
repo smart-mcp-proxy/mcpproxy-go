@@ -64,10 +64,10 @@ type Manager struct {
 }
 
 // NewManager creates a new observability manager
-func NewManager(logger *zap.SugaredLogger, config Config) (*Manager, error) {
+func NewManager(logger *zap.SugaredLogger, config *Config) (*Manager, error) {
 	manager := &Manager{
 		logger:    logger,
-		config:    config,
+		config:    *config,
 		startTime: time.Now(),
 	}
 

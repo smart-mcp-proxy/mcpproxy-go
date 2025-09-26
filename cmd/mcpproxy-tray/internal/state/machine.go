@@ -253,9 +253,8 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 			// Check retry count
 			if m.shouldRetry(StateReconnecting) {
 				return StateConnectingAPI
-			} else {
-				return StateFailed
 			}
+			return StateFailed
 		case EventShutdown:
 			return StateShuttingDown
 		}
@@ -265,9 +264,8 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 		case EventRetry:
 			if m.shouldRetry(currentState) {
 				return StateLaunchingCore
-			} else {
-				return StateFailed
 			}
+			return StateFailed
 		case EventShutdown:
 			return StateShuttingDown
 		}
@@ -282,8 +280,7 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 		}
 
 	case StateFailed:
-		switch event {
-		case EventShutdown:
+		if event == EventShutdown {
 			return StateShuttingDown
 		}
 
@@ -333,7 +330,7 @@ func (m *Machine) transition(from, to State, event Event, data map[string]interf
 	m.handleStateEntry(to)
 
 	// Notify subscribers
-	m.notifySubscribers(transition)
+	m.notifySubscribers(&transition)
 
 	// Send to transition channel
 	select {
@@ -428,13 +425,13 @@ func (m *Machine) clearTimeoutTimerUnsafe() {
 }
 
 // notifySubscribers sends transition notifications to all subscribers
-func (m *Machine) notifySubscribers(transition StateTransition) {
+func (m *Machine) notifySubscribers(transition *StateTransition) {
 	m.subscribersMu.RLock()
 	defer m.subscribersMu.RUnlock()
 
 	for _, subscriber := range m.subscribers {
 		select {
-		case subscriber <- transition:
+		case subscriber <- *transition:
 		default:
 			// Subscriber channel full, skip
 			m.logger.Debug("Subscriber channel full, dropping transition notification")

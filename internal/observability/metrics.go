@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
@@ -148,8 +149,8 @@ func (mm *MetricsManager) registerMetrics() {
 	)
 
 	// Also register Go runtime metrics
-	mm.registry.MustRegister(prometheus.NewGoCollector())
-	mm.registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	mm.registry.MustRegister(collectors.NewGoCollector())
+	mm.registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 }
 
 // Handler returns an HTTP handler for the /metrics endpoint

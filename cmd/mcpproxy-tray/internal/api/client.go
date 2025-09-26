@@ -118,7 +118,14 @@ func (c *Client) StartSSE(ctx context.Context) error {
 			attemptCount++
 
 			// Calculate exponential backoff delay
-			backoffFactor := 1 << uint(min(attemptCount-1, 4))
+			minVal := attemptCount - 1
+			if minVal > 4 {
+				minVal = 4
+			}
+			if minVal < 0 {
+				minVal = 0
+			}
+			backoffFactor := 1 << minVal
 			delay := time.Duration(int64(baseDelay) * int64(backoffFactor))
 			if delay > maxDelay {
 				delay = maxDelay
@@ -186,14 +193,6 @@ func (c *Client) StartSSE(ctx context.Context) error {
 	}()
 
 	return nil
-}
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // StopSSE stops the SSE connection
@@ -524,59 +523,73 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 			}
 			return nil, fmt.Errorf("request failed after %d attempts: %w", maxRetries, err)
 		}
-		defer resp.Body.Close()
 
-		// Handle specific HTTP status codes
-		switch resp.StatusCode {
-		case 401:
-			return nil, fmt.Errorf("authentication failed: invalid or missing API key")
-		case 403:
-			return nil, fmt.Errorf("authorization failed: insufficient permissions")
-		case 404:
-			return nil, fmt.Errorf("endpoint not found: %s", path)
-		case 429:
-			// Rate limited - retry with exponential backoff
-			if attempt < maxRetries {
-				delay := time.Duration(attempt*attempt) * baseDelay
-				if c.logger != nil {
-					c.logger.Warn("Rate limited, retrying",
-						"attempt", attempt,
-						"delay", delay,
-						"status", resp.StatusCode)
-				}
-				time.Sleep(delay)
-				continue
-			}
-			return nil, fmt.Errorf("rate limited after %d attempts", maxRetries)
-		case 500, 502, 503, 504:
-			// Server errors - retry
-			if attempt < maxRetries {
-				delay := time.Duration(attempt) * baseDelay
-				if c.logger != nil {
-					c.logger.Warn("Server error, retrying",
-						"attempt", attempt,
-						"status", resp.StatusCode,
-						"delay", delay)
-				}
-				time.Sleep(delay)
-				continue
-			}
-			return nil, fmt.Errorf("server error after %d attempts: status %d", maxRetries, resp.StatusCode)
+		// Process response with proper cleanup
+		result, shouldContinue, err := c.processResponse(resp, attempt, maxRetries, baseDelay, path)
+		if err != nil {
+			return nil, err
 		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("API call failed with status %d", resp.StatusCode)
+		if shouldContinue {
+			continue
 		}
-
-		var apiResp Response
-		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-			return nil, fmt.Errorf("failed to decode response: %w", err)
-		}
-
-		return &apiResp, nil
+		return result, nil
 	}
 
 	return nil, fmt.Errorf("unexpected error in request retry loop")
+}
+
+// processResponse handles response processing with proper cleanup
+func (c *Client) processResponse(resp *http.Response, attempt, maxRetries int, baseDelay time.Duration, path string) (*Response, bool, error) {
+	defer resp.Body.Close()
+
+	// Handle specific HTTP status codes
+	switch resp.StatusCode {
+	case 401:
+		return nil, false, fmt.Errorf("authentication failed: invalid or missing API key")
+	case 403:
+		return nil, false, fmt.Errorf("authorization failed: insufficient permissions")
+	case 404:
+		return nil, false, fmt.Errorf("endpoint not found: %s", path)
+	case 429:
+		// Rate limited - retry with exponential backoff
+		if attempt < maxRetries {
+			delay := time.Duration(attempt*attempt) * baseDelay
+			if c.logger != nil {
+				c.logger.Warn("Rate limited, retrying",
+					"attempt", attempt,
+					"delay", delay,
+					"status", resp.StatusCode)
+			}
+			time.Sleep(delay)
+			return nil, true, nil // shouldContinue = true
+		}
+		return nil, false, fmt.Errorf("rate limited after %d attempts", maxRetries)
+	case 500, 502, 503, 504:
+		// Server errors - retry
+		if attempt < maxRetries {
+			delay := time.Duration(attempt) * baseDelay
+			if c.logger != nil {
+				c.logger.Warn("Server error, retrying",
+					"attempt", attempt,
+					"status", resp.StatusCode,
+					"delay", delay)
+			}
+			time.Sleep(delay)
+			return nil, true, nil // shouldContinue = true
+		}
+		return nil, false, fmt.Errorf("server error after %d attempts: status %d", maxRetries, resp.StatusCode)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false, fmt.Errorf("API call failed with status %d", resp.StatusCode)
+	}
+
+	var apiResp Response
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, false, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &apiResp, false, nil
 }
 
 // Helper functions to safely extract values from maps

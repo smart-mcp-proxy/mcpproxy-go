@@ -93,7 +93,7 @@ type ProcessMonitor struct {
 }
 
 // NewProcessMonitor creates a new process monitor
-func NewProcessMonitor(config ProcessConfig, logger *zap.SugaredLogger, stateMachine *state.Machine) *ProcessMonitor {
+func NewProcessMonitor(config *ProcessConfig, logger *zap.SugaredLogger, stateMachine *state.Machine) *ProcessMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Set default timeout if not specified
@@ -102,7 +102,7 @@ func NewProcessMonitor(config ProcessConfig, logger *zap.SugaredLogger, stateMac
 	}
 
 	return &ProcessMonitor{
-		config:       config,
+		config:       *config,
 		logger:       logger,
 		stateMachine: stateMachine,
 		status:       ProcessStatusStopped,

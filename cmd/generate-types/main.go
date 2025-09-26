@@ -28,7 +28,7 @@ func main() {
 
 %s`, time.Now().Format(time.RFC3339), typeDefinitions)
 
-	if err := os.WriteFile(outputFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(outputFile, []byte(content), 0600); err != nil {
 		fmt.Printf("Error writing TypeScript file: %v\n", err)
 		os.Exit(1)
 	}

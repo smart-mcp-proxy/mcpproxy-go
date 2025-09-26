@@ -748,7 +748,7 @@ func (cpl *CoreProcessLauncher) handleLaunchCore(ctx context.Context) {
 	}
 
 	// Create process monitor
-	cpl.processMonitor = monitor.NewProcessMonitor(processConfig, cpl.logger, cpl.stateMachine)
+	cpl.processMonitor = monitor.NewProcessMonitor(&processConfig, cpl.logger, cpl.stateMachine)
 
 	// Start the process
 	if err := cpl.processMonitor.Start(); err != nil {
