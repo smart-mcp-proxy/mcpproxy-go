@@ -23,6 +23,8 @@ build: frontend-build
 
 # Build frontend for production
 frontend-build:
+	@echo "🎨 Generating TypeScript types from Go contracts..."
+	go run ./cmd/generate-types
 	@echo "🎨 Building frontend for production..."
 	cd frontend && npm install && npm run build
 	@echo "📁 Copying dist files for embedding..."
