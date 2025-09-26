@@ -625,6 +625,169 @@ MCPProxy leverages the `mark3labs/mcp-go` library's native OAuth support:
 4. **Token Storage**: In-memory token storage with automatic refresh
 5. **Exact URI Matching**: Perfect URI consistency for Cloudflare OAuth compliance
 
+## 12.7  Web UI Authentication Flow
+
+MCPProxy implements a **two-tier authentication architecture** that separates UI access from API access, enabling a smooth user experience while maintaining security for API endpoints.
+
+### Authentication Architecture
+
+```
+┌─────────────────┐    No Auth     ┌─────────────────┐    API Key     ┌─────────────────┐
+│  Static Files   │ ────────────▶  │   Web UI/SPA    │ ────────────▶  │  REST API       │
+│                 │                │                 │                │                 │
+│ • HTML files    │                │ • JavaScript     │                │ • /api/v1/*     │
+│ • CSS/JS/Images │                │ • localStorage   │                │ • /events (SSE) │
+│ • Assets folder │                │ • API calls      │                │ • Protected     │
+└─────────────────┘                └─────────────────┘                └─────────────────┘
+```
+
+### Endpoint Protection Matrix
+
+| Endpoint Type | Path Examples | Authentication Required | Purpose |
+|--------------|---------------|------------------------|---------|
+| **UI Static** | `/ui/`, `/ui/assets/`, `*.html`, `*.js`, `*.css` | ❌ No | SPA loading & assets |
+| **API Endpoints** | `/api/v1/*` | ✅ API Key | Data access |
+| **SSE Events** | `/events` | ✅ API Key | Real-time updates |
+| **Health Checks** | `/healthz`, `/ready` | ❌ No | System monitoring |
+
+### Authentication Flow
+
+#### 1. Initial Page Load
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Backend as MCPProxy Backend
+    participant SPA as Vue.js SPA
+
+    Browser->>Backend: GET /ui/?apikey=ABC123
+    Backend-->>Browser: index.html (no auth required)
+    Browser->>Backend: GET /ui/assets/app.js (no auth)
+    Backend-->>Browser: JavaScript bundle
+    SPA->>SPA: initializeAPIKey()
+    SPA->>SPA: Store "ABC123" in localStorage
+    SPA->>SPA: Remove ?apikey from URL (security)
+    SPA->>Backend: GET /api/v1/servers (X-API-Key: ABC123)
+    Backend-->>SPA: Server data (authenticated)
+```
+
+#### 2. Page Reload Flow
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Backend as MCPProxy Backend
+    participant SPA as Vue.js SPA
+    participant LocalStorage
+
+    Browser->>Backend: GET /ui/ (no query params)
+    Backend-->>Browser: index.html (no auth required)
+    Browser->>Backend: GET /ui/assets/app.js (no auth)
+    Backend-->>Browser: JavaScript bundle
+    SPA->>LocalStorage: getItem('mcpproxy-api-key')
+    LocalStorage-->>SPA: "ABC123"
+    SPA->>Backend: GET /api/v1/servers (X-API-Key: ABC123)
+    Backend-->>SPA: Server data (authenticated)
+```
+
+### Frontend Implementation
+
+**API Service Initialization** (`frontend/src/services/api.ts`):
+```typescript
+private initializeAPIKey() {
+  // Set initialized flag first to prevent race conditions
+  this.initialized = true;
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const apiKeyFromURL = urlParams.get('apikey');
+
+  if (apiKeyFromURL) {
+    // URL param always takes priority (for backend restarts with new keys)
+    this.apiKey = apiKeyFromURL;
+    localStorage.setItem('mcpproxy-api-key', apiKeyFromURL);
+    // Clean URL for security
+    urlParams.delete('apikey');
+    window.history.replaceState({}, '', newURL);
+  } else {
+    // Fallback to localStorage
+    const storedApiKey = localStorage.getItem('mcpproxy-api-key');
+    if (storedApiKey) {
+      this.apiKey = storedApiKey;
+    }
+  }
+}
+```
+
+### Backend Implementation
+
+**UI Handler** (`internal/server/server.go`):
+```go
+// createSelectiveWebUIProtectedHandler serves the Web UI without authentication
+// for HTML and static assets, allowing the SPA to load and use localStorage for API keys.
+// API endpoints are protected separately by the httpAPIServer middleware.
+func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http.Handler {
+  return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    // Allow static assets and HTML pages without authentication
+    if strings.HasPrefix(r.URL.Path, "/ui/assets/") ||
+       strings.HasSuffix(r.URL.Path, ".css") ||
+       strings.HasSuffix(r.URL.Path, ".js") ||
+       strings.HasSuffix(r.URL.Path, ".html") ||
+       r.URL.Path == "/ui/" || r.URL.Path == "/ui" {
+      handler.ServeHTTP(w, r)
+      return
+    }
+    // Other paths would require authentication (but this handler only serves /ui/*)
+  })
+}
+```
+
+**API Handler** (`internal/httpapi/server.go`):
+```go
+// API routes with authentication middleware
+s.router.Route("/api/v1", func(r chi.Router) {
+  r.Use(s.apiKeyAuthMiddleware()) // ← Authentication required
+  r.Get("/servers", s.handleGetServers)
+  // ... other API endpoints
+})
+
+// SSE events also protected
+s.router.With(s.apiKeyAuthMiddleware()).Method("GET", "/events", ...)
+```
+
+### Error Handling
+
+**401/403 Response Handling**:
+1. **API Service** (`api.ts:177-180`): Detects 401/403 responses and emits auth error events
+2. **AuthErrorModal** (`AuthErrorModal.vue`): Displays user-friendly instructions
+3. **User Recovery Options**:
+   - **Tray Menu**: "Open Web UI" with correct API key
+   - **Manual Entry**: Input API key directly in modal
+   - **Log Inspection**: Find API key in mcpproxy startup logs
+
+### Security Benefits
+
+1. **SPA Loading**: HTML and assets load without auth, enabling proper SPA initialization
+2. **API Protection**: All data endpoints require valid API keys
+3. **Clean URLs**: API keys removed from browser URL bar after initialization
+4. **Persistence**: localStorage survives page reloads and navigation
+5. **Override Capability**: New `?apikey=` parameter overrides stored key
+6. **Progressive Enhancement**: Works with or without API key configuration
+
+### Usage Examples
+
+**Development (No API Key)**:
+```bash
+# Start without API key requirement
+./mcpproxy serve --api-key=""
+# Open browser: http://localhost:8080/ui/
+```
+
+**Production (API Key Required)**:
+```bash
+# Start with API key
+./mcpproxy serve --api-key="secure-key-123"
+# Tray menu: "Open Web UI" → http://localhost:8080/ui/?apikey=secure-key-123
+# After load: http://localhost:8080/ui/ (key in localStorage)
+```
+
 ## 13  Interface Architecture & Dependency Injection (P7)
 
 ### 13.1  Facades & Interfaces
