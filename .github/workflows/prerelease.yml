@@ -92,6 +92,12 @@ jobs:
       - name: Build frontend
         run: cd frontend && npm run build
 
+      - name: Copy frontend dist to embed location
+        run: |
+          rm -rf web/frontend
+          mkdir -p web/frontend
+          cp -r frontend/dist web/frontend/
+
       - name: Import Code-Signing Certificates (macOS)
         if: matrix.goos == 'darwin'
         run: |
