@@ -92,7 +92,7 @@ func NewMachine(logger *zap.SugaredLogger) *Machine {
 func (m *Machine) Start() {
 	m.logger.Info("State machine starting", "initial_state", m.currentState)
 	go m.run()
-	m.SendEvent(EventStart)
+	// Note: Initial event is now sent by the caller to allow proper SKIP_CORE handling
 }
 
 // SendEvent sends an event to the state machine

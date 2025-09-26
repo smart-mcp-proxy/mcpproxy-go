@@ -142,7 +142,7 @@ func main() {
 
 	trayApp := tray.NewWithAPIClient(api.NewServerAdapter(apiClient), apiClient, logger.Sugar(), version, shutdownFunc)
 
-	// Start the state machine
+	// Start the state machine (without automatic initial event)
 	stateMachine.Start()
 
 	// Launch core management with state machine
@@ -154,6 +154,15 @@ func main() {
 		trayApp,
 		coreTimeout,
 	)
+
+	// Send the appropriate initial event based on SKIP_CORE flag
+	if shouldSkipCoreLaunch() {
+		logger.Info("Skipping core launch, will connect to existing core")
+		stateMachine.SendEvent(state.EventSkipCore)
+	} else {
+		logger.Info("Will launch new core process")
+		stateMachine.SendEvent(state.EventStart)
+	}
 
 	go launcher.Start(ctx)
 
@@ -619,15 +628,8 @@ func (cpl *CoreProcessLauncher) Start(ctx context.Context) {
 	// Handle state transitions
 	go cpl.handleStateTransitions(ctx, transitionsCh)
 
-	// Check if we should skip core launch
-	if shouldSkipCoreLaunch() {
-		cpl.logger.Info("Skipping core launch, connecting to existing core")
-		cpl.stateMachine.SendEvent(state.EventSkipCore)
-		return
-	}
-
-	// Start with launching core
-	cpl.handleLaunchCore(ctx)
+	// The initial event (EventStart or EventSkipCore) is now sent from main.go
+	// based on the shouldSkipCoreLaunch() check, so we just wait for state transitions
 }
 
 // handleStateTransitions processes state machine transitions
@@ -711,7 +713,7 @@ func (cpl *CoreProcessLauncher) updateTrayConnectionState(machineState state.Sta
 }
 
 // handleLaunchCore handles launching the core process
-func (cpl *CoreProcessLauncher) handleLaunchCore(ctx context.Context) {
+func (cpl *CoreProcessLauncher) handleLaunchCore(_ context.Context) {
 	cpl.logger.Info("Launching mcpproxy core process")
 
 	// Stop existing process monitor if running
@@ -762,7 +764,7 @@ func (cpl *CoreProcessLauncher) handleLaunchCore(ctx context.Context) {
 }
 
 // handleWaitForCore handles waiting for the core to become ready
-func (cpl *CoreProcessLauncher) handleWaitForCore(ctx context.Context) {
+func (cpl *CoreProcessLauncher) handleWaitForCore(_ context.Context) {
 	cpl.logger.Info("Waiting for core to become ready")
 
 	// Create health monitor if not exists
