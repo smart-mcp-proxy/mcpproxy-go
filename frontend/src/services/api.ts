@@ -25,6 +25,9 @@ class APIService {
   }
 
   private initializeAPIKey() {
+    // Set initialized flag first to prevent race conditions
+    this.initialized = true
+
     const urlParams = new URLSearchParams(window.location.search)
     const apiKeyFromURL = urlParams.get('apikey')
 
@@ -48,7 +51,6 @@ class APIService {
         console.log('No API key found in URL or localStorage')
       }
     }
-    this.initialized = true
   }
 
   // Public method to reinitialize API key if needed

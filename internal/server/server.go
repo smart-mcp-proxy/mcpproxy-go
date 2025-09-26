@@ -90,51 +90,14 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	return server, nil
 }
 
-// createSelectiveWebUIProtectedHandler wraps a Web UI handler with API key authentication
-// that only applies to HTML pages, not static assets
+// createSelectiveWebUIProtectedHandler serves the Web UI without authentication.
+// Since this handler is only mounted on /ui/*, all paths it receives are UI paths
+// that should be served without authentication to allow the SPA to work properly.
+// API endpoints are protected separately by the httpAPIServer middleware.
 func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow static assets (CSS, JS, images, etc.) and HTML pages without authentication
-		// This enables proper UX where users can refresh the page without losing access
-		if strings.HasPrefix(r.URL.Path, "/ui/assets/") ||
-			strings.HasSuffix(r.URL.Path, ".css") ||
-			strings.HasSuffix(r.URL.Path, ".js") ||
-			strings.HasSuffix(r.URL.Path, ".png") ||
-			strings.HasSuffix(r.URL.Path, ".jpg") ||
-			strings.HasSuffix(r.URL.Path, ".jpeg") ||
-			strings.HasSuffix(r.URL.Path, ".svg") ||
-			strings.HasSuffix(r.URL.Path, ".ico") ||
-			strings.HasSuffix(r.URL.Path, ".woff") ||
-			strings.HasSuffix(r.URL.Path, ".woff2") ||
-			strings.HasSuffix(r.URL.Path, ".html") ||
-			r.URL.Path == "/ui/" ||
-			r.URL.Path == "/ui" {
-			handler.ServeHTTP(w, r)
-			return
-		}
-
-		// All other requests (API endpoints) still require authentication when enabled
-		cfg := s.runtime.Config()
-		if cfg == nil {
-			s.logger.Error("No configuration available for API key validation")
-			http.Error(w, "Server configuration error", http.StatusInternalServerError)
-			return
-		}
-
-		// If API key is empty, authentication is disabled
-		if cfg.APIKey == "" {
-			handler.ServeHTTP(w, r)
-			return
-		}
-
-		// Validate API key for non-UI requests
-		if !s.validateAPIKey(r, cfg.APIKey) {
-			http.Error(w, "Invalid or missing API key", http.StatusUnauthorized)
-			return
-		}
-
-		handler.ServeHTTP(w, r)
-	})
+	// Simply pass through all requests without authentication
+	// The handler is only mounted on /ui/* so it won't receive API requests
+	return handler
 }
 
 // validateAPIKey checks if the request contains a valid API key
