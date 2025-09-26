@@ -410,24 +410,47 @@ func generateAPIKey() string {
 	return hex.EncodeToString(bytes)
 }
 
+// APIKeySource represents where the API key came from
+type APIKeySource int
+
+const (
+	APIKeySourceEnvironment APIKeySource = iota
+	APIKeySourceConfig
+	APIKeySourceGenerated
+)
+
+// String returns a human-readable representation of the API key source
+func (s APIKeySource) String() string {
+	switch s {
+	case APIKeySourceEnvironment:
+		return "environment variable"
+	case APIKeySourceConfig:
+		return "configuration file"
+	case APIKeySourceGenerated:
+		return "auto-generated"
+	default:
+		return "unknown"
+	}
+}
+
 // EnsureAPIKey ensures the API key is set, generating one if needed
-// Returns the API key and whether it was auto-generated
-func (c *Config) EnsureAPIKey() (string, bool) {
+// Returns the API key, whether it was auto-generated, and the source
+func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource) {
 	// Check environment variable for API key first - this overrides config file
 	if envAPIKey := os.Getenv("MCPP_API_KEY"); envAPIKey != "" {
 		c.APIKey = envAPIKey
-		return c.APIKey, false
+		return c.APIKey, false, APIKeySourceEnvironment
 	}
 
 	// If API key was explicitly set in config (including empty string), respect it
 	if c.apiKeyExplicitlySet {
-		return c.APIKey, false // User-provided or explicitly disabled
+		return c.APIKey, false, APIKeySourceConfig // User-provided or explicitly disabled
 	}
 
 	// Generate a new API key only if not explicitly set
 	c.APIKey = generateAPIKey()
 	c.apiKeyExplicitlySet = true
-	return c.APIKey, true
+	return c.APIKey, true, APIKeySourceGenerated
 }
 
 // Validate validates the configuration

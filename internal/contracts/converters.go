@@ -87,7 +87,7 @@ func ConvertSearchResult(result *config.SearchResult) *SearchResult {
 
 // ConvertLogEntry converts a string log line to a contracts.LogEntry
 // This is a simplified conversion - in a real implementation you'd parse structured logs
-func ConvertLogEntry(line string, serverName string) *LogEntry {
+func ConvertLogEntry(line, serverName string) *LogEntry {
 	// Use a fixed timestamp for testing consistency
 	timestamp := time.Date(2025, 9, 19, 12, 0, 0, 0, time.UTC)
 
@@ -313,10 +313,10 @@ func NewSuccessResponse(data interface{}) APIResponse {
 	}
 }
 
-func NewErrorResponse(error string) APIResponse {
+func NewErrorResponse(errorMsg string) APIResponse {
 	return APIResponse{
 		Success: false,
-		Error:   error,
+		Error:   errorMsg,
 	}
 }
 

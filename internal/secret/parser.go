@@ -81,12 +81,12 @@ func MaskSecretValue(value string) string {
 }
 
 // DetectPotentialSecret analyzes a string to determine if it might be a secret
-func DetectPotentialSecret(value string, fieldName string) (bool, float64) {
+func DetectPotentialSecret(value, fieldName string) (isSecret bool, confidence float64) {
 	if value == "" {
 		return false, 0.0
 	}
 
-	confidence := 0.0
+	confidence = 0.0
 
 	// Field name indicators
 	fieldLower := strings.ToLower(fieldName)

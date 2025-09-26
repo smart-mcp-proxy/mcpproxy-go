@@ -94,7 +94,8 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 // that only applies to HTML pages, not static assets
 func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow static assets (CSS, JS, images, etc.) without authentication
+		// Allow static assets (CSS, JS, images, etc.) and HTML pages without authentication
+		// This enables proper UX where users can refresh the page without losing access
 		if strings.HasPrefix(r.URL.Path, "/ui/assets/") ||
 			strings.HasSuffix(r.URL.Path, ".css") ||
 			strings.HasSuffix(r.URL.Path, ".js") ||
@@ -104,12 +105,15 @@ func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http
 			strings.HasSuffix(r.URL.Path, ".svg") ||
 			strings.HasSuffix(r.URL.Path, ".ico") ||
 			strings.HasSuffix(r.URL.Path, ".woff") ||
-			strings.HasSuffix(r.URL.Path, ".woff2") {
+			strings.HasSuffix(r.URL.Path, ".woff2") ||
+			strings.HasSuffix(r.URL.Path, ".html") ||
+			r.URL.Path == "/ui/" ||
+			r.URL.Path == "/ui" {
 			handler.ServeHTTP(w, r)
 			return
 		}
 
-		// For HTML pages and root paths, require API key authentication
+		// All other requests (API endpoints) still require authentication when enabled
 		cfg := s.runtime.Config()
 		if cfg == nil {
 			s.logger.Error("No configuration available for API key validation")
@@ -123,7 +127,7 @@ func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http
 			return
 		}
 
-		// Validate API key
+		// Validate API key for non-UI requests
 		if !s.validateAPIKey(r, cfg.APIKey) {
 			http.Error(w, "Invalid or missing API key", http.StatusUnauthorized)
 			return

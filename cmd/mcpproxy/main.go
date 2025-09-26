@@ -47,6 +47,14 @@ const (
 	defaultLogLevel = "info"
 )
 
+// maskAPIKey returns a masked version of the API key showing only first and last 4 characters
+func maskAPIKey(apiKey string) string {
+	if len(apiKey) <= 8 {
+		return "****"
+	}
+	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
+}
+
 func main() {
 	// Set up registries initialization callback to avoid circular imports
 	config.SetRegistriesInitCallback(registries.SetRegistriesFromConfig)
@@ -365,15 +373,25 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
 	// Ensure API key is configured
-	apiKey, wasGenerated := cfg.EnsureAPIKey()
+	apiKey, wasGenerated, source := cfg.EnsureAPIKey()
 	if apiKey == "" {
 		logger.Info("API key authentication disabled")
 	} else if wasGenerated {
-		logger.Warn("API key was auto-generated for security. To access the Web UI and REST API, use this key:",
+		// Frame the auto-generated key message for visibility
+		frameMsg := strings.Repeat("*", 80)
+		logger.Warn(frameMsg)
+		logger.Warn("API key was auto-generated for security. To access the Web UI and REST API, use this key:")
+		logger.Warn("",
 			zap.String("api_key", apiKey),
-			zap.String("web_ui_url", fmt.Sprintf("http://%s/ui/?apikey=%s", cfg.Listen, apiKey)))
+			zap.String("web_ui_url", fmt.Sprintf("http://%s/ui/?apikey=%s", cfg.Listen, apiKey)),
+			zap.String("source", source.String()))
+		logger.Warn(frameMsg)
 	} else {
-		logger.Info("API key authentication enabled (using configured key)")
+		// Mask API key when it comes from environment or config file
+		maskedKey := maskAPIKey(apiKey)
+		logger.Info("API key authentication enabled",
+			zap.String("source", source.String()),
+			zap.String("api_key_prefix", maskedKey))
 	}
 
 	// Create server with the actual config path used

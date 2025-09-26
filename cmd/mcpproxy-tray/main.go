@@ -110,11 +110,20 @@ func main() {
 	coreURL := resolveCoreURL()
 	logger.Info("Resolved core URL", zap.String("core_url", coreURL))
 
-	// Generate API key for secure communication between tray and core
+	// Setup API key for secure communication between tray and core
 	if trayAPIKey == "" {
-		trayAPIKey = generateAPIKey()
-		logger.Info("Generated API key for tray-core communication",
-			zap.String("api_key_prefix", maskAPIKey(trayAPIKey)))
+		// Check environment variable first (for consistency with core behavior)
+		if envAPIKey := os.Getenv("MCPP_API_KEY"); envAPIKey != "" {
+			trayAPIKey = envAPIKey
+			logger.Info("Using API key from environment variable for tray-core communication",
+				zap.String("api_key_source", "MCPP_API_KEY environment variable"),
+				zap.String("api_key_prefix", maskAPIKey(trayAPIKey)))
+		} else {
+			trayAPIKey = generateAPIKey()
+			logger.Info("Generated API key for tray-core communication",
+				zap.String("api_key_source", "auto-generated"),
+				zap.String("api_key_prefix", maskAPIKey(trayAPIKey)))
+		}
 	}
 
 	// Create state machine

@@ -1,9 +1,19 @@
 import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse } from '@/types'
 
+// Event types for API service
+export interface APIAuthEvent {
+  type: 'auth-error'
+  error: string
+  status: number
+}
+
+type APIEventListener = (event: APIAuthEvent) => void
+
 class APIService {
   private baseUrl = ''
   private apiKey = ''
   private initialized = false
+  private eventListeners: APIEventListener[] = []
 
   constructor() {
     // In development, Vite proxy handles API calls
@@ -76,6 +86,32 @@ class APIService {
     }
   }
 
+  // Event system for global error handling
+  public addEventListener(listener: APIEventListener): () => void {
+    this.eventListeners.push(listener)
+    return () => {
+      const index = this.eventListeners.indexOf(listener)
+      if (index > -1) {
+        this.eventListeners.splice(index, 1)
+      }
+    }
+  }
+
+  private emitAuthError(error: string, status: number): void {
+    const event: APIAuthEvent = {
+      type: 'auth-error',
+      error,
+      status
+    }
+    this.eventListeners.forEach(listener => {
+      try {
+        listener(event)
+      } catch (err) {
+        console.error('Error in API event listener:', err)
+      }
+    })
+  }
+
   // Validate the current API key by making a test request
   public async validateAPIKey(): Promise<boolean> {
     if (!this.apiKey) {
@@ -132,6 +168,7 @@ class APIService {
         // Special handling for authentication errors
         if (response.status === 401 || response.status === 403) {
           console.error('Authentication failed - API key may be invalid or missing')
+          this.emitAuthError(errorMsg, response.status)
         }
 
         throw new Error(errorMsg)
