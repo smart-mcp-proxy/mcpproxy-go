@@ -7,7 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -21,7 +21,7 @@ type TracingConfig struct {
 	Enabled        bool    `json:"enabled"`
 	ServiceName    string  `json:"service_name"`
 	ServiceVersion string  `json:"service_version"`
-	JaegerEndpoint string  `json:"jaeger_endpoint"`
+	OTLPEndpoint   string  `json:"otlp_endpoint"`
 	SampleRate     float64 `json:"sample_rate"`
 }
 
@@ -53,7 +53,7 @@ func NewTracingManager(logger *zap.SugaredLogger, config TracingConfig) (*Tracin
 
 	logger.Infow("OpenTelemetry tracing initialized",
 		"service_name", config.ServiceName,
-		"jaeger_endpoint", config.JaegerEndpoint,
+		"otlp_endpoint", config.OTLPEndpoint,
 		"sample_rate", config.SampleRate)
 
 	return tm, nil
@@ -61,10 +61,13 @@ func NewTracingManager(logger *zap.SugaredLogger, config TracingConfig) (*Tracin
 
 // initTracing initializes OpenTelemetry tracing
 func (tm *TracingManager) initTracing() error {
-	// Create Jaeger exporter
-	exporter, err := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(tm.config.JaegerEndpoint)))
+	// Create OTLP exporter
+	exporter, err := otlptracehttp.New(context.Background(),
+		otlptracehttp.WithEndpoint(tm.config.OTLPEndpoint),
+		otlptracehttp.WithInsecure(), // Use HTTP instead of HTTPS for local development
+	)
 	if err != nil {
-		return fmt.Errorf("failed to create Jaeger exporter: %w", err)
+		return fmt.Errorf("failed to create OTLP exporter: %w", err)
 	}
 
 	// Create resource

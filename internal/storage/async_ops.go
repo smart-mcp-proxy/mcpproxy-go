@@ -9,15 +9,15 @@ import (
 	"mcpproxy-go/internal/config"
 )
 
-// StorageOperation represents a queued storage operation
-type StorageOperation struct {
+// Operation represents a queued storage operation
+type Operation struct {
 	Type     string
 	Data     interface{}
-	ResultCh chan StorageResult
+	ResultCh chan Result
 }
 
-// StorageResult contains the result of a storage operation
-type StorageResult struct {
+// Result contains the result of a storage operation
+type Result struct {
 	Error error
 	Data  interface{}
 }
@@ -26,7 +26,7 @@ type StorageResult struct {
 type AsyncManager struct {
 	logger  *zap.SugaredLogger
 	db      *BoltDB
-	opQueue chan StorageOperation
+	opQueue chan Operation
 	ctx     context.Context
 	cancel  context.CancelFunc
 	started bool
@@ -38,7 +38,7 @@ func NewAsyncManager(db *BoltDB, logger *zap.SugaredLogger) *AsyncManager {
 	return &AsyncManager{
 		logger:  logger,
 		db:      db,
-		opQueue: make(chan StorageOperation, 100), // Buffer for 100 operations
+		opQueue: make(chan Operation, 100), // Buffer for 100 operations
 		ctx:     ctx,
 		cancel:  cancel,
 	}
@@ -92,8 +92,8 @@ func (am *AsyncManager) drainQueue() {
 }
 
 // executeOperation performs the actual storage operation
-func (am *AsyncManager) executeOperation(op StorageOperation) {
-	var result StorageResult
+func (am *AsyncManager) executeOperation(op Operation) {
+	var result Result
 
 	switch op.Type {
 	case "enable_server":
@@ -189,7 +189,7 @@ func (am *AsyncManager) deleteServerSync(name string) error {
 
 // EnableServerAsync queues an enable/disable operation
 func (am *AsyncManager) EnableServerAsync(name string, enabled bool) {
-	op := StorageOperation{
+	op := Operation{
 		Type: "enable_server",
 		Data: EnableServerData{Name: name, Enabled: enabled},
 	}
@@ -204,7 +204,7 @@ func (am *AsyncManager) EnableServerAsync(name string, enabled bool) {
 
 // QuarantineServerAsync queues a quarantine operation
 func (am *AsyncManager) QuarantineServerAsync(name string, quarantined bool) {
-	op := StorageOperation{
+	op := Operation{
 		Type: "quarantine_server",
 		Data: QuarantineServerData{Name: name, Quarantined: quarantined},
 	}
@@ -219,7 +219,7 @@ func (am *AsyncManager) QuarantineServerAsync(name string, quarantined bool) {
 
 // SaveServerAsync queues a save server operation
 func (am *AsyncManager) SaveServerAsync(serverConfig *config.ServerConfig) {
-	op := StorageOperation{
+	op := Operation{
 		Type: "save_server",
 		Data: serverConfig,
 	}
@@ -234,7 +234,7 @@ func (am *AsyncManager) SaveServerAsync(serverConfig *config.ServerConfig) {
 
 // DeleteServerAsync queues a delete server operation
 func (am *AsyncManager) DeleteServerAsync(name string) {
-	op := StorageOperation{
+	op := Operation{
 		Type: "delete_server",
 		Data: name,
 	}
@@ -251,8 +251,8 @@ func (am *AsyncManager) DeleteServerAsync(name string) {
 
 // EnableServerSync queues an enable/disable operation and waits for confirmation
 func (am *AsyncManager) EnableServerSync(name string, enabled bool) error {
-	resultCh := make(chan StorageResult, 1)
-	op := StorageOperation{
+	resultCh := make(chan Result, 1)
+	op := Operation{
 		Type:     "enable_server",
 		Data:     EnableServerData{Name: name, Enabled: enabled},
 		ResultCh: resultCh,
@@ -274,8 +274,8 @@ func (am *AsyncManager) EnableServerSync(name string, enabled bool) error {
 
 // QuarantineServerSync queues a quarantine operation and waits for confirmation
 func (am *AsyncManager) QuarantineServerSync(name string, quarantined bool) error {
-	resultCh := make(chan StorageResult, 1)
-	op := StorageOperation{
+	resultCh := make(chan Result, 1)
+	op := Operation{
 		Type:     "quarantine_server",
 		Data:     QuarantineServerData{Name: name, Quarantined: quarantined},
 		ResultCh: resultCh,

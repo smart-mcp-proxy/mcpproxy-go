@@ -46,7 +46,7 @@ func DefaultConfig(serviceName, serviceVersion string) Config {
 			Enabled:        false, // Disabled by default
 			ServiceName:    serviceName,
 			ServiceVersion: serviceVersion,
-			JaegerEndpoint: "http://localhost:14268/api/traces",
+			OTLPEndpoint:   "http://localhost:4318/v1/traces",
 			SampleRate:     0.1, // 10% sampling
 		},
 	}

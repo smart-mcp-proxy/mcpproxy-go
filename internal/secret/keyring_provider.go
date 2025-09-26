@@ -33,7 +33,7 @@ func (p *KeyringProvider) CanResolve(secretType string) bool {
 }
 
 // Resolve retrieves the secret value from the OS keyring
-func (p *KeyringProvider) Resolve(_ context.Context, ref SecretRef) (string, error) {
+func (p *KeyringProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 	if !p.CanResolve(ref.Type) {
 		return "", fmt.Errorf("keyring provider cannot resolve secret type: %s", ref.Type)
 	}
@@ -47,7 +47,7 @@ func (p *KeyringProvider) Resolve(_ context.Context, ref SecretRef) (string, err
 }
 
 // Store saves a secret to the OS keyring and updates the registry
-func (p *KeyringProvider) Store(_ context.Context, ref SecretRef, value string) error {
+func (p *KeyringProvider) Store(_ context.Context, ref Ref, value string) error {
 	if !p.CanResolve(ref.Type) {
 		return fmt.Errorf("keyring provider cannot store secret type: %s", ref.Type)
 	}
@@ -67,7 +67,7 @@ func (p *KeyringProvider) Store(_ context.Context, ref SecretRef, value string) 
 }
 
 // Delete removes a secret from the OS keyring and updates the registry
-func (p *KeyringProvider) Delete(_ context.Context, ref SecretRef) error {
+func (p *KeyringProvider) Delete(_ context.Context, ref Ref) error {
 	if !p.CanResolve(ref.Type) {
 		return fmt.Errorf("keyring provider cannot delete secret type: %s", ref.Type)
 	}
@@ -88,7 +88,7 @@ func (p *KeyringProvider) Delete(_ context.Context, ref SecretRef) error {
 
 // List returns all secret references stored in the keyring
 // Note: go-keyring doesn't provide a list function, so we'll track them differently
-func (p *KeyringProvider) List(_ context.Context) ([]SecretRef, error) {
+func (p *KeyringProvider) List(_ context.Context) ([]Ref, error) {
 	// Since go-keyring doesn't provide a list function, we maintain a special
 	// registry entry that tracks all our secret names
 	registryKey := RegistryKey
@@ -96,16 +96,16 @@ func (p *KeyringProvider) List(_ context.Context) ([]SecretRef, error) {
 	registry, err := keyring.Get(p.serviceName, registryKey)
 	if err != nil {
 		// Registry doesn't exist yet - return empty list
-		return []SecretRef{}, nil
+		return []Ref{}, nil
 	}
 
-	var refs []SecretRef
+	var refs []Ref
 	if registry != "" {
 		names := strings.Split(registry, "\n")
 		for _, name := range names {
 			name = strings.TrimSpace(name)
 			if name != "" {
-				refs = append(refs, SecretRef{
+				refs = append(refs, Ref{
 					Type:     "keyring",
 					Name:     name,
 					Original: fmt.Sprintf("${keyring:%s}", name),
@@ -192,7 +192,7 @@ func (p *KeyringProvider) removeFromRegistry(secretName string) error {
 }
 
 // StoreWithRegistry stores a secret and updates the registry
-func (p *KeyringProvider) StoreWithRegistry(ctx context.Context, ref SecretRef, value string) error {
+func (p *KeyringProvider) StoreWithRegistry(ctx context.Context, ref Ref, value string) error {
 	// Store the secret
 	if err := p.Store(ctx, ref, value); err != nil {
 		return err
@@ -203,7 +203,7 @@ func (p *KeyringProvider) StoreWithRegistry(ctx context.Context, ref SecretRef, 
 }
 
 // DeleteWithRegistry deletes a secret and updates the registry
-func (p *KeyringProvider) DeleteWithRegistry(ctx context.Context, ref SecretRef) error {
+func (p *KeyringProvider) DeleteWithRegistry(ctx context.Context, ref Ref) error {
 	// Delete the secret
 	if err := p.Delete(ctx, ref); err != nil {
 		return err

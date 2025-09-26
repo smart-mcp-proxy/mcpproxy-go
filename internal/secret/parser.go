@@ -13,13 +13,13 @@ var (
 )
 
 // ParseSecretRef parses a string that may contain secret references
-func ParseSecretRef(input string) (*SecretRef, error) {
+func ParseSecretRef(input string) (*Ref, error) {
 	matches := secretRefRegex.FindStringSubmatch(input)
 	if len(matches) != 3 {
 		return nil, fmt.Errorf("invalid secret reference format: %s", input)
 	}
 
-	return &SecretRef{
+	return &Ref{
 		Type:     strings.TrimSpace(matches[1]),
 		Name:     strings.TrimSpace(matches[2]),
 		Original: input,
@@ -32,13 +32,13 @@ func IsSecretRef(input string) bool {
 }
 
 // FindSecretRefs finds all secret references in a string
-func FindSecretRefs(input string) []*SecretRef {
+func FindSecretRefs(input string) []*Ref {
 	matches := secretRefRegex.FindAllStringSubmatch(input, -1)
-	refs := make([]*SecretRef, 0, len(matches))
+	refs := make([]*Ref, 0, len(matches))
 
 	for _, match := range matches {
 		if len(match) == 3 {
-			refs = append(refs, &SecretRef{
+			refs = append(refs, &Ref{
 				Type:     strings.TrimSpace(match[1]),
 				Name:     strings.TrimSpace(match[2]),
 				Original: match[0],

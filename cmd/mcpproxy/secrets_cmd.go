@@ -46,7 +46,7 @@ func getSecretsSetCommand() *cobra.Command {
 		Short: "Store a secret in the keyring",
 		Long:  "Store a secret in the OS keyring. If no value is provided, will prompt for input.",
 		Args:  cobra.RangeArgs(1, 2),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
 			var value string
 
@@ -58,14 +58,8 @@ func getSecretsSetCommand() *cobra.Command {
 				if value == "" {
 					return fmt.Errorf("environment variable %s is not set or empty", fromEnv)
 				}
-			} else if fromStdin {
-				fmt.Print("Enter secret value: ")
-				var err error
-				value, err = readPassword()
-				if err != nil {
-					return fmt.Errorf("failed to read password: %w", err)
-				}
 			} else {
+				// Both fromStdin and default case read from stdin
 				fmt.Print("Enter secret value: ")
 				var err error
 				value, err = readPassword()
@@ -83,7 +77,7 @@ func getSecretsSetCommand() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			ref := secret.SecretRef{
+			ref := secret.Ref{
 				Type: secretType,
 				Name: name,
 			}
@@ -119,14 +113,14 @@ func getSecretsGetCommand() *cobra.Command {
 		Short: "Retrieve a secret from the keyring",
 		Long:  "Retrieve a secret from the OS keyring. By default, output is masked for security.",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
 
 			resolver := secret.NewResolver()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			ref := secret.SecretRef{
+			ref := secret.Ref{
 				Type: secretType,
 				Name: name,
 			}
@@ -161,14 +155,14 @@ func getSecretsDeleteCommand() *cobra.Command {
 		Short: "Delete a secret from the keyring",
 		Long:  "Delete a secret from the OS keyring.",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
 
 			resolver := secret.NewResolver()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			ref := secret.SecretRef{
+			ref := secret.Ref{
 				Type: secretType,
 				Name: name,
 			}
@@ -200,7 +194,7 @@ func getSecretsListCommand() *cobra.Command {
 		Use:   "list",
 		Short: "List all stored secrets",
 		Long:  "List all secrets stored in available providers. Secret values are never displayed.",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			resolver := secret.NewResolver()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -275,7 +269,7 @@ func getSecretsMigrateCommand() *cobra.Command {
 		Use:   "migrate",
 		Short: "Migrate plaintext secrets to secure storage",
 		Long:  "Analyze configuration for plaintext secrets and migrate them to secure keyring storage.",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			// Initialize logger
 			logger, err := logs.SetupLogger(&config.LogConfig{
 				Level:         logLevel,
@@ -286,7 +280,7 @@ func getSecretsMigrateCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to setup logger: %w", err)
 			}
-			defer logger.Sync()
+			defer func() { _ = logger.Sync() }()
 
 			// Load configuration
 			cfg, err := config.LoadFromFile(configFile)
@@ -320,8 +314,8 @@ func getSecretsMigrateCommand() *cobra.Command {
 			if !autoApprove {
 				fmt.Print("Proceed with migration? (y/N): ")
 				var response string
-				fmt.Scanln(&response)
-				if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+				_, _ = fmt.Scanln(&response)
+				if !strings.EqualFold(response, "y") && !strings.EqualFold(response, "yes") {
 					fmt.Println("Migration cancelled")
 					return nil
 				}

@@ -94,8 +94,8 @@ const (
 	EventSkipCore Event = "skip_core"
 )
 
-// StateInfo provides metadata about each state
-type StateInfo struct {
+// Info provides metadata about each state
+type Info struct {
 	Name        State
 	Description string
 	IsError     bool
@@ -104,13 +104,13 @@ type StateInfo struct {
 	Timeout     *time.Duration
 }
 
-// GetStateInfo returns metadata for a given state
-func GetStateInfo(state State) StateInfo {
+// GetInfo returns metadata for a given state
+func GetInfo(state State) Info {
 	timeout30s := 30 * time.Second
 	timeout5s := 5 * time.Second
 	timeout10s := 10 * time.Second
 
-	stateInfoMap := map[State]StateInfo{
+	stateInfoMap := map[State]Info{
 		StateInitializing: {
 			Name:        StateInitializing,
 			Description: "Initializing tray application",
@@ -192,7 +192,7 @@ func GetStateInfo(state State) StateInfo {
 	}
 
 	// Default for unknown states
-	return StateInfo{
+	return Info{
 		Name:        state,
 		Description: string(state),
 		UserMessage: string(state),

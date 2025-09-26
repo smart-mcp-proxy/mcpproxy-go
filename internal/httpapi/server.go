@@ -20,7 +20,10 @@ import (
 	"mcpproxy-go/internal/secret"
 )
 
-const asyncToggleTimeout = 5 * time.Second
+const (
+	asyncToggleTimeout = 5 * time.Second
+	secretTypeKeyring  = "keyring"
+)
 
 // ServerController defines the interface for core server functionality
 type ServerController interface {
@@ -872,11 +875,11 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// Default to keyring if type not specified
 	if request.Type == "" {
-		request.Type = "keyring"
+		request.Type = secretTypeKeyring
 	}
 
 	// Only allow keyring type for security
-	if request.Type != "keyring" {
+	if request.Type != secretTypeKeyring {
 		s.writeError(w, http.StatusBadRequest, "Only keyring type is supported")
 		return
 	}
@@ -884,7 +887,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	ref := secret.SecretRef{
+	ref := secret.Ref{
 		Type: request.Type,
 		Name: request.Name,
 	}
@@ -925,11 +928,11 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	// Get optional type from query parameter, default to keyring
 	secretType := r.URL.Query().Get("type")
 	if secretType == "" {
-		secretType = "keyring"
+		secretType = secretTypeKeyring
 	}
 
 	// Only allow keyring type for security
-	if secretType != "keyring" {
+	if secretType != secretTypeKeyring {
 		s.writeError(w, http.StatusBadRequest, "Only keyring type is supported")
 		return
 	}
@@ -937,7 +940,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	ref := secret.SecretRef{
+	ref := secret.Ref{
 		Type: secretType,
 		Name: name,
 	}

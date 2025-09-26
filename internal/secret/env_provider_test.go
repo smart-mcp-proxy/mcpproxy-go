@@ -32,7 +32,7 @@ func TestEnvProvider_Resolve(t *testing.T) {
 		os.Setenv(key, value)
 		defer os.Unsetenv(key)
 
-		ref := SecretRef{
+		ref := Ref{
 			Type: "env",
 			Name: key,
 		}
@@ -44,7 +44,7 @@ func TestEnvProvider_Resolve(t *testing.T) {
 	})
 
 	t.Run("non-existing environment variable", func(t *testing.T) {
-		ref := SecretRef{
+		ref := Ref{
 			Type: "env",
 			Name: "NON_EXISTING_VAR",
 		}
@@ -60,7 +60,7 @@ func TestEnvProvider_Resolve(t *testing.T) {
 		os.Setenv(key, "")
 		defer os.Unsetenv(key)
 
-		ref := SecretRef{
+		ref := Ref{
 			Type: "env",
 			Name: key,
 		}
@@ -72,7 +72,7 @@ func TestEnvProvider_Resolve(t *testing.T) {
 	})
 
 	t.Run("wrong secret type", func(t *testing.T) {
-		ref := SecretRef{
+		ref := Ref{
 			Type: "keyring",
 			Name: "test",
 		}
@@ -88,7 +88,7 @@ func TestEnvProvider_Store(t *testing.T) {
 	provider := NewEnvProvider()
 	ctx := context.Background()
 
-	ref := SecretRef{
+	ref := Ref{
 		Type: "env",
 		Name: "test",
 	}
@@ -103,7 +103,7 @@ func TestEnvProvider_Delete(t *testing.T) {
 	provider := NewEnvProvider()
 	ctx := context.Background()
 
-	ref := SecretRef{
+	ref := Ref{
 		Type: "env",
 		Name: "test",
 	}
@@ -126,10 +126,19 @@ func TestEnvProvider_List(t *testing.T) {
 		"TEST_SHORT":    "abc",
 	}
 
+	// Set environment variables and collect keys for cleanup
+	var keysToCleanup []string
 	for key, value := range testVars {
 		os.Setenv(key, value)
-		defer os.Unsetenv(key)
+		keysToCleanup = append(keysToCleanup, key)
 	}
+
+	// Clean up environment variables after test
+	defer func() {
+		for _, key := range keysToCleanup {
+			os.Unsetenv(key)
+		}
+	}()
 
 	refs, err := provider.List(ctx)
 

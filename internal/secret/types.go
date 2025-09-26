@@ -4,8 +4,8 @@ import (
 	"context"
 )
 
-// SecretRef represents a reference to a secret
-type SecretRef struct {
+// Ref represents a reference to a secret
+type Ref struct {
 	Type     string `json:"type"`     // env, keyring, op, age
 	Name     string `json:"name"`     // environment variable name, keyring alias, etc.
 	Original string `json:"original"` // original reference string
@@ -17,16 +17,16 @@ type Provider interface {
 	CanResolve(secretType string) bool
 
 	// Resolve retrieves the actual secret value
-	Resolve(ctx context.Context, ref SecretRef) (string, error)
+	Resolve(ctx context.Context, ref Ref) (string, error)
 
 	// Store saves a secret (if supported by the provider)
-	Store(ctx context.Context, ref SecretRef, value string) error
+	Store(ctx context.Context, ref Ref, value string) error
 
 	// Delete removes a secret (if supported by the provider)
-	Delete(ctx context.Context, ref SecretRef) error
+	Delete(ctx context.Context, ref Ref) error
 
 	// List returns all secret references handled by this provider
-	List(ctx context.Context) ([]SecretRef, error)
+	List(ctx context.Context) ([]Ref, error)
 
 	// IsAvailable checks if the provider is available on the current system
 	IsAvailable() bool
@@ -39,7 +39,7 @@ type Resolver struct {
 
 // ResolveResult contains the result of secret resolution
 type ResolveResult struct {
-	SecretRef SecretRef
+	Ref Ref
 	Value     string
 	Error     error
 	Resolved  bool
@@ -49,7 +49,7 @@ type ResolveResult struct {
 type MigrationCandidate struct {
 	Field      string  `json:"field"`      // Field path in config
 	Value      string  `json:"value"`      // Current plaintext value (masked in responses)
-	Suggested  string  `json:"suggested"`  // Suggested SecretRef
+	Suggested  string  `json:"suggested"`  // Suggested Ref
 	Confidence float64 `json:"confidence"` // Confidence this is a secret (0-1)
 }
 
@@ -61,13 +61,13 @@ type MigrationAnalysis struct {
 
 // EnvVarStatus represents the status of an environment variable reference
 type EnvVarStatus struct {
-	SecretRef SecretRef `json:"secret_ref"`
+	Ref Ref `json:"secret_ref"`
 	IsSet     bool      `json:"is_set"`
 }
 
 // ConfigSecretsResponse contains secrets and environment variables referenced in config
 type ConfigSecretsResponse struct {
-	Secrets         []SecretRef    `json:"secrets"`
+	Secrets         []Ref    `json:"secrets"`
 	EnvironmentVars []EnvVarStatus `json:"environment_vars"`
 	TotalSecrets    int            `json:"total_secrets"`
 	TotalEnvVars    int            `json:"total_env_vars"`

@@ -31,6 +31,11 @@ import (
 	"mcpproxy-go/internal/tray"
 )
 
+const (
+	platformDarwin  = "darwin"
+	platformWindows = "windows"
+)
+
 var (
 	version          = "development" // Set by build flags
 	defaultCoreURL   = "http://127.0.0.1:8080"
@@ -44,11 +49,11 @@ func getLogDir() string {
 	fallback := filepath.Join(os.TempDir(), "mcpproxy", "logs")
 
 	switch runtime.GOOS {
-	case "darwin":
+	case platformDarwin:
 		if homeDir, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(homeDir, "Library", "Logs", "mcpproxy")
 		}
-	case "windows": // This case will never be reached due to build constraints, but kept for clarity
+	case platformWindows: // This case will never be reached due to build constraints, but kept for clarity
 		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
 			return filepath.Join(localAppData, "mcpproxy", "logs")
 		}
@@ -633,7 +638,7 @@ func (cpl *CoreProcessLauncher) Start(ctx context.Context) {
 }
 
 // handleStateTransitions processes state machine transitions
-func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, transitionsCh <-chan state.StateTransition) {
+func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, transitionsCh <-chan state.Transition) {
 	for {
 		select {
 		case <-ctx.Done():

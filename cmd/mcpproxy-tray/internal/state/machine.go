@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// StateTransition represents a state change with metadata
-type StateTransition struct {
+// Transition represents a state change with metadata
+type Transition struct {
 	From      State
 	To        State
 	Event     Event
@@ -28,9 +28,9 @@ type Machine struct {
 
 	// Channels for communication
 	eventCh       chan Event
-	transitionCh  chan StateTransition
+	transitionCh  chan Transition
 	shutdownCh    chan struct{}
-	subscribers   []chan StateTransition
+	subscribers   []chan Transition
 	subscribersMu sync.RWMutex
 
 	// Retry management
@@ -77,9 +77,9 @@ func NewMachine(logger *zap.SugaredLogger) *Machine {
 		currentState: StateInitializing,
 		logger:       logger,
 		eventCh:      make(chan Event, 10),
-		transitionCh: make(chan StateTransition, 100),
+		transitionCh: make(chan Transition, 100),
 		shutdownCh:   make(chan struct{}),
-		subscribers:  make([]chan StateTransition, 0),
+		subscribers:  make([]chan Transition, 0),
 		retryCount:   make(map[State]int),
 		maxRetries:   maxRetries,
 		retryDelay:   retryDelay,
@@ -122,11 +122,11 @@ func (m *Machine) GetLastError() error {
 }
 
 // Subscribe returns a channel for receiving state transitions
-func (m *Machine) Subscribe() <-chan StateTransition {
+func (m *Machine) Subscribe() <-chan Transition {
 	m.subscribersMu.Lock()
 	defer m.subscribersMu.Unlock()
 
-	ch := make(chan StateTransition, 10)
+	ch := make(chan Transition, 10)
 	m.subscribers = append(m.subscribers, ch)
 	return ch
 }
@@ -306,7 +306,7 @@ func (m *Machine) transition(from, to State, event Event, data map[string]interf
 	m.mu.Unlock()
 
 	// Create transition record
-	transition := StateTransition{
+	transition := Transition{
 		From:      from,
 		To:        to,
 		Event:     event,
@@ -322,7 +322,7 @@ func (m *Machine) transition(from, to State, event Event, data map[string]interf
 		"retry_count", m.retryCount[from])
 
 	// Reset retry count on successful progress
-	if !GetStateInfo(to).IsError {
+	if !GetInfo(to).IsError {
 		m.retryCount[from] = 0
 	}
 
@@ -347,7 +347,7 @@ func (m *Machine) transition(from, to State, event Event, data map[string]interf
 
 // handleStateEntry performs actions when entering a new state
 func (m *Machine) handleStateEntry(state State) {
-	stateInfo := GetStateInfo(state)
+	stateInfo := GetInfo(state)
 
 	// Set up timeout if the state has one
 	if stateInfo.Timeout != nil {
@@ -425,7 +425,7 @@ func (m *Machine) clearTimeoutTimerUnsafe() {
 }
 
 // notifySubscribers sends transition notifications to all subscribers
-func (m *Machine) notifySubscribers(transition *StateTransition) {
+func (m *Machine) notifySubscribers(transition *Transition) {
 	m.subscribersMu.RLock()
 	defer m.subscribersMu.RUnlock()
 

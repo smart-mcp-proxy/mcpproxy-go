@@ -18,24 +18,24 @@ func (m *MockProvider) CanResolve(secretType string) bool {
 	return args.Bool(0)
 }
 
-func (m *MockProvider) Resolve(ctx context.Context, ref SecretRef) (string, error) {
+func (m *MockProvider) Resolve(ctx context.Context, ref Ref) (string, error) {
 	args := m.Called(ctx, ref)
 	return args.String(0), args.Error(1)
 }
 
-func (m *MockProvider) Store(ctx context.Context, ref SecretRef, value string) error {
+func (m *MockProvider) Store(ctx context.Context, ref Ref, value string) error {
 	args := m.Called(ctx, ref, value)
 	return args.Error(0)
 }
 
-func (m *MockProvider) Delete(ctx context.Context, ref SecretRef) error {
+func (m *MockProvider) Delete(ctx context.Context, ref Ref) error {
 	args := m.Called(ctx, ref)
 	return args.Error(0)
 }
 
-func (m *MockProvider) List(ctx context.Context) ([]SecretRef, error) {
+func (m *MockProvider) List(ctx context.Context) ([]Ref, error) {
 	args := m.Called(ctx)
-	return args.Get(0).([]SecretRef), args.Error(1)
+	return args.Get(0).([]Ref), args.Error(1)
 }
 
 func (m *MockProvider) IsAvailable() bool {
@@ -63,7 +63,7 @@ func TestResolver_Resolve(t *testing.T) {
 	mockProvider := &MockProvider{}
 	resolver.RegisterProvider("mock", mockProvider)
 
-	ref := SecretRef{
+	ref := Ref{
 		Type: "mock",
 		Name: "test-key",
 	}
@@ -83,7 +83,7 @@ func TestResolver_Resolve(t *testing.T) {
 	})
 
 	t.Run("provider not found", func(t *testing.T) {
-		unknownRef := SecretRef{Type: "unknown", Name: "test"}
+		unknownRef := Ref{Type: "unknown", Name: "test"}
 
 		_, err := resolver.Resolve(ctx, unknownRef)
 
@@ -107,7 +107,7 @@ func TestResolver_ExpandSecretRefs(t *testing.T) {
 
 		mockProvider.On("CanResolve", "mock").Return(true)
 		mockProvider.On("IsAvailable").Return(true)
-		mockProvider.On("Resolve", ctx, SecretRef{
+		mockProvider.On("Resolve", ctx, Ref{
 			Type:     "mock",
 			Name:     "api-key",
 			Original: "${mock:api-key}",
@@ -141,12 +141,12 @@ func TestResolver_ExpandSecretRefs(t *testing.T) {
 
 		freshMockProvider.On("CanResolve", "mock").Return(true).Times(2)
 		freshMockProvider.On("IsAvailable").Return(true).Times(2)
-		freshMockProvider.On("Resolve", ctx, SecretRef{
+		freshMockProvider.On("Resolve", ctx, Ref{
 			Type:     "mock",
 			Name:     "username",
 			Original: "${mock:username}",
 		}).Return("user123", nil)
-		freshMockProvider.On("Resolve", ctx, SecretRef{
+		freshMockProvider.On("Resolve", ctx, Ref{
 			Type:     "mock",
 			Name:     "password",
 			Original: "${mock:password}",

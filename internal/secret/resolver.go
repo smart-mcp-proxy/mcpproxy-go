@@ -26,7 +26,7 @@ func (r *Resolver) RegisterProvider(secretType string, provider Provider) {
 }
 
 // Resolve resolves a single secret reference
-func (r *Resolver) Resolve(ctx context.Context, ref SecretRef) (string, error) {
+func (r *Resolver) Resolve(ctx context.Context, ref Ref) (string, error) {
 	provider, exists := r.providers[ref.Type]
 	if !exists {
 		return "", fmt.Errorf("no provider for secret type: %s", ref.Type)
@@ -44,7 +44,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref SecretRef) (string, error) {
 }
 
 // Store stores a secret using the appropriate provider
-func (r *Resolver) Store(ctx context.Context, ref SecretRef, value string) error {
+func (r *Resolver) Store(ctx context.Context, ref Ref, value string) error {
 	provider, exists := r.providers[ref.Type]
 	if !exists {
 		return fmt.Errorf("no provider for secret type: %s", ref.Type)
@@ -58,7 +58,7 @@ func (r *Resolver) Store(ctx context.Context, ref SecretRef, value string) error
 }
 
 // Delete deletes a secret using the appropriate provider
-func (r *Resolver) Delete(ctx context.Context, ref SecretRef) error {
+func (r *Resolver) Delete(ctx context.Context, ref Ref) error {
 	provider, exists := r.providers[ref.Type]
 	if !exists {
 		return fmt.Errorf("no provider for secret type: %s", ref.Type)
@@ -72,8 +72,8 @@ func (r *Resolver) Delete(ctx context.Context, ref SecretRef) error {
 }
 
 // ListAll lists all secret references from all providers
-func (r *Resolver) ListAll(ctx context.Context) ([]SecretRef, error) {
-	var allRefs []SecretRef
+func (r *Resolver) ListAll(ctx context.Context) ([]Ref, error) {
+	var allRefs []Ref
 
 	for _, provider := range r.providers {
 		if !provider.IsAvailable() {
@@ -181,12 +181,12 @@ func (r *Resolver) expandValue(ctx context.Context, v reflect.Value) error {
 
 // ExtractConfigSecrets extracts all secret and environment references from a config structure
 func (r *Resolver) ExtractConfigSecrets(ctx context.Context, v interface{}) (*ConfigSecretsResponse, error) {
-	allRefs := []SecretRef{}
+	allRefs := []Ref{}
 	r.extractSecretRefs(reflect.ValueOf(v), "", &allRefs)
 
 	// Separate secrets by type
-	var keyringRefs []SecretRef
-	var envRefs []SecretRef
+	var keyringRefs []Ref
+	var envRefs []Ref
 	var envStatus []EnvVarStatus
 
 	for _, ref := range allRefs {
@@ -205,7 +205,7 @@ func (r *Resolver) ExtractConfigSecrets(ctx context.Context, v interface{}) (*Co
 			}
 
 			envStatus = append(envStatus, EnvVarStatus{
-				SecretRef: ref,
+				Ref: ref,
 				IsSet:     isSet,
 			})
 		}
@@ -220,7 +220,7 @@ func (r *Resolver) ExtractConfigSecrets(ctx context.Context, v interface{}) (*Co
 }
 
 // extractSecretRefs recursively extracts secret references from a struct
-func (r *Resolver) extractSecretRefs(v reflect.Value, path string, refs *[]SecretRef) {
+func (r *Resolver) extractSecretRefs(v reflect.Value, path string, refs *[]Ref) {
 	if !v.IsValid() {
 		return
 	}

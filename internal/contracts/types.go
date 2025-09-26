@@ -187,8 +187,8 @@ type QuarantinedServersResponse struct {
 
 // Secret management DTOs
 
-// SecretRef represents a reference to a secret value
-type SecretRef struct {
+// Ref represents a reference to a secret value
+type Ref struct {
 	Type     string `json:"type"`     // "env", "keyring", etc.
 	Name     string `json:"name"`     // The secret name/key
 	Original string `json:"original"` // Original reference string like "${env:API_KEY}"
@@ -208,9 +208,9 @@ type MigrationAnalysis struct {
 	TotalFound int                  `json:"total_found"`
 }
 
-// GetSecretRefsResponse is the response for GET /api/v1/secrets/refs
-type GetSecretRefsResponse struct {
-	Refs []SecretRef `json:"refs"`
+// GetRefsResponse is the response for GET /api/v1/secrets/refs
+type GetRefsResponse struct {
+	Refs []Ref `json:"refs"`
 }
 
 // GetMigrationAnalysisResponse is the response for POST /api/v1/secrets/migrate

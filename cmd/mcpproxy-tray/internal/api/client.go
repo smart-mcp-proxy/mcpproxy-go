@@ -561,7 +561,7 @@ func (c *Client) processResponse(resp *http.Response, attempt, maxRetries int, b
 					"status", resp.StatusCode)
 			}
 			time.Sleep(delay)
-			return nil, true, nil // shouldContinue = true
+			return nil, true, nil
 		}
 		return nil, false, fmt.Errorf("rate limited after %d attempts", maxRetries)
 	case 500, 502, 503, 504:
@@ -575,7 +575,7 @@ func (c *Client) processResponse(resp *http.Response, attempt, maxRetries int, b
 					"delay", delay)
 			}
 			time.Sleep(delay)
-			return nil, true, nil // shouldContinue = true
+			return nil, true, nil
 		}
 		return nil, false, fmt.Errorf("server error after %d attempts: status %d", maxRetries, resp.StatusCode)
 	}

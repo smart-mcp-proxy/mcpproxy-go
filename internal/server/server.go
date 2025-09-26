@@ -100,20 +100,6 @@ func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http
 	return handler
 }
 
-// validateAPIKey checks if the request contains a valid API key
-func (s *Server) validateAPIKey(r *http.Request, expectedKey string) bool {
-	// Check X-API-Key header
-	if key := r.Header.Get("X-API-Key"); key != "" {
-		return key == expectedKey
-	}
-
-	// Check query parameter (for Web UI initial load)
-	if key := r.URL.Query().Get("apikey"); key != "" {
-		return key == expectedKey
-	}
-
-	return false
-}
 
 // GetStatus returns the current server status
 func (s *Server) GetStatus() interface{} {

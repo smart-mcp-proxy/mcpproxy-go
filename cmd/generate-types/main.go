@@ -179,19 +179,19 @@ export interface Event {
 
 	// Secret types
 	sb.WriteString(`// Secret Management Types
-export interface SecretRef {
+export interface Ref {
   type: string;      // env, keyring, op, age
   name: string;      // environment variable name, keyring alias, etc.
   original: string;  // original reference string
 }
 
 export interface EnvVarStatus {
-  secret_ref: SecretRef;
+  secret_ref: Ref;
   is_set: boolean;
 }
 
 export interface ConfigSecretsResponse {
-  secrets: SecretRef[];
+  secrets: Ref[];
   environment_vars: EnvVarStatus[];
   total_secrets: number;
   total_env_vars: number;

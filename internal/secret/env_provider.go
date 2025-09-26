@@ -25,7 +25,7 @@ func (p *EnvProvider) CanResolve(secretType string) bool {
 }
 
 // Resolve retrieves the secret value from environment variables
-func (p *EnvProvider) Resolve(_ context.Context, ref SecretRef) (string, error) {
+func (p *EnvProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 	if !p.CanResolve(ref.Type) {
 		return "", fmt.Errorf("env provider cannot resolve secret type: %s", ref.Type)
 	}
@@ -39,18 +39,18 @@ func (p *EnvProvider) Resolve(_ context.Context, ref SecretRef) (string, error) 
 }
 
 // Store is not supported for environment variables
-func (p *EnvProvider) Store(_ context.Context, _ SecretRef, _ string) error {
+func (p *EnvProvider) Store(_ context.Context, _ Ref, _ string) error {
 	return fmt.Errorf("env provider does not support storing secrets")
 }
 
 // Delete is not supported for environment variables
-func (p *EnvProvider) Delete(_ context.Context, _ SecretRef) error {
+func (p *EnvProvider) Delete(_ context.Context, _ Ref) error {
 	return fmt.Errorf("env provider does not support deleting secrets")
 }
 
 // List returns all environment variables that look like secrets
-func (p *EnvProvider) List(_ context.Context) ([]SecretRef, error) {
-	var refs []SecretRef
+func (p *EnvProvider) List(_ context.Context) ([]Ref, error) {
+	var refs []Ref
 
 	for _, env := range os.Environ() {
 		pair := strings.SplitN(env, "=", 2)
@@ -63,7 +63,7 @@ func (p *EnvProvider) List(_ context.Context) ([]SecretRef, error) {
 
 		// Only include variables that look like secrets
 		if isLikelySecretEnvVar(name, value) {
-			refs = append(refs, SecretRef{
+			refs = append(refs, Ref{
 				Type:     "env",
 				Name:     name,
 				Original: fmt.Sprintf("${env:%s}", name),

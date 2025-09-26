@@ -10,13 +10,13 @@ func TestParseSecretRef(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   string
-		want    *SecretRef
+		want    *Ref
 		wantErr bool
 	}{
 		{
 			name:  "valid keyring reference",
 			input: "${keyring:my-api-key}",
-			want: &SecretRef{
+			want: &Ref{
 				Type:     "keyring",
 				Name:     "my-api-key",
 				Original: "${keyring:my-api-key}",
@@ -26,7 +26,7 @@ func TestParseSecretRef(t *testing.T) {
 		{
 			name:  "valid env reference",
 			input: "${env:API_KEY}",
-			want: &SecretRef{
+			want: &Ref{
 				Type:     "env",
 				Name:     "API_KEY",
 				Original: "${env:API_KEY}",
@@ -36,7 +36,7 @@ func TestParseSecretRef(t *testing.T) {
 		{
 			name:  "valid reference with spaces",
 			input: "${keyring: my key }",
-			want: &SecretRef{
+			want: &Ref{
 				Type:     "keyring",
 				Name:     "my key",
 				Original: "${keyring: my key }",
@@ -123,12 +123,12 @@ func TestFindSecretRefs(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
-		want  []*SecretRef
+		want  []*Ref
 	}{
 		{
 			name:  "single reference",
 			input: "token: ${keyring:github-token}",
-			want: []*SecretRef{
+			want: []*Ref{
 				{
 					Type:     "keyring",
 					Name:     "github-token",
@@ -139,7 +139,7 @@ func TestFindSecretRefs(t *testing.T) {
 		{
 			name:  "multiple references",
 			input: "api_key: ${env:API_KEY} and secret: ${keyring:secret}",
-			want: []*SecretRef{
+			want: []*Ref{
 				{
 					Type:     "env",
 					Name:     "API_KEY",
@@ -155,12 +155,12 @@ func TestFindSecretRefs(t *testing.T) {
 		{
 			name:  "no references",
 			input: "plain text with no secrets",
-			want:  []*SecretRef{},
+			want:  []*Ref{},
 		},
 		{
 			name:  "empty string",
 			input: "",
-			want:  []*SecretRef{},
+			want:  []*Ref{},
 		},
 	}
 

@@ -22,22 +22,3 @@ const (
 	ExitCodePermissionError = 5
 )
 
-// exitCodeDescription returns a human-readable description of the exit code
-func exitCodeDescription(code int) string {
-	switch code {
-	case ExitCodeSuccess:
-		return "Success"
-	case ExitCodeGeneralError:
-		return "General error"
-	case ExitCodePortConflict:
-		return "Port conflict - address already in use"
-	case ExitCodeDBLocked:
-		return "Database locked by another process"
-	case ExitCodeConfigError:
-		return "Configuration error"
-	case ExitCodePermissionError:
-		return "Permission denied"
-	default:
-		return "Unknown error"
-	}
-}

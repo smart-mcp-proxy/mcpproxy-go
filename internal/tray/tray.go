@@ -37,6 +37,7 @@ const (
 	osDarwin      = "darwin"
 	osWindows     = "windows"
 	osLinux       = "linux"
+	phaseError    = "Error"
 	assetZipExt   = ".zip"
 	assetTarGzExt = ".tar.gz"
 	trueStr       = "true"
@@ -709,7 +710,7 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	serverRunning := a.server != nil && a.server.IsRunning()
 
 	lowerMessage := strings.ToLower(message)
-	portConflict := phase == "Error" && strings.Contains(lowerMessage, "port") && strings.Contains(lowerMessage, "in use")
+	portConflict := phase == phaseError && strings.Contains(lowerMessage, "port") && strings.Contains(lowerMessage, "in use")
 
 	a.logger.Debug("Updating tray status",
 		zap.Bool("status_running", running),
@@ -743,7 +744,7 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		a.logger.Debug("Set tray to running state")
 	} else {
 		title := "Status: Stopped"
-		if phase == "Error" {
+		if phase == phaseError {
 			title = "Status: Error"
 			if portConflict && listenAddr != "" {
 				title = fmt.Sprintf("Status: Port conflict (%s)", listenAddr)
@@ -755,7 +756,7 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		a.statusMu.Unlock()
 		if a.startStopItem != nil {
 			a.startStopItem.Enable()
-			if phase == "Error" {
+			if phase == phaseError {
 				if portConflict {
 					a.startStopItem.SetTitle("Retry start")
 				} else {
@@ -794,7 +795,7 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 
 	if !running {
 		tooltip := "mcpproxy is stopped"
-		if phase == "Error" {
+		if phase == phaseError {
 			if strings.TrimSpace(message) != "" {
 				tooltip = fmt.Sprintf("mcpproxy error: %s", message)
 			} else {

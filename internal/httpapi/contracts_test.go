@@ -34,7 +34,7 @@ func (m *MockServerController) GetUpstreamStats() map[string]interface{} {
 		},
 	}
 }
-func (m *MockServerController) StartServer(ctx context.Context) error { return nil }
+func (m *MockServerController) StartServer(_ context.Context) error { return nil }
 func (m *MockServerController) StopServer() error                     { return nil }
 func (m *MockServerController) GetStatus() interface{} {
 	return map[string]interface{}{
@@ -73,14 +73,14 @@ func (m *MockServerController) GetAllServers() ([]map[string]interface{}, error)
 	}, nil
 }
 
-func (m *MockServerController) EnableServer(serverName string, enabled bool) error { return nil }
-func (m *MockServerController) QuarantineServer(serverName string, quarantined bool) error {
+func (m *MockServerController) EnableServer(_ string, _ bool) error { return nil }
+func (m *MockServerController) QuarantineServer(_ string, _ bool) error {
 	return nil
 }
 func (m *MockServerController) GetQuarantinedServers() ([]map[string]interface{}, error) {
 	return []map[string]interface{}{}, nil
 }
-func (m *MockServerController) UnquarantineServer(serverName string) error { return nil }
+func (m *MockServerController) UnquarantineServer(_ string) error { return nil }
 
 func (m *MockServerController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
@@ -93,7 +93,7 @@ func (m *MockServerController) GetServerTools(serverName string) ([]map[string]i
 	}, nil
 }
 
-func (m *MockServerController) SearchTools(query string, limit int) ([]map[string]interface{}, error) {
+func (m *MockServerController) SearchTools(_ string, _ int) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
 		{
 			"tool": map[string]interface{}{
@@ -107,7 +107,7 @@ func (m *MockServerController) SearchTools(query string, limit int) ([]map[strin
 	}, nil
 }
 
-func (m *MockServerController) GetServerLogs(serverName string, tail int) ([]string, error) {
+func (m *MockServerController) GetServerLogs(_ string, _ int) ([]string, error) {
 	return []string{
 		"2025-09-19T12:00:00Z INFO Server started",
 		"2025-09-19T12:00:01Z INFO Tool registered: echo_tool",
@@ -117,7 +117,7 @@ func (m *MockServerController) GetServerLogs(serverName string, tail int) ([]str
 func (m *MockServerController) ReloadConfiguration() error                { return nil }
 func (m *MockServerController) GetConfigPath() string                     { return "/test/config.json" }
 func (m *MockServerController) GetLogDir() string                         { return "/test/logs" }
-func (m *MockServerController) TriggerOAuthLogin(serverName string) error { return nil }
+func (m *MockServerController) TriggerOAuthLogin(_ string) error { return nil }
 
 // Secrets management methods
 func (m *MockServerController) GetSecretResolver() *secret.Resolver { return nil }
@@ -172,7 +172,7 @@ func TestAPIContractCompliance(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create request
-			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req := httptest.NewRequest(tt.method, tt.path, http.NoBody)
 			w := httptest.NewRecorder()
 
 			// Execute request
@@ -267,7 +267,7 @@ func updateGoldenFile(t *testing.T, filename string, data []byte) {
 }
 
 func compareWithGoldenFile(t *testing.T, filename string, actual []byte) {
-	goldenPath := filepath.Join("testdata/golden", filename)
+	goldenPath := filepath.Join("testdata", "golden", filename)
 
 	if _, err := os.Stat(goldenPath); os.IsNotExist(err) {
 		t.Logf("Golden file %s does not exist. Run with UPDATE_GOLDEN=true to create it.", goldenPath)
@@ -308,7 +308,7 @@ func TestEndpointResponseTypes(t *testing.T) {
 
 	for _, tt := range actionTests {
 		t.Run(tt.path, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req := httptest.NewRequest(tt.method, tt.path, http.NoBody)
 			w := httptest.NewRecorder()
 
 			server.ServeHTTP(w, req)
@@ -339,7 +339,7 @@ func BenchmarkAPIResponseMarshaling(b *testing.B) {
 	controller := &MockServerController{}
 	server := NewServer(controller, logger, nil)
 
-	req := httptest.NewRequest("GET", "/api/v1/servers", nil)
+	req := httptest.NewRequest("GET", "/api/v1/servers", http.NoBody)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
