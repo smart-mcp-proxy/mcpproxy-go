@@ -6,9 +6,9 @@ import (
 
 // SecretRef represents a reference to a secret
 type SecretRef struct {
-	Type     string // env, keyring, op, age
-	Name     string // environment variable name, keyring alias, etc.
-	Original string // original reference string
+	Type     string `json:"type"`     // env, keyring, op, age
+	Name     string `json:"name"`     // environment variable name, keyring alias, etc.
+	Original string `json:"original"` // original reference string
 }
 
 // Provider interface for secret resolution

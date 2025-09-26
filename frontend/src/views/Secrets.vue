@@ -45,13 +45,13 @@
 
       <!-- Actions Bar -->
       <div class="actions-bar">
-        <button @click="loadConfigSecrets" class="action-button secondary">
+        <button @click="loadConfigSecrets" class="btn btn-outline">
           🔄 Refresh
         </button>
-        <button @click="runMigrationAnalysis" class="action-button secondary" :disabled="analysisLoading">
+        <button @click="runMigrationAnalysis" class="btn btn-outline" :disabled="analysisLoading">
           🔍 {{ analysisLoading ? 'Analyzing...' : 'Analyze Configuration' }}
         </button>
-        <button @click="showAddSecretForm = !showAddSecretForm" class="action-button">
+        <button @click="showAddSecretForm = !showAddSecretForm" class="btn btn-primary">
           {{ showAddSecretForm ? '✕ Cancel' : '➕ Add Secret' }}
         </button>
       </div>
@@ -88,12 +88,12 @@
           <div class="form-actions">
             <button
               type="submit"
-              class="action-button"
+              class="btn btn-primary"
               :disabled="addingSecret || !newSecret.name || !newSecret.value"
             >
               {{ addingSecret ? 'Adding...' : 'Add Secret' }}
             </button>
-            <button type="button" @click="cancelAddSecret" class="action-button secondary">
+            <button type="button" @click="cancelAddSecret" class="btn btn-outline">
               Cancel
             </button>
           </div>
@@ -141,8 +141,8 @@
                     <div class="secret-ref">{{ ref.original }}</div>
                   </div>
                   <div class="secret-actions">
-                    <button @click="testSecret(ref)" class="action-button small">Test</button>
-                    <button @click="deleteSecret(ref)" class="action-button small danger">Delete</button>
+                    <button @click="testSecret(ref)" class="btn btn-sm btn-outline">Test</button>
+                    <button @click="deleteSecret(ref)" class="btn btn-sm btn-outline">Delete</button>
                   </div>
                 </div>
               </div>
@@ -170,8 +170,8 @@
                     <div class="env-var-ref">{{ envVar.secret_ref.original }}</div>
                   </div>
                   <div class="env-var-actions">
-                    <button @click="testEnvVar(envVar)" class="action-button small">Test</button>
-                    <button v-if="!envVar.is_set" @click="setEnvVarHelp(envVar)" class="action-button small warning">Help</button>
+                    <button @click="testEnvVar(envVar)" class="btn btn-sm btn-outline">Test</button>
+                    <button v-if="!envVar.is_set" @click="setEnvVarHelp(envVar)" class="btn btn-sm btn-warning">Help</button>
                   </div>
                 </div>
               </div>
@@ -219,7 +219,7 @@
             <div class="migration-actions">
               <button
                 @click="migrateSecret(candidate)"
-                class="action-button small"
+                class="btn btn-sm btn-primary"
                 :disabled="candidate.migrating"
               >
                 {{ candidate.migrating ? 'Migrating...' : 'Store in Keychain' }}

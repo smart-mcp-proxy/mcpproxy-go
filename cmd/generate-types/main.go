@@ -177,6 +177,41 @@ export interface Event {
 
 `)
 
+	// Secret types
+	sb.WriteString(`// Secret Management Types
+export interface SecretRef {
+  type: string;      // env, keyring, op, age
+  name: string;      // environment variable name, keyring alias, etc.
+  original: string;  // original reference string
+}
+
+export interface EnvVarStatus {
+  secret_ref: SecretRef;
+  is_set: boolean;
+}
+
+export interface ConfigSecretsResponse {
+  secrets: SecretRef[];
+  environment_vars: EnvVarStatus[];
+  total_secrets: number;
+  total_env_vars: number;
+}
+
+export interface MigrationCandidate {
+  field: string;      // Field path in configuration
+  value: string;      // Masked value for display
+  suggested: string;  // Suggested secret reference
+  confidence: number; // Confidence score (0.0 to 1.0)
+  migrating?: boolean; // UI state for migration in progress
+}
+
+export interface MigrationAnalysis {
+  candidates: MigrationCandidate[];
+  total_found: number;
+}
+
+`)
+
 	// API Response DTOs
 	sb.WriteString(`// API Response DTOs
 export interface GetServersResponse {
