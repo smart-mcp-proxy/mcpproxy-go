@@ -110,3 +110,4 @@ assets/mcpproxy.icns
 build-info.json
 .gocache/
 mcpproxy-tray
+config.db.backup.*
