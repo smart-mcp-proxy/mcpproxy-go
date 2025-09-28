@@ -93,7 +93,7 @@ cat > "$LAUNCH_AGENT_FILE" << 'EOF'
     <string>com.smartmcpproxy.mcpproxy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/mcpproxy.app/Contents/MacOS/mcpproxy-tray</string>
+        <string>/Applications/mcpproxy.app/Contents/MacOS/mcpproxy</string>
     </array>
     <key>RunAtLoad</key>
     <false/>

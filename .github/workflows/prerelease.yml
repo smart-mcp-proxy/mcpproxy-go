@@ -470,6 +470,40 @@ jobs:
 
           echo "✅ DMG created and signed successfully: ${DMG_NAME}"
 
+      - name: Create PKG installer (macOS)
+        if: matrix.goos == 'darwin'
+        env:
+          # Ensure PKG creation also uses correct deployment target
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          CGO_CFLAGS: "-mmacosx-version-min=12.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+        run: |
+          # For prerelease, determine version differently (reuse from build step)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Get last tag on any branch for base version
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            COMMIT_HASH=$(git rev-parse --short HEAD)
+            VERSION="${LAST_TAG}-next.${COMMIT_HASH}"
+          fi
+
+          chmod +x scripts/create-pkg.sh
+          chmod +x scripts/create-installer-dmg.sh
+
+          # Determine binary names
+          TRAY_BINARY="mcpproxy-tray"
+          CORE_BINARY="mcpproxy"
+
+          # Create PKG installer with both tray and core binaries
+          ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+
+          # Create installer DMG containing the PKG
+          PKG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.pkg"
+          ./scripts/create-installer-dmg.sh ${PKG_NAME} ${VERSION} ${{ matrix.goarch }}
+
+          echo "✅ PKG installer and installer DMG created successfully"
+
       - name: Submit for notarization (macOS)
         if: matrix.goos == 'darwin'
         run: |
@@ -484,59 +518,74 @@ jobs:
           fi
 
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
+          PKG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.pkg"
+          INSTALLER_DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}-installer.dmg"
 
-          echo "Submitting DMG for notarization..."
+          # Function to submit file for notarization
+          submit_for_notarization() {
+            local FILE_NAME="$1"
+            local FILE_TYPE="$2"
 
-          # Submit with proper error handling and retries
-          SUBMISSION_SUCCESS=false
-          for attempt in 1 2 3; do
-            echo "Notarization attempt $attempt/3..."
+            echo "Submitting ${FILE_TYPE} for notarization: ${FILE_NAME}"
 
-            # Capture both stdout and stderr
-            SUBMISSION_OUTPUT=$(xcrun notarytool submit "${DMG_NAME}" \
-              --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
-              --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" \
-              --team-id "${{ secrets.APPLE_TEAM_ID }}" \
-              --output-format json 2>&1)
+            # Submit with proper error handling and retries
+            SUBMISSION_SUCCESS=false
+            for attempt in 1 2 3; do
+              echo "${FILE_TYPE} notarization attempt $attempt/3..."
 
-            SUBMISSION_EXIT_CODE=$?
+              # Capture both stdout and stderr
+              SUBMISSION_OUTPUT=$(xcrun notarytool submit "${FILE_NAME}" \
+                --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+                --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" \
+                --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+                --output-format json 2>&1)
 
-            if [ $SUBMISSION_EXIT_CODE -eq 0 ]; then
-              # Extract submission ID with validation
-              SUBMISSION_ID=$(echo "$SUBMISSION_OUTPUT" | jq -r '.id // empty')
+              SUBMISSION_EXIT_CODE=$?
 
-              if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ]; then
-                echo "✅ Notarization submission successful on attempt $attempt"
-                echo "Submission ID: ${SUBMISSION_ID}"
+              if [ $SUBMISSION_EXIT_CODE -eq 0 ]; then
+                # Extract submission ID with validation
+                SUBMISSION_ID=$(echo "$SUBMISSION_OUTPUT" | jq -r '.id // empty')
 
-                # Save submission ID
-                echo "${SUBMISSION_ID}" > "${DMG_NAME}.submission_id"
+                if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ]; then
+                  echo "✅ ${FILE_TYPE} notarization submission successful on attempt $attempt"
+                  echo "Submission ID: ${SUBMISSION_ID}"
 
-                SUBMISSION_SUCCESS=true
-                break
+                  # Save submission ID
+                  echo "${SUBMISSION_ID}" > "${FILE_NAME}.submission_id"
+
+                  SUBMISSION_SUCCESS=true
+                  break
+                else
+                  echo "❌ Failed to extract valid submission ID from response"
+                  echo "Response: $SUBMISSION_OUTPUT"
+                fi
               else
-                echo "❌ Failed to extract valid submission ID from response"
-                echo "Response: $SUBMISSION_OUTPUT"
+                echo "❌ ${FILE_TYPE} notarization submission failed with exit code: $SUBMISSION_EXIT_CODE"
+                echo "Output: $SUBMISSION_OUTPUT"
               fi
-            else
-              echo "❌ Notarization submission failed with exit code: $SUBMISSION_EXIT_CODE"
-              echo "Output: $SUBMISSION_OUTPUT"
+
+              if [ $attempt -lt 3 ]; then
+                echo "Retrying in 30 seconds..."
+                sleep 30
+              fi
+            done
+
+            if [ "$SUBMISSION_SUCCESS" != "true" ]; then
+              echo "❌ All ${FILE_TYPE} notarization submission attempts failed"
+              echo "Skipping notarization tracking for ${FILE_NAME}"
+              return 1
             fi
 
-            if [ $attempt -lt 3 ]; then
-              echo "Retrying in 30 seconds..."
-              sleep 30
-            fi
-          done
+            echo "✅ ${FILE_TYPE} submitted for notarization (ID: ${SUBMISSION_ID})"
+            return 0
+          }
 
-          if [ "$SUBMISSION_SUCCESS" != "true" ]; then
-            echo "❌ All notarization submission attempts failed"
-            echo "Creating empty submission ID file to skip notarization tracking"
-            # Don't create submission_id file - this will cause the DMG to be uploaded without notarization tracking
-            exit 0  # Don't fail the entire build, just skip notarization
-          fi
+          # Submit all files for notarization
+          submit_for_notarization "${DMG_NAME}" "App DMG" || true
+          submit_for_notarization "${PKG_NAME}" "PKG installer" || true
+          submit_for_notarization "${INSTALLER_DMG_NAME}" "Installer DMG" || true
 
-          echo "✅ DMG submitted for notarization (ID: ${SUBMISSION_ID})"
+          echo "✅ All files submitted for notarization"
 
       - name: Cleanup isolated keychain (macOS)
         if: matrix.goos == 'darwin' && always()
@@ -560,10 +609,10 @@ jobs:
           name: versioned-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
-      - name: Upload DMG installer (macOS)
+      - name: Upload macOS installers (DMG and PKG)
         if: matrix.goos == 'darwin'
         run: |
-          # For prerelease, determine version to create exact DMG name (reuse from build step)
+          # For prerelease, determine version to create exact file names (reuse from build step)
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
           else
@@ -574,40 +623,69 @@ jobs:
           fi
 
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
-          SUBMISSION_ID_FILE="${DMG_NAME}.submission_id"
+          PKG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.pkg"
+          INSTALLER_DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}-installer.dmg"
 
-          echo "Looking for DMG: ${DMG_NAME}"
-          echo "Looking for submission ID: ${SUBMISSION_ID_FILE}"
+          echo "Looking for files:"
+          echo "  App DMG: ${DMG_NAME}"
+          echo "  PKG installer: ${PKG_NAME}"
+          echo "  Installer DMG: ${INSTALLER_DMG_NAME}"
 
           # Verify files exist before upload
+          FILES_TO_UPLOAD=""
+
           if [ -f "${DMG_NAME}" ]; then
-            echo "✅ Found DMG: ${DMG_NAME}"
+            echo "✅ Found App DMG: ${DMG_NAME}"
+            FILES_TO_UPLOAD="${FILES_TO_UPLOAD} ${DMG_NAME}"
           else
-            echo "❌ DMG not found: ${DMG_NAME}"
+            echo "❌ App DMG not found: ${DMG_NAME}"
+          fi
+
+          if [ -f "${PKG_NAME}" ]; then
+            echo "✅ Found PKG installer: ${PKG_NAME}"
+            FILES_TO_UPLOAD="${FILES_TO_UPLOAD} ${PKG_NAME}"
+          else
+            echo "❌ PKG installer not found: ${PKG_NAME}"
+          fi
+
+          if [ -f "${INSTALLER_DMG_NAME}" ]; then
+            echo "✅ Found Installer DMG: ${INSTALLER_DMG_NAME}"
+            FILES_TO_UPLOAD="${FILES_TO_UPLOAD} ${INSTALLER_DMG_NAME}"
+          else
+            echo "❌ Installer DMG not found: ${INSTALLER_DMG_NAME}"
+          fi
+
+          if [ -z "${FILES_TO_UPLOAD}" ]; then
+            echo "❌ No installer files found"
             exit 1
           fi
 
           # Create artifact directory
-          mkdir -p dmg-artifact
-          cp "${DMG_NAME}" dmg-artifact/
+          mkdir -p installers-artifact
 
-          # Copy submission ID file if it exists
-          if [ -f "${SUBMISSION_ID_FILE}" ]; then
-            echo "✅ Found submission ID file: ${SUBMISSION_ID_FILE}"
-            cp "${SUBMISSION_ID_FILE}" dmg-artifact/
-          else
-            echo "⚠️  No submission ID file found: ${SUBMISSION_ID_FILE}"
-          fi
+          # Copy all installer files
+          for file in ${FILES_TO_UPLOAD}; do
+            cp "${file}" installers-artifact/
+
+            # Copy submission ID file if it exists
+            SUBMISSION_ID_FILE="${file}.submission_id"
+            if [ -f "${SUBMISSION_ID_FILE}" ]; then
+              echo "✅ Found submission ID file: ${SUBMISSION_ID_FILE}"
+              cp "${SUBMISSION_ID_FILE}" installers-artifact/
+            else
+              echo "⚠️  No submission ID file found: ${SUBMISSION_ID_FILE}"
+            fi
+          done
 
           echo "Files to upload:"
-          ls -la dmg-artifact/
+          ls -la installers-artifact/
 
-      - name: Upload DMG artifact (macOS)
+      - name: Upload macOS installers artifact
         if: matrix.goos == 'darwin'
         uses: actions/upload-artifact@v4
         with:
-          name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dmg-artifact/*
+          name: installers-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: installers-artifact/*
 
   release:
     needs: build
@@ -639,40 +717,41 @@ jobs:
             cp "$file" "release-files/$filename"
           done
 
-          # Handle DMG files and notarization submissions
+          # Handle installer files (DMG and PKG) and notarization submissions
           mkdir -p pending-notarizations
 
-          find dist -path "*/dmg-*" -name "*.dmg" | while read dmg_file; do
-            filename=$(basename "$dmg_file")
-            submission_id_file="${dmg_file}.submission_id"
+          # Process installer artifacts (contains DMG, PKG, and installer DMG files)
+          find dist -path "*/installers-*" \( -name "*.dmg" -o -name "*.pkg" \) | while read installer_file; do
+            filename=$(basename "$installer_file")
+            submission_id_file="${installer_file}.submission_id"
 
             if [ -f "$submission_id_file" ]; then
-              # DMG has pending notarization
+              # File has pending notarization
               SUBMISSION_ID=$(cat "$submission_id_file")
 
               # Validate submission ID before creating pending file
               if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ] && [ ${#SUBMISSION_ID} -gt 10 ]; then
                 echo "Found valid pending notarization for $filename (ID: $SUBMISSION_ID)"
-                cp "$dmg_file" "release-files/$filename"
+                cp "$installer_file" "release-files/$filename"
 
                 # Create pending notarization record
                 cat > "pending-notarizations/${filename}.pending" << EOF
           {
             "submission_id": "$SUBMISSION_ID",
-            "dmg_name": "$filename",
+            "file_name": "$filename",
             "version": "$VERSION",
             "submitted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
               else
                 echo "❌ Invalid submission ID for $filename: '$SUBMISSION_ID'"
-                echo "Copying DMG without notarization tracking"
-                cp "$dmg_file" "release-files/$filename"
+                echo "Copying installer file without notarization tracking"
+                cp "$installer_file" "release-files/$filename"
               fi
             else
               # No notarization submission (shouldn't happen, but handle it)
               echo "No submission ID for $filename, copying as-is"
-              cp "$dmg_file" "release-files/$filename"
+              cp "$installer_file" "release-files/$filename"
             fi
           done
 
@@ -711,17 +790,28 @@ jobs:
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.tar.gz)
 
             **macOS Installers (Recommended):**
-            - [macOS Universal DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.dmg) (Apple Silicon)
-            - [macOS Intel DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.dmg) (Intel)
+            - [PKG Installer (Apple Silicon)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64-installer.dmg) - **Best Choice**
+            - [PKG Installer (Intel)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64-installer.dmg) - **Best Choice**
+            - [Drag-and-Drop DMG (Apple Silicon)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.dmg) - Manual Setup
+            - [Drag-and-Drop DMG (Intel)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.dmg) - Manual Setup
 
             ### Installation
 
-            **macOS (Recommended - DMG Installer):**
-            1. Download the appropriate DMG file for your Mac (Apple Silicon or Intel)
+            **macOS (Recommended - PKG Installer):**
+            1. Download the PKG installer DMG for your Mac (Apple Silicon or Intel)
+            2. Double-click the DMG to mount it
+            3. Double-click the PKG installer inside
+            4. Follow the installation wizard
+            5. CLI tool `mcpproxy` will be available in Terminal
+            6. Launch mcpproxy.app from Applications folder
+            7. The app will appear in your system tray
+
+            **macOS (Alternative - Drag-and-Drop DMG):**
+            1. Download the drag-and-drop DMG file for your Mac
             2. Double-click the DMG to mount it
             3. Drag mcpproxy.app to Applications folder
-            4. Launch from Applications or Launchpad
-            5. The app will appear in your system tray with autostart capability
+            4. Manually create CLI symlink: `sudo ln -sf /Applications/mcpproxy.app/Contents/Resources/bin/mcpproxy /usr/local/bin/mcpproxy`
+            5. Launch from Applications or Launchpad
 
             **Manual Installation (All Platforms):**
             1. Download the appropriate archive for your platform using the links above

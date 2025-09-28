@@ -38,7 +38,7 @@ const (
 
 var (
 	version          = "development" // Set by build flags
-	defaultCoreURL   = "https://127.0.0.1:8080"
+	defaultCoreURL   = "http://127.0.0.1:8080"
 	errNoBundledCore = errors.New("no bundled core binary found")
 	trayAPIKey       = "" // API key generated for core communication
 )
@@ -251,14 +251,24 @@ func resolveCoreURL() string {
 		return override
 	}
 
+	// Determine protocol based on TLS setting
+	protocol := "http"
+	if strings.TrimSpace(os.Getenv("MCPPROXY_TLS_ENABLED")) == "true" {
+		protocol = "https"
+	}
+
 	if listen := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listen != "" {
-		return "https://127.0.0.1" + listen
+		return protocol + "://127.0.0.1" + listen
 	}
 
 	if port := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_PORT")); port != "" {
-		return fmt.Sprintf("https://127.0.0.1:%s", port)
+		return fmt.Sprintf("%s://127.0.0.1:%s", protocol, port)
 	}
 
+	// Update default URL based on TLS setting
+	if protocol == "https" {
+		return "https://127.0.0.1:8080"
+	}
 	return defaultCoreURL
 }
 
