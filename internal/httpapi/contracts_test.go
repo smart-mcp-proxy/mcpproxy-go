@@ -35,7 +35,7 @@ func (m *MockServerController) GetUpstreamStats() map[string]interface{} {
 	}
 }
 func (m *MockServerController) StartServer(_ context.Context) error { return nil }
-func (m *MockServerController) StopServer() error                     { return nil }
+func (m *MockServerController) StopServer() error                   { return nil }
 func (m *MockServerController) GetStatus() interface{} {
 	return map[string]interface{}{
 		"phase":   "Ready",
@@ -114,9 +114,9 @@ func (m *MockServerController) GetServerLogs(_ string, _ int) ([]string, error) 
 	}, nil
 }
 
-func (m *MockServerController) ReloadConfiguration() error                { return nil }
-func (m *MockServerController) GetConfigPath() string                     { return "/test/config.json" }
-func (m *MockServerController) GetLogDir() string                         { return "/test/logs" }
+func (m *MockServerController) ReloadConfiguration() error       { return nil }
+func (m *MockServerController) GetConfigPath() string            { return "/test/config.json" }
+func (m *MockServerController) GetLogDir() string                { return "/test/logs" }
 func (m *MockServerController) TriggerOAuthLogin(_ string) error { return nil }
 
 // Secrets management methods

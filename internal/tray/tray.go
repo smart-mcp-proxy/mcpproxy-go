@@ -211,13 +211,13 @@ func (a *App) getConnectionState() ConnectionState {
 	return a.connectionState
 }
 
-func (a *App) getStatusSnapshot() (string, string) {
+func (a *App) getStatusSnapshot() (title, tooltip string) {
 	a.statusMu.RLock()
 	defer a.statusMu.RUnlock()
 	return a.statusTitle, a.statusTooltip
 }
 
-func (a *App) getMenuSnapshot() ([]map[string]interface{}, []map[string]interface{}) {
+func (a *App) getMenuSnapshot() (servers, quarantine []map[string]interface{}) {
 	if a.menuManager == nil {
 		return nil, nil
 	}

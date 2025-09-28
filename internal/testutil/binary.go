@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -369,7 +370,7 @@ func (env *BinaryTestEnv) CallMCPTool(toolName string, args map[string]interface
 		if trimmedLine == "" {
 			continue
 		}
-		firstRune := []rune(trimmedLine)[0]
+		firstRune, _ := utf8.DecodeRuneInString(trimmedLine)
 		if firstRune == '{' || firstRune == '[' {
 			candidate = strings.Join(lines[i:], "\n")
 			break

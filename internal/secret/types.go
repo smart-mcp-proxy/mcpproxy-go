@@ -39,10 +39,10 @@ type Resolver struct {
 
 // ResolveResult contains the result of secret resolution
 type ResolveResult struct {
-	Ref Ref
-	Value     string
-	Error     error
-	Resolved  bool
+	Ref      Ref
+	Value    string
+	Error    error
+	Resolved bool
 }
 
 // MigrationCandidate represents a potential secret that could be migrated
@@ -61,13 +61,13 @@ type MigrationAnalysis struct {
 
 // EnvVarStatus represents the status of an environment variable reference
 type EnvVarStatus struct {
-	Ref Ref `json:"secret_ref"`
-	IsSet     bool      `json:"is_set"`
+	Ref   Ref  `json:"secret_ref"`
+	IsSet bool `json:"is_set"`
 }
 
 // ConfigSecretsResponse contains secrets and environment variables referenced in config
 type ConfigSecretsResponse struct {
-	Secrets         []Ref    `json:"secrets"`
+	Secrets         []Ref          `json:"secrets"`
 	EnvironmentVars []EnvVarStatus `json:"environment_vars"`
 	TotalSecrets    int            `json:"total_secrets"`
 	TotalEnvVars    int            `json:"total_env_vars"`

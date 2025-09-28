@@ -354,7 +354,7 @@ func getManagedBinDir() (string, error) {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == platformDarwin {
 		return filepath.Join(homeDir, "Library", "Application Support", "mcpproxy", "bin"), nil
 	}
 
@@ -442,7 +442,7 @@ func findMcpproxyBinary() (string, error) {
 	// 3. Managed installation directories (Application Support on macOS).
 	if homeDir, err := os.UserHomeDir(); err == nil {
 		addCandidate(filepath.Join(homeDir, ".mcpproxy", "bin", "mcpproxy"))
-		if runtime.GOOS == "darwin" {
+		if runtime.GOOS == platformDarwin {
 			addCandidate(filepath.Join(homeDir, "Library", "Application Support", "mcpproxy", "bin", "mcpproxy"))
 		}
 	}
@@ -482,7 +482,7 @@ func resolveExecutableCandidate(path string) (string, bool) {
 		return "", false
 	}
 
-	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
+	if info.Mode()&0o111 == 0 {
 		return "", false
 	}
 

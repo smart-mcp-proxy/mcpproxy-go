@@ -21,4 +21,3 @@ const (
 	// ExitCodePermissionError indicates insufficient permissions (file access, port binding)
 	ExitCodePermissionError = 5
 )
-

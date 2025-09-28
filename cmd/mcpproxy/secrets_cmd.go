@@ -194,7 +194,7 @@ func getSecretsListCommand() *cobra.Command {
 		Use:   "list",
 		Short: "List all stored secrets",
 		Long:  "List all secrets stored in available providers. Secret values are never displayed.",
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			resolver := secret.NewResolver()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -269,7 +269,7 @@ func getSecretsMigrateCommand() *cobra.Command {
 		Use:   "migrate",
 		Short: "Migrate plaintext secrets to secure storage",
 		Long:  "Analyze configuration for plaintext secrets and migrate them to secure keyring storage.",
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// Initialize logger
 			logger, err := logs.SetupLogger(&config.LogConfig{
 				Level:         logLevel,

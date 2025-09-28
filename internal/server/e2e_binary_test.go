@@ -12,7 +12,7 @@ import (
 	"mcpproxy-go/internal/testutil"
 )
 
-func assertServerReady(t *testing.T, server testutil.TestServer) {
+func assertServerReady(t *testing.T, server *testutil.TestServer) {
 	t.Helper()
 	if server.ConnectionStatus != "" {
 		assert.Equal(t, "Ready", server.ConnectionStatus)
@@ -55,7 +55,7 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 		assert.True(t, response.Success)
 		assert.Len(t, response.Data.Servers, 1)
 		assert.Equal(t, "everything", response.Data.Servers[0].Name)
-		assertServerReady(t, response.Data.Servers[0])
+		assertServerReady(t, &response.Data.Servers[0])
 	})
 
 	t.Run("GET /servers/everything/tools", func(t *testing.T) {
@@ -358,7 +358,7 @@ func TestBinaryHealthAndRecovery(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, response.Success)
 		assert.Len(t, response.Data.Servers, 1)
-		assertServerReady(t, response.Data.Servers[0])
+		assertServerReady(t, &response.Data.Servers[0])
 	})
 
 	t.Run("Disable and re-enable server", func(t *testing.T) {
@@ -388,6 +388,6 @@ func TestBinaryHealthAndRecovery(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, response.Success)
 		assert.True(t, response.Data.Servers[0].Enabled)
-		assertServerReady(t, response.Data.Servers[0])
+		assertServerReady(t, &response.Data.Servers[0])
 	})
 }

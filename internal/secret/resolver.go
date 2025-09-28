@@ -205,8 +205,8 @@ func (r *Resolver) ExtractConfigSecrets(ctx context.Context, v interface{}) (*Co
 			}
 
 			envStatus = append(envStatus, EnvVarStatus{
-				Ref: ref,
-				IsSet:     isSet,
+				Ref:   ref,
+				IsSet: isSet,
 			})
 		}
 	}

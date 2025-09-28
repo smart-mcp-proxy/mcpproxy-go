@@ -100,7 +100,6 @@ func (s *Server) createSelectiveWebUIProtectedHandler(handler http.Handler) http
 	return handler
 }
 
-
 // GetStatus returns the current server status
 func (s *Server) GetStatus() interface{} {
 	status := s.runtime.StatusSnapshot(s.IsRunning())

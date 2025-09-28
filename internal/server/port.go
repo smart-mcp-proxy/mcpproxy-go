@@ -95,7 +95,7 @@ func probeAvailableAddress(host string, port int) (string, error) {
 }
 
 // splitListenAddress parses a listen string into host and port components.
-func splitListenAddress(addr string) (string, int, error) {
+func splitListenAddress(addr string) (host string, port int, err error) {
 	if addr == "" {
 		return "", 0, fmt.Errorf("listen address cannot be empty")
 	}
@@ -109,7 +109,7 @@ func splitListenAddress(addr string) (string, int, error) {
 		return "", 0, fmt.Errorf("invalid listen address %q: %w", addr, err)
 	}
 
-	port, err := strconv.Atoi(portStr)
+	port, err = strconv.Atoi(portStr)
 	if err != nil {
 		return "", 0, fmt.Errorf("invalid port %q: %w", portStr, err)
 	}
