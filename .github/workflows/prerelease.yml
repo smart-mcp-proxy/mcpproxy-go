@@ -112,53 +112,20 @@ jobs:
           security unlock-keychain -p "temp123" "$TEMP_KEYCHAIN"
           security set-keychain-settings -t 3600 -l "$TEMP_KEYCHAIN"
 
-          APP_CERT_B64="${{ secrets.APPLE_DEVELOPER_ID_APP_CERT }}"
-          APP_CERT_PASSWORD="${{ secrets.APPLE_DEVELOPER_ID_APP_CERT_PASSWORD }}"
-
-          if [ -z "$APP_CERT_B64" ] || [ -z "$APP_CERT_PASSWORD" ]; then
-            APP_CERT_B64="${{ secrets.APPLE_DEVELOPER_ID_CERT }}"
-            APP_CERT_PASSWORD="${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}"
-          fi
-
-          if [ -z "$APP_CERT_B64" ] || [ -z "$APP_CERT_PASSWORD" ]; then
-            echo "❌ Developer ID Application certificate secrets are required"
+          if [ -z "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" ] || [ -z "${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" ]; then
+            echo "❌ APPLE_DEVELOPER_ID_CERT and APPLE_DEVELOPER_ID_CERT_PASSWORD secrets are required"
             exit 1
           fi
 
-          echo "$APP_CERT_B64" | base64 -d > developer-id-app.p12
-          security import developer-id-app.p12 \
+          echo "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" | base64 -d > developer-id.p12
+          security import developer-id.p12 \
             -k "$TEMP_KEYCHAIN" \
-            -P "$APP_CERT_PASSWORD" \
+            -P "${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
             -T /usr/bin/codesign \
             -T /usr/bin/productbuild \
             -T /usr/bin/productsign \
             -T /usr/bin/security
-          rm -f developer-id-app.p12
-
-          echo "🔍 Checking for existing Developer ID Installer identity"
-          INSTALLER_ID=$(security find-identity -v -p basic "$TEMP_KEYCHAIN" | grep "Developer ID Installer" || true)
-
-          if [ -z "$INSTALLER_ID" ]; then
-            INSTALLER_CERT_B64="${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT }}"
-            INSTALLER_CERT_PASSWORD="${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}"
-
-            if [ -z "$INSTALLER_CERT_B64" ] || [ -z "$INSTALLER_CERT_PASSWORD" ]; then
-              echo "❌ Developer ID Installer certificate secrets are required (APPLE_DEVELOPER_ID_INSTALLER_CERT/_PASSWORD)"
-              exit 1
-            fi
-
-            echo "$INSTALLER_CERT_B64" | base64 -d > developer-id-installer.p12
-            security import developer-id-installer.p12 \
-              -k "$TEMP_KEYCHAIN" \
-              -P "$INSTALLER_CERT_PASSWORD" \
-              -T /usr/bin/productsign \
-              -T /usr/bin/productbuild \
-              -T /usr/bin/codesign \
-              -T /usr/bin/security
-            rm -f developer-id-installer.p12
-          else
-            echo "✅ Developer ID Installer identity already present"
-          fi
+          rm -f developer-id.p12
 
           security set-key-partition-list -S apple-tool:,apple: -s -k "temp123" "$TEMP_KEYCHAIN"
 
@@ -519,8 +486,8 @@ jobs:
           fi
 
           if [ -z "${PKG_CERT_IDENTITY}" ]; then
-            echo "❌ Developer ID Installer certificate not available in the build keychain"
-            echo "   Ensure APPLE_DEVELOPER_ID_INSTALLER_CERT and password secrets are set"
+            echo "❌ Developer ID Installer certificate not available in the isolated keychain"
+            echo "   Embed the 'Developer ID Installer' identity in APPLE_DEVELOPER_ID_CERT"
             exit 1
           fi
 
