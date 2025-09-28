@@ -231,18 +231,21 @@ pkgbuild --root "$PKG_ROOT" \
          --install-location "/" \
          "${PKG_NAME}-component.pkg"
 
-# Check if we should create a product PKG or use component PKG directly
+# Resolve installer signing identity (must be Developer ID Installer)
+INSTALLER_CERT_IDENTITY="${PKG_CERT_IDENTITY}"
+
+if [ -z "${INSTALLER_CERT_IDENTITY}" ]; then
+    INSTALLER_CERT_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+fi
+
 if [ -n "${INSTALLER_CERT_IDENTITY}" ] && echo "${INSTALLER_CERT_IDENTITY}" | grep -q "Developer ID Installer"; then
-    echo "Using product PKG approach with Installer certificate..."
+    echo "Using product PKG approach with Installer certificate: ${INSTALLER_CERT_IDENTITY}"
     CREATE_PRODUCT_PKG=true
 else
-    echo "No Installer certificate available - using component PKG directly"
-    echo "Component PKG contains signed app bundle and should work without Gatekeeper warnings"
-    CREATE_PRODUCT_PKG=false
-
-    # Use component PKG as the final PKG
-    cp "${PKG_NAME}-component.pkg" "${PKG_NAME}.pkg"
-    echo "✅ Component PKG ready: ${PKG_NAME}.pkg"
+    echo "❌ Developer ID Installer certificate not available"
+    echo "   PKG installers must be signed with a 'Developer ID Installer' identity to satisfy Gatekeeper"
+    echo "   Ensure the certificate is imported and expose it to this script via PKG_CERT_IDENTITY"
+    exit 1
 fi
 
 if [ "$CREATE_PRODUCT_PKG" = "true" ]; then
@@ -330,60 +333,25 @@ fi  # End of CREATE_PRODUCT_PKG conditional
 
 # Sign the PKG with Developer ID Installer certificate (only for product PKGs)
 if [ "$CREATE_PRODUCT_PKG" = "true" ]; then
-    echo "Signing product PKG installer..."
+    echo "Signing product PKG installer with ${INSTALLER_CERT_IDENTITY}..."
 
-    # Use certificate identity passed from GitHub workflow environment
-    if [ -n "${PKG_CERT_IDENTITY}" ]; then
-        INSTALLER_CERT_IDENTITY="${PKG_CERT_IDENTITY}"
-        echo "✅ Using provided Developer ID Installer certificate: ${INSTALLER_CERT_IDENTITY}"
-    else
-        # Fallback: Find the Developer ID Installer certificate locally
-        INSTALLER_CERT_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
-        if [ -n "${INSTALLER_CERT_IDENTITY}" ]; then
-            echo "✅ Found Developer ID Installer certificate locally: ${INSTALLER_CERT_IDENTITY}"
-        fi
+    if ! productsign --sign "${INSTALLER_CERT_IDENTITY}" \
+                     --timestamp \
+                     "${PKG_NAME}.pkg" \
+                     "${PKG_NAME}-signed.pkg"; then
+        echo "❌ PKG signing with productsign failed"
+        exit 1
     fi
 
-    # Check if the certificate is actually a "Developer ID Installer" certificate
-    if [ -n "${INSTALLER_CERT_IDENTITY}" ]; then
-    if echo "${INSTALLER_CERT_IDENTITY}" | grep -q "Developer ID Installer"; then
-        echo "✅ Valid Developer ID Installer certificate found"
+    mv "${PKG_NAME}-signed.pkg" "${PKG_NAME}.pkg"
 
-        # Sign the PKG with proper installer certificate
-        if productsign --sign "${INSTALLER_CERT_IDENTITY}" \
-                      --timestamp \
-                      "${PKG_NAME}.pkg" \
-                      "${PKG_NAME}-signed.pkg"; then
-
-            # Replace unsigned with signed
-            mv "${PKG_NAME}-signed.pkg" "${PKG_NAME}.pkg"
-
-            # Verify PKG signing
-            echo "=== Verifying PKG signature ==="
-            pkgutil --check-signature "${PKG_NAME}.pkg"
-
-            echo "✅ PKG signed successfully with Developer ID Installer certificate"
-        else
-            echo "❌ PKG signing with productsign failed"
-            echo "Keeping unsigned PKG"
-        fi
-    else
-        echo "⚠️  Certificate is not a Developer ID Installer certificate: ${INSTALLER_CERT_IDENTITY}"
-        echo "productsign requires specifically a 'Developer ID Installer' certificate"
-        echo "Creating unsigned product PKG (component PKG is still signed with app certificate)"
-        echo ""
-        echo "Note: The app bundle inside the PKG is properly signed with Developer ID Application certificate"
-        echo "The product PKG container itself will be unsigned, but may still work for testing"
-    fi
-    else
-        echo "❌ No Developer ID Installer certificate found"
-        echo "Creating unsigned product PKG (component PKG is still signed with app certificate)"
+    echo "=== Verifying PKG signature ==="
+    if ! pkgutil --check-signature "${PKG_NAME}.pkg"; then
+        echo "❌ PKG signature verification failed"
+        exit 1
     fi
 
-else
-    # Component PKG approach
-    echo "✅ Using component PKG approach - contains signed app bundle"
-    echo "Component PKG should not trigger Gatekeeper warnings since it contains properly signed app"
+    echo "✅ PKG signed successfully with Developer ID Installer certificate"
 fi
 
 # Clean up
