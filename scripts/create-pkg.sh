@@ -149,11 +149,19 @@ echo "APPLMCPP" > "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/PkgInfo"
 # Sign the app bundle properly with Developer ID certificate
 echo "Signing app bundle with Developer ID certificate..."
 
-# Find the Developer ID certificate (same logic as in workflow)
-CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+# Use certificate identity passed from GitHub workflow environment
+if [ -n "${APP_CERT_IDENTITY}" ]; then
+    CERT_IDENTITY="${APP_CERT_IDENTITY}"
+    echo "✅ Using provided Developer ID Application certificate: ${CERT_IDENTITY}"
+else
+    # Fallback: Find the Developer ID certificate locally
+    CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+    if [ -n "${CERT_IDENTITY}" ]; then
+        echo "✅ Found Developer ID certificate locally: ${CERT_IDENTITY}"
+    fi
+fi
 
 if [ -n "${CERT_IDENTITY}" ]; then
-    echo "✅ Found Developer ID certificate: ${CERT_IDENTITY}"
 
     # Validate entitlements file formatting (Apple's recommendation)
     if [ -f "scripts/entitlements.plist" ]; then
@@ -305,11 +313,19 @@ productbuild --distribution "$TEMP_DIR/Distribution.xml" \
 # Sign the PKG with Developer ID Installer certificate
 echo "Signing PKG installer..."
 
-# Find the Developer ID Installer certificate
-INSTALLER_CERT_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+# Use certificate identity passed from GitHub workflow environment
+if [ -n "${PKG_CERT_IDENTITY}" ]; then
+    INSTALLER_CERT_IDENTITY="${PKG_CERT_IDENTITY}"
+    echo "✅ Using provided Developer ID Installer certificate: ${INSTALLER_CERT_IDENTITY}"
+else
+    # Fallback: Find the Developer ID Installer certificate locally
+    INSTALLER_CERT_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+    if [ -n "${INSTALLER_CERT_IDENTITY}" ]; then
+        echo "✅ Found Developer ID Installer certificate locally: ${INSTALLER_CERT_IDENTITY}"
+    fi
+fi
 
 if [ -n "${INSTALLER_CERT_IDENTITY}" ]; then
-    echo "✅ Found Developer ID Installer certificate: ${INSTALLER_CERT_IDENTITY}"
 
     # Sign the PKG
     productsign --sign "${INSTALLER_CERT_IDENTITY}" \

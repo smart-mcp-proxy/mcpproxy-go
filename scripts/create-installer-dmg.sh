@@ -97,12 +97,20 @@ mv "${DMG_NAME}-compressed.dmg" "${DMG_NAME}.dmg"
 # Sign DMG
 echo "Signing DMG..."
 
-# Find the Developer ID certificate identity
-CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+# Use certificate identity passed from GitHub workflow environment
+if [ -n "${APP_CERT_IDENTITY}" ]; then
+    CERT_IDENTITY="${APP_CERT_IDENTITY}"
+    echo "✅ Using provided Developer ID Application certificate for DMG: ${CERT_IDENTITY}"
+else
+    # Fallback: Find the Developer ID certificate locally
+    CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+    if [ -n "${CERT_IDENTITY}" ]; then
+        echo "✅ Found Developer ID certificate locally for DMG: ${CERT_IDENTITY}"
+    fi
+fi
 
 # Verify we found a valid certificate
 if [ -n "${CERT_IDENTITY}" ]; then
-    echo "✅ Found Developer ID certificate for DMG: ${CERT_IDENTITY}"
 
     # Sign DMG with proper certificate and timestamp
     codesign --force \
