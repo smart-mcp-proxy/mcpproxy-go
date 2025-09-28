@@ -85,6 +85,17 @@ type Config struct {
 
 	// Feature flags for modular functionality
 	Features *FeatureFlags `json:"features,omitempty" mapstructure:"features"`
+
+	// TLS configuration
+	TLS *TLSConfig `json:"tls,omitempty" mapstructure:"tls"`
+}
+
+// TLSConfig represents TLS configuration
+type TLSConfig struct {
+	Enabled           bool   `json:"enabled" mapstructure:"enabled"`                           // Enable HTTPS
+	RequireClientCert bool   `json:"require_client_cert" mapstructure:"require_client_cert"`  // Enable mTLS
+	CertsDir          string `json:"certs_dir,omitempty" mapstructure:"certs_dir"`            // Directory for certificates
+	HSTS              bool   `json:"hsts" mapstructure:"hsts"`                                // Enable HTTP Strict Transport Security
 }
 
 // LogConfig represents logging configuration
@@ -397,6 +408,14 @@ func DefaultConfig() *Config {
 			flags := DefaultFeatureFlags()
 			return &flags
 		}(),
+
+		// Default TLS configuration - disabled by default for easier setup
+		TLS: &TLSConfig{
+			Enabled:           false, // HTTPS disabled by default, can be enabled via config or env var
+			RequireClientCert: false, // mTLS disabled by default
+			CertsDir:          "",    // Will default to ${data_dir}/certs
+			HSTS:              true,  // HSTS enabled by default
+		},
 	}
 }
 
@@ -498,6 +517,16 @@ func (c *Config) Validate() error {
 	} else {
 		if err := c.Features.ValidateFeatureFlags(); err != nil {
 			return fmt.Errorf("feature flag validation failed: %w", err)
+		}
+	}
+
+	// Ensure TLS config is not nil
+	if c.TLS == nil {
+		c.TLS = &TLSConfig{
+			Enabled:           false, // HTTPS disabled by default, can be enabled via config or env var
+			RequireClientCert: false, // mTLS disabled by default
+			CertsDir:          "",    // Will default to ${data_dir}/certs
+			HSTS:              true,  // HSTS enabled by default
 		}
 	}
 

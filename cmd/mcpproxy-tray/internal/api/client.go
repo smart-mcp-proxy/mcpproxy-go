@@ -5,10 +5,14 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -77,10 +81,16 @@ type Client struct {
 
 // NewClient creates a new API client
 func NewClient(baseURL string, logger *zap.SugaredLogger) *Client {
+	// Create TLS config that trusts the local CA
+	tlsConfig := createTLSConfig(logger)
+
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
 			Timeout: 0,
+			Transport: &http.Transport{
+				TLSClientConfig: tlsConfig,
+			},
 		},
 		logger:            logger,
 		statusCh:          make(chan StatusUpdate, 10),
@@ -619,4 +629,57 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return v
 	}
 	return 0.0
+}
+
+// createTLSConfig creates a TLS config that trusts the local mcpproxy CA
+func createTLSConfig(logger *zap.SugaredLogger) *tls.Config {
+	// Start with system cert pool
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil {
+		if logger != nil {
+			logger.Warn("Failed to load system cert pool, creating empty pool", "error", err)
+		}
+		rootCAs = x509.NewCertPool()
+	}
+
+	// Try to load the local mcpproxy CA certificate
+	caPath := getLocalCAPath()
+	if caPath != "" {
+		if caCert, err := os.ReadFile(caPath); err == nil {
+			if rootCAs.AppendCertsFromPEM(caCert) {
+				if logger != nil {
+					logger.Debug("Successfully loaded local mcpproxy CA certificate", "ca_path", caPath)
+				}
+			} else {
+				if logger != nil {
+					logger.Warn("Failed to parse local mcpproxy CA certificate", "ca_path", caPath)
+				}
+			}
+		} else {
+			if logger != nil {
+				logger.Debug("Local mcpproxy CA certificate not found, will use system certs only", "ca_path", caPath)
+			}
+		}
+	}
+
+	return &tls.Config{
+		RootCAs:            rootCAs,
+		InsecureSkipVerify: false, // Keep verification enabled for security
+	}
+}
+
+// getLocalCAPath returns the path to the local mcpproxy CA certificate
+func getLocalCAPath() string {
+	// Check environment variable first
+	if customCertsDir := os.Getenv("MCPPROXY_CERTS_DIR"); customCertsDir != "" {
+		return filepath.Join(customCertsDir, "ca.pem")
+	}
+
+	// Use default location
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	return filepath.Join(homeDir, ".mcpproxy", "certs", "ca.pem")
 }

@@ -108,7 +108,7 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 
 ```jsonc
 {
-  "listen": ":8080",
+  "listen": "127.0.0.1:8080",   // Localhost-only by default for security
   "data_dir": "~/.mcpproxy",
   "enable_tray": true,
 
@@ -117,9 +117,16 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
   "tools_limit": 15,
   "tool_response_limit": 20000,
 
+  // Optional HTTPS configuration (disabled by default)
+  "tls": {
+    "enabled": false,          // Set to true to enable HTTPS
+    "require_client_cert": false,
+    "hsts": true
+  },
+
   "mcpServers": [
-    { "name": "local-python", "command": "python", "args": ["-m", "my_server"], "type": "stdio", "enabled": true },
-    { "name": "remote-http", "url": "http://localhost:3001", "type": "http", "enabled": true }
+    { "name": "local-python", "command": "python", "args": ["-m", "my_server"], "protocol": "stdio", "enabled": true },
+    { "name": "remote-http", "url": "http://localhost:3001", "protocol": "http", "enabled": true }
   ]
 }
 ```
@@ -128,12 +135,16 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `listen` | Address the proxy listens on | `:8080` |
+| `listen` | Address the proxy listens on | `127.0.0.1:8080` |
 | `data_dir` | Folder for config, DB & logs | `~/.mcpproxy` |
 | `enable_tray` | Show native system-tray UI | `true` |
 | `top_k` | Tools returned by `retrieve_tools` | `5` |
 | `tools_limit` | Max tools returned to client | `15` |
 | `tool_response_limit` | Auto-truncate responses above N chars (`0` disables) | `20000` |
+| `tls.enabled` | Enable HTTPS with local CA certificates | `false` |
+| `tls.require_client_cert` | Enable mutual TLS (mTLS) for client authentication | `false` |
+| `tls.certs_dir` | Custom directory for TLS certificates | `{data_dir}/certs` |
+| `tls.hsts` | Send HTTP Strict Transport Security headers | `true` |
 | `docker_isolation` | Docker security isolation settings (see below) | `enabled: false` |
 
 ### CLI Commands
@@ -142,20 +153,23 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 ```bash
 mcpproxy serve                      # Start proxy server with system tray
 mcpproxy tools list --server=NAME  # Debug tool discovery for specific server
+mcpproxy trust-cert                 # Install CA certificate as trusted (for HTTPS)
 ```
 
 **Serve Command Flags:**
 ```text
 mcpproxy serve --help
-  -c, --config <file>          path to mcp_config.json
-  -l, --listen <addr>          listen address (":8080")
-  -d, --data-dir <dir>         custom data directory
-      --tray                   enable/disable system tray (default true, use --tray=false to disable)
-      --log-level <level>      debug|info|warn|error
-      --read-only              forbid config changes
-      --disable-management     disable upstream_servers tool
-      --allow-server-add       allow adding servers (default true)
-      --allow-server-remove    allow removing servers (default true)
+  -c, --config <file>              path to mcp_config.json
+  -l, --listen <addr>              listen address for HTTP mode
+  -d, --data-dir <dir>             custom data directory
+      --log-level <level>          trace|debug|info|warn|error
+      --log-to-file                enable logging to file in standard OS location
+      --read-only                  enable read-only mode
+      --disable-management         disable management features
+      --allow-server-add           allow adding new servers (default true)
+      --allow-server-remove        allow removing existing servers (default true)
+      --enable-prompts             enable prompts for user input (default true)
+      --tool-response-limit <num>  tool response limit in characters (0 = disabled)
 ```
 
 **Tools Command Flags:**
@@ -542,6 +556,98 @@ mcpproxy call tool --tool-name=upstream_servers \
 mcpproxy call tool --tool-name=upstream_servers \
   --json_args='{"operation":"update","name":"git-myproject","working_dir":"/new/project/path"}'
 ```
+
+## 🔐 Optional HTTPS Setup
+
+MCPProxy works with HTTP by default for easy setup. HTTPS is optional and primarily useful for production environments or when stricter security is required.
+
+**💡 Note**: Most users can stick with HTTP (the default) as it works perfectly with all supported clients including Claude Desktop, Cursor, and VS Code.
+
+### Quick HTTPS Setup
+
+**1. Enable HTTPS** (choose one method):
+```bash
+# Method 1: Environment variable
+export MCPPROXY_TLS_ENABLED=true
+mcpproxy serve
+
+# Method 2: Config file
+# Edit ~/.mcpproxy/mcp_config.json and set "tls.enabled": true
+```
+
+**2. Trust the certificate** (one-time setup):
+```bash
+mcpproxy trust-cert
+```
+
+**3. Use HTTPS URLs**:
+- MCP endpoint: `https://localhost:8080/mcp`
+- Web UI: `https://localhost:8080/ui/`
+
+### Claude Desktop Integration
+
+For Claude Desktop, add this to your `claude_desktop_config.json`:
+
+**HTTP (Default - Recommended):**
+```json
+{
+  "mcpServers": {
+    "mcpproxy": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://localhost:8080/mcp"
+      ]
+    }
+  }
+}
+```
+
+**HTTPS (With Certificate Trust):**
+```json
+{
+  "mcpServers": {
+    "mcpproxy": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://localhost:8080/mcp"
+      ],
+      "env": {
+        "NODE_EXTRA_CA_CERTS": "~/.mcpproxy/certs/ca.pem"
+      }
+    }
+  }
+}
+```
+
+### Certificate Management
+
+- **Automatic generation**: Certificates created on first HTTPS startup
+- **Multi-domain support**: Works with `localhost`, `127.0.0.1`, `::1`
+- **Trust installation**: Use `mcpproxy trust-cert` to add to system keychain
+- **Certificate location**: `~/.mcpproxy/certs/` (ca.pem, server.pem, server-key.pem)
+
+### Troubleshooting HTTPS
+
+**Certificate trust issues**:
+```bash
+# Re-trust certificate
+mcpproxy trust-cert --force
+
+# Check certificate location
+ls ~/.mcpproxy/certs/
+
+# Test HTTPS connection
+curl -k https://localhost:8080/api/v1/status
+```
+
+**Claude Desktop connection issues**:
+- Ensure `NODE_EXTRA_CA_CERTS` points to the correct ca.pem file
+- Restart Claude Desktop after config changes
+- Verify HTTPS is enabled: `mcpproxy serve --log-level=debug`
 
 ## Learn More
 

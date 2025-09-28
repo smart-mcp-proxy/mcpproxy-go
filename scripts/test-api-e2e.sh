@@ -14,7 +14,22 @@ MCPPROXY_BINARY="./mcpproxy"
 CONFIG_TEMPLATE="./test/e2e-config.template.json"
 CONFIG_FILE="./test/e2e-config.json"
 LISTEN_PORT="8081"
-BASE_URL="http://localhost:${LISTEN_PORT}"
+# Support both HTTP and HTTPS modes
+USE_HTTPS="${USE_HTTPS:-true}"  # Default to HTTPS since TLS is enabled by default
+if [ "$USE_HTTPS" = "true" ]; then
+    BASE_URL="https://localhost:${LISTEN_PORT}"
+    # Check for CA certificate in test-data directory (E2E config uses ./test-data as data_dir)
+    if [ -f "./test-data/certs/ca.pem" ]; then
+        CURL_CA_OPTS="--cacert ./test-data/certs/ca.pem"
+    elif [ -f "./certs/ca.pem" ]; then
+        CURL_CA_OPTS="--cacert ./certs/ca.pem"
+    else
+        CURL_CA_OPTS=""
+    fi
+else
+    BASE_URL="http://localhost:${LISTEN_PORT}"
+    CURL_CA_OPTS=""
+fi
 API_BASE="${BASE_URL}/api/v1"
 TEST_DATA_DIR="./test-data"
 MCPPROXY_PID=""
@@ -114,8 +129,19 @@ wait_for_server() {
         # First extract API key from logs if available
         extract_api_key
 
-        # Build curl command with API key if available
+        # Build curl command with CA certificate if it exists, otherwise use insecure for initial check
         local curl_cmd="curl -s -f"
+        if [ "$USE_HTTPS" = "true" ]; then
+            if [ -f "./test-data/certs/ca.pem" ]; then
+                curl_cmd="$curl_cmd --cacert ./test-data/certs/ca.pem"
+            elif [ -f "./certs/ca.pem" ]; then
+                curl_cmd="$curl_cmd --cacert ./certs/ca.pem"
+            else
+                # For initial startup, use insecure until certificates are generated
+                curl_cmd="$curl_cmd -k"
+            fi
+        fi
+
         if [ ! -z "$API_KEY" ]; then
             curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
         fi
@@ -123,6 +149,14 @@ wait_for_server() {
 
         if eval $curl_cmd > /dev/null 2>&1; then
             echo "Server is ready!"
+            # Update CURL_CA_OPTS for subsequent tests if certificates now exist
+            if [ "$USE_HTTPS" = "true" ]; then
+                if [ -f "./test-data/certs/ca.pem" ]; then
+                    CURL_CA_OPTS="--cacert ./test-data/certs/ca.pem"
+                elif [ -f "./certs/ca.pem" ]; then
+                    CURL_CA_OPTS="--cacert ./certs/ca.pem"
+                fi
+            fi
             return 0
         fi
 
@@ -144,7 +178,7 @@ wait_for_everything_server() {
 
     while [ $attempt -le $max_attempts ]; do
         # Check if everything server is connected
-        local curl_cmd="curl -s"
+        local curl_cmd="curl -s $CURL_CA_OPTS"
         if [ ! -z "$API_KEY" ]; then
             curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
         fi
@@ -180,6 +214,11 @@ test_api() {
     log_test "$test_name"
 
     local curl_args=("-s" "-w" "%{http_code}" "-o" "$TEST_RESULTS_FILE")
+
+    # Add CA certificate for HTTPS if needed
+    if [ ! -z "$CURL_CA_OPTS" ]; then
+        curl_args+=($CURL_CA_OPTS)
+    fi
 
     # Add API key header if available
     if [ ! -z "$API_KEY" ]; then
@@ -227,7 +266,7 @@ test_sse() {
     log_test "$test_name"
 
     # Test SSE endpoint by connecting and reading first few events
-    local curl_cmd="timeout 5s curl -s -N"
+    local curl_cmd="timeout 5s curl -s -N $CURL_CA_OPTS"
     if [ ! -z "$API_KEY" ]; then
         curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
     fi
@@ -255,7 +294,7 @@ test_sse_with_query_param() {
         sse_url="${sse_url}?apikey=${API_KEY}"
     fi
 
-    timeout 5s curl -s -N "$sse_url" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
+    timeout 5s curl -s -N $CURL_CA_OPTS "$sse_url" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
 
     if [ -s "$TEST_RESULTS_FILE" ] && grep -q "data:" "$TEST_RESULTS_FILE"; then
         log_pass "$test_name"
@@ -272,7 +311,7 @@ test_sse_connection() {
     log_test "$test_name"
 
     # Test that SSE endpoint establishes proper connection headers
-    local curl_cmd="curl -s -I --max-time 3"
+    local curl_cmd="curl -s -I --max-time 3 $CURL_CA_OPTS"
     if [ ! -z "$API_KEY" ]; then
         curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
     fi
@@ -302,7 +341,7 @@ test_sse_auth_failure() {
         return 0
     fi
 
-    local status_code=$(curl -s -w "%{http_code}" -o /dev/null -H "X-API-Key: wrong-api-key" "${BASE_URL}/events")
+    local status_code=$(curl -s -w "%{http_code}" -o /dev/null $CURL_CA_OPTS -H "X-API-Key: wrong-api-key" "${BASE_URL}/events")
 
     if [ "$status_code" = "401" ]; then
         log_pass "$test_name"

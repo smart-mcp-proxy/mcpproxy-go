@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/tlslocal"
 	"mcpproxy-go/web"
 )
 
@@ -702,6 +704,14 @@ func (s *Server) StopServer() error {
 	return nil
 }
 
+// withHSTS adds HTTP Strict Transport Security headers
+func withHSTS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // startCustomHTTPServer creates a custom HTTP server that handles MCP endpoints
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
 	mux := http.NewServeMux()
@@ -788,8 +798,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	})
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
+	cfg := s.runtime.Config()
 	listenAddr := ""
-	if cfg := s.runtime.Config(); cfg != nil {
+	if cfg != nil {
 		listenAddr = cfg.Listen
 	}
 
@@ -828,7 +839,14 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		"/healthz", "/readyz", "/livez", "/ready", "/health", // Health endpoints (at root level)
 	}
 
-	s.logger.Info("Starting MCP HTTP server with enhanced client stability",
+	// Determine protocol for logging
+	protocol := "HTTP"
+	if cfg != nil && cfg.TLS != nil && cfg.TLS.Enabled {
+		protocol = "HTTPS"
+	}
+
+	s.logger.Info(fmt.Sprintf("Starting MCP %s server with enhanced client stability", protocol),
+		zap.String("protocol", protocol),
 		zap.String("address", actualAddr),
 		zap.String("requested_address", listenAddr),
 		zap.Strings("endpoints", allEndpoints),
@@ -838,26 +856,80 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		zap.String("features", "connection_tracking,graceful_shutdown,enhanced_logging"),
 	)
 
-	// Run the HTTP server in a goroutine to enable graceful shutdown
+	// Setup error channel for server communication
 	serverErrCh := make(chan error, 1)
-	go func() {
-		if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			s.logger.Error("HTTP server error", zap.Error(err))
-			s.mu.Lock()
-			s.running = false
-			s.listenAddr = ""
-			s.mu.Unlock()
-			s.runtime.SetRunning(false)
-			s.updateStatus("Error", fmt.Sprintf("Server failed: %v", err))
-			serverErrCh <- err
-		} else {
-			s.logger.Info("HTTP server stopped gracefully")
-			s.mu.Lock()
-			s.listenAddr = ""
-			s.mu.Unlock()
-			serverErrCh <- nil
+
+	// Apply TLS configuration if enabled
+	if cfg != nil && cfg.TLS != nil && cfg.TLS.Enabled {
+		// Setup TLS configuration
+		certsDir := cfg.TLS.CertsDir
+		if certsDir == "" {
+			certsDir = filepath.Join(cfg.DataDir, "certs")
 		}
-	}()
+
+		tlsCfg, err := tlslocal.EnsureServerTLSConfig(tlslocal.Options{
+			Dir:               certsDir,
+			RequireClientCert: cfg.TLS.RequireClientCert,
+		})
+		if err != nil {
+			return fmt.Errorf("TLS initialization failed: %w", err)
+		}
+
+		// Apply HSTS middleware if enabled
+		handler := s.httpServer.Handler
+		if cfg.TLS.HSTS {
+			handler = withHSTS(handler)
+			s.httpServer.Handler = handler
+		}
+
+		s.logger.Info("Starting HTTPS server with TLS configuration",
+			zap.String("certs_dir", certsDir),
+			zap.Bool("require_client_cert", cfg.TLS.RequireClientCert),
+			zap.Bool("hsts", cfg.TLS.HSTS),
+		)
+
+		// Run the HTTPS server in a goroutine to enable graceful shutdown
+		go func() {
+			if err := tlslocal.ServeWithTLS(s.httpServer, listener, tlsCfg); err != nil && err != http.ErrServerClosed {
+				s.logger.Error("HTTPS server error", zap.Error(err))
+				s.mu.Lock()
+				s.running = false
+				s.listenAddr = ""
+				s.mu.Unlock()
+				s.runtime.SetRunning(false)
+				s.updateStatus("Error", fmt.Sprintf("HTTPS server failed: %v", err))
+				serverErrCh <- err
+			} else {
+				s.logger.Info("HTTPS server stopped gracefully")
+				s.mu.Lock()
+				s.listenAddr = ""
+				s.mu.Unlock()
+				serverErrCh <- nil
+			}
+		}()
+	} else {
+		s.logger.Info("Starting HTTP server (TLS disabled)")
+
+		// Run the HTTP server in a goroutine to enable graceful shutdown
+		go func() {
+			if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+				s.logger.Error("HTTP server error", zap.Error(err))
+				s.mu.Lock()
+				s.running = false
+				s.listenAddr = ""
+				s.mu.Unlock()
+				s.runtime.SetRunning(false)
+				s.updateStatus("Error", fmt.Sprintf("HTTP server failed: %v", err))
+				serverErrCh <- err
+			} else {
+				s.logger.Info("HTTP server stopped gracefully")
+				s.mu.Lock()
+				s.listenAddr = ""
+				s.mu.Unlock()
+				serverErrCh <- nil
+			}
+		}()
+	}
 
 	// Wait for either context cancellation or server error
 	select {

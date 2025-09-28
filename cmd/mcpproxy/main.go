@@ -105,6 +105,9 @@ func main() {
 	// Add secrets command
 	secretsCmd := GetSecretsCommand()
 
+	// Add trust-cert command
+	trustCertCmd := GetTrustCertCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
@@ -112,6 +115,7 @@ func main() {
 	rootCmd.AddCommand(callCmd)
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(secretsCmd)
+	rootCmd.AddCommand(trustCertCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer

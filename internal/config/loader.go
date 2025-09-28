@@ -40,6 +40,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 	}
 
+	// Apply environment variable overrides for TLS configuration
+	applyTLSEnvOverrides(cfg)
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -130,6 +133,9 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Apply environment variable overrides for TLS configuration
+	applyTLSEnvOverrides(cfg)
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -162,6 +168,11 @@ func setupViper() {
 	viper.SetDefault("allow-server-remove", true)
 	viper.SetDefault("enable-prompts", true)
 	viper.SetDefault("check-server-repo", true)
+
+	// TLS defaults
+	viper.SetDefault("tls.enabled", true)
+	viper.SetDefault("tls.require_client_cert", false)
+	viper.SetDefault("tls.hsts", true)
 }
 
 // findAndLoadConfigFile tries to find config file in common locations
@@ -370,4 +381,37 @@ var registriesInitCallback func(*Config)
 // SetRegistriesInitCallback sets the callback function for registries initialization
 func SetRegistriesInitCallback(callback func(*Config)) {
 	registriesInitCallback = callback
+}
+
+// applyTLSEnvOverrides applies environment variable overrides for TLS configuration
+func applyTLSEnvOverrides(cfg *Config) {
+	// Ensure TLS config is initialized
+	if cfg.TLS == nil {
+		cfg.TLS = &TLSConfig{
+			Enabled:           true,
+			RequireClientCert: false,
+			CertsDir:          "",
+			HSTS:              true,
+		}
+	}
+
+	// Override TLS enabled from environment
+	if value := os.Getenv("MCPPROXY_TLS_ENABLED"); value != "" {
+		cfg.TLS.Enabled = (value == "true" || value == "1")
+	}
+
+	// Override TLS client cert requirement from environment
+	if value := os.Getenv("MCPPROXY_TLS_REQUIRE_CLIENT_CERT"); value != "" {
+		cfg.TLS.RequireClientCert = (value == "true" || value == "1")
+	}
+
+	// Override TLS certificates directory from environment
+	if value := os.Getenv("MCPPROXY_CERTS_DIR"); value != "" {
+		cfg.TLS.CertsDir = value
+	}
+
+	// Override data directory from environment (for backward compatibility)
+	if value := os.Getenv("MCPPROXY_DATA"); value != "" {
+		cfg.DataDir = value
+	}
 }

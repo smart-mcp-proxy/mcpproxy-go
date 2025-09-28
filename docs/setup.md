@@ -41,7 +41,10 @@ mcpproxy serve
 
 This starts MCPProxy on the default port `:8080` with HTTP endpoint at `http://localhost:8080/mcp/`
 
-**📝 Note:** At first launch, MCPProxy will automatically generate a minimal configuration file if none exists.
+**📝 Note:**
+- MCPProxy starts with **HTTP by default** for immediate compatibility
+- HTTPS is available optionally for enhanced security (see [HTTPS Setup](#optional-https-setup) below)
+- At first launch, MCPProxy will automatically generate a minimal configuration file if none exists
 
 ### 3. Check if Port is Available
 
@@ -295,6 +298,190 @@ goose> Help me search for files related to authentication
 ```
 
 **📚 Reference:** [Goose Documentation](https://block.github.io/goose/docs/tutorials/custom-extensions/)
+
+---
+
+## Optional HTTPS Setup
+
+MCPProxy supports secure HTTPS connections with automatic certificate generation. **HTTP is enabled by default** for immediate compatibility, but HTTPS provides enhanced security for production use.
+
+### Why Use HTTPS?
+
+- 🔒 **Encrypted Communication**: All data between clients and MCPProxy is encrypted
+- 🛡️ **Production Ready**: Secure for network-exposed deployments
+- 🔑 **Certificate Authentication**: Prevents man-in-the-middle attacks
+- 🌐 **Standard Compliance**: Follow web security best practices
+
+### Quick HTTPS Setup
+
+**Step 1: Install Certificate (One-time setup)**
+```bash
+# Trust the mcpproxy CA certificate
+mcpproxy trust-cert
+```
+This command will:
+- Generate a local CA certificate if needed
+- Install it to your system's trusted certificate store
+- Prompt for your password once (required for keychain access)
+
+**Step 2: Enable HTTPS**
+
+Choose one of these methods:
+
+**Option A: Environment Variable (Temporary)**
+```bash
+export MCPPROXY_TLS_ENABLED=true
+mcpproxy serve
+```
+
+**Option B: Configuration File (Permanent)**
+Edit `~/.mcpproxy/mcp_config.json`:
+```json
+{
+  "listen": ":8080",
+  "tls": {
+    "enabled": true,
+    "require_client_cert": false,
+    "hsts": true
+  }
+}
+```
+
+**Step 3: Update Client Configurations**
+
+After enabling HTTPS, update your client configurations to use `https://` URLs:
+
+**Cursor IDE:**
+```json
+{
+  "MCPProxy": {
+    "type": "http",
+    "url": "https://localhost:8080/mcp/"
+  }
+}
+```
+
+**VS Code:**
+```json
+{
+  "mcp": {
+    "servers": {
+      "mcpproxy": {
+        "type": "http",
+        "url": "https://localhost:8080/mcp/"
+      }
+    }
+  }
+}
+```
+
+**Claude Desktop (with certificate trust):**
+```json
+{
+  "mcpServers": {
+    "mcpproxy": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://localhost:8080/mcp"],
+      "env": {
+        "NODE_EXTRA_CA_CERTS": "~/.mcpproxy/certs/ca.pem"
+      }
+    }
+  }
+}
+```
+
+### HTTPS Configuration Options
+
+**Basic HTTPS (Recommended):**
+```json
+{
+  "tls": {
+    "enabled": true
+  }
+}
+```
+
+**Advanced HTTPS with mTLS:**
+```json
+{
+  "tls": {
+    "enabled": true,
+    "require_client_cert": true,
+    "certs_dir": "~/.mcpproxy/certs",
+    "hsts": true
+  }
+}
+```
+
+**Configuration Options:**
+- `enabled`: Enable/disable HTTPS (default: `false`)
+- `require_client_cert`: Enable mutual TLS (mTLS) for client authentication
+- `certs_dir`: Custom directory for certificates (default: `{data_dir}/certs`)
+- `hsts`: Enable HTTP Strict Transport Security headers
+
+### Certificate Management
+
+**Certificate Locations:**
+- **CA Certificate**: `~/.mcpproxy/certs/ca.pem`
+- **Server Certificate**: `~/.mcpproxy/certs/localhost.pem`
+- **Private Keys**: `~/.mcpproxy/certs/*.key` (automatically secured)
+
+**View Certificate Details:**
+```bash
+# View CA certificate info
+openssl x509 -in ~/.mcpproxy/certs/ca.pem -text -noout
+
+# Verify certificate chain
+openssl verify -CAfile ~/.mcpproxy/certs/ca.pem ~/.mcpproxy/certs/localhost.pem
+```
+
+**Regenerate Certificates:**
+```bash
+# Remove existing certificates
+rm -rf ~/.mcpproxy/certs
+
+# Start mcpproxy with HTTPS (will generate new certificates)
+MCPPROXY_TLS_ENABLED=true mcpproxy serve
+
+# Trust the new certificate
+mcpproxy trust-cert
+```
+
+### Troubleshooting HTTPS
+
+**Certificate Trust Issues:**
+
+If you get SSL/TLS errors, verify certificate trust:
+```bash
+# Test certificate trust
+curl -f https://localhost:8080/health
+
+# If it fails, re-trust the certificate
+mcpproxy trust-cert --force
+```
+
+**Claude Desktop Certificate Issues:**
+
+If Claude Desktop shows certificate errors:
+1. Ensure `NODE_EXTRA_CA_CERTS` points to the correct certificate path
+2. Use absolute path: `/Users/yourusername/.mcpproxy/certs/ca.pem`
+3. Restart Claude Desktop after configuration changes
+
+**Browser Certificate Warnings:**
+
+When accessing the Web UI at `https://localhost:8080/ui/`:
+1. Click "Advanced" on the certificate warning
+2. Click "Proceed to localhost (unsafe)"
+3. This is expected for self-signed certificates
+
+### Security Notes
+
+- 🔒 **Local Development**: Self-signed certificates are perfect for local development
+- 🏢 **Production**: Consider using proper CA-signed certificates for production deployments
+- 🔑 **Certificate Rotation**: Certificates are valid for 10 years but can be regenerated anytime
+- 🛡️ **mTLS**: Enable `require_client_cert: true` for maximum security in sensitive environments
+
+---
 
 ## Port Management
 
