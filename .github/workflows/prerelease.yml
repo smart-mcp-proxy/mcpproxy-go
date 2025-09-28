@@ -127,6 +127,28 @@ jobs:
             -T /usr/bin/security
           rm -f developer-id.p12
 
+          echo "🔍 Checking for separate Developer ID Installer certificate"
+          INSTALLER_ID=$(security find-identity -v -p basic "$TEMP_KEYCHAIN" | grep "Developer ID Installer" || true)
+
+          if [ -z "$INSTALLER_ID" ]; then
+            if [ -z "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT }}" ] || [ -z "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}" ]; then
+              echo "❌ Developer ID Installer identity not found in APPLE_DEVELOPER_ID_CERT"
+              echo "   Provide APPLE_DEVELOPER_ID_INSTALLER_CERT and password secrets"
+              exit 1
+            fi
+
+            echo "Importing dedicated Developer ID Installer certificate"
+            echo "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT }}" | base64 -d > developer-id-installer.p12
+            security import developer-id-installer.p12 \
+              -k "$TEMP_KEYCHAIN" \
+              -P "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}" \
+              -T /usr/bin/productsign \
+              -T /usr/bin/productbuild \
+              -T /usr/bin/codesign \
+              -T /usr/bin/security
+            rm -f developer-id-installer.p12
+          fi
+
           security set-key-partition-list -S apple-tool:,apple: -s -k "temp123" "$TEMP_KEYCHAIN"
 
           APP_CERT_IDENTITY=$(security find-identity -v -p codesigning "$TEMP_KEYCHAIN" | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
