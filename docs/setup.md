@@ -517,11 +517,11 @@ mcpproxy serve --listen 127.0.0.1:8080  # Bind to specific interface
 
 **Environment Variable:**
 ```bash
-export MCPP_LISTEN=":8081"
+export MCPPROXY_LISTEN=":8081"
 mcpproxy serve
 ```
 
-**📝 Note:** Environment variables are prefixed with `MCPP_`. For example, `MCPP_LISTEN` controls the listen address.
+**📝 Note:** Environment variables are prefixed with `MCPPROXY_`. For example, `MCPPROXY_LISTEN` controls the listen address.
 
 ### Multiple Instances
 

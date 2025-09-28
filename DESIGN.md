@@ -150,7 +150,7 @@ Returns `{total_tools, top:[{tool_name,count}]}`.
 ## 10  CLI, Config & Tray
 
 * `mcpproxy [--listen :8080] [--log-dir ~/.mcpproxy/logs] [--upstream "prod=https://api"]`
-* Viper reads `$MCPP_` envs and `config.toml`.
+* Viper reads `$MCPPROXY_` envs and `config.toml`.
 * Tray (systray): icon + menu items (Enable, Disable, Add…, Reindex, Quit).
 
 ### 10.1 Logging System

@@ -347,8 +347,8 @@ Core process exit codes are mapped to specific state machine events:
 MCPProxy supports several environment variables for configuration and security:
 
 **Security Configuration**:
-- `MCPP_LISTEN` - Override network binding (e.g., `127.0.0.1:8080`, `:8080`)
-- `MCPP_API_KEY` - Set API key for REST API authentication
+- `MCPPROXY_LISTEN` - Override network binding (e.g., `127.0.0.1:8080`, `:8080`)
+- `MCPPROXY_API_KEY` - Set API key for REST API authentication
 
 **Debugging**:
 - `MCPPROXY_DEBUG` - Enable debug mode
@@ -358,15 +358,15 @@ MCPProxy supports several environment variables for configuration and security:
 **Examples**:
 ```bash
 # Start with custom network binding
-export MCPP_LISTEN=":8080"
+export MCPPROXY_LISTEN=":8080"
 ./mcpproxy serve
 
 # Start with custom API key
-export MCPP_API_KEY="my-secret-key"
+export MCPPROXY_API_KEY="my-secret-key"
 ./mcpproxy serve
 
 # Disable authentication for testing
-export MCPP_API_KEY=""
+export MCPPROXY_API_KEY=""
 ./mcpproxy serve
 
 # Run in headless mode
@@ -492,7 +492,7 @@ open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
 
 ### Network Security
 - **Localhost-only binding by default**: Core server binds to `127.0.0.1:8080` by default to prevent network exposure
-- **Override options**: Can be changed via `--listen` flag, `MCPP_LISTEN` environment variable, or config file
+- **Override options**: Can be changed via `--listen` flag, `MCPPROXY_LISTEN` environment variable, or config file
 - **API key authentication**: REST API endpoints protected with optional API key authentication
 - **MCP endpoints open**: MCP protocol endpoints (`/mcp`, `/mcp/`) remain unprotected for client compatibility
 
@@ -500,7 +500,7 @@ open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
 - **Automatic generation**: API key generated if not provided and logged for easy access
 - **Multiple authentication methods**: Supports `X-API-Key` header and `?apikey=` query parameter
 - **Tray integration**: Tray app automatically generates and manages API keys for core communication
-- **Configuration options**: Set via `--api-key` flag, `MCPP_API_KEY` environment variable, or config file
+- **Configuration options**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
 - **Optional protection**: Empty API key disables authentication (useful for testing)
 - **Protected endpoints**: `/api/v1/*` and `/events` (SSE) require authentication when enabled
 

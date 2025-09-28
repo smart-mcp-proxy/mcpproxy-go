@@ -665,6 +665,7 @@ func createTLSConfig(logger *zap.SugaredLogger) *tls.Config {
 	return &tls.Config{
 		RootCAs:            rootCAs,
 		InsecureSkipVerify: false, // Keep verification enabled for security
+		MinVersion:         tls.VersionTLS12,
 	}
 }
 

@@ -15,6 +15,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	darwinOS = "darwin"
+)
+
 var (
 	trustCertCmd = &cobra.Command{
 		Use:   "trust-cert",
@@ -49,7 +53,7 @@ func init() {
 	trustCertCmd.Flags().StringVar(&trustCertKeychain, "keychain", "system", "Target keychain: 'system' or 'login'")
 }
 
-func runTrustCert(cmd *cobra.Command, args []string) error {
+func runTrustCert(_ *cobra.Command, _ []string) error {
 	// Load configuration to get certificate directory
 	cfg, err := config.LoadFromFile(configFile)
 	if err != nil {
@@ -113,7 +117,7 @@ func runTrustCert(cmd *cobra.Command, args []string) error {
 		fmt.Println("• Require your password for keychain access")
 		fmt.Println()
 
-		if runtime.GOOS == "darwin" {
+		if runtime.GOOS == darwinOS {
 			fmt.Println("After installation, you can enable HTTPS:")
 			fmt.Println("1. Set environment: export MCPPROXY_TLS_ENABLED=true")
 			fmt.Println("2. Or edit config: ~/.mcpproxy/config.json")
@@ -141,7 +145,7 @@ func runTrustCert(cmd *cobra.Command, args []string) error {
 
 	// Install certificate based on OS
 	switch runtime.GOOS {
-	case "darwin":
+	case darwinOS:
 		return installCertificateMacOS(caCertPath, trustCertKeychain)
 	case "linux":
 		return installCertificateLinux(caCertPath)
@@ -164,7 +168,7 @@ func installCertificateMacOS(certPath, keychain string) error {
 		if err != nil {
 			return fmt.Errorf("failed to get user home directory: %w", err)
 		}
-		keychainPath = filepath.Join(homeDir, "Library/Keychains/login.keychain-db")
+		keychainPath = filepath.Join(homeDir, "Library", "Keychains", "login.keychain-db")
 	default:
 		return fmt.Errorf("invalid keychain: %s (must be 'system' or 'login')", keychain)
 	}
@@ -172,12 +176,12 @@ func installCertificateMacOS(certPath, keychain string) error {
 	// Try the full add-trusted-cert command first
 	trustArgs := []string{
 		"add-trusted-cert",
-		"-d",                    // Add to default trust domain
-		"-r", "trustAsRoot",     // Trust as root certificate
-		"-p", "ssl",             // For SSL/TLS usage
-		"-p", "basic",           // For basic certificate policies
-		"-k", keychainPath,      // Target keychain
-		certPath,                // Certificate file
+		"-d",                // Add to default trust domain
+		"-r", "trustAsRoot", // Trust as root certificate
+		"-p", "ssl", // For SSL/TLS usage
+		"-p", "basic", // For basic certificate policies
+		"-k", keychainPath, // Target keychain
+		certPath, // Certificate file
 	}
 
 	trustCmd := exec.Command("security", trustArgs...)
@@ -191,7 +195,7 @@ func installCertificateMacOS(certPath, keychain string) error {
 
 		// If it's already installed or trust settings issue, try simpler approach
 		if strings.Contains(stderrStr, "already in") ||
-		   strings.Contains(stderrStr, "SecTrustSettingsSetTrustSettings") {
+			strings.Contains(stderrStr, "SecTrustSettingsSetTrustSettings") {
 
 			fmt.Println("Certificate already exists, adding with basic trust...")
 
@@ -215,7 +219,7 @@ func installCertificateMacOS(certPath, keychain string) error {
 			// This might fail on some systems, but we'll continue
 			trustSettingsArgs := []string{
 				"set-trust-settings",
-				"-t", "unspecified",  // Use unspecified trust (user can modify)
+				"-t", "unspecified", // Use unspecified trust (user can modify)
 				"-k", keychainPath,
 				certPath,
 			}
@@ -288,7 +292,7 @@ func installCertificateWindows(certPath string) error {
 
 	if err := cmd.Run(); err != nil {
 		// Try alternative method using PowerShell
-		psCmd := fmt.Sprintf(`Import-Certificate -FilePath "%s" -CertStoreLocation Cert:\LocalMachine\Root`, certPath)
+		psCmd := fmt.Sprintf(`Import-Certificate -FilePath %q -CertStoreLocation Cert:\LocalMachine\Root`, certPath)
 		powershellCmd := exec.Command("powershell", "-Command", psCmd)
 		powershellCmd.Stdout = os.Stdout
 		powershellCmd.Stderr = os.Stderr

@@ -5,7 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -16,7 +16,7 @@ import (
 
 func TestEnsureServerTLSConfig(t *testing.T) {
 	// Create a temporary directory for test certificates
-	tempDir, err := ioutil.TempDir("", "tlslocal_test")
+	tempDir, err := os.MkdirTemp("", "tlslocal_test")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestEnsureServerTLSConfig(t *testing.T) {
 	serverCertPath := filepath.Join(tempDir, "localhost.pem")
 
 	// Load and verify CA certificate
-	caCertPEM, err := ioutil.ReadFile(caCertPath)
+	caCertPEM, err := os.ReadFile(caCertPath)
 	if err != nil {
 		t.Fatalf("Failed to read CA cert: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestEnsureServerTLSConfig(t *testing.T) {
 	}
 
 	// Load and verify server certificate
-	serverCertPEM, err := ioutil.ReadFile(serverCertPath)
+	serverCertPEM, err := os.ReadFile(serverCertPath)
 	if err != nil {
 		t.Fatalf("Failed to read server cert: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestEnsureServerTLSConfig(t *testing.T) {
 
 func TestEnsureServerTLSConfigWithClientCert(t *testing.T) {
 	// Create a temporary directory for test certificates
-	tempDir, err := ioutil.TempDir("", "tlslocal_test_client")
+	tempDir, err := os.MkdirTemp("", "tlslocal_test_client")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestEnsureServerTLSConfigWithClientCert(t *testing.T) {
 
 func TestEnsureServerTLSConfigReusesCerts(t *testing.T) {
 	// Create a temporary directory for test certificates
-	tempDir, err := ioutil.TempDir("", "tlslocal_test_reuse")
+	tempDir, err := os.MkdirTemp("", "tlslocal_test_reuse")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestEnsureServerTLSConfigReusesCerts(t *testing.T) {
 
 func TestServeWithTLS(t *testing.T) {
 	// Create a temporary directory for test certificates
-	tempDir, err := ioutil.TempDir("", "tlslocal_test_serve")
+	tempDir, err := os.MkdirTemp("", "tlslocal_test_serve")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -232,9 +232,9 @@ func TestServeWithTLS(t *testing.T) {
 
 	// Create a test HTTP server
 	mux := http.NewServeMux()
-	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/test", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("test response"))
+		_, _ = w.Write([]byte("test response"))
 	})
 
 	server := &http.Server{
@@ -263,7 +263,7 @@ func TestServeWithTLS(t *testing.T) {
 	addr := listener.Addr().String()
 
 	// Create a client that trusts our local CA
-	caCert, err := ioutil.ReadFile(filepath.Join(tempDir, "ca.pem"))
+	caCert, err := os.ReadFile(filepath.Join(tempDir, "ca.pem"))
 	if err != nil {
 		t.Fatalf("Failed to read CA cert: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestServeWithTLS(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("Failed to read response body: %v", err)
 	}

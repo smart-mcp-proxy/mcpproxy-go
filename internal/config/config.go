@@ -92,10 +92,10 @@ type Config struct {
 
 // TLSConfig represents TLS configuration
 type TLSConfig struct {
-	Enabled           bool   `json:"enabled" mapstructure:"enabled"`                           // Enable HTTPS
-	RequireClientCert bool   `json:"require_client_cert" mapstructure:"require_client_cert"`  // Enable mTLS
-	CertsDir          string `json:"certs_dir,omitempty" mapstructure:"certs_dir"`            // Directory for certificates
-	HSTS              bool   `json:"hsts" mapstructure:"hsts"`                                // Enable HTTP Strict Transport Security
+	Enabled           bool   `json:"enabled" mapstructure:"enabled"`                         // Enable HTTPS
+	RequireClientCert bool   `json:"require_client_cert" mapstructure:"require_client_cert"` // Enable mTLS
+	CertsDir          string `json:"certs_dir,omitempty" mapstructure:"certs_dir"`           // Directory for certificates
+	HSTS              bool   `json:"hsts" mapstructure:"hsts"`                               // Enable HTTP Strict Transport Security
 }
 
 // LogConfig represents logging configuration
@@ -456,7 +456,7 @@ func (s APIKeySource) String() string {
 // Returns the API key, whether it was auto-generated, and the source
 func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource) {
 	// Check environment variable for API key first - this overrides config file
-	if envAPIKey := os.Getenv("MCPP_API_KEY"); envAPIKey != "" {
+	if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
 		c.APIKey = envAPIKey
 		return c.APIKey, false, APIKeySourceEnvironment
 	}
@@ -494,7 +494,7 @@ func (c *Config) Validate() error {
 	// Empty string means authentication disabled, nil means auto-generate
 	if c.APIKey == "" {
 		// Check environment variable for API key
-		if envAPIKey := os.Getenv("MCPP_API_KEY"); envAPIKey != "" {
+		if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
 			c.APIKey = envAPIKey
 		}
 		// Note: Empty string explicitly disables authentication

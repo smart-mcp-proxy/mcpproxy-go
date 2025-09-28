@@ -14,6 +14,7 @@ import (
 const (
 	DefaultDataDir = ".mcpproxy"
 	ConfigFileName = "mcp_config.json"
+	trueValue      = "true"
 )
 
 // LoadFromFile loads configuration from a specific file
@@ -395,14 +396,19 @@ func applyTLSEnvOverrides(cfg *Config) {
 		}
 	}
 
+	// Override listen address from environment
+	if value := os.Getenv("MCPPROXY_LISTEN"); value != "" {
+		cfg.Listen = value
+	}
+
 	// Override TLS enabled from environment
 	if value := os.Getenv("MCPPROXY_TLS_ENABLED"); value != "" {
-		cfg.TLS.Enabled = (value == "true" || value == "1")
+		cfg.TLS.Enabled = (value == trueValue || value == "1")
 	}
 
 	// Override TLS client cert requirement from environment
 	if value := os.Getenv("MCPPROXY_TLS_REQUIRE_CLIENT_CERT"); value != "" {
-		cfg.TLS.RequireClientCert = (value == "true" || value == "1")
+		cfg.TLS.RequireClientCert = (value == trueValue || value == "1")
 	}
 
 	// Override TLS certificates directory from environment
