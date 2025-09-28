@@ -631,29 +631,27 @@ jobs:
           echo "  PKG installer: ${PKG_NAME}"
           echo "  Installer DMG: ${INSTALLER_DMG_NAME}"
 
-          # Verify files exist before upload
+          # Prioritize installer DMG (contains PKG) as primary choice
+          # Also include app DMG for users who prefer drag-and-drop
           FILES_TO_UPLOAD=""
 
+          # Primary choice: Installer DMG (contains PKG installer)
+          if [ -f "${INSTALLER_DMG_NAME}" ]; then
+            echo "✅ Found Installer DMG (PRIMARY): ${INSTALLER_DMG_NAME}"
+            FILES_TO_UPLOAD="${FILES_TO_UPLOAD} ${INSTALLER_DMG_NAME}"
+          else
+            echo "❌ Installer DMG not found: ${INSTALLER_DMG_NAME}"
+          fi
+
+          # Alternative choice: App DMG (drag-and-drop)
           if [ -f "${DMG_NAME}" ]; then
-            echo "✅ Found App DMG: ${DMG_NAME}"
+            echo "✅ Found App DMG (ALTERNATIVE): ${DMG_NAME}"
             FILES_TO_UPLOAD="${FILES_TO_UPLOAD} ${DMG_NAME}"
           else
             echo "❌ App DMG not found: ${DMG_NAME}"
           fi
 
-          if [ -f "${PKG_NAME}" ]; then
-            echo "✅ Found PKG installer: ${PKG_NAME}"
-            FILES_TO_UPLOAD="${FILES_TO_UPLOAD} ${PKG_NAME}"
-          else
-            echo "❌ PKG installer not found: ${PKG_NAME}"
-          fi
-
-          if [ -f "${INSTALLER_DMG_NAME}" ]; then
-            echo "✅ Found Installer DMG: ${INSTALLER_DMG_NAME}"
-            FILES_TO_UPLOAD="${FILES_TO_UPLOAD} ${INSTALLER_DMG_NAME}"
-          else
-            echo "❌ Installer DMG not found: ${INSTALLER_DMG_NAME}"
-          fi
+          # Note: PKG file is included inside installer DMG, so we don't upload it separately
 
           if [ -z "${FILES_TO_UPLOAD}" ]; then
             echo "❌ No installer files found"
@@ -663,7 +661,7 @@ jobs:
           # Create artifact directory
           mkdir -p installers-artifact
 
-          # Copy all installer files
+          # Copy installer files (prioritize installer DMG)
           for file in ${FILES_TO_UPLOAD}; do
             cp "${file}" installers-artifact/
 
