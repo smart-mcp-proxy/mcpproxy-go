@@ -325,25 +325,40 @@ else
     fi
 fi
 
+# Check if the certificate is actually a "Developer ID Installer" certificate
 if [ -n "${INSTALLER_CERT_IDENTITY}" ]; then
+    if echo "${INSTALLER_CERT_IDENTITY}" | grep -q "Developer ID Installer"; then
+        echo "✅ Valid Developer ID Installer certificate found"
 
-    # Sign the PKG
-    productsign --sign "${INSTALLER_CERT_IDENTITY}" \
-                --timestamp \
-                "${PKG_NAME}.pkg" \
-                "${PKG_NAME}-signed.pkg"
+        # Sign the PKG with proper installer certificate
+        if productsign --sign "${INSTALLER_CERT_IDENTITY}" \
+                      --timestamp \
+                      "${PKG_NAME}.pkg" \
+                      "${PKG_NAME}-signed.pkg"; then
 
-    # Replace unsigned with signed
-    mv "${PKG_NAME}-signed.pkg" "${PKG_NAME}.pkg"
+            # Replace unsigned with signed
+            mv "${PKG_NAME}-signed.pkg" "${PKG_NAME}.pkg"
 
-    # Verify PKG signing
-    echo "=== Verifying PKG signature ==="
-    pkgutil --check-signature "${PKG_NAME}.pkg"
+            # Verify PKG signing
+            echo "=== Verifying PKG signature ==="
+            pkgutil --check-signature "${PKG_NAME}.pkg"
 
-    echo "✅ PKG signed successfully"
+            echo "✅ PKG signed successfully with Developer ID Installer certificate"
+        else
+            echo "❌ PKG signing with productsign failed"
+            echo "Keeping unsigned PKG"
+        fi
+    else
+        echo "⚠️  Certificate is not a Developer ID Installer certificate: ${INSTALLER_CERT_IDENTITY}"
+        echo "productsign requires specifically a 'Developer ID Installer' certificate"
+        echo "Creating unsigned PKG (component PKG is still signed with app certificate)"
+        echo ""
+        echo "Note: The app bundle inside the PKG is properly signed with Developer ID Application certificate"
+        echo "The PKG container itself will be unsigned, but may still work for testing"
+    fi
 else
     echo "❌ No Developer ID Installer certificate found"
-    echo "PKG will be unsigned (will not pass notarization)"
+    echo "Creating unsigned PKG (component PKG is still signed with app certificate)"
 fi
 
 # Clean up

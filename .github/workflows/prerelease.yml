@@ -520,8 +520,9 @@ jobs:
             echo "✅ Found Developer ID Installer certificate: ${PKG_CERT_IDENTITY}"
           else
             echo "⚠️  No specific Developer ID Installer certificate found"
-            echo "Using Developer ID Application certificate for PKG signing (this is valid)"
-            PKG_CERT_IDENTITY="${APP_CERT_IDENTITY}"
+            echo "Note: PKG signing requires a separate 'Developer ID Installer' certificate"
+            echo "App bundle will be signed with Developer ID Application, PKG will be unsigned"
+            PKG_CERT_IDENTITY=""  # Don't pass app cert to PKG signing
           fi
 
           # Export certificate identities for scripts to use
@@ -533,7 +534,12 @@ jobs:
           CORE_BINARY="mcpproxy"
 
           # Create PKG installer with both tray and core binaries
-          echo "Creating PKG installer with certificate: ${PKG_CERT_IDENTITY}"
+          if [ -n "${PKG_CERT_IDENTITY}" ]; then
+            echo "Creating signed PKG installer with certificate: ${PKG_CERT_IDENTITY}"
+          else
+            echo "Creating PKG installer (unsigned - app bundle inside will be signed)"
+            echo "Note: PKG signing requires a separate Developer ID Installer certificate"
+          fi
           ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
 
           # Create installer DMG containing the PKG
