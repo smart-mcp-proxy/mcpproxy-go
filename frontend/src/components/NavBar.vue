@@ -55,6 +55,20 @@
           </span>
         </div>
 
+        <!-- MCP Address with copy button -->
+        <div v-if="systemStore.listenAddr" class="flex items-center space-x-1 text-sm">
+          <span class="hidden md:inline text-xs opacity-60">{{ systemStore.listenAddr }}</span>
+          <button
+            @click="copyAddress"
+            class="btn btn-ghost btn-xs p-1 tooltip"
+            :data-tip="copyTooltip"
+          >
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+          </button>
+        </div>
+
         <!-- Server stats -->
         <div class="flex items-center space-x-1 text-sm">
           <span class="hidden md:inline">{{ systemStore.upstreamStats.connected_servers }}/{{ systemStore.upstreamStats.total_servers }}</span>
@@ -89,16 +103,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 
 // Icons (we'll use SVG icons directly for simplicity)
 const DashboardIcon = 'svg'
 const ServersIcon = 'svg'
-const ToolsIcon = 'svg'
 const SearchIcon = 'svg'
 const SecretsIcon = 'svg'
+const RepositoriesIcon = 'svg'
 const SettingsIcon = 'svg'
 
 const route = useRoute()
@@ -107,11 +121,33 @@ const systemStore = useSystemStore()
 const menuItems = [
   { name: 'Dashboard', path: '/', icon: DashboardIcon },
   { name: 'Servers', path: '/servers', icon: ServersIcon },
-  { name: 'Tools', path: '/tools', icon: ToolsIcon },
   { name: 'Search', path: '/search', icon: SearchIcon },
   { name: 'Secrets', path: '/secrets', icon: SecretsIcon },
+  { name: 'Repositories', path: '/repositories', icon: RepositoriesIcon },
   { name: 'Settings', path: '/settings', icon: SettingsIcon },
 ]
+
+// Copy-to-clipboard functionality
+const copyTooltip = ref('Copy MCP address')
+
+async function copyAddress() {
+  const address = systemStore.listenAddr
+  if (!address) return
+
+  try {
+    await navigator.clipboard.writeText(`http://${address}/mcp`)
+    copyTooltip.value = 'Copied!'
+    setTimeout(() => {
+      copyTooltip.value = 'Copy MCP address'
+    }, 2000)
+  } catch (err) {
+    console.error('Failed to copy to clipboard:', err)
+    copyTooltip.value = 'Failed to copy'
+    setTimeout(() => {
+      copyTooltip.value = 'Copy MCP address'
+    }, 2000)
+  }
+}
 
 function isActiveRoute(path: string): boolean {
   if (path === '/') {

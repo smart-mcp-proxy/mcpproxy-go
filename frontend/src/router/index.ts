@@ -30,11 +30,11 @@ const router = createRouter({
       },
     },
     {
-      path: '/tools',
-      name: 'tools',
-      component: () => import('@/views/Tools.vue'),
+      path: '/repositories',
+      name: 'repositories',
+      component: () => import('@/views/Repositories.vue'),
       meta: {
-        title: 'Tools',
+        title: 'Repositories',
       },
     },
     {
