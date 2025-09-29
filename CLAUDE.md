@@ -355,6 +355,12 @@ MCPProxy supports several environment variables for configuration and security:
 - `MCPPROXY_DISABLE_OAUTH` - Disable OAuth for testing
 - `HEADLESS` - Run in headless mode (no browser launching)
 
+**Tray-Core Communication**:
+- `MCPPROXY_API_KEY` - Shared API key for tray-core authentication (auto-generated if not set)
+- `MCPPROXY_TLS_ENABLED` - Enable TLS/HTTPS for both tray and core (automatically passed through)
+- `MCPPROXY_TRAY_SKIP_CORE` - Skip core launch in tray app (for development)
+- `MCPPROXY_CORE_URL` - Custom core URL for tray to connect to
+
 **Examples**:
 ```bash
 # Start with custom network binding
@@ -503,6 +509,16 @@ open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
 - **Configuration options**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
 - **Optional protection**: Empty API key disables authentication (useful for testing)
 - **Protected endpoints**: `/api/v1/*` and `/events` (SSE) require authentication when enabled
+
+#### Tray-Core API Key Coordination
+The tray application ensures secure communication with the core process through coordinated API key management:
+
+1. **Environment Variable Priority**: If `MCPPROXY_API_KEY` is set, both tray and core use the same key
+2. **Auto-Generation**: If no API key is provided, tray generates one and passes it to core via environment
+3. **Core Process Environment**: Tray always passes `MCPPROXY_API_KEY` to the core process it launches
+4. **TLS Configuration**: When `MCPPROXY_TLS_ENABLED=true`, it's automatically passed to the core process
+
+This prevents the "API key auto-generated for security" mismatch that would prevent tray-core communication.
 
 ### Quarantine System
 - **All new servers** added via LLM tools are automatically quarantined

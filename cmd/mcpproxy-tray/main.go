@@ -118,10 +118,10 @@ func main() {
 	// Setup API key for secure communication between tray and core
 	if trayAPIKey == "" {
 		// Check environment variable first (for consistency with core behavior)
-		if envAPIKey := os.Getenv("MCPP_API_KEY"); envAPIKey != "" {
+		if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
 			trayAPIKey = envAPIKey
 			logger.Info("Using API key from environment variable for tray-core communication",
-				zap.String("api_key_source", "MCPP_API_KEY environment variable"),
+				zap.String("api_key_source", "MCPPROXY_API_KEY environment variable"),
 				zap.String("api_key_prefix", maskAPIKey(trayAPIKey)))
 		} else {
 			trayAPIKey = generateAPIKey()
@@ -887,18 +887,23 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 func (cpl *CoreProcessLauncher) buildCoreEnvironment() []string {
 	env := os.Environ()
 
-	// Filter out any existing MCPP_API_KEY to avoid conflicts
+	// Filter out any existing MCPPROXY_API_KEY to avoid conflicts
 	filtered := make([]string, 0, len(env))
 	for _, envVar := range env {
-		if !strings.HasPrefix(envVar, "MCPP_API_KEY=") {
+		if !strings.HasPrefix(envVar, "MCPPROXY_API_KEY=") {
 			filtered = append(filtered, envVar)
 		}
 	}
 
 	// Add our environment variables
 	filtered = append(filtered,
-		"MCPP_ENABLE_TRAY=false",
-		fmt.Sprintf("MCPP_API_KEY=%s", trayAPIKey))
+		"MCPPROXY_ENABLE_TRAY=false",
+		fmt.Sprintf("MCPPROXY_API_KEY=%s", trayAPIKey))
+
+	// Pass through TLS configuration if set
+	if tlsEnabled := strings.TrimSpace(os.Getenv("MCPPROXY_TLS_ENABLED")); tlsEnabled != "" {
+		filtered = append(filtered, fmt.Sprintf("MCPPROXY_TLS_ENABLED=%s", tlsEnabled))
+	}
 
 	return filtered
 }
