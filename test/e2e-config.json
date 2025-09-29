@@ -2,6 +2,7 @@
   "listen": ":8081",
   "data_dir": "./test-data",
   "enable_tray": false,
+  "api_key": "",
   "debug_search": false,
   "mcpServers": [
     {
@@ -15,7 +16,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-09-28T13:49:51.200657+03:00"
+      "updated": "2025-09-23T10:13:46.357736+03:00"
     }
   ],
   "top_k": 10,
@@ -164,10 +165,5 @@
     "enable_tray": true,
     "enable_debug_logging": false,
     "enable_contract_tests": false
-  },
-  "tls": {
-    "enabled": false,
-    "require_client_cert": false,
-    "hsts": true
   }
 }

@@ -8,7 +8,7 @@ import (
 )
 
 // ConvertServerConfig converts a config.ServerConfig to a contracts.Server
-func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool, toolCount int) *Server {
+func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool, toolCount int, authenticated bool) *Server {
 	server := &Server{
 		ID:             cfg.Name,
 		Name:           cfg.Name,
@@ -27,6 +27,7 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		Created:        cfg.Created,
 		Updated:        cfg.Updated,
 		ReconnectCount: 0, // TODO: Get from runtime status
+		Authenticated:  authenticated,
 	}
 
 	// Convert OAuth config if present
@@ -182,6 +183,9 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		}
 		if reconnectCount, ok := generic["reconnect_count"].(int); ok {
 			server.ReconnectCount = reconnectCount
+		}
+		if authenticated, ok := generic["authenticated"].(bool); ok {
+			server.Authenticated = authenticated
 		}
 
 		// Extract args slice

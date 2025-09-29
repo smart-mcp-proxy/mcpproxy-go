@@ -293,6 +293,41 @@ class APIService {
     })
   }
 
+  // Diagnostics
+  async getDiagnostics(): Promise<APIResponse<{
+    upstream_errors: Array<{
+      type: string
+      category: string
+      server?: string
+      title: string
+      message: string
+      timestamp: string
+      severity: string
+      metadata?: Record<string, any>
+    }>
+    oauth_required: string[]
+    missing_secrets: Array<{
+      name: string
+      reference: string
+      server: string
+      type: string
+    }>
+    runtime_warnings: Array<{
+      type: string
+      category: string
+      server?: string
+      title: string
+      message: string
+      timestamp: string
+      severity: string
+      metadata?: Record<string, any>
+    }>
+    total_issues: number
+    last_updated: string
+  }>> {
+    return this.request('/api/v1/diagnostics')
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {

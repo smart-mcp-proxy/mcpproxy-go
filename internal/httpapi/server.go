@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -251,6 +252,9 @@ func (s *Server) setupRoutes() {
 			r.Post("/", s.handleSetSecret)
 			r.Delete("/{name}", s.handleDeleteSecret)
 		})
+
+		// Diagnostics
+		r.Get("/diagnostics", s.handleGetDiagnostics)
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD
@@ -957,4 +961,151 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		"name":    name,
 		"type":    secretType,
 	})
+}
+
+// Diagnostics handler
+
+func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Get all servers
+	genericServers, err := s.controller.GetAllServers()
+	if err != nil {
+		s.logger.Error("Failed to get servers for diagnostics", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to get servers")
+		return
+	}
+
+	// Convert to typed servers
+	servers := contracts.ConvertGenericServersToTyped(genericServers)
+
+	// Collect diagnostics
+	var upstreamErrors []contracts.DiagnosticIssue
+	var oauthRequired []string
+	var missingSecrets []contracts.MissingSecret
+	var runtimeWarnings []contracts.DiagnosticIssue
+
+	now := time.Now()
+
+	// Check for upstream errors
+	for _, server := range servers {
+		if server.LastError != "" {
+			upstreamErrors = append(upstreamErrors, contracts.DiagnosticIssue{
+				Type:      "error",
+				Category:  "connection",
+				Server:    server.Name,
+				Title:     "Server Connection Error",
+				Message:   server.LastError,
+				Timestamp: now, // TODO: Use actual error timestamp
+				Severity:  "high",
+				Metadata: map[string]interface{}{
+					"protocol": server.Protocol,
+					"enabled":  server.Enabled,
+				},
+			})
+		}
+
+		// Check for OAuth requirements
+		if server.OAuth != nil && !server.Authenticated {
+			oauthRequired = append(oauthRequired, server.Name)
+		}
+
+		// Check for missing secrets
+		missingSecrets = append(missingSecrets, s.checkMissingSecrets(server)...)
+	}
+
+	// TODO: Collect runtime warnings from system
+	// This could include configuration warnings, performance alerts, etc.
+
+	totalIssues := len(upstreamErrors) + len(oauthRequired) + len(missingSecrets) + len(runtimeWarnings)
+
+	response := contracts.DiagnosticsResponse{
+		UpstreamErrors:  upstreamErrors,
+		OAuthRequired:   oauthRequired,
+		MissingSecrets:  missingSecrets,
+		RuntimeWarnings: runtimeWarnings,
+		TotalIssues:     totalIssues,
+		LastUpdated:     now,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// checkMissingSecrets analyzes a server configuration for unresolved secret references
+func (s *Server) checkMissingSecrets(server contracts.Server) []contracts.MissingSecret {
+	var missingSecrets []contracts.MissingSecret
+
+	// Check environment variables for secret references
+	for key, value := range server.Env {
+		if secretRef := extractSecretReference(value); secretRef != nil {
+			// Check if secret can be resolved
+			if !s.canResolveSecret(secretRef) {
+				missingSecrets = append(missingSecrets, contracts.MissingSecret{
+					Name:      secretRef.Name,
+					Reference: secretRef.Original,
+					Server:    server.Name,
+					Type:      secretRef.Type,
+				})
+			}
+		}
+		_ = key // Avoid unused variable warning
+	}
+
+	// Check OAuth configuration for secret references
+	if server.OAuth != nil {
+		if secretRef := extractSecretReference(server.OAuth.ClientID); secretRef != nil {
+			if !s.canResolveSecret(secretRef) {
+				missingSecrets = append(missingSecrets, contracts.MissingSecret{
+					Name:      secretRef.Name,
+					Reference: secretRef.Original,
+					Server:    server.Name,
+					Type:      secretRef.Type,
+				})
+			}
+		}
+	}
+
+	return missingSecrets
+}
+
+// extractSecretReference extracts secret reference from a value string
+func extractSecretReference(value string) *contracts.Ref {
+	// Match patterns like ${env:VAR_NAME} or ${keyring:secret_name}
+	if len(value) < 7 || !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") {
+		return nil
+	}
+
+	inner := value[2 : len(value)-1] // Remove ${ and }
+	parts := strings.SplitN(inner, ":", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+
+	return &contracts.Ref{
+		Type:     parts[0],
+		Name:     parts[1],
+		Original: value,
+	}
+}
+
+// canResolveSecret checks if a secret reference can be resolved
+func (s *Server) canResolveSecret(ref *contracts.Ref) bool {
+	resolver := s.controller.GetSecretResolver()
+	if resolver == nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Try to resolve the secret
+	_, err := resolver.Resolve(ctx, secret.Ref{
+		Type: ref.Type,
+		Name: ref.Name,
+	})
+
+	return err == nil
 }

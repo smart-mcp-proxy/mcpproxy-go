@@ -36,6 +36,7 @@ type Server struct {
 	Created         time.Time         `json:"created"`
 	Updated         time.Time         `json:"updated"`
 	Isolation       *IsolationConfig  `json:"isolation,omitempty"`
+	Authenticated   bool              `json:"authenticated"`       // OAuth authentication status
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -216,4 +217,36 @@ type GetRefsResponse struct {
 // GetMigrationAnalysisResponse is the response for POST /api/v1/secrets/migrate
 type GetMigrationAnalysisResponse struct {
 	Analysis MigrationAnalysis `json:"analysis"`
+}
+
+// Diagnostics types
+
+// DiagnosticIssue represents a single diagnostic issue
+type DiagnosticIssue struct {
+	Type        string                 `json:"type"`         // error, warning, info
+	Category    string                 `json:"category"`     // oauth, connection, secrets, config
+	Server      string                 `json:"server,omitempty"` // Associated server (if any)
+	Title       string                 `json:"title"`        // Short title
+	Message     string                 `json:"message"`      // Detailed message
+	Timestamp   time.Time              `json:"timestamp"`    // When detected
+	Severity    string                 `json:"severity"`     // critical, high, medium, low
+	Metadata    map[string]interface{} `json:"metadata,omitempty"` // Additional context
+}
+
+// MissingSecret represents an unresolved secret reference
+type MissingSecret struct {
+	Name      string `json:"name"`      // Variable/secret name
+	Reference string `json:"reference"` // Original reference (e.g., "${env:API_KEY}")
+	Server    string `json:"server"`    // Which server needs it
+	Type      string `json:"type"`      // env, keyring, etc.
+}
+
+// DiagnosticsResponse represents the aggregated diagnostics
+type DiagnosticsResponse struct {
+	UpstreamErrors   []DiagnosticIssue `json:"upstream_errors"`
+	OAuthRequired    []string          `json:"oauth_required"`    // Server names
+	MissingSecrets   []MissingSecret   `json:"missing_secrets"`
+	RuntimeWarnings  []DiagnosticIssue `json:"runtime_warnings"`
+	TotalIssues      int               `json:"total_issues"`
+	LastUpdated      time.Time         `json:"last_updated"`
 }

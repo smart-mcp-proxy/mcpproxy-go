@@ -79,134 +79,210 @@
       </div>
     </div>
 
-    <!-- Recent Servers -->
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <!-- Connected Servers -->
+    <!-- Diagnostics Panel -->
+    <div class="space-y-6">
+      <!-- Main Diagnostics Card -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title text-xl mb-4">
-            Connected Servers
-            <div class="badge badge-success">{{ serversStore.connectedServers.length }}</div>
-          </h2>
-
-          <div v-if="serversStore.loading.loading" class="text-center py-8">
-            <span class="loading loading-spinner loading-lg"></span>
-            <p class="mt-2">Loading servers...</p>
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="card-title text-xl">System Diagnostics</h2>
+            <div class="flex items-center space-x-2">
+              <div class="badge badge-sm" :class="diagnosticsBadgeClass">
+                {{ totalDiagnosticsCount }} {{ totalDiagnosticsCount === 1 ? 'issue' : 'issues' }}
+              </div>
+              <button
+                v-if="dismissedDiagnostics.size > 0"
+                @click="restoreAllDismissed"
+                class="btn btn-xs btn-ghost"
+                title="Restore dismissed issues"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+            </div>
           </div>
 
-          <div v-else-if="serversStore.loading.error" class="alert alert-error">
-            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>{{ serversStore.loading.error }}</span>
-          </div>
-
-          <div v-else-if="serversStore.connectedServers.length === 0" class="text-center py-8 text-base-content/60">
-            <svg class="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
-            </svg>
-            <p>No servers connected</p>
-            <router-link to="/servers" class="btn btn-sm btn-primary mt-2">
-              Manage Servers
-            </router-link>
-          </div>
-
-          <div v-else class="space-y-3">
-            <div
-              v-for="server in serversStore.connectedServers.slice(0, 5)"
-              :key="server.name"
-              class="flex items-center justify-between p-3 bg-base-200 rounded-lg"
-            >
-              <div class="flex items-center space-x-3">
-                <div class="w-3 h-3 bg-success rounded-full"></div>
-                <div>
-                  <div class="font-medium">{{ server.name }}</div>
-                  <div class="text-sm text-base-content/70">{{ server.tool_count }} tools</div>
+          <!-- Upstream Errors -->
+          <div v-if="upstreamErrors.length > 0" class="collapse collapse-arrow border border-error mb-4">
+            <input type="checkbox" class="peer" :checked="!collapsedSections.upstreamErrors" @change="toggleSection('upstreamErrors')" />
+            <div class="collapse-title bg-error/10 text-error font-medium flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>Upstream Errors ({{ upstreamErrors.length }})</span>
+              </div>
+            </div>
+            <div class="collapse-content bg-error/5">
+              <div class="pt-4 space-y-3">
+                <div
+                  v-for="error in upstreamErrors"
+                  :key="error.server"
+                  class="flex items-start justify-between p-3 bg-base-100 rounded-lg border border-error/20"
+                >
+                  <div class="flex-1">
+                    <div class="font-medium text-error">{{ error.server }}</div>
+                    <div class="text-sm text-base-content/70 mt-1">{{ error.message }}</div>
+                    <div class="text-xs text-base-content/50 mt-1">{{ error.timestamp }}</div>
+                  </div>
+                  <div class="flex items-center space-x-2 ml-4">
+                    <router-link :to="`/servers/${error.server}`" class="btn btn-xs btn-outline btn-error">
+                      Fix
+                    </router-link>
+                    <button @click="dismissError(error)" class="btn btn-xs btn-ghost" title="Dismiss">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               </div>
-              <router-link
-                :to="`/servers/${server.name}`"
-                class="btn btn-xs btn-outline"
-              >
-                View
-              </router-link>
             </div>
+          </div>
 
-            <div v-if="serversStore.connectedServers.length > 5" class="text-center pt-2">
-              <router-link to="/servers" class="btn btn-sm btn-outline">
-                View All ({{ serversStore.connectedServers.length }})
-              </router-link>
+          <!-- OAuth Required -->
+          <div v-if="oauthRequired.length > 0" class="collapse collapse-arrow border border-warning mb-4">
+            <input type="checkbox" class="peer" :checked="!collapsedSections.oauthRequired" @change="toggleSection('oauthRequired')" />
+            <div class="collapse-title bg-warning/10 text-warning font-medium flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8v2.25H5.5v2.25H3v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121 9z" />
+                </svg>
+                <span>Authentication Required ({{ oauthRequired.length }})</span>
+              </div>
             </div>
+            <div class="collapse-content bg-warning/5">
+              <div class="pt-4 space-y-3">
+                <div
+                  v-for="server in oauthRequired"
+                  :key="server"
+                  class="flex items-center justify-between p-3 bg-base-100 rounded-lg border border-warning/20"
+                >
+                  <div class="flex items-center space-x-3">
+                    <svg class="w-5 h-5 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8v2.25H5.5v2.25H3v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121 9z" />
+                    </svg>
+                    <div>
+                      <div class="font-medium">{{ server }}</div>
+                      <div class="text-sm text-base-content/70">OAuth authentication needed</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center space-x-2">
+                    <button @click="triggerOAuthLogin(server)" class="btn btn-xs btn-warning">
+                      Login
+                    </button>
+                    <button @click="dismissOAuth(server)" class="btn btn-xs btn-ghost" title="Dismiss">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Missing Secrets -->
+          <div v-if="missingSecrets.length > 0" class="collapse collapse-arrow border border-warning mb-4">
+            <input type="checkbox" class="peer" :checked="!collapsedSections.missingSecrets" @change="toggleSection('missingSecrets')" />
+            <div class="collapse-title bg-warning/10 text-warning font-medium flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                <span>Missing Secrets ({{ missingSecrets.length }})</span>
+              </div>
+            </div>
+            <div class="collapse-content bg-warning/5">
+              <div class="pt-4 space-y-3">
+                <div
+                  v-for="secret in missingSecrets"
+                  :key="secret.name"
+                  class="flex items-center justify-between p-3 bg-base-100 rounded-lg border border-warning/20"
+                >
+                  <div class="flex items-center space-x-3">
+                    <svg class="w-5 h-5 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                    </svg>
+                    <div>
+                      <div class="font-medium">{{ secret.name }}</div>
+                      <div class="text-sm text-base-content/70 font-mono">{{ secret.reference }}</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center space-x-2">
+                    <router-link to="/secrets" class="btn btn-xs btn-warning">
+                      Set Value
+                    </router-link>
+                    <button @click="dismissSecret(secret)" class="btn btn-xs btn-ghost" title="Dismiss">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Runtime Warnings -->
+          <div v-if="runtimeWarnings.length > 0" class="collapse collapse-arrow border border-info mb-4">
+            <input type="checkbox" class="peer" :checked="!collapsedSections.runtimeWarnings" @change="toggleSection('runtimeWarnings')" />
+            <div class="collapse-title bg-info/10 text-info font-medium flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>Runtime Warnings ({{ runtimeWarnings.length }})</span>
+              </div>
+            </div>
+            <div class="collapse-content bg-info/5">
+              <div class="pt-4 space-y-3">
+                <div
+                  v-for="warning in runtimeWarnings"
+                  :key="warning.id"
+                  class="flex items-start justify-between p-3 bg-base-100 rounded-lg border border-info/20"
+                >
+                  <div class="flex-1">
+                    <div class="font-medium text-info">{{ warning.category }}</div>
+                    <div class="text-sm text-base-content/70 mt-1">{{ warning.message }}</div>
+                    <div class="text-xs text-base-content/50 mt-1">{{ warning.timestamp }}</div>
+                  </div>
+                  <button @click="dismissWarning(warning)" class="btn btn-xs btn-ghost ml-4" title="Dismiss">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- No Issues State -->
+          <div v-if="totalDiagnosticsCount === 0" class="text-center py-12">
+            <svg class="w-16 h-16 mx-auto mb-4 text-success opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <h3 class="text-lg font-medium text-success mb-2">All Systems Operational</h3>
+            <p class="text-base-content/60">No issues detected with your server configuration</p>
+            <router-link to="/servers" class="btn btn-sm btn-outline btn-success mt-4">
+              View Servers
+            </router-link>
           </div>
         </div>
       </div>
 
-      <!-- Quick Actions -->
+      <!-- Tool Call History Placeholder -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title text-xl mb-4">Quick Actions</h2>
+          <h2 class="card-title text-xl mb-4">Recent Tool Calls</h2>
 
-          <div class="space-y-4">
-            <router-link to="/search" class="btn btn-outline btn-block justify-start">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
-              Search Tools
-            </router-link>
-
-            <router-link to="/servers" class="btn btn-outline btn-block justify-start">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
-              </svg>
-              Manage Servers
-            </router-link>
-
-            <router-link to="/tools" class="btn btn-outline btn-block justify-start">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              </svg>
-              Browse All Tools
-            </router-link>
-
-            <router-link to="/settings" class="btn btn-outline btn-block justify-start">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              </svg>
-              Settings
-            </router-link>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- System Info -->
-    <div class="card bg-base-100 shadow-md">
-      <div class="card-body">
-        <h2 class="card-title text-xl mb-4">System Information</h2>
-
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div class="stat bg-base-200 rounded-lg">
-            <div class="stat-title">Status</div>
-            <div class="stat-value text-lg">
-              {{ systemStore.isRunning ? 'Running' : 'Stopped' }}
-            </div>
-            <div class="stat-desc">{{ systemStore.listenAddr || 'Not listening' }}</div>
-          </div>
-
-          <div class="stat bg-base-200 rounded-lg">
-            <div class="stat-title">Real-time Updates</div>
-            <div class="stat-value text-lg">
-              {{ systemStore.connected ? 'Connected' : 'Disconnected' }}
-            </div>
-            <div class="stat-desc">Server-Sent Events</div>
-          </div>
-
-          <div class="stat bg-base-200 rounded-lg">
-            <div class="stat-title">Last Update</div>
-            <div class="stat-value text-lg">
-              {{ lastUpdateTime }}
-            </div>
-            <div class="stat-desc">{{ systemStore.status?.timestamp ? 'Live' : 'No data' }}</div>
+          <div class="text-center py-12">
+            <svg class="w-16 h-16 mx-auto mb-4 text-base-content/30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            </svg>
+            <h3 class="text-lg font-medium text-base-content/60 mb-2">Tool Call History Coming Soon</h3>
+            <p class="text-base-content/40">Tool call logging and history will be available after Phase 3 implementation</p>
           </div>
         </div>
       </div>
@@ -215,12 +291,138 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import api from '@/services/api'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+
+// Collapsed sections state
+const collapsedSections = reactive({
+  upstreamErrors: false,
+  oauthRequired: false,
+  missingSecrets: false,
+  runtimeWarnings: false
+})
+
+// Dismissed diagnostics
+const dismissedDiagnostics = ref(new Set<string>())
+
+// Load dismissed items from localStorage
+const STORAGE_KEY = 'mcpproxy-dismissed-diagnostics'
+const loadDismissedDiagnostics = () => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (stored) {
+      const items = JSON.parse(stored) as string[]
+      dismissedDiagnostics.value = new Set(items)
+    }
+  } catch (error) {
+    console.warn('Failed to load dismissed diagnostics from localStorage:', error)
+  }
+}
+
+// Save dismissed items to localStorage
+const saveDismissedDiagnostics = () => {
+  try {
+    const items = Array.from(dismissedDiagnostics.value)
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
+  } catch (error) {
+    console.warn('Failed to save dismissed diagnostics to localStorage:', error)
+  }
+}
+
+// Load dismissed diagnostics on init
+loadDismissedDiagnostics()
+
+// Diagnostics data
+const diagnosticsData = ref<any>(null)
+const diagnosticsLoading = ref(false)
+const diagnosticsError = ref<string | null>(null)
+
+// Auto-refresh interval
+let refreshInterval: ReturnType<typeof setInterval> | null = null
+
+// Load diagnostics from API
+const loadDiagnostics = async () => {
+  diagnosticsLoading.value = true
+  diagnosticsError.value = null
+
+  try {
+    const response = await api.getDiagnostics()
+    if (response.success && response.data) {
+      diagnosticsData.value = response.data
+    } else {
+      diagnosticsError.value = response.error || 'Failed to load diagnostics'
+    }
+  } catch (error) {
+    diagnosticsError.value = error instanceof Error ? error.message : 'Unknown error'
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
+// Computed diagnostics with dismiss filtering
+const upstreamErrors = computed(() => {
+  if (!diagnosticsData.value?.upstream_errors) return []
+
+  return diagnosticsData.value.upstream_errors.filter((error: any) => {
+    const errorKey = `error_${error.server}`
+    return !dismissedDiagnostics.value.has(errorKey)
+  }).map((error: any) => ({
+    server: error.server || 'Unknown',
+    message: error.message,
+    timestamp: new Date(error.timestamp).toLocaleString()
+  }))
+})
+
+const oauthRequired = computed(() => {
+  if (!diagnosticsData.value?.oauth_required) return []
+
+  return diagnosticsData.value.oauth_required.filter((server: string) => {
+    const oauthKey = `oauth_${server}`
+    return !dismissedDiagnostics.value.has(oauthKey)
+  })
+})
+
+const missingSecrets = computed(() => {
+  if (!diagnosticsData.value?.missing_secrets) return []
+
+  return diagnosticsData.value.missing_secrets.filter((secret: any) => {
+    const secretKey = `secret_${secret.name}`
+    return !dismissedDiagnostics.value.has(secretKey)
+  })
+})
+
+const runtimeWarnings = computed(() => {
+  if (!diagnosticsData.value?.runtime_warnings) return []
+
+  return diagnosticsData.value.runtime_warnings.filter((warning: any) => {
+    const warningKey = `warning_${warning.title}_${warning.timestamp}`
+    return !dismissedDiagnostics.value.has(warningKey)
+  }).map((warning: any) => ({
+    id: `${warning.title}_${warning.timestamp}`,
+    category: warning.category,
+    message: warning.message,
+    timestamp: new Date(warning.timestamp).toLocaleString()
+  }))
+})
+
+const totalDiagnosticsCount = computed(() => {
+  return upstreamErrors.value.length +
+         oauthRequired.value.length +
+         missingSecrets.value.length +
+         runtimeWarnings.value.length
+})
+
+const diagnosticsBadgeClass = computed(() => {
+  if (totalDiagnosticsCount.value === 0) return 'badge-success'
+  if (upstreamErrors.value.length > 0) return 'badge-error'
+  if (oauthRequired.value.length > 0 || missingSecrets.value.length > 0) return 'badge-warning'
+  return 'badge-info'
+})
 
 const lastUpdateTime = computed(() => {
   if (!systemStore.status?.timestamp) return 'Never'
@@ -234,5 +436,86 @@ const lastUpdateTime = computed(() => {
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
 
   return new Date(timestamp).toLocaleTimeString()
+})
+
+// Methods
+const toggleSection = (section: keyof typeof collapsedSections) => {
+  collapsedSections[section] = !collapsedSections[section]
+}
+
+const dismissError = (error: any) => {
+  const key = `error_${error.server}`
+  dismissedDiagnostics.value.add(key)
+  saveDismissedDiagnostics()
+}
+
+const dismissOAuth = (server: string) => {
+  const key = `oauth_${server}`
+  dismissedDiagnostics.value.add(key)
+  saveDismissedDiagnostics()
+}
+
+const dismissSecret = (secret: any) => {
+  const key = `secret_${secret.name}`
+  dismissedDiagnostics.value.add(key)
+  saveDismissedDiagnostics()
+}
+
+const dismissWarning = (warning: any) => {
+  const key = `warning_${warning.id}`
+  dismissedDiagnostics.value.add(key)
+  saveDismissedDiagnostics()
+}
+
+const restoreAllDismissed = () => {
+  dismissedDiagnostics.value.clear()
+  saveDismissedDiagnostics()
+}
+
+const triggerOAuthLogin = async (server: string) => {
+  try {
+    await serversStore.triggerOAuthLogin(server)
+    systemStore.addToast({
+      type: 'success',
+      title: 'OAuth Login',
+      message: `OAuth login initiated for ${server}`
+    })
+    // Refresh diagnostics after OAuth attempt
+    setTimeout(loadDiagnostics, 2000)
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'OAuth Login Failed',
+      message: `Failed to initiate OAuth login: ${error instanceof Error ? error.message : 'Unknown error'}`
+    })
+  }
+}
+
+// Lifecycle
+onMounted(() => {
+  // Load diagnostics immediately
+  loadDiagnostics()
+
+  // Set up auto-refresh every 30 seconds
+  refreshInterval = setInterval(loadDiagnostics, 30000)
+
+  // Listen for SSE events to refresh diagnostics
+  const handleSSEUpdate = () => {
+    setTimeout(loadDiagnostics, 1000) // Small delay to let backend process the change
+  }
+
+  // Listen to system store events
+  systemStore.connectEventSource()
+
+  // Refresh when servers change
+  serversStore.fetchServers()
+})
+
+onUnmounted(() => {
+  // Clean up interval
+  if (refreshInterval) {
+    clearInterval(refreshInterval)
+    refreshInterval = null
+  }
 })
 </script>
