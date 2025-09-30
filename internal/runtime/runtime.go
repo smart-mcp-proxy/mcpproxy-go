@@ -514,6 +514,98 @@ func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts
 	return contractCalls, nil
 }
 
+// ReplayToolCall replays a tool call with modified arguments
+func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Get the original tool call using the same pattern as GetToolCallByID
+	var originalCall *storage.ToolCallRecord
+	identities, err := r.storageManager.ListServerIdentities()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list server identities: %w", err)
+	}
+
+	for _, identity := range identities {
+		calls, err := r.storageManager.GetServerToolCalls(identity.ID, 1000)
+		if err != nil {
+			continue
+		}
+
+		for _, call := range calls {
+			if call.ID == id {
+				originalCall = call
+				break
+			}
+		}
+		if originalCall != nil {
+			break
+		}
+	}
+
+	if originalCall == nil {
+		return nil, fmt.Errorf("tool call not found: %s", id)
+	}
+
+	// Use modified arguments if provided, otherwise use original
+	callArgs := arguments
+	if callArgs == nil {
+		callArgs = originalCall.Arguments
+	}
+
+	// Get the upstream client
+	client, ok := r.upstreamManager.GetClient(originalCall.ServerName)
+	if !ok || client == nil {
+		return nil, fmt.Errorf("server not found: %s", originalCall.ServerName)
+	}
+
+	// Call the tool with modified arguments
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.CallToolTimeout.Duration())
+	defer cancel()
+
+	startTime := time.Now()
+	result, callErr := client.CallTool(ctx, originalCall.ToolName, callArgs)
+	duration := time.Since(startTime)
+
+	// Create new tool call record
+	newCall := &storage.ToolCallRecord{
+		ID:         fmt.Sprintf("%d-%s", time.Now().UnixNano(), originalCall.ToolName),
+		ServerID:   originalCall.ServerID,
+		ServerName: originalCall.ServerName,
+		ToolName:   originalCall.ToolName,
+		Arguments:  callArgs,
+		Duration:   duration.Nanoseconds(),
+		Timestamp:  time.Now(),
+		ConfigPath: r.cfgPath,
+	}
+
+	if callErr != nil {
+		newCall.Error = callErr.Error()
+	} else {
+		newCall.Response = result
+	}
+
+	// Store the new tool call
+	if err := r.storageManager.RecordToolCall(newCall); err != nil {
+		r.logger.Warn("Failed to record replayed tool call", zap.Error(err))
+	}
+
+	// Convert to contract type
+	return &contracts.ToolCallRecord{
+		ID:         newCall.ID,
+		ServerID:   newCall.ServerID,
+		ServerName: newCall.ServerName,
+		ToolName:   newCall.ToolName,
+		Arguments:  newCall.Arguments,
+		Response:   newCall.Response,
+		Error:      newCall.Error,
+		Duration:   newCall.Duration,
+		Timestamp:  newCall.Timestamp,
+		ConfigPath: newCall.ConfigPath,
+		RequestID:  newCall.RequestID,
+	}, nil
+}
+
 // ValidateConfig validates a configuration without applying it
 func (r *Runtime) ValidateConfig(cfg *config.Config) ([]config.ValidationError, error) {
 	if cfg == nil {

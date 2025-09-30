@@ -347,6 +347,13 @@ class APIService {
     return this.request<GetServerToolCallsResponse>(url)
   }
 
+  async replayToolCall(id: string, args: Record<string, any>): Promise<APIResponse<any>> {
+    return this.request(`/api/v1/tool-calls/${encodeURIComponent(id)}/replay`, {
+      method: 'POST',
+      body: JSON.stringify({ arguments: args })
+    })
+  }
+
   // Configuration management endpoints
   async getConfig(): Promise<APIResponse<GetConfigResponse>> {
     return this.request<GetConfigResponse>('/api/v1/config')

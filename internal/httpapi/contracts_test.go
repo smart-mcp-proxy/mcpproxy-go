@@ -134,6 +134,14 @@ func (m *MockServerController) GetToolCallByID(_ string) (*contracts.ToolCallRec
 func (m *MockServerController) GetServerToolCalls(_ string, _ int) ([]*contracts.ToolCallRecord, error) {
 	return []*contracts.ToolCallRecord{}, nil
 }
+func (m *MockServerController) ReplayToolCall(_ string, _ map[string]interface{}) (*contracts.ToolCallRecord, error) {
+	return &contracts.ToolCallRecord{
+		ID:         "replayed-call-123",
+		ServerName: "test-server",
+		ToolName:   "echo_tool",
+		Arguments:  map[string]interface{}{},
+	}, nil
+}
 
 // Configuration management methods
 func (m *MockServerController) ValidateConfig(_ *config.Config) ([]config.ValidationError, error) {

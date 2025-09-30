@@ -139,6 +139,15 @@
                       </svg>
                     </button>
                     <button
+                      @click="openReplayModal(call)"
+                      class="btn btn-xs btn-primary"
+                      title="Replay tool call"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </button>
+                    <button
                       @click="copyCLICommand(call)"
                       class="btn btn-xs btn-ghost"
                       title="Copy as CLI command"
@@ -211,6 +220,92 @@
         </div>
       </div>
     </div>
+
+    <!-- Replay Modal -->
+    <dialog ref="replayModal" class="modal">
+      <div class="modal-box max-w-4xl">
+        <h3 class="font-bold text-lg mb-4">Replay Tool Call</h3>
+
+        <div v-if="replayingCall" class="space-y-4">
+          <!-- Call Info -->
+          <div class="bg-base-200 p-3 rounded">
+            <div class="text-sm space-y-1">
+              <div><strong>Server:</strong> {{ replayingCall.server_name }}</div>
+              <div><strong>Tool:</strong> <code class="bg-base-300 px-2 py-1 rounded">{{ replayingCall.tool_name }}</code></div>
+              <div><strong>Original Call ID:</strong> {{ replayingCall.id }}</div>
+            </div>
+          </div>
+
+          <!-- Arguments Editor -->
+          <div>
+            <label class="label">
+              <span class="label-text font-semibold">Edit Arguments (JSON)</span>
+            </label>
+            <vue-monaco-editor
+              v-model:value="replayArgsJson"
+              language="json"
+              theme="vs-dark"
+              :options="editorOptions"
+              height="300px"
+            />
+          </div>
+
+          <!-- Validation Error -->
+          <div v-if="replayValidationError" class="alert alert-error">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>{{ replayValidationError }}</span>
+          </div>
+
+          <!-- Replay Result -->
+          <div v-if="replayResult" class="space-y-2">
+            <div v-if="replayResult.success" class="alert alert-success">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+              </svg>
+              <span>Tool call replayed successfully! New call ID: {{ replayResult.new_call_id }}</span>
+            </div>
+
+            <!-- Response Preview -->
+            <div v-if="replayResult.new_tool_call">
+              <h4 class="font-semibold mb-2">Response:</h4>
+              <pre class="bg-base-300 p-3 rounded text-xs overflow-x-auto max-h-60">{{ JSON.stringify(replayResult.new_tool_call.response || replayResult.new_tool_call.error, null, 2) }}</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="modal-action">
+          <button
+            v-if="!replayResult"
+            @click="executeReplay"
+            :disabled="replaying"
+            class="btn btn-primary"
+          >
+            <span v-if="replaying" class="loading loading-spinner loading-sm"></span>
+            <span v-else>Replay Tool Call</span>
+          </button>
+          <button
+            v-if="replayResult?.success"
+            @click="closeReplayModal(); loadToolCalls()"
+            class="btn btn-success"
+          >
+            Close & Refresh
+          </button>
+          <button
+            @click="closeReplayModal"
+            class="btn"
+            :class="{ 'btn-ghost': !replayResult }"
+          >
+            {{ replayResult ? 'Close' : 'Cancel' }}
+          </button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button @click="closeReplayModal">close</button>
+      </form>
+    </dialog>
   </div>
 </template>
 
@@ -219,6 +314,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ToolCallRecord } from '@/types'
+import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 
 const systemStore = useSystemStore()
 
@@ -236,6 +332,23 @@ const filterStatus = ref('')
 // Pagination
 const currentPage = ref(1)
 const itemsPerPage = 20
+
+// Replay modal state
+const replayModal = ref<HTMLDialogElement>()
+const replayingCall = ref<ToolCallRecord | null>(null)
+const replayArgsJson = ref('')
+const replayValidationError = ref('')
+const replayResult = ref<any>(null)
+const replaying = ref(false)
+
+// Monaco editor options
+const editorOptions = {
+  minimap: { enabled: false },
+  lineNumbers: 'on' as 'on',
+  scrollBeyondLastLine: false,
+  wordWrap: 'on' as 'on',
+  automaticLayout: true
+}
 
 // Load tool calls
 const loadToolCalls = async () => {
@@ -325,6 +438,48 @@ const copyCLICommand = (call: ToolCallRecord) => {
       message: 'Failed to copy command to clipboard'
     })
   })
+}
+
+// Replay methods
+const openReplayModal = (call: ToolCallRecord) => {
+  replayingCall.value = call
+  replayArgsJson.value = JSON.stringify(call.arguments, null, 2)
+  replayValidationError.value = ''
+  replayResult.value = null
+  replaying.value = false
+  replayModal.value?.showModal()
+}
+
+const closeReplayModal = () => {
+  replayModal.value?.close()
+  replayingCall.value = null
+}
+
+const executeReplay = async () => {
+  if (!replayingCall.value) return
+
+  replaying.value = true
+  replayValidationError.value = ''
+
+  try {
+    const args = JSON.parse(replayArgsJson.value)
+    const response = await api.replayToolCall(replayingCall.value.id, args)
+
+    if (response.success && response.data) {
+      replayResult.value = response.data
+      systemStore.addToast({
+        type: 'success',
+        title: 'Tool Call Replayed',
+        message: `Successfully replayed tool call. New ID: ${response.data.new_call_id}`
+      })
+    } else {
+      replayValidationError.value = response.error || 'Failed to replay tool call'
+    }
+  } catch (error: any) {
+    replayValidationError.value = error.message || 'Invalid JSON or replay failed'
+  } finally {
+    replaying.value = false
+  }
 }
 
 // Format helpers

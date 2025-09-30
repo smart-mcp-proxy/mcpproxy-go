@@ -1187,3 +1187,8 @@ func (s *Server) GetToolCallByID(id string) (*contracts.ToolCallRecord, error) {
 func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error) {
 	return s.runtime.GetServerToolCalls(serverName, limit)
 }
+
+// ReplayToolCall replays a tool call with modified arguments
+func (s *Server) ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
+	return s.runtime.ReplayToolCall(id, arguments)
+}

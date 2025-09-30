@@ -66,6 +66,7 @@ type ServerController interface {
 	GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error)
 	GetToolCallByID(id string) (*contracts.ToolCallRecord, error)
 	GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error)
+	ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error)
 
 	// Configuration management
 	ValidateConfig(cfg *config.Config) ([]config.ValidationError, error)
@@ -270,6 +271,7 @@ func (s *Server) setupRoutes() {
 		// Tool call history
 		r.Get("/tool-calls", s.handleGetToolCalls)
 		r.Get("/tool-calls/{id}", s.handleGetToolCallDetail)
+		r.Post("/tool-calls/{id}/replay", s.handleReplayToolCall)
 
 		// Configuration management
 		r.Get("/config", s.handleGetConfig)
@@ -1248,6 +1250,43 @@ func convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.T
 		}
 	}
 	return records
+}
+
+func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		s.writeError(w, http.StatusBadRequest, "Tool call ID required")
+		return
+	}
+
+	// Parse request body for modified arguments
+	var request contracts.ReplayToolCallRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	// Replay the tool call with modified arguments
+	newToolCall, err := s.controller.ReplayToolCall(id, request.Arguments)
+	if err != nil {
+		s.logger.Error("Failed to replay tool call", "id", id, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to replay tool call: %v", err))
+		return
+	}
+
+	response := contracts.ReplayToolCallResponse{
+		Success:      true,
+		NewCallID:    newToolCall.ID,
+		NewToolCall:  *newToolCall,
+		ReplayedFrom: id,
+	}
+
+	s.writeSuccess(w, response)
 }
 
 // Configuration management handlers
