@@ -272,17 +272,83 @@
         </div>
       </div>
 
-      <!-- Tool Call History Placeholder -->
+      <!-- Tool Call History Widget -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title text-xl mb-4">Recent Tool Calls</h2>
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="card-title text-xl">Recent Tool Calls</h2>
+            <router-link to="/tool-calls" class="btn btn-sm btn-ghost">
+              View All
+              <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+              </svg>
+            </router-link>
+          </div>
 
-          <div class="text-center py-12">
-            <svg class="w-16 h-16 mx-auto mb-4 text-base-content/30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+          <div v-if="toolCallsLoading" class="flex justify-center py-8">
+            <span class="loading loading-spinner loading-md"></span>
+          </div>
+
+          <div v-else-if="toolCallsError" class="alert alert-error">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <h3 class="text-lg font-medium text-base-content/60 mb-2">Tool Call History Coming Soon</h3>
-            <p class="text-base-content/40">Tool call logging and history will be available after Phase 3 implementation</p>
+            <span>{{ toolCallsError }}</span>
+          </div>
+
+          <div v-else-if="recentToolCalls.length === 0" class="text-center py-8 text-base-content/60">
+            <svg class="w-12 h-12 mx-auto mb-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+            </svg>
+            <p>No tool calls yet</p>
+            <p class="text-sm mt-1">Tool calls will appear here once servers start executing tools</p>
+          </div>
+
+          <div v-else class="overflow-x-auto">
+            <table class="table table-sm">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Server</th>
+                  <th>Tool</th>
+                  <th>Status</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="call in recentToolCalls" :key="call.id" class="hover">
+                  <td>
+                    <span class="text-xs" :title="call.timestamp">
+                      {{ formatRelativeTime(call.timestamp) }}
+                    </span>
+                  </td>
+                  <td>
+                    <router-link
+                      :to="`/servers/${call.server_name}`"
+                      class="link link-hover text-sm"
+                    >
+                      {{ call.server_name }}
+                    </router-link>
+                  </td>
+                  <td>
+                    <code class="text-xs">{{ call.tool_name }}</code>
+                  </td>
+                  <td>
+                    <div
+                      class="badge badge-sm"
+                      :class="call.error ? 'badge-error' : 'badge-success'"
+                    >
+                      {{ call.error ? 'Error' : 'Success' }}
+                    </div>
+                  </td>
+                  <td>
+                    <span class="text-xs text-base-content/70">
+                      {{ formatDuration(call.duration) }}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -491,17 +557,69 @@ const triggerOAuthLogin = async (server: string) => {
   }
 }
 
+// Tool Calls History
+const recentToolCalls = ref<any[]>([])
+const toolCallsLoading = ref(false)
+const toolCallsError = ref<string | null>(null)
+
+// Load recent tool calls
+const loadToolCalls = async () => {
+  toolCallsLoading.value = true
+  toolCallsError.value = null
+
+  try {
+    const response = await api.getToolCalls({ limit: 10 })
+    if (response.success && response.data) {
+      recentToolCalls.value = response.data.tool_calls || []
+    } else {
+      toolCallsError.value = response.error || 'Failed to load tool calls'
+    }
+  } catch (error) {
+    toolCallsError.value = error instanceof Error ? error.message : 'Unknown error'
+  } finally {
+    toolCallsLoading.value = false
+  }
+}
+
+// Format duration from nanoseconds
+const formatDuration = (nanoseconds: number): string => {
+  const ms = nanoseconds / 1000000
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(2)}s`
+}
+
+// Format relative time
+const formatRelativeTime = (timestamp: string): string => {
+  const now = Date.now()
+  const time = new Date(timestamp).getTime()
+  const diff = now - time
+
+  if (diff < 1000) return 'Just now'
+  if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
+  return `${Math.floor(diff / 86400000)}d ago`
+}
+
 // Lifecycle
 onMounted(() => {
   // Load diagnostics immediately
   loadDiagnostics()
+  // Load tool calls immediately
+  loadToolCalls()
 
   // Set up auto-refresh every 30 seconds
-  refreshInterval = setInterval(loadDiagnostics, 30000)
+  refreshInterval = setInterval(() => {
+    loadDiagnostics()
+    loadToolCalls()
+  }, 30000)
 
   // Listen for SSE events to refresh diagnostics
   const handleSSEUpdate = () => {
-    setTimeout(loadDiagnostics, 1000) // Small delay to let backend process the change
+    setTimeout(() => {
+      loadDiagnostics()
+      loadToolCalls()
+    }, 1000) // Small delay to let backend process the change
   }
 
   // Listen to system store events

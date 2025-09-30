@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/httpapi"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/runtime"
@@ -1153,4 +1154,19 @@ func (s *Server) GetSecretResolver() *secret.Resolver {
 // GetCurrentConfig returns the current configuration
 func (s *Server) GetCurrentConfig() interface{} {
 	return s.runtime.GetCurrentConfig()
+}
+
+// GetToolCalls retrieves tool call history with pagination
+func (s *Server) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+	return s.runtime.GetToolCalls(limit, offset)
+}
+
+// GetToolCallByID retrieves a single tool call by ID
+func (s *Server) GetToolCallByID(id string) (*contracts.ToolCallRecord, error) {
+	return s.runtime.GetToolCallByID(id)
+}
+
+// GetServerToolCalls retrieves tool call history for a specific server
+func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error) {
+	return s.runtime.GetServerToolCalls(serverName, limit)
 }

@@ -586,7 +586,7 @@ func (m *Manager) GetStats() map[string]interface{} {
 }
 
 // GetTotalToolCount returns the total number of tools across all servers
-// This is optimized to avoid network calls during shutdown for performance
+// Uses cached counts to avoid excessive network calls (2-minute cache per server)
 func (m *Manager) GetTotalToolCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -597,21 +597,13 @@ func (m *Manager) GetTotalToolCount() int {
 			continue
 		}
 
-		// Quick check if client is actually reachable before making network call
-		if !client.IsConnected() {
-			continue
-		}
-
-		// Use timeout for UI status updates (30 seconds for SSE servers)
-		// This allows time for SSE servers to establish connections and respond
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-
-		m.logger.Debug("Starting ListTools for tool counting",
-			zap.Duration("timeout", 30*time.Second))
-		tools, err := client.ListTools(ctx)
+		// Use cached tool count with 2-minute TTL to prevent overload
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		count, err := client.GetCachedToolCount(ctx)
 		cancel()
-		if err == nil && tools != nil {
-			totalTools += len(tools)
+
+		if err == nil {
+			totalTools += count
 		}
 		// Silently ignore errors during tool counting to avoid noise during shutdown
 	}

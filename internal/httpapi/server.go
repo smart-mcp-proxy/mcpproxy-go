@@ -61,6 +61,11 @@ type ServerController interface {
 	// Secrets management
 	GetSecretResolver() *secret.Resolver
 	GetCurrentConfig() interface{}
+
+	// Tool call history
+	GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error)
+	GetToolCallByID(id string) (*contracts.ToolCallRecord, error)
+	GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error)
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -239,6 +244,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/login", s.handleServerLogin)
 			r.Get("/tools", s.handleGetServerTools)
 			r.Get("/logs", s.handleGetServerLogs)
+			r.Get("/tool-calls", s.handleGetServerToolCalls)
 		})
 
 		// Search
@@ -255,6 +261,10 @@ func (s *Server) setupRoutes() {
 
 		// Diagnostics
 		r.Get("/diagnostics", s.handleGetDiagnostics)
+
+		// Tool call history
+		r.Get("/tool-calls", s.handleGetToolCalls)
+		r.Get("/tool-calls/{id}", s.handleGetToolCallDetail)
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD
@@ -1108,4 +1118,124 @@ func (s *Server) canResolveSecret(ref *contracts.Ref) bool {
 	})
 
 	return err == nil
+}
+
+// Tool call history handlers
+
+func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Parse query parameters
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+
+	limit := 50 // default
+	if limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
+		}
+	}
+
+	offset := 0
+	if offsetStr != "" {
+		if parsed, err := strconv.Atoi(offsetStr); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	// Get tool calls from controller
+	toolCalls, total, err := s.controller.GetToolCalls(limit, offset)
+	if err != nil {
+		s.logger.Error("Failed to get tool calls", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to get tool calls")
+		return
+	}
+
+	response := contracts.GetToolCallsResponse{
+		ToolCalls: convertToolCallPointers(toolCalls),
+		Total:     total,
+		Limit:     limit,
+		Offset:    offset,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		s.writeError(w, http.StatusBadRequest, "Tool call ID required")
+		return
+	}
+
+	// Get tool call by ID
+	toolCall, err := s.controller.GetToolCallByID(id)
+	if err != nil {
+		s.logger.Error("Failed to get tool call detail", "id", id, "error", err)
+		s.writeError(w, http.StatusNotFound, "Tool call not found")
+		return
+	}
+
+	response := contracts.GetToolCallDetailResponse{
+		ToolCall: *toolCall,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	// Parse limit parameter
+	limitStr := r.URL.Query().Get("limit")
+	limit := 50 // default
+	if limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
+		}
+	}
+
+	// Get server tool calls
+	toolCalls, err := s.controller.GetServerToolCalls(serverID, limit)
+	if err != nil {
+		s.logger.Error("Failed to get server tool calls", "server", serverID, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to get server tool calls")
+		return
+	}
+
+	response := contracts.GetServerToolCallsResponse{
+		ServerName: serverID,
+		ToolCalls:  convertToolCallPointers(toolCalls),
+		Total:      len(toolCalls),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// Helper to convert []*contracts.ToolCallRecord to []contracts.ToolCallRecord
+func convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.ToolCallRecord {
+	records := make([]contracts.ToolCallRecord, 0, len(pointers))
+	for _, ptr := range pointers {
+		if ptr != nil {
+			records = append(records, *ptr)
+		}
+	}
+	return records
 }

@@ -250,3 +250,40 @@ type DiagnosticsResponse struct {
 	TotalIssues      int               `json:"total_issues"`
 	LastUpdated      time.Time         `json:"last_updated"`
 }
+
+// Tool Call History types
+
+// ToolCallRecord represents a single recorded tool call with full context
+type ToolCallRecord struct {
+	ID         string                 `json:"id"`          // Unique identifier
+	ServerID   string                 `json:"server_id"`   // Server identity hash
+	ServerName string                 `json:"server_name"` // Human-readable server name
+	ToolName   string                 `json:"tool_name"`   // Tool name (without server prefix)
+	Arguments  map[string]interface{} `json:"arguments"`   // Tool arguments
+	Response   interface{}            `json:"response,omitempty"` // Tool response (success only)
+	Error      string                 `json:"error,omitempty"`    // Error message (failure only)
+	Duration   int64                  `json:"duration"`    // Duration in nanoseconds
+	Timestamp  time.Time              `json:"timestamp"`   // When the call was made
+	ConfigPath string                 `json:"config_path"` // Active config file path
+	RequestID  string                 `json:"request_id,omitempty"` // Request correlation ID
+}
+
+// GetToolCallsResponse is the response for GET /api/v1/tool-calls
+type GetToolCallsResponse struct {
+	ToolCalls []ToolCallRecord `json:"tool_calls"`
+	Total     int              `json:"total"`
+	Limit     int              `json:"limit"`
+	Offset    int              `json:"offset"`
+}
+
+// GetToolCallDetailResponse is the response for GET /api/v1/tool-calls/{id}
+type GetToolCallDetailResponse struct {
+	ToolCall ToolCallRecord `json:"tool_call"`
+}
+
+// GetServerToolCallsResponse is the response for GET /api/v1/servers/{name}/tool-calls
+type GetServerToolCallsResponse struct {
+	ServerName string           `json:"server_name"`
+	ToolCalls  []ToolCallRecord `json:"tool_calls"`
+	Total      int              `json:"total"`
+}

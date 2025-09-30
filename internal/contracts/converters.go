@@ -332,3 +332,54 @@ func AssertType[T any](data interface{}, fieldName string) (T, error) {
 	}
 	return zero, fmt.Errorf("field %s has unexpected type %T", fieldName, data)
 }
+
+// ConvertStorageToolCallToContract converts storage.ToolCallRecord to contracts.ToolCallRecord
+func ConvertStorageToolCallToContract(storageRecord interface{}) *ToolCallRecord {
+	// Handle conversion from storage package types
+	// Since storage.ToolCallRecord and contracts.ToolCallRecord have the same structure,
+	// we can use a map as an intermediary
+
+	recordMap, ok := storageRecord.(map[string]interface{})
+	if !ok {
+		// If it's already a proper struct, try direct field mapping
+		return nil
+	}
+
+	record := &ToolCallRecord{}
+
+	if id, ok := recordMap["id"].(string); ok {
+		record.ID = id
+	}
+	if serverID, ok := recordMap["server_id"].(string); ok {
+		record.ServerID = serverID
+	}
+	if serverName, ok := recordMap["server_name"].(string); ok {
+		record.ServerName = serverName
+	}
+	if toolName, ok := recordMap["tool_name"].(string); ok {
+		record.ToolName = toolName
+	}
+	if arguments, ok := recordMap["arguments"].(map[string]interface{}); ok {
+		record.Arguments = arguments
+	}
+	if response := recordMap["response"]; response != nil {
+		record.Response = response
+	}
+	if errorMsg, ok := recordMap["error"].(string); ok {
+		record.Error = errorMsg
+	}
+	if duration, ok := recordMap["duration"].(int64); ok {
+		record.Duration = duration
+	}
+	if timestamp, ok := recordMap["timestamp"].(time.Time); ok {
+		record.Timestamp = timestamp
+	}
+	if configPath, ok := recordMap["config_path"].(string); ok {
+		record.ConfigPath = configPath
+	}
+	if requestID, ok := recordMap["request_id"].(string); ok {
+		record.RequestID = requestID
+	}
+
+	return record
+}

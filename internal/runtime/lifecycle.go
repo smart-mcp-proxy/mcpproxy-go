@@ -200,9 +200,19 @@ func (r *Runtime) LoadConfiguredServers() error {
 		}
 
 		if serverCfg.Enabled {
-			if err := r.upstreamManager.AddServer(serverCfg.Name, serverCfg); err != nil {
-				r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", serverCfg.Name))
-			}
+			// Add server asynchronously to prevent blocking startup
+			go func(cfg *config.ServerConfig, cfgPath string) {
+				if err := r.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
+					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
+				} else {
+					// Register server identity for tool call tracking
+					if _, err := r.storageManager.RegisterServerIdentity(cfg, cfgPath); err != nil {
+						r.logger.Warn("Failed to register server identity",
+							zap.Error(err),
+							zap.String("server", cfg.Name))
+					}
+				}
+			}(serverCfg, r.cfgPath)
 
 			if serverCfg.Quarantined {
 				r.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", serverCfg.Name))

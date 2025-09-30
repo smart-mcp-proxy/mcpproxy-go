@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -326,6 +326,25 @@ class APIService {
     last_updated: string
   }>> {
     return this.request('/api/v1/diagnostics')
+  }
+
+  // Tool Call History endpoints
+  async getToolCalls(params?: { limit?: number; offset?: number }): Promise<APIResponse<GetToolCallsResponse>> {
+    const searchParams = new URLSearchParams()
+    if (params?.limit) searchParams.set('limit', params.limit.toString())
+    if (params?.offset) searchParams.set('offset', params.offset.toString())
+
+    const url = `/api/v1/tool-calls${searchParams.toString() ? '?' + searchParams.toString() : ''}`
+    return this.request<GetToolCallsResponse>(url)
+  }
+
+  async getToolCallDetail(id: string): Promise<APIResponse<GetToolCallDetailResponse>> {
+    return this.request<GetToolCallDetailResponse>(`/api/v1/tool-calls/${encodeURIComponent(id)}`)
+  }
+
+  async getServerToolCalls(serverName: string, limit?: number): Promise<APIResponse<GetServerToolCallsResponse>> {
+    const url = `/api/v1/servers/${encodeURIComponent(serverName)}/tool-calls${limit ? `?limit=${limit}` : ''}`
+    return this.request<GetServerToolCallsResponse>(url)
   }
 
   // Utility methods

@@ -591,8 +591,27 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	}
 
 	// Call tool via upstream manager with circuit breaker pattern
+	startTime := time.Now()
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
+	duration := time.Since(startTime)
+
+	// Record tool call for history (even if error)
+	toolCallRecord := &storage.ToolCallRecord{
+		ID:         fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
+		ServerID:   storage.GenerateServerID(serverConfig),
+		ServerName: serverName,
+		ToolName:   actualToolName,
+		Arguments:  args,
+		Duration:   int64(duration),
+		Timestamp:  startTime,
+		ConfigPath: p.mainServer.GetConfigPath(),
+		RequestID:  "", // TODO: Extract from context if available
+	}
+
 	if err != nil {
+		// Record error in tool call history
+		toolCallRecord.Error = err.Error()
+
 		// Log upstream errors for debugging server stability
 		p.logger.Debug("Upstream tool call failed",
 			zap.String("server", serverName),
@@ -609,8 +628,16 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("server_name", serverName),
 			zap.String("actual_tool", actualToolName))
 
+		// Store error tool call
+		if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+			p.logger.Warn("Failed to record failed tool call", zap.Error(storeErr))
+		}
+
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
+
+	// Record successful response
+	toolCallRecord.Response = result
 
 	// Increment usage stats
 	if err := p.storage.IncrementToolUsage(toolName); err != nil {
@@ -650,6 +677,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 
 		response = truncResult.TruncatedContent
+	}
+
+	// Store successful tool call in history
+	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
+		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
 	}
 
 	return mcp.NewToolResultText(response), nil

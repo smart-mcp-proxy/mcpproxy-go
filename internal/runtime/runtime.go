@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
@@ -367,4 +369,147 @@ func (r *Runtime) GetCurrentConfig() interface{} {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.cfg
+}
+
+// GetToolCalls retrieves tool call history with pagination
+func (r *Runtime) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Get all server identities to aggregate tool calls
+	identities, err := r.storageManager.ListServerIdentities()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list server identities: %w", err)
+	}
+
+	// Collect tool calls from all servers
+	var allCalls []*storage.ToolCallRecord
+	for _, identity := range identities {
+		calls, err := r.storageManager.GetServerToolCalls(identity.ID, 1000) // Get up to 1000 per server
+		if err != nil {
+			r.logger.Sugar().Warnw("Failed to get tool calls for server",
+				"server_id", identity.ID,
+				"error", err)
+			continue
+		}
+		allCalls = append(allCalls, calls...)
+	}
+
+	// Sort by timestamp (most recent first)
+	sort.Slice(allCalls, func(i, j int) bool {
+		return allCalls[i].Timestamp.After(allCalls[j].Timestamp)
+	})
+
+	total := len(allCalls)
+
+	// Apply pagination
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+
+	pagedCalls := allCalls[start:end]
+
+	// Convert to contract types
+	contractCalls := make([]*contracts.ToolCallRecord, len(pagedCalls))
+	for i, call := range pagedCalls {
+		contractCalls[i] = &contracts.ToolCallRecord{
+			ID:         call.ID,
+			ServerID:   call.ServerID,
+			ServerName: call.ServerName,
+			ToolName:   call.ToolName,
+			Arguments:  call.Arguments,
+			Response:   call.Response,
+			Error:      call.Error,
+			Duration:   call.Duration,
+			Timestamp:  call.Timestamp,
+			ConfigPath: call.ConfigPath,
+			RequestID:  call.RequestID,
+		}
+	}
+
+	return contractCalls, total, nil
+}
+
+// GetToolCallByID retrieves a single tool call by ID
+func (r *Runtime) GetToolCallByID(id string) (*contracts.ToolCallRecord, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Search through all server tool calls
+	identities, err := r.storageManager.ListServerIdentities()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list server identities: %w", err)
+	}
+
+	for _, identity := range identities {
+		calls, err := r.storageManager.GetServerToolCalls(identity.ID, 1000)
+		if err != nil {
+			continue
+		}
+
+		for _, call := range calls {
+			if call.ID == id {
+				return &contracts.ToolCallRecord{
+					ID:         call.ID,
+					ServerID:   call.ServerID,
+					ServerName: call.ServerName,
+					ToolName:   call.ToolName,
+					Arguments:  call.Arguments,
+					Response:   call.Response,
+					Error:      call.Error,
+					Duration:   call.Duration,
+					Timestamp:  call.Timestamp,
+					ConfigPath: call.ConfigPath,
+					RequestID:  call.RequestID,
+				}, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("tool call not found: %s", id)
+}
+
+// GetServerToolCalls retrieves tool call history for a specific server
+func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Get server config to find its identity
+	serverConfig, err := r.storageManager.GetUpstreamServer(serverName)
+	if err != nil {
+		return nil, fmt.Errorf("server not found: %w", err)
+	}
+
+	serverID := storage.GenerateServerID(serverConfig)
+
+	// Get tool calls for this server
+	calls, err := r.storageManager.GetServerToolCalls(serverID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get server tool calls: %w", err)
+	}
+
+	// Convert to contract types
+	contractCalls := make([]*contracts.ToolCallRecord, len(calls))
+	for i, call := range calls {
+		contractCalls[i] = &contracts.ToolCallRecord{
+			ID:         call.ID,
+			ServerID:   call.ServerID,
+			ServerName: call.ServerName,
+			ToolName:   call.ToolName,
+			Arguments:  call.Arguments,
+			Response:   call.Response,
+			Error:      call.Error,
+			Duration:   call.Duration,
+			Timestamp:  call.Timestamp,
+			ConfigPath: call.ConfigPath,
+			RequestID:  call.RequestID,
+		}
+	}
+
+	return contractCalls, nil
 }

@@ -99,3 +99,35 @@ export interface ConfigSecretsResponse {
   total_secrets: number
   total_env_vars: number
 }
+
+// Tool Call History types
+export interface ToolCallRecord {
+  id: string
+  server_id: string
+  server_name: string
+  tool_name: string
+  arguments: Record<string, any>
+  response?: any
+  error?: string
+  duration: number  // nanoseconds
+  timestamp: string  // ISO 8601 date string
+  config_path: string
+  request_id?: string
+}
+
+export interface GetToolCallsResponse {
+  tool_calls: ToolCallRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface GetToolCallDetailResponse {
+  tool_call: ToolCallRecord
+}
+
+export interface GetServerToolCallsResponse {
+  server_name: string
+  tool_calls: ToolCallRecord[]
+  total: number
+}

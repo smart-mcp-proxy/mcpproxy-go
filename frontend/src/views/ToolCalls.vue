@@ -1,0 +1,357 @@
+<template>
+  <div class="space-y-6">
+    <!-- Page Header -->
+    <div class="flex justify-between items-center">
+      <div>
+        <h1 class="text-3xl font-bold">Tool Call History</h1>
+        <p class="text-base-content/70 mt-1">Browse and analyze tool call execution history</p>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card bg-base-100 shadow-md">
+      <div class="card-body">
+        <div class="flex flex-wrap gap-4">
+          <div class="form-control flex-1 min-w-[200px]">
+            <label class="label">
+              <span class="label-text">Filter by Server</span>
+            </label>
+            <select v-model="filterServer" class="select select-bordered select-sm">
+              <option value="">All Servers</option>
+              <option v-for="server in availableServers" :key="server" :value="server">
+                {{ server }}
+              </option>
+            </select>
+          </div>
+
+          <div class="form-control flex-1 min-w-[200px]">
+            <label class="label">
+              <span class="label-text">Filter by Tool</span>
+            </label>
+            <input
+              v-model="filterTool"
+              type="text"
+              placeholder="Tool name..."
+              class="input input-bordered input-sm"
+            />
+          </div>
+
+          <div class="form-control flex-1 min-w-[200px]">
+            <label class="label">
+              <span class="label-text">Status</span>
+            </label>
+            <select v-model="filterStatus" class="select select-bordered select-sm">
+              <option value="">All</option>
+              <option value="success">Success</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">&nbsp;</span>
+            </label>
+            <button @click="clearFilters" class="btn btn-sm btn-ghost">
+              Clear Filters
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tool Calls Table -->
+    <div class="card bg-base-100 shadow-md">
+      <div class="card-body">
+        <div v-if="loading" class="flex justify-center py-12">
+          <span class="loading loading-spinner loading-lg"></span>
+        </div>
+
+        <div v-else-if="error" class="alert alert-error">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>{{ error }}</span>
+        </div>
+
+        <div v-else-if="filteredToolCalls.length === 0" class="text-center py-12 text-base-content/60">
+          <svg class="w-16 h-16 mx-auto mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+          </svg>
+          <p class="text-lg">No tool calls found</p>
+          <p class="text-sm mt-1">Try adjusting your filters or wait for servers to execute tools</p>
+        </div>
+
+        <div v-else class="overflow-x-auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Server</th>
+                <th>Tool</th>
+                <th>Status</th>
+                <th>Duration</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="call in paginatedToolCalls" :key="call.id">
+                <td>
+                  <div class="text-sm">{{ formatTimestamp(call.timestamp) }}</div>
+                  <div class="text-xs text-base-content/60">{{ formatRelativeTime(call.timestamp) }}</div>
+                </td>
+                <td>
+                  <router-link
+                    :to="`/servers/${call.server_name}`"
+                    class="link link-hover font-medium"
+                  >
+                    {{ call.server_name }}
+                  </router-link>
+                </td>
+                <td>
+                  <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ call.tool_name }}</code>
+                </td>
+                <td>
+                  <div
+                    class="badge"
+                    :class="call.error ? 'badge-error' : 'badge-success'"
+                  >
+                    {{ call.error ? 'Error' : 'Success' }}
+                  </div>
+                </td>
+                <td>
+                  <span class="text-sm">{{ formatDuration(call.duration) }}</span>
+                </td>
+                <td>
+                  <div class="flex gap-2">
+                    <button
+                      @click="toggleDetails(call.id)"
+                      class="btn btn-xs btn-ghost"
+                      :title="expandedCalls.has(call.id) ? 'Collapse' : 'Expand'"
+                    >
+                      <svg
+                        class="w-4 h-4 transition-transform"
+                        :class="{ 'rotate-180': expandedCalls.has(call.id) }"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    <button
+                      @click="copyCLICommand(call)"
+                      class="btn btn-xs btn-ghost"
+                      title="Copy as CLI command"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    </button>
+                  </div>
+                </td>
+              </tr>
+
+              <!-- Expandable detail row -->
+              <tr v-for="call in paginatedToolCalls" :key="`${call.id}-details`" v-show="expandedCalls.has(call.id)">
+                <td colspan="6" class="bg-base-200">
+                  <div class="p-4 space-y-4">
+                    <!-- Arguments -->
+                    <div>
+                      <h4 class="font-semibold mb-2">Arguments:</h4>
+                      <pre class="bg-base-300 p-3 rounded text-xs overflow-x-auto">{{ JSON.stringify(call.arguments, null, 2) }}</pre>
+                    </div>
+
+                    <!-- Response or Error -->
+                    <div v-if="call.error">
+                      <h4 class="font-semibold mb-2 text-error">Error:</h4>
+                      <div class="alert alert-error">
+                        <span class="font-mono text-sm">{{ call.error }}</span>
+                      </div>
+                    </div>
+                    <div v-else-if="call.response">
+                      <h4 class="font-semibold mb-2 text-success">Response:</h4>
+                      <pre class="bg-base-300 p-3 rounded text-xs overflow-x-auto max-h-96">{{ JSON.stringify(call.response, null, 2) }}</pre>
+                    </div>
+
+                    <!-- Metadata -->
+                    <div class="text-xs text-base-content/60">
+                      <div><strong>Call ID:</strong> {{ call.id }}</div>
+                      <div><strong>Server ID:</strong> {{ call.server_id }}</div>
+                      <div v-if="call.request_id"><strong>Request ID:</strong> {{ call.request_id }}</div>
+                      <div><strong>Config Path:</strong> {{ call.config_path }}</div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <!-- Pagination -->
+          <div v-if="filteredToolCalls.length > itemsPerPage" class="flex justify-center mt-6">
+            <div class="join">
+              <button
+                @click="currentPage = Math.max(1, currentPage - 1)"
+                :disabled="currentPage === 1"
+                class="join-item btn btn-sm"
+              >
+                «
+              </button>
+              <button class="join-item btn btn-sm">
+                Page {{ currentPage }} of {{ totalPages }}
+              </button>
+              <button
+                @click="currentPage = Math.min(totalPages, currentPage + 1)"
+                :disabled="currentPage === totalPages"
+                class="join-item btn btn-sm"
+              >
+                »
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { useSystemStore } from '@/stores/system'
+import api from '@/services/api'
+import type { ToolCallRecord } from '@/types'
+
+const systemStore = useSystemStore()
+
+// State
+const toolCalls = ref<ToolCallRecord[]>([])
+const loading = ref(false)
+const error = ref<string | null>(null)
+const expandedCalls = ref(new Set<string>())
+
+// Filters
+const filterServer = ref('')
+const filterTool = ref('')
+const filterStatus = ref('')
+
+// Pagination
+const currentPage = ref(1)
+const itemsPerPage = 20
+
+// Load tool calls
+const loadToolCalls = async () => {
+  loading.value = true
+  error.value = null
+
+  try {
+    const response = await api.getToolCalls({ limit: 100 })
+    if (response.success && response.data) {
+      toolCalls.value = response.data.tool_calls || []
+    } else {
+      error.value = response.error || 'Failed to load tool calls'
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Unknown error'
+  } finally {
+    loading.value = false
+  }
+}
+
+// Computed properties
+const availableServers = computed(() => {
+  const servers = new Set<string>()
+  toolCalls.value.forEach(call => servers.add(call.server_name))
+  return Array.from(servers).sort()
+})
+
+const filteredToolCalls = computed(() => {
+  let filtered = toolCalls.value
+
+  if (filterServer.value) {
+    filtered = filtered.filter(call => call.server_name === filterServer.value)
+  }
+
+  if (filterTool.value) {
+    const searchTerm = filterTool.value.toLowerCase()
+    filtered = filtered.filter(call => call.tool_name.toLowerCase().includes(searchTerm))
+  }
+
+  if (filterStatus.value === 'success') {
+    filtered = filtered.filter(call => !call.error)
+  } else if (filterStatus.value === 'error') {
+    filtered = filtered.filter(call => !!call.error)
+  }
+
+  return filtered
+})
+
+const totalPages = computed(() => Math.ceil(filteredToolCalls.value.length / itemsPerPage))
+
+const paginatedToolCalls = computed(() => {
+  const start = (currentPage.value - 1) * itemsPerPage
+  const end = start + itemsPerPage
+  return filteredToolCalls.value.slice(start, end)
+})
+
+// Actions
+const clearFilters = () => {
+  filterServer.value = ''
+  filterTool.value = ''
+  filterStatus.value = ''
+  currentPage.value = 1
+}
+
+const toggleDetails = (callId: string) => {
+  if (expandedCalls.value.has(callId)) {
+    expandedCalls.value.delete(callId)
+  } else {
+    expandedCalls.value.add(callId)
+  }
+}
+
+const copyCLICommand = (call: ToolCallRecord) => {
+  const argsJson = JSON.stringify(call.arguments)
+  const command = `mcpproxy call tool --tool-name="${call.server_name}:${call.tool_name}" --json_args='${argsJson}'`
+
+  navigator.clipboard.writeText(command).then(() => {
+    systemStore.addToast({
+      type: 'success',
+      title: 'Copied!',
+      message: 'CLI command copied to clipboard'
+    })
+  }).catch(() => {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Copy Failed',
+      message: 'Failed to copy command to clipboard'
+    })
+  })
+}
+
+// Format helpers
+const formatTimestamp = (timestamp: string): string => {
+  return new Date(timestamp).toLocaleString()
+}
+
+const formatRelativeTime = (timestamp: string): string => {
+  const now = Date.now()
+  const time = new Date(timestamp).getTime()
+  const diff = now - time
+
+  if (diff < 1000) return 'Just now'
+  if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
+  return `${Math.floor(diff / 86400000)}d ago`
+}
+
+const formatDuration = (nanoseconds: number): string => {
+  const ms = nanoseconds / 1000000
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(2)}s`
+}
+
+// Lifecycle
+onMounted(() => {
+  loadToolCalls()
+})
+</script>
