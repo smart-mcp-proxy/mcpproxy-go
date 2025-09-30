@@ -189,7 +189,7 @@
                       <!-- Arguments -->
                       <div>
                         <h4 class="font-semibold mb-2">Arguments:</h4>
-                        <pre class="bg-base-300 p-3 rounded text-xs overflow-auto max-h-60 w-full" style="white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;">{{ JSON.stringify(call.arguments, null, 2) }}</pre>
+                        <JsonViewer :data="call.arguments" max-height="15rem" />
                       </div>
 
                       <!-- Response or Error -->
@@ -201,7 +201,7 @@
                       </div>
                       <div v-else-if="call.response">
                         <h4 class="font-semibold mb-2 text-success">Response:</h4>
-                        <pre class="bg-base-300 p-3 rounded text-xs overflow-auto max-h-96 w-full" style="white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;">{{ JSON.stringify(call.response, null, 2) }}</pre>
+                        <JsonViewer :data="call.response" max-height="24rem" />
                       </div>
 
                       <!-- Metadata -->
@@ -357,6 +357,7 @@ import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ToolCallRecord } from '@/types'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
+import JsonViewer from '@/components/JsonViewer.vue'
 
 const systemStore = useSystemStore()
 
