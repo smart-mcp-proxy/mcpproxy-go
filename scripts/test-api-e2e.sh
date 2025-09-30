@@ -15,7 +15,8 @@ CONFIG_TEMPLATE="./test/e2e-config.template.json"
 CONFIG_FILE="./test/e2e-config.json"
 LISTEN_PORT="8081"
 # Support both HTTP and HTTPS modes
-USE_HTTPS="${USE_HTTPS:-true}"  # Default to HTTPS since TLS is enabled by default
+# Default to HTTP for E2E tests since the template config has TLS disabled
+USE_HTTPS="${USE_HTTPS:-false}"
 if [ "$USE_HTTPS" = "true" ]; then
     BASE_URL="https://localhost:${LISTEN_PORT}"
     # Check for CA certificate in test-data directory (E2E config uses ./test-data as data_dir)

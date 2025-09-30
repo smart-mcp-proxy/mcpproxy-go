@@ -4,6 +4,9 @@
   "enable_tray": false,
   "api_key": "",
   "debug_search": false,
+  "tls": {
+    "enabled": false
+  },
   "mcpServers": [
     {
       "name": "everything",

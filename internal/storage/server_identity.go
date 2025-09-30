@@ -171,18 +171,54 @@ func generateIDFromAttributes(attrs ServerAttributes) string {
 
 // normalizeAttributes ensures consistent ordering for hashing
 func normalizeAttributes(attrs ServerAttributes) ServerAttributes {
-	normalized := attrs
-
-	// Sort slices
-	if normalized.Args != nil {
-		sort.Strings(normalized.Args)
+	// Create a deep copy to avoid modifying the original
+	normalized := ServerAttributes{
+		Name:       attrs.Name,
+		Protocol:   attrs.Protocol,
+		URL:        attrs.URL,
+		Command:    attrs.Command,
+		WorkingDir: attrs.WorkingDir,
 	}
-	if normalized.OAuth != nil && normalized.OAuth.Scopes != nil {
-		sort.Strings(normalized.OAuth.Scopes)
+
+	// Copy Args without sorting (order matters!)
+	if attrs.Args != nil {
+		normalized.Args = make([]string, len(attrs.Args))
+		copy(normalized.Args, attrs.Args)
 	}
 
-	// Maps are already sorted by json.Marshal, but we can ensure it
-	// by using a consistent approach
+	// Copy Env map
+	if attrs.Env != nil {
+		normalized.Env = make(map[string]string, len(attrs.Env))
+		for k, v := range attrs.Env {
+			normalized.Env[k] = v
+		}
+	}
+
+	// Copy Headers map
+	if attrs.Headers != nil {
+		normalized.Headers = make(map[string]string, len(attrs.Headers))
+		for k, v := range attrs.Headers {
+			normalized.Headers[k] = v
+		}
+	}
+
+	// Deep copy OAuth with sorted scopes (order doesn't affect OAuth functionality)
+	if attrs.OAuth != nil {
+		normalized.OAuth = &OAuthAttributes{
+			ClientID:     attrs.OAuth.ClientID,
+			ClientSecret: attrs.OAuth.ClientSecret,
+			RedirectURI:  attrs.OAuth.RedirectURI,
+			PKCEEnabled:  attrs.OAuth.PKCEEnabled,
+		}
+
+		if attrs.OAuth.Scopes != nil {
+			normalized.OAuth.Scopes = make([]string, len(attrs.OAuth.Scopes))
+			copy(normalized.OAuth.Scopes, attrs.OAuth.Scopes)
+			sort.Strings(normalized.OAuth.Scopes)
+		}
+	}
+
+	// Maps are already sorted by json.Marshal, but we ensure consistency
 
 	return normalized
 }
