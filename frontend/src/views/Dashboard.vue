@@ -79,6 +79,106 @@
       </div>
     </div>
 
+    <!-- Token Savings Card -->
+    <div v-if="tokenSavingsData" class="card bg-base-100 shadow-md">
+      <div class="card-body">
+        <h2 class="card-title">Token Savings</h2>
+        <p class="text-sm text-base-content/70">MCPProxy reduces token usage through intelligent BM25 search</p>
+
+        <div class="stats stats-horizontal shadow mt-4">
+          <div class="stat">
+            <div class="stat-figure text-success">
+              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
+              </svg>
+            </div>
+            <div class="stat-title">Tokens Saved</div>
+            <div class="stat-value text-success">{{ tokenSavingsData.saved_tokens.toLocaleString() }}</div>
+            <div class="stat-desc">{{ tokenSavingsData.saved_tokens_percentage.toFixed(1) }}% reduction</div>
+          </div>
+
+          <div class="stat">
+            <div class="stat-title">Full Tool List Size</div>
+            <div class="stat-value text-sm">{{ tokenSavingsData.total_server_tool_list_size.toLocaleString() }}</div>
+            <div class="stat-desc">All upstream server tools</div>
+          </div>
+
+          <div class="stat">
+            <div class="stat-title">Typical Query Result</div>
+            <div class="stat-value text-sm">{{ tokenSavingsData.average_query_result_size.toLocaleString() }}</div>
+            <div class="stat-desc">BM25 search result size</div>
+          </div>
+        </div>
+
+        <div class="text-xs text-base-content/60 mt-4">
+          <details class="collapse collapse-arrow bg-base-200">
+            <summary class="collapse-title text-sm font-medium">Per-Server Token Breakdown</summary>
+            <div class="collapse-content">
+              <div class="overflow-x-auto mt-2">
+                <table class="table table-xs">
+                  <thead>
+                    <tr>
+                      <th>Server</th>
+                      <th class="text-right">Tool List Size (tokens)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(size, serverName) in tokenSavingsData.per_server_tool_list_sizes" :key="serverName">
+                      <td>{{ serverName }}</td>
+                      <td class="text-right font-mono">{{ size.toLocaleString() }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+    </div>
+
+    <!-- Token Usage Stats (Recent Calls) -->
+    <div v-if="tokenStats.totalTokens > 0" class="card bg-base-100 shadow-md">
+      <div class="card-body">
+        <h2 class="card-title">Recent Token Usage</h2>
+        <p class="text-sm text-base-content/70">Token consumption from the last {{ recentToolCalls.length }} tool calls</p>
+
+        <div class="stats stats-horizontal shadow mt-4">
+          <div class="stat">
+            <div class="stat-figure text-primary">
+              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </div>
+            <div class="stat-title">Total Tokens</div>
+            <div class="stat-value text-primary">{{ tokenStats.totalTokens.toLocaleString() }}</div>
+            <div class="stat-desc">{{ tokenStats.callsWithMetrics }} of {{ recentToolCalls.length }} calls tracked</div>
+          </div>
+
+          <div class="stat">
+            <div class="stat-title">Input Tokens</div>
+            <div class="stat-value text-sm">{{ tokenStats.inputTokens.toLocaleString() }}</div>
+            <div class="stat-desc">Request data</div>
+          </div>
+
+          <div class="stat">
+            <div class="stat-title">Output Tokens</div>
+            <div class="stat-value text-sm">{{ tokenStats.outputTokens.toLocaleString() }}</div>
+            <div class="stat-desc">Response data</div>
+          </div>
+
+          <div class="stat">
+            <div class="stat-title">Avg per Call</div>
+            <div class="stat-value text-sm">{{ tokenStats.avgTokensPerCall.toLocaleString() }}</div>
+            <div class="stat-desc">{{ tokenStats.mostUsedModel || 'Mixed models' }}</div>
+          </div>
+        </div>
+
+        <div class="text-xs text-base-content/60 mt-2">
+          <router-link to="/tool-calls" class="link">View detailed token usage →</router-link>
+        </div>
+      </div>
+    </div>
+
     <!-- Diagnostics Panel -->
     <div class="space-y-6">
       <!-- Main Diagnostics Card -->
@@ -562,10 +662,34 @@ const triggerOAuthLogin = async (server: string) => {
   }
 }
 
+// Token Savings Data
+const tokenSavingsData = ref<any>(null)
+const tokenSavingsLoading = ref(false)
+const tokenSavingsError = ref<string | null>(null)
+
 // Tool Calls History
 const recentToolCalls = ref<any[]>([])
 const toolCallsLoading = ref(false)
 const toolCallsError = ref<string | null>(null)
+
+// Load token savings data
+const loadTokenSavings = async () => {
+  tokenSavingsLoading.value = true
+  tokenSavingsError.value = null
+
+  try {
+    const response = await api.getTokenStats()
+    if (response.success && response.data) {
+      tokenSavingsData.value = response.data
+    } else {
+      tokenSavingsError.value = response.error || 'Failed to load token savings'
+    }
+  } catch (error) {
+    tokenSavingsError.value = error instanceof Error ? error.message : 'Unknown error'
+  } finally {
+    tokenSavingsLoading.value = false
+  }
+}
 
 // Load recent tool calls
 const loadToolCalls = async () => {
@@ -605,6 +729,50 @@ const formatRelativeTime = (timestamp: string): string => {
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
   return `${Math.floor(diff / 86400000)}d ago`
 }
+
+// Token statistics from recent tool calls
+const tokenStats = computed(() => {
+  let totalTokens = 0
+  let inputTokens = 0
+  let outputTokens = 0
+  let callsWithMetrics = 0
+  const modelCounts: Record<string, number> = {}
+
+  for (const call of recentToolCalls.value) {
+    if (call.metrics) {
+      totalTokens += call.metrics.total_tokens || 0
+      inputTokens += call.metrics.input_tokens || 0
+      outputTokens += call.metrics.output_tokens || 0
+      callsWithMetrics++
+
+      const model = call.metrics.model || 'unknown'
+      modelCounts[model] = (modelCounts[model] || 0) + 1
+    }
+  }
+
+  // Find most used model
+  let mostUsedModel = ''
+  let maxCount = 0
+  for (const [model, count] of Object.entries(modelCounts)) {
+    if (count > maxCount) {
+      maxCount = count
+      mostUsedModel = model
+    }
+  }
+
+  const avgTokensPerCall = callsWithMetrics > 0
+    ? Math.round(totalTokens / callsWithMetrics)
+    : 0
+
+  return {
+    totalTokens,
+    inputTokens,
+    outputTokens,
+    avgTokensPerCall,
+    mostUsedModel,
+    callsWithMetrics
+  }
+})
 
 // Dashboard hints
 const dashboardHints = computed<Hint[]>(() => {
@@ -757,12 +925,15 @@ const dashboardHints = computed<Hint[]>(() => {
 onMounted(() => {
   // Load diagnostics immediately
   loadDiagnostics()
+  // Load token savings immediately
+  loadTokenSavings()
   // Load tool calls immediately
   loadToolCalls()
 
   // Set up auto-refresh every 30 seconds
   refreshInterval = setInterval(() => {
     loadDiagnostics()
+    loadTokenSavings()
     loadToolCalls()
   }, 30000)
 

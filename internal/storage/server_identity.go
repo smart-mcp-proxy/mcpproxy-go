@@ -44,6 +44,18 @@ type OAuthAttributes struct {
 	PKCEEnabled  bool     `json:"pkce_enabled"`
 }
 
+// TokenMetrics represents token usage statistics for a tool call
+type TokenMetrics struct {
+	InputTokens      int     `json:"input_tokens"`                  // Tokens in the request
+	OutputTokens     int     `json:"output_tokens"`                 // Tokens in the response
+	TotalTokens      int     `json:"total_tokens"`                  // Total tokens (input + output)
+	Model            string  `json:"model"`                         // Model used for tokenization
+	Encoding         string  `json:"encoding"`                      // Encoding used (e.g., cl100k_base)
+	EstimatedCost    float64 `json:"estimated_cost,omitempty"`      // Optional cost estimate
+	TruncatedTokens  int     `json:"truncated_tokens,omitempty"`    // Tokens removed by truncation
+	WasTruncated     bool    `json:"was_truncated"`                 // Whether response was truncated
+}
+
 // ToolCallRecord represents a tool call with server context
 type ToolCallRecord struct {
 	ID         string                 `json:"id"`         // UUID
@@ -57,6 +69,7 @@ type ToolCallRecord struct {
 	Timestamp  time.Time              `json:"timestamp"`   // When the call was made
 	ConfigPath string                 `json:"config_path"` // Which config was active
 	RequestID  string                 `json:"request_id"`  // For correlation
+	Metrics    *TokenMetrics          `json:"metrics,omitempty"` // Token usage metrics (nil for older records)
 }
 
 // DiagnosticRecord represents a diagnostic event for a server

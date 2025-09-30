@@ -17,6 +17,7 @@ export interface Server {
   connecting: boolean
   tool_count: number
   last_error: string
+  tool_list_token_size?: number
 }
 
 // Tool types
@@ -101,6 +102,25 @@ export interface ConfigSecretsResponse {
 }
 
 // Tool Call History types
+export interface TokenMetrics {
+  input_tokens: number        // Tokens in the request
+  output_tokens: number       // Tokens in the response
+  total_tokens: number        // Total tokens (input + output)
+  model: string               // Model used for tokenization
+  encoding: string            // Encoding used (e.g., cl100k_base)
+  estimated_cost?: number     // Optional cost estimate
+  truncated_tokens?: number   // Tokens removed by truncation
+  was_truncated: boolean      // Whether response was truncated
+}
+
+export interface ServerTokenMetrics {
+  total_server_tool_list_size: number
+  average_query_result_size: number
+  saved_tokens: number
+  saved_tokens_percentage: number
+  per_server_tool_list_sizes: Record<string, number>
+}
+
 export interface ToolCallRecord {
   id: string
   server_id: string
@@ -113,6 +133,7 @@ export interface ToolCallRecord {
   timestamp: string  // ISO 8601 date string
   config_path: string
   request_id?: string
+  metrics?: TokenMetrics  // Token usage metrics (optional for older records)
 }
 
 export interface GetToolCallsResponse {

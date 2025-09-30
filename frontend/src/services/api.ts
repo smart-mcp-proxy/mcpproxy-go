@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -371,6 +371,11 @@ class APIService {
       method: 'POST',
       body: JSON.stringify(config)
     })
+  }
+
+  // Token statistics endpoints
+  async getTokenStats(): Promise<APIResponse<ServerTokenMetrics>> {
+    return this.request<ServerTokenMetrics>('/api/v1/stats/tokens')
   }
 
   // Utility methods

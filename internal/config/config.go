@@ -88,6 +88,9 @@ type Config struct {
 
 	// TLS configuration
 	TLS *TLSConfig `json:"tls,omitempty" mapstructure:"tls"`
+
+	// Tokenizer configuration for token counting
+	Tokenizer *TokenizerConfig `json:"tokenizer,omitempty" mapstructure:"tokenizer"`
 }
 
 // TLSConfig represents TLS configuration
@@ -96,6 +99,13 @@ type TLSConfig struct {
 	RequireClientCert bool   `json:"require_client_cert" mapstructure:"require_client_cert"` // Enable mTLS
 	CertsDir          string `json:"certs_dir,omitempty" mapstructure:"certs_dir"`           // Directory for certificates
 	HSTS              bool   `json:"hsts" mapstructure:"hsts"`                               // Enable HTTP Strict Transport Security
+}
+
+// TokenizerConfig represents tokenizer configuration for token counting
+type TokenizerConfig struct {
+	Enabled      bool   `json:"enabled" mapstructure:"enabled"`             // Enable token counting
+	DefaultModel string `json:"default_model" mapstructure:"default_model"` // Default model for tokenization (e.g., "gpt-4")
+	Encoding     string `json:"encoding" mapstructure:"encoding"`           // Default encoding (e.g., "cl100k_base")
 }
 
 // LogConfig represents logging configuration
@@ -416,6 +426,13 @@ func DefaultConfig() *Config {
 			CertsDir:          "",    // Will default to ${data_dir}/certs
 			HSTS:              true,  // HSTS enabled by default
 		},
+
+		// Default tokenizer configuration
+		Tokenizer: &TokenizerConfig{
+			Enabled:      true,            // Token counting enabled by default
+			DefaultModel: "gpt-4",         // Default to GPT-4 tokenization
+			Encoding:     "cl100k_base",   // Default encoding (GPT-4, GPT-3.5)
+		},
 	}
 }
 
@@ -710,6 +727,15 @@ func (c *Config) Validate() error {
 			RequireClientCert: false, // mTLS disabled by default
 			CertsDir:          "",    // Will default to ${data_dir}/certs
 			HSTS:              true,  // HSTS enabled by default
+		}
+	}
+
+	// Ensure Tokenizer config is not nil
+	if c.Tokenizer == nil {
+		c.Tokenizer = &TokenizerConfig{
+			Enabled:      true,          // Token counting enabled by default
+			DefaultModel: "gpt-4",       // Default to GPT-4 tokenization
+			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
 		}
 	}
 

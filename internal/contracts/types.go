@@ -36,7 +36,8 @@ type Server struct {
 	Created         time.Time         `json:"created"`
 	Updated         time.Time         `json:"updated"`
 	Isolation       *IsolationConfig  `json:"isolation,omitempty"`
-	Authenticated   bool              `json:"authenticated"`       // OAuth authentication status
+	Authenticated   bool              `json:"authenticated"`        // OAuth authentication status
+	ToolListTokenSize int             `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -79,11 +80,21 @@ type SearchResult struct {
 
 // ServerStats represents aggregated statistics about servers
 type ServerStats struct {
-	TotalServers       int `json:"total_servers"`
-	ConnectedServers   int `json:"connected_servers"`
-	QuarantinedServers int `json:"quarantined_servers"`
-	TotalTools         int `json:"total_tools"`
-	DockerContainers   int `json:"docker_containers"`
+	TotalServers       int                  `json:"total_servers"`
+	ConnectedServers   int                  `json:"connected_servers"`
+	QuarantinedServers int                  `json:"quarantined_servers"`
+	TotalTools         int                  `json:"total_tools"`
+	DockerContainers   int                  `json:"docker_containers"`
+	TokenMetrics       *ServerTokenMetrics  `json:"token_metrics,omitempty"`
+}
+
+// ServerTokenMetrics represents token usage and savings metrics
+type ServerTokenMetrics struct {
+	TotalServerToolListSize int            `json:"total_server_tool_list_size"` // All upstream tools combined (tokens)
+	AverageQueryResultSize  int            `json:"average_query_result_size"`   // Typical retrieve_tools output (tokens)
+	SavedTokens             int            `json:"saved_tokens"`                 // Difference
+	SavedTokensPercentage   float64        `json:"saved_tokens_percentage"`     // Percentage saved
+	PerServerToolListSizes  map[string]int `json:"per_server_tool_list_sizes"`  // Token size per server
 }
 
 // LogEntry represents a single log entry
@@ -253,6 +264,18 @@ type DiagnosticsResponse struct {
 
 // Tool Call History types
 
+// TokenMetrics represents token usage statistics for a tool call
+type TokenMetrics struct {
+	InputTokens      int     `json:"input_tokens"`                  // Tokens in the request
+	OutputTokens     int     `json:"output_tokens"`                 // Tokens in the response
+	TotalTokens      int     `json:"total_tokens"`                  // Total tokens (input + output)
+	Model            string  `json:"model"`                         // Model used for tokenization
+	Encoding         string  `json:"encoding"`                      // Encoding used (e.g., cl100k_base)
+	EstimatedCost    float64 `json:"estimated_cost,omitempty"`      // Optional cost estimate
+	TruncatedTokens  int     `json:"truncated_tokens,omitempty"`    // Tokens removed by truncation
+	WasTruncated     bool    `json:"was_truncated"`                 // Whether response was truncated
+}
+
 // ToolCallRecord represents a single recorded tool call with full context
 type ToolCallRecord struct {
 	ID         string                 `json:"id"`          // Unique identifier
@@ -266,6 +289,7 @@ type ToolCallRecord struct {
 	Timestamp  time.Time              `json:"timestamp"`   // When the call was made
 	ConfigPath string                 `json:"config_path"` // Active config file path
 	RequestID  string                 `json:"request_id,omitempty"` // Request correlation ID
+	Metrics    *TokenMetrics          `json:"metrics,omitempty"` // Token usage metrics (nil for older records)
 }
 
 // GetToolCallsResponse is the response for GET /api/v1/tool-calls

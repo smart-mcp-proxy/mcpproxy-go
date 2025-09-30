@@ -90,108 +90,150 @@
                 <th>Tool</th>
                 <th>Status</th>
                 <th>Duration</th>
+                <th>Tokens</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="call in paginatedToolCalls" :key="call.id">
-                <td>
-                  <div class="text-sm">{{ formatTimestamp(call.timestamp) }}</div>
-                  <div class="text-xs text-base-content/60">{{ formatRelativeTime(call.timestamp) }}</div>
-                </td>
-                <td>
-                  <router-link
-                    :to="`/servers/${call.server_name}`"
-                    class="link link-hover font-medium"
-                  >
-                    {{ call.server_name }}
-                  </router-link>
-                </td>
-                <td>
-                  <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ call.tool_name }}</code>
-                </td>
-                <td>
-                  <div
-                    class="badge"
-                    :class="call.error ? 'badge-error' : 'badge-success'"
-                  >
-                    {{ call.error ? 'Error' : 'Success' }}
-                  </div>
-                </td>
-                <td>
-                  <span class="text-sm">{{ formatDuration(call.duration) }}</span>
-                </td>
-                <td>
-                  <div class="flex gap-2">
-                    <button
-                      @click="toggleDetails(call.id)"
-                      class="btn btn-xs btn-ghost"
-                      :title="expandedCalls.has(call.id) ? 'Collapse' : 'Expand'"
+              <template v-for="call in paginatedToolCalls" :key="call.id">
+                <!-- Main row -->
+                <tr>
+                  <td>
+                    <div class="text-sm">{{ formatTimestamp(call.timestamp) }}</div>
+                    <div class="text-xs text-base-content/60">{{ formatRelativeTime(call.timestamp) }}</div>
+                  </td>
+                  <td>
+                    <router-link
+                      :to="`/servers/${call.server_name}`"
+                      class="link link-hover font-medium"
                     >
-                      <svg
-                        class="w-4 h-4 transition-transform"
-                        :class="{ 'rotate-180': expandedCalls.has(call.id) }"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </button>
-                    <button
-                      @click="openReplayModal(call)"
-                      class="btn btn-xs btn-primary"
-                      title="Replay tool call"
+                      {{ call.server_name }}
+                    </router-link>
+                  </td>
+                  <td>
+                    <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ call.tool_name }}</code>
+                  </td>
+                  <td>
+                    <div
+                      class="badge"
+                      :class="call.error ? 'badge-error' : 'badge-success'"
                     >
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                    </button>
-                    <button
-                      @click="copyCLICommand(call)"
-                      class="btn btn-xs btn-ghost"
-                      title="Copy as CLI command"
-                    >
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                    </button>
-                  </div>
-                </td>
-              </tr>
-
-              <!-- Expandable detail row -->
-              <tr v-for="call in paginatedToolCalls" :key="`${call.id}-details`" v-show="expandedCalls.has(call.id)">
-                <td colspan="6" class="bg-base-200">
-                  <div class="p-4 space-y-4">
-                    <!-- Arguments -->
-                    <div>
-                      <h4 class="font-semibold mb-2">Arguments:</h4>
-                      <pre class="bg-base-300 p-3 rounded text-xs overflow-x-auto">{{ JSON.stringify(call.arguments, null, 2) }}</pre>
+                      {{ call.error ? 'Error' : 'Success' }}
                     </div>
-
-                    <!-- Response or Error -->
-                    <div v-if="call.error">
-                      <h4 class="font-semibold mb-2 text-error">Error:</h4>
-                      <div class="alert alert-error">
-                        <span class="font-mono text-sm">{{ call.error }}</span>
+                  </td>
+                  <td>
+                    <span class="text-sm">{{ formatDuration(call.duration) }}</span>
+                  </td>
+                  <td>
+                    <div v-if="call.metrics" class="text-sm">
+                      <div class="flex items-center gap-1">
+                        <span class="font-mono text-xs" :title="`Input: ${call.metrics.input_tokens}, Output: ${call.metrics.output_tokens}`">
+                          {{ call.metrics.total_tokens }}
+                        </span>
+                        <span class="text-xs text-base-content/60">tokens</span>
+                      </div>
+                      <div class="flex items-center gap-1 mt-0.5">
+                        <span class="text-xs text-base-content/50">
+                          {{ call.metrics.model }}
+                        </span>
+                        <div v-if="call.metrics.was_truncated" class="badge badge-warning badge-xs" :title="`Saved ${call.metrics.truncated_tokens || 0} tokens`">
+                          Truncated
+                        </div>
                       </div>
                     </div>
-                    <div v-else-if="call.response">
-                      <h4 class="font-semibold mb-2 text-success">Response:</h4>
-                      <pre class="bg-base-300 p-3 rounded text-xs overflow-x-auto max-h-96">{{ JSON.stringify(call.response, null, 2) }}</pre>
+                    <span v-else class="text-xs text-base-content/40">—</span>
+                  </td>
+                  <td>
+                    <div class="flex gap-2">
+                      <button
+                        @click="toggleDetails(call.id)"
+                        class="btn btn-xs btn-ghost"
+                        :title="expandedCalls.has(call.id) ? 'Collapse' : 'Expand'"
+                      >
+                        <svg
+                          class="w-4 h-4 transition-transform"
+                          :class="{ 'rotate-180': expandedCalls.has(call.id) }"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                      <button
+                        @click="openReplayModal(call)"
+                        class="btn btn-xs btn-primary"
+                        title="Replay tool call"
+                      >
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                      </button>
+                      <button
+                        @click="copyCLICommand(call)"
+                        class="btn btn-xs btn-ghost"
+                        title="Copy as CLI command"
+                      >
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                      </button>
                     </div>
+                  </td>
+                </tr>
 
-                    <!-- Metadata -->
-                    <div class="text-xs text-base-content/60">
-                      <div><strong>Call ID:</strong> {{ call.id }}</div>
-                      <div><strong>Server ID:</strong> {{ call.server_id }}</div>
-                      <div v-if="call.request_id"><strong>Request ID:</strong> {{ call.request_id }}</div>
-                      <div><strong>Config Path:</strong> {{ call.config_path }}</div>
+                <!-- Expandable detail row (immediately follows main row) -->
+                <tr v-show="expandedCalls.has(call.id)">
+                  <td colspan="7" class="bg-base-200">
+                    <div class="p-4 space-y-4">
+                      <!-- Arguments -->
+                      <div>
+                        <h4 class="font-semibold mb-2">Arguments:</h4>
+                        <pre class="bg-base-300 p-3 rounded text-xs overflow-auto max-h-60 w-full" style="white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;">{{ JSON.stringify(call.arguments, null, 2) }}</pre>
+                      </div>
+
+                      <!-- Response or Error -->
+                      <div v-if="call.error">
+                        <h4 class="font-semibold mb-2 text-error">Error:</h4>
+                        <div class="alert alert-error">
+                          <span class="font-mono text-sm break-words">{{ call.error }}</span>
+                        </div>
+                      </div>
+                      <div v-else-if="call.response">
+                        <h4 class="font-semibold mb-2 text-success">Response:</h4>
+                        <pre class="bg-base-300 p-3 rounded text-xs overflow-auto max-h-96 w-full" style="white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;">{{ JSON.stringify(call.response, null, 2) }}</pre>
+                      </div>
+
+                      <!-- Metadata -->
+                      <div class="text-xs text-base-content/60 space-y-1">
+                        <div class="break-all"><strong>Call ID:</strong> {{ call.id }}</div>
+                        <div class="break-all"><strong>Server ID:</strong> {{ call.server_id }}</div>
+                        <div v-if="call.request_id" class="break-all"><strong>Request ID:</strong> {{ call.request_id }}</div>
+                        <div class="break-all"><strong>Config Path:</strong> {{ call.config_path }}</div>
+                        <div v-if="call.metrics" class="pt-2 border-t border-base-300 mt-2">
+                          <div class="font-semibold text-sm text-base-content/80 mb-1">Token Usage:</div>
+                          <div><strong>Input Tokens:</strong> {{ call.metrics.input_tokens.toLocaleString() }}</div>
+                          <div><strong>Output Tokens:</strong> {{ call.metrics.output_tokens.toLocaleString() }}</div>
+                          <div><strong>Total Tokens:</strong> {{ call.metrics.total_tokens.toLocaleString() }}</div>
+                          <div><strong>Model:</strong> {{ call.metrics.model }}</div>
+                          <div><strong>Encoding:</strong> {{ call.metrics.encoding }}</div>
+                          <div v-if="call.metrics.was_truncated" class="mt-2 pt-2 border-t border-base-300">
+                            <div class="font-semibold text-sm text-warning mb-1 flex items-center gap-2">
+                              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                              </svg>
+                              Response Truncation:
+                            </div>
+                            <div><strong>Truncated Tokens:</strong> {{ (call.metrics.truncated_tokens || 0).toLocaleString() }}</div>
+                            <div class="text-success"><strong>Tokens Saved:</strong> {{ (call.metrics.truncated_tokens || 0).toLocaleString() }}</div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </td>
-              </tr>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
 
@@ -414,11 +456,13 @@ const clearFilters = () => {
 }
 
 const toggleDetails = (callId: string) => {
-  if (expandedCalls.value.has(callId)) {
-    expandedCalls.value.delete(callId)
+  const newSet = new Set(expandedCalls.value)
+  if (newSet.has(callId)) {
+    newSet.delete(callId)
   } else {
-    expandedCalls.value.add(callId)
+    newSet.add(callId)
   }
+  expandedCalls.value = newSet
 }
 
 const copyCLICommand = (call: ToolCallRecord) => {

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/server/tokens"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
@@ -53,6 +55,7 @@ type Runtime struct {
 	cacheManager    *cache.Manager
 	truncator       *truncate.Truncator
 	secretResolver  *secret.Resolver
+	tokenizer       tokens.Tokenizer
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -92,6 +95,23 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
 
+	// Initialize tokenizer (defaults to enabled with cl100k_base)
+	tokenizerEnabled := true
+	tokenizerEncoding := "cl100k_base"
+	if cfg.Tokenizer != nil {
+		tokenizerEnabled = cfg.Tokenizer.Enabled
+		if cfg.Tokenizer.Encoding != "" {
+			tokenizerEncoding = cfg.Tokenizer.Encoding
+		}
+	}
+
+	tokenizer, err := tokens.NewTokenizer(tokenizerEncoding, logger.Sugar(), tokenizerEnabled)
+	if err != nil {
+		logger.Warn("Failed to initialize tokenizer, disabling token counting", zap.Error(err))
+		// Create a disabled tokenizer as fallback
+		tokenizer, _ = tokens.NewTokenizer(tokenizerEncoding, logger.Sugar(), false)
+	}
+
 	appCtx, appCancel := context.WithCancel(context.Background())
 
 	rt := &Runtime{
@@ -104,6 +124,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		cacheManager:    cacheManager,
 		truncator:       truncator,
 		secretResolver:  secretResolver,
+		tokenizer:       tokenizer,
 		appCtx:          appCtx,
 		appCancel:       appCancel,
 		status: Status{
@@ -371,6 +392,23 @@ func (r *Runtime) GetCurrentConfig() interface{} {
 	return r.cfg
 }
 
+// convertTokenMetrics converts storage.TokenMetrics to contracts.TokenMetrics
+func convertTokenMetrics(m *storage.TokenMetrics) *contracts.TokenMetrics {
+	if m == nil {
+		return nil
+	}
+	return &contracts.TokenMetrics{
+		InputTokens:     m.InputTokens,
+		OutputTokens:    m.OutputTokens,
+		TotalTokens:     m.TotalTokens,
+		Model:           m.Model,
+		Encoding:        m.Encoding,
+		EstimatedCost:   m.EstimatedCost,
+		TruncatedTokens: m.TruncatedTokens,
+		WasTruncated:    m.WasTruncated,
+	}
+}
+
 // GetToolCalls retrieves tool call history with pagination
 func (r *Runtime) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
 	r.mu.RLock()
@@ -429,6 +467,7 @@ func (r *Runtime) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, 
 			Timestamp:  call.Timestamp,
 			ConfigPath: call.ConfigPath,
 			RequestID:  call.RequestID,
+			Metrics:    convertTokenMetrics(call.Metrics),
 		}
 	}
 
@@ -466,6 +505,7 @@ func (r *Runtime) GetToolCallByID(id string) (*contracts.ToolCallRecord, error) 
 					Timestamp:  call.Timestamp,
 					ConfigPath: call.ConfigPath,
 					RequestID:  call.RequestID,
+					Metrics:    convertTokenMetrics(call.Metrics),
 				}, nil
 			}
 		}
@@ -508,6 +548,7 @@ func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts
 			Timestamp:  call.Timestamp,
 			ConfigPath: call.ConfigPath,
 			RequestID:  call.RequestID,
+			Metrics:    convertTokenMetrics(call.Metrics),
 		}
 	}
 
@@ -712,6 +753,97 @@ func (r *Runtime) GetConfig() (*config.Config, error) {
 	// For now, we return the same reference (caller should not modify)
 	// TODO: Implement deep copy if needed
 	return r.cfg, nil
+}
+
+// Tokenizer returns the tokenizer instance.
+func (r *Runtime) Tokenizer() tokens.Tokenizer {
+	return r.tokenizer
+}
+
+// CalculateTokenSavings calculates token savings from using MCPProxy
+func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error) {
+	if r.tokenizer == nil {
+		return nil, fmt.Errorf("tokenizer not available")
+	}
+
+	// Get default model from config
+	model := "gpt-4"
+	if r.cfg.Tokenizer != nil && r.cfg.Tokenizer.DefaultModel != "" {
+		model = r.cfg.Tokenizer.DefaultModel
+	}
+
+	// Create savings calculator
+	savingsCalc := tokens.NewSavingsCalculator(r.tokenizer, r.logger.Sugar(), model)
+
+	// Get all connected servers and their tools
+	serverInfos := []tokens.ServerToolInfo{}
+
+	// Get all server names
+	serverNames := r.upstreamManager.GetAllServerNames()
+	for _, serverName := range serverNames {
+		client, exists := r.upstreamManager.GetClient(serverName)
+		if !exists {
+			continue
+		}
+
+		// Get tools for this server
+		toolsList, err := client.ListTools(r.appCtx)
+		if err != nil {
+			r.logger.Debug("Failed to list tools for server", zap.String("server", serverName), zap.Error(err))
+			continue
+		}
+
+		// Convert to ToolInfo format
+		toolInfos := make([]tokens.ToolInfo, 0, len(toolsList))
+		for _, tool := range toolsList {
+			// Parse input schema from ParamsJSON
+			var inputSchema map[string]interface{}
+			if tool.ParamsJSON != "" {
+				if err := json.Unmarshal([]byte(tool.ParamsJSON), &inputSchema); err != nil {
+					r.logger.Debug("Failed to parse tool params JSON",
+						zap.String("tool", tool.Name),
+						zap.Error(err))
+					inputSchema = make(map[string]interface{})
+				}
+			} else {
+				inputSchema = make(map[string]interface{})
+			}
+
+			toolInfos = append(toolInfos, tokens.ToolInfo{
+				Name:        tool.Name,
+				Description: tool.Description,
+				InputSchema: inputSchema,
+			})
+		}
+
+		serverInfos = append(serverInfos, tokens.ServerToolInfo{
+			ServerName: serverName,
+			ToolCount:  len(toolsList),
+			Tools:      toolInfos,
+		})
+	}
+
+	// Calculate savings
+	topK := r.cfg.ToolsLimit
+	if topK == 0 {
+		topK = 15 // Default
+	}
+
+	savingsMetrics, err := savingsCalc.CalculateProxySavings(serverInfos, topK)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate savings: %w", err)
+	}
+
+	// Convert to contracts type
+	result := &contracts.ServerTokenMetrics{
+		TotalServerToolListSize: savingsMetrics.TotalServerToolListSize,
+		AverageQueryResultSize:  savingsMetrics.AverageQueryResultSize,
+		SavedTokens:             savingsMetrics.SavedTokens,
+		SavedTokensPercentage:   savingsMetrics.SavedTokensPercentage,
+		PerServerToolListSizes:  savingsMetrics.PerServerToolListSizes,
+	}
+
+	return result, nil
 }
 
 // contains checks if a string slice contains a specific string

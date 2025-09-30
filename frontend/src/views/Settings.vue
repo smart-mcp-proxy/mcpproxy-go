@@ -257,6 +257,100 @@
       </div>
     </div>
 
+    <!-- Tokenizer Settings -->
+    <div v-if="activeTab === 'tokenizer'" class="space-y-6">
+      <div class="card bg-base-100 shadow-md">
+        <div class="card-body">
+          <h2 class="card-title">Token Counting Configuration</h2>
+          <p class="text-base-content/70 mb-4">
+            Configure token counting for LLM cost estimation and usage tracking.
+          </p>
+
+          <div class="form-control">
+            <label class="label cursor-pointer">
+              <span class="label-text">Enable Token Counting</span>
+              <input
+                type="checkbox"
+                class="toggle toggle-primary"
+                checked
+                disabled
+                title="Token counting is always enabled (read-only for now)"
+              />
+            </label>
+            <label class="label">
+              <span class="label-text-alt">Token counting helps track API usage and estimate costs</span>
+            </label>
+          </div>
+
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">Default Model</span>
+              <span class="label-text-alt">Model used for token estimation</span>
+            </label>
+            <select class="select select-bordered" disabled>
+              <option selected>gpt-4</option>
+              <option>gpt-4o</option>
+              <option>gpt-3.5-turbo</option>
+              <option>claude-3-5-sonnet</option>
+              <option>claude-3-opus</option>
+            </select>
+            <label class="label">
+              <span class="label-text-alt">Current: gpt-4 (configuration editing coming soon)</span>
+            </label>
+          </div>
+
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">Encoding</span>
+              <span class="label-text-alt">Tokenization encoding method</span>
+            </label>
+            <select class="select select-bordered" disabled>
+              <option selected>cl100k_base (GPT-4, GPT-3.5)</option>
+              <option>o200k_base (GPT-4o)</option>
+              <option>p50k_base (Codex)</option>
+              <option>r50k_base (GPT-3)</option>
+            </select>
+            <label class="label">
+              <span class="label-text-alt">Current: cl100k_base</span>
+            </label>
+          </div>
+
+          <div class="alert alert-info mt-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div class="text-sm">
+              <p><strong>Note:</strong> Token counting is currently read-only in the UI.</p>
+              <p class="mt-1">To customize settings, edit the <code class="bg-base-300 px-1 rounded">tokenizer</code> section in your config file:</p>
+              <pre class="bg-base-300 p-2 rounded mt-2 text-xs">
+{
+  "tokenizer": {
+    "enabled": true,
+    "default_model": "gpt-4",
+    "encoding": "cl100k_base"
+  }
+}</pre>
+            </div>
+          </div>
+
+          <div class="alert">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div class="text-sm">
+              <p><strong>Supported Models:</strong></p>
+              <ul class="list-disc list-inside mt-1 space-y-1">
+                <li>GPT-4, GPT-4 Turbo, GPT-3.5 Turbo</li>
+                <li>GPT-4o (o200k_base encoding)</li>
+                <li>Claude 3.5, Claude 3 (approximation using cl100k_base)</li>
+                <li>Codex models (p50k_base)</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Configuration Editor -->
     <div v-if="activeTab === 'configuration'" class="space-y-6">
       <div class="card bg-base-100 shadow-md">
@@ -557,6 +651,7 @@ const tabs = [
   { id: 'general', label: 'General' },
   { id: 'servers', label: 'Servers' },
   { id: 'logging', label: 'Logging' },
+  { id: 'tokenizer', label: 'Tokenizer' },
   { id: 'configuration', label: 'Configuration' },
   { id: 'system', label: 'System' }
 ]

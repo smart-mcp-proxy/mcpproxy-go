@@ -72,6 +72,9 @@ type ServerController interface {
 	ValidateConfig(cfg *config.Config) ([]config.ValidationError, error)
 	ApplyConfig(cfg *config.Config, cfgPath string) (*internalRuntime.ConfigApplyResult, error)
 	GetConfig() (*config.Config, error)
+
+	// Token statistics
+	GetTokenSavings() (*contracts.ServerTokenMetrics, error)
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -267,6 +270,9 @@ func (s *Server) setupRoutes() {
 
 		// Diagnostics
 		r.Get("/diagnostics", s.handleGetDiagnostics)
+
+		// Token statistics
+		r.Get("/stats/tokens", s.handleGetTokenStats)
 
 		// Tool call history
 		r.Get("/tool-calls", s.handleGetToolCalls)
@@ -1054,6 +1060,23 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// handleGetTokenStats returns token savings statistics
+func (s *Server) handleGetTokenStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	tokenStats, err := s.controller.GetTokenSavings()
+	if err != nil {
+		s.logger.Error("Failed to calculate token savings", "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to calculate token savings: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, tokenStats)
 }
 
 // checkMissingSecrets analyzes a server configuration for unresolved secret references

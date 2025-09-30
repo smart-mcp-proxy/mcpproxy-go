@@ -24,7 +24,7 @@ const (
 )
 
 // Current schema version
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {

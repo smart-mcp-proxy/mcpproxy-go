@@ -16,6 +16,7 @@ import (
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
+	"mcpproxy-go/internal/server/tokens"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/truncate"
@@ -595,6 +596,33 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
 	duration := time.Since(startTime)
 
+	// Count tokens for request and response
+	var tokenMetrics *storage.TokenMetrics
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizer := p.mainServer.runtime.Tokenizer()
+		if tokenizer != nil {
+			// Get model for token counting
+			model := "gpt-4" // default
+			if cfg := p.mainServer.runtime.Config(); cfg != nil && cfg.Tokenizer != nil && cfg.Tokenizer.DefaultModel != "" {
+				model = cfg.Tokenizer.DefaultModel
+			}
+
+			// Count input tokens (arguments)
+			inputTokens, inputErr := tokenizer.CountTokensInJSONForModel(args, model)
+			if inputErr != nil {
+				p.logger.Debug("Failed to count input tokens", zap.Error(inputErr))
+			}
+
+			// Count output tokens (will be set after we get the result)
+			// For now, we'll update this after result is available
+			tokenMetrics = &storage.TokenMetrics{
+				InputTokens: inputTokens,
+				Model:       model,
+				Encoding:    tokenizer.(*tokens.DefaultTokenizer).GetDefaultEncoding(),
+			}
+		}
+	}
+
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
 		ID:         fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
@@ -606,6 +634,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		Timestamp:  startTime,
 		ConfigPath: p.mainServer.GetConfigPath(),
 		RequestID:  "", // TODO: Extract from context if available
+		Metrics:    tokenMetrics,
 	}
 
 	if err != nil {
@@ -639,6 +668,21 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Record successful response
 	toolCallRecord.Response = result
 
+	// Count output tokens for successful response
+	if tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizer := p.mainServer.runtime.Tokenizer()
+		if tokenizer != nil {
+			outputTokens, outputErr := tokenizer.CountTokensInJSONForModel(result, tokenMetrics.Model)
+			if outputErr != nil {
+				p.logger.Debug("Failed to count output tokens", zap.Error(outputErr))
+			} else {
+				tokenMetrics.OutputTokens = outputTokens
+				tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
+				toolCallRecord.Metrics = tokenMetrics
+			}
+		}
+	}
+
 	// Increment usage stats
 	if err := p.storage.IncrementToolUsage(toolName); err != nil {
 		p.logger.Warn("Failed to update tool stats", zap.String("tool_name", toolName), zap.Error(err))
@@ -655,6 +699,27 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Apply truncation if configured
 	if p.truncator.ShouldTruncate(response) {
 		truncResult := p.truncator.Truncate(response, toolName, args)
+
+		// Track truncation in token metrics
+		if tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
+			tokenizer := p.mainServer.runtime.Tokenizer()
+			if tokenizer != nil {
+				// Count tokens in original response
+				originalTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
+				if err == nil {
+					// Count tokens in truncated response
+					truncatedTokens, err := tokenizer.CountTokensForModel(truncResult.TruncatedContent, tokenMetrics.Model)
+					if err == nil {
+						tokenMetrics.WasTruncated = true
+						tokenMetrics.TruncatedTokens = originalTokens - truncatedTokens
+						// Update output tokens to reflect truncated size
+						tokenMetrics.OutputTokens = truncatedTokens
+						tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
+						toolCallRecord.Metrics = tokenMetrics
+					}
+				}
+			}
+		}
 
 		// If caching is available, store the full response
 		if truncResult.CacheAvailable {

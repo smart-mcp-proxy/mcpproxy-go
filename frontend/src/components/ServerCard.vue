@@ -28,6 +28,9 @@
         <div class="stat bg-base-200 rounded-lg p-3">
           <div class="stat-title text-xs">Tools</div>
           <div class="stat-value text-lg">{{ server.tool_count }}</div>
+          <div v-if="server.tool_list_token_size" class="stat-desc text-xs">
+            {{ server.tool_list_token_size.toLocaleString() }} tokens
+          </div>
         </div>
         <div class="stat bg-base-200 rounded-lg p-3">
           <div class="stat-title text-xs">Status</div>

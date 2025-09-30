@@ -1054,6 +1054,11 @@ func (s *Server) ApplyConfig(cfg *config.Config, cfgPath string) (*runtime.Confi
 	return s.runtime.ApplyConfig(cfg, cfgPath)
 }
 
+// GetTokenSavings calculates and returns token savings statistics
+func (s *Server) GetTokenSavings() (*contracts.ServerTokenMetrics, error) {
+	return s.runtime.CalculateTokenSavings()
+}
+
 // GetServerTools returns tools for a specific server
 func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	s.logger.Debug("GetServerTools called", zap.String("server", serverName))
