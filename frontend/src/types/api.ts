@@ -131,3 +131,36 @@ export interface GetServerToolCallsResponse {
   tool_calls: ToolCallRecord[]
   total: number
 }
+
+// Configuration management types
+export interface ValidationError {
+  field: string
+  message: string
+}
+
+export interface ConfigApplyResult {
+  success: boolean
+  applied_immediately: boolean
+  requires_restart: boolean
+  restart_reason?: string
+  validation_errors?: ValidationError[]
+  changed_fields?: string[]
+}
+
+export interface GetConfigResponse {
+  config: any  // The full configuration object
+  config_path: string
+}
+
+export interface ValidateConfigRequest {
+  config: any
+}
+
+export interface ValidateConfigResponse {
+  valid: boolean
+  errors?: ValidationError[]
+}
+
+export interface ApplyConfigRequest {
+  config: any
+}

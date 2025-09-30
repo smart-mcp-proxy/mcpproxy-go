@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
 	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
@@ -122,6 +123,38 @@ func (m *MockServerController) TriggerOAuthLogin(_ string) error { return nil }
 // Secrets management methods
 func (m *MockServerController) GetSecretResolver() *secret.Resolver { return nil }
 func (m *MockServerController) GetCurrentConfig() interface{}       { return map[string]interface{}{} }
+
+// Tool call history methods
+func (m *MockServerController) GetToolCalls(_ int, _ int) ([]*contracts.ToolCallRecord, int, error) {
+	return []*contracts.ToolCallRecord{}, 0, nil
+}
+func (m *MockServerController) GetToolCallByID(_ string) (*contracts.ToolCallRecord, error) {
+	return nil, nil
+}
+func (m *MockServerController) GetServerToolCalls(_ string, _ int) ([]*contracts.ToolCallRecord, error) {
+	return []*contracts.ToolCallRecord{}, nil
+}
+
+// Configuration management methods
+func (m *MockServerController) ValidateConfig(_ *config.Config) ([]config.ValidationError, error) {
+	return []config.ValidationError{}, nil
+}
+func (m *MockServerController) ApplyConfig(_ *config.Config, _ string) (*internalRuntime.ConfigApplyResult, error) {
+	return &internalRuntime.ConfigApplyResult{
+		Success:            true,
+		AppliedImmediately: true,
+		RequiresRestart:    false,
+		ChangedFields:      []string{},
+	}, nil
+}
+func (m *MockServerController) GetConfig() (*config.Config, error) {
+	return &config.Config{
+		Listen:            "127.0.0.1:8080",
+		TopK:              5,
+		ToolsLimit:        15,
+		ToolResponseLimit: 1000,
+	}, nil
+}
 
 // Readiness method
 func (m *MockServerController) IsReady() bool { return true }

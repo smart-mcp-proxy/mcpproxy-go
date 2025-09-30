@@ -112,3 +112,4 @@ build-info.json
 mcpproxy-tray
 config.db.backup.*
 node_modules/
+certs/

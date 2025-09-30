@@ -66,6 +66,11 @@ type ServerController interface {
 	GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error)
 	GetToolCallByID(id string) (*contracts.ToolCallRecord, error)
 	GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error)
+
+	// Configuration management
+	ValidateConfig(cfg *config.Config) ([]config.ValidationError, error)
+	ApplyConfig(cfg *config.Config, cfgPath string) (*internalRuntime.ConfigApplyResult, error)
+	GetConfig() (*config.Config, error)
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -265,6 +270,11 @@ func (s *Server) setupRoutes() {
 		// Tool call history
 		r.Get("/tool-calls", s.handleGetToolCalls)
 		r.Get("/tool-calls/{id}", s.handleGetToolCallDetail)
+
+		// Configuration management
+		r.Get("/config", s.handleGetConfig)
+		r.Post("/config/validate", s.handleValidateConfig)
+		r.Post("/config/apply", s.handleApplyConfig)
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD
@@ -1238,4 +1248,97 @@ func convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.T
 		}
 	}
 	return records
+}
+
+// Configuration management handlers
+
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	cfg, err := s.controller.GetConfig()
+	if err != nil {
+		s.logger.Error("Failed to get configuration", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to get configuration")
+		return
+	}
+
+	if cfg == nil {
+		s.writeError(w, http.StatusInternalServerError, "Configuration not available")
+		return
+	}
+
+	// Convert config to contracts type for consistent API response
+	response := contracts.GetConfigResponse{
+		Config:     contracts.ConvertConfigToContract(cfg),
+		ConfigPath: s.controller.GetConfigPath(),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var cfg config.Config
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	// Perform validation
+	validationErrors, err := s.controller.ValidateConfig(&cfg)
+	if err != nil {
+		s.logger.Error("Failed to validate configuration", "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Validation failed: %v", err))
+		return
+	}
+
+	response := contracts.ValidateConfigResponse{
+		Valid:  len(validationErrors) == 0,
+		Errors: contracts.ConvertValidationErrors(validationErrors),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var cfg config.Config
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	// Get config path from controller
+	cfgPath := s.controller.GetConfigPath()
+
+	// Apply configuration
+	result, err := s.controller.ApplyConfig(&cfg, cfgPath)
+	if err != nil {
+		s.logger.Error("Failed to apply configuration", "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to apply configuration: %v", err))
+		return
+	}
+
+	// Convert result to contracts type directly here to avoid import cycles
+	response := &contracts.ConfigApplyResult{
+		Success:            result.Success,
+		AppliedImmediately: result.AppliedImmediately,
+		RequiresRestart:    result.RequiresRestart,
+		RestartReason:      result.RestartReason,
+		ChangedFields:      result.ChangedFields,
+		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
+	}
+
+	s.writeSuccess(w, response)
 }

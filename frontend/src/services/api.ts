@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -345,6 +345,25 @@ class APIService {
   async getServerToolCalls(serverName: string, limit?: number): Promise<APIResponse<GetServerToolCallsResponse>> {
     const url = `/api/v1/servers/${encodeURIComponent(serverName)}/tool-calls${limit ? `?limit=${limit}` : ''}`
     return this.request<GetServerToolCallsResponse>(url)
+  }
+
+  // Configuration management endpoints
+  async getConfig(): Promise<APIResponse<GetConfigResponse>> {
+    return this.request<GetConfigResponse>('/api/v1/config')
+  }
+
+  async validateConfig(config: any): Promise<APIResponse<ValidateConfigResponse>> {
+    return this.request<ValidateConfigResponse>('/api/v1/config/validate', {
+      method: 'POST',
+      body: JSON.stringify(config)
+    })
+  }
+
+  async applyConfig(config: any): Promise<APIResponse<ConfigApplyResult>> {
+    return this.request<ConfigApplyResult>('/api/v1/config/apply', {
+      method: 'POST',
+      body: JSON.stringify(config)
+    })
   }
 
   // Utility methods

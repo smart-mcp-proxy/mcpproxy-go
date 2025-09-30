@@ -513,3 +513,121 @@ func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts
 
 	return contractCalls, nil
 }
+
+// ValidateConfig validates a configuration without applying it
+func (r *Runtime) ValidateConfig(cfg *config.Config) ([]config.ValidationError, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+
+	// Perform detailed validation
+	return cfg.ValidateDetailed(), nil
+}
+
+// ApplyConfig applies a new configuration with hot-reload support
+func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApplyResult, error) {
+	if newCfg == nil {
+		return &ConfigApplyResult{
+			Success: false,
+		}, fmt.Errorf("config cannot be nil")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Validate the new configuration first
+	validationErrors := newCfg.ValidateDetailed()
+	if len(validationErrors) > 0 {
+		return &ConfigApplyResult{
+			Success: false,
+		}, fmt.Errorf("configuration validation failed: %v", validationErrors[0].Error())
+	}
+
+	// Detect changes and determine if restart is required
+	result := DetectConfigChanges(r.cfg, newCfg)
+	if !result.Success {
+		return result, fmt.Errorf("failed to detect config changes")
+	}
+
+	// If restart is required, don't apply changes (let user restart)
+	if result.RequiresRestart {
+		r.logger.Warn("Configuration changes require restart",
+			zap.String("reason", result.RestartReason),
+			zap.Strings("changed_fields", result.ChangedFields))
+		return result, nil
+	}
+
+	// Apply hot-reloadable changes
+	oldCfg := r.cfg
+	r.cfg = newCfg
+	if cfgPath != "" {
+		r.cfgPath = cfgPath
+	}
+
+	// Apply configuration changes to components
+	r.logger.Info("Applying configuration hot-reload",
+		zap.Strings("changed_fields", result.ChangedFields))
+
+	// Update upstream manager configuration if servers changed
+	if contains(result.ChangedFields, "mcpServers") {
+		r.logger.Info("Server configuration changed, will re-sync on next operation")
+		// Note: Upstream manager doesn't need explicit SetConfig call
+		// It will pick up the new config through r.cfg reference
+	}
+
+	// Update logging configuration
+	if contains(result.ChangedFields, "logging") {
+		r.logger.Info("Logging configuration changed")
+		if r.upstreamManager != nil && newCfg.Logging != nil {
+			r.upstreamManager.SetLogConfig(newCfg.Logging)
+		}
+	}
+
+	// Update truncator if tool response limit changed
+	if contains(result.ChangedFields, "tool_response_limit") {
+		r.logger.Info("Tool response limit changed, updating truncator",
+			zap.Int("old_limit", oldCfg.ToolResponseLimit),
+			zap.Int("new_limit", newCfg.ToolResponseLimit))
+		r.truncator = truncate.NewTruncator(newCfg.ToolResponseLimit)
+	}
+
+	// Emit config.reloaded event
+	r.emitConfigReloaded(r.cfgPath)
+
+	// Emit servers.changed event if servers were modified
+	if contains(result.ChangedFields, "mcpServers") {
+		r.emitServersChanged("config hot-reload", map[string]any{
+			"changed_fields": result.ChangedFields,
+		})
+	}
+
+	r.logger.Info("Configuration hot-reload completed successfully",
+		zap.Strings("changed_fields", result.ChangedFields))
+
+	return result, nil
+}
+
+// GetConfig returns a copy of the current configuration
+func (r *Runtime) GetConfig() (*config.Config, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.cfg == nil {
+		return nil, fmt.Errorf("config not initialized")
+	}
+
+	// Return a deep copy to prevent external modifications
+	// For now, we return the same reference (caller should not modify)
+	// TODO: Implement deep copy if needed
+	return r.cfg, nil
+}
+
+// contains checks if a string slice contains a specific string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}

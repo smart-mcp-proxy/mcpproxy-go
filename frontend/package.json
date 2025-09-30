@@ -13,10 +13,18 @@
     "test:ui": "vitest --ui",
     "coverage": "vitest run --coverage"
   },
-  "keywords": ["mcpproxy", "vue", "typescript", "daisyui", "control-panel"],
+  "keywords": [
+    "mcpproxy",
+    "vue",
+    "typescript",
+    "daisyui",
+    "control-panel"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@guolao/vue-monaco-editor": "^1.5.5",
+    "monaco-editor": "^0.53.0",
     "pinia": "^2.3.1",
     "vue": "^3.5.21",
     "vue-router": "^4.5.1"

@@ -287,3 +287,59 @@ type GetServerToolCallsResponse struct {
 	ToolCalls  []ToolCallRecord `json:"tool_calls"`
 	Total      int              `json:"total"`
 }
+
+// Configuration management types
+
+// ValidationError represents a single configuration validation error
+type ValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// ConfigApplyResult represents the result of applying a configuration change
+type ConfigApplyResult struct {
+	Success            bool              `json:"success"`
+	AppliedImmediately bool              `json:"applied_immediately"`
+	RequiresRestart    bool              `json:"requires_restart"`
+	RestartReason      string            `json:"restart_reason,omitempty"`
+	ValidationErrors   []ValidationError `json:"validation_errors,omitempty"`
+	ChangedFields      []string          `json:"changed_fields,omitempty"`
+}
+
+// GetConfigResponse is the response for GET /api/v1/config
+type GetConfigResponse struct {
+	Config     interface{} `json:"config"`      // The configuration object
+	ConfigPath string      `json:"config_path"` // Path to config file
+}
+
+// ValidateConfigRequest is the request for POST /api/v1/config/validate
+type ValidateConfigRequest struct {
+	Config interface{} `json:"config"` // The configuration to validate
+}
+
+// ValidateConfigResponse is the response for POST /api/v1/config/validate
+type ValidateConfigResponse struct {
+	Valid  bool              `json:"valid"`
+	Errors []ValidationError `json:"errors,omitempty"`
+}
+
+// ApplyConfigRequest is the request for POST /api/v1/config/apply
+type ApplyConfigRequest struct {
+	Config interface{} `json:"config"` // The new configuration to apply
+}
+
+// Tool call replay types
+
+// ReplayToolCallRequest is the request for POST /api/v1/tool-calls/{id}/replay
+type ReplayToolCallRequest struct {
+	Arguments map[string]interface{} `json:"arguments"` // Modified arguments for replay
+}
+
+// ReplayToolCallResponse is the response for POST /api/v1/tool-calls/{id}/replay
+type ReplayToolCallResponse struct {
+	Success       bool           `json:"success"`
+	NewCallID     string         `json:"new_call_id"`     // ID of the newly created call
+	NewToolCall   ToolCallRecord `json:"new_tool_call"`   // The new tool call record
+	ReplayedFrom  string         `json:"replayed_from"`   // Original call ID
+	Error         string         `json:"error,omitempty"` // Error if replay failed
+}

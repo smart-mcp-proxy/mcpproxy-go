@@ -472,8 +472,184 @@ func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKey
 	return c.APIKey, true, APIKeySourceGenerated
 }
 
-// Validate validates the configuration
+// ValidationError represents a configuration validation error
+type ValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// Error implements the error interface
+func (v ValidationError) Error() string {
+	return fmt.Sprintf("%s: %s", v.Field, v.Message)
+}
+
+// ValidateDetailed performs detailed validation and returns all errors
+func (c *Config) ValidateDetailed() []ValidationError {
+	var errors []ValidationError
+
+	// Validate listen address format
+	if c.Listen != "" {
+		// Check for valid format (host:port or :port)
+		if !isValidListenAddr(c.Listen) {
+			errors = append(errors, ValidationError{
+				Field:   "listen",
+				Message: "invalid listen address format (expected host:port or :port)",
+			})
+		}
+	}
+
+	// Validate TopK range
+	if c.TopK < 1 || c.TopK > 100 {
+		errors = append(errors, ValidationError{
+			Field:   "top_k",
+			Message: "must be between 1 and 100",
+		})
+	}
+
+	// Validate ToolsLimit range
+	if c.ToolsLimit < 1 || c.ToolsLimit > 1000 {
+		errors = append(errors, ValidationError{
+			Field:   "tools_limit",
+			Message: "must be between 1 and 1000",
+		})
+	}
+
+	// Validate ToolResponseLimit
+	if c.ToolResponseLimit < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "tool_response_limit",
+			Message: "cannot be negative",
+		})
+	}
+
+	// Validate timeout
+	if c.CallToolTimeout.Duration() <= 0 {
+		errors = append(errors, ValidationError{
+			Field:   "call_tool_timeout",
+			Message: "must be a positive duration",
+		})
+	}
+
+	// Validate server configurations
+	serverNames := make(map[string]bool)
+	for i, server := range c.Servers {
+		fieldPrefix := fmt.Sprintf("mcpServers[%d]", i)
+
+		// Validate server name
+		if server.Name == "" {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".name",
+				Message: "server name is required",
+			})
+		} else if serverNames[server.Name] {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".name",
+				Message: fmt.Sprintf("duplicate server name: %s", server.Name),
+			})
+		} else {
+			serverNames[server.Name] = true
+		}
+
+		// Validate protocol
+		validProtocols := map[string]bool{"stdio": true, "http": true, "sse": true, "streamable-http": true, "auto": true}
+		if server.Protocol != "" && !validProtocols[server.Protocol] {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".protocol",
+				Message: fmt.Sprintf("invalid protocol: %s (must be stdio, http, sse, streamable-http, or auto)", server.Protocol),
+			})
+		}
+
+		// Validate stdio server requirements
+		if server.Protocol == "stdio" || (server.Protocol == "" && server.Command != "") {
+			if server.Command == "" {
+				errors = append(errors, ValidationError{
+					Field:   fieldPrefix + ".command",
+					Message: "command is required for stdio protocol",
+				})
+			}
+			// Validate working directory exists if specified
+			if server.WorkingDir != "" {
+				if _, err := os.Stat(server.WorkingDir); os.IsNotExist(err) {
+					errors = append(errors, ValidationError{
+						Field:   fieldPrefix + ".working_dir",
+						Message: fmt.Sprintf("directory does not exist: %s", server.WorkingDir),
+					})
+				}
+			}
+		}
+
+		// Validate HTTP server requirements
+		if server.Protocol == "http" || server.Protocol == "sse" || server.Protocol == "streamable-http" {
+			if server.URL == "" {
+				errors = append(errors, ValidationError{
+					Field:   fieldPrefix + ".url",
+					Message: fmt.Sprintf("url is required for %s protocol", server.Protocol),
+				})
+			}
+		}
+
+		// Validate OAuth configuration if present
+		if server.OAuth != nil {
+			oauthPrefix := fieldPrefix + ".oauth"
+			if server.OAuth.ClientID == "" {
+				errors = append(errors, ValidationError{
+					Field:   oauthPrefix + ".client_id",
+					Message: "client_id is required when oauth is configured",
+				})
+			}
+			// Note: ClientSecret can be a secret reference, so we don't validate it as empty
+		}
+	}
+
+	// Validate DataDir exists (if specified and not empty)
+	if c.DataDir != "" {
+		if _, err := os.Stat(c.DataDir); os.IsNotExist(err) {
+			errors = append(errors, ValidationError{
+				Field:   "data_dir",
+				Message: fmt.Sprintf("directory does not exist: %s", c.DataDir),
+			})
+		}
+	}
+
+	// Validate TLS configuration
+	if c.TLS != nil && c.TLS.Enabled {
+		if c.TLS.CertsDir != "" {
+			if _, err := os.Stat(c.TLS.CertsDir); os.IsNotExist(err) {
+				errors = append(errors, ValidationError{
+					Field:   "tls.certs_dir",
+					Message: fmt.Sprintf("directory does not exist: %s", c.TLS.CertsDir),
+				})
+			}
+		}
+	}
+
+	// Validate logging configuration
+	if c.Logging != nil {
+		validLevels := map[string]bool{"trace": true, "debug": true, "info": true, "warn": true, "error": true}
+		if c.Logging.Level != "" && !validLevels[c.Logging.Level] {
+			errors = append(errors, ValidationError{
+				Field:   "logging.level",
+				Message: fmt.Sprintf("invalid log level: %s (must be trace, debug, info, warn, or error)", c.Logging.Level),
+			})
+		}
+	}
+
+	return errors
+}
+
+// isValidListenAddr checks if the listen address format is valid
+func isValidListenAddr(addr string) bool {
+	// Allow :port format
+	if addr != "" && addr[0] == ':' {
+		return true
+	}
+	// Allow host:port format (simple check)
+	return addr != "" && (addr[0] != ':' || len(addr) > 1)
+}
+
+// Validate validates the configuration (backward compatible)
 func (c *Config) Validate() error {
+	// Apply defaults FIRST (non-validation logic)
 	if c.Listen == "" {
 		c.Listen = defaultPort
 	}
@@ -488,6 +664,13 @@ func (c *Config) Validate() error {
 	}
 	if c.CallToolTimeout.Duration() <= 0 {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
+	}
+
+	// Then perform detailed validation
+	errors := c.ValidateDetailed()
+	if len(errors) > 0 {
+		// Return first error for backward compatibility
+		return fmt.Errorf("%s", errors[0].Error())
 	}
 
 	// Handle API key generation if not configured

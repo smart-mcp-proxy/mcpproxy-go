@@ -383,3 +383,28 @@ func ConvertStorageToolCallToContract(storageRecord interface{}) *ToolCallRecord
 
 	return record
 }
+
+// Config validation converters
+
+// ConvertValidationErrors converts config.ValidationError slice to contracts.ValidationError slice
+func ConvertValidationErrors(configErrors []config.ValidationError) []ValidationError {
+	contractErrors := make([]ValidationError, len(configErrors))
+	for i, err := range configErrors {
+		contractErrors[i] = ValidationError{
+			Field:   err.Field,
+			Message: err.Message,
+		}
+	}
+	return contractErrors
+}
+
+// ConvertConfigToContract converts config.Config to a map for API response
+func ConvertConfigToContract(cfg *config.Config) interface{} {
+	if cfg == nil {
+		return nil
+	}
+
+	// Return the config as-is for JSON marshaling
+	// The JSON tags on config.Config will handle serialization
+	return cfg
+}

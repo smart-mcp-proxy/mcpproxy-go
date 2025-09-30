@@ -1037,6 +1037,23 @@ func (s *Server) GetLogDir() string {
 	return ""
 }
 
+// Configuration management methods
+
+// GetConfig returns the current configuration
+func (s *Server) GetConfig() (*config.Config, error) {
+	return s.runtime.GetConfig()
+}
+
+// ValidateConfig validates a configuration
+func (s *Server) ValidateConfig(cfg *config.Config) ([]config.ValidationError, error) {
+	return s.runtime.ValidateConfig(cfg)
+}
+
+// ApplyConfig applies a new configuration
+func (s *Server) ApplyConfig(cfg *config.Config, cfgPath string) (*runtime.ConfigApplyResult, error) {
+	return s.runtime.ApplyConfig(cfg, cfgPath)
+}
+
 // GetServerTools returns tools for a specific server
 func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	s.logger.Debug("GetServerTools called", zap.String("server", serverName))
