@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -176,6 +177,9 @@ func (r *Runtime) LoadConfiguredServers() error {
 		storedServerMap[storedServer.Name] = storedServer
 	}
 
+	// Use WaitGroup to ensure all servers are processed before continuing
+	var wg sync.WaitGroup
+
 	for _, serverCfg := range cfg.Servers {
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
 		hasChanged := !existsInStorage ||
@@ -201,7 +205,9 @@ func (r *Runtime) LoadConfiguredServers() error {
 
 		if serverCfg.Enabled {
 			// Add server asynchronously to prevent blocking startup
+			wg.Add(1)
 			go func(cfg *config.ServerConfig, cfgPath string) {
+				defer wg.Done()
 				if err := r.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
 					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
 				} else {
@@ -222,6 +228,9 @@ func (r *Runtime) LoadConfiguredServers() error {
 			r.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
 		}
 	}
+
+	// Wait for all server additions to complete
+	wg.Wait()
 
 	serversToRemove := []string{}
 
