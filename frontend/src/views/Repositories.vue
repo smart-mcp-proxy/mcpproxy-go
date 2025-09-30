@@ -42,32 +42,91 @@
       </div>
     </div>
 
-    <!-- Hint Panel for LLM Usage -->
-    <div class="collapse collapse-arrow bg-base-200">
-      <input type="checkbox" />
-      <div class="collapse-title text-xl font-medium">
-        💡 LLM Usage Hints
-      </div>
-      <div class="collapse-content">
-        <div class="space-y-3 text-sm">
-          <p class="text-base-content/70">
-            While the repository explorer is under development, you can still add MCP servers via CLI or LLM commands:
-          </p>
-          <div class="mockup-code">
-            <pre><code># Add server via CLI
-mcpproxy call tool --tool-name=upstream_servers \
-  --json_args='{"operation":"add","name":"new-server","url":"https://api.example.com/mcp","enabled":true}'</code></pre>
-          </div>
-          <p class="text-base-content/70">
-            Or ask an LLM agent to help discover and add MCP servers for your specific use case.
-          </p>
-        </div>
-      </div>
-    </div>
+    <!-- Hints Panel -->
+    <HintsPanel :hints="repositoriesHints" />
   </div>
 </template>
 
 <script setup lang="ts">
-// Placeholder component for Phase 7 implementation
-// This will eventually contain the repositories explorer functionality
+import { computed } from 'vue'
+import HintsPanel from '@/components/HintsPanel.vue'
+import type { Hint } from '@/components/HintsPanel.vue'
+
+// Repositories hints
+const repositoriesHints = computed<Hint[]>(() => {
+  return [
+    {
+      icon: '📦',
+      title: 'Add MCP Servers Manually',
+      description: 'While the repository explorer is being developed, you can add servers via CLI',
+      sections: [
+        {
+          title: 'Popular MCP servers',
+          list: [
+            '@modelcontextprotocol/server-filesystem - File system operations',
+            '@modelcontextprotocol/server-github - GitHub API integration',
+            '@modelcontextprotocol/server-git - Git operations',
+            '@modelcontextprotocol/server-slack - Slack integration',
+            '@modelcontextprotocol/server-postgres - PostgreSQL database'
+          ]
+        },
+        {
+          title: 'Add npm-based server',
+          codeBlock: {
+            language: 'bash',
+            code: `# Add filesystem server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"add","name":"filesystem","command":"npx","args_json":"[\\"@modelcontextprotocol/server-filesystem\\"]","protocol":"stdio","enabled":true}'`
+          }
+        },
+        {
+          title: 'Add Python-based server',
+          codeBlock: {
+            language: 'bash',
+            code: `# Add Python MCP server via uvx\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"add","name":"python-server","command":"uvx","args_json":"[\\"your-package\\"]","protocol":"stdio","enabled":true}'`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🤖',
+      title: 'Discover Servers with LLM Agents',
+      description: 'Let AI help you find and configure MCP servers',
+      sections: [
+        {
+          title: 'Example LLM prompts',
+          list: [
+            'Find MCP servers for working with GitHub and add them to my configuration',
+            'What MCP servers are available for file system operations?',
+            'Help me find and install MCP servers for database access',
+            'Search for MCP servers related to Slack and add the best one'
+          ]
+        },
+        {
+          title: 'LLM-driven discovery',
+          text: 'AI agents can help you:',
+          list: [
+            'Search npm registry for @modelcontextprotocol/* packages',
+            'Find Python packages that work with uvx',
+            'Recommend servers based on your use case',
+            'Automatically configure and add servers'
+          ]
+        }
+      ]
+    },
+    {
+      icon: '🔗',
+      title: 'Official MCP Resources',
+      description: 'Learn more about available MCP servers',
+      sections: [
+        {
+          title: 'Useful links',
+          list: [
+            'MCP GitHub: github.com/modelcontextprotocol',
+            'npm registry: search for "@modelcontextprotocol"',
+            'Community servers: Check GitHub topics for "mcp-server"'
+          ]
+        }
+      ]
+    }
+  ]
+})
 </script>

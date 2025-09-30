@@ -73,6 +73,9 @@
       </div>
     </div>
 
+    <!-- Hints Panel -->
+    <HintsPanel v-if="!hasSearched" :hints="searchHints" />
+
     <!-- Search Results -->
     <div v-if="hasSearched">
       <!-- Results Header -->
@@ -271,6 +274,8 @@
 import { ref, computed } from 'vue'
 import type { SearchResult } from '@/types'
 import api from '@/services/api'
+import HintsPanel from '@/components/HintsPanel.vue'
+import type { Hint } from '@/components/HintsPanel.vue'
 
 // State
 const searchQuery = ref('')
@@ -346,4 +351,74 @@ function clearSearch() {
   searchError.value = null
   searchDuration.value = null
 }
+
+// Search hints
+const searchHints = computed<Hint[]>(() => {
+  return [
+    {
+      icon: '🔍',
+      title: 'How to Search Tools',
+      description: 'Tips for getting the best search results',
+      sections: [
+        {
+          title: 'Search strategies',
+          list: [
+            'Use descriptive keywords: "create file", "send email", "random number"',
+            'Search by functionality rather than exact tool names',
+            'Use multiple keywords to narrow results',
+            'Adjust minimum relevance score to filter results'
+          ]
+        },
+        {
+          title: 'CLI search',
+          codeBlock: {
+            language: 'bash',
+            code: `# Search from command line\nmcpproxy tools search "your query"\n\n# Limit results\nmcpproxy tools search "your query" --limit=20`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🤖',
+      title: 'Search with LLM Agents',
+      description: 'Let AI agents search and discover tools for you',
+      sections: [
+        {
+          title: 'Example LLM prompts',
+          list: [
+            'Search for all file-related tools across my MCP servers',
+            'Find tools that can help me work with GitHub issues',
+            'Show me the most relevant tools for sending notifications',
+            'What tools are available for data analysis?'
+          ]
+        },
+        {
+          title: 'LLM can call retrieve_tools',
+          text: 'AI agents can use the retrieve_tools built-in tool:',
+          codeBlock: {
+            language: 'bash',
+            code: `# LLM agents call this tool internally\nmcpproxy call tool --tool-name=retrieve_tools \\\n  --json_args='{"query":"file operations","limit":10}'`
+          }
+        }
+      ]
+    },
+    {
+      icon: '💡',
+      title: 'Understanding Search Results',
+      description: 'How MCPProxy ranks and displays results',
+      sections: [
+        {
+          title: 'BM25 scoring',
+          text: 'MCPProxy uses BM25 (Best Matching 25) algorithm for relevance ranking:',
+          list: [
+            'Scores range from 0.0 to ~1.0+ (higher is more relevant)',
+            'Takes into account keyword frequency and rarity',
+            'Considers tool name and description',
+            'Server-qualified names (server:tool) for easy identification'
+          ]
+        }
+      ]
+    }
+  ]
+})
 </script>

@@ -272,6 +272,9 @@
         </div>
       </div>
 
+      <!-- Hints Panel -->
+      <HintsPanel :hints="dashboardHints" />
+
       <!-- Tool Call History Widget -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
@@ -361,6 +364,8 @@ import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
+import HintsPanel from '@/components/HintsPanel.vue'
+import type { Hint } from '@/components/HintsPanel.vue'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -600,6 +605,153 @@ const formatRelativeTime = (timestamp: string): string => {
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
   return `${Math.floor(diff / 86400000)}d ago`
 }
+
+// Dashboard hints
+const dashboardHints = computed<Hint[]>(() => {
+  const hints: Hint[] = []
+
+  // Add hint if there are upstream errors
+  if (upstreamErrors.value.length > 0) {
+    hints.push({
+      icon: '🔧',
+      title: 'Fix Upstream Errors with CLI',
+      description: 'Use these commands to diagnose and fix server connection issues',
+      sections: [
+        {
+          title: 'Check server logs',
+          codeBlock: {
+            language: 'bash',
+            code: `# View logs for specific server\ntail -f ~/.mcpproxy/logs/server-${upstreamErrors.value[0].server}.log\n\n# View main log\ntail -f ~/.mcpproxy/logs/main.log`
+          }
+        },
+        {
+          title: 'Restart server connection',
+          codeBlock: {
+            language: 'bash',
+            code: `# Disable and re-enable server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"update","name":"${upstreamErrors.value[0].server}","enabled":false}'\n\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"update","name":"${upstreamErrors.value[0].server}","enabled":true}'`
+          }
+        }
+      ]
+    })
+  }
+
+  // Add hint if there are missing secrets
+  if (missingSecrets.value.length > 0) {
+    hints.push({
+      icon: '🔐',
+      title: 'Set Missing Secrets',
+      description: 'Add secrets to your system keyring',
+      sections: [
+        {
+          title: 'Store secret using CLI',
+          codeBlock: {
+            language: 'bash',
+            code: `# Add secret to keyring\nmcpproxy secrets set ${missingSecrets.value[0].name}`
+          }
+        },
+        {
+          title: 'Or use environment variable',
+          text: 'You can also set environment variables instead of keyring secrets:',
+          codeBlock: {
+            language: 'bash',
+            code: `export ${missingSecrets.value[0].name}="your-secret-value"`
+          }
+        }
+      ]
+    })
+  }
+
+  // Add hint if there are OAuth required
+  if (oauthRequired.value.length > 0) {
+    hints.push({
+      icon: '🔑',
+      title: 'Authenticate OAuth Servers',
+      description: 'Complete OAuth authentication for these servers',
+      sections: [
+        {
+          title: 'Login via CLI',
+          codeBlock: {
+            language: 'bash',
+            code: `# Authenticate with OAuth\nmcpproxy auth login --server=${oauthRequired.value[0]}`
+          }
+        },
+        {
+          title: 'Check authentication status',
+          codeBlock: {
+            language: 'bash',
+            code: `# View authentication status\nmcpproxy auth status`
+          }
+        }
+      ]
+    })
+  }
+
+  // Always show general CLI hints
+  hints.push({
+    icon: '💡',
+    title: 'CLI Commands for Managing MCPProxy',
+    description: 'Useful commands for working with MCPProxy',
+    sections: [
+      {
+        title: 'View all servers',
+        codeBlock: {
+          language: 'bash',
+          code: `# List all upstream servers\nmcpproxy upstream list`
+        }
+      },
+      {
+        title: 'Search for tools',
+        codeBlock: {
+          language: 'bash',
+          code: `# Search across all server tools\nmcpproxy tools search "your query"\n\n# List tools from specific server\nmcpproxy tools list --server=server-name`
+        }
+      },
+      {
+        title: 'Call a tool directly',
+        codeBlock: {
+          language: 'bash',
+          code: `# Execute a tool\nmcpproxy call tool --tool-name=server:tool-name \\\n  --json_args='{"arg1":"value1"}'`
+        }
+      }
+    ]
+  })
+
+  // LLM Agent hints
+  hints.push({
+    icon: '🤖',
+    title: 'Use MCPProxy with LLM Agents',
+    description: 'Connect Claude or other LLM agents to MCPProxy',
+    sections: [
+      {
+        title: 'Example LLM prompts',
+        list: [
+          'Search for tools related to GitHub issues across all my MCP servers',
+          'List all available MCP servers and their connection status',
+          'Add a new MCP server from npm package @modelcontextprotocol/server-filesystem',
+          'Show me statistics about which tools are being used most frequently'
+        ]
+      },
+      {
+        title: 'Configure Claude Desktop',
+        text: 'Add MCPProxy to your Claude Desktop config:',
+        codeBlock: {
+          language: 'json',
+          code: `{
+  "mcpServers": {
+    "mcpproxy": {
+      "command": "mcpproxy",
+      "args": ["serve"],
+      "env": {}
+    }
+  }
+}`
+        }
+      }
+    ]
+  })
+
+  return hints
+})
 
 // Lifecycle
 onMounted(() => {

@@ -48,6 +48,9 @@
       </div>
     </div>
 
+    <!-- Hints Panel -->
+    <HintsPanel :hints="serversHints" />
+
     <!-- Filters -->
     <div class="flex flex-wrap gap-4 items-center justify-between">
       <div class="flex flex-wrap gap-2">
@@ -136,6 +139,8 @@
 import { ref, computed } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import ServerCard from '@/components/ServerCard.vue'
+import HintsPanel from '@/components/HintsPanel.vue'
+import type { Hint } from '@/components/HintsPanel.vue'
 
 const serversStore = useServersStore()
 const filter = ref<'all' | 'connected' | 'enabled' | 'quarantined'>('all')
@@ -176,4 +181,82 @@ const filteredServers = computed(() => {
 async function refreshServers() {
   await serversStore.fetchServers()
 }
+
+// Servers hints
+const serversHints = computed<Hint[]>(() => {
+  return [
+    {
+      icon: '➕',
+      title: 'Add New MCP Servers',
+      description: 'Multiple ways to add servers to MCPProxy',
+      sections: [
+        {
+          title: 'Add HTTP/HTTPS server',
+          codeBlock: {
+            language: 'bash',
+            code: `# Add a remote MCP server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"add","name":"my-server","url":"https://api.example.com/mcp","protocol":"http","enabled":true}'`
+          }
+        },
+        {
+          title: 'Add stdio server (npx)',
+          codeBlock: {
+            language: 'bash',
+            code: `# Add an npm-based MCP server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"add","name":"filesystem","command":"npx","args_json":"[\\"@modelcontextprotocol/server-filesystem\\"]","protocol":"stdio","enabled":true}'`
+          }
+        },
+        {
+          title: 'Add stdio server (uvx)',
+          codeBlock: {
+            language: 'bash',
+            code: `# Add a Python-based MCP server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"add","name":"python-server","command":"uvx","args_json":"[\\"mcp-server-package\\"]","protocol":"stdio","enabled":true}'`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🔧',
+      title: 'Manage Servers via CLI',
+      description: 'Common server management operations',
+      sections: [
+        {
+          title: 'List all servers',
+          codeBlock: {
+            language: 'bash',
+            code: `# View all upstream servers\nmcpproxy upstream list`
+          }
+        },
+        {
+          title: 'Enable/disable server',
+          codeBlock: {
+            language: 'bash',
+            code: `# Disable a server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"update","name":"server-name","enabled":false}'\n\n# Enable a server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"update","name":"server-name","enabled":true}'`
+          }
+        },
+        {
+          title: 'Remove server',
+          codeBlock: {
+            language: 'bash',
+            code: `# Delete a server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"delete","name":"server-name"}'`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🤖',
+      title: 'Use LLM Agents to Manage Servers',
+      description: 'Let AI agents help you configure MCPProxy',
+      sections: [
+        {
+          title: 'Example LLM prompts',
+          list: [
+            'Add the GitHub MCP server from @modelcontextprotocol/server-github to my configuration',
+            'Show me all quarantined servers and help me review them',
+            'Disable all servers that haven\'t been used in the last 24 hours',
+            'Find and add MCP servers for working with Slack'
+          ]
+        }
+      ]
+    }
+  ]
+})
 </script>
