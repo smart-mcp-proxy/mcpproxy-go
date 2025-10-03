@@ -1,16 +1,24 @@
 <template>
-  <div id="app" class="min-h-screen bg-base-200">
-    <!-- Navigation -->
-    <NavBar />
+  <div id="app" class="drawer lg:drawer-open">
+    <input id="sidebar-drawer" type="checkbox" class="drawer-toggle" />
 
-    <!-- Main Content -->
-    <main class="container mx-auto px-4 py-6">
-      <router-view v-slot="{ Component }">
-        <transition name="page" mode="out-in">
-          <component :is="Component" />
-        </transition>
-      </router-view>
-    </main>
+    <!-- Main content area -->
+    <div class="drawer-content flex flex-col min-h-screen bg-base-200">
+      <!-- Top Header -->
+      <TopHeader />
+
+      <!-- Page content -->
+      <main class="flex-1 p-6 overflow-x-hidden max-w-full">
+        <router-view v-slot="{ Component }">
+          <transition name="page" mode="out-in">
+            <component :is="Component" />
+          </transition>
+        </router-view>
+      </main>
+    </div>
+
+    <!-- Sidebar -->
+    <SidebarNav />
 
     <!-- Toast Notifications -->
     <ToastContainer />
@@ -32,7 +40,8 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
-import NavBar from '@/components/NavBar.vue'
+import SidebarNav from '@/components/SidebarNav.vue'
+import TopHeader from '@/components/TopHeader.vue'
 import ToastContainer from '@/components/ToastContainer.vue'
 import ConnectionStatus from '@/components/ConnectionStatus.vue'
 import AuthErrorModal from '@/components/AuthErrorModal.vue'

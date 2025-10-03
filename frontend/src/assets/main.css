@@ -2,6 +2,27 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Prevent horizontal scroll globally */
+html,
+body {
+  overflow-x: hidden;
+  width: 100%;
+  max-width: 100vw;
+}
+
+#app {
+  overflow-x: hidden;
+  width: 100%;
+  max-width: 100vw;
+}
+
+/* Ensure drawer content doesn't overflow */
+.drawer-content {
+  overflow-x: hidden;
+  width: 100%;
+  max-width: 100%;
+}
+
 /* Custom styles */
 @layer components {
   .btn-primary {

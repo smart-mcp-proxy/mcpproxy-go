@@ -129,6 +129,22 @@ export const useServersStore = defineStore('servers', () => {
     }
   }
 
+  async function addServer(serverData: any) {
+    try {
+      const response = await api.callTool('upstream_servers', serverData)
+      if (response.success) {
+        // Refresh servers list
+        await fetchServers()
+        return true
+      } else {
+        throw new Error(response.error || 'Failed to add server')
+      }
+    } catch (error) {
+      console.error('Failed to add server:', error)
+      throw error
+    }
+  }
+
   function getServerByName(name: string): Server | undefined {
     return servers.value.find(s => s.name === name)
   }
@@ -153,5 +169,6 @@ export const useServersStore = defineStore('servers', () => {
     triggerOAuthLogin,
     updateServerStatus,
     getServerByName,
+    addServer,
   }
 })

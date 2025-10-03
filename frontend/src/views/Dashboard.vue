@@ -1,458 +1,189 @@
 <template>
   <div class="space-y-6">
-    <!-- Page Header -->
-    <div class="flex justify-between items-center">
-      <div>
-        <h1 class="text-3xl font-bold">Dashboard</h1>
-        <p class="text-base-content/70 mt-1">MCPProxy Control Panel Overview</p>
-      </div>
-      <div class="flex items-center space-x-2">
-        <div
-          :class="[
-            'badge',
-            systemStore.isRunning ? 'badge-success' : 'badge-error'
-          ]"
-        >
-          {{ systemStore.isRunning ? 'Running' : 'Stopped' }}
+    <!-- System Diagnostics -->
+    <div
+      v-if="totalDiagnosticsCount > 0"
+      class="alert"
+      :class="{
+        'alert-error': upstreamErrors.length > 0,
+        'alert-warning': upstreamErrors.length === 0 && (oauthRequired.length > 0 || missingSecrets.length > 0),
+        'alert-info': upstreamErrors.length === 0 && oauthRequired.length === 0 && missingSecrets.length === 0
+      }"
+    >
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+      </svg>
+      <div class="flex-1">
+        <h3 class="font-bold">System Diagnostics</h3>
+        <div class="text-sm">
+          <span class="badge badge-sm mr-2">{{ upstreamErrors.length }} Error{{ upstreamErrors.length !== 1 ? 's' : '' }}</span>
+          <span v-if="upstreamErrors.length > 0">{{ upstreamErrors[0].server }}: {{ upstreamErrors[0].message }}</span>
+          <span v-else-if="oauthRequired.length > 0">{{ oauthRequired.length }} server{{ oauthRequired.length !== 1 ? 's' : '' }} need authentication</span>
+          <span v-else-if="missingSecrets.length > 0">{{ missingSecrets.length }} missing secret{{ missingSecrets.length !== 1 ? 's' : '' }}</span>
         </div>
-        <span class="text-sm">{{ systemStore.listenAddr || 'Not running' }}</span>
       </div>
+      <button class="btn btn-sm" @click="showDiagnosticsDetail = true">
+        Fix
+      </button>
+      <button v-if="totalDiagnosticsCount > 1" class="btn btn-ghost btn-sm" @click="showDiagnosticsDetail = true">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
     </div>
 
-    <!-- Stats Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-      <!-- Servers Stats -->
-      <div class="stats shadow bg-base-100">
-        <div class="stat">
-          <div class="stat-figure text-primary">
-            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
-            </svg>
-          </div>
-          <div class="stat-title">Total Servers</div>
-          <div class="stat-value">{{ serversStore.serverCount.total }}</div>
-          <div class="stat-desc">{{ serversStore.serverCount.connected }} connected</div>
-        </div>
-      </div>
-
-      <!-- Tools Stats -->
-      <div class="stats shadow bg-base-100">
-        <div class="stat">
-          <div class="stat-figure text-secondary">
-            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-          </div>
-          <div class="stat-title">Available Tools</div>
-          <div class="stat-value">{{ serversStore.totalTools }}</div>
-          <div class="stat-desc">across all servers</div>
-        </div>
-      </div>
-
-      <!-- Enabled Servers -->
-      <div class="stats shadow bg-base-100">
-        <div class="stat">
-          <div class="stat-figure text-success">
-            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </div>
-          <div class="stat-title">Enabled</div>
-          <div class="stat-value">{{ serversStore.serverCount.enabled }}</div>
-          <div class="stat-desc">servers active</div>
-        </div>
-      </div>
-
-      <!-- Quarantined Servers -->
-      <div class="stats shadow bg-base-100">
-        <div class="stat">
-          <div class="stat-figure text-warning">
-            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
-            </svg>
-          </div>
-          <div class="stat-title">Quarantined</div>
-          <div class="stat-value">{{ serversStore.serverCount.quarantined }}</div>
-          <div class="stat-desc">security review needed</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Token Savings Card -->
-    <div v-if="tokenSavingsData" class="card bg-base-100 shadow-md">
-      <div class="card-body">
-        <h2 class="card-title">Token Savings</h2>
-        <p class="text-sm text-base-content/70">MCPProxy reduces token usage through intelligent BM25 search</p>
-
-        <div class="stats stats-horizontal shadow mt-4">
-          <div class="stat">
-            <div class="stat-figure text-success">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
-              </svg>
-            </div>
-            <div class="stat-title">Tokens Saved</div>
-            <div class="stat-value text-success">{{ tokenSavingsData.saved_tokens.toLocaleString() }}</div>
-            <div class="stat-desc">{{ tokenSavingsData.saved_tokens_percentage.toFixed(1) }}% reduction</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-title">Full Tool List Size</div>
-            <div class="stat-value text-sm">{{ tokenSavingsData.total_server_tool_list_size.toLocaleString() }}</div>
-            <div class="stat-desc">All upstream server tools</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-title">Typical Query Result</div>
-            <div class="stat-value text-sm">{{ tokenSavingsData.average_query_result_size.toLocaleString() }}</div>
-            <div class="stat-desc">BM25 search result size</div>
-          </div>
-        </div>
-
-        <div class="text-xs text-base-content/60 mt-4">
-          <details class="collapse collapse-arrow bg-base-200">
-            <summary class="collapse-title text-sm font-medium">Per-Server Token Breakdown</summary>
-            <div class="collapse-content">
-              <div class="overflow-x-auto mt-2">
-                <table class="table table-xs">
-                  <thead>
-                    <tr>
-                      <th>Server</th>
-                      <th class="text-right">Tool List Size (tokens)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(size, serverName) in tokenSavingsData.per_server_tool_list_sizes" :key="serverName">
-                      <td>{{ serverName }}</td>
-                      <td class="text-right font-mono">{{ size.toLocaleString() }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </details>
-        </div>
-      </div>
-    </div>
-
-    <!-- Token Usage Stats (Recent Calls) -->
-    <div v-if="tokenStats.totalTokens > 0" class="card bg-base-100 shadow-md">
-      <div class="card-body">
-        <h2 class="card-title">Recent Token Usage</h2>
-        <p class="text-sm text-base-content/70">Token consumption from the last {{ recentToolCalls.length }} tool calls</p>
-
-        <div class="stats stats-horizontal shadow mt-4">
-          <div class="stat">
-            <div class="stat-figure text-primary">
-              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-              </svg>
-            </div>
-            <div class="stat-title">Total Tokens</div>
-            <div class="stat-value text-primary">{{ tokenStats.totalTokens.toLocaleString() }}</div>
-            <div class="stat-desc">{{ tokenStats.callsWithMetrics }} of {{ recentToolCalls.length }} calls tracked</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-title">Input Tokens</div>
-            <div class="stat-value text-sm">{{ tokenStats.inputTokens.toLocaleString() }}</div>
-            <div class="stat-desc">Request data</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-title">Output Tokens</div>
-            <div class="stat-value text-sm">{{ tokenStats.outputTokens.toLocaleString() }}</div>
-            <div class="stat-desc">Response data</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-title">Avg per Call</div>
-            <div class="stat-value text-sm">{{ tokenStats.avgTokensPerCall.toLocaleString() }}</div>
-            <div class="stat-desc">{{ tokenStats.mostUsedModel || 'Mixed models' }}</div>
-          </div>
-        </div>
-
-        <div class="text-xs text-base-content/60 mt-2">
-          <router-link to="/tool-calls" class="link">View detailed token usage →</router-link>
-        </div>
-      </div>
-    </div>
-
-    <!-- Diagnostics Panel -->
-    <div class="space-y-6">
-      <!-- Main Diagnostics Card -->
+    <!-- Token Savings and Distribution -->
+    <div v-if="tokenSavingsData" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <!-- Token Savings -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <div class="flex items-center justify-between mb-4">
-            <h2 class="card-title text-xl">System Diagnostics</h2>
-            <div class="flex items-center space-x-2">
-              <div class="badge badge-sm" :class="diagnosticsBadgeClass">
-                {{ totalDiagnosticsCount }} {{ totalDiagnosticsCount === 1 ? 'issue' : 'issues' }}
-              </div>
-              <button
-                v-if="dismissedDiagnostics.size > 0"
-                @click="restoreAllDismissed"
-                class="btn btn-xs btn-ghost"
-                title="Restore dismissed issues"
-              >
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-              </button>
-            </div>
-          </div>
+          <h2 class="card-title text-lg">Token Savings</h2>
 
-          <!-- Upstream Errors -->
-          <div v-if="upstreamErrors.length > 0" class="collapse collapse-arrow border border-error mb-4">
-            <input type="checkbox" class="peer" :checked="!collapsedSections.upstreamErrors" @change="toggleSection('upstreamErrors')" />
-            <div class="collapse-title bg-error/10 text-error font-medium flex items-center justify-between">
-              <div class="flex items-center space-x-2">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span>Upstream Errors ({{ upstreamErrors.length }})</span>
-              </div>
+          <div class="grid grid-cols-3 gap-4 mt-4">
+            <div>
+              <div class="text-sm opacity-60">Tokens Saved</div>
+              <div class="text-3xl font-bold text-success">{{ formatNumber(tokenSavingsData.saved_tokens) }}</div>
+              <div class="text-xs opacity-60">{{ tokenSavingsData.saved_tokens_percentage.toFixed(1) }}% reduction</div>
             </div>
-            <div class="collapse-content bg-error/5">
-              <div class="pt-4 space-y-3">
-                <div
-                  v-for="error in upstreamErrors"
-                  :key="error.server"
-                  class="flex items-start justify-between p-3 bg-base-100 rounded-lg border border-error/20"
-                >
-                  <div class="flex-1">
-                    <div class="font-medium text-error">{{ error.server }}</div>
-                    <div class="text-sm text-base-content/70 mt-1">{{ error.message }}</div>
-                    <div class="text-xs text-base-content/50 mt-1">{{ error.timestamp }}</div>
-                  </div>
-                  <div class="flex items-center space-x-2 ml-4">
-                    <router-link :to="`/servers/${error.server}`" class="btn btn-xs btn-outline btn-error">
-                      Fix
-                    </router-link>
-                    <button @click="dismissError(error)" class="btn btn-xs btn-ghost" title="Dismiss">
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
+            <div>
+              <div class="text-sm opacity-60">Full Tool List Size</div>
+              <div class="text-2xl font-bold">{{ formatNumber(tokenSavingsData.total_server_tool_list_size) }}</div>
+              <div class="text-xs opacity-60">All upstream servers</div>
             </div>
-          </div>
-
-          <!-- OAuth Required -->
-          <div v-if="oauthRequired.length > 0" class="collapse collapse-arrow border border-warning mb-4">
-            <input type="checkbox" class="peer" :checked="!collapsedSections.oauthRequired" @change="toggleSection('oauthRequired')" />
-            <div class="collapse-title bg-warning/10 text-warning font-medium flex items-center justify-between">
-              <div class="flex items-center space-x-2">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8v2.25H5.5v2.25H3v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121 9z" />
-                </svg>
-                <span>Authentication Required ({{ oauthRequired.length }})</span>
-              </div>
+            <div>
+              <div class="text-sm opacity-60">Typical Query Result</div>
+              <div class="text-2xl font-bold">{{ formatNumber(tokenSavingsData.average_query_result_size) }}</div>
+              <div class="text-xs opacity-60">BM25 search size</div>
             </div>
-            <div class="collapse-content bg-warning/5">
-              <div class="pt-4 space-y-3">
-                <div
-                  v-for="server in oauthRequired"
-                  :key="server"
-                  class="flex items-center justify-between p-3 bg-base-100 rounded-lg border border-warning/20"
-                >
-                  <div class="flex items-center space-x-3">
-                    <svg class="w-5 h-5 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8v2.25H5.5v2.25H3v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121 9z" />
-                    </svg>
-                    <div>
-                      <div class="font-medium">{{ server }}</div>
-                      <div class="text-sm text-base-content/70">OAuth authentication needed</div>
-                    </div>
-                  </div>
-                  <div class="flex items-center space-x-2">
-                    <button @click="triggerOAuthLogin(server)" class="btn btn-xs btn-warning">
-                      Login
-                    </button>
-                    <button @click="dismissOAuth(server)" class="btn btn-xs btn-ghost" title="Dismiss">
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Missing Secrets -->
-          <div v-if="missingSecrets.length > 0" class="collapse collapse-arrow border border-warning mb-4">
-            <input type="checkbox" class="peer" :checked="!collapsedSections.missingSecrets" @change="toggleSection('missingSecrets')" />
-            <div class="collapse-title bg-warning/10 text-warning font-medium flex items-center justify-between">
-              <div class="flex items-center space-x-2">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                </svg>
-                <span>Missing Secrets ({{ missingSecrets.length }})</span>
-              </div>
-            </div>
-            <div class="collapse-content bg-warning/5">
-              <div class="pt-4 space-y-3">
-                <div
-                  v-for="secret in missingSecrets"
-                  :key="secret.name"
-                  class="flex items-center justify-between p-3 bg-base-100 rounded-lg border border-warning/20"
-                >
-                  <div class="flex items-center space-x-3">
-                    <svg class="w-5 h-5 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                    </svg>
-                    <div>
-                      <div class="font-medium">{{ secret.name }}</div>
-                      <div class="text-sm text-base-content/70 font-mono">{{ secret.reference }}</div>
-                    </div>
-                  </div>
-                  <div class="flex items-center space-x-2">
-                    <router-link to="/secrets" class="btn btn-xs btn-warning">
-                      Set Value
-                    </router-link>
-                    <button @click="dismissSecret(secret)" class="btn btn-xs btn-ghost" title="Dismiss">
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Runtime Warnings -->
-          <div v-if="runtimeWarnings.length > 0" class="collapse collapse-arrow border border-info mb-4">
-            <input type="checkbox" class="peer" :checked="!collapsedSections.runtimeWarnings" @change="toggleSection('runtimeWarnings')" />
-            <div class="collapse-title bg-info/10 text-info font-medium flex items-center justify-between">
-              <div class="flex items-center space-x-2">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span>Runtime Warnings ({{ runtimeWarnings.length }})</span>
-              </div>
-            </div>
-            <div class="collapse-content bg-info/5">
-              <div class="pt-4 space-y-3">
-                <div
-                  v-for="warning in runtimeWarnings"
-                  :key="warning.id"
-                  class="flex items-start justify-between p-3 bg-base-100 rounded-lg border border-info/20"
-                >
-                  <div class="flex-1">
-                    <div class="font-medium text-info">{{ warning.category }}</div>
-                    <div class="text-sm text-base-content/70 mt-1">{{ warning.message }}</div>
-                    <div class="text-xs text-base-content/50 mt-1">{{ warning.timestamp }}</div>
-                  </div>
-                  <button @click="dismissWarning(warning)" class="btn btn-xs btn-ghost ml-4" title="Dismiss">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- No Issues State -->
-          <div v-if="totalDiagnosticsCount === 0" class="text-center py-12">
-            <svg class="w-16 h-16 mx-auto mb-4 text-success opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <h3 class="text-lg font-medium text-success mb-2">All Systems Operational</h3>
-            <p class="text-base-content/60">No issues detected with your server configuration</p>
-            <router-link to="/servers" class="btn btn-sm btn-outline btn-success mt-4">
-              View Servers
-            </router-link>
           </div>
         </div>
       </div>
 
-      <!-- Hints Panel -->
-      <HintsPanel :hints="dashboardHints" />
-
-      <!-- Tool Call History Widget -->
+      <!-- Token Distribution -->
       <div class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <div class="flex items-center justify-between mb-4">
-            <h2 class="card-title text-xl">Recent Tool Calls</h2>
-            <router-link to="/tool-calls" class="btn btn-sm btn-ghost">
-              View All
-              <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-              </svg>
-            </router-link>
+          <h2 class="card-title text-lg">Token Distribution</h2>
+          <p class="text-sm opacity-60">Per-server tool list size breakdown</p>
+
+          <!-- Pie Chart -->
+          <div class="flex items-center justify-center py-4">
+            <div class="w-64 h-64">
+              <TokenPieChart v-if="pieChartSegments.length > 0" :data="pieChartSegments" />
+            </div>
           </div>
 
-          <div v-if="toolCallsLoading" class="flex justify-center py-8">
-            <span class="loading loading-spinner loading-md"></span>
+          <!-- Legend -->
+          <div class="mt-4 space-y-2 max-h-40 overflow-y-auto">
+            <div
+              v-for="(segment, index) in pieChartSegments"
+              :key="index"
+              class="flex items-center justify-between text-sm"
+            >
+              <div class="flex items-center space-x-2">
+                <div class="w-3 h-3 rounded" :style="{ backgroundColor: segment.color }"></div>
+                <span class="truncate">{{ segment.name }}</span>
+              </div>
+              <div class="flex items-center space-x-2">
+                <span class="font-mono text-xs">{{ formatNumber(segment.value) }}</span>
+                <span class="text-xs opacity-60">({{ segment.percentage.toFixed(1) }}%)</span>
+              </div>
+            </div>
           </div>
+        </div>
+      </div>
+    </div>
 
-          <div v-else-if="toolCallsError" class="alert alert-error">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>{{ toolCallsError }}</span>
-          </div>
 
-          <div v-else-if="recentToolCalls.length === 0" class="text-center py-8 text-base-content/60">
-            <svg class="w-12 h-12 mx-auto mb-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-            </svg>
-            <p>No tool calls yet</p>
-            <p class="text-sm mt-1">Tool calls will appear here once servers start executing tools</p>
-          </div>
+    <!-- Hints Panel -->
+    <HintsPanel :hints="dashboardHints" />
 
-          <div v-else class="overflow-x-auto">
-            <table class="table table-sm">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Server</th>
-                  <th>Tool</th>
-                  <th>Status</th>
-                  <th>Duration</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="call in recentToolCalls" :key="call.id" class="hover">
-                  <td>
-                    <span class="text-xs" :title="call.timestamp">
-                      {{ formatRelativeTime(call.timestamp) }}
-                    </span>
-                  </td>
-                  <td>
-                    <router-link
-                      :to="`/servers/${call.server_name}`"
-                      class="link link-hover text-sm"
-                    >
-                      {{ call.server_name }}
-                    </router-link>
-                  </td>
-                  <td>
-                    <code class="text-xs">{{ call.tool_name }}</code>
-                  </td>
-                  <td>
-                    <div
-                      class="badge badge-sm"
-                      :class="call.error ? 'badge-error' : 'badge-success'"
-                    >
-                      {{ call.error ? 'Error' : 'Success' }}
-                    </div>
-                  </td>
-                  <td>
-                    <span class="text-xs text-base-content/70">
-                      {{ formatDuration(call.duration) }}
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+    <!-- Recent Tool Calls -->
+    <div class="card bg-base-100 shadow-md">
+      <div class="card-body">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="card-title text-lg">Recent Tool Calls</h2>
+            <p v-if="tokenStats.totalTokens > 0" class="text-sm opacity-60">
+              Total usage: <span class="font-bold">{{ formatNumber(tokenStats.totalTokens) }}</span> tokens
+              ({{ recentToolCalls.length }} calls, avg {{ formatNumber(tokenStats.avgTokensPerCall) }}/call)
+            </p>
           </div>
+          <router-link to="/tool-calls" class="btn btn-sm btn-ghost">
+            View All →
+          </router-link>
+        </div>
+
+        <div v-if="toolCallsLoading" class="flex justify-center py-8">
+          <span class="loading loading-spinner loading-md"></span>
+        </div>
+
+        <div v-else-if="toolCallsError" class="alert alert-error">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>{{ toolCallsError }}</span>
+        </div>
+
+        <div v-else-if="recentToolCalls.length === 0" class="text-center py-8 text-base-content/60">
+          <svg class="w-12 h-12 mx-auto mb-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+          </svg>
+          <p>No tool calls yet</p>
+          <p class="text-sm mt-1">Tool calls will appear here once servers start executing tools</p>
+        </div>
+
+        <div v-else class="overflow-x-auto">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Server</th>
+                <th>Tool</th>
+                <th>Status</th>
+                <th>Duration</th>
+                <th class="text-right">Tokens</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="call in recentToolCalls" :key="call.id" class="hover">
+                <td>
+                  <span class="text-xs" :title="call.timestamp">
+                    {{ formatRelativeTime(call.timestamp) }}
+                  </span>
+                </td>
+                <td>
+                  <router-link
+                    :to="`/servers/${call.server_name}`"
+                    class="link link-hover text-sm"
+                  >
+                    {{ call.server_name }}
+                  </router-link>
+                </td>
+                <td>
+                  <code class="text-xs">{{ call.tool_name }}</code>
+                </td>
+                <td>
+                  <div
+                    class="badge badge-sm"
+                    :class="call.error ? 'badge-error' : 'badge-success'"
+                  >
+                    {{ call.error ? 'Error' : 'Success' }}
+                  </div>
+                </td>
+                <td>
+                  <span class="text-xs text-base-content/70">
+                    {{ formatDuration(call.duration) }}
+                  </span>
+                </td>
+                <td class="text-right">
+                  <span v-if="call.metrics?.total_tokens" class="text-xs font-mono">
+                    {{ formatNumber(call.metrics.total_tokens) }}
+                  </span>
+                  <span v-else class="text-xs opacity-40">-</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -465,10 +196,14 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import HintsPanel from '@/components/HintsPanel.vue'
+import TokenPieChart from '@/components/TokenPieChart.vue'
 import type { Hint } from '@/components/HintsPanel.vue'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+
+// Show diagnostics detail modal
+const showDiagnosticsDetail = ref(false)
 
 // Collapsed sections state
 const collapsedSections = reactive({
@@ -729,6 +464,57 @@ const formatRelativeTime = (timestamp: string): string => {
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
   return `${Math.floor(diff / 86400000)}d ago`
 }
+
+// Format number with K, M suffixes
+const formatNumber = (num: number): string => {
+  if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`
+  if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
+  return num.toString()
+}
+
+// Pie chart colors
+const pieChartColors = [
+  '#3b82f6',  // blue
+  '#10b981',  // green
+  '#f59e0b',  // orange
+  '#ec4899',  // pink
+  '#8b5cf6',  // purple
+  '#06b6d4',  // cyan
+  '#ef4444',  // red
+  '#14b8a6',  // teal
+  '#f97316',  // orange-600
+  '#a855f7',  // purple-500
+  '#6366f1',  // indigo
+  '#84cc16',  // lime
+  '#f43f5e',  // rose
+  '#0ea5e9',  // sky
+  '#22c55e',  // green-500
+  '#eab308'   // yellow
+]
+
+// Compute pie chart segments
+const pieChartSegments = computed(() => {
+  if (!tokenSavingsData.value?.per_server_tool_list_sizes) return []
+
+  const sizes = tokenSavingsData.value.per_server_tool_list_sizes
+  const entries = Object.entries(sizes).sort((a, b) => (b[1] as number) - (a[1] as number))
+  const total = entries.reduce((sum, [, value]) => sum + (value as number), 0)
+
+  let offset = 0
+  return entries.map(([name, value], index) => {
+    const numValue = value as number
+    const percentage = (numValue / total) * 100
+    const segment = {
+      name,
+      value: numValue,
+      percentage,
+      offset,
+      color: pieChartColors[index % pieChartColors.length]
+    }
+    offset += percentage
+    return segment
+  })
+})
 
 // Token statistics from recent tool calls
 const tokenStats = computed(() => {

@@ -378,6 +378,22 @@ class APIService {
     return this.request<ServerTokenMetrics>('/api/v1/stats/tokens')
   }
 
+  // MCP Tool Call
+  async callTool(toolName: string, args: Record<string, any>): Promise<APIResponse<any>> {
+    return this.request('/mcp', {
+      method: 'POST',
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: {
+          name: toolName,
+          arguments: args
+        },
+        id: Date.now()
+      })
+    })
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {
