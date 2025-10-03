@@ -157,7 +157,7 @@ func setupViper() {
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 
 	// Set defaults
-	viper.SetDefault("listen", ":8080")
+	viper.SetDefault("listen", "127.0.0.1:8080")
 	viper.SetDefault("top-k", 5)
 	viper.SetDefault("tools-limit", 15)
 	viper.SetDefault("config", "")
@@ -171,7 +171,7 @@ func setupViper() {
 	viper.SetDefault("check-server-repo", true)
 
 	// TLS defaults
-	viper.SetDefault("tls.enabled", true)
+	viper.SetDefault("tls.enabled", false)
 	viper.SetDefault("tls.require_client_cert", false)
 	viper.SetDefault("tls.hsts", true)
 }
