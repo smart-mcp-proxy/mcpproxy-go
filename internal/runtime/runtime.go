@@ -703,9 +703,30 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 
 	// Update upstream manager configuration if servers changed
 	if contains(result.ChangedFields, "mcpServers") {
-		r.logger.Info("Server configuration changed, will re-sync on next operation")
-		// Note: Upstream manager doesn't need explicit SetConfig call
-		// It will pick up the new config through r.cfg reference
+		r.logger.Info("Server configuration changed, triggering reload")
+
+		// Reload servers asynchronously to avoid holding lock
+		// This ensures storage and upstream manager are synced with new config
+		go func() {
+			if err := r.LoadConfiguredServers(); err != nil {
+				r.logger.Error("Failed to reload servers after config apply", zap.Error(err))
+				return
+			}
+
+			// Re-index tools after servers are reloaded
+			ctx := r.AppContext()
+			if ctx == nil {
+				r.logger.Warn("Application context not available for tool re-indexing")
+				return
+			}
+
+			// Brief delay to let server connections stabilize
+			time.Sleep(500 * time.Millisecond)
+
+			if err := r.DiscoverAndIndexTools(ctx); err != nil {
+				r.logger.Error("Failed to re-index tools after config apply", zap.Error(err))
+			}
+		}()
 	}
 
 	// Update logging configuration
