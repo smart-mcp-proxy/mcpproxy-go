@@ -75,6 +75,9 @@ type ServerController interface {
 
 	// Token statistics
 	GetTokenSavings() (*contracts.ServerTokenMetrics, error)
+
+	// Tool execution
+	CallTool(ctx context.Context, toolName string, arguments map[string]interface{}) (interface{}, error)
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -278,6 +281,9 @@ func (s *Server) setupRoutes() {
 		r.Get("/tool-calls", s.handleGetToolCalls)
 		r.Get("/tool-calls/{id}", s.handleGetToolCallDetail)
 		r.Post("/tool-calls/{id}/replay", s.handleReplayToolCall)
+
+		// Tool execution
+		r.Post("/tools/call", s.handleCallTool)
 
 		// Configuration management
 		r.Get("/config", s.handleGetConfig)
@@ -1403,4 +1409,37 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// handleCallTool handles REST API tool calls (wrapper around MCP tool calls)
+func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var request struct {
+		ToolName  string                 `json:"tool_name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	if request.ToolName == "" {
+		s.writeError(w, http.StatusBadRequest, "Tool name is required")
+		return
+	}
+
+	// Call tool via controller
+	result, err := s.controller.CallTool(r.Context(), request.ToolName, request.Arguments)
+	if err != nil {
+		s.logger.Error("Failed to call tool", "tool", request.ToolName, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to call tool: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, result)
 }

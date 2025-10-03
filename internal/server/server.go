@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
@@ -1196,4 +1197,27 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 // ReplayToolCall replays a tool call with modified arguments
 func (s *Server) ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	return s.runtime.ReplayToolCall(id, arguments)
+}
+
+// CallTool calls an MCP tool and returns the result
+func (s *Server) CallTool(ctx context.Context, toolName string, arguments map[string]interface{}) (interface{}, error) {
+	if s.mcpProxy == nil {
+		return nil, fmt.Errorf("MCP proxy not initialized")
+	}
+
+	// Create MCP call tool request
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: arguments,
+		},
+	}
+
+	// Call the tool via MCP proxy
+	result, err := s.mcpProxy.CallToolDirect(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("tool call failed: %w", err)
+	}
+
+	return result, nil
 }

@@ -2124,3 +2124,47 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 		}
 	}
 }
+
+// CallToolDirect calls a tool directly without going through the MCP server's request handling
+// This is used for REST API calls that bypass the MCP protocol layer
+func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToolRequest) (interface{}, error) {
+	toolName := request.Params.Name
+
+	// Route to the appropriate handler based on tool name
+	var result *mcp.CallToolResult
+	var err error
+
+	switch toolName {
+	case "upstream_servers":
+		result, err = p.handleUpstreamServers(ctx, request)
+	case "call_tool":
+		result, err = p.handleCallTool(ctx, request)
+	case "retrieve_tools":
+		result, err = p.handleRetrieveTools(ctx, request)
+	case "quarantine_security":
+		result, err = p.handleQuarantineSecurity(ctx, request)
+	case "list_registries":
+		result, err = p.handleListRegistries(ctx, request)
+	case "search_servers":
+		result, err = p.handleSearchServers(ctx, request)
+	default:
+		return nil, fmt.Errorf("unknown tool: %s", toolName)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract the actual result content from the MCP response
+	if result.IsError {
+		if len(result.Content) > 0 {
+			if textContent, ok := result.Content[0].(mcp.TextContent); ok {
+				return nil, fmt.Errorf("%s", textContent.Text)
+			}
+		}
+		return nil, fmt.Errorf("tool call failed")
+	}
+
+	// Return the content as the result
+	return result.Content, nil
+}

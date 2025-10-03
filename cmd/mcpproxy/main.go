@@ -402,6 +402,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	var actualConfigPath string
 	if configFile != "" {
 		actualConfigPath = configFile
+	} else {
+		// When using default config, still track the actual path used
+		actualConfigPath = config.GetConfigPath(cfg.DataDir)
 	}
 	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger)
 	if err != nil {

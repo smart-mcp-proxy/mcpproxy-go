@@ -317,7 +317,20 @@ func (r *Runtime) SaveConfiguration() error {
 
 	// Update servers and save without holding runtime lock
 	configCopy.Servers = latestServers
-	return config.SaveConfig(&configCopy, cfgPath)
+	if err := config.SaveConfig(&configCopy, cfgPath); err != nil {
+		return err
+	}
+
+	// Update in-memory config with latest servers to keep UI in sync
+	r.mu.Lock()
+	r.cfg.Servers = latestServers
+	r.mu.Unlock()
+
+	r.logger.Debug("Configuration saved and in-memory config updated",
+		zap.Int("server_count", len(latestServers)),
+		zap.String("config_path", cfgPath))
+
+	return nil
 }
 
 // ReloadConfiguration reloads the configuration from disk and resyncs state.
