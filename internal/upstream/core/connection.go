@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	osLinux  = "linux"
-	osDarwin = "darwin"
+	osLinux   = "linux"
+	osDarwin  = "darwin"
+	osWindows = "windows"
 
 	// Transport types
 	transportHTTP           = "http"
@@ -605,7 +606,7 @@ func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand 
 	shell, _ := c.envManager.GetSystemEnvVar("SHELL")
 	if shell == "" {
 		// Fallback to common shells based on OS
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == osWindows {
 			shell = "cmd"
 		} else {
 			shell = pathBinBash // Default fallback
@@ -630,41 +631,39 @@ func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand 
 		zap.String("wrapped_command", commandString))
 
 	// Return shell with appropriate flags for the OS
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		// Windows cmd.exe uses /c flag to execute command string
 		return shell, []string{"/c", commandString}
-	} else {
-		// Unix shells use -l (login) flag to load user's full environment
-		// The -c flag executes the command string
-		return shell, []string{"-l", "-c", commandString}
 	}
+	// Unix shells use -l (login) flag to load user's full environment
+	// The -c flag executes the command string
+	return shell, []string{"-l", "-c", commandString}
 }
 
 // shellescape escapes a string for safe shell execution
 func shellescape(s string) string {
 	if s == "" {
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == osWindows {
 			return `""`
 		}
 		return "''"
 	}
 
 	// If string contains no special characters, return as-is
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		// Windows cmd.exe special characters
 		if !strings.ContainsAny(s, " \t\n\r\"&|<>()^%") {
 			return s
 		}
 		// For Windows, use double quotes and escape internal double quotes
 		return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
-	} else {
-		// Unix shell special characters
-		if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
-			return s
-		}
-		// Use single quotes and escape any single quotes in the string
-		return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 	}
+	// Unix shell special characters
+	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
+		return s
+	}
+	// Use single quotes and escape any single quotes in the string
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
 // hasCommand checks if a command is available in PATH
@@ -1996,7 +1995,7 @@ func (c *Client) openBrowser(authURL string) error {
 	var args []string
 
 	switch runtime.GOOS {
-	case "windows":
+	case osWindows:
 		cmd = "rundll32"
 		args = []string{"url.dll,FileProtocolHandler", authURL}
 	case osDarwin:
