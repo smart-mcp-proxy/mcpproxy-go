@@ -38,7 +38,10 @@ const (
 )
 
 //go:embed icon-mono-44.png
-var iconData []byte
+var iconDataPNG []byte
+
+//go:embed icon-mono-44.ico
+var iconDataICO []byte
 
 // GitHubRelease represents a GitHub release
 type GitHubRelease struct {
@@ -328,6 +331,14 @@ func (a *App) cleanup() {
 }
 
 func (a *App) onReady() {
+	// Use .ico format on Windows for better compatibility, PNG on other platforms
+	var iconData []byte
+	if runtime.GOOS == osWindows {
+		iconData = iconDataICO
+	} else {
+		iconData = iconDataPNG
+	}
+
 	systray.SetIcon(iconData)
 	// On macOS, also set as template icon for better system integration
 	if runtime.GOOS == osDarwin {

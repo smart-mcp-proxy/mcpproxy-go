@@ -20,6 +20,23 @@ go build -o mcpproxy ./cmd/mcpproxy
 scripts/build.sh
 ```
 
+### Icon Generation
+```bash
+# Generate all icon files (PNG for macOS/Linux, ICO for Windows)
+# Requires: inkscape, imagemagick (convert), python3 with Pillow
+./scripts/logo-convert.sh
+
+# Generate Windows ICO file only (requires Python 3 with Pillow)
+python3 scripts/create-ico.py
+
+# Install Pillow if needed
+pip install --break-system-packages Pillow
+# or
+python3 -m pip install --break-system-packages Pillow
+```
+
+**Note**: The Windows tray icon uses `.ico` format for better compatibility with the Windows system tray. The macOS/Linux versions use `.png` format. If you modify the logo, regenerate all icon files using the script above.
+
 ### Testing
 ```bash
 # Run unit tests
