@@ -1092,7 +1092,7 @@ func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, er
 		toolMap := map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,
-			"server":      tool.ServerName,
+			"server_name": tool.ServerName,
 		}
 		// Note: ListTools returns ToolMetadata which doesn't have InputSchema
 		// We'd need to get that from the actual tool definition
@@ -1122,18 +1122,23 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 	var resultMaps []map[string]interface{}
 	for _, result := range results {
 		if result.Tool != nil {
-			resultMap := map[string]interface{}{
+			toolData := map[string]interface{}{
 				"name":        result.Tool.Name,
 				"description": result.Tool.Description,
-				"server":      result.Tool.ServerName,
-				"score":       result.Score,
+				"server_name": result.Tool.ServerName,
 			}
 			// Parse params JSON as input schema if available
 			if result.Tool.ParamsJSON != "" {
 				var inputSchema map[string]interface{}
 				if err := json.Unmarshal([]byte(result.Tool.ParamsJSON), &inputSchema); err == nil {
-					resultMap["input_schema"] = inputSchema
+					toolData["input_schema"] = inputSchema
 				}
+			}
+
+			// Wrap in search result format with nested tool
+			resultMap := map[string]interface{}{
+				"tool":  toolData,
+				"score": result.Score,
 			}
 			resultMaps = append(resultMaps, resultMap)
 		}

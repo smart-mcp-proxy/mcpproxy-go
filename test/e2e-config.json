@@ -15,7 +15,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-09-30T14:56:19.466456+03:00"
+      "updated": "2025-10-05T09:34:28.873436+03:00"
     }
   ],
   "top_k": 10,
@@ -47,6 +47,7 @@
     "compress": true,
     "json_format": false
   },
+  "api_key": "2a17ecb20e7d1491062264d0f7345a1fa0fa6cabea30247251fd043ac2b01beb",
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,

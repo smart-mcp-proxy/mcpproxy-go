@@ -127,55 +127,52 @@
       </div>
 
       <!-- Results List -->
-      <div v-else class="space-y-4">
+      <div v-else class="space-y-3">
         <div
           v-for="(result, index) in filteredResults"
-          :key="`${result.server}:${result.name}`"
+          :key="`${result.tool.server_name}:${result.tool.name}`"
           class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow"
         >
-          <div class="card-body">
-            <div class="flex items-start justify-between">
-              <div class="flex-1">
-                <div class="flex items-center space-x-3 mb-2">
-                  <h3 class="text-xl font-semibold">{{ result.name }}</h3>
-                  <div class="badge badge-secondary">{{ result.server }}</div>
-                  <div class="flex items-center space-x-1">
-                    <div class="text-sm text-base-content/60">Score:</div>
-                    <div class="text-sm font-mono">{{ result.score.toFixed(3) }}</div>
-                    <div class="w-16 bg-base-300 rounded-full h-2">
-                      <div
-                        class="bg-primary h-2 rounded-full transition-all"
-                        :style="{ width: Math.min(100, result.score * 100) + '%' }"
-                      ></div>
-                    </div>
+          <div class="card-body py-4">
+            <div class="flex items-start justify-between gap-4">
+              <div class="flex-1 min-w-0">
+                <!-- Tool Name and Server Badge -->
+                <div class="flex items-center gap-2 mb-2 flex-wrap">
+                  <h3 class="text-lg font-bold text-base-content">{{ result.tool.name }}</h3>
+                  <div class="badge badge-secondary badge-sm">{{ result.tool.server_name }}</div>
+                  <div class="badge badge-ghost badge-sm">
+                    Score: {{ result.score.toFixed(2) }}
                   </div>
                 </div>
-                <p class="text-base-content/80 mb-3">
-                  {{ result.description || 'No description available' }}
+
+                <!-- Description (truncated) -->
+                <p class="text-sm text-base-content/70 line-clamp-2 mb-2">
+                  {{ result.tool.description || 'No description available' }}
                 </p>
-                <div class="flex items-center space-x-4 text-sm text-base-content/60">
-                  <div class="flex items-center space-x-1">
-                    <span class="font-medium">#{{ index + 1 }}</span>
-                    <span>in results</span>
-                  </div>
-                  <div v-if="result.input_schema" class="flex items-center space-x-1">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+
+                <!-- Metadata -->
+                <div class="flex items-center gap-3 text-xs text-base-content/60">
+                  <span>#{{ index + 1 }} in results</span>
+                  <span v-if="result.tool.input_schema" class="flex items-center gap-1">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
-                    <span>Has schema</span>
-                  </div>
+                    Schema available
+                  </span>
                 </div>
               </div>
-              <div class="flex flex-col space-y-2">
+
+              <!-- Action Buttons -->
+              <div class="flex flex-col gap-2 flex-shrink-0">
                 <button
-                  class="btn btn-sm btn-outline"
+                  class="btn btn-sm btn-primary"
                   @click="viewToolDetails(result)"
                 >
                   View Details
                 </button>
                 <router-link
-                  :to="`/servers/${result.server}`"
-                  class="btn btn-sm btn-ghost"
+                  :to="`/servers/${result.tool.server_name}`"
+                  class="btn btn-sm btn-outline"
                 >
                   Server Info
                 </router-link>
@@ -220,13 +217,13 @@
     <!-- Tool Details Modal -->
     <div v-if="selectedTool" class="modal modal-open">
       <div class="modal-box max-w-4xl">
-        <h3 class="font-bold text-lg mb-4">{{ selectedTool.name }}</h3>
+        <h3 class="font-bold text-lg mb-4">{{ selectedTool.tool.name }}</h3>
 
         <div class="space-y-4">
           <div class="grid grid-cols-2 gap-4">
             <div>
               <label class="block text-sm font-medium mb-1">Server</label>
-              <div class="badge badge-secondary">{{ selectedTool.server }}</div>
+              <div class="badge badge-secondary">{{ selectedTool.tool.server_name }}</div>
             </div>
             <div>
               <label class="block text-sm font-medium mb-1">Relevance Score</label>
@@ -244,20 +241,20 @@
 
           <div>
             <label class="block text-sm font-medium mb-1">Description</label>
-            <p class="text-sm">{{ selectedTool.description || 'No description available' }}</p>
+            <p class="text-sm">{{ selectedTool.tool.description || 'No description available' }}</p>
           </div>
 
-          <div v-if="selectedTool.input_schema">
+          <div v-if="selectedTool.tool.input_schema">
             <label class="block text-sm font-medium mb-1">Input Schema</label>
             <div class="mockup-code">
-              <pre><code>{{ JSON.stringify(selectedTool.input_schema, null, 2) }}</code></pre>
+              <pre><code>{{ JSON.stringify(selectedTool.tool.input_schema, null, 2) }}</code></pre>
             </div>
           </div>
         </div>
 
         <div class="modal-action">
           <router-link
-            :to="`/servers/${selectedTool.server}`"
+            :to="`/servers/${selectedTool.tool.server_name}`"
             class="btn btn-outline"
             @click="selectedTool = null"
           >
@@ -271,11 +268,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import type { SearchResult } from '@/types'
 import api from '@/services/api'
 import HintsPanel from '@/components/HintsPanel.vue'
 import type { Hint } from '@/components/HintsPanel.vue'
+
+const route = useRoute()
 
 // State
 const searchQuery = ref('')
@@ -351,6 +351,15 @@ function clearSearch() {
   searchError.value = null
   searchDuration.value = null
 }
+
+// Initialize search from URL query parameter
+onMounted(() => {
+  const queryParam = route.query.q
+  if (queryParam && typeof queryParam === 'string') {
+    searchQuery.value = queryParam
+    performSearch()
+  }
+})
 
 // Search hints
 const searchHints = computed<Hint[]>(() => {

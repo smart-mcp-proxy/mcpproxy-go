@@ -30,11 +30,17 @@ export interface Tool {
 
 // Search result types
 export interface SearchResult {
-  name: string
-  description: string
-  server: string
+  tool: {
+    name: string
+    description: string
+    server_name: string
+    input_schema?: Record<string, any>
+    usage?: number
+    last_used?: string
+  }
   score: number
-  input_schema?: Record<string, any>
+  snippet?: string
+  matches: number
 }
 
 // Status types
