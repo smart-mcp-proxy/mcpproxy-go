@@ -120,6 +120,42 @@ export const useServersStore = defineStore('servers', () => {
     }
   }
 
+  async function quarantineServer(serverName: string) {
+    try {
+      const response = await api.quarantineServer(serverName)
+      if (response.success) {
+        const server = servers.value.find(s => s.name === serverName)
+        if (server) {
+          server.quarantined = true
+        }
+        return true
+      } else {
+        throw new Error(response.error || 'Failed to quarantine server')
+      }
+    } catch (error) {
+      console.error('Failed to quarantine server:', error)
+      throw error
+    }
+  }
+
+  async function unquarantineServer(serverName: string) {
+    try {
+      const response = await api.unquarantineServer(serverName)
+      if (response.success) {
+        const server = servers.value.find(s => s.name === serverName)
+        if (server) {
+          server.quarantined = false
+        }
+        return true
+      } else {
+        throw new Error(response.error || 'Failed to unquarantine server')
+      }
+    } catch (error) {
+      console.error('Failed to unquarantine server:', error)
+      throw error
+    }
+  }
+
   function updateServerStatus(statusUpdate: any) {
     // Update servers based on real-time status updates
     if (statusUpdate.upstream_stats) {
@@ -167,6 +203,8 @@ export const useServersStore = defineStore('servers', () => {
     disableServer,
     restartServer,
     triggerOAuthLogin,
+    quarantineServer,
+    unquarantineServer,
     updateServerStatus,
     getServerByName,
     addServer,

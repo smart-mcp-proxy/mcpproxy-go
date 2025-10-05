@@ -87,6 +87,12 @@
                 </button>
               </li>
               <li>
+                <button @click="server.quarantined ? unquarantineServer() : quarantineServer()" :disabled="actionLoading">
+                  <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+                  {{ server.quarantined ? 'Unquarantine' : 'Quarantine' }}
+                </button>
+              </li>
+              <li>
                 <button @click="refreshData" :disabled="actionLoading">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
                   Refresh
@@ -174,6 +180,10 @@
             <h3 class="font-bold">Security Quarantine</h3>
             <div class="text-sm">This server is quarantined and requires manual approval before tools can be executed.</div>
           </div>
+          <button @click="unquarantineServer" :disabled="actionLoading" class="btn btn-sm btn-warning">
+            <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+            Unquarantine
+          </button>
         </div>
       </div>
 
@@ -604,6 +614,56 @@ async function triggerOAuth() {
     systemStore.addToast({
       type: 'error',
       title: 'OAuth Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+async function quarantineServer() {
+  if (!server.value) return
+
+  actionLoading.value = true
+  try {
+    await serversStore.quarantineServer(server.value.name)
+    systemStore.addToast({
+      type: 'success',
+      title: 'Server Quarantined',
+      message: `${server.value.name} has been quarantined`,
+    })
+    // Update local server reference
+    await serversStore.fetchServers()
+    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Quarantine Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+async function unquarantineServer() {
+  if (!server.value) return
+
+  actionLoading.value = true
+  try {
+    await serversStore.unquarantineServer(server.value.name)
+    systemStore.addToast({
+      type: 'success',
+      title: 'Server Unquarantined',
+      message: `${server.value.name} has been removed from quarantine`,
+    })
+    // Update local server reference
+    await serversStore.fetchServers()
+    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Unquarantine Failed',
       message: error instanceof Error ? error.message : 'Unknown error',
     })
   } finally {

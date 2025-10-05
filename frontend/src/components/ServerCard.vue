@@ -68,6 +68,16 @@
       <!-- Actions -->
       <div class="card-actions justify-end space-x-2">
         <button
+          v-if="server.quarantined"
+          @click="unquarantine"
+          :disabled="loading"
+          class="btn btn-sm btn-warning"
+        >
+          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
+          Unquarantine
+        </button>
+
+        <button
           v-if="!server.connected && server.enabled"
           @click="restart"
           :disabled="loading"
@@ -185,6 +195,26 @@ async function triggerOAuth() {
     systemStore.addToast({
       type: 'error',
       title: 'OAuth Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } finally {
+    loading.value = false
+  }
+}
+
+async function unquarantine() {
+  loading.value = true
+  try {
+    await serversStore.unquarantineServer(props.server.name)
+    systemStore.addToast({
+      type: 'success',
+      title: 'Server Unquarantined',
+      message: `${props.server.name} has been removed from quarantine`,
+    })
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Unquarantine Failed',
       message: error instanceof Error ? error.message : 'Unknown error',
     })
   } finally {

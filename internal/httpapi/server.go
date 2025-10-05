@@ -258,6 +258,8 @@ func (s *Server) setupRoutes() {
 			r.Post("/disable", s.handleDisableServer)
 			r.Post("/restart", s.handleRestartServer)
 			r.Post("/login", s.handleServerLogin)
+			r.Post("/quarantine", s.handleQuarantineServer)
+			r.Post("/unquarantine", s.handleUnquarantineServer)
 			r.Get("/tools", s.handleGetServerTools)
 			r.Get("/logs", s.handleGetServerLogs)
 			r.Get("/tool-calls", s.handleGetServerToolCalls)
@@ -548,6 +550,50 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	response := contracts.ServerActionResponse{
 		Server:  serverID,
 		Action:  "login",
+		Success: true,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	if err := s.controller.QuarantineServer(serverID, true); err != nil {
+		s.logger.Error("Failed to quarantine server", "server", serverID, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to quarantine server: %v", err))
+		return
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "quarantine",
+		Success: true,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	if err := s.controller.QuarantineServer(serverID, false); err != nil {
+		s.logger.Error("Failed to unquarantine server", "server", serverID, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to unquarantine server: %v", err))
+		return
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "unquarantine",
 		Success: true,
 	}
 

@@ -225,6 +225,18 @@ class APIService {
     })
   }
 
+  async quarantineServer(serverName: string): Promise<APIResponse> {
+    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/quarantine`, {
+      method: 'POST',
+    })
+  }
+
+  async unquarantineServer(serverName: string): Promise<APIResponse> {
+    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/unquarantine`, {
+      method: 'POST',
+    })
+  }
+
   async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
     return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
   }
