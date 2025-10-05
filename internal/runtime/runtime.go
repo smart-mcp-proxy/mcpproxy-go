@@ -701,6 +701,19 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		r.cfgPath = cfgPath
 	}
 
+	// Save configuration to disk
+	saveErr := config.SaveConfig(newCfg, r.cfgPath)
+	if saveErr != nil {
+		r.logger.Error("Failed to save configuration to disk",
+			zap.String("path", r.cfgPath),
+			zap.Error(saveErr))
+		// Don't fail the entire operation, but log the error
+		// In-memory changes are still applied
+	} else {
+		r.logger.Info("Configuration successfully saved to disk",
+			zap.String("path", r.cfgPath))
+	}
+
 	// Apply configuration changes to components
 	r.logger.Info("Applying configuration hot-reload",
 		zap.Strings("changed_fields", result.ChangedFields))

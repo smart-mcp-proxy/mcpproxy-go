@@ -89,8 +89,11 @@ func SetupLogger(config *config.LogConfig) (*zap.Logger, error) {
 	// Combine cores
 	core := zapcore.NewTee(cores...)
 
+	// Wrap with secret sanitizer for security
+	sanitizedCore := NewSecretSanitizer(core)
+
 	// Create logger with caller information
-	logger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	logger := zap.New(sanitizedCore, zap.AddCaller(), zap.AddCallerSkip(1))
 
 	return logger, nil
 }
@@ -289,8 +292,11 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 		return nil, fmt.Errorf("failed to create file core for upstream server %s: %w", serverName, err)
 	}
 
+	// Wrap with secret sanitizer for security
+	sanitizedCore := NewSecretSanitizer(fileCore)
+
 	// Create logger with server name prefix
-	logger := zap.New(fileCore, zap.AddCaller(), zap.AddCallerSkip(1))
+	logger := zap.New(sanitizedCore, zap.AddCaller(), zap.AddCallerSkip(1))
 	logger = logger.With(zap.String("server", serverName))
 
 	return logger, nil
@@ -354,8 +360,11 @@ func CreateCLIUpstreamServerLogger(config *config.LogConfig, serverName string) 
 	// Combine cores
 	core := zapcore.NewTee(cores...)
 
+	// Wrap with secret sanitizer for security
+	sanitizedCore := NewSecretSanitizer(core)
+
 	// Create logger with server name prefix
-	logger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	logger := zap.New(sanitizedCore, zap.AddCaller(), zap.AddCallerSkip(1))
 	logger = logger.With(zap.String("server", serverName))
 
 	return logger, nil
@@ -396,8 +405,11 @@ func CreateHTTPLogger(config *config.LogConfig) (*zap.Logger, error) {
 		return nil, fmt.Errorf("failed to create file core for HTTP logger: %w", err)
 	}
 
+	// Wrap with secret sanitizer for security
+	sanitizedCore := NewSecretSanitizer(fileCore)
+
 	// Create logger without caller info for cleaner HTTP logs
-	logger := zap.New(fileCore)
+	logger := zap.New(sanitizedCore)
 	logger = logger.With(zap.String("component", "http_api"))
 
 	return logger, nil

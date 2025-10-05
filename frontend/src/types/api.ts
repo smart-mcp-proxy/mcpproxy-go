@@ -100,8 +100,13 @@ export interface EnvVarStatus {
   is_set: boolean
 }
 
+export interface KeyringSecretStatus {
+  secret_ref: SecretRef
+  is_set: boolean
+}
+
 export interface ConfigSecretsResponse {
-  secrets: SecretRef[]
+  secrets: KeyringSecretStatus[]
   environment_vars: EnvVarStatus[]
   total_secrets: number
   total_env_vars: number

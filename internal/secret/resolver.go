@@ -185,14 +185,25 @@ func (r *Resolver) ExtractConfigSecrets(ctx context.Context, v interface{}) (*Co
 	r.extractSecretRefs(reflect.ValueOf(v), "", &allRefs)
 
 	// Separate secrets by type
-	var keyringRefs []Ref
+	var keyringStatus []KeyringSecretStatus
 	var envRefs []Ref
 	var envStatus []EnvVarStatus
 
 	for _, ref := range allRefs {
 		switch ref.Type {
 		case "keyring":
-			keyringRefs = append(keyringRefs, ref)
+			// Check if keyring secret can be resolved
+			provider, exists := r.providers["keyring"]
+			isSet := false
+			if exists && provider.IsAvailable() {
+				_, err := provider.Resolve(ctx, ref)
+				isSet = err == nil
+			}
+
+			keyringStatus = append(keyringStatus, KeyringSecretStatus{
+				Ref:   ref,
+				IsSet: isSet,
+			})
 		case "env":
 			envRefs = append(envRefs, ref)
 
@@ -212,9 +223,9 @@ func (r *Resolver) ExtractConfigSecrets(ctx context.Context, v interface{}) (*Co
 	}
 
 	return &ConfigSecretsResponse{
-		Secrets:         keyringRefs,
+		Secrets:         keyringStatus,
 		EnvironmentVars: envStatus,
-		TotalSecrets:    len(keyringRefs),
+		TotalSecrets:    len(keyringStatus),
 		TotalEnvVars:    len(envRefs),
 	}, nil
 }

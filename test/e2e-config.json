@@ -2,11 +2,7 @@
   "listen": ":8081",
   "data_dir": "./test-data",
   "enable_tray": false,
-  "api_key": "",
   "debug_search": false,
-  "tls": {
-    "enabled": false
-  },
   "mcpServers": [
     {
       "name": "everything",
@@ -16,10 +12,10 @@
         "-y",
         "@modelcontextprotocol/server-everything"
       ],
-      "enabled": true,
+      "enabled": false,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-09-23T10:13:46.357736+03:00"
+      "updated": "2025-10-05T21:05:58.786562+03:00"
     }
   ],
   "top_k": 10,
@@ -168,5 +164,15 @@
     "enable_tray": true,
     "enable_debug_logging": false,
     "enable_contract_tests": false
+  },
+  "tls": {
+    "enabled": false,
+    "require_client_cert": false,
+    "hsts": true
+  },
+  "tokenizer": {
+    "enabled": true,
+    "default_model": "gpt-4",
+    "encoding": "cl100k_base"
   }
 }

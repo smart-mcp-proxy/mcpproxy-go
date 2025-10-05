@@ -114,28 +114,20 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 	}
 
 	r.logger.Info("Discovering and indexing tools...")
-	r.logger.Debug("DiscoverAndIndexTools: calling upstream manager to discover tools")
 
 	tools, err := r.upstreamManager.DiscoverTools(ctx)
 	if err != nil {
-		r.logger.Error("DiscoverAndIndexTools: failed to discover tools", zap.Error(err))
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}
-
-	r.logger.Debug("DiscoverAndIndexTools: discovered tools from upstream", zap.Int("tool_count", len(tools)))
 
 	if len(tools) == 0 {
 		r.logger.Warn("No tools discovered from upstream servers")
 		return nil
 	}
 
-	r.logger.Debug("DiscoverAndIndexTools: indexing tools", zap.Int("count", len(tools)))
 	if err := r.indexManager.BatchIndexTools(tools); err != nil {
-		r.logger.Error("DiscoverAndIndexTools: failed to index tools", zap.Error(err))
 		return fmt.Errorf("failed to index tools: %w", err)
 	}
-
-	r.logger.Debug("DiscoverAndIndexTools: invalidating tool count caches")
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
@@ -161,13 +153,8 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 
 	r.logger.Info("Synchronizing servers from configuration (config as source of truth)")
 
-	r.logger.Debug("LoadConfiguredServers: getting current upstreams")
 	currentUpstreams := r.upstreamManager.GetAllServerNames()
-	r.logger.Debug("LoadConfiguredServers: got current upstreams", zap.Int("count", len(currentUpstreams)))
-
-	r.logger.Debug("LoadConfiguredServers: listing stored servers from storage")
 	storedServers, err := r.storageManager.ListUpstreamServers()
-	r.logger.Debug("LoadConfiguredServers: listed stored servers", zap.Int("count", len(storedServers)), zap.Error(err))
 	if err != nil {
 		r.logger.Error("Failed to get stored servers for sync", zap.Error(err))
 		storedServers = []*config.ServerConfig{}
@@ -189,12 +176,9 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	// Wait for all server add/remove operations to complete before returning
 	// This prevents DiscoverAndIndexTools from trying to acquire locks while servers are being modified
 
-	r.logger.Debug("LoadConfiguredServers: starting server sync loop", zap.Int("servers_to_process", len(cfg.Servers)))
-
 	var wg sync.WaitGroup
 
 	for _, serverCfg := range cfg.Servers {
-		r.logger.Debug("LoadConfiguredServers: processing server", zap.String("name", serverCfg.Name), zap.Bool("enabled", serverCfg.Enabled))
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
 		hasChanged := !existsInStorage ||
 			storedServer.Enabled != serverCfg.Enabled ||
@@ -212,15 +196,12 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined))
 		}
 
-		r.logger.Debug("LoadConfiguredServers: saving server to storage", zap.String("name", serverCfg.Name))
 		if err := r.storageManager.SaveUpstreamServer(serverCfg); err != nil {
 			r.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
 			continue
 		}
-		r.logger.Debug("LoadConfiguredServers: saved server to storage", zap.String("name", serverCfg.Name))
 
 		if serverCfg.Enabled {
-			r.logger.Debug("LoadConfiguredServers: server is enabled, adding to upstream manager", zap.String("name", serverCfg.Name))
 			// Add server synchronously to avoid lock contention with DiscoverAndIndexTools
 			// The actual connection still happens asynchronously inside AddServer
 			wg.Add(1)
@@ -242,19 +223,12 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 				r.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", serverCfg.Name))
 			}
 		} else {
-			r.logger.Debug("LoadConfiguredServers: server is disabled, removing from upstream manager", zap.String("name", serverCfg.Name))
 			r.upstreamManager.RemoveServer(serverCfg.Name)
-			r.logger.Debug("LoadConfiguredServers: removed server from upstream manager", zap.String("name", serverCfg.Name))
 			r.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
 		}
-		r.logger.Debug("LoadConfiguredServers: finished processing server", zap.String("name", serverCfg.Name))
 	}
 
-	r.logger.Debug("LoadConfiguredServers: waiting for all server add operations to complete")
 	wg.Wait()
-	r.logger.Debug("LoadConfiguredServers: all server add operations completed")
-
-	r.logger.Debug("LoadConfiguredServers: finished server sync loop")
 
 	serversToRemove := []string{}
 

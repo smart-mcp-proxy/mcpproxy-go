@@ -292,20 +292,11 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	m.logger.Debug("DiscoverTools: starting discovery", zap.Int("total_clients", len(m.clients)))
-
 	var allTools []*config.ToolMetadata
 	connectedCount := 0
 
 	for id, client := range m.clients {
-		m.logger.Debug("DiscoverTools: checking client",
-			zap.String("id", id),
-			zap.Bool("enabled", client.Config.Enabled),
-			zap.Bool("connected", client.IsConnected()),
-			zap.String("state", client.GetState().String()))
-
 		if !client.Config.Enabled {
-			m.logger.Debug("DiscoverTools: skipping disabled client", zap.String("id", id))
 			continue
 		}
 		if !client.IsConnected() {
@@ -314,7 +305,6 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 		}
 		connectedCount++
 
-		m.logger.Debug("DiscoverTools: calling ListTools for client", zap.String("id", id))
 		tools, err := client.ListTools(ctx)
 		if err != nil {
 			m.logger.Error("Failed to list tools from client",
@@ -322,10 +312,6 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 				zap.Error(err))
 			continue
 		}
-
-		m.logger.Debug("DiscoverTools: received tools from client",
-			zap.String("id", id),
-			zap.Int("tool_count", len(tools)))
 
 		if tools != nil {
 			allTools = append(allTools, tools...)
