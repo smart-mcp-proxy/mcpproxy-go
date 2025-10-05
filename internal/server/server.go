@@ -975,14 +975,15 @@ func (s *Server) logConnectionState(conn net.Conn, state http.ConnState) {
 		s.logger.Debug("New client connection established",
 			zap.String("remote_addr", conn.RemoteAddr().String()),
 			zap.String("state", "new"))
-	case http.StateActive:
-		s.logger.Debug("Client connection active",
-			zap.String("remote_addr", conn.RemoteAddr().String()),
-			zap.String("state", "active"))
-	case http.StateIdle:
-		s.logger.Debug("Client connection idle",
-			zap.String("remote_addr", conn.RemoteAddr().String()),
-			zap.String("state", "idle"))
+	// StateActive and StateIdle removed - too noisy with keep-alive connections and SSE streams
+	// case http.StateActive:
+	// 	s.logger.Debug("Client connection active",
+	// 		zap.String("remote_addr", conn.RemoteAddr().String()),
+	// 		zap.String("state", "active"))
+	// case http.StateIdle:
+	// 	s.logger.Debug("Client connection idle",
+	// 		zap.String("remote_addr", conn.RemoteAddr().String()),
+	// 		zap.String("state", "idle"))
 	case http.StateHijacked:
 		s.logger.Debug("Client connection hijacked (likely for upgrade)",
 			zap.String("remote_addr", conn.RemoteAddr().String()),
