@@ -105,7 +105,7 @@ type App struct {
 
 	// Menu items for dynamic updates
 	statusItem          *systray.MenuItem
-	startStopItem       *systray.MenuItem
+	// startStopItem removed - tray doesn't directly control core lifecycle
 	upstreamServersMenu *systray.MenuItem
 	quarantineMenu      *systray.MenuItem
 	portConflictMenu    *systray.MenuItem
@@ -290,17 +290,7 @@ func (a *App) applyConnectionStateToUI(state ConnectionState) {
 		a.hidePortConflictMenu()
 	}
 
-	if a.startStopItem != nil {
-		if state == ConnectionStateConnected {
-			a.startStopItem.Enable()
-			if !a.portConflictActive {
-				a.startStopItem.SetTitle("Start core")
-			}
-		} else {
-			a.startStopItem.SetTitle("Core managed by tray")
-			a.startStopItem.Disable()
-		}
-	}
+	// Note: startStopItem removed - no longer needed in new architecture
 
 	a.instrumentation.NotifyConnectionState(state)
 	a.instrumentation.NotifyStatus()
@@ -486,14 +476,15 @@ func (a *App) onReady() {
 	a.logger.Debug("Initializing tray menu items")
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
 	a.statusItem.Disable() // Initially disabled as it's just for display
-	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
+	// Note: startStopItem removed - tray doesn't directly control core lifecycle
+	// Users should quit tray to restart (when tray manages core) or use CLI (when core is independent)
 	a.applyConnectionStateToUI(a.getConnectionState())
 
 	// Port conflict resolution submenu (hidden until needed)
 	a.portConflictMenu = systray.AddMenuItem("Resolve port conflict", "Actions to resolve listen port issues")
 	a.portConflictInfo = a.portConflictMenu.AddSubMenuItem("Waiting for status...", "Port conflict details")
 	a.portConflictInfo.Disable()
-	a.portConflictRetry = a.portConflictMenu.AddSubMenuItem("Retry starting core", "Attempt to start the core on the configured port")
+	a.portConflictRetry = a.portConflictMenu.AddSubMenuItem("Retry starting MCPProxy", "Attempt to start MCPProxy on the configured port")
 	a.portConflictAuto = a.portConflictMenu.AddSubMenuItem("Use next available port", "Automatically select an available port")
 	a.portConflictCopy = a.portConflictMenu.AddSubMenuItem("Copy MCP URL", "Copy the MCP connection URL to the clipboard")
 	a.portConflictConfig = a.portConflictMenu.AddSubMenuItem("Open config directory", "Edit the configuration manually")
@@ -559,8 +550,6 @@ func (a *App) onReady() {
 	go func() {
 		for {
 			select {
-			case <-a.startStopItem.ClickedCh:
-				a.handleStartStop()
 			case <-a.portConflictRetry.ClickedCh:
 				go a.handlePortConflictRetry()
 			case <-a.portConflictAuto.ClickedCh:
@@ -737,10 +726,8 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		a.statusMu.Lock()
 		a.statusTitle = title
 		a.statusMu.Unlock()
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Stop core")
-			a.startStopItem.Enable()
-		}
+		// Note: startStopItem visibility is now managed by applyConnectionStateToUI
+		// based on ConnectionState, not server running status
 		a.logger.Debug("Set tray to running state")
 	} else {
 		title := "Status: Stopped"
@@ -754,18 +741,8 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		a.statusMu.Lock()
 		a.statusTitle = title
 		a.statusMu.Unlock()
-		if a.startStopItem != nil {
-			a.startStopItem.Enable()
-			if phase == phaseError {
-				if portConflict {
-					a.startStopItem.SetTitle("Retry start")
-				} else {
-					a.startStopItem.SetTitle("Retry core start")
-				}
-			} else {
-				a.startStopItem.SetTitle("Start core")
-			}
-		}
+		// Note: startStopItem visibility is now managed by applyConnectionStateToUI
+		// based on ConnectionState, not server running status
 		a.logger.Debug("Set tray to non-running state", zap.String("phase", phase))
 	}
 
@@ -892,90 +869,12 @@ func (a *App) updateServersMenu() {
 	}
 }
 
-// handleStartStop toggles the server's running state
-func (a *App) handleStartStop() {
-	if a.server.IsRunning() {
-		a.logger.Info("Stopping server from tray")
-
-		// Immediately update UI to show stopping state
-		if a.statusItem != nil {
-			a.statusItem.SetTitle("Status: Stopping...")
-		}
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Stopping...")
-		}
-
-		// Stop the server
-		if err := a.server.StopServer(); err != nil {
-			a.logger.Error("Failed to stop server", zap.Error(err))
-			// Restore UI state on error
-			a.updateStatus()
-			return
-		}
-
-		// Wait for server to fully stop with timeout
-		go func() {
-			timeout := time.After(10 * time.Second)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-timeout:
-					a.logger.Warn("Timeout waiting for server to stop, updating status anyway")
-					a.updateStatus()
-					return
-				case <-ticker.C:
-					if !a.server.IsRunning() {
-						a.logger.Info("Server stopped, updating UI")
-						a.updateStatus()
-						return
-					}
-				}
-			}
-		}()
-	} else {
-		a.logger.Info("Starting server from tray")
-
-		// Immediately update UI to show starting state
-		if a.statusItem != nil {
-			a.statusItem.SetTitle("Status: Starting...")
-		}
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Starting...")
-		}
-
-		// Start the server
-		go func() {
-			if err := a.server.StartServer(a.ctx); err != nil {
-				a.logger.Error("Failed to start server", zap.Error(err))
-				// Restore UI state on error
-				a.updateStatus()
-				return
-			}
-
-			// Wait for server to fully start with timeout
-			timeout := time.After(10 * time.Second)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-timeout:
-					a.logger.Warn("Timeout waiting for server to start, updating status anyway")
-					a.updateStatus()
-					return
-				case <-ticker.C:
-					if a.server.IsRunning() {
-						a.logger.Info("Server started, updating UI")
-						a.updateStatus()
-						return
-					}
-				}
-			}
-		}()
-	}
-}
+// handleStartStop - REMOVED
+// In the new architecture, tray doesn't directly control the core process lifecycle.
+// The state machine in cmd/mcpproxy-tray/main.go manages the core process.
+// Users should:
+// - Quit tray to restart (when tray manages core)
+// - Use CLI to restart (when core is independent)
 
 // onExit is called when the application is quitting
 func (a *App) onExit() {
@@ -1422,12 +1321,9 @@ func (a *App) handlePortConflictRetry() {
 	if !a.portConflictActive {
 		return
 	}
-	if a.startStopItem != nil {
-		a.startStopItem.SetTitle("Retrying start...")
-		a.startStopItem.Disable()
-	}
-	a.logger.Info("Retrying server start after port conflict")
-	a.handleStartStop()
+	a.logger.Info("Port conflict retry requested - user should quit and restart MCPProxy")
+	// In new architecture, tray doesn't control process lifecycle directly
+	// User must quit tray and restart to retry on the configured port
 }
 
 func (a *App) handlePortConflictAuto() {
@@ -1462,12 +1358,10 @@ func (a *App) handlePortConflictAuto() {
 
 	a.hidePortConflictMenu()
 
-	if a.startStopItem != nil {
-		a.startStopItem.SetTitle("Starting on alternate port...")
-		a.startStopItem.Disable()
-	}
-
-	a.handleStartStop()
+	a.logger.Info("Alternate port configured - user should restart to apply changes",
+		zap.String("new_port", suggestion))
+	// In new architecture, config changes require manual restart
+	// User must quit tray and restart to use the new port
 }
 
 func (a *App) handlePortConflictCopy() {

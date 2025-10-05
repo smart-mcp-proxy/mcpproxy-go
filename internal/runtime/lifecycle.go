@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -17,7 +16,7 @@ func (r *Runtime) StartBackgroundInitialization() {
 }
 
 func (r *Runtime) backgroundInitialization() {
-	r.UpdatePhase("Loading", "Loading configuration and connecting to servers...")
+	r.UpdatePhase("Loading", "Loading configuration...")
 
 	if err := r.LoadConfiguredServers(); err != nil {
 		r.logger.Error("Failed to load configured servers", zap.Error(err))
@@ -25,19 +24,12 @@ func (r *Runtime) backgroundInitialization() {
 		return
 	}
 
-	// Only transition to "Connecting" if the server is not yet running
-	// If the server is running, keep it as "Running" while upstream connections happen in background
-	if !r.IsRunning() {
-		r.UpdatePhase("Connecting", "Connecting to upstream servers...")
-	}
+	// Immediately mark as ready - server connections happen in background
+	r.UpdatePhase("Ready", "Server is ready (upstream servers connecting in background)")
 
 	appCtx := r.AppContext()
 	go r.backgroundConnections(appCtx)
 	go r.backgroundToolIndexing(appCtx)
-
-	if !r.IsRunning() {
-		r.UpdatePhase("Ready", "Server is ready (connections continue in background)")
-	}
 }
 
 func (r *Runtime) backgroundConnections(ctx context.Context) {
@@ -177,8 +169,8 @@ func (r *Runtime) LoadConfiguredServers() error {
 		storedServerMap[storedServer.Name] = storedServer
 	}
 
-	// Use WaitGroup to ensure all servers are processed before continuing
-	var wg sync.WaitGroup
+	// Add servers asynchronously without blocking
+	// Each server connects in background, no need to wait for all to complete
 
 	for _, serverCfg := range cfg.Servers {
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
@@ -204,10 +196,8 @@ func (r *Runtime) LoadConfiguredServers() error {
 		}
 
 		if serverCfg.Enabled {
-			// Add server asynchronously to prevent blocking startup
-			wg.Add(1)
+			// Add server asynchronously - connections happen in background
 			go func(cfg *config.ServerConfig, cfgPath string) {
-				defer wg.Done()
 				if err := r.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
 					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
 				} else {
@@ -228,9 +218,6 @@ func (r *Runtime) LoadConfiguredServers() error {
 			r.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
 		}
 	}
-
-	// Wait for all server additions to complete
-	wg.Wait()
 
 	serversToRemove := []string{}
 
