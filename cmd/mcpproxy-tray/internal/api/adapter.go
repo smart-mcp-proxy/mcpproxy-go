@@ -5,6 +5,9 @@ package api
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 
 	internalRuntime "mcpproxy-go/internal/runtime"
 )
@@ -221,12 +224,35 @@ func (a *ServerAdapter) ReloadConfiguration() error {
 
 // GetConfigPath returns the configuration file path
 func (a *ServerAdapter) GetConfigPath() string {
-	return "~/.mcpproxy/mcp_config.json"
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "~/.mcpproxy/mcp_config.json" // fallback
+	}
+	return filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
 }
 
 // GetLogDir returns the log directory path
 func (a *ServerAdapter) GetLogDir() string {
-	return "~/.mcpproxy/logs"
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "~/.mcpproxy/logs" // fallback
+	}
+
+	// Use platform-specific log directory (same logic as mcpproxy-tray/main.go)
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(homeDir, "Library", "Logs", "mcpproxy")
+	case "windows":
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			return filepath.Join(localAppData, "mcpproxy", "logs")
+		}
+		if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
+			return filepath.Join(userProfile, "AppData", "Local", "mcpproxy", "logs")
+		}
+		return filepath.Join(homeDir, ".mcpproxy", "logs")
+	default: // linux and others
+		return filepath.Join(homeDir, ".mcpproxy", "logs")
+	}
 }
 
 // TriggerOAuthLogin triggers OAuth login for a server
