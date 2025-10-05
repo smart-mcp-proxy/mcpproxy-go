@@ -34,7 +34,7 @@
             </svg>
             <span class="flex-1 text-left">Theme</span>
           </div>
-          <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-2xl bg-base-300 rounded-box w-52 max-h-96 overflow-y-auto mb-2">
+          <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-2xl bg-base-300 rounded-box w-64 max-h-96 overflow-y-auto mb-2">
             <li class="menu-title">
               <span>Choose theme</span>
             </li>
