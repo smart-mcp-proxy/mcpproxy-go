@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -387,6 +387,56 @@ class APIService {
         arguments: args
       })
     })
+  }
+
+  // Registry browsing (Phase 7)
+  async listRegistries(): Promise<APIResponse<GetRegistriesResponse>> {
+    return this.request<GetRegistriesResponse>('/api/v1/registries')
+  }
+
+  async searchRegistryServers(
+    registryId: string,
+    options?: {
+      query?: string
+      tag?: string
+      limit?: number
+    }
+  ): Promise<APIResponse<SearchRegistryServersResponse>> {
+    const params = new URLSearchParams()
+    if (options?.query) params.append('q', options.query)
+    if (options?.tag) params.append('tag', options.tag)
+    if (options?.limit) params.append('limit', options.limit.toString())
+
+    const url = `/api/v1/registries/${encodeURIComponent(registryId)}/servers${params.toString() ? '?' + params.toString() : ''}`
+    return this.request<SearchRegistryServersResponse>(url)
+  }
+
+  async addServerFromRepository(server: RepositoryServer): Promise<APIResponse<any>> {
+    // Use the upstream_servers tool to add the server
+    const args: Record<string, any> = {
+      operation: 'add',
+      name: server.id,
+      enabled: true,
+      protocol: 'stdio'
+    }
+
+    // Determine command and args from installCmd or connectUrl
+    if (server.installCmd) {
+      const parts = server.installCmd.split(' ')
+      args.command = parts[0]
+      if (parts.length > 1) {
+        args.args_json = JSON.stringify(parts.slice(1))
+      }
+    } else if (server.url) {
+      // Remote server with HTTP protocol
+      args.protocol = 'http'
+      args.url = server.url
+    } else if (server.connectUrl) {
+      args.protocol = 'http'
+      args.url = server.connectUrl
+    }
+
+    return this.callTool('upstream_servers', args)
   }
 
   // Utility methods

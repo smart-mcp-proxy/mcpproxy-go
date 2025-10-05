@@ -78,6 +78,10 @@ type ServerController interface {
 
 	// Tool execution
 	CallTool(ctx context.Context, toolName string, arguments map[string]interface{}) (interface{}, error)
+
+	// Registry browsing (Phase 7)
+	ListRegistries() ([]interface{}, error)
+	SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error)
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -289,6 +293,10 @@ func (s *Server) setupRoutes() {
 		r.Get("/config", s.handleGetConfig)
 		r.Post("/config/validate", s.handleValidateConfig)
 		r.Post("/config/apply", s.handleApplyConfig)
+
+		// Registry browsing (Phase 7)
+		r.Get("/registries", s.handleListRegistries)
+		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD
@@ -1442,4 +1450,141 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, result)
+}
+
+// handleListRegistries handles GET /api/v1/registries
+func (s *Server) handleListRegistries(w http.ResponseWriter, _ *http.Request) {
+	registries, err := s.controller.ListRegistries()
+	if err != nil {
+		s.logger.Error("Failed to list registries", "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to list registries: %v", err))
+		return
+	}
+
+	// Convert to contracts.Registry
+	contractRegistries := make([]contracts.Registry, len(registries))
+	for i, reg := range registries {
+		regMap, ok := reg.(map[string]interface{})
+		if !ok {
+			s.logger.Warn("Invalid registry type", "registry", reg)
+			continue
+		}
+
+		contractReg := contracts.Registry{
+			ID:          getString(regMap, "id"),
+			Name:        getString(regMap, "name"),
+			Description: getString(regMap, "description"),
+			URL:         getString(regMap, "url"),
+			ServersURL:  getString(regMap, "servers_url"),
+			Protocol:    getString(regMap, "protocol"),
+			Count:       regMap["count"],
+		}
+
+		if tags, ok := regMap["tags"].([]interface{}); ok {
+			contractReg.Tags = make([]string, 0, len(tags))
+			for _, tag := range tags {
+				if tagStr, ok := tag.(string); ok {
+					contractReg.Tags = append(contractReg.Tags, tagStr)
+				}
+			}
+		}
+
+		contractRegistries[i] = contractReg
+	}
+
+	response := contracts.GetRegistriesResponse{
+		Registries: contractRegistries,
+		Total:      len(contractRegistries),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// handleSearchRegistryServers handles GET /api/v1/registries/{id}/servers
+func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Request) {
+	registryID := chi.URLParam(r, "id")
+	if registryID == "" {
+		s.writeError(w, http.StatusBadRequest, "Registry ID is required")
+		return
+	}
+
+	// Parse query parameters
+	query := r.URL.Query().Get("q")
+	tag := r.URL.Query().Get("tag")
+	limitStr := r.URL.Query().Get("limit")
+
+	limit := 10 // Default limit
+	if limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	servers, err := s.controller.SearchRegistryServers(registryID, tag, query, limit)
+	if err != nil {
+		s.logger.Error("Failed to search registry servers", "registry", registryID, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to search servers: %v", err))
+		return
+	}
+
+	// Convert to contracts.RepositoryServer
+	contractServers := make([]contracts.RepositoryServer, len(servers))
+	for i, srv := range servers {
+		srvMap, ok := srv.(map[string]interface{})
+		if !ok {
+			s.logger.Warn("Invalid server type", "server", srv)
+			continue
+		}
+
+		contractSrv := contracts.RepositoryServer{
+			ID:            getString(srvMap, "id"),
+			Name:          getString(srvMap, "name"),
+			Description:   getString(srvMap, "description"),
+			URL:           getString(srvMap, "url"),
+			SourceCodeURL: getString(srvMap, "source_code_url"),
+			InstallCmd:    getString(srvMap, "installCmd"),
+			ConnectURL:    getString(srvMap, "connectUrl"),
+			UpdatedAt:     getString(srvMap, "updatedAt"),
+			CreatedAt:     getString(srvMap, "createdAt"),
+			Registry:      getString(srvMap, "registry"),
+		}
+
+		// Parse repository_info if present
+		if repoInfo, ok := srvMap["repository_info"].(map[string]interface{}); ok {
+			contractSrv.RepositoryInfo = &contracts.RepositoryInfo{}
+			if npm, ok := repoInfo["npm"].(map[string]interface{}); ok {
+				contractSrv.RepositoryInfo.NPM = &contracts.NPMPackageInfo{
+					Exists:     getBool(npm, "exists"),
+					InstallCmd: getString(npm, "install_cmd"),
+				}
+			}
+		}
+
+		contractServers[i] = contractSrv
+	}
+
+	response := contracts.SearchRegistryServersResponse{
+		RegistryID: registryID,
+		Servers:    contractServers,
+		Total:      len(contractServers),
+		Query:      query,
+		Tag:        tag,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// Helper functions for type conversion
+func getString(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
+}
+
+func getBool(m map[string]interface{}, key string) bool {
+	if val, ok := m[key].(bool); ok {
+		return val
+	}
+	return false
 }

@@ -191,3 +191,53 @@ export interface ValidateConfigResponse {
 export interface ApplyConfigRequest {
   config: any
 }
+
+// Registry browsing types (Phase 7)
+
+export interface Registry {
+  id: string
+  name: string
+  description: string
+  url: string
+  servers_url?: string
+  tags?: string[]
+  protocol?: string
+  count?: number | string
+}
+
+export interface NPMPackageInfo {
+  exists: boolean
+  install_cmd: string
+}
+
+export interface RepositoryInfo {
+  npm?: NPMPackageInfo
+  // Future: pypi, docker_hub, etc.
+}
+
+export interface RepositoryServer {
+  id: string
+  name: string
+  description: string
+  url?: string  // MCP endpoint for remote servers only
+  source_code_url?: string  // Source repository URL
+  installCmd?: string  // Installation command
+  connectUrl?: string  // Alternative connection URL
+  updatedAt?: string
+  createdAt?: string
+  registry?: string  // Which registry this came from
+  repository_info?: RepositoryInfo  // Detected package info
+}
+
+export interface GetRegistriesResponse {
+  registries: Registry[]
+  total: number
+}
+
+export interface SearchRegistryServersResponse {
+  registry_id: string
+  servers: RepositoryServer[]
+  total: number
+  query?: string
+  tag?: string
+}

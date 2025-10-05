@@ -367,3 +367,59 @@ type ReplayToolCallResponse struct {
 	ReplayedFrom  string         `json:"replayed_from"`   // Original call ID
 	Error         string         `json:"error,omitempty"` // Error if replay failed
 }
+
+// Registry browsing types (Phase 7)
+
+// Registry represents an MCP server registry
+type Registry struct {
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	URL         string      `json:"url"`
+	ServersURL  string      `json:"servers_url,omitempty"`
+	Tags        []string    `json:"tags,omitempty"`
+	Protocol    string      `json:"protocol,omitempty"`
+	Count       interface{} `json:"count,omitempty"` // number or string
+}
+
+// RepositoryInfo represents detected repository type information
+type RepositoryInfo struct {
+	NPM *NPMPackageInfo `json:"npm,omitempty"`
+	// Future: PyPI, Docker Hub, etc.
+}
+
+// NPMPackageInfo represents NPM package information
+type NPMPackageInfo struct {
+	Exists     bool   `json:"exists"`
+	InstallCmd string `json:"install_cmd"`
+}
+
+// RepositoryServer represents an MCP server from a registry
+type RepositoryServer struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	URL            string          `json:"url,omitempty"` // MCP endpoint for remote servers only
+	SourceCodeURL  string          `json:"source_code_url,omitempty"` // Source repository URL
+	InstallCmd     string          `json:"install_cmd,omitempty"` // Installation command
+	ConnectURL     string          `json:"connect_url,omitempty"` // Alternative connection URL
+	UpdatedAt      string          `json:"updated_at,omitempty"`
+	CreatedAt      string          `json:"created_at,omitempty"`
+	Registry       string          `json:"registry,omitempty"` // Which registry this came from
+	RepositoryInfo *RepositoryInfo `json:"repository_info,omitempty"` // Detected package info
+}
+
+// GetRegistriesResponse is the response for GET /api/v1/registries
+type GetRegistriesResponse struct {
+	Registries []Registry `json:"registries"`
+	Total      int        `json:"total"`
+}
+
+// SearchRegistryServersResponse is the response for GET /api/v1/registries/{id}/servers
+type SearchRegistryServersResponse struct {
+	RegistryID string             `json:"registry_id"`
+	Servers    []RepositoryServer `json:"servers"`
+	Total      int                `json:"total"`
+	Query      string             `json:"query,omitempty"`
+	Tag        string             `json:"tag,omitempty"`
+}

@@ -1226,3 +1226,13 @@ func (s *Server) CallTool(ctx context.Context, toolName string, arguments map[st
 
 	return result, nil
 }
+
+// ListRegistries returns the list of available MCP server registries (Phase 7)
+func (s *Server) ListRegistries() ([]interface{}, error) {
+	return s.runtime.ListRegistries()
+}
+
+// SearchRegistryServers searches for servers in a specific registry (Phase 7)
+func (s *Server) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
+	return s.runtime.SearchRegistryServers(registryID, tag, query, limit)
+}

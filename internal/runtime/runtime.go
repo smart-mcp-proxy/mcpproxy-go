@@ -16,7 +16,9 @@ import (
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
+	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/server/tokens"
 	"mcpproxy-go/internal/storage"
@@ -875,4 +877,111 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// ListRegistries returns the list of available MCP server registries (Phase 7)
+func (r *Runtime) ListRegistries() ([]interface{}, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Import registries package dynamically to avoid import cycles
+	// For now, we'll return registries from config or use defaults
+	registries := r.cfg.Registries
+	if len(registries) == 0 {
+		// Return default registry (Smithery)
+		defaultRegistry := map[string]interface{}{
+			"id":          "smithery",
+			"name":        "Smithery MCP Registry",
+			"description": "The official community registry for Model Context Protocol (MCP) servers.",
+			"url":         "https://smithery.ai/protocols",
+			"servers_url": "https://smithery.ai/api/smithery-protocol-registry",
+			"tags":        []string{"official", "community"},
+			"protocol":    "modelcontextprotocol/registry",
+			"count":       -1,
+		}
+		return []interface{}{defaultRegistry}, nil
+	}
+
+	// Convert config registries to interface slice
+	result := make([]interface{}, 0, len(registries))
+	for _, reg := range registries {
+		regMap := map[string]interface{}{
+			"id":          reg.ID,
+			"name":        reg.Name,
+			"description": reg.Description,
+			"url":         reg.URL,
+			"servers_url": reg.ServersURL,
+			"tags":        reg.Tags,
+			"protocol":    reg.Protocol,
+			"count":       reg.Count,
+		}
+		result = append(result, regMap)
+	}
+
+	return result, nil
+}
+
+// SearchRegistryServers searches for servers in a specific registry (Phase 7)
+func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+
+	r.logger.Info("Registry search requested",
+		zap.String("registry_id", registryID),
+		zap.String("query", query),
+		zap.String("tag", tag),
+		zap.Int("limit", limit))
+
+	// Initialize registries from config
+	registries.SetRegistriesFromConfig(cfg)
+
+	// Create a guesser for repository detection (with caching)
+	guesser := experiments.NewGuesser(r.cacheManager, r.logger)
+
+	// Search the registry
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	servers, err := registries.SearchServers(ctx, registryID, tag, query, limit, guesser)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search registry: %w", err)
+	}
+
+	// Convert to interface slice
+	result := make([]interface{}, len(servers))
+	for i, server := range servers {
+		serverMap := map[string]interface{}{
+			"id":              server.ID,
+			"name":            server.Name,
+			"description":     server.Description,
+			"url":             server.URL,
+			"source_code_url": server.SourceCodeURL,
+			"installCmd":      server.InstallCmd,
+			"connectUrl":      server.ConnectURL,
+			"updatedAt":       server.UpdatedAt,
+			"createdAt":       server.CreatedAt,
+			"registry":        server.Registry,
+		}
+
+		// Add repository info if present
+		if server.RepositoryInfo != nil {
+			repoInfo := make(map[string]interface{})
+			if server.RepositoryInfo.NPM != nil {
+				repoInfo["npm"] = map[string]interface{}{
+					"exists":      server.RepositoryInfo.NPM.Exists,
+					"install_cmd": server.RepositoryInfo.NPM.InstallCmd,
+				}
+			}
+			serverMap["repository_info"] = repoInfo
+		}
+
+		result[i] = serverMap
+	}
+
+	r.logger.Info("Registry search completed",
+		zap.String("registry_id", registryID),
+		zap.Int("results", len(result)))
+
+	return result, nil
 }

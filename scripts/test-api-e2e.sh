@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+# Note: Not using 'set -e' to allow tests to continue even if some fail
 
 # Colors for output
 RED='\033[0;31m'
@@ -267,13 +267,15 @@ test_sse() {
     log_test "$test_name"
 
     # Test SSE endpoint by connecting and reading first few events
-    local curl_cmd="timeout 5s curl -s -N $CURL_CA_OPTS"
+    # Use Perl for cross-platform timeout (macOS doesn't have timeout command)
+    local curl_cmd="curl -s -N $CURL_CA_OPTS"
     if [ ! -z "$API_KEY" ]; then
         curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
     fi
     curl_cmd="$curl_cmd \"${BASE_URL}/events\""
 
-    eval "$curl_cmd" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
+    # Run with 5 second timeout using Perl
+    perl -e 'alarm 5; exec @ARGV' sh -c "$curl_cmd" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
 
     if [ -s "$TEST_RESULTS_FILE" ] && grep -q "data:" "$TEST_RESULTS_FILE"; then
         log_pass "$test_name"
@@ -295,7 +297,8 @@ test_sse_with_query_param() {
         sse_url="${sse_url}?apikey=${API_KEY}"
     fi
 
-    timeout 5s curl -s -N $CURL_CA_OPTS "$sse_url" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
+    # Use Perl for cross-platform timeout (macOS doesn't have timeout command)
+    perl -e 'alarm 5; exec @ARGV' curl -s -N $CURL_CA_OPTS "$sse_url" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
 
     if [ -s "$TEST_RESULTS_FILE" ] && grep -q "data:" "$TEST_RESULTS_FILE"; then
         log_pass "$test_name"
@@ -567,6 +570,39 @@ fi
 
 # Test 24: Error handling - replay nonexistent tool call
 test_api "POST /api/v1/tool-calls/nonexistent/replay" "POST" "${API_BASE}/tool-calls/nonexistent-id-12345/replay" "500" '{"arguments":{}}'
+
+# Test 25: List registries (Phase 7)
+log_test "GET /api/v1/registries"
+RESPONSE=$(curl -s $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries")
+echo "$RESPONSE" > "$TEST_RESULTS_FILE"
+if echo "$RESPONSE" | jq -e '.success == true and .data.registries != null and .data.total > 0' >/dev/null; then
+    log_pass "GET /api/v1/registries - Response has registries array and total count"
+else
+    log_fail "GET /api/v1/registries - Expected registries data structure" \
+        "jq -e '.success == true and .data.registries != null and .data.total > 0' < '$TEST_RESULTS_FILE' >/dev/null"
+fi
+
+# Test 26: Search registry servers (Phase 7)
+log_test "GET /api/v1/registries/{id}/servers"
+RESPONSE=$(curl -s $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/pulse/servers?limit=5")
+echo "$RESPONSE" > "$TEST_RESULTS_FILE"
+if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.registry_id == "pulse"' >/dev/null; then
+    log_pass "GET /api/v1/registries/{id}/servers - Response has servers array and registry_id"
+else
+    log_fail "GET /api/v1/registries/{id}/servers - Expected server search results" \
+        "jq -e '.success == true and .data.servers != null and .data.registry_id == \"pulse\"' < '$TEST_RESULTS_FILE' >/dev/null"
+fi
+
+# Test 27: Search registry servers with query (Phase 7)
+log_test "GET /api/v1/registries/{id}/servers with query parameter"
+RESPONSE=$(curl -s $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/pulse/servers?q=github&limit=3")
+echo "$RESPONSE" > "$TEST_RESULTS_FILE"
+if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.query == "github"' >/dev/null; then
+    log_pass "GET /api/v1/registries/{id}/servers?q=github - Response has query field"
+else
+    log_fail "GET /api/v1/registries/{id}/servers?q=github - Expected query parameter in response" \
+        "jq -e '.success == true and .data.servers != null and .data.query == \"github\"' < '$TEST_RESULTS_FILE' >/dev/null"
+fi
 
 echo ""
 echo -e "${YELLOW}Test Summary${NC}"
