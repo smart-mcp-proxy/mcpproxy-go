@@ -1,0 +1,72 @@
+{\rtf1\ansi\deff0 {\fonttbl {\f0 Helvetica;}{\f1 Helvetica-Bold;}{\f2 Courier;}}
+{\colortbl;\red0\green0\blue0;\red51\green51\blue51;\red0\green102\blue204;}
+\f1\fs36\cf1 Installation Complete!\line
+\f0\fs24\cf2\line
+MCP Proxy has been successfully installed on your Mac.\line
+\line
+\b\fs28 Getting Started\b0\fs24\line
+\line
+{\b Option 1: System Tray Application (Recommended)}\line
+\f1\bullet\f0  Open {\b Applications} folder and double-click {\b mcpproxy.app}\line
+\f1\bullet\f0  The MCP Proxy icon will appear in your menu bar\line
+\f1\bullet\f0  Click the menu bar icon to manage servers and view status\line
+\f1\bullet\f0  The core server will start automatically when you launch the tray app\line
+\line
+{\b Option 2: Command-Line Interface}\line
+\f1\bullet\f0  Open {\b Terminal}\line
+\f1\bullet\f0  Run: \f2 mcpproxy serve\f0\line
+\f1\bullet\f0  The server will start on {\b http://127.0.0.1:8080} by default\line
+\line
+\b\fs28 Default Configuration\b0\fs24\line
+MCP Proxy runs in {\b HTTP mode} by default - no certificate trust required!\line
+\line
+\f1\bullet\f0  {\b Default endpoint:} http://127.0.0.1:8080\line
+\f1\bullet\f0  {\b Config file:} ~/.mcpproxy/mcp_config.json\line
+\f1\bullet\f0  {\b Data directory:} ~/.mcpproxy/\line
+\f1\bullet\f0  {\b Logs:} ~/Library/Logs/mcpproxy/\line
+\line
+\b\fs28 Optional: Enable HTTPS (Advanced)\b0\fs24\line
+If you need HTTPS for your workflow:\line
+\line
+{\b Step 1: Trust the bundled CA certificate}\line
+\f2 mcpproxy trust-cert\f0\line
+\line
+{\b Step 2: Enable TLS in environment}\line
+\f2 export MCPPROXY_TLS_ENABLED=true\f0\line
+\line
+{\b Step 3: Start server}\line
+\f2 mcpproxy serve\f0\line
+\line
+{\i For Claude Desktop with HTTPS, add to your config:}\line
+\f2 "env": \{\line
+  "NODE_EXTRA_CA_CERTS": "~/.mcpproxy/certs/ca.pem"\line
+\}\f0\line
+\line
+\b\fs28 Useful Commands\b0\fs24\line
+\f2 mcpproxy --help\f0                 # Show all available commands\line
+\f2 mcpproxy upstream list\f0          # List configured MCP servers\line
+\f2 mcpproxy tools search "git"\f0     # Search for tools across servers\line
+\f2 mcpproxy auth status\f0            # Check OAuth authentication status\line
+\line
+\b\fs28 Documentation & Support\b0\fs24\line
+\line
+\f1\bullet\f0  {\b Documentation:} \cf3 https://mcpproxy.app/docs\cf2\line
+\f1\bullet\f0  {\b GitHub Repository:} \cf3 https://github.com/smart-mcp-proxy/mcpproxy-go\cf2\line
+\f1\bullet\f0  {\b Report Issues:} \cf3 https://github.com/smart-mcp-proxy/mcpproxy-go/issues\cf2\line
+\f1\bullet\f0  {\b Release Notes:} \cf3 https://github.com/smart-mcp-proxy/mcpproxy-go/releases\cf2\line
+\line
+\b\fs28 Security & Privacy\b0\fs24\line
+MCP Proxy includes built-in security features:\line
+\line
+\f1\bullet\f0  {\b Automatic Quarantine:} New servers are quarantined until you approve them\line
+\f1\bullet\f0  {\b Localhost Binding:} Server binds to 127.0.0.1 by default (no network exposure)\line
+\f1\bullet\f0  {\b API Key Protection:} Optional authentication for REST API endpoints\line
+\f1\bullet\f0  {\b Docker Isolation:} Run stdio MCP servers in isolated containers\line
+\line
+\line
+{\b Thank you for installing MCP Proxy!}\line
+\line
+We hope MCP Proxy accelerates your AI workflow with faster tool discovery and enhanced security.\line
+\line
+{\i Happy proxying! \'f0\'9f\'9a\'80}\line
+}

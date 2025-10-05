@@ -286,8 +286,13 @@ cat > "$TEMP_DIR/Distribution.xml" << EOF
 </installer-gui-script>
 EOF
 
-# Create welcome RTF
-cat > "$TEMP_DIR/welcome_en.rtf" << 'EOF'
+# Copy RTF files from installer-resources, or create inline as fallback
+if [ -f "scripts/installer-resources/welcome_en.rtf" ]; then
+    echo "Using external welcome_en.rtf from installer-resources/"
+    cp "scripts/installer-resources/welcome_en.rtf" "$TEMP_DIR/welcome_en.rtf"
+else
+    echo "Warning: scripts/installer-resources/welcome_en.rtf not found, using inline fallback"
+    cat > "$TEMP_DIR/welcome_en.rtf" << 'EOF'
 {\rtf1\ansi\deff0 {\fonttbl {\f0 Times New Roman;}}
 \f0\fs28 MCP Proxy Installer.
 \fs24 Welcome to the MCP Proxy installer. This guided setup installs the desktop tray, CLI, and secure proxy that coordinate your AI tools across multiple MCP servers.
@@ -302,9 +307,14 @@ Before continuing, close any running copies of MCP Proxy and make sure you have 
 Click Continue to start installing MCP Proxy.
 }
 EOF
+fi
 
-# Create conclusion RTF
-cat > "$TEMP_DIR/conclusion_en.rtf" << 'EOF'
+if [ -f "scripts/installer-resources/conclusion_en.rtf" ]; then
+    echo "Using external conclusion_en.rtf from installer-resources/"
+    cp "scripts/installer-resources/conclusion_en.rtf" "$TEMP_DIR/conclusion_en.rtf"
+else
+    echo "Warning: scripts/installer-resources/conclusion_en.rtf not found, using inline fallback"
+    cat > "$TEMP_DIR/conclusion_en.rtf" << 'EOF'
 {\rtf1\ansi\deff0 {\fonttbl {\f0 Times New Roman;}}
 \f0\fs28 MCP Proxy Ready.
 \fs24 Installation completed successfully!
@@ -321,6 +331,7 @@ Helpful resources:
 Thank you for installing MCP Proxy—enjoy faster, safer MCP tooling.
 }
 EOF
+fi
 
     # Create product PKG (installer)
     echo "Creating product PKG..."
