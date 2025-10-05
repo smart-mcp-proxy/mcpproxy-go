@@ -14,10 +14,13 @@
             v-model="formData.name"
             placeholder="e.g., my-api-key"
             class="input input-bordered"
+            :class="{ 'input-disabled': !!props.predefinedName }"
+            :readonly="!!props.predefinedName"
             required
           />
           <label class="label">
-            <span class="label-text-alt">Use only letters, numbers, and hyphens</span>
+            <span v-if="!props.predefinedName" class="label-text-alt">Use only letters, numbers, and hyphens</span>
+            <span v-else class="label-text-alt text-info">Name is predefined from config</span>
           </label>
         </div>
 
@@ -71,12 +74,13 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import apiClient from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 
 interface Props {
   show: boolean
+  predefinedName?: string
 }
 
 interface Emits {
@@ -96,6 +100,13 @@ const formData = reactive({
 
 const loading = ref(false)
 const error = ref('')
+
+// Watch for predefinedName changes and set the form name
+watch(() => props.predefinedName, (newName) => {
+  if (newName) {
+    formData.name = newName
+  }
+}, { immediate: true })
 
 async function handleSubmit() {
   error.value = ''
