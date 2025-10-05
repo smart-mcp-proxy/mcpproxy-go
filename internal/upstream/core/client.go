@@ -162,7 +162,8 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 	}
 
 	// Add server-specific environment variables
-	if len(serverConfig.Env) > 0 {
+	// IMPORTANT: Use resolvedServerConfig.Env which has secrets expanded
+	if len(resolvedServerConfig.Env) > 0 {
 		serverEnvConfig := *envConfig
 		if serverEnvConfig.CustomVars == nil {
 			serverEnvConfig.CustomVars = make(map[string]string)
@@ -174,7 +175,7 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 			serverEnvConfig.CustomVars = customVars
 		}
 
-		for k, v := range serverConfig.Env {
+		for k, v := range resolvedServerConfig.Env {
 			serverEnvConfig.CustomVars[k] = v
 		}
 		envConfig = &serverEnvConfig
