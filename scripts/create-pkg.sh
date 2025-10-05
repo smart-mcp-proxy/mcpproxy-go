@@ -106,7 +106,7 @@ cat > "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Info.plist" << EOF
     <key>CFBundleName</key>
     <string>mcpproxy</string>
     <key>CFBundleDisplayName</key>
-    <string>Smart MCP Proxy</string>
+    <string>MCP Proxy</string>
     <key>CFBundleVersion</key>
     <string>${VERSION#v}</string>
     <key>CFBundleShortVersionString</key>
@@ -254,7 +254,7 @@ if [ "$CREATE_PRODUCT_PKG" = "true" ]; then
 cat > "$TEMP_DIR/Distribution.xml" << EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
-    <title>Smart MCP Proxy ${VERSION#v}</title>
+    <title>MCP Proxy ${VERSION#v}</title>
     <organization>com.smartmcpproxy</organization>
     <domains enable_localSystem="true"/>
     <options customize="never" require-scripts="true" rootVolumeOnly="true" />
@@ -289,36 +289,36 @@ EOF
 # Create welcome RTF
 cat > "$TEMP_DIR/welcome_en.rtf" << 'EOF'
 {\rtf1\ansi\deff0 {\fonttbl {\f0 Times New Roman;}}
-\f0\fs24 Welcome to Smart MCP Proxy installer.
+\f0\fs28 MCP Proxy Installer.
+\fs24 Welcome to the MCP Proxy installer. This guided setup installs the desktop tray, CLI, and secure proxy that coordinate your AI tools across multiple MCP servers.
 
-This will install mcpproxy on your computer.
+What this installer sets up:
+• Federated MCP hub so agents can discover dozens of tools without hitting provider limits
+• Security quarantine that keeps untrusted servers isolated until you approve them
+• Local certificate authority to enable HTTPS connections with a single command
 
-Features:
-• CLI tool available in Terminal
-• System tray application
-• Intelligent MCP server proxy
-• Built-in security features
+Before continuing, close any running copies of MCP Proxy and make sure you have administrator privileges.
 
-Click Continue to proceed with the installation.
+Click Continue to start installing MCP Proxy.
 }
 EOF
 
 # Create conclusion RTF
 cat > "$TEMP_DIR/conclusion_en.rtf" << 'EOF'
 {\rtf1\ansi\deff0 {\fonttbl {\f0 Times New Roman;}}
-\f0\fs24 Installation completed successfully!
+\f0\fs28 MCP Proxy Ready.
+\fs24 Installation completed successfully!
 
-Smart MCP Proxy has been installed to your Applications folder.
+Next steps:
+• Launch MCP Proxy from Applications to access the menu bar controls.
+• Run the mcpproxy serve command from Terminal if you prefer the CLI workflow.
+• Enable HTTPS clients later by running mcpproxy trust-cert to trust the bundled certificate.
 
-To get started:
-• Open mcpproxy from Applications
-• Or use 'mcpproxy' command in Terminal
+Helpful resources:
+• Documentation: https://mcpproxy.app/docs
+• GitHub releases & support: https://github.com/smart-mcp-proxy/mcpproxy-go
 
-For HTTPS support (optional):
-• Run: mcpproxy trust-cert
-• Set: export MCPPROXY_TLS_ENABLED=true
-
-Visit https://github.com/smart-mcp-proxy/mcpproxy-go for documentation.
+Thank you for installing MCP Proxy—enjoy faster, safer MCP tooling.
 }
 EOF
 
