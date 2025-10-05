@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -113,21 +114,28 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 	}
 
 	r.logger.Info("Discovering and indexing tools...")
+	r.logger.Debug("DiscoverAndIndexTools: calling upstream manager to discover tools")
 
 	tools, err := r.upstreamManager.DiscoverTools(ctx)
 	if err != nil {
+		r.logger.Error("DiscoverAndIndexTools: failed to discover tools", zap.Error(err))
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}
+
+	r.logger.Debug("DiscoverAndIndexTools: discovered tools from upstream", zap.Int("tool_count", len(tools)))
 
 	if len(tools) == 0 {
 		r.logger.Warn("No tools discovered from upstream servers")
 		return nil
 	}
 
+	r.logger.Debug("DiscoverAndIndexTools: indexing tools", zap.Int("count", len(tools)))
 	if err := r.indexManager.BatchIndexTools(tools); err != nil {
+		r.logger.Error("DiscoverAndIndexTools: failed to index tools", zap.Error(err))
 		return fmt.Errorf("failed to index tools: %w", err)
 	}
 
+	r.logger.Debug("DiscoverAndIndexTools: invalidating tool count caches")
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
@@ -177,10 +185,14 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		storedServerMap[storedServer.Name] = storedServer
 	}
 
-	// Add servers asynchronously without blocking
-	// Each server connects in background, no need to wait for all to complete
+	// Add servers synchronously to avoid deadlock with tool discovery
+	// Wait for all server add/remove operations to complete before returning
+	// This prevents DiscoverAndIndexTools from trying to acquire locks while servers are being modified
 
 	r.logger.Debug("LoadConfiguredServers: starting server sync loop", zap.Int("servers_to_process", len(cfg.Servers)))
+
+	var wg sync.WaitGroup
+
 	for _, serverCfg := range cfg.Servers {
 		r.logger.Debug("LoadConfiguredServers: processing server", zap.String("name", serverCfg.Name), zap.Bool("enabled", serverCfg.Enabled))
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
@@ -209,8 +221,11 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 
 		if serverCfg.Enabled {
 			r.logger.Debug("LoadConfiguredServers: server is enabled, adding to upstream manager", zap.String("name", serverCfg.Name))
-			// Add server asynchronously - connections happen in background
+			// Add server synchronously to avoid lock contention with DiscoverAndIndexTools
+			// The actual connection still happens asynchronously inside AddServer
+			wg.Add(1)
 			go func(cfg *config.ServerConfig, cfgPath string) {
+				defer wg.Done()
 				if err := r.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
 					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
 				} else {
@@ -234,6 +249,11 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		}
 		r.logger.Debug("LoadConfiguredServers: finished processing server", zap.String("name", serverCfg.Name))
 	}
+
+	r.logger.Debug("LoadConfiguredServers: waiting for all server add operations to complete")
+	wg.Wait()
+	r.logger.Debug("LoadConfiguredServers: all server add operations completed")
+
 	r.logger.Debug("LoadConfiguredServers: finished server sync loop")
 
 	serversToRemove := []string{}

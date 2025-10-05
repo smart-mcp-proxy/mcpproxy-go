@@ -90,9 +90,9 @@ func (m *Manager) AddNotificationHandler(handler NotificationHandler) {
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// Check if existing client exists and if config has changed
+	var clientToDisconnect *managed.Client
 	if existingClient, exists := m.clients[id]; exists {
 		existingConfig := existingClient.Config
 
@@ -112,8 +112,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 				zap.String("name", serverConfig.Name),
 				zap.String("current_state", existingClient.GetState().String()),
 				zap.Bool("is_connected", existingClient.IsConnected()))
-			_ = existingClient.Disconnect()
+
+			// Remove from map immediately to prevent new operations
 			delete(m.clients, id)
+			// Save reference to disconnect outside lock
+			clientToDisconnect = existingClient
 		} else {
 			m.logger.Debug("Server configuration unchanged, keeping existing client",
 				zap.String("id", id),
@@ -122,6 +125,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 				zap.Bool("is_connected", existingClient.IsConnected()))
 			// Update the client's config reference to the new config but don't recreate the client
 			existingClient.Config = serverConfig
+			m.mu.Unlock()
 			return nil
 		}
 	}
@@ -129,6 +133,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	// Create new client but don't connect yet
 	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storage, m.secretResolver)
 	if err != nil {
+		m.mu.Unlock()
+		// Disconnect old client if we failed to create new one
+		if clientToDisconnect != nil {
+			_ = clientToDisconnect.Disconnect()
+		}
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
 
@@ -151,6 +160,14 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	m.logger.Info("Added upstream server configuration",
 		zap.String("id", id),
 		zap.String("name", serverConfig.Name))
+
+	// IMPORTANT: Release lock before disconnecting to prevent deadlock
+	m.mu.Unlock()
+
+	// Disconnect old client outside lock to avoid blocking other operations
+	if clientToDisconnect != nil {
+		_ = clientToDisconnect.Disconnect()
+	}
 
 	return nil
 }
@@ -275,11 +292,20 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	m.logger.Debug("DiscoverTools: starting discovery", zap.Int("total_clients", len(m.clients)))
+
 	var allTools []*config.ToolMetadata
 	connectedCount := 0
 
 	for id, client := range m.clients {
+		m.logger.Debug("DiscoverTools: checking client",
+			zap.String("id", id),
+			zap.Bool("enabled", client.Config.Enabled),
+			zap.Bool("connected", client.IsConnected()),
+			zap.String("state", client.GetState().String()))
+
 		if !client.Config.Enabled {
+			m.logger.Debug("DiscoverTools: skipping disabled client", zap.String("id", id))
 			continue
 		}
 		if !client.IsConnected() {
@@ -288,6 +314,7 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 		}
 		connectedCount++
 
+		m.logger.Debug("DiscoverTools: calling ListTools for client", zap.String("id", id))
 		tools, err := client.ListTools(ctx)
 		if err != nil {
 			m.logger.Error("Failed to list tools from client",
@@ -295,6 +322,10 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 				zap.Error(err))
 			continue
 		}
+
+		m.logger.Debug("DiscoverTools: received tools from client",
+			zap.String("id", id),
+			zap.Int("tool_count", len(tools)))
 
 		if tools != nil {
 			allTools = append(allTools, tools...)
@@ -310,6 +341,10 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 
 // CallTool calls a tool on the appropriate upstream server
 func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+	m.logger.Debug("CallTool: starting",
+		zap.String("tool_name", toolName),
+		zap.Any("args", args))
+
 	// Parse tool name to extract server and tool components
 	parts := strings.SplitN(toolName, ":", 2)
 	if len(parts) != 2 {
@@ -319,8 +354,16 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	serverName := parts[0]
 	actualToolName := parts[1]
 
+	m.logger.Debug("CallTool: parsed tool name",
+		zap.String("server_name", serverName),
+		zap.String("actual_tool_name", actualToolName))
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	m.logger.Debug("CallTool: acquired read lock, searching for client",
+		zap.String("server_name", serverName),
+		zap.Int("total_clients", len(m.clients)))
 
 	// Find the client for this server
 	var targetClient *managed.Client
@@ -332,8 +375,16 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	}
 
 	if targetClient == nil {
+		m.logger.Error("CallTool: no client found",
+			zap.String("server_name", serverName))
 		return nil, fmt.Errorf("no client found for server: %s", serverName)
 	}
+
+	m.logger.Debug("CallTool: client found",
+		zap.String("server_name", serverName),
+		zap.Bool("enabled", targetClient.Config.Enabled),
+		zap.Bool("connected", targetClient.IsConnected()),
+		zap.String("state", targetClient.GetState().String()))
 
 	if !targetClient.Config.Enabled {
 		return nil, fmt.Errorf("client for server %s is disabled", serverName)
@@ -366,8 +417,18 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, fmt.Errorf("server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 	}
 
+	m.logger.Debug("CallTool: calling client.CallTool",
+		zap.String("server_name", serverName),
+		zap.String("actual_tool_name", actualToolName))
+
 	// Call the tool on the upstream server with enhanced error handling
 	result, err := targetClient.CallTool(ctx, actualToolName, args)
+
+	m.logger.Debug("CallTool: client.CallTool returned",
+		zap.String("server_name", serverName),
+		zap.String("actual_tool_name", actualToolName),
+		zap.Error(err),
+		zap.Bool("has_result", result != nil))
 	if err != nil {
 		// Enrich errors at source with server context
 		errStr := err.Error()

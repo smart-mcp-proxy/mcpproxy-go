@@ -1,279 +1,322 @@
 <template>
-  <div class="secrets-page">
-    <div class="page-header">
-      <h1 class="page-title">Secrets & Environment Variables</h1>
-      <p class="page-description">
-        Manage secrets stored in your system's secure keyring and environment variables referenced in your configuration.
-      </p>
+  <div class="space-y-6">
+    <!-- Page Header -->
+    <div class="flex justify-between items-center">
+      <div>
+        <h1 class="text-3xl font-bold">Secrets & Environment Variables</h1>
+        <p class="text-base-content/70 mt-1">Manage secrets stored in your system's secure keyring and environment variables</p>
+      </div>
+      <div class="flex items-center space-x-2">
+        <button
+          @click="refreshSecrets"
+          :disabled="loading"
+          class="btn btn-outline"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          <span v-if="loading" class="loading loading-spinner loading-sm"></span>
+          {{ loading ? 'Refreshing...' : 'Refresh' }}
+        </button>
+        <button @click="showAddModal = true" class="btn btn-primary">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+          </svg>
+          Add Secret
+        </button>
+      </div>
+    </div>
+
+    <!-- Summary Stats -->
+    <div class="stats shadow bg-base-100 w-full">
+      <div class="stat">
+        <div class="stat-title">Keyring Secrets</div>
+        <div class="stat-value">{{ configSecrets?.total_secrets || 0 }}</div>
+        <div class="stat-desc">Stored in system keyring</div>
+      </div>
+
+      <div class="stat">
+        <div class="stat-title">Environment Variables</div>
+        <div class="stat-value text-info">{{ configSecrets?.total_env_vars || 0 }}</div>
+        <div class="stat-desc">Referenced in config</div>
+      </div>
+
+      <div class="stat">
+        <div class="stat-title">Missing Env Vars</div>
+        <div class="stat-value text-warning">{{ missingEnvVars }}</div>
+        <div class="stat-desc">Need to be set</div>
+      </div>
+
+      <div class="stat">
+        <div class="stat-title">Migration Candidates</div>
+        <div class="stat-value text-error">{{ migrationCandidates.length }}</div>
+        <div class="stat-desc">Potential secrets to secure</div>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="flex flex-wrap gap-4 items-center justify-between">
+      <div class="flex flex-wrap gap-2">
+        <button
+          @click="filter = 'all'"
+          :class="['btn btn-sm', filter === 'all' ? 'btn-primary' : 'btn-outline']"
+        >
+          All ({{ totalItems }})
+        </button>
+        <button
+          @click="filter = 'secrets'"
+          :class="['btn btn-sm', filter === 'secrets' ? 'btn-primary' : 'btn-outline']"
+        >
+          Keyring Secrets ({{ configSecrets?.total_secrets || 0 }})
+        </button>
+        <button
+          @click="filter = 'envs'"
+          :class="['btn btn-sm', filter === 'envs' ? 'btn-primary' : 'btn-outline']"
+        >
+          Environment Variables ({{ configSecrets?.total_env_vars || 0 }})
+        </button>
+        <button
+          @click="filter = 'missing'"
+          :class="['btn btn-sm', filter === 'missing' ? 'btn-primary' : 'btn-outline']"
+        >
+          Missing ({{ missingEnvVars }})
+        </button>
+      </div>
+
+      <div class="form-control">
+        <input
+          v-model="searchQuery"
+          type="text"
+          placeholder="Search secrets..."
+          class="input input-bordered input-sm w-64"
+        />
+      </div>
     </div>
 
     <!-- Loading State -->
-    <div v-if="loading" class="loading-state">
-      <div class="spinner"></div>
-      <p>Loading secrets...</p>
+    <div v-if="loading" class="text-center py-12">
+      <span class="loading loading-spinner loading-lg"></span>
+      <p class="mt-4">Loading secrets...</p>
     </div>
 
     <!-- Error State -->
-    <div v-else-if="error" class="error-state">
-      <div class="error-icon">⚠️</div>
-      <h3>Error Loading Secrets</h3>
-      <p>{{ error }}</p>
-      <button @click="loadSecrets" class="retry-button">Retry</button>
+    <div v-else-if="error" class="alert alert-error">
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <div>
+        <h3 class="font-bold">Failed to load secrets</h3>
+        <div class="text-sm">{{ error }}</div>
+      </div>
+      <button @click="refreshSecrets" class="btn btn-sm">
+        Try Again
+      </button>
     </div>
 
-    <!-- Main Content -->
-    <div v-else class="secrets-content">
-      <!-- Statistics -->
-      <div class="stats-section">
-        <div class="stat-card">
-          <div class="stat-number">{{ configSecrets?.total_secrets || 0 }}</div>
-          <div class="stat-label">Keyring Secrets</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-number">{{ configSecrets?.total_env_vars || 0 }}</div>
-          <div class="stat-label">Environment Variables</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-number">{{ missingEnvVars }}</div>
-          <div class="stat-label">Missing Env Vars</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-number">{{ migrationCandidates.length }}</div>
-          <div class="stat-label">Migration Candidates</div>
-        </div>
-      </div>
+    <!-- Empty State -->
+    <div v-else-if="filteredItems.length === 0" class="text-center py-12">
+      <svg class="w-24 h-24 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+      <h3 class="text-xl font-semibold mb-2">No secrets found</h3>
+      <p class="text-base-content/70 mb-4">
+        {{ searchQuery ? 'No secrets match your search criteria' : `No ${filter === 'all' ? '' : filter} secrets available`.replace(/\s+/g, ' ').trim() }}
+      </p>
+      <button v-if="searchQuery" @click="searchQuery = ''" class="btn btn-outline">
+        Clear Search
+      </button>
+    </div>
 
-      <!-- Actions Bar -->
-      <div class="actions-bar">
-        <button @click="loadConfigSecrets" class="btn btn-outline">
-          🔄 Refresh
-        </button>
-        <button @click="runMigrationAnalysis" class="btn btn-outline" :disabled="analysisLoading">
-          🔍 {{ analysisLoading ? 'Analyzing...' : 'Analyze Configuration' }}
-        </button>
-        <button @click="showAddSecretForm = !showAddSecretForm" class="btn btn-primary">
-          {{ showAddSecretForm ? '✕ Cancel' : '➕ Add Secret' }}
-        </button>
-      </div>
-
-      <!-- Add Secret Form -->
-      <div v-if="showAddSecretForm" class="add-secret-form">
-        <h3>Add New Secret</h3>
-        <form @submit.prevent="addSecret">
-          <div class="form-row">
-            <div class="form-group">
-              <label for="secret-name">Secret Name</label>
-              <input
-                id="secret-name"
-                v-model="newSecret.name"
-                type="text"
-                placeholder="e.g. my-api-key"
-                required
-                class="form-input"
-              />
-              <small class="form-hint">Use only letters, numbers, and hyphens</small>
-            </div>
-            <div class="form-group">
-              <label for="secret-value">Secret Value</label>
-              <input
-                id="secret-value"
-                v-model="newSecret.value"
-                type="password"
-                placeholder="Enter secret value"
-                required
-                class="form-input"
-              />
-            </div>
-          </div>
-          <div class="form-actions">
-            <button
-              type="submit"
-              class="btn btn-primary"
-              :disabled="addingSecret || !newSecret.name || !newSecret.value"
-            >
-              {{ addingSecret ? 'Adding...' : 'Add Secret' }}
-            </button>
-            <button type="button" @click="cancelAddSecret" class="btn btn-outline">
-              Cancel
-            </button>
-          </div>
-          <div class="form-preview" v-if="newSecret.name">
-            <strong>Configuration reference:</strong>
-            <code>${keyring:{{ newSecret.name }}}</code>
-          </div>
-        </form>
-      </div>
-
-      <!-- Tabs -->
-      <div class="tabs-container">
-        <div class="tabs-header">
-          <button
-            @click="activeTab = 'secrets'"
-            :class="['tab-button', { active: activeTab === 'secrets' }]"
-          >
-            Secrets ({{ configSecrets?.total_secrets || 0 }})
-          </button>
-          <button
-            @click="activeTab = 'envs'"
-            :class="['tab-button', { active: activeTab === 'envs' }]"
-          >
-            Environment Variables ({{ configSecrets?.total_env_vars || 0 }})
-          </button>
-        </div>
-
-        <div class="tabs-content">
-          <!-- Secrets Tab -->
-          <div v-if="activeTab === 'secrets'" class="tab-panel">
-            <div class="section">
-              <h2 class="section-title">Keyring Secrets Referenced in Configuration</h2>
-              <div v-if="!configSecrets?.secrets || configSecrets.secrets.length === 0" class="empty-state">
-                <div class="empty-icon">🔐</div>
-                <h3>No Keyring Secrets Referenced</h3>
-                <p>No keyring secret references are currently used in your configuration.</p>
-                <p>Use the form below to store secrets or use the CLI: <code>mcpproxy secrets set &lt;name&gt;</code></p>
-                <p>Then reference them in config: <code>${keyring:name}</code></p>
-              </div>
-              <div v-else class="secrets-list">
-                <div v-for="ref in configSecrets.secrets" :key="ref.name" class="secret-item">
-                  <div class="secret-info">
-                    <div class="secret-name">{{ ref.name }}</div>
-                    <div class="secret-type">{{ ref.type }}</div>
-                    <div class="secret-ref">{{ ref.original }}</div>
-                  </div>
-                  <div class="secret-actions">
-                    <button @click="testSecret(ref)" class="btn btn-sm btn-outline">Test</button>
-                    <button @click="deleteSecret(ref)" class="btn btn-sm btn-outline">Delete</button>
-                  </div>
-                </div>
+    <!-- Secrets List -->
+    <div v-else class="space-y-4">
+      <!-- Keyring Secrets -->
+      <div v-for="secret in filteredSecrets" :key="secret.name" class="card bg-base-100 shadow">
+        <div class="card-body">
+          <div class="flex justify-between items-start">
+            <div class="flex-1">
+              <h3 class="card-title text-lg">{{ secret.name }}</h3>
+              <div class="flex items-center gap-2 mt-2">
+                <span class="badge badge-primary">Keyring</span>
+                <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ secret.original }}</code>
               </div>
             </div>
-          </div>
-
-          <!-- Environment Variables Tab -->
-          <div v-if="activeTab === 'envs'" class="tab-panel">
-            <div class="section">
-              <h2 class="section-title">Environment Variables Referenced in Configuration</h2>
-              <div v-if="!configSecrets?.environment_vars?.length" class="empty-state">
-                <div class="empty-icon">🌍</div>
-                <h3>No Environment Variables Referenced</h3>
-                <p>No environment variables are currently referenced in your configuration.</p>
-                <p>Reference them in config: <code>${env:VARIABLE_NAME}</code></p>
-              </div>
-              <div v-else class="env-vars-list">
-                <div v-for="envVar in configSecrets.environment_vars" :key="envVar.secret_ref.name" class="env-var-item" :class="{ 'missing': !envVar.is_set }">
-                  <div class="env-var-info">
-                    <div class="env-var-name">{{ envVar.secret_ref.name }}</div>
-                    <div class="env-var-status">
-                      <span v-if="envVar.is_set" class="status-badge set">✅ Set</span>
-                      <span v-else class="status-badge missing">❌ Missing</span>
-                    </div>
-                    <div class="env-var-ref">{{ envVar.secret_ref.original }}</div>
-                  </div>
-                  <div class="env-var-actions">
-                    <button @click="testEnvVar(envVar)" class="btn btn-sm btn-outline">Test</button>
-                    <button v-if="!envVar.is_set" @click="setEnvVarHelp(envVar)" class="btn btn-sm btn-warning">Help</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Migration Candidates -->
-      <div v-if="migrationCandidates.length > 0" class="section">
-        <h2 class="section-title">
-          Migration Candidates
-          <span class="confidence-legend">
-            <span class="confidence-item">
-              <span class="confidence-dot high"></span>High Confidence
-            </span>
-            <span class="confidence-item">
-              <span class="confidence-dot medium"></span>Medium Confidence
-            </span>
-            <span class="confidence-item">
-              <span class="confidence-dot low"></span>Low Confidence
-            </span>
-          </span>
-        </h2>
-        <p class="section-description">
-          These configuration values appear to be secrets that could be migrated to secure storage.
-        </p>
-        <div class="migration-list">
-          <div
-            v-for="(candidate, index) in migrationCandidates"
-            :key="index"
-            class="migration-item"
-            :class="getConfidenceClass(candidate.confidence)"
-          >
-            <div class="migration-info">
-              <div class="migration-field">{{ candidate.field }}</div>
-              <div class="migration-value">{{ candidate.value }}</div>
-              <div class="migration-suggestion">
-                Suggested: <code>{{ candidate.suggested }}</code>
-              </div>
-              <div class="migration-confidence">
-                Confidence: {{ Math.round(candidate.confidence * 100) }}%
-              </div>
-            </div>
-            <div class="migration-actions">
-              <button
-                @click="migrateSecret(candidate)"
-                class="btn btn-sm btn-primary"
-                :disabled="candidate.migrating"
-              >
-                {{ candidate.migrating ? 'Migrating...' : 'Store in Keychain' }}
+            <div class="flex gap-2">
+              <button @click="testSecret(secret)" class="btn btn-sm btn-outline">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Test
+              </button>
+              <button @click="deleteSecret(secret)" class="btn btn-sm btn-error btn-outline">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                Delete
               </button>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Help Section -->
-      <div class="section help-section">
-        <h2 class="section-title">How to Use Secrets</h2>
-        <div class="help-content">
-          <div class="help-item">
-            <h4>Store a Secret</h4>
-            <p>Use the CLI to store secrets securely:</p>
-            <code>mcpproxy secrets set my-api-key</code>
-          </div>
-          <div class="help-item">
-            <h4>Use in Configuration</h4>
-            <p>Reference secrets in your config using the format:</p>
-            <code>${keyring:my-api-key}</code>
-          </div>
-          <div class="help-item">
-            <h4>Environment Variables</h4>
-            <p>You can also reference environment variables:</p>
-            <code>${env:MY_API_KEY}</code>
+      <!-- Environment Variables -->
+      <div v-for="envVar in filteredEnvVars" :key="envVar.secret_ref.name" class="card bg-base-100 shadow" :class="{ 'border-l-4 border-error': !envVar.is_set }">
+        <div class="card-body">
+          <div class="flex justify-between items-start">
+            <div class="flex-1">
+              <h3 class="card-title text-lg">{{ envVar.secret_ref.name }}</h3>
+              <div class="flex items-center gap-2 mt-2">
+                <span class="badge badge-info">Environment Variable</span>
+                <span v-if="envVar.is_set" class="badge badge-success">✓ Set</span>
+                <span v-else class="badge badge-error">✗ Missing</span>
+                <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ envVar.secret_ref.original }}</code>
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <button @click="testEnvVar(envVar)" class="btn btn-sm btn-outline">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Test
+              </button>
+              <button v-if="!envVar.is_set" @click="setEnvVarHelp(envVar)" class="btn btn-sm btn-warning btn-outline">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Help
+              </button>
+            </div>
           </div>
         </div>
       </div>
     </div>
+
+    <!-- Migration Candidates Section -->
+    <div v-if="migrationCandidates.length > 0" class="card bg-base-100 shadow">
+      <div class="card-body">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="card-title">Migration Candidates</h2>
+          <button @click="runMigrationAnalysis" class="btn btn-sm btn-outline" :disabled="analysisLoading">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            {{ analysisLoading ? 'Analyzing...' : 'Re-analyze' }}
+          </button>
+        </div>
+        <p class="text-sm text-base-content/70 mb-4">
+          These configuration values appear to be secrets that could be migrated to secure storage.
+        </p>
+        <div class="space-y-3">
+          <div
+            v-for="(candidate, index) in migrationCandidates"
+            :key="index"
+            class="alert"
+            :class="{
+              'alert-success': candidate.confidence >= 0.8,
+              'alert-warning': candidate.confidence >= 0.6 && candidate.confidence < 0.8,
+              'alert-error': candidate.confidence < 0.6
+            }"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div class="flex-1">
+              <div class="font-bold">{{ candidate.field }}</div>
+              <div class="text-sm opacity-70">{{ candidate.value }}</div>
+              <div class="text-sm mt-1">
+                Suggested: <code class="bg-base-200 px-2 py-1 rounded">{{ candidate.suggested }}</code>
+                <span class="ml-2 opacity-60">({{ Math.round(candidate.confidence * 100) }}% confidence)</span>
+              </div>
+            </div>
+            <button
+              @click="migrateSecret(candidate)"
+              class="btn btn-sm btn-primary"
+              :disabled="candidate.migrating"
+            >
+              {{ candidate.migrating ? 'Migrating...' : 'Store in Keychain' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="secretsHints" />
+
+    <!-- Add Secret Modal -->
+    <AddSecretModal
+      :show="showAddModal"
+      @close="showAddModal = false"
+      @added="handleSecretAdded"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import apiClient from '@/services/api'
-import type { SecretRef, MigrationCandidate, MigrationAnalysis, ConfigSecretsResponse, EnvVarStatus } from '@/types'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import AddSecretModal from '@/components/AddSecretModal.vue'
+import { useSystemStore } from '@/stores/system'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
+import type { SecretRef, MigrationCandidate, ConfigSecretsResponse, EnvVarStatus } from '@/types'
+
+const systemStore = useSystemStore()
 
 const loading = ref(true)
 const error = ref<string | null>(null)
 const configSecrets = ref<ConfigSecretsResponse | null>(null)
 const migrationCandidates = ref<MigrationCandidate[]>([])
 const analysisLoading = ref(false)
-const activeTab = ref('secrets')
-const showAddSecretForm = ref(false)
-const addingSecret = ref(false)
-const newSecret = ref({
-  name: '',
-  value: ''
-})
+const filter = ref<'all' | 'secrets' | 'envs' | 'missing'>('all')
+const searchQuery = ref('')
+const showAddModal = ref(false)
 
 const missingEnvVars = computed(() => {
   return configSecrets.value?.environment_vars?.filter(env => !env.is_set).length || 0
+})
+
+const totalItems = computed(() => {
+  return (configSecrets.value?.total_secrets || 0) + (configSecrets.value?.total_env_vars || 0)
+})
+
+const filteredSecrets = computed(() => {
+  if (filter.value === 'envs' || filter.value === 'missing') return []
+
+  let secrets = configSecrets.value?.secrets || []
+
+  if (searchQuery.value) {
+    const query = searchQuery.value.toLowerCase()
+    secrets = secrets.filter(s =>
+      s.name.toLowerCase().includes(query) ||
+      s.original.toLowerCase().includes(query)
+    )
+  }
+
+  return secrets
+})
+
+const filteredEnvVars = computed(() => {
+  if (filter.value === 'secrets') return []
+
+  let envVars = configSecrets.value?.environment_vars || []
+
+  if (filter.value === 'missing') {
+    envVars = envVars.filter(e => !e.is_set)
+  }
+
+  if (searchQuery.value) {
+    const query = searchQuery.value.toLowerCase()
+    envVars = envVars.filter(e =>
+      e.secret_ref.name.toLowerCase().includes(query) ||
+      e.secret_ref.original.toLowerCase().includes(query)
+    )
+  }
+
+  return envVars
+})
+
+const filteredItems = computed(() => {
+  return [...filteredSecrets.value, ...filteredEnvVars.value]
 })
 
 const loadConfigSecrets = async () => {
@@ -282,10 +325,8 @@ const loadConfigSecrets = async () => {
 
   try {
     const response = await apiClient.getConfigSecrets()
-    console.log('Config secrets response:', response) // Debug log
     if (response.success && response.data) {
       configSecrets.value = response.data
-      console.log('Loaded config secrets:', configSecrets.value) // Debug log
     } else {
       error.value = response.error || 'Failed to load config secrets'
     }
@@ -297,7 +338,7 @@ const loadConfigSecrets = async () => {
   }
 }
 
-const loadSecrets = loadConfigSecrets // Alias for compatibility
+const refreshSecrets = loadConfigSecrets
 
 const runMigrationAnalysis = async () => {
   analysisLoading.value = true
@@ -306,6 +347,12 @@ const runMigrationAnalysis = async () => {
     const response = await apiClient.runMigrationAnalysis()
     if (response.success && response.data) {
       migrationCandidates.value = response.data.analysis.candidates || []
+
+      systemStore.addToast({
+        type: 'success',
+        title: 'Analysis Complete',
+        message: `Found ${migrationCandidates.value.length} migration candidates`
+      })
     } else {
       error.value = response.error || 'Failed to run migration analysis'
     }
@@ -318,44 +365,11 @@ const runMigrationAnalysis = async () => {
 }
 
 const testSecret = async (ref: SecretRef) => {
-  // For security, we don't actually retrieve the secret value
-  // Just confirm it exists
-  alert(`Secret "${ref.name}" is available in ${ref.type}`)
-}
-
-const addSecret = async () => {
-  if (!newSecret.value.name || !newSecret.value.value) {
-    return
-  }
-
-  addingSecret.value = true
-
-  try {
-    const response = await apiClient.setSecret(newSecret.value.name, newSecret.value.value)
-    if (response.success) {
-      // Show success message
-      alert(`Secret "${newSecret.value.name}" added successfully!\nUse in config: ${response.data?.reference}`)
-
-      // Reset form and hide it
-      cancelAddSecret()
-
-      // Reload secrets to show the new one
-      await loadConfigSecrets()
-    } else {
-      alert('Failed to add secret: ' + (response.error || 'Unknown error'))
-    }
-  } catch (err: any) {
-    alert('Failed to add secret: ' + err.message)
-    console.error('Failed to add secret:', err)
-  } finally {
-    addingSecret.value = false
-  }
-}
-
-const cancelAddSecret = () => {
-  showAddSecretForm.value = false
-  newSecret.value.name = ''
-  newSecret.value.value = ''
+  systemStore.addToast({
+    type: 'info',
+    title: 'Secret Available',
+    message: `Secret "${ref.name}" is available in ${ref.type}`
+  })
 }
 
 const deleteSecret = async (ref: SecretRef) => {
@@ -366,15 +380,26 @@ const deleteSecret = async (ref: SecretRef) => {
   try {
     const response = await apiClient.deleteSecret(ref.name, ref.type)
     if (response.success) {
-      alert(`Secret "${ref.name}" deleted successfully!`)
-      // Reload secrets to update the list
+      systemStore.addToast({
+        type: 'success',
+        title: 'Secret Deleted',
+        message: `Secret "${ref.name}" deleted successfully`
+      })
+
       await loadConfigSecrets()
     } else {
-      alert('Failed to delete secret: ' + (response.error || 'Unknown error'))
+      systemStore.addToast({
+        type: 'error',
+        title: 'Delete Failed',
+        message: response.error || 'Failed to delete secret'
+      })
     }
   } catch (err: any) {
-    alert('Failed to delete secret: ' + err.message)
-    console.error('Failed to delete secret:', err)
+    systemStore.addToast({
+      type: 'error',
+      title: 'Delete Failed',
+      message: err.message || 'Failed to delete secret'
+    })
   }
 }
 
@@ -382,7 +407,6 @@ const migrateSecret = async (candidate: MigrationCandidate) => {
   candidate.migrating = true
 
   try {
-    // This would extract the secret name from the suggested reference
     const match = candidate.suggested.match(/\$\{keyring:([^}]+)\}/)
     if (!match) {
       throw new Error('Invalid suggested reference format')
@@ -390,561 +414,114 @@ const migrateSecret = async (candidate: MigrationCandidate) => {
 
     const secretName = match[1]
 
-    // For now, show instructions since we can't securely transfer the value via web UI
-    alert(`To migrate this secret:
-1. Run: mcpproxy secrets set ${secretName}
-2. Enter the value when prompted
-3. Update your configuration to use: ${candidate.suggested}`)
-
+    systemStore.addToast({
+      type: 'info',
+      title: 'Migration Instructions',
+      message: `Run: mcpproxy secrets set ${secretName}\nThen update config to use: ${candidate.suggested}`
+    })
   } catch (err: any) {
-    alert('Migration failed: ' + err.message)
+    systemStore.addToast({
+      type: 'error',
+      title: 'Migration Failed',
+      message: err.message
+    })
   } finally {
     candidate.migrating = false
   }
 }
 
-const getConfidenceClass = (confidence: number): string => {
-  if (confidence >= 0.8) return 'high-confidence'
-  if (confidence >= 0.6) return 'medium-confidence'
-  return 'low-confidence'
-}
-
 const testEnvVar = async (envVar: EnvVarStatus) => {
-  if (envVar.is_set) {
-    alert(`Environment variable "${envVar.secret_ref.name}" is set`)
-  } else {
-    alert(`Environment variable "${envVar.secret_ref.name}" is NOT set`)
-  }
+  systemStore.addToast({
+    type: envVar.is_set ? 'success' : 'warning',
+    title: `Environment Variable ${envVar.is_set ? 'Set' : 'Missing'}`,
+    message: `"${envVar.secret_ref.name}" is ${envVar.is_set ? 'set' : 'NOT set'}`
+  })
 }
 
 const setEnvVarHelp = async (envVar: EnvVarStatus) => {
-  const instructions = `To set the environment variable "${envVar.secret_ref.name}":
+  const instructions = `To set "${envVar.secret_ref.name}":\n\nmacOS/Linux: export ${envVar.secret_ref.name}="your-value"\nWindows (PS): $env:${envVar.secret_ref.name}="your-value"\nWindows (CMD): set ${envVar.secret_ref.name}=your-value`
 
-On macOS/Linux:
-export ${envVar.secret_ref.name}="your-value"
-
-On Windows (PowerShell):
-$env:${envVar.secret_ref.name}="your-value"
-
-On Windows (CMD):
-set ${envVar.secret_ref.name}=your-value
-
-To make it permanent, add it to your shell profile or use your system's environment variable settings.`
-
-  alert(instructions)
+  systemStore.addToast({
+    type: 'info',
+    title: 'Set Environment Variable',
+    message: instructions
+  })
 }
+
+const handleSecretAdded = async () => {
+  await loadConfigSecrets()
+}
+
+// Secrets hints
+const secretsHints = computed<Hint[]>(() => {
+  return [
+    {
+      icon: '🔐',
+      title: 'Store Secrets Securely',
+      description: 'Use the system keyring to store sensitive values',
+      sections: [
+        {
+          title: 'Add a secret via CLI',
+          codeBlock: {
+            language: 'bash',
+            code: `# Store a secret in system keyring\nmcpproxy secrets set my-api-key`
+          }
+        },
+        {
+          title: 'Add a secret via Web UI',
+          text: 'Click the "Add Secret" button above to add secrets through the web interface'
+        },
+        {
+          title: 'Use in configuration',
+          codeBlock: {
+            language: 'json',
+            code: `{\n  "env": {\n    "API_KEY": "\${keyring:my-api-key}"\n  }\n}`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🌍',
+      title: 'Environment Variables',
+      description: 'Reference environment variables in your configuration',
+      sections: [
+        {
+          title: 'Use environment variables',
+          codeBlock: {
+            language: 'json',
+            code: `{\n  "env": {\n    "API_KEY": "\${env:MY_API_KEY}"\n  }\n}`
+          }
+        },
+        {
+          title: 'Set environment variables',
+          codeBlock: {
+            language: 'bash',
+            code: `# macOS/Linux\nexport MY_API_KEY="your-value"\n\n# Windows PowerShell\n$env:MY_API_KEY="your-value"`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🔄',
+      title: 'Migrate Existing Secrets',
+      description: 'Find and migrate hardcoded secrets to secure storage',
+      sections: [
+        {
+          title: 'Run migration analysis',
+          text: 'MCPProxy can scan your configuration and identify potential secrets that should be moved to secure storage. Click the "Analyze Configuration" button to find migration candidates.'
+        },
+        {
+          title: 'Automatic detection',
+          text: 'The analyzer looks for patterns like API keys, tokens, passwords, and other sensitive values that might be hardcoded in your configuration.'
+        }
+      ]
+    }
+  ]
+})
 
 onMounted(async () => {
   // Give the API service time to initialize the API key from URL params
   await new Promise(resolve => setTimeout(resolve, 100))
-
-  // Debug: Check if API key is available
-  console.log('API key available on secrets mount:', apiClient.hasAPIKey(), apiClient.getAPIKeyPreview())
-
   loadConfigSecrets()
 })
 </script>
-
-<style scoped>
-.secrets-page {
-  padding: 1.5rem;
-  max-width: 1200px;
-  margin: 0 auto;
-}
-
-.page-header {
-  margin-bottom: 2rem;
-}
-
-.page-title {
-  font-size: 2rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0 0 0.5rem 0;
-}
-
-.page-description {
-  color: var(--text-secondary);
-  margin: 0;
-}
-
-.loading-state, .error-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 200px;
-  text-align: center;
-}
-
-.spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--border-color);
-  border-top: 3px solid var(--primary-color);
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-  margin-bottom: 1rem;
-}
-
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-
-.error-icon {
-  font-size: 3rem;
-  margin-bottom: 1rem;
-}
-
-.retry-button {
-  background: var(--primary-color);
-  color: white;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: 4px;
-  cursor: pointer;
-  margin-top: 1rem;
-}
-
-.stats-section {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1rem;
-  margin-bottom: 2rem;
-}
-
-.stat-card {
-  background: var(--card-background);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 1.5rem;
-  text-align: center;
-}
-
-.stat-number {
-  font-size: 2rem;
-  font-weight: 600;
-  color: var(--primary-color);
-  margin-bottom: 0.5rem;
-}
-
-.stat-label {
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-}
-
-.actions-bar {
-  display: flex;
-  gap: 1rem;
-  margin-bottom: 2rem;
-}
-
-.action-button {
-  background: var(--primary-color);
-  color: white;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.action-button:hover {
-  background: var(--primary-color-dark);
-}
-
-.action-button.secondary {
-  background: var(--card-background);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
-}
-
-.action-button.secondary:hover {
-  background: var(--hover-color);
-}
-
-.action-button.small {
-  padding: 0.25rem 0.5rem;
-  font-size: 0.875rem;
-}
-
-.action-button.danger {
-  background: var(--error-color);
-}
-
-.action-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.section {
-  margin-bottom: 3rem;
-}
-
-.section-title {
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0 0 0.5rem 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.section-description {
-  color: var(--text-secondary);
-  margin: 0 0 1rem 0;
-}
-
-.confidence-legend {
-  display: flex;
-  gap: 1rem;
-  font-size: 0.875rem;
-  font-weight: normal;
-}
-
-.confidence-item {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-.confidence-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.confidence-dot.high { background: #10b981; }
-.confidence-dot.medium { background: #f59e0b; }
-.confidence-dot.low { background: #ef4444; }
-
-.empty-state {
-  text-align: center;
-  padding: 3rem 1rem;
-  color: var(--text-secondary);
-}
-
-.empty-icon {
-  font-size: 3rem;
-  margin-bottom: 1rem;
-}
-
-.secrets-list, .migration-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.secret-item, .migration-item {
-  background: var(--card-background);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 1rem;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-}
-
-.migration-item.high-confidence {
-  border-left: 4px solid #10b981;
-}
-
-.migration-item.medium-confidence {
-  border-left: 4px solid #f59e0b;
-}
-
-.migration-item.low-confidence {
-  border-left: 4px solid #ef4444;
-}
-
-/* Tabs */
-.tabs-container {
-  margin-top: 2rem;
-}
-
-.tabs-header {
-  display: flex;
-  border-bottom: 2px solid var(--border-color);
-  margin-bottom: 1.5rem;
-}
-
-.tab-button {
-  background: none;
-  border: none;
-  padding: 1rem 1.5rem;
-  font-size: 1rem;
-  color: var(--text-secondary);
-  cursor: pointer;
-  border-bottom: 3px solid transparent;
-  transition: all 0.2s;
-}
-
-.tab-button:hover {
-  color: var(--text-primary);
-  background: var(--hover-color);
-}
-
-.tab-button.active {
-  color: var(--primary-color);
-  border-bottom-color: var(--primary-color);
-  font-weight: 600;
-}
-
-.tab-panel {
-  min-height: 300px;
-}
-
-/* Environment Variables */
-.env-vars-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.env-var-item {
-  background: var(--card-background);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 1rem;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-}
-
-.env-var-item.missing {
-  border-left: 4px solid #ef4444;
-  background: #fef2f2;
-}
-
-.env-var-info {
-  flex: 1;
-}
-
-.env-var-name {
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 0.5rem;
-}
-
-.env-var-status {
-  margin-bottom: 0.5rem;
-}
-
-.status-badge {
-  padding: 0.25rem 0.75rem;
-  border-radius: 12px;
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.status-badge.set {
-  background: #d1fae5;
-  color: #065f46;
-}
-
-.status-badge.missing {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-.env-var-ref {
-  font-family: 'Courier New', monospace;
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-}
-
-.env-var-actions {
-  display: flex;
-  gap: 0.5rem;
-  margin-left: 1rem;
-}
-
-.action-button.warning {
-  background: #f59e0b;
-  color: white;
-}
-
-.secret-info, .migration-info {
-  flex: 1;
-}
-
-.secret-name, .migration-field {
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 0.25rem;
-}
-
-.secret-type {
-  background: var(--tag-background);
-  color: var(--tag-text);
-  padding: 0.125rem 0.5rem;
-  border-radius: 12px;
-  font-size: 0.75rem;
-  display: inline-block;
-  margin-bottom: 0.25rem;
-}
-
-.secret-ref, .migration-value, .migration-suggestion {
-  font-family: 'Courier New', monospace;
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-  margin-bottom: 0.25rem;
-}
-
-.migration-confidence {
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-}
-
-.secret-actions, .migration-actions {
-  display: flex;
-  gap: 0.5rem;
-  margin-left: 1rem;
-}
-
-.help-section {
-  background: var(--card-background);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 1.5rem;
-}
-
-.help-content {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 1.5rem;
-}
-
-.help-item h4 {
-  margin: 0 0 0.5rem 0;
-  color: var(--text-primary);
-}
-
-.help-item p {
-  margin: 0 0 0.5rem 0;
-  color: var(--text-secondary);
-}
-
-.help-item code {
-  background: var(--code-background);
-  color: var(--code-text);
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  font-family: 'Courier New', monospace;
-  font-size: 0.875rem;
-}
-
-/* Add Secret Form Styles */
-.add-secret-form {
-  background: var(--card-background);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 1.5rem;
-  margin-bottom: 2rem;
-}
-
-.add-secret-form h3 {
-  margin: 0 0 1rem 0;
-  color: var(--text-primary);
-}
-
-.form-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-
-.form-group {
-  display: flex;
-  flex-direction: column;
-}
-
-.form-group label {
-  margin-bottom: 0.5rem;
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.form-input {
-  padding: 0.75rem;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--card-background);
-  color: var(--text-primary);
-  font-size: 1rem;
-}
-
-.form-input:focus {
-  outline: none;
-  border-color: var(--primary-color);
-  box-shadow: 0 0 0 2px var(--primary-color)20;
-}
-
-.form-hint {
-  margin-top: 0.25rem;
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-}
-
-.form-actions {
-  display: flex;
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-
-.form-preview {
-  padding: 0.75rem;
-  background: var(--code-background);
-  border-radius: 4px;
-  border-left: 3px solid var(--primary-color);
-}
-
-.form-preview code {
-  background: transparent;
-  color: var(--primary-color);
-  font-weight: 600;
-}
-
-@media (max-width: 768px) {
-  .form-row {
-    grid-template-columns: 1fr;
-  }
-
-  .form-actions {
-    flex-direction: column;
-  }
-}
-
-/* CSS Variables (these would typically be defined in your main CSS) */
-:root {
-  --text-primary: #1f2937;
-  --text-secondary: #6b7280;
-  --primary-color: #3b82f6;
-  --primary-color-dark: #2563eb;
-  --card-background: #ffffff;
-  --border-color: #e5e7eb;
-  --hover-color: #f9fafb;
-  --error-color: #ef4444;
-  --tag-background: #e0e7ff;
-  --tag-text: #3730a3;
-  --code-background: #f3f4f6;
-  --code-text: #374151;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text-primary: #f9fafb;
-    --text-secondary: #9ca3af;
-    --card-background: #1f2937;
-    --border-color: #374151;
-    --hover-color: #374151;
-    --tag-background: #1e3a8a;
-    --tag-text: #dbeafe;
-    --code-background: #374151;
-    --code-text: #d1d5db;
-  }
-}
-</style>

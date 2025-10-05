@@ -668,11 +668,11 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	// Validate the new configuration first
 	validationErrors := newCfg.ValidateDetailed()
 	if len(validationErrors) > 0 {
+		r.mu.Unlock() // Unlock before returning
 		return &ConfigApplyResult{
 			Success: false,
 		}, fmt.Errorf("configuration validation failed: %v", validationErrors[0].Error())
@@ -681,6 +681,7 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// Detect changes and determine if restart is required
 	result := DetectConfigChanges(r.cfg, newCfg)
 	if !result.Success {
+		r.mu.Unlock() // Unlock before returning
 		return result, fmt.Errorf("failed to detect config changes")
 	}
 
@@ -689,6 +690,7 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		r.logger.Warn("Configuration changes require restart",
 			zap.String("reason", result.RestartReason),
 			zap.Strings("changed_fields", result.ChangedFields))
+		r.mu.Unlock() // Unlock before returning
 		return result, nil
 	}
 
@@ -719,23 +721,30 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		r.truncator = truncate.NewTruncator(newCfg.ToolResponseLimit)
 	}
 
-	// Capture app context and config copy while we still hold the lock
+	// Capture app context, config path, and config copy while we still hold the lock
 	appCtx := r.appCtx
+	cfgPathCopy := r.cfgPath
 	configCopy := *r.cfg // Make a copy to pass to async goroutine
 	serversChanged := contains(result.ChangedFields, "mcpServers")
-
-	// Emit config.reloaded event
-	r.emitConfigReloaded(r.cfgPath)
-
-	// Emit servers.changed event if servers were modified
-	if serversChanged {
-		r.emitServersChanged("config hot-reload", map[string]any{
-			"changed_fields": result.ChangedFields,
-		})
-	}
+	changedFieldsCopy := make([]string, len(result.ChangedFields))
+	copy(changedFieldsCopy, result.ChangedFields)
 
 	r.logger.Info("Configuration hot-reload completed successfully",
 		zap.Strings("changed_fields", result.ChangedFields))
+
+	// IMPORTANT: Unlock before emitting events to prevent deadlocks
+	// Event handlers may need to acquire locks on other resources
+	r.mu.Unlock()
+
+	// Emit config.reloaded event (after releasing lock)
+	r.emitConfigReloaded(cfgPathCopy)
+
+	// Emit servers.changed event if servers were modified (after releasing lock)
+	if serversChanged {
+		r.emitServersChanged("config hot-reload", map[string]any{
+			"changed_fields": changedFieldsCopy,
+		})
+	}
 
 	// IMPORTANT: Pass config copy to goroutine to avoid lock dependency
 	// The goroutine will use the copied config instead of calling r.Config()

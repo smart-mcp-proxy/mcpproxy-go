@@ -571,15 +571,31 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	serverName := parts[0]
 	actualToolName := parts[1]
 
+	p.logger.Debug("handleCallTool: parsed tool name",
+		zap.String("tool_name", toolName),
+		zap.String("server_name", serverName),
+		zap.String("actual_tool_name", actualToolName),
+		zap.Any("args", args))
+
 	// Check if server is quarantined before calling tool
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
 	if err == nil && serverConfig.Quarantined {
+		p.logger.Debug("handleCallTool: server is quarantined",
+			zap.String("server_name", serverName))
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
 	}
 
+	p.logger.Debug("handleCallTool: checking connection status",
+		zap.String("server_name", serverName))
+
 	// Check connection status before attempting tool call to prevent hanging
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
+		p.logger.Debug("handleCallTool: client found",
+			zap.String("server_name", serverName),
+			zap.Bool("is_connected", client.IsConnected()),
+			zap.String("state", client.GetState().String()))
+
 		if !client.IsConnected() {
 			state := client.GetState()
 			if client.IsConnecting() {
@@ -588,13 +604,24 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())), nil
 		}
 	} else {
+		p.logger.Error("handleCallTool: no client found for server",
+			zap.String("server_name", serverName))
 		return mcp.NewToolResultError(fmt.Sprintf("No client found for server: %s", serverName)), nil
 	}
+
+	p.logger.Debug("handleCallTool: calling upstream manager",
+		zap.String("tool_name", toolName),
+		zap.String("server_name", serverName))
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
 	duration := time.Since(startTime)
+
+	p.logger.Debug("handleCallTool: upstream call completed",
+		zap.String("tool_name", toolName),
+		zap.Duration("duration", duration),
+		zap.Error(err))
 
 	// Count tokens for request and response
 	var tokenMetrics *storage.TokenMetrics

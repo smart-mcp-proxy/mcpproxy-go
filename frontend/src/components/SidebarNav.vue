@@ -64,6 +64,7 @@ const systemStore = useSystemStore()
 const menuItems = [
   { name: 'Dashboard', path: '/' },
   { name: 'Servers', path: '/servers' },
+  { name: 'Secrets', path: '/secrets' },
   { name: 'Search', path: '/search' },
   { name: 'Tool Call History', path: '/tool-calls' },
   { name: 'Repositories', path: '/repositories' },
