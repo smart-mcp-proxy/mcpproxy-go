@@ -5,6 +5,9 @@ package tray
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +23,63 @@ const (
 	textEnable    = "Enable"
 	textDisable   = "Disable"
 )
+
+// Icon file paths relative to executable
+const (
+	iconConnected    = "assets/status/green-circle.ico"
+	iconDisconnected = "assets/status/red-circle.ico"
+	iconPaused       = "assets/status/pause.ico"
+	iconLocked       = "assets/status/locked.ico"
+)
+
+// Icon cache to avoid loading the same icon multiple times
+var (
+	iconCache     = make(map[string][]byte)
+	iconCacheMu   sync.RWMutex
+	useIconsCache = runtime.GOOS == osWindows // Icons work best on Windows
+)
+
+// loadIcon loads an icon from file and caches it
+func loadIcon(iconPath string) []byte {
+	if !useIconsCache {
+		return nil
+	}
+
+	// Check cache first
+	iconCacheMu.RLock()
+	if data, ok := iconCache[iconPath]; ok {
+		iconCacheMu.RUnlock()
+		return data
+	}
+	iconCacheMu.RUnlock()
+
+	// Get executable directory
+	exePath, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	exeDir := filepath.Dir(exePath)
+
+	// Build full path
+	fullPath := filepath.Join(exeDir, iconPath)
+
+	// Load icon file
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		// Try relative to current directory as fallback
+		data, err = os.ReadFile(iconPath)
+		if err != nil {
+			return nil
+		}
+	}
+
+	// Cache the icon
+	iconCacheMu.Lock()
+	iconCache[iconPath] = data
+	iconCacheMu.Unlock()
+
+	return data
+}
 
 // ServerStateManager manages server state synchronization between storage, config, and menu
 type ServerStateManager struct {
@@ -339,8 +399,14 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 		for _, serverName := range currentServerNames {
 			serverData := currentServerMap[serverName]
 			m.logger.Info("Creating menu item for server", zap.String("server", serverName))
-			status, tooltip := m.getServerStatusDisplay(serverData)
+			status, tooltip, iconData := m.getServerStatusDisplay(serverData)
 			serverMenuItem := m.upstreamServersMenu.AddSubMenuItem(status, tooltip)
+
+			// Set icon if available (Windows)
+			if iconData != nil {
+				serverMenuItem.SetIcon(iconData)
+			}
+
 			m.serverMenuItems[serverName] = serverMenuItem
 
 			// Create its action submenus
@@ -356,9 +422,15 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 
 			serverData := currentServerMap[serverName]
 			// Server exists, update its display and ensure it's visible
-			status, tooltip := m.getServerStatusDisplay(serverData)
+			status, tooltip, iconData := m.getServerStatusDisplay(serverData)
 			menuItem.SetTitle(status)
 			menuItem.SetTooltip(tooltip)
+
+			// Update icon if available (Windows)
+			if iconData != nil {
+				menuItem.SetIcon(iconData)
+			}
+
 			m.updateServerActionMenus(serverName, serverData) // Update sub-menu items too
 			menuItem.Show()
 		}
@@ -410,8 +482,10 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 	if m.quarantineInfoEmpty == nil || m.quarantineInfoHelp == nil {
 		m.quarantineInfoEmpty = m.quarantineMenu.AddSubMenuItem("(No servers quarantined)", "No servers are currently quarantined")
 		m.quarantineInfoHelp = m.quarantineMenu.AddSubMenuItem("Click to unquarantine", "Click on a quarantined server to remove it from quarantine")
+		m.quarantineInfoEmpty.Disable()
+		m.quarantineInfoHelp.Disable()
 		// Add empty separator for visual separation
-		m.quarantineMenu.AddSubMenuItem("", "")
+		m.quarantineMenu.AddSeparator()
 	}
 
 	// --- Update Info Item Visibility ---
@@ -466,14 +540,30 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 				continue
 			}
 
+			// On Windows, use icon instead of emoji
+			var displayText string
+			if runtime.GOOS == osWindows {
+				displayText = serverName
+			} else {
+				displayText = fmt.Sprintf("🔒 %s", serverName)
+			}
+
 			quarantineMenuItem := m.quarantineMenu.AddSubMenuItem(
-				fmt.Sprintf("🔒 %s", serverName),
+				displayText,
 				fmt.Sprintf("Click to unquarantine %s", serverName),
 			)
 
 			if quarantineMenuItem == nil {
 				m.logger.Error("Failed to create quarantine menu item", zap.String("server", serverName))
 				continue
+			}
+
+			// Set icon for Windows
+			if runtime.GOOS == osWindows {
+				iconData := loadIcon(iconLocked)
+				if iconData != nil {
+					quarantineMenuItem.SetIcon(iconData)
+				}
 			}
 
 			m.quarantineMenuItems[serverName] = quarantineMenuItem
@@ -531,8 +621,8 @@ func (m *MenuManager) ForceRefresh() {
 	// The new Hide/Show logic should be used instead.
 }
 
-// getServerStatusDisplay returns display text and tooltip for a server
-func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (displayText, tooltip string) {
+// getServerStatusDisplay returns display text, tooltip, and icon data for a server
+func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (displayText, tooltip string, iconData []byte) {
 	serverName, _ := server["name"].(string)
 	enabled, _ := server["enabled"].(bool)
 	connected, _ := server["connected"].(bool)
@@ -541,22 +631,35 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 
 	var statusIcon string
 	var statusText string
+	var iconPath string
 
 	if quarantined {
 		statusIcon = "🔒"
 		statusText = "quarantined"
+		iconPath = iconLocked
 	} else if !enabled {
 		statusIcon = "⏸️"
 		statusText = "disabled"
+		iconPath = iconPaused
 	} else if connected {
 		statusIcon = "🟢"
 		statusText = fmt.Sprintf("connected (%d tools)", toolCount)
+		iconPath = iconConnected
 	} else {
 		statusIcon = "🔴"
 		statusText = "disconnected"
+		iconPath = iconDisconnected
 	}
 
-	displayText = fmt.Sprintf("%s %s", statusIcon, serverName)
+	// On Windows, use icons instead of emoji for better visual appearance
+	if runtime.GOOS == osWindows {
+		displayText = serverName
+		iconData = loadIcon(iconPath)
+	} else {
+		// On other platforms, keep using emoji
+		displayText = fmt.Sprintf("%s %s", statusIcon, serverName)
+	}
+
 	tooltip = fmt.Sprintf("%s - %s", serverName, statusText)
 
 	return

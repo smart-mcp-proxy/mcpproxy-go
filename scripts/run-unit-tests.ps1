@@ -18,6 +18,25 @@ if (!(Get-Command go -ErrorAction SilentlyContinue)) {
 
 $goVersion = go version
 Write-Host "Go version: $goVersion" -ForegroundColor Yellow
+
+# Check if CGO is available (required for race detection)
+if ($Race) {
+    $env:CGO_ENABLED = "1"
+    $cgoTest = go env CGO_ENABLED
+    if ($cgoTest -eq "0") {
+        Write-Host "Warning: CGO is not available. Race detection will be disabled." -ForegroundColor Yellow
+        Write-Host "To enable race detection, install MinGW-w64: https://www.mingw-w64.org/" -ForegroundColor Yellow
+        $Race = $false
+    } else {
+        # Check if gcc is available
+        if (!(Get-Command gcc -ErrorAction SilentlyContinue)) {
+            Write-Host "Warning: gcc not found. Race detection will be disabled." -ForegroundColor Yellow
+            Write-Host "To enable race detection, install MinGW-w64 and add it to PATH" -ForegroundColor Yellow
+            $Race = $false
+        }
+    }
+}
+
 Write-Host "Test timeout: $Timeout" -ForegroundColor Yellow
 Write-Host "Race detection: $Race" -ForegroundColor Yellow
 Write-Host "Coverage: $Cover" -ForegroundColor Yellow
