@@ -42,7 +42,7 @@ const router = createRouter({
       name: 'search',
       component: () => import('@/views/Search.vue'),
       meta: {
-        title: 'Search Tools',
+        title: 'Search',
       },
     },
     {
@@ -50,7 +50,7 @@ const router = createRouter({
       name: 'settings',
       component: () => import('@/views/Settings.vue'),
       meta: {
-        title: 'Settings',
+        title: 'Configuration',
       },
     },
     {

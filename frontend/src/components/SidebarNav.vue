@@ -64,10 +64,10 @@ const systemStore = useSystemStore()
 const menuItems = [
   { name: 'Dashboard', path: '/' },
   { name: 'Servers', path: '/servers' },
-  { name: 'Tools', path: '/search' },
-  { name: 'Records', path: '/tool-calls' },
+  { name: 'Search', path: '/search' },
+  { name: 'Tool Call History', path: '/tool-calls' },
   { name: 'Repositories', path: '/repositories' },
-  { name: 'Settings', path: '/settings' },
+  { name: 'Configuration', path: '/settings' },
 ]
 
 function isActiveRoute(path: string): boolean {
