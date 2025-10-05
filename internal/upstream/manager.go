@@ -219,15 +219,22 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 
 // RemoveServer removes an upstream server
 func (m *Manager) RemoveServer(id string) {
+	// Get client reference while holding lock briefly
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	client, exists := m.clients[id]
+	if exists {
+		// Remove from map immediately to prevent new operations
+		delete(m.clients, id)
+	}
+	m.mu.Unlock()
 
-	if client, exists := m.clients[id]; exists {
+	// Disconnect outside the lock to avoid blocking other operations
+	if exists {
 		m.logger.Info("Removing upstream server",
 			zap.String("id", id),
 			zap.String("state", client.GetState().String()))
 		_ = client.Disconnect()
-		delete(m.clients, id)
+		m.logger.Debug("upstream.Manager.RemoveServer: disconnect completed", zap.String("id", id))
 	}
 }
 

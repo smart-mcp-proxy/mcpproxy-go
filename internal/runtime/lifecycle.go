@@ -18,7 +18,7 @@ func (r *Runtime) StartBackgroundInitialization() {
 func (r *Runtime) backgroundInitialization() {
 	r.UpdatePhase("Loading", "Loading configuration...")
 
-	if err := r.LoadConfiguredServers(); err != nil {
+	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("Failed to load configured servers", zap.Error(err))
 		r.UpdatePhase("Error", fmt.Sprintf("Failed to load servers: %v", err))
 		return
@@ -135,13 +135,16 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 	return nil
 }
 
-// LoadConfiguredServers synchronizes storage and upstream manager from the current config.
+// LoadConfiguredServers synchronizes storage and upstream manager from the given or current config.
+// If cfg is nil, it will use the current runtime configuration.
 //
 //nolint:unparam // maintained for parity with previous implementation
-func (r *Runtime) LoadConfiguredServers() error {
-	cfg := r.Config()
+func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	if cfg == nil {
-		return fmt.Errorf("runtime configuration is not available")
+		cfg = r.Config()
+		if cfg == nil {
+			return fmt.Errorf("runtime configuration is not available")
+		}
 	}
 
 	if r.storageManager == nil || r.upstreamManager == nil || r.indexManager == nil {
@@ -150,8 +153,13 @@ func (r *Runtime) LoadConfiguredServers() error {
 
 	r.logger.Info("Synchronizing servers from configuration (config as source of truth)")
 
+	r.logger.Debug("LoadConfiguredServers: getting current upstreams")
 	currentUpstreams := r.upstreamManager.GetAllServerNames()
+	r.logger.Debug("LoadConfiguredServers: got current upstreams", zap.Int("count", len(currentUpstreams)))
+
+	r.logger.Debug("LoadConfiguredServers: listing stored servers from storage")
 	storedServers, err := r.storageManager.ListUpstreamServers()
+	r.logger.Debug("LoadConfiguredServers: listed stored servers", zap.Int("count", len(storedServers)), zap.Error(err))
 	if err != nil {
 		r.logger.Error("Failed to get stored servers for sync", zap.Error(err))
 		storedServers = []*config.ServerConfig{}
@@ -172,7 +180,9 @@ func (r *Runtime) LoadConfiguredServers() error {
 	// Add servers asynchronously without blocking
 	// Each server connects in background, no need to wait for all to complete
 
+	r.logger.Debug("LoadConfiguredServers: starting server sync loop", zap.Int("servers_to_process", len(cfg.Servers)))
 	for _, serverCfg := range cfg.Servers {
+		r.logger.Debug("LoadConfiguredServers: processing server", zap.String("name", serverCfg.Name), zap.Bool("enabled", serverCfg.Enabled))
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
 		hasChanged := !existsInStorage ||
 			storedServer.Enabled != serverCfg.Enabled ||
@@ -190,12 +200,15 @@ func (r *Runtime) LoadConfiguredServers() error {
 				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined))
 		}
 
+		r.logger.Debug("LoadConfiguredServers: saving server to storage", zap.String("name", serverCfg.Name))
 		if err := r.storageManager.SaveUpstreamServer(serverCfg); err != nil {
 			r.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
 			continue
 		}
+		r.logger.Debug("LoadConfiguredServers: saved server to storage", zap.String("name", serverCfg.Name))
 
 		if serverCfg.Enabled {
+			r.logger.Debug("LoadConfiguredServers: server is enabled, adding to upstream manager", zap.String("name", serverCfg.Name))
 			// Add server asynchronously - connections happen in background
 			go func(cfg *config.ServerConfig, cfgPath string) {
 				if err := r.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
@@ -214,10 +227,14 @@ func (r *Runtime) LoadConfiguredServers() error {
 				r.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", serverCfg.Name))
 			}
 		} else {
+			r.logger.Debug("LoadConfiguredServers: server is disabled, removing from upstream manager", zap.String("name", serverCfg.Name))
 			r.upstreamManager.RemoveServer(serverCfg.Name)
+			r.logger.Debug("LoadConfiguredServers: removed server from upstream manager", zap.String("name", serverCfg.Name))
 			r.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
 		}
+		r.logger.Debug("LoadConfiguredServers: finished processing server", zap.String("name", serverCfg.Name))
 	}
+	r.logger.Debug("LoadConfiguredServers: finished server sync loop")
 
 	serversToRemove := []string{}
 
@@ -341,7 +358,7 @@ func (r *Runtime) ReloadConfiguration() error {
 
 	r.UpdateConfig(newConfig, cfgPath)
 
-	if err := r.LoadConfiguredServers(); err != nil {
+	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)
 	}
@@ -402,7 +419,7 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 			r.logger.Error("Failed to save configuration after state change", zap.Error(err))
 		}
 
-		if err := r.LoadConfiguredServers(); err != nil {
+		if err := r.LoadConfiguredServers(nil); err != nil {
 			r.logger.Error("Failed to synchronize runtime after enable toggle", zap.Error(err))
 		}
 	}()
@@ -434,7 +451,7 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 			r.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))
 		}
 
-		if err := r.LoadConfiguredServers(); err != nil {
+		if err := r.LoadConfiguredServers(nil); err != nil {
 			r.logger.Error("Failed to synchronize runtime after quarantine toggle", zap.Error(err))
 		}
 	}()
