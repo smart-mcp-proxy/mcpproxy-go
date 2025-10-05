@@ -358,6 +358,17 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		return fmt.Errorf("failed to start stdio client: %w", err)
 	}
 
+	// CRITICAL FIX: Enable stderr monitoring IMMEDIATELY after starting the process
+	// This ensures we capture startup errors (like missing API keys) even if
+	// initialization fails with timeout. Previously, stderr monitoring started
+	// after successful initialization, so early errors were never logged.
+	c.stderr = stdioTransport.Stderr()
+	if c.stderr != nil {
+		c.StartStderrMonitoring()
+		c.logger.Debug("Started early stderr monitoring to capture startup errors",
+			zap.String("server", c.config.Name))
+	}
+
 	// IMPORTANT: Perform MCP initialize() handshake for stdio transports as well,
 	// so c.serverInfo is populated and tool discovery/search can proceed.
 	// Use the caller's context with timeout to avoid hanging.
@@ -459,11 +470,8 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		}
 	}
 
-	// Enable stderr monitoring for Docker containers
-	c.stderr = stdioTransport.Stderr()
-	if c.stderr != nil {
-		c.StartStderrMonitoring()
-	}
+	// Note: stderr monitoring was already started earlier (right after Start())
+	// to capture startup errors before initialization completes
 
 	// Start process monitoring if we have the process reference OR it's a Docker command
 	if c.processCmd != nil {
