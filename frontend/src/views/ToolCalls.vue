@@ -348,6 +348,9 @@
         <button @click="closeReplayModal">close</button>
       </form>
     </dialog>
+
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="toolCallsHints" />
   </div>
 </template>
 
@@ -358,6 +361,8 @@ import api from '@/services/api'
 import type { ToolCallRecord } from '@/types'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import JsonViewer from '@/components/JsonViewer.vue'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 
 const systemStore = useSystemStore()
 
@@ -549,6 +554,81 @@ const formatDuration = (nanoseconds: number): string => {
   if (ms < 1000) return `${Math.round(ms)}ms`
   return `${(ms / 1000).toFixed(2)}s`
 }
+
+// Tool calls hints
+const toolCallsHints = computed<Hint[]>(() => {
+  return [
+    {
+      icon: '📊',
+      title: 'Understanding Tool Call History',
+      description: 'Track and analyze tool execution performance',
+      sections: [
+        {
+          title: 'What you can see',
+          list: [
+            'Complete execution history with timestamps',
+            'Success/error status for each call',
+            'Token usage and cost metrics',
+            'Request and response payloads',
+            'Duration and performance stats'
+          ]
+        },
+        {
+          title: 'Export tool call data',
+          text: 'Get tool call history via API:',
+          codeBlock: {
+            language: 'bash',
+            code: `# Get recent tool calls\ncurl -H "X-API-Key: your-api-key" \\\n  "http://127.0.0.1:8080/api/v1/tool-calls?limit=100" | jq`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🔁',
+      title: 'Replay Tool Calls',
+      description: 'Re-execute previous tool calls for testing',
+      sections: [
+        {
+          title: 'How to replay',
+          list: [
+            'Click the replay button on any tool call row',
+            'Edit the arguments in the JSON editor',
+            'Execute to create a new tool call with modified args',
+            'Compare responses to debug issues'
+          ]
+        },
+        {
+          title: 'Replay via CLI',
+          text: 'Copy tool call as CLI command:',
+          codeBlock: {
+            language: 'bash',
+            code: `# Use the copy button to get CLI command\nmcpproxy call tool --tool-name=server:tool \\\n  --json_args='{"arg":"value"}'`
+          }
+        }
+      ]
+    },
+    {
+      icon: '💡',
+      title: 'Token Optimization',
+      description: 'Understand token usage and savings',
+      sections: [
+        {
+          title: 'Token metrics',
+          list: [
+            'Input tokens: Size of tool arguments and context',
+            'Output tokens: Size of tool response',
+            'Truncated tokens: Tokens saved by response limits',
+            'Model: AI model used for token counting'
+          ]
+        },
+        {
+          title: 'Response truncation',
+          text: 'MCPProxy automatically truncates large responses to save tokens. Look for the "Truncated" badge to see token savings.'
+        }
+      ]
+    }
+  ]
+})
 
 // Lifecycle
 onMounted(() => {

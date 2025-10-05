@@ -397,6 +397,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="serverDetailHints" />
   </div>
 </template>
 
@@ -405,6 +408,8 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool } from '@/types'
 import api from '@/services/api'
 
@@ -613,6 +618,81 @@ async function refreshData() {
 function viewToolSchema(tool: Tool) {
   selectedToolSchema.value = tool
 }
+
+// Server detail hints
+const serverDetailHints = computed<Hint[]>(() => {
+  const hints: Hint[] = [
+    {
+      icon: '🔧',
+      title: 'Server Management',
+      description: 'Control and monitor this MCP server',
+      sections: [
+        {
+          title: 'Enable/Disable server',
+          codeBlock: {
+            language: 'bash',
+            code: `# Disable server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"update","name":"${props.serverName}","enabled":false}'\n\n# Enable server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"update","name":"${props.serverName}","enabled":true}'`
+          }
+        },
+        {
+          title: 'View server logs',
+          codeBlock: {
+            language: 'bash',
+            code: `# Real-time logs for this server\ntail -f ~/.mcpproxy/logs/server-${props.serverName}.log`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🛠️',
+      title: 'Working with Tools',
+      description: 'Use tools provided by this server',
+      sections: [
+        {
+          title: 'List all tools',
+          codeBlock: {
+            language: 'bash',
+            code: `# List tools from this server\nmcpproxy tools list --server=${props.serverName}`
+          }
+        },
+        {
+          title: 'Call a tool',
+          text: 'Tools are prefixed with server name:',
+          codeBlock: {
+            language: 'bash',
+            code: `# Call tool from this server\nmcpproxy call tool --tool-name=${props.serverName}:tool-name \\\n  --json_args='{"arg1":"value1"}'`
+          }
+        }
+      ]
+    },
+    {
+      icon: '💡',
+      title: 'Troubleshooting',
+      description: 'Common issues and solutions',
+      sections: [
+        {
+          title: 'Connection issues',
+          list: [
+            'Check if server is enabled in configuration',
+            'Review server logs for error messages',
+            'Verify network connectivity for remote servers',
+            'Check authentication credentials for OAuth servers'
+          ]
+        },
+        {
+          title: 'OAuth authentication',
+          text: 'If server requires OAuth login:',
+          codeBlock: {
+            language: 'bash',
+            code: `# Trigger OAuth login\nmcpproxy auth login --server=${props.serverName}`
+          }
+        }
+      ]
+    }
+  ]
+
+  return hints
+})
 
 // Watch for log tail changes
 watch(logTail, () => {

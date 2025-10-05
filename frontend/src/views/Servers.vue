@@ -48,9 +48,6 @@
       </div>
     </div>
 
-    <!-- Hints Panel -->
-    <HintsPanel :hints="serversHints" />
-
     <!-- Filters -->
     <div class="flex flex-wrap gap-4 items-center justify-between">
       <div class="flex flex-wrap gap-2">
@@ -132,6 +129,9 @@
         :server="server"
       />
     </div>
+
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="serversHints" />
   </div>
 </template>
 
@@ -139,8 +139,8 @@
 import { ref, computed } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import ServerCard from '@/components/ServerCard.vue'
-import HintsPanel from '@/components/HintsPanel.vue'
-import type { Hint } from '@/components/HintsPanel.vue'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 
 const serversStore = useServersStore()
 const filter = ref<'all' | 'connected' | 'enabled' | 'quarantined'>('all')

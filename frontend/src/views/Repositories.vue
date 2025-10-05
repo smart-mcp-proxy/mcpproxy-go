@@ -204,16 +204,16 @@
       </div>
     </div>
 
-    <!-- Hints Panel -->
-    <HintsPanel :hints="repositoriesHints" />
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="repositoriesHints" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import api from '@/services/api'
-import HintsPanel from '@/components/HintsPanel.vue'
-import type { Hint } from '@/components/HintsPanel.vue'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Registry, RepositoryServer } from '@/types'
 
 // State

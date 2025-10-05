@@ -212,6 +212,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="toolsHints" />
   </div>
 </template>
 
@@ -219,6 +222,8 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Tool } from '@/types'
 import api from '@/services/api'
 
@@ -337,6 +342,77 @@ watch(() => serversStore.serverCount.connected, () => {
 // Watch for search/filter changes to reset pagination
 watch([searchQuery, selectedServer], () => {
   currentPage.value = 1
+})
+
+// Tools page hints
+const toolsHints = computed<Hint[]>(() => {
+  return [
+    {
+      icon: '🔍',
+      title: 'Browse All Tools',
+      description: 'Explore tools from all connected MCP servers',
+      sections: [
+        {
+          title: 'Filtering and search',
+          list: [
+            'Search by tool name or description',
+            'Filter by specific server',
+            'Switch between grid and list view',
+            'View detailed tool schemas'
+          ]
+        },
+        {
+          title: 'List tools via CLI',
+          codeBlock: {
+            language: 'bash',
+            code: `# List all tools\nmcpproxy tools list\n\n# List tools from specific server\nmcpproxy tools list --server=server-name`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🛠️',
+      title: 'Using Tools',
+      description: 'Execute tools from the command line or via API',
+      sections: [
+        {
+          title: 'Call a tool',
+          codeBlock: {
+            language: 'bash',
+            code: `# Execute a tool with arguments\nmcpproxy call tool --tool-name=server:tool-name \\\n  --json_args='{"arg1":"value1","arg2":"value2"}'`
+          }
+        },
+        {
+          title: 'Get tool schema',
+          text: 'View input schema to understand required arguments:',
+          codeBlock: {
+            language: 'bash',
+            code: `# Get tool details and schema\nmcpproxy tools list --server=server-name | jq '.tools[] | select(.name=="tool-name")'`
+          }
+        }
+      ]
+    },
+    {
+      icon: '🤖',
+      title: 'LLM Integration',
+      description: 'Let AI agents discover and use tools',
+      sections: [
+        {
+          title: 'Example prompts',
+          list: [
+            'Search for all file-related tools and use them to read my project',
+            'Find tools for GitHub integration and create an issue',
+            'Discover what tools are available and explain what they do',
+            'Use the best tool to perform [specific task]'
+          ]
+        },
+        {
+          title: 'How MCPProxy helps LLMs',
+          text: 'MCPProxy uses BM25 search to find the most relevant tools based on natural language queries, massively reducing tokens sent to the LLM.'
+        }
+      ]
+    }
+  ]
 })
 
 // Load tools on mount

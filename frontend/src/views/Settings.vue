@@ -105,13 +105,18 @@
         </div>
       </div>
     </div>
+
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="settingsHints" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import { useServersStore } from '@/stores/servers'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import api from '@/services/api'
 
 // Store references
@@ -246,6 +251,84 @@ async function applyConfig() {
     applyingConfig.value = false
   }
 }
+
+// Settings hints
+const settingsHints = computed<Hint[]>(() => {
+  return [
+    {
+      icon: '⚙️',
+      title: 'Configuration Management',
+      description: 'Edit MCPProxy configuration with JSON editor',
+      sections: [
+        {
+          title: 'Hot-Reloadable Settings',
+          text: 'These settings are applied immediately without restarting:',
+          list: [
+            'Server enable/disable status',
+            'Tool limits and search parameters',
+            'Log levels and output settings',
+            'Cache and timeout settings'
+          ]
+        },
+        {
+          title: 'Restart Required',
+          text: 'These settings require mcpproxy restart to take effect:',
+          list: [
+            'Listen address (network binding)',
+            'Data directory path',
+            'API key authentication',
+            'TLS/HTTPS configuration'
+          ]
+        }
+      ]
+    },
+    {
+      icon: '🔧',
+      title: 'CLI Configuration Tools',
+      description: 'Manage configuration from the command line',
+      sections: [
+        {
+          title: 'View current configuration',
+          codeBlock: {
+            language: 'bash',
+            code: `# View configuration location\nmcpproxy config path\n\n# Dump current config\ncat ~/.mcpproxy/mcp_config.json`
+          }
+        },
+        {
+          title: 'Backup configuration',
+          codeBlock: {
+            language: 'bash',
+            code: `# Create backup\ncp ~/.mcpproxy/mcp_config.json ~/.mcpproxy/mcp_config.backup.json`
+          }
+        }
+      ]
+    },
+    {
+      icon: '💡',
+      title: 'Configuration Tips',
+      description: 'Best practices for managing MCPProxy config',
+      sections: [
+        {
+          title: 'Editor features',
+          list: [
+            'Use Ctrl+Space for autocomplete suggestions',
+            'Use Ctrl+F to search within the configuration',
+            'Invalid JSON is highlighted with red squiggles',
+            'Format with Ctrl+Shift+F (or Cmd+Shift+F on Mac)'
+          ]
+        },
+        {
+          title: 'Version control',
+          text: 'Consider tracking your configuration in git (excluding secrets):',
+          codeBlock: {
+            language: 'bash',
+            code: `# Initialize git repo for configs\ncd ~/.mcpproxy\ngit init\necho "*.db" >> .gitignore\necho "*.bleve/" >> .gitignore\ngit add mcp_config.json\ngit commit -m "Initial MCPProxy configuration"`
+          }
+        }
+      ]
+    }
+  ]
+})
 
 // Initialize component
 onMounted(() => {

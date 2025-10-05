@@ -94,9 +94,6 @@
     </div>
 
 
-    <!-- Hints Panel -->
-    <HintsPanel :hints="dashboardHints" />
-
     <!-- Recent Tool Calls -->
     <div class="card bg-base-100 shadow-md">
       <div class="card-body">
@@ -187,6 +184,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="dashboardHints" />
   </div>
 </template>
 
@@ -195,9 +195,9 @@ import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
-import HintsPanel from '@/components/HintsPanel.vue'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import TokenPieChart from '@/components/TokenPieChart.vue'
-import type { Hint } from '@/components/HintsPanel.vue'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()

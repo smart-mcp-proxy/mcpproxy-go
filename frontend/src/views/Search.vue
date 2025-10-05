@@ -73,9 +73,6 @@
       </div>
     </div>
 
-    <!-- Hints Panel -->
-    <HintsPanel v-if="!hasSearched" :hints="searchHints" />
-
     <!-- Search Results -->
     <div v-if="hasSearched">
       <!-- Results Header -->
@@ -264,6 +261,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Hints Panel (Bottom of Page) -->
+    <CollapsibleHintsPanel :hints="searchHints" />
   </div>
 </template>
 
@@ -272,8 +272,8 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import type { SearchResult } from '@/types'
 import api from '@/services/api'
-import HintsPanel from '@/components/HintsPanel.vue'
-import type { Hint } from '@/components/HintsPanel.vue'
+import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 
 const route = useRoute()
 
