@@ -115,3 +115,5 @@ node_modules/
 certs/
 test-results/
 playwright-report/
+web/index.html
+web/assets/

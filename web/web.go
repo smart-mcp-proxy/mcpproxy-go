@@ -16,17 +16,18 @@ var frontendFS embed.FS
 // NewHandler creates a new HTTP handler for serving the embedded web UI
 func NewHandler(logger *zap.SugaredLogger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Clean the path
-		p := r.URL.Path
-		if p == "" || p == "/" {
-			p = "frontend/dist/index.html"
-		} else {
-			// Add frontend/dist prefix to all paths
-			p = "frontend/dist" + strings.TrimPrefix(p, "/")
+		// The /ui prefix is already stripped by http.StripPrefix in server.go
+		// So paths come in as: "/" for index, "/assets/file.js" for assets
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p == "" {
+			p = "index.html"
 		}
 
+		// Build full path within embedded FS
+		fullPath := "frontend/dist/" + p
+
 		// Try to read the file
-		content, err := fs.ReadFile(frontendFS, p)
+		content, err := fs.ReadFile(frontendFS, fullPath)
 		if err != nil {
 			// If file not found, serve index.html (for SPA routing)
 			content, err = fs.ReadFile(frontendFS, "frontend/dist/index.html")
@@ -35,11 +36,11 @@ func NewHandler(logger *zap.SugaredLogger) http.Handler {
 				http.Error(w, "Not found", http.StatusNotFound)
 				return
 			}
-			p = "frontend/dist/index.html"
+			fullPath = "frontend/dist/index.html"
 		}
 
 		// Set content type based on file extension
-		ext := path.Ext(p)
+		ext := path.Ext(fullPath)
 		contentType := "text/html"
 		switch ext {
 		case ".js":
