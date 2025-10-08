@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: ["1.21", "1.22", "1.23.10"]
+        go-version: ["1.23.10", "1.24.5", "1.25"]
 
     steps:
       - name: Checkout code
