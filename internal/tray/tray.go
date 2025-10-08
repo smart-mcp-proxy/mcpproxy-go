@@ -134,11 +134,7 @@ type App struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// Legacy fields for compatibility during transition
-	lastRunningState bool // Track last known server running state
-
 	// Menu tracking fields for dynamic updates
-	menusInitialized  bool                         // Track if menus have been initialized
 	coreMenusReady    bool                         // Track if core menu items are ready
 	lastServerList    []string                     // Track last known server list for change detection
 	serverMenus       map[string]*systray.MenuItem // Track server menu items
@@ -212,19 +208,6 @@ func (a *App) getConnectionState() ConnectionState {
 	a.connectionStateMu.RLock()
 	defer a.connectionStateMu.RUnlock()
 	return a.connectionState
-}
-
-func (a *App) getStatusSnapshot() (title, tooltip string) {
-	a.statusMu.RLock()
-	defer a.statusMu.RUnlock()
-	return a.statusTitle, a.statusTooltip
-}
-
-func (a *App) getMenuSnapshot() (servers, quarantine []map[string]interface{}) {
-	if a.menuManager == nil {
-		return nil, nil
-	}
-	return a.menuManager.LatestServersSnapshot(), a.menuManager.LatestQuarantineSnapshot()
 }
 
 // ObserveConnectionState wires a channel of connection states into the tray UI.
@@ -847,16 +830,6 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 	a.statusMu.Unlock()
 }
 
-// updateServersMenuFromStatusData is a legacy method, functionality is now in MenuManager
-func (a *App) updateServersMenuFromStatusData(_ map[string]interface{}) {
-	// This function is kept for reference during transition but the primary
-	// logic is now handled by the MenuManager and SynchronizationManager.
-	// We trigger a sync instead of manually updating here.
-	if a.syncManager != nil {
-		a.syncManager.SyncDelayed()
-	}
-}
-
 // updateStatus updates the status menu item and tooltip
 func (a *App) updateStatus() {
 	if a.server == nil {
@@ -871,13 +844,6 @@ func (a *App) updateStatus() {
 
 	statusData := a.server.GetStatus()
 	a.updateStatusFromData(statusData)
-}
-
-// updateServersMenu is a legacy method, now triggers a sync
-func (a *App) updateServersMenu() {
-	if a.syncManager != nil {
-		a.syncManager.SyncDelayed()
-	}
 }
 
 // handleStartStop - REMOVED
@@ -1438,22 +1404,6 @@ func quoteForPowerShell(text string) string {
 	return "'" + escaped + "'"
 }
 
-// refreshMenusDelayed refreshes menus after a delay using the synchronization manager
-func (a *App) refreshMenusDelayed() {
-	if a.syncManager != nil {
-		a.syncManager.SyncDelayed()
-	} else {
-		a.logger.Warn("Sync manager not initialized for delayed refresh")
-	}
-}
-
-// refreshMenusImmediate refreshes menus immediately using the synchronization manager
-func (a *App) refreshMenusImmediate() {
-	if err := a.syncManager.SyncNow(); err != nil {
-		a.logger.Error("Failed to refresh menus immediately", zap.Error(err))
-	}
-}
-
 // handleServerAction is the centralized handler for all server-related menu actions.
 func (a *App) handleServerAction(serverName, action string) {
 	var err error
@@ -1598,19 +1548,6 @@ func (a *App) handleOAuthLogin(serverName string) error {
 		return fmt.Errorf("failed to trigger OAuth: %w", err)
 	}
 	return nil
-}
-
-// stringSlicesEqual compares two string slices for equality
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // updateAutostartMenuItem updates the autostart menu item based on current state

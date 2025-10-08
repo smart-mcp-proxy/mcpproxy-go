@@ -321,6 +321,8 @@ func (b *BoltDB) Stats() (*bbolt.Stats, error) {
 }
 
 // copyFile copies a file from src to dst
+//
+//nolint:unused // Reserved for future backup functionality
 func copyFile(src, dst string) error {
 	sourceFile, err := os.Open(src)
 	if err != nil {
@@ -339,6 +341,8 @@ func copyFile(src, dst string) error {
 }
 
 // removeFile safely removes a file
+//
+//nolint:unused // Reserved for future cleanup functionality
 func removeFile(path string) error {
 	return os.Remove(path)
 }

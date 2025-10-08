@@ -572,12 +572,6 @@ func containsAll(slice, expected []string) bool {
 	return true
 }
 
-// testMenuItem is a dummy type for testing (since we can't create real systray items in tests)
-type testMenuItem struct {
-	title   string
-	tooltip string
-}
-
 // TestAssetSelection tests the asset selection logic for updates
 func TestAssetSelection(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()

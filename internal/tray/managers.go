@@ -296,12 +296,9 @@ type MenuManager struct {
 	quarantineInfoEmpty   *systray.MenuItem            // "No servers" info item
 	quarantineInfoHelp    *systray.MenuItem            // "Click to unquarantine" help item
 
-	// State tracking to detect changes
-	lastServerNames     []string
-	lastQuarantineNames []string
-	menusInitialized    bool
-	latestServers       []map[string]interface{}
-	latestQuarantined   []map[string]interface{}
+	// Latest server data snapshots
+	latestServers     []map[string]interface{}
+	latestQuarantined []map[string]interface{}
 
 	// Event handler callback
 	onServerAction func(serverName string, action string) // callback for server actions
