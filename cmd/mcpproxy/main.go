@@ -3,14 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
-	"sync"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
@@ -18,6 +20,7 @@ import (
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/server"
+	"mcpproxy-go/internal/storage"
 )
 
 var (
@@ -25,7 +28,6 @@ var (
 	dataDir           string
 	listen            string
 	logLevel          string
-	enableTray        bool
 	debugSearch       bool
 	toolResponseLimit int
 	logToFile         bool
@@ -45,12 +47,13 @@ const (
 	defaultLogLevel = "info"
 )
 
-// TrayInterface defines the interface for system tray functionality
-type TrayInterface interface {
-	Run(ctx context.Context) error
+// maskAPIKey returns a masked version of the API key showing only first and last 4 characters
+func maskAPIKey(apiKey string) string {
+	if len(apiKey) <= 8 {
+		return "****"
+	}
+	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
 }
-
-// createTray is implemented in build-tagged files
 
 func main() {
 	// Set up registries initialization callback to avoid circular imports
@@ -79,7 +82,6 @@ func main() {
 
 	// Add server-specific flags
 	serverCmd.Flags().StringVarP(&listen, "listen", "l", "", "Listen address (for HTTP mode, not used in stdio mode)")
-	serverCmd.Flags().BoolVar(&enableTray, "tray", true, "Enable system tray (use --tray=false to disable)")
 	serverCmd.Flags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	serverCmd.Flags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
 	serverCmd.Flags().BoolVar(&readOnlyMode, "read-only", false, "Enable read-only mode")
@@ -100,19 +102,29 @@ func main() {
 	// Add auth command
 	authCmd := GetAuthCommand()
 
+	// Add secrets command
+	secretsCmd := GetSecretsCommand()
+
+	// Add trust-cert command
+	trustCertCmd := GetTrustCertCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(toolsCmd)
 	rootCmd.AddCommand(callCmd)
 	rootCmd.AddCommand(authCmd)
+	rootCmd.AddCommand(secretsCmd)
+	rootCmd.AddCommand(trustCertCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
 
 	if err := rootCmd.Execute(); err != nil {
+		// Check for specific error types to return appropriate exit codes
+		exitCode := classifyError(err)
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCode)
 	}
 }
 
@@ -248,7 +260,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
 	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
 	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
-	cmdEnableTray, _ := cmd.Flags().GetBool("tray")
 	cmdDebugSearch, _ := cmd.Flags().GetBool("debug-search")
 	cmdToolResponseLimit, _ := cmd.Flags().GetInt("tool-response-limit")
 	cmdReadOnlyMode, _ := cmd.Flags().GetBool("read-only")
@@ -330,14 +341,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	logger.Info("Starting mcpproxy",
 		zap.String("version", version),
 		zap.String("log_level", cmdLogLevel),
-		zap.Bool("tray_enabled", cmdEnableTray),
 		zap.Bool("log_to_file", cmdLogToFile))
 
 	// Override other settings from command line
-	// Check if the tray flag was explicitly set by the user
-	if cmd.Flags().Changed("tray") {
-		cfg.EnableTray = cmdEnableTray
-	}
 	cfg.DebugSearch = cmdDebugSearch
 
 	if cmdToolResponseLimit != 0 {
@@ -364,17 +370,41 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	logger.Info("Configuration loaded",
 		zap.String("data_dir", cfg.DataDir),
 		zap.Int("servers_count", len(cfg.Servers)),
-		zap.Bool("tray_enabled", cfg.EnableTray),
 		zap.Bool("read_only_mode", cfg.ReadOnlyMode),
 		zap.Bool("disable_management", cfg.DisableManagement),
 		zap.Bool("allow_server_add", cfg.AllowServerAdd),
 		zap.Bool("allow_server_remove", cfg.AllowServerRemove),
 		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
+	// Ensure API key is configured
+	apiKey, wasGenerated, source := cfg.EnsureAPIKey()
+	if apiKey == "" {
+		logger.Info("API key authentication disabled")
+	} else if wasGenerated {
+		// Frame the auto-generated key message for visibility
+		frameMsg := strings.Repeat("*", 80)
+		logger.Warn(frameMsg)
+		logger.Warn("API key was auto-generated for security. To access the Web UI and REST API, use this key:")
+		logger.Warn("",
+			zap.String("api_key", apiKey),
+			zap.String("web_ui_url", fmt.Sprintf("http://%s/ui/?apikey=%s", cfg.Listen, apiKey)),
+			zap.String("source", source.String()))
+		logger.Warn(frameMsg)
+	} else {
+		// Mask API key when it comes from environment or config file
+		maskedKey := maskAPIKey(apiKey)
+		logger.Info("API key authentication enabled",
+			zap.String("source", source.String()),
+			zap.String("api_key_prefix", maskedKey))
+	}
+
 	// Create server with the actual config path used
 	var actualConfigPath string
 	if configFile != "" {
 		actualConfigPath = configFile
+	} else {
+		// When using default config, still track the actual path used
+		actualConfigPath = config.GetConfigPath(cfg.DataDir)
 	}
 	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger)
 	if err != nil {
@@ -383,76 +413,44 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Shutdown function that can be called from tray
-	shutdownFunc := func() {
-		logger.Info("Shutdown requested")
-		cancel()
-		// Don't wait here - let the main thread handle the delay
-	}
-
+	// Setup signal handling for graceful shutdown with force quit on second signal
 	go func() {
 		sig := <-sigChan
 		logger.Info("Received signal, shutting down", zap.String("signal", sig.String()))
-		shutdownFunc()
-		// Don't exit here - let main thread handle the shutdown delay
+		logger.Info("Press Ctrl+C again within 10 seconds to force quit")
+		cancel()
+
+		// Start a timer for force quit
+		forceQuitTimer := time.NewTimer(10 * time.Second)
+		defer forceQuitTimer.Stop()
+
+		// Wait for second signal or timeout
+		select {
+		case sig2 := <-sigChan:
+			logger.Warn("Received second signal, forcing immediate exit", zap.String("signal", sig2.String()))
+			_ = logger.Sync()
+			os.Exit(ExitCodeGeneralError)
+		case <-forceQuitTimer.C:
+			// Normal shutdown timeout - continue with graceful shutdown
+			logger.Debug("Force quit timer expired, continuing with graceful shutdown")
+		}
 	}()
 
-	if cfg.EnableTray {
-		// When tray is enabled, start tray immediately and auto-start server
-		logger.Info("Starting system tray with auto-start server")
+	// Start the server
+	logger.Info("Starting mcpproxy server")
+	if err := srv.StartServer(ctx); err != nil {
+		return fmt.Errorf("failed to start server: %w", err)
+	}
 
-		// Create and start tray on main thread (required for macOS)
-		trayApp := createTray(srv, logger.Sugar(), version, shutdownFunc)
-
-		// Auto-start server in background
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			logger.Info("Auto-starting server for tray mode")
-			if err := srv.StartServer(ctx); err != nil {
-				logger.Error("Failed to auto-start server", zap.Error(err))
-				// Don't cancel context here - let tray handle manual start/stop
-			}
-		}()
-
-		// This is a blocking call that runs the tray event loop
-		logger.Info("MAIN - Starting tray event loop")
-		if err := trayApp.Run(ctx); err != nil && err != context.Canceled {
-			logger.Error("Tray application error", zap.Error(err))
-		}
-		logger.Info("MAIN - Tray event loop exited")
-
-		// If context was cancelled (shutdown requested), wait for container cleanup
-		if ctx.Err() != nil {
-			logger.Info("MAIN - Tray exited due to shutdown, waiting for container cleanup...")
-			time.Sleep(12 * time.Second)
-			logger.Info("MAIN - Container cleanup wait completed")
-		} else {
-			logger.Info("MAIN - Tray exited normally")
-		}
-
-		// Wait for server goroutine to finish
-		logger.Info("MAIN - Waiting for server goroutine to finish")
-		wg.Wait()
-		logger.Info("MAIN - Server goroutine finished, exiting")
-	} else {
-		// Without tray, run server normally and wait
-		logger.Info("Starting server without tray")
-		if err := srv.StartServer(ctx); err != nil {
-			return fmt.Errorf("failed to start server: %w", err)
-		}
-
-		// Wait for context to be cancelled
-		<-ctx.Done()
-		logger.Info("Shutting down server")
-		if err := srv.StopServer(); err != nil {
-			logger.Error("Error stopping server", zap.Error(err))
-		}
+	// Wait for context to be cancelled
+	<-ctx.Done()
+	logger.Info("Shutting down server")
+	if err := srv.StopServer(); err != nil {
+		logger.Error("Error stopping server", zap.Error(err))
 	}
 
 	return nil
@@ -491,4 +489,61 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// classifyError categorizes errors to return appropriate exit codes
+func classifyError(err error) int {
+	if err == nil {
+		return ExitCodeSuccess
+	}
+
+	// Check for port conflict errors
+	var portErr *server.PortInUseError
+	if errors.As(err, &portErr) {
+		return ExitCodePortConflict
+	}
+
+	// Check for database lock errors (specific type first, then generic bbolt timeout)
+	var dbLockedErr *storage.DatabaseLockedError
+	if errors.As(err, &dbLockedErr) {
+		return ExitCodeDBLocked
+	}
+
+	if errors.Is(err, bbolterrors.ErrTimeout) {
+		return ExitCodeDBLocked
+	}
+
+	// Check for string-based error messages from various sources
+	errMsg := strings.ToLower(err.Error())
+
+	// Port conflict indicators
+	if strings.Contains(errMsg, "address already in use") ||
+		strings.Contains(errMsg, "port") && strings.Contains(errMsg, "in use") ||
+		strings.Contains(errMsg, "bind: address already in use") {
+		return ExitCodePortConflict
+	}
+
+	// Database lock indicators
+	if strings.Contains(errMsg, "database is locked") ||
+		strings.Contains(errMsg, "database locked") ||
+		strings.Contains(errMsg, "bolt") && strings.Contains(errMsg, "timeout") {
+		return ExitCodeDBLocked
+	}
+
+	// Configuration error indicators
+	if strings.Contains(errMsg, "invalid configuration") ||
+		strings.Contains(errMsg, "config") && (strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "error")) ||
+		strings.Contains(errMsg, "failed to load configuration") {
+		return ExitCodeConfigError
+	}
+
+	// Permission error indicators
+	if strings.Contains(errMsg, "permission denied") ||
+		strings.Contains(errMsg, "access denied") ||
+		strings.Contains(errMsg, "operation not permitted") {
+		return ExitCodePermissionError
+	}
+
+	// Default to general error
+	return ExitCodeGeneralError
 }

@@ -13,6 +13,20 @@ import (
 	"go.uber.org/zap"
 )
 
+// DatabaseLockedError indicates that the database is locked by another process
+type DatabaseLockedError struct {
+	Path string
+	Err  error
+}
+
+func (e *DatabaseLockedError) Error() string {
+	return fmt.Sprintf("database %s is locked by another process", e.Path)
+}
+
+func (e *DatabaseLockedError) Unwrap() error {
+	return e.Err
+}
+
 // BoltDB wraps bolt database operations
 type BoltDB struct {
 	db     *bbolt.DB
@@ -23,42 +37,24 @@ type BoltDB struct {
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	dbPath := filepath.Join(dataDir, "config.db")
 
-	// Try to open with timeout, if it fails, attempt recovery
+	// Try to open with timeout, if it fails, immediately return database locked error
 	db, err := bbolt.Open(dbPath, 0644, &bbolt.Options{
 		Timeout: 10 * time.Second,
 	})
 	if err != nil {
 		logger.Warnf("Failed to open database on first attempt: %v", err)
 
-		// Check if it's a timeout or lock issue
+		// Check if it's a timeout or lock issue - return immediately without recovery attempts
 		if err == errors.ErrTimeout {
-			logger.Info("Database timeout detected, attempting recovery...")
-
-			// Try to backup and recreate if file exists
-			if _, statErr := filepath.Glob(dbPath); statErr == nil {
-				backupPath := dbPath + ".backup." + time.Now().Format("20060102-150405")
-				logger.Infof("Creating backup at %s", backupPath)
-
-				// Attempt to copy the file
-				if cpErr := copyFile(dbPath, backupPath); cpErr != nil {
-					logger.Warnf("Failed to create backup: %v", cpErr)
-				}
-
-				// Remove the original file to clear any locks
-				if rmErr := removeFile(dbPath); rmErr != nil {
-					logger.Warnf("Failed to remove locked database file: %v", rmErr)
-				}
+			logger.Info("Database timeout detected, another mcpproxy instance may be running")
+			return nil, &DatabaseLockedError{
+				Path: dbPath,
+				Err:  err,
 			}
-
-			// Try to open again
-			db, err = bbolt.Open(dbPath, 0644, &bbolt.Options{
-				Timeout: 5 * time.Second,
-			})
 		}
 
-		if err != nil {
-			return nil, fmt.Errorf("failed to open bolt database after recovery attempt: %w", err)
-		}
+		// For other errors, return wrapped error
+		return nil, fmt.Errorf("failed to open bolt database: %w", err)
 	}
 
 	boltDB := &BoltDB{

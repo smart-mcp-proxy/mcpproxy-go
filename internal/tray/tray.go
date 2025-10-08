@@ -11,30 +11,36 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/systray"
-	"github.com/fsnotify/fsnotify"
 	"github.com/inconshreveable/go-update"
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
 	"mcpproxy-go/internal/config"
+	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/server"
 	// "mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
 )
 
 const (
-	repo      = "smart-mcp-proxy/mcpproxy-go" // Actual repository
-	osDarwin  = "darwin"
-	osWindows = "windows"
-	trueStr   = "true"
+	repo          = "smart-mcp-proxy/mcpproxy-go" // Actual repository
+	osDarwin      = "darwin"
+	osWindows     = "windows"
+	osLinux       = "linux"
+	phaseError    = "Error"
+	assetZipExt   = ".zip"
+	assetTarGzExt = ".tar.gz"
+	trueStr       = "true"
 )
 
 //go:embed icon-mono-44.png
@@ -45,8 +51,9 @@ var iconDataICO []byte
 
 // GitHubRelease represents a GitHub release
 type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
+	TagName    string `json:"tag_name"`
+	Prerelease bool   `json:"prerelease"`
+	Assets     []struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 	} `json:"assets"`
@@ -61,6 +68,7 @@ type ServerInterface interface {
 	StopServer() error
 	GetStatus() interface{}            // Returns server status for display
 	StatusChannel() <-chan interface{} // Channel for status updates
+	EventsChannel() <-chan internalRuntime.Event
 
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)
@@ -70,6 +78,8 @@ type ServerInterface interface {
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string, quarantined bool) error
 	GetAllServers() ([]map[string]interface{}, error)
+	SetListenAddress(addr string, persist bool) error
+	SuggestAlternateListen(baseAddr string) (string, error)
 
 	// Config management for file watching
 	ReloadConfiguration() error
@@ -82,16 +92,31 @@ type ServerInterface interface {
 
 // App represents the system tray application
 type App struct {
-	server   ServerInterface
-	logger   *zap.SugaredLogger
-	version  string
-	shutdown func()
+	server    ServerInterface
+	apiClient interface{ OpenWebUI() error } // API client for web UI access (optional)
+	logger    *zap.SugaredLogger
+	version   string
+	shutdown  func()
+
+	connectionState   ConnectionState
+	connectionStateMu sync.RWMutex
+	instrumentation   instrumentation
+
+	statusMu      sync.RWMutex
+	statusTitle   string
+	statusTooltip string
 
 	// Menu items for dynamic updates
-	statusItem          *systray.MenuItem
-	startStopItem       *systray.MenuItem
+	statusItem *systray.MenuItem
+	// startStopItem removed - tray doesn't directly control core lifecycle
 	upstreamServersMenu *systray.MenuItem
 	quarantineMenu      *systray.MenuItem
+	portConflictMenu    *systray.MenuItem
+	portConflictInfo    *systray.MenuItem
+	portConflictRetry   *systray.MenuItem
+	portConflictAuto    *systray.MenuItem
+	portConflictCopy    *systray.MenuItem
+	portConflictConfig  *systray.MenuItem
 
 	// Managers for proper synchronization
 	stateManager *ServerStateManager
@@ -102,9 +127,8 @@ type App struct {
 	autostartManager *AutostartManager
 	autostartItem    *systray.MenuItem
 
-	// Config file watching
-	configWatcher *fsnotify.Watcher
-	configPath    string
+	// Config path for opening from menu
+	configPath string
 
 	// Context for background operations
 	ctx    context.Context
@@ -114,7 +138,6 @@ type App struct {
 	lastRunningState bool // Track last known server running state
 
 	// Menu tracking fields for dynamic updates
-	forceRefresh      bool                         // Force menu refresh flag
 	menusInitialized  bool                         // Track if menus have been initialized
 	coreMenusReady    bool                         // Track if core menu items are ready
 	lastServerList    []string                     // Track last known server list for change detection
@@ -124,16 +147,30 @@ type App struct {
 	// Quarantine menu tracking fields
 	lastQuarantineList    []string                     // Track last known quarantine list for change detection
 	quarantineServerMenus map[string]*systray.MenuItem // Track quarantine server menu items
+	portConflictActive    bool
+	portConflictAddress   string
+	portConflictSuggested string
 }
 
 // New creates a new tray application
 func New(server ServerInterface, logger *zap.SugaredLogger, version string, shutdown func()) *App {
+	return NewWithAPIClient(server, nil, logger, version, shutdown)
+}
+
+// NewWithAPIClient creates a new tray application with an API client for web UI access
+func NewWithAPIClient(server ServerInterface, apiClient interface{ OpenWebUI() error }, logger *zap.SugaredLogger, version string, shutdown func()) *App {
 	app := &App{
-		server:   server,
-		logger:   logger,
-		version:  version,
-		shutdown: shutdown,
+		server:          server,
+		apiClient:       apiClient,
+		logger:          logger,
+		version:         version,
+		shutdown:        shutdown,
+		connectionState: ConnectionStateInitializing,
+		statusTitle:     "Status: Initializing...",
+		statusTooltip:   "mcpproxy tray is starting",
 	}
+
+	app.instrumentation = newInstrumentation(app)
 
 	// Initialize managers (will be fully set up in onReady)
 	app.stateManager = NewServerStateManager(server, logger)
@@ -155,15 +192,122 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 	return app
 }
 
+// SetConnectionState updates the tray's view of the core connectivity status.
+func (a *App) SetConnectionState(state ConnectionState) {
+	a.connectionStateMu.Lock()
+	a.connectionState = state
+	a.connectionStateMu.Unlock()
+	a.logger.Debug("Updated connection state", zap.String("state", string(state)))
+	a.instrumentation.NotifyConnectionState(state)
+
+	if !a.coreMenusReady || a.statusItem == nil {
+		return
+	}
+
+	a.applyConnectionStateToUI(state)
+}
+
+// getConnectionState returns the last observed connection state.
+func (a *App) getConnectionState() ConnectionState {
+	a.connectionStateMu.RLock()
+	defer a.connectionStateMu.RUnlock()
+	return a.connectionState
+}
+
+func (a *App) getStatusSnapshot() (title, tooltip string) {
+	a.statusMu.RLock()
+	defer a.statusMu.RUnlock()
+	return a.statusTitle, a.statusTooltip
+}
+
+func (a *App) getMenuSnapshot() (servers, quarantine []map[string]interface{}) {
+	if a.menuManager == nil {
+		return nil, nil
+	}
+	return a.menuManager.LatestServersSnapshot(), a.menuManager.LatestQuarantineSnapshot()
+}
+
+// ObserveConnectionState wires a channel of connection states into the tray UI.
+func (a *App) ObserveConnectionState(ctx context.Context, states <-chan ConnectionState) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case state, ok := <-states:
+				if !ok {
+					a.SetConnectionState(ConnectionStateDisconnected)
+					return
+				}
+				a.SetConnectionState(state)
+			}
+		}
+	}()
+}
+
+// applyConnectionStateToUI mutates tray widgets to reflect the provided connection state.
+func (a *App) applyConnectionStateToUI(state ConnectionState) {
+	if a.statusItem == nil {
+		return
+	}
+
+	var statusText string
+	var tooltip string
+
+	switch state {
+	case ConnectionStateInitializing:
+		statusText = "Status: Initializing..."
+		tooltip = "mcpproxy tray is starting"
+	case ConnectionStateStartingCore:
+		statusText = "Status: Launching core..."
+		tooltip = "Starting mcpproxy core process"
+	case ConnectionStateConnecting:
+		statusText = "Status: Connecting to core..."
+		tooltip = "Waiting for core API to become reachable"
+	case ConnectionStateReconnecting:
+		statusText = "Status: Reconnecting..."
+		tooltip = "Reconnecting to the core runtime"
+	case ConnectionStateDisconnected:
+		statusText = "Status: Core unavailable"
+		tooltip = "Tray cannot reach the core runtime"
+	case ConnectionStateAuthError:
+		statusText = "Status: Authentication error"
+		tooltip = "Core is running but API key authentication failed"
+	case ConnectionStateConnected:
+		statusText = "Status: Connected"
+		tooltip = "Core runtime is responding"
+	default:
+		statusText = "Status: Unknown"
+		tooltip = "Core connection state is unknown"
+	}
+
+	a.statusItem.SetTitle(statusText)
+	a.statusItem.SetTooltip(tooltip)
+	systray.SetTooltip(tooltip)
+	a.statusMu.Lock()
+	a.statusTitle = statusText
+	a.statusTooltip = tooltip
+	a.statusMu.Unlock()
+
+	if state != ConnectionStateConnected {
+		a.hidePortConflictMenu()
+	}
+
+	// Note: startStopItem removed - no longer needed in new architecture
+
+	a.instrumentation.NotifyConnectionState(state)
+	a.instrumentation.NotifyStatus()
+}
+
 // Run starts the system tray application
 func (a *App) Run(ctx context.Context) error {
 	a.logger.Info("Starting system tray application")
 	a.ctx, a.cancel = context.WithCancel(ctx)
 	defer a.cancel()
+	a.instrumentation.Start(a.ctx)
 
-	// Initialize config file watcher
-	if err := a.initConfigWatcher(); err != nil {
-		a.logger.Warn("Failed to initialize config file watcher", zap.Error(err))
+	if a.server != nil {
+		a.configPath = a.server.GetConfigPath()
 	}
 
 	// Start background auto-update checker (daily)
@@ -207,36 +351,15 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Start config file watcher
-	if a.configWatcher != nil {
-		go a.watchConfigFile()
-	}
-
 	// Listen for real-time status updates
 	if a.server != nil {
 		go func() {
-			a.logger.Debug("Waiting for core menu items before processing real-time status updates...")
-			// Wait for menu items to be initialized using the flag
-			for !a.coreMenusReady {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					time.Sleep(100 * time.Millisecond) // Check every 100ms
-				}
-			}
-
-			a.logger.Debug("Core menu items ready, starting real-time status updates")
-			statusCh := a.server.StatusChannel()
-			for {
-				select {
-				case status := <-statusCh:
-					a.updateStatusFromData(status)
-				case <-ctx.Done():
-					return
-				}
-			}
+			a.consumeStatusUpdates()
 		}()
+
+		if eventsCh := a.server.EventsChannel(); eventsCh != nil {
+			go a.consumeRuntimeEvents(eventsCh)
+		}
 	}
 
 	// Monitor context cancellation and quit systray when needed
@@ -253,81 +376,95 @@ func (a *App) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// initConfigWatcher initializes the config file watcher
-func (a *App) initConfigWatcher() error {
-	if a.server == nil {
-		return fmt.Errorf("server interface not available")
-	}
-
-	configPath := a.server.GetConfigPath()
-	if configPath == "" {
-		return fmt.Errorf("config path not available")
-	}
-
-	a.configPath = configPath
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return fmt.Errorf("failed to create file watcher: %w", err)
-	}
-
-	a.configWatcher = watcher
-
-	// Watch the config file
-	if err := a.configWatcher.Add(configPath); err != nil {
-		a.configWatcher.Close()
-		return fmt.Errorf("failed to watch config file %s: %w", configPath, err)
-	}
-
-	a.logger.Info("Config file watcher initialized", zap.String("path", configPath))
-	return nil
+// cleanup performs cleanup operations
+func (a *App) cleanup() {
+	a.instrumentation.Shutdown()
+	a.cancel()
 }
 
-// watchConfigFile watches for config file changes and reloads configuration
-func (a *App) watchConfigFile() {
-	defer a.configWatcher.Close()
+func (a *App) consumeStatusUpdates() {
+	statusCh := a.server.StatusChannel()
+	if statusCh == nil {
+		return
+	}
 
+	a.logger.Debug("Waiting for core menu items before processing real-time status updates...")
+	for !a.coreMenusReady {
+		select {
+		case <-a.ctx.Done():
+			return
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	a.logger.Debug("Core menu items ready, starting real-time status updates")
 	for {
 		select {
-		case event, ok := <-a.configWatcher.Events:
+		case status, ok := <-statusCh:
 			if !ok {
+				a.logger.Debug("Status channel closed; stopping status updates listener")
 				return
 			}
-
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				a.logger.Debug("Config file changed, reloading configuration", zap.String("event", event.String()))
-
-				// Add a small delay to ensure file write is complete
-				time.Sleep(500 * time.Millisecond)
-
-				if err := a.server.ReloadConfiguration(); err != nil {
-					a.logger.Error("Failed to reload configuration", zap.Error(err))
-				} else {
-					a.logger.Debug("Configuration reloaded successfully")
-					// Force a menu refresh after config reload
-					a.forceRefresh = true
-					a.refreshMenusImmediate()
-				}
-			}
-
-		case err, ok := <-a.configWatcher.Errors:
-			if !ok {
-				return
-			}
-			a.logger.Error("Config file watcher error", zap.Error(err))
-
+			a.updateStatusFromData(status)
 		case <-a.ctx.Done():
 			return
 		}
 	}
 }
 
-// cleanup performs cleanup operations
-func (a *App) cleanup() {
-	if a.configWatcher != nil {
-		a.configWatcher.Close()
+func (a *App) consumeRuntimeEvents(eventsCh <-chan internalRuntime.Event) {
+	if eventsCh == nil {
+		return
 	}
-	a.cancel()
+
+	a.logger.Debug("Waiting for core menu items before processing runtime events...")
+	for !a.coreMenusReady {
+		select {
+		case <-a.ctx.Done():
+			return
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	a.logger.Debug("Core menu items ready, starting runtime event listener")
+	for {
+		select {
+		case evt, ok := <-eventsCh:
+			if !ok {
+				a.logger.Debug("Runtime events channel closed; stopping listener")
+				return
+			}
+			a.handleRuntimeEvent(evt)
+		case <-a.ctx.Done():
+			return
+		}
+	}
+}
+
+func (a *App) handleRuntimeEvent(evt internalRuntime.Event) {
+	switch evt.Type {
+	case internalRuntime.EventTypeServersChanged, internalRuntime.EventTypeConfigReloaded:
+		if evt.Payload != nil {
+			a.logger.Debug("Processing runtime event",
+				zap.String("type", string(evt.Type)),
+				zap.Any("payload", evt.Payload))
+		} else {
+			a.logger.Debug("Processing runtime event", zap.String("type", string(evt.Type)))
+		}
+
+		if a.syncManager != nil {
+			if err := a.syncManager.SyncNow(); err != nil {
+				a.logger.Error("Failed to synchronize menus after runtime event", zap.Error(err))
+			}
+		}
+
+		a.updateStatus()
+	default:
+		// Ignore other event types for now but log at debug for visibility
+		a.logger.Debug("Ignoring runtime event", zap.String("type", string(evt.Type)))
+	}
 }
 
 func (a *App) onReady() {
@@ -350,7 +487,23 @@ func (a *App) onReady() {
 	a.logger.Debug("Initializing tray menu items")
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
 	a.statusItem.Disable() // Initially disabled as it's just for display
-	a.startStopItem = systray.AddMenuItem("Start Server", "Start the proxy server")
+	// Note: startStopItem removed - tray doesn't directly control core lifecycle
+	// Users should quit tray to restart (when tray manages core) or use CLI (when core is independent)
+	a.applyConnectionStateToUI(a.getConnectionState())
+
+	// Port conflict resolution submenu (hidden until needed)
+	a.portConflictMenu = systray.AddMenuItem("Resolve port conflict", "Actions to resolve listen port issues")
+	a.portConflictInfo = a.portConflictMenu.AddSubMenuItem("Waiting for status...", "Port conflict details")
+	a.portConflictInfo.Disable()
+	a.portConflictRetry = a.portConflictMenu.AddSubMenuItem("Retry starting MCPProxy", "Attempt to start MCPProxy on the configured port")
+	a.portConflictAuto = a.portConflictMenu.AddSubMenuItem("Use next available port", "Automatically select an available port")
+	a.portConflictCopy = a.portConflictMenu.AddSubMenuItem("Copy MCP URL", "Copy the MCP connection URL to the clipboard")
+	a.portConflictConfig = a.portConflictMenu.AddSubMenuItem("Open config directory", "Edit the configuration manually")
+	a.portConflictMenu.Hide()
+	a.portConflictRetry.Disable()
+	a.portConflictAuto.Disable()
+	a.portConflictCopy.Disable()
+	a.portConflictConfig.Disable()
 
 	// Mark core menu items as ready - this will release waiting goroutines
 	a.coreMenusReady = true
@@ -365,6 +518,10 @@ func (a *App) onReady() {
 	// --- Initialize Managers ---
 	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
+	a.syncManager.SetOnSync(func() {
+		a.instrumentation.NotifyMenus()
+	})
+	a.instrumentation.NotifyMenus()
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
@@ -374,6 +531,12 @@ func (a *App) onReady() {
 	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
 	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
 	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
+
+	// Add Web Control Panel menu item if API client is available
+	var openWebUIItem *systray.MenuItem
+	if a.apiClient != nil {
+		openWebUIItem = systray.AddMenuItem("Open Web Control Panel", "Open the web control panel in your browser")
+	}
 	systray.AddSeparator()
 
 	// --- Autostart Menu Item (macOS only) ---
@@ -398,8 +561,14 @@ func (a *App) onReady() {
 	go func() {
 		for {
 			select {
-			case <-a.startStopItem.ClickedCh:
-				a.handleStartStop()
+			case <-a.portConflictRetry.ClickedCh:
+				go a.handlePortConflictRetry()
+			case <-a.portConflictAuto.ClickedCh:
+				go a.handlePortConflictAuto()
+			case <-a.portConflictCopy.ClickedCh:
+				go a.handlePortConflictCopy()
+			case <-a.portConflictConfig.ClickedCh:
+				a.openConfigDir()
 			case <-updateItem.ClickedCh:
 				go a.checkForUpdates()
 			case <-openConfigItem.ClickedCh:
@@ -417,6 +586,20 @@ func (a *App) onReady() {
 			}
 		}
 	}()
+
+	// --- Web UI Click Handler (separate goroutine if available) ---
+	if openWebUIItem != nil {
+		go func() {
+			for {
+				select {
+				case <-openWebUIItem.ClickedCh:
+					a.handleOpenWebUI()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	// --- Autostart Click Handler (separate goroutine for macOS) ---
 	if runtime.GOOS == osDarwin && a.autostartItem != nil {
@@ -437,8 +620,13 @@ func (a *App) onReady() {
 
 // updateTooltip updates the tooltip based on the server's running state
 func (a *App) updateTooltip() {
+	if a.getConnectionState() != ConnectionStateConnected {
+		// Connection state handler already set an appropriate tooltip.
+		return
+	}
+
 	if a.server == nil {
-		systray.SetTooltip("mcpproxy is stopped")
+		systray.SetTooltip("mcpproxy core not attached")
 		return
 	}
 
@@ -509,69 +697,108 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		return
 	}
 
+	if a.getConnectionState() != ConnectionStateConnected {
+		a.logger.Debug("Skipping runtime status update; core not in connected state")
+		return
+	}
+
 	// Debug logging to track status updates
 	running, _ := status["running"].(bool)
 	phase, _ := status["phase"].(string)
+	message, _ := status["message"].(string)
+	listenAddr, _ := status["listen_addr"].(string)
 	serverRunning := a.server != nil && a.server.IsRunning()
+
+	lowerMessage := strings.ToLower(message)
+	portConflict := phase == phaseError && strings.Contains(lowerMessage, "port") && strings.Contains(lowerMessage, "in use")
 
 	a.logger.Debug("Updating tray status",
 		zap.Bool("status_running", running),
 		zap.Bool("server_is_running", serverRunning),
 		zap.String("phase", phase),
+		zap.Bool("port_conflict", portConflict),
 		zap.Any("status_data", status))
 
 	// Use the actual server running state as the authoritative source
 	actuallyRunning := serverRunning
 
-	// Update running status and start/stop button
+	if portConflict {
+		a.showPortConflictMenu(listenAddr, message)
+	} else {
+		a.hidePortConflictMenu()
+	}
+
 	if actuallyRunning {
-		listenAddr, _ := status["listen_addr"].(string)
+		title := "Status: Running"
 		if listenAddr != "" {
-			a.statusItem.SetTitle(fmt.Sprintf("Status: Running (%s)", listenAddr))
-		} else {
-			a.statusItem.SetTitle("Status: Running")
+			title = fmt.Sprintf("Status: Running (%s)", listenAddr)
 		}
-		a.startStopItem.SetTitle("Stop Server")
+		a.statusItem.SetTitle(title)
+		a.statusMu.Lock()
+		a.statusTitle = title
+		a.statusMu.Unlock()
+		// Note: startStopItem visibility is now managed by applyConnectionStateToUI
+		// based on ConnectionState, not server running status
 		a.logger.Debug("Set tray to running state")
 	} else {
-		a.statusItem.SetTitle("Status: Stopped")
-		a.startStopItem.SetTitle("Start Server")
-		a.logger.Debug("Set tray to stopped state")
+		title := "Status: Stopped"
+		if phase == phaseError {
+			title = "Status: Error"
+			if portConflict && listenAddr != "" {
+				title = fmt.Sprintf("Status: Port conflict (%s)", listenAddr)
+			}
+		}
+		a.statusItem.SetTitle(title)
+		a.statusMu.Lock()
+		a.statusTitle = title
+		a.statusMu.Unlock()
+		// Note: startStopItem visibility is now managed by applyConnectionStateToUI
+		// based on ConnectionState, not server running status
+		a.logger.Debug("Set tray to non-running state", zap.String("phase", phase))
 	}
 
 	// Update tooltip
 	a.updateTooltipFromStatusData(status)
+	a.instrumentation.NotifyStatus()
 
 	// Update server menus using the manager (only if server is running)
 	if a.syncManager != nil {
 		if actuallyRunning {
 			a.syncManager.SyncDelayed()
 		} else {
-			// When server is stopped, preserve the last known server list but update connection status
-			// This prevents the UI from showing (0/0) when the server is temporarily stopped
-			// The menu items will still be visible but will show disconnected status
 			a.logger.Debug("Server stopped, preserving menu state with disconnected status")
-			// DON'T clear menus - this causes the (0/0) flickering issue
-			// DON'T clear quarantine menu - quarantine data is persistent storage,
-			// not runtime connection data. Users should manage quarantined servers
-			// even when server is stopped.
-			// a.menuManager.UpdateQuarantineMenu([]map[string]interface{}{})
 		}
 	}
 }
 
 // updateTooltipFromStatusData updates the tray tooltip from status data map
 func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
+	if a.getConnectionState() != ConnectionStateConnected {
+		return
+	}
+
 	running, _ := status["running"].(bool)
+	phase, _ := status["phase"].(string)
+	message, _ := status["message"].(string)
 
 	if !running {
-		systray.SetTooltip("mcpproxy is stopped")
+		tooltip := "mcpproxy is stopped"
+		if phase == phaseError {
+			if strings.TrimSpace(message) != "" {
+				tooltip = fmt.Sprintf("mcpproxy error: %s", message)
+			} else {
+				tooltip = "mcpproxy encountered an error while starting"
+			}
+		}
+		systray.SetTooltip(tooltip)
+		a.statusMu.Lock()
+		a.statusTooltip = tooltip
+		a.statusMu.Unlock()
 		return
 	}
 
 	// Build comprehensive tooltip for running server
 	listenAddr, _ := status["listen_addr"].(string)
-	phase, _ := status["phase"].(string)
 	toolsIndexed, _ := status["tools_indexed"].(int)
 
 	// Get upstream stats for connected servers and total tools
@@ -615,6 +842,9 @@ func (a *App) updateTooltipFromStatusData(status map[string]interface{}) {
 
 	tooltip := strings.Join(tooltipLines, "\n")
 	systray.SetTooltip(tooltip)
+	a.statusMu.Lock()
+	a.statusTooltip = tooltip
+	a.statusMu.Unlock()
 }
 
 // updateServersMenuFromStatusData is a legacy method, functionality is now in MenuManager
@@ -650,90 +880,12 @@ func (a *App) updateServersMenu() {
 	}
 }
 
-// handleStartStop toggles the server's running state
-func (a *App) handleStartStop() {
-	if a.server.IsRunning() {
-		a.logger.Info("Stopping server from tray")
-
-		// Immediately update UI to show stopping state
-		if a.statusItem != nil {
-			a.statusItem.SetTitle("Status: Stopping...")
-		}
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Stopping...")
-		}
-
-		// Stop the server
-		if err := a.server.StopServer(); err != nil {
-			a.logger.Error("Failed to stop server", zap.Error(err))
-			// Restore UI state on error
-			a.updateStatus()
-			return
-		}
-
-		// Wait for server to fully stop with timeout
-		go func() {
-			timeout := time.After(10 * time.Second)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-timeout:
-					a.logger.Warn("Timeout waiting for server to stop, updating status anyway")
-					a.updateStatus()
-					return
-				case <-ticker.C:
-					if !a.server.IsRunning() {
-						a.logger.Info("Server stopped, updating UI")
-						a.updateStatus()
-						return
-					}
-				}
-			}
-		}()
-	} else {
-		a.logger.Info("Starting server from tray")
-
-		// Immediately update UI to show starting state
-		if a.statusItem != nil {
-			a.statusItem.SetTitle("Status: Starting...")
-		}
-		if a.startStopItem != nil {
-			a.startStopItem.SetTitle("Starting...")
-		}
-
-		// Start the server
-		go func() {
-			if err := a.server.StartServer(a.ctx); err != nil {
-				a.logger.Error("Failed to start server", zap.Error(err))
-				// Restore UI state on error
-				a.updateStatus()
-				return
-			}
-
-			// Wait for server to fully start with timeout
-			timeout := time.After(10 * time.Second)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-timeout:
-					a.logger.Warn("Timeout waiting for server to start, updating status anyway")
-					a.updateStatus()
-					return
-				case <-ticker.C:
-					if a.server.IsRunning() {
-						a.logger.Info("Server started, updating UI")
-						a.updateStatus()
-						return
-					}
-				}
-			}
-		}()
-	}
-}
+// handleStartStop - REMOVED
+// In the new architecture, tray doesn't directly control the core process lifecycle.
+// The state machine in cmd/mcpproxy-tray/main.go manages the core process.
+// Users should:
+// - Quit tray to restart (when tray manages core)
+// - Use CLI to restart (when core is independent)
 
 // onExit is called when the application is quitting
 func (a *App) onExit() {
@@ -800,6 +952,15 @@ func (a *App) checkForUpdates() {
 
 // getLatestRelease fetches the latest release information from GitHub
 func (a *App) getLatestRelease() (*GitHubRelease, error) {
+	// Check if prerelease updates are allowed
+	allowPrerelease := os.Getenv("MCPPROXY_ALLOW_PRERELEASE_UPDATES") == trueStr
+
+	if allowPrerelease {
+		// Get all releases and find the latest (including prereleases)
+		return a.getLatestReleaseIncludingPrereleases()
+	}
+
+	// Default behavior: get latest stable release only
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 	resp, err := http.Get(url) // #nosec G107 -- URL is constructed from known repo constant
 	if err != nil {
@@ -814,6 +975,28 @@ func (a *App) getLatestRelease() (*GitHubRelease, error) {
 	return &release, nil
 }
 
+// getLatestReleaseIncludingPrereleases fetches the latest release including prereleases
+func (a *App) getLatestReleaseIncludingPrereleases() (*GitHubRelease, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases", repo)
+	resp, err := http.Get(url) // #nosec G107 -- URL is constructed from known repo constant
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var releases []GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, err
+	}
+
+	if len(releases) == 0 {
+		return nil, fmt.Errorf("no releases found")
+	}
+
+	// Return the first release (GitHub returns them sorted by creation date, newest first)
+	return &releases[0], nil
+}
+
 // findAssetURL finds the correct asset URL for the current system
 func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 	// Check if this is a Homebrew installation to avoid conflicts
@@ -825,9 +1008,9 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 	var extension string
 	switch runtime.GOOS {
 	case osWindows:
-		extension = ".zip"
+		extension = assetZipExt
 	default: // macOS, Linux
-		extension = ".tar.gz"
+		extension = assetTarGzExt
 	}
 
 	// Try latest assets first (for website integration)
@@ -885,9 +1068,9 @@ func (a *App) downloadAndApplyUpdate(url string) error {
 	}
 	defer resp.Body.Close()
 
-	if strings.HasSuffix(url, ".zip") {
+	if strings.HasSuffix(url, assetZipExt) {
 		return a.applyZipUpdate(resp.Body)
-	} else if strings.HasSuffix(url, ".tar.gz") {
+	} else if strings.HasSuffix(url, assetTarGzExt) {
 		return a.applyTarGzUpdate(resp.Body)
 	}
 
@@ -896,7 +1079,7 @@ func (a *App) downloadAndApplyUpdate(url string) error {
 
 // applyZipUpdate extracts and applies an update from a zip archive
 func (a *App) applyZipUpdate(body io.Reader) error {
-	tmpfile, err := os.CreateTemp("", "update-*.zip")
+	tmpfile, err := os.CreateTemp("", fmt.Sprintf("update-*%s", assetZipExt))
 	if err != nil {
 		return err
 	}
@@ -939,7 +1122,7 @@ func (a *App) applyZipUpdate(body io.Reader) error {
 // applyTarGzUpdate extracts and applies an update from a tar.gz archive
 func (a *App) applyTarGzUpdate(body io.Reader) error {
 	// For tar.gz files, we need to extract and find the binary
-	tmpfile, err := os.CreateTemp("", "update-*.tar.gz")
+	tmpfile, err := os.CreateTemp("", fmt.Sprintf("update-*%s", assetTarGzExt))
 	if err != nil {
 		return err
 	}
@@ -1019,7 +1202,7 @@ func (a *App) openDirectory(dirPath, dirType string) {
 	switch runtime.GOOS {
 	case osDarwin:
 		cmd = exec.Command("open", dirPath)
-	case "linux":
+	case osLinux:
 		cmd = exec.Command("xdg-open", dirPath)
 	case osWindows:
 		cmd = exec.Command("explorer", dirPath)
@@ -1033,6 +1216,226 @@ func (a *App) openDirectory(dirPath, dirType string) {
 	} else {
 		a.logger.Info("Successfully opened directory", zap.String("dir_type", dirType), zap.String("path", dirPath))
 	}
+}
+
+func (a *App) showPortConflictMenu(listenAddr, message string) {
+	if a.portConflictMenu == nil {
+		return
+	}
+
+	if listenAddr == "" && a.server != nil {
+		listenAddr = a.server.GetListenAddress()
+	}
+
+	a.portConflictActive = true
+	a.portConflictAddress = listenAddr
+
+	headline := "Resolve port conflict"
+	if listenAddr != "" {
+		headline = fmt.Sprintf("Resolve port conflict (%s)", listenAddr)
+	}
+	a.portConflictMenu.SetTitle(headline)
+
+	info := message
+	if strings.TrimSpace(info) == "" {
+		info = "Another process is using the configured port."
+	}
+	if a.portConflictInfo != nil {
+		a.portConflictInfo.SetTitle(info)
+		a.portConflictInfo.Disable()
+	}
+
+	if a.portConflictRetry != nil {
+		a.portConflictRetry.Enable()
+	}
+
+	if a.portConflictConfig != nil {
+		a.portConflictConfig.Enable()
+	}
+
+	suggestion := ""
+	var err error
+	if a.server != nil {
+		suggestion, err = a.server.SuggestAlternateListen(listenAddr)
+	}
+	if err != nil {
+		a.logger.Warn("Failed to suggest alternate listen address", zap.Error(err))
+		a.portConflictSuggested = ""
+		if a.portConflictAuto != nil {
+			a.portConflictAuto.SetTitle("Find available port (retry)")
+			a.portConflictAuto.Enable()
+		}
+	} else {
+		a.portConflictSuggested = suggestion
+		if a.portConflictAuto != nil {
+			label := "Use next available port"
+			if suggestion != "" {
+				label = fmt.Sprintf("Use available port %s", suggestion)
+			}
+			a.portConflictAuto.SetTitle(label)
+			a.portConflictAuto.Enable()
+		}
+	}
+
+	if a.portConflictCopy != nil {
+		connectionURL := a.buildConnectionURL(listenAddr)
+		if connectionURL != "" {
+			a.portConflictCopy.SetTitle(fmt.Sprintf("Copy MCP URL (%s)", connectionURL))
+			a.portConflictCopy.Enable()
+			a.portConflictCopy.SetTooltip("Copy the MCP connection URL to the clipboard")
+		} else {
+			a.portConflictCopy.SetTitle("Copy MCP URL (unavailable)")
+			a.portConflictCopy.Disable()
+		}
+	}
+
+	a.portConflictMenu.Show()
+}
+
+func (a *App) hidePortConflictMenu() {
+	if !a.portConflictActive {
+		return
+	}
+
+	a.portConflictActive = false
+	a.portConflictAddress = ""
+	a.portConflictSuggested = ""
+
+	if a.portConflictMenu != nil {
+		a.portConflictMenu.Hide()
+		// Reset headline to default for next time
+		a.portConflictMenu.SetTitle("Resolve port conflict")
+	}
+
+	if a.portConflictInfo != nil {
+		a.portConflictInfo.SetTitle("Waiting for status...")
+	}
+
+	if a.portConflictRetry != nil {
+		a.portConflictRetry.Disable()
+	}
+
+	if a.portConflictAuto != nil {
+		a.portConflictAuto.Disable()
+	}
+
+	if a.portConflictCopy != nil {
+		a.portConflictCopy.Disable()
+	}
+
+	if a.portConflictConfig != nil {
+		a.portConflictConfig.Disable()
+	}
+}
+
+func (a *App) handlePortConflictRetry() {
+	if !a.portConflictActive {
+		return
+	}
+	a.logger.Info("Port conflict retry requested - user should quit and restart MCPProxy")
+	// In new architecture, tray doesn't control process lifecycle directly
+	// User must quit tray and restart to retry on the configured port
+}
+
+func (a *App) handlePortConflictAuto() {
+	if a.server == nil {
+		a.logger.Warn("Port conflict auto action requested without server interface")
+		return
+	}
+
+	listen := a.portConflictAddress
+	if listen == "" {
+		listen = a.server.GetListenAddress()
+	}
+
+	suggestion := a.portConflictSuggested
+	var err error
+	if suggestion == "" {
+		suggestion, err = a.server.SuggestAlternateListen(listen)
+		if err != nil {
+			a.logger.Error("Failed to calculate alternate listen address", zap.Error(err))
+			return
+		}
+	}
+
+	a.logger.Info("Applying alternate listen address",
+		zap.String("requested", listen),
+		zap.String("alternate", suggestion))
+
+	if err := a.server.SetListenAddress(suggestion, true); err != nil {
+		a.logger.Error("Failed to update listen address", zap.Error(err), zap.String("listen", suggestion))
+		return
+	}
+
+	a.hidePortConflictMenu()
+
+	a.logger.Info("Alternate port configured - user should restart to apply changes",
+		zap.String("new_port", suggestion))
+	// In new architecture, config changes require manual restart
+	// User must quit tray and restart to use the new port
+}
+
+func (a *App) handlePortConflictCopy() {
+	if !a.portConflictActive {
+		return
+	}
+
+	listen := a.portConflictAddress
+	if listen == "" && a.server != nil {
+		listen = a.server.GetListenAddress()
+	}
+
+	connectionURL := a.buildConnectionURL(listen)
+	if connectionURL == "" {
+		a.logger.Warn("Unable to build connection URL for clipboard", zap.String("listen", listen))
+		return
+	}
+
+	if err := copyToClipboard(connectionURL); err != nil {
+		a.logger.Error("Failed to copy connection URL to clipboard",
+			zap.String("url", connectionURL),
+			zap.Error(err))
+		return
+	}
+
+	a.logger.Info("Copied connection URL to clipboard", zap.String("url", connectionURL))
+}
+
+func (a *App) buildConnectionURL(listenAddr string) string {
+	if listenAddr == "" {
+		return ""
+	}
+
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		a.logger.Debug("Failed to parse listen address for connection URL", zap.String("listen", listenAddr), zap.Error(err))
+		return ""
+	}
+
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+
+	return fmt.Sprintf("http://%s/mcp", net.JoinHostPort(host, port))
+}
+
+func copyToClipboard(text string) error {
+	switch runtime.GOOS {
+	case osDarwin:
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	case osWindows:
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", fmt.Sprintf("Set-Clipboard -Value %s", quoteForPowerShell(text)))
+		return cmd.Run()
+	default:
+		return fmt.Errorf("clipboard copy not supported on %s", runtime.GOOS)
+	}
+}
+
+func quoteForPowerShell(text string) string {
+	escaped := strings.ReplaceAll(text, "'", "''")
+	return "'" + escaped + "'"
 }
 
 // refreshMenusDelayed refreshes menus after a delay using the synchronization manager
@@ -1247,5 +1650,21 @@ func (a *App) handleAutostartToggle() {
 		a.logger.Info("Autostart enabled - mcpproxy will start automatically at login")
 	} else {
 		a.logger.Info("Autostart disabled - mcpproxy will not start automatically at login")
+	}
+}
+
+// handleOpenWebUI opens the web control panel in the default browser
+func (a *App) handleOpenWebUI() {
+	if a.apiClient == nil {
+		a.logger.Warn("API client not available, cannot open web UI")
+		return
+	}
+
+	a.logger.Info("Opening web control panel from tray menu")
+
+	if err := a.apiClient.OpenWebUI(); err != nil {
+		a.logger.Error("Failed to open web control panel", zap.Error(err))
+	} else {
+		a.logger.Info("Successfully opened web control panel")
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"context"
 
 	"go.uber.org/zap"
+
+	internalRuntime "mcpproxy-go/internal/runtime"
 )
 
 // ServerInterface defines the interface for server control (stub version)
@@ -17,6 +19,7 @@ type ServerInterface interface {
 	StopServer() error
 	GetStatus() interface{}
 	StatusChannel() <-chan interface{}
+	EventsChannel() <-chan internalRuntime.Event
 
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)
@@ -26,6 +29,8 @@ type ServerInterface interface {
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string, quarantined bool) error
 	GetAllServers() ([]map[string]interface{}, error)
+	SetListenAddress(addr string, persist bool) error
+	SuggestAlternateListen(baseAddr string) (string, error)
 
 	// Config management for file watching
 	ReloadConfiguration() error

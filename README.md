@@ -48,6 +48,20 @@ brew install smart-mcp-proxy/mcpproxy/mcpproxy
 Manual download (all platforms):
 - **Linux**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
 - **Windows**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-amd64.zip) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-arm64.zip)
+
+**Prerelease Builds (Latest Features):**
+
+Want to try the newest features? Download prerelease builds from the `next` branch:
+
+1. Go to [GitHub Actions](https://github.com/smart-mcp-proxy/mcpproxy-go/actions)
+2. Click the latest successful "Prerelease" workflow run
+3. Download from **Artifacts**:
+   - `dmg-darwin-arm64` (Apple Silicon Macs)
+   - `dmg-darwin-amd64` (Intel Macs)
+   - `versioned-linux-amd64`, `versioned-windows-amd64` (other platforms)
+
+> **Note**: Prerelease builds are signed and notarized for macOS but contain cutting-edge features that may be unstable.
+
 - **macOS**: [Intel](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz) | [Apple Silicon](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
 Anywhere with Go 1.22+:
@@ -94,7 +108,7 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 
 ```jsonc
 {
-  "listen": ":8080",
+  "listen": "127.0.0.1:8080",   // Localhost-only by default for security
   "data_dir": "~/.mcpproxy",
   "enable_tray": true,
 
@@ -103,9 +117,16 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
   "tools_limit": 15,
   "tool_response_limit": 20000,
 
+  // Optional HTTPS configuration (disabled by default)
+  "tls": {
+    "enabled": false,          // Set to true to enable HTTPS
+    "require_client_cert": false,
+    "hsts": true
+  },
+
   "mcpServers": [
-    { "name": "local-python", "command": "python", "args": ["-m", "my_server"], "type": "stdio", "enabled": true },
-    { "name": "remote-http", "url": "http://localhost:3001", "type": "http", "enabled": true }
+    { "name": "local-python", "command": "python", "args": ["-m", "my_server"], "protocol": "stdio", "enabled": true },
+    { "name": "remote-http", "url": "http://localhost:3001", "protocol": "http", "enabled": true }
   ]
 }
 ```
@@ -114,12 +135,16 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `listen` | Address the proxy listens on | `:8080` |
+| `listen` | Address the proxy listens on | `127.0.0.1:8080` |
 | `data_dir` | Folder for config, DB & logs | `~/.mcpproxy` |
 | `enable_tray` | Show native system-tray UI | `true` |
 | `top_k` | Tools returned by `retrieve_tools` | `5` |
 | `tools_limit` | Max tools returned to client | `15` |
 | `tool_response_limit` | Auto-truncate responses above N chars (`0` disables) | `20000` |
+| `tls.enabled` | Enable HTTPS with local CA certificates | `false` |
+| `tls.require_client_cert` | Enable mutual TLS (mTLS) for client authentication | `false` |
+| `tls.certs_dir` | Custom directory for TLS certificates | `{data_dir}/certs` |
+| `tls.hsts` | Send HTTP Strict Transport Security headers | `true` |
 | `docker_isolation` | Docker security isolation settings (see below) | `enabled: false` |
 
 ### CLI Commands
@@ -128,20 +153,23 @@ Edit `mcp_config.json` (see below). Or **ask LLM** to add servers (see [doc](htt
 ```bash
 mcpproxy serve                      # Start proxy server with system tray
 mcpproxy tools list --server=NAME  # Debug tool discovery for specific server
+mcpproxy trust-cert                 # Install CA certificate as trusted (for HTTPS)
 ```
 
 **Serve Command Flags:**
 ```text
 mcpproxy serve --help
-  -c, --config <file>          path to mcp_config.json
-  -l, --listen <addr>          listen address (":8080")
-  -d, --data-dir <dir>         custom data directory
-      --tray                   enable/disable system tray (default true, use --tray=false to disable)
-      --log-level <level>      debug|info|warn|error
-      --read-only              forbid config changes
-      --disable-management     disable upstream_servers tool
-      --allow-server-add       allow adding servers (default true)
-      --allow-server-remove    allow removing servers (default true)
+  -c, --config <file>              path to mcp_config.json
+  -l, --listen <addr>              listen address for HTTP mode
+  -d, --data-dir <dir>             custom data directory
+      --log-level <level>          trace|debug|info|warn|error
+      --log-to-file                enable logging to file in standard OS location
+      --read-only                  enable read-only mode
+      --disable-management         disable management features
+      --allow-server-add           allow adding new servers (default true)
+      --allow-server-remove        allow removing existing servers (default true)
+      --enable-prompts             enable prompts for user input (default true)
+      --tool-response-limit <num>  tool response limit in characters (0 = disabled)
 ```
 
 **Tools Command Flags:**
@@ -164,6 +192,170 @@ mcpproxy tools list --server=slow-server --timeout=60s
 
 # Output tools in JSON format for scripting
 mcpproxy tools list --server=weather-api --output=json
+```
+
+---
+
+## 🔐 Secrets Management
+
+MCPProxy provides secure secrets management using your operating system's native keyring to store sensitive information like API keys, tokens, and credentials.
+
+### ✨ **Key Features**
+- **OS-native security**: Uses macOS Keychain, Linux Secret Service, or Windows Credential Manager
+- **Placeholder expansion**: Automatically resolves `${keyring:secret_name}` placeholders in config files
+- **Global access**: Secrets are shared across all MCPProxy configurations and data directories
+- **CLI management**: Full command-line interface for storing, retrieving, and managing secrets
+
+### 🔧 **Managing Secrets**
+
+**Store a secret:**
+```bash
+# Interactive prompt (recommended for sensitive values)
+mcpproxy secrets set github_token
+
+# From command line (less secure - visible in shell history)
+mcpproxy secrets set github_token "ghp_abcd1234..."
+
+# From environment variable
+mcpproxy secrets set github_token --from-env GITHUB_TOKEN
+```
+
+**List all secrets:**
+```bash
+mcpproxy secrets list
+# Output: Found 3 secrets in keyring:
+#   github_token
+#   openai_api_key
+#   database_password
+```
+
+**Retrieve a secret:**
+```bash
+mcpproxy secrets get github_token
+```
+
+**Delete a secret:**
+```bash
+mcpproxy secrets delete github_token
+```
+
+### 📝 **Using Placeholders in Configuration**
+
+Use `${keyring:secret_name}` placeholders in your `mcp_config.json`:
+
+```jsonc
+{
+  "mcpServers": [
+    {
+      "name": "github-mcp",
+      "command": "uvx",
+      "args": ["mcp-server-github"],
+      "protocol": "stdio",
+      "env": {
+        "GITHUB_TOKEN": "${keyring:github_token}",
+        "OPENAI_API_KEY": "${keyring:openai_api_key}"
+      },
+      "enabled": true
+    },
+    {
+      "name": "database-server",
+      "command": "python",
+      "args": ["-m", "my_db_server", "--password", "${keyring:database_password}"],
+      "protocol": "stdio",
+      "enabled": true
+    }
+  ]
+}
+```
+
+**Placeholder expansion works in:**
+- ✅ Environment variables (`env` field)
+- ✅ Command arguments (`args` field)
+- ❌ Server names, commands, URLs (static fields)
+
+### 🏗️ **Secret Storage Architecture**
+
+**Storage Location:**
+- **macOS**: Keychain Access (`/Applications/Utilities/Keychain Access.app`)
+- **Linux**: Secret Service (GNOME Keyring, KDE Wallet, etc.)
+- **Windows**: Windows Credential Manager
+
+**Service Name:** All secrets are stored under the service name `"mcpproxy"`
+
+**Global Scope:**
+- ✅ Secrets are **shared across all MCPProxy instances** regardless of:
+  - Configuration file location (`--config` flag)
+  - Data directory (`--data-dir` flag)
+  - Working directory
+- ✅ Same secrets work across different projects and setups
+- ⚠️ **No isolation** - all MCPProxy instances access the same keyring
+
+### 🎯 **Best Practices for Multiple Projects**
+
+If you use MCPProxy with multiple projects or environments, use descriptive secret names:
+
+```bash
+# Environment-specific secrets
+mcpproxy secrets set prod_database_url
+mcpproxy secrets set dev_database_url
+mcpproxy secrets set staging_api_key
+
+# Project-specific secrets
+mcpproxy secrets set work_github_token
+mcpproxy secrets set personal_github_token
+mcpproxy secrets set client_a_api_key
+```
+
+Then reference them in your configs:
+```jsonc
+{
+  "mcpServers": [
+    {
+      "name": "work-github",
+      "env": {
+        "GITHUB_TOKEN": "${keyring:work_github_token}"
+      }
+    },
+    {
+      "name": "personal-github",
+      "env": {
+        "GITHUB_TOKEN": "${keyring:personal_github_token}"
+      }
+    }
+  ]
+}
+```
+
+### 🔍 **Security Considerations**
+
+- **Encrypted storage**: Secrets are encrypted by the OS keyring
+- **Process isolation**: Other applications cannot access MCPProxy secrets without appropriate permissions
+- **No file storage**: Secrets are never written to config files or logs
+- **Audit trail**: OS keyring may provide access logs (varies by platform)
+
+### 🐛 **Troubleshooting**
+
+**Secret not found:**
+```bash
+# Verify secret exists
+mcpproxy secrets list
+
+# Check the exact secret name (case-sensitive)
+mcpproxy secrets get your_secret_name
+```
+
+**Keyring access denied:**
+- **macOS**: Grant MCPProxy access in `System Preferences > Security & Privacy > Privacy > Accessibility`
+- **Linux**: Ensure your desktop session has an active keyring service
+- **Windows**: Run MCPProxy with appropriate user permissions
+
+**Placeholder not resolving:**
+```bash
+# Test secret resolution
+mcpproxy secrets get your_secret_name
+
+# Check logs for secret resolution errors
+mcpproxy serve --log-level=debug
 ```
 
 ---
@@ -364,6 +556,98 @@ mcpproxy call tool --tool-name=upstream_servers \
 mcpproxy call tool --tool-name=upstream_servers \
   --json_args='{"operation":"update","name":"git-myproject","working_dir":"/new/project/path"}'
 ```
+
+## 🔐 Optional HTTPS Setup
+
+MCPProxy works with HTTP by default for easy setup. HTTPS is optional and primarily useful for production environments or when stricter security is required.
+
+**💡 Note**: Most users can stick with HTTP (the default) as it works perfectly with all supported clients including Claude Desktop, Cursor, and VS Code.
+
+### Quick HTTPS Setup
+
+**1. Enable HTTPS** (choose one method):
+```bash
+# Method 1: Environment variable
+export MCPPROXY_TLS_ENABLED=true
+mcpproxy serve
+
+# Method 2: Config file
+# Edit ~/.mcpproxy/mcp_config.json and set "tls.enabled": true
+```
+
+**2. Trust the certificate** (one-time setup):
+```bash
+mcpproxy trust-cert
+```
+
+**3. Use HTTPS URLs**:
+- MCP endpoint: `https://localhost:8080/mcp`
+- Web UI: `https://localhost:8080/ui/`
+
+### Claude Desktop Integration
+
+For Claude Desktop, add this to your `claude_desktop_config.json`:
+
+**HTTP (Default - Recommended):**
+```json
+{
+  "mcpServers": {
+    "mcpproxy": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://localhost:8080/mcp"
+      ]
+    }
+  }
+}
+```
+
+**HTTPS (With Certificate Trust):**
+```json
+{
+  "mcpServers": {
+    "mcpproxy": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://localhost:8080/mcp"
+      ],
+      "env": {
+        "NODE_EXTRA_CA_CERTS": "~/.mcpproxy/certs/ca.pem"
+      }
+    }
+  }
+}
+```
+
+### Certificate Management
+
+- **Automatic generation**: Certificates created on first HTTPS startup
+- **Multi-domain support**: Works with `localhost`, `127.0.0.1`, `::1`
+- **Trust installation**: Use `mcpproxy trust-cert` to add to system keychain
+- **Certificate location**: `~/.mcpproxy/certs/` (ca.pem, server.pem, server-key.pem)
+
+### Troubleshooting HTTPS
+
+**Certificate trust issues**:
+```bash
+# Re-trust certificate
+mcpproxy trust-cert --force
+
+# Check certificate location
+ls ~/.mcpproxy/certs/
+
+# Test HTTPS connection
+curl -k https://localhost:8080/api/v1/status
+```
+
+**Claude Desktop connection issues**:
+- Ensure `NODE_EXTRA_CA_CERTS` points to the correct ca.pem file
+- Restart Claude Desktop after config changes
+- Verify HTTPS is enabled: `mcpproxy serve --log-level=debug`
 
 ## Learn More
 

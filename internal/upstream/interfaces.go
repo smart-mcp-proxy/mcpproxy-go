@@ -37,6 +37,9 @@ type StatefulClient interface {
 	// Advanced connection management
 	ShouldRetry() bool
 	SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo))
+
+	// Tool count optimization
+	GetCachedToolCount(ctx context.Context) (int, error)
 }
 
 // TransportClient defines transport-specific client creation

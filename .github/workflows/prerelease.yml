@@ -1,0 +1,822 @@
+name: Prerelease
+
+on:
+  push:
+    branches: [next]
+    tags: ["v*-rc.*", "v*-next.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GITHUB_ENVIRONMENT: staging
+
+jobs:
+  build:
+    environment: staging
+    # Run on pushes to next branch or prerelease tags
+    if: github.ref == 'refs/heads/next' || startsWith(github.ref, 'refs/tags/v') && (contains(github.ref, '-rc.') || contains(github.ref, '-next.'))
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+            name: mcpproxy-linux-amd64
+            archive_format: tar.gz
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: "0"
+            name: mcpproxy-linux-arm64
+            archive_format: tar.gz
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            cgo: "0"
+            name: mcpproxy-windows-amd64.exe
+            archive_format: zip
+          - os: ubuntu-latest
+            goos: windows
+            goarch: arm64
+            cgo: "0"
+            name: mcpproxy-windows-arm64.exe
+            archive_format: zip
+          - os: macos-14
+            goos: darwin
+            goarch: amd64
+            cgo: "1"
+            name: mcpproxy-darwin-amd64
+            archive_format: tar.gz
+          - os: macos-14
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
+            name: mcpproxy-darwin-arm64
+            archive_format: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.10"
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+
+      - name: Copy frontend dist to embed location
+        run: |
+          rm -rf web/frontend
+          mkdir -p web/frontend
+          cp -r frontend/dist web/frontend/
+
+      - name: Import Code-Signing Certificates (macOS)
+        if: matrix.goos == 'darwin'
+        run: |
+          set -euo pipefail
+
+          echo "📦 Preparing isolated keychain for code signing"
+          UNIQUE_ID="${{ matrix.goos }}-${{ matrix.goarch }}-$$-$(date +%s)"
+          TEMP_KEYCHAIN="mcpproxy-build-${UNIQUE_ID}.keychain"
+
+          security create-keychain -p "temp123" "$TEMP_KEYCHAIN"
+          security list-keychains -s "$TEMP_KEYCHAIN" ~/Library/Keychains/login.keychain-db /Library/Keychains/System.keychain
+          security unlock-keychain -p "temp123" "$TEMP_KEYCHAIN"
+          security set-keychain-settings -t 3600 -l "$TEMP_KEYCHAIN"
+
+          if [ -z "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" ] || [ -z "${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" ]; then
+            echo "❌ APPLE_DEVELOPER_ID_CERT and APPLE_DEVELOPER_ID_CERT_PASSWORD secrets are required"
+            exit 1
+          fi
+
+          echo "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" | base64 -d > developer-id.p12
+          security import developer-id.p12 \
+            -k "$TEMP_KEYCHAIN" \
+            -P "${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild \
+            -T /usr/bin/productsign \
+            -T /usr/bin/security
+          rm -f developer-id.p12
+
+          echo "🔍 Checking for separate Developer ID Installer certificate"
+          INSTALLER_ID=$(security find-identity -v -p basic "$TEMP_KEYCHAIN" | grep "Developer ID Installer" || true)
+
+          if [ -z "$INSTALLER_ID" ]; then
+            if [ -z "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT }}" ] || [ -z "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}" ]; then
+              echo "❌ Developer ID Installer identity not found in APPLE_DEVELOPER_ID_CERT"
+              echo "   Provide APPLE_DEVELOPER_ID_INSTALLER_CERT and password secrets"
+              exit 1
+            fi
+
+            echo "Importing dedicated Developer ID Installer certificate"
+            echo "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT }}" | base64 -d > developer-id-installer.p12
+            security import developer-id-installer.p12 \
+              -k "$TEMP_KEYCHAIN" \
+              -P "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}" \
+              -T /usr/bin/productsign \
+              -T /usr/bin/productbuild \
+              -T /usr/bin/codesign \
+              -T /usr/bin/security
+            rm -f developer-id-installer.p12
+          fi
+
+          security set-key-partition-list -S apple-tool:,apple: -s -k "temp123" "$TEMP_KEYCHAIN"
+
+          APP_CERT_IDENTITY=$(security find-identity -v -p codesigning "$TEMP_KEYCHAIN" | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+          PKG_CERT_IDENTITY=$(security find-identity -v -p basic "$TEMP_KEYCHAIN" | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+
+          if [ -z "$APP_CERT_IDENTITY" ]; then
+            echo "❌ Developer ID Application identity not found after import"
+            exit 1
+          fi
+
+          if [ -z "$PKG_CERT_IDENTITY" ]; then
+            echo "❌ Developer ID Installer identity not found after import"
+            exit 1
+          fi
+
+          echo "✅ Using Developer ID Application: $APP_CERT_IDENTITY"
+          echo "✅ Using Developer ID Installer: $PKG_CERT_IDENTITY"
+
+          echo "APP_CERT_IDENTITY=$APP_CERT_IDENTITY" >> "$GITHUB_ENV"
+          echo "PKG_CERT_IDENTITY=$PKG_CERT_IDENTITY" >> "$GITHUB_ENV"
+          echo "$TEMP_KEYCHAIN" > .keychain_name
+
+          echo "=== Available signing identities in temporary keychain ==="
+          security find-identity -v "$TEMP_KEYCHAIN"
+
+          echo "✅ Certificate import completed"
+
+
+      - name: Build binary and create archives
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # ✅ Force minimum supported macOS version for compatibility
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          # Defensive CGO flags to ensure proper deployment target
+          CGO_CFLAGS: "-mmacosx-version-min=12.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+        run: |
+          # For prerelease, determine version differently
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Get last tag on any branch for base version
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            COMMIT_HASH=$(git rev-parse --short HEAD)
+            VERSION="${LAST_TAG}-next.${COMMIT_HASH}"
+          fi
+
+          echo "Building version: ${VERSION}"
+          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION}"
+
+          # Determine clean binary name
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            CLEAN_BINARY="mcpproxy.exe"
+          else
+            CLEAN_BINARY="mcpproxy"
+          fi
+
+          # Create clean core binary for archive
+          go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
+
+          # Build tray binary for macOS
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "Building mcpproxy-tray for macOS..."
+            go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
+          fi
+
+          # Code sign macOS binaries
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "Code signing macOS binary..."
+
+            # Debug: List all available certificates
+            echo "Available certificates:"
+            security find-identity -v -p codesigning
+
+            # Find the Developer ID certificate identity
+            CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+
+            # Verify we found a valid certificate
+            if [ -n "${CERT_IDENTITY}" ]; then
+              echo "✅ Found Developer ID certificate: ${CERT_IDENTITY}"
+            else
+              echo "❌ No Developer ID certificate found, using team ID as fallback"
+              CERT_IDENTITY="${{ secrets.APPLE_TEAM_ID }}"
+              echo "⚠️  Using fallback identity: ${CERT_IDENTITY}"
+            fi
+
+            # Validate entitlements file formatting (Apple's recommendation)
+            echo "=== Validating entitlements file ==="
+            if [ -f "scripts/entitlements.plist" ]; then
+              echo "Validating entitlements formatting with plutil..."
+              if plutil -lint scripts/entitlements.plist; then
+                echo "✅ Entitlements file is properly formatted"
+              else
+                echo "❌ Entitlements file has formatting issues"
+                exit 1
+              fi
+
+              # Convert to XML format if needed (Apple's recommendation)
+              plutil -convert xml1 scripts/entitlements.plist
+              echo "✅ Entitlements converted to XML format"
+            else
+              echo "⚠️  No entitlements file found"
+            fi
+
+            # Sign both binaries with proper Developer ID certificate, hardened runtime, and timestamp
+            echo "=== Signing binaries with hardened runtime ==="
+
+            # Install GNU coreutils for timeout command (macOS compatibility)
+            if ! command -v timeout &> /dev/null; then
+              echo "Installing GNU coreutils for timeout command..."
+              brew install coreutils
+              # Use gtimeout from coreutils
+              TIMEOUT_CMD="gtimeout"
+            else
+              TIMEOUT_CMD="timeout"
+            fi
+
+            # Sign core binary
+            echo "Signing core binary: ${CLEAN_BINARY}"
+            SIGN_SUCCESS=false
+            for attempt in 1 2 3; do
+              echo "Core binary signing attempt $attempt/3..."
+
+              # Use timeout command to prevent hanging (max 5 minutes per attempt)
+              if $TIMEOUT_CMD 300 codesign --force \
+                --options runtime \
+                --entitlements scripts/entitlements.plist \
+                --sign "${CERT_IDENTITY}" \
+                --timestamp \
+                ${CLEAN_BINARY}; then
+
+                SIGN_SUCCESS=true
+                echo "✅ Core binary signing succeeded on attempt $attempt"
+                break
+              else
+                echo "❌ Core binary signing attempt $attempt failed or timed out"
+                if [ $attempt -lt 3 ]; then
+                  echo "Retrying in 10 seconds..."
+                  sleep 10
+                fi
+              fi
+            done
+
+            if [ "$SIGN_SUCCESS" != "true" ]; then
+              echo "❌ All core binary signing attempts failed"
+              exit 1
+            fi
+
+            # Sign tray binary
+            echo "Signing tray binary: mcpproxy-tray"
+            TRAY_SIGN_SUCCESS=false
+            for attempt in 1 2 3; do
+              echo "Tray binary signing attempt $attempt/3..."
+
+              # Use timeout command to prevent hanging (max 5 minutes per attempt)
+              if $TIMEOUT_CMD 300 codesign --force \
+                --options runtime \
+                --entitlements scripts/entitlements.plist \
+                --sign "${CERT_IDENTITY}" \
+                --timestamp \
+                mcpproxy-tray; then
+
+                TRAY_SIGN_SUCCESS=true
+                echo "✅ Tray binary signing succeeded on attempt $attempt"
+                break
+              else
+                echo "❌ Tray binary signing attempt $attempt failed or timed out"
+                if [ $attempt -lt 3 ]; then
+                  echo "Retrying in 10 seconds..."
+                  sleep 10
+                fi
+              fi
+            done
+
+            if [ "$TRAY_SIGN_SUCCESS" != "true" ]; then
+              echo "❌ All tray binary signing attempts failed"
+              exit 1
+            fi
+
+            # Verify signing, hardened runtime, and timestamp using Apple's recommended methods
+            echo "=== Verifying binary signatures (Apple's recommended verification) ==="
+
+            # Verify core binary
+            echo "=== Core binary verification ==="
+            codesign --verify --verbose ${CLEAN_BINARY}
+            echo "Core binary basic verification: $?"
+
+            # Apple's recommended strict verification for notarization
+            echo "=== Core binary strict verification (matches notarization requirements) ==="
+            if codesign -vvv --deep --strict ${CLEAN_BINARY}; then
+              echo "✅ Core binary strict verification PASSED - ready for notarization"
+            else
+              echo "❌ Core binary strict verification FAILED - will not pass notarization"
+              exit 1
+            fi
+
+            # Verify tray binary
+            echo "=== Tray binary verification ==="
+            codesign --verify --verbose mcpproxy-tray
+            echo "Tray binary basic verification: $?"
+
+            # Apple's recommended strict verification for notarization
+            echo "=== Tray binary strict verification (matches notarization requirements) ==="
+            if codesign -vvv --deep --strict mcpproxy-tray; then
+              echo "✅ Tray binary strict verification PASSED - ready for notarization"
+            else
+              echo "❌ Tray binary strict verification FAILED - will not pass notarization"
+              exit 1
+            fi
+
+            # Check for secure timestamp (Apple's recommended check)
+            echo "=== Checking for secure timestamps ==="
+            CORE_TIMESTAMP_CHECK=$(codesign -dvv ${CLEAN_BINARY} 2>&1)
+            if echo "$CORE_TIMESTAMP_CHECK" | grep -q "Timestamp="; then
+              echo "✅ Core binary secure timestamp present:"
+              echo "$CORE_TIMESTAMP_CHECK" | grep "Timestamp="
+            else
+              echo "❌ No secure timestamp found for core binary"
+            fi
+
+            TRAY_TIMESTAMP_CHECK=$(codesign -dvv mcpproxy-tray 2>&1)
+            if echo "$TRAY_TIMESTAMP_CHECK" | grep -q "Timestamp="; then
+              echo "✅ Tray binary secure timestamp present:"
+              echo "$TRAY_TIMESTAMP_CHECK" | grep "Timestamp="
+            else
+              echo "❌ No secure timestamp found for tray binary"
+            fi
+
+            echo "✅ Both binaries signed successfully with hardened runtime and timestamp"
+          fi
+
+          # Create archive with version info - DO NOT create "latest" archives for prereleases
+          ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+          if [ "${{ matrix.archive_format }}" = "zip" ]; then
+            # Create only versioned archive (no latest for prereleases)
+            zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+          else
+            # Create only versioned archive (no latest for prereleases)
+            tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
+          fi
+
+      - name: Create .icns icon (macOS)
+        if: matrix.goos == 'darwin'
+        run: |
+          chmod +x scripts/create-icns.sh
+          ./scripts/create-icns.sh
+
+      - name: Create DMG installer (macOS)
+        if: matrix.goos == 'darwin'
+        env:
+          # Ensure DMG creation also uses correct deployment target
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          CGO_CFLAGS: "-mmacosx-version-min=12.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+        run: |
+          # For prerelease, determine version differently (reuse from build step)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Get last tag on any branch for base version
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            COMMIT_HASH=$(git rev-parse --short HEAD)
+            VERSION="${LAST_TAG}-next.${COMMIT_HASH}"
+          fi
+
+          chmod +x scripts/create-dmg.sh
+
+          # Determine binary names
+          TRAY_BINARY="mcpproxy-tray"
+          CORE_BINARY="mcpproxy"
+
+          # Create DMG with both tray and core binaries
+          ./scripts/create-dmg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+
+          # Sign DMG
+          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
+          echo "Signing DMG: ${DMG_NAME}"
+
+          # Find the Developer ID certificate identity
+          CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+
+          # Verify we found a valid certificate
+          if [ -n "${CERT_IDENTITY}" ]; then
+            echo "✅ Found Developer ID certificate for DMG: ${CERT_IDENTITY}"
+          else
+            echo "❌ No Developer ID certificate found for DMG, using team ID as fallback"
+            CERT_IDENTITY="${{ secrets.APPLE_TEAM_ID }}"
+            echo "⚠️  Using fallback identity for DMG: ${CERT_IDENTITY}"
+          fi
+
+          # Sign DMG with proper certificate and timestamp
+          codesign --force \
+            --sign "${CERT_IDENTITY}" \
+            --timestamp \
+            "${DMG_NAME}"
+
+          # Verify DMG signing
+          echo "=== Verifying DMG signature ==="
+          codesign --verify --verbose "${DMG_NAME}"
+          echo "DMG verification: $?"
+
+          codesign --display --verbose=4 "${DMG_NAME}"
+
+          echo "✅ DMG created and signed successfully: ${DMG_NAME}"
+
+      - name: Create PKG installer (macOS)
+        if: matrix.goos == 'darwin'
+        env:
+          # Ensure PKG creation also uses correct deployment target
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          CGO_CFLAGS: "-mmacosx-version-min=12.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+        run: |
+          # For prerelease, determine version differently (reuse from build step)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Get last tag on any branch for base version
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            COMMIT_HASH=$(git rev-parse --short HEAD)
+            VERSION="${LAST_TAG}-next.${COMMIT_HASH}"
+          fi
+
+          chmod +x scripts/create-pkg.sh
+          chmod +x scripts/create-installer-dmg.sh
+
+          # Set up certificate environment for PKG creation (reuse from binary signing)
+          echo "=== Setting up certificate environment for PKG creation ==="
+
+          # Debug: List all available certificates for PKG creation
+          echo "=== Available certificates for PKG creation ==="
+          echo "Codesigning certificates:"
+          security find-identity -v -p codesigning || echo "No codesigning certificates found"
+          echo "Basic certificates:"
+          security find-identity -v -p basic || echo "No basic certificates found"
+          echo "All certificates:"
+          security find-identity -v || echo "No certificates found"
+
+          # Prefer identities exported during certificate import, fallback to keychain lookup
+          APP_CERT_IDENTITY="${APP_CERT_IDENTITY:-}"
+          PKG_CERT_IDENTITY="${PKG_CERT_IDENTITY:-}"
+
+          if [ -z "${APP_CERT_IDENTITY}" ]; then
+            APP_CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+          fi
+
+          if [ -z "${PKG_CERT_IDENTITY}" ]; then
+            PKG_CERT_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+          fi
+
+          if [ -z "${APP_CERT_IDENTITY}" ]; then
+            echo "❌ Developer ID Application certificate not available in the build keychain"
+            exit 1
+          fi
+
+          if [ -z "${PKG_CERT_IDENTITY}" ]; then
+            echo "❌ Developer ID Installer certificate not available in the isolated keychain"
+            echo "   Embed the 'Developer ID Installer' identity in APPLE_DEVELOPER_ID_CERT"
+            exit 1
+          fi
+
+          echo "✅ Using Developer ID Application certificate: ${APP_CERT_IDENTITY}"
+          echo "✅ Using Developer ID Installer certificate: ${PKG_CERT_IDENTITY}"
+
+          export APP_CERT_IDENTITY
+          export PKG_CERT_IDENTITY
+
+          # Determine binary names
+          TRAY_BINARY="mcpproxy-tray"
+          CORE_BINARY="mcpproxy"
+
+          # Create PKG installer with both tray and core binaries
+          echo "Creating signed PKG installer with certificate: ${PKG_CERT_IDENTITY}"
+          ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+
+          # Create installer DMG containing the PKG
+          PKG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.pkg"
+          ./scripts/create-installer-dmg.sh ${PKG_NAME} ${VERSION} ${{ matrix.goarch }}
+
+          echo "✅ PKG installer and installer DMG created successfully"
+
+      - name: Submit for notarization (macOS)
+        if: matrix.goos == 'darwin'
+        run: |
+          set -euo pipefail
+
+          # For prerelease, determine version differently (reuse from build step)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Get last tag on any branch for base version
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            COMMIT_HASH=$(git rev-parse --short HEAD)
+            VERSION="${LAST_TAG}-next.${COMMIT_HASH}"
+          fi
+
+          PKG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.pkg"
+          INSTALLER_DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}-installer.dmg"
+
+          notarize_and_staple() {
+            local FILE_NAME="$1"
+            local FILE_LABEL="$2"
+
+            if [ ! -f "${FILE_NAME}" ]; then
+              echo "❌ ${FILE_LABEL} (${FILE_NAME}) not found"
+              return 1
+            fi
+
+            echo "Submitting ${FILE_LABEL} for notarization: ${FILE_NAME}"
+
+            local SUBMISSION_OUTPUT
+            if ! SUBMISSION_OUTPUT=$(xcrun notarytool submit "${FILE_NAME}" \
+              --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+              --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" \
+              --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+              --wait \
+              --output-format json 2>&1); then
+              echo "❌ ${FILE_LABEL} notarization failed"
+              echo "Output: ${SUBMISSION_OUTPUT}"
+              return 1
+            fi
+
+            local SUBMISSION_ID
+            SUBMISSION_ID=$(echo "${SUBMISSION_OUTPUT}" | jq -r '.id // empty')
+            local STATUS
+            STATUS=$(echo "${SUBMISSION_OUTPUT}" | jq -r '.status // empty')
+
+            if [ -z "${SUBMISSION_ID}" ] || [ "${SUBMISSION_ID}" = "null" ] || [ "${STATUS}" != "Accepted" ]; then
+              echo "❌ ${FILE_LABEL} notarization did not succeed"
+              echo "Response: ${SUBMISSION_OUTPUT}"
+              return 1
+            fi
+
+            echo "✅ ${FILE_LABEL} notarization accepted (ID: ${SUBMISSION_ID})"
+            echo "${SUBMISSION_ID}" > "${FILE_NAME}.submission_id"
+
+            echo "Stapling notarization ticket to ${FILE_LABEL}"
+            xcrun stapler staple "${FILE_NAME}"
+            xcrun stapler validate "${FILE_NAME}"
+          }
+
+          notarize_and_staple "${PKG_NAME}" "PKG installer"
+          notarize_and_staple "${INSTALLER_DMG_NAME}" "Installer DMG"
+
+          echo "✅ Notarization and stapling complete"
+
+      - name: Cleanup isolated keychain (macOS)
+        if: matrix.goos == 'darwin' && always()
+        run: |
+          # Clean up the isolated keychain we created for this worker
+          if [ -f .keychain_name ]; then
+            TEMP_KEYCHAIN=$(cat .keychain_name)
+            echo "Cleaning up keychain: ${TEMP_KEYCHAIN}"
+
+            # Remove from search list and delete
+            security delete-keychain "$TEMP_KEYCHAIN" 2>/dev/null || echo "Keychain already cleaned up"
+            rm -f .keychain_name
+            echo "✅ Keychain cleanup completed"
+          else
+            echo "No keychain to clean up"
+          fi
+
+      - name: Upload versioned archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: versioned-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
+
+      - name: Upload macOS installer DMG
+        if: matrix.goos == 'darwin'
+        run: |
+          set -euo pipefail
+
+          # For prerelease, determine version to create exact file names (reuse from build step)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Get last tag on any branch for base version
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            COMMIT_HASH=$(git rev-parse --short HEAD)
+            VERSION="${LAST_TAG}-next.${COMMIT_HASH}"
+          fi
+
+          INSTALLER_DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}-installer.dmg"
+
+          echo "Looking for files:"
+          echo "  Installer DMG: ${INSTALLER_DMG_NAME}"
+          if [ ! -f "${INSTALLER_DMG_NAME}" ]; then
+            echo "❌ Installer DMG not found: ${INSTALLER_DMG_NAME}"
+            exit 1
+          fi
+
+          mkdir -p installers-artifact
+          cp "${INSTALLER_DMG_NAME}" installers-artifact/
+
+          SUBMISSION_ID_FILE="${INSTALLER_DMG_NAME}.submission_id"
+          if [ -f "${SUBMISSION_ID_FILE}" ]; then
+            echo "✅ Found submission ID file: ${SUBMISSION_ID_FILE}"
+            cp "${SUBMISSION_ID_FILE}" installers-artifact/
+          else
+            echo "⚠️  No submission ID file found: ${SUBMISSION_ID_FILE}"
+          fi
+
+          echo "Files to upload:"
+          ls -la installers-artifact/
+
+      - name: Upload macOS installers artifact
+        if: matrix.goos == 'darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: installers-artifact/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+    # Only create releases for tag pushes, not branch pushes
+    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref, '-rc.') || contains(github.ref, '-next.'))
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Reorganize files
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          # Create a flat structure to avoid duplicates
+          mkdir -p release-files
+
+          # Copy archives (tar.gz and zip files) - only versioned, no latest for prereleases
+          find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
+            filename=$(basename "$file")
+            cp "$file" "release-files/$filename"
+          done
+
+          # Handle installer files (DMG and PKG) and notarization submissions
+          mkdir -p pending-notarizations
+
+          # Process installer artifacts (only notarized installer DMGs)
+          find dist -path "*/installers-*" -name "*.dmg" | while read installer_file; do
+            filename=$(basename "$installer_file")
+            submission_id_file="${installer_file}.submission_id"
+
+            if [ -f "$submission_id_file" ]; then
+              # File has pending notarization
+              SUBMISSION_ID=$(cat "$submission_id_file")
+
+              # Validate submission ID before creating pending file
+              if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ] && [ ${#SUBMISSION_ID} -gt 10 ]; then
+                echo "Found valid pending notarization for $filename (ID: $SUBMISSION_ID)"
+                cp "$installer_file" "release-files/$filename"
+
+                # Create pending notarization record
+                cat > "pending-notarizations/${filename}.pending" << EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "file_name": "$filename",
+            "version": "$VERSION",
+            "submitted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+              else
+                echo "❌ Invalid submission ID for $filename: '$SUBMISSION_ID'"
+                echo "Copying installer file without notarization tracking"
+                cp "$installer_file" "release-files/$filename"
+              fi
+            else
+              # No notarization submission (shouldn't happen, but handle it)
+              echo "No submission ID for $filename, copying as-is"
+              cp "$installer_file" "release-files/$filename"
+            fi
+          done
+
+      - name: List files for upload
+        run: |
+          echo "Files to upload:"
+          ls -la release-files/
+          echo "Pending notarizations:"
+          ls -la pending-notarizations/ || echo "No pending notarizations"
+
+      - name: Set version variable
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Create prerelease with binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/*
+          prerelease: true
+          body: |
+            ## mcpproxy ${{ github.ref_name }} (Prerelease)
+
+            ⚠️ **This is a prerelease version** - Use at your own risk!
+
+            Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
+
+            ### Download Links
+
+            **This Prerelease (${{ github.ref_name }}):**
+            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz)
+            - [Linux ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-arm64.tar.gz)
+            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-amd64.zip)
+            - [Windows ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-arm64.zip)
+            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.tar.gz)
+            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.tar.gz)
+
+            **macOS Installer:**
+            - [Signed DMG (Apple Silicon)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64-installer.dmg)
+            - [Signed DMG (Intel)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64-installer.dmg)
+
+            ### Installation
+
+            **macOS:**
+            1. Download the signed installer DMG for your Mac (Apple Silicon or Intel)
+            2. Double-click the DMG to mount it
+            3. Double-click the PKG installer inside
+            4. Follow the installation wizard
+            5. CLI tool `mcpproxy` will be available in Terminal
+            6. Launch mcpproxy.app from Applications folder
+            7. The app will appear in your system tray
+
+            **Manual Installation (All Platforms):**
+            1. Download the appropriate archive for your platform using the links above
+            2. Extract the archive: `tar -xzf mcpproxy-*.tar.gz` (Linux/macOS) or unzip (Windows)
+            3. Make it executable: `chmod +x mcpproxy` (Linux/macOS)
+            4. Run `./mcpproxy` to start
+
+            ### Platform Support
+
+            - **macOS**: Full system tray support with menu and icons
+            - **Windows**: Full system tray support with menu and icons
+            - **Linux**: Headless mode only (no system tray due to compatibility)
+
+            ### Usage
+
+            - With tray: `./mcpproxy serve` (default)
+            - Custom port (default: 8080): `./mcpproxy serve --listen :8081`
+            - Headless: `./mcpproxy serve --tray=false`
+
+            ### ⚠️ Prerelease Notes
+
+            - This is a development version and may contain bugs
+            - Not recommended for production use
+            - Auto-updater will NOT automatically update to this version unless `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` is set
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload pending notarizations
+        if: hashFiles('pending-notarizations/*.pending') != ''
+        run: |
+          # Upload pending notarization files as release assets
+          for pending_file in pending-notarizations/*.pending; do
+            if [ -f "$pending_file" ]; then
+              echo "Uploading pending notarization: $(basename "$pending_file")"
+              gh release upload "${{ github.ref_name }}" "$pending_file" --clobber
+            fi
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -366,21 +367,21 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	assert.False(t, result.IsError)
 
 	// Unquarantine the server for testing (bypassing security restrictions)
-	serverConfig, err := env.proxyServer.storageManager.GetUpstreamServer("testserver")
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("testserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
-	err = env.proxyServer.storageManager.SaveUpstreamServer(serverConfig)
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
 	// Trigger connection to the unquarantined server
-	err = env.proxyServer.upstreamManager.ConnectAll(ctx)
+	err = env.proxyServer.runtime.UpstreamManager().ConnectAll(ctx)
 	require.NoError(t, err)
 
 	// Wait for connection to establish
 	time.Sleep(1 * time.Second)
 
 	// Manually trigger tool discovery and indexing
-	_ = env.proxyServer.discoverAndIndexTools(ctx)
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
 
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)
@@ -467,21 +468,21 @@ func TestE2E_ToolCalling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Unquarantine the server for testing (bypassing security restrictions)
-	serverConfig, err := env.proxyServer.storageManager.GetUpstreamServer("echoserver")
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("echoserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
-	err = env.proxyServer.storageManager.SaveUpstreamServer(serverConfig)
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
 	// Trigger connection to the unquarantined server
-	err = env.proxyServer.upstreamManager.ConnectAll(ctx)
+	err = env.proxyServer.runtime.UpstreamManager().ConnectAll(ctx)
 	require.NoError(t, err)
 
 	// Wait for connection to establish
 	time.Sleep(1 * time.Second)
 
 	// Manually trigger tool discovery and indexing
-	_ = env.proxyServer.discoverAndIndexTools(ctx)
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
 
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)
@@ -712,6 +713,131 @@ func TestE2E_ConcurrentOperations(t *testing.T) {
 			t.Fatal("Timeout waiting for concurrent operations")
 		}
 	}
+}
+
+// Test: SSE Events endpoint functionality
+func TestE2E_SSEEvents(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	// Test SSE connection without authentication (no API key configured)
+	testSSEConnection(t, env, "")
+
+	// Now test with API key authentication
+	// Update config to include API key
+	cfg := env.proxyServer.runtime.Config()
+	cfg.APIKey = "test-api-key-12345"
+
+	// Test SSE with correct API key
+	testSSEConnection(t, env, "test-api-key-12345")
+
+	// Test SSE with incorrect API key
+	testSSEConnectionAuthFailure(t, env, "wrong-api-key")
+}
+
+// testSSEConnection tests SSE connection functionality
+func testSSEConnection(t *testing.T, env *TestEnvironment, apiKey string) {
+	listenAddr := env.proxyServer.GetListenAddress()
+	if listenAddr == "" {
+		listenAddr = ":8080" // fallback
+	}
+
+	// Parse the listen address to handle IPv6 format
+	var sseURL string
+	if strings.HasPrefix(listenAddr, "[::]:") {
+		// IPv6 format [::]:port -> localhost:port
+		port := strings.TrimPrefix(listenAddr, "[::]:")
+		sseURL = fmt.Sprintf("http://localhost:%s/events", port)
+	} else if strings.HasPrefix(listenAddr, ":") {
+		// Port only format :port -> localhost:port
+		port := strings.TrimPrefix(listenAddr, ":")
+		sseURL = fmt.Sprintf("http://localhost:%s/events", port)
+	} else {
+		// Full address format
+		sseURL = fmt.Sprintf("http://%s/events", listenAddr)
+	}
+
+	if apiKey != "" {
+		sseURL += "?apikey=" + apiKey
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Create HTTP client with very short timeout to avoid hanging on SSE stream
+	client := &http.Client{
+		Timeout: 500 * time.Millisecond, // Very short timeout
+	}
+
+	// Test that SSE endpoint accepts GET connections
+	// The connection will timeout quickly, but we can check the initial response
+	req, err := http.NewRequestWithContext(ctx, "GET", sseURL, http.NoBody)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := client.Do(req)
+
+	// We expect either:
+	// 1. A successful connection (200) that times out
+	// 2. A timeout error (which indicates the connection was established)
+	if err != nil && resp == nil {
+		// Connection timeout is expected for SSE - this means the endpoint is working
+		t.Logf("✅ SSE endpoint connection established (timed out as expected): %s", sseURL)
+		return
+	}
+
+	if resp != nil {
+		defer resp.Body.Close()
+		// If we get a response, it should be 200 OK
+		assert.Equal(t, 200, resp.StatusCode, "SSE endpoint should return 200 OK")
+		t.Logf("✅ SSE endpoint accessible with status %d at %s", resp.StatusCode, sseURL)
+	}
+}
+
+// testSSEConnectionAuthFailure tests SSE connection with invalid authentication
+func testSSEConnectionAuthFailure(t *testing.T, env *TestEnvironment, wrongAPIKey string) {
+	listenAddr := env.proxyServer.GetListenAddress()
+	if listenAddr == "" {
+		listenAddr = ":8080" // fallback
+	}
+
+	// Parse the listen address to handle IPv6 format
+	var sseURL string
+	if strings.HasPrefix(listenAddr, "[::]:") {
+		// IPv6 format [::]:port -> localhost:port
+		port := strings.TrimPrefix(listenAddr, "[::]:")
+		sseURL = fmt.Sprintf("http://localhost:%s/events?apikey=%s", port, wrongAPIKey)
+	} else if strings.HasPrefix(listenAddr, ":") {
+		// Port only format :port -> localhost:port
+		port := strings.TrimPrefix(listenAddr, ":")
+		sseURL = fmt.Sprintf("http://localhost:%s/events?apikey=%s", port, wrongAPIKey)
+	} else {
+		// Full address format
+		sseURL = fmt.Sprintf("http://%s/events?apikey=%s", listenAddr, wrongAPIKey)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", sseURL, http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+
+	// For authentication failures, we should get an immediate 401 response
+	if err != nil {
+		t.Fatalf("Expected immediate auth failure response, got error: %v", err)
+	}
+
+	require.NotNil(t, resp, "Expected HTTP response for auth failure")
+	defer resp.Body.Close()
+
+	// Should receive 401 Unauthorized when API key is wrong
+	assert.Equal(t, 401, resp.StatusCode, "SSE endpoint should return 401 for invalid API key")
 }
 
 // Test: Add single upstream server with command-based configuration

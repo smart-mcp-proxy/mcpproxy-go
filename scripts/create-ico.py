@@ -17,11 +17,11 @@ def create_ico():
     png_files = [
         os.path.join(project_root, 'assets/icons/icon-16.png'),
         os.path.join(project_root, 'assets/icons/icon-32.png'),
-        os.path.join(project_root, 'internal/tray/icon-mono-44.png'),
+        os.path.join(project_root, 'cmd/mcpproxy-tray/icon-mono-44.png'),
     ]
 
     # Output ICO file
-    ico_output = os.path.join(project_root, 'internal/tray/icon-mono-44.ico')
+    ico_output = os.path.join(project_root, 'cmd/mcpproxy-tray/icon-mono-44.ico')
 
     # Check if all source files exist
     for png_file in png_files:

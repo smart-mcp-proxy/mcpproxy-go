@@ -2,13 +2,24 @@
 set -e
 
 # Script to create macOS DMG installer
-BINARY_PATH="$1"
-VERSION="$2"
-ARCH="$3"
+TRAY_BINARY_PATH="$1"
+CORE_BINARY_PATH="$2"
+VERSION="$3"
+ARCH="$4"
 
-if [ -z "$BINARY_PATH" ] || [ -z "$VERSION" ] || [ -z "$ARCH" ]; then
-    echo "Usage: $0 <binary_path> <version> <arch>"
-    echo "Example: $0 ./mcpproxy v1.0.0 arm64"
+if [ -z "$TRAY_BINARY_PATH" ] || [ -z "$CORE_BINARY_PATH" ] || [ -z "$VERSION" ] || [ -z "$ARCH" ]; then
+    echo "Usage: $0 <tray_binary> <core_binary> <version> <arch>"
+    echo "Example: $0 ./mcpproxy-tray ./mcpproxy v1.0.0 arm64"
+    exit 1
+fi
+
+if [ ! -f "$TRAY_BINARY_PATH" ]; then
+    echo "Tray binary not found: $TRAY_BINARY_PATH"
+    exit 1
+fi
+
+if [ ! -f "$CORE_BINARY_PATH" ]; then
+    echo "Core binary not found: $CORE_BINARY_PATH"
     exit 1
 fi
 
@@ -32,9 +43,43 @@ mkdir -p "$TEMP_DIR"
 mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/Resources"
 
-# Copy binary
-cp "$BINARY_PATH" "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+# Copy tray binary
+cp "$TRAY_BINARY_PATH" "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+# Copy core binary inside Resources/bin for the tray to manage
+mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin"
+cp "$CORE_BINARY_PATH" "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+chmod +x "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+
+# Generate CA certificate for bundling
+echo "Generating CA certificate for bundling..."
+mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/certs"
+
+# Use the core binary to generate certificates in a temporary directory
+TEMP_CERT_DIR=$(mktemp -d)
+export MCPPROXY_TLS_ENABLED=true
+"$CORE_BINARY_PATH" serve --data-dir="$TEMP_CERT_DIR" --config=/dev/null &
+SERVER_PID=$!
+
+# Wait for certificate generation (server will create certs on startup)
+sleep 3
+
+# Kill the temporary server
+kill $SERVER_PID 2>/dev/null || true
+wait $SERVER_PID 2>/dev/null || true
+
+# Copy generated CA certificate to bundle
+if [ -f "$TEMP_CERT_DIR/certs/ca.pem" ]; then
+    cp "$TEMP_CERT_DIR/certs/ca.pem" "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/"
+    chmod 644 "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/ca.pem"
+    echo "✅ CA certificate bundled"
+else
+    echo "⚠️  Failed to generate CA certificate for bundling"
+fi
+
+# Clean up temporary certificate directory
+rm -rf "$TEMP_CERT_DIR"
 
 # Copy icon if available
 if [ -f "assets/mcpproxy.icns" ]; then

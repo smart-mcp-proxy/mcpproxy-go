@@ -1,14 +1,17 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"mcpproxy-go/internal/secureenv"
+	"os"
 	"time"
 )
 
 const (
-	defaultPort = ":8080"
+	defaultPort = "127.0.0.1:8080" // Localhost-only binding by default for security
 )
 
 // Duration is a wrapper around time.Duration that can be marshaled to/from JSON
@@ -59,10 +62,14 @@ type Config struct {
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
 
 	// Security settings
-	ReadOnlyMode      bool `json:"read_only_mode" mapstructure:"read-only-mode"`
-	DisableManagement bool `json:"disable_management" mapstructure:"disable-management"`
-	AllowServerAdd    bool `json:"allow_server_add" mapstructure:"allow-server-add"`
-	AllowServerRemove bool `json:"allow_server_remove" mapstructure:"allow-server-remove"`
+	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"` // API key for REST API authentication
+	ReadOnlyMode      bool   `json:"read_only_mode" mapstructure:"read-only-mode"`
+	DisableManagement bool   `json:"disable_management" mapstructure:"disable-management"`
+	AllowServerAdd    bool   `json:"allow_server_add" mapstructure:"allow-server-add"`
+	AllowServerRemove bool   `json:"allow_server_remove" mapstructure:"allow-server-remove"`
+
+	// Internal field to track if API key was explicitly set in config
+	apiKeyExplicitlySet bool `json:"-"`
 
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
@@ -75,6 +82,30 @@ type Config struct {
 
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
+
+	// Feature flags for modular functionality
+	Features *FeatureFlags `json:"features,omitempty" mapstructure:"features"`
+
+	// TLS configuration
+	TLS *TLSConfig `json:"tls,omitempty" mapstructure:"tls"`
+
+	// Tokenizer configuration for token counting
+	Tokenizer *TokenizerConfig `json:"tokenizer,omitempty" mapstructure:"tokenizer"`
+}
+
+// TLSConfig represents TLS configuration
+type TLSConfig struct {
+	Enabled           bool   `json:"enabled" mapstructure:"enabled"`                         // Enable HTTPS
+	RequireClientCert bool   `json:"require_client_cert" mapstructure:"require_client_cert"` // Enable mTLS
+	CertsDir          string `json:"certs_dir,omitempty" mapstructure:"certs_dir"`           // Directory for certificates
+	HSTS              bool   `json:"hsts" mapstructure:"hsts"`                               // Enable HTTP Strict Transport Security
+}
+
+// TokenizerConfig represents tokenizer configuration for token counting
+type TokenizerConfig struct {
+	Enabled      bool   `json:"enabled" mapstructure:"enabled"`             // Enable token counting
+	DefaultModel string `json:"default_model" mapstructure:"default_model"` // Default model for tokenization (e.g., "gpt-4")
+	Encoding     string `json:"encoding" mapstructure:"encoding"`           // Default encoding (e.g., "cl100k_base")
 }
 
 // LogConfig represents logging configuration
@@ -381,11 +412,261 @@ func DefaultConfig() *Config {
 				Protocol:    "custom/remote",
 			},
 		},
+
+		// Default feature flags
+		Features: func() *FeatureFlags {
+			flags := DefaultFeatureFlags()
+			return &flags
+		}(),
+
+		// Default TLS configuration - disabled by default for easier setup
+		TLS: &TLSConfig{
+			Enabled:           false, // HTTPS disabled by default, can be enabled via config or env var
+			RequireClientCert: false, // mTLS disabled by default
+			CertsDir:          "",    // Will default to ${data_dir}/certs
+			HSTS:              true,  // HSTS enabled by default
+		},
+
+		// Default tokenizer configuration
+		Tokenizer: &TokenizerConfig{
+			Enabled:      true,          // Token counting enabled by default
+			DefaultModel: "gpt-4",       // Default to GPT-4 tokenization
+			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
+		},
 	}
 }
 
-// Validate validates the configuration
+// generateAPIKey creates a cryptographically secure random API key
+func generateAPIKey() string {
+	bytes := make([]byte, 32) // 32 bytes = 256 bits
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to less secure method if crypto/rand fails
+		return fmt.Sprintf("mcpproxy_%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(bytes)
+}
+
+// APIKeySource represents where the API key came from
+type APIKeySource int
+
+const (
+	APIKeySourceEnvironment APIKeySource = iota
+	APIKeySourceConfig
+	APIKeySourceGenerated
+)
+
+// String returns a human-readable representation of the API key source
+func (s APIKeySource) String() string {
+	switch s {
+	case APIKeySourceEnvironment:
+		return "environment variable"
+	case APIKeySourceConfig:
+		return "configuration file"
+	case APIKeySourceGenerated:
+		return "auto-generated"
+	default:
+		return "unknown"
+	}
+}
+
+// EnsureAPIKey ensures the API key is set, generating one if needed
+// Returns the API key, whether it was auto-generated, and the source
+func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource) {
+	// Check environment variable for API key first - this overrides config file
+	if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
+		c.APIKey = envAPIKey
+		return c.APIKey, false, APIKeySourceEnvironment
+	}
+
+	// If API key was explicitly set in config (including empty string), respect it
+	if c.apiKeyExplicitlySet {
+		return c.APIKey, false, APIKeySourceConfig // User-provided or explicitly disabled
+	}
+
+	// Generate a new API key only if not explicitly set
+	c.APIKey = generateAPIKey()
+	c.apiKeyExplicitlySet = true
+	return c.APIKey, true, APIKeySourceGenerated
+}
+
+// ValidationError represents a configuration validation error
+type ValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// Error implements the error interface
+func (v ValidationError) Error() string {
+	return fmt.Sprintf("%s: %s", v.Field, v.Message)
+}
+
+// ValidateDetailed performs detailed validation and returns all errors
+func (c *Config) ValidateDetailed() []ValidationError {
+	var errors []ValidationError
+
+	// Validate listen address format
+	if c.Listen != "" {
+		// Check for valid format (host:port or :port)
+		if !isValidListenAddr(c.Listen) {
+			errors = append(errors, ValidationError{
+				Field:   "listen",
+				Message: "invalid listen address format (expected host:port or :port)",
+			})
+		}
+	}
+
+	// Validate TopK range
+	if c.TopK < 1 || c.TopK > 100 {
+		errors = append(errors, ValidationError{
+			Field:   "top_k",
+			Message: "must be between 1 and 100",
+		})
+	}
+
+	// Validate ToolsLimit range
+	if c.ToolsLimit < 1 || c.ToolsLimit > 1000 {
+		errors = append(errors, ValidationError{
+			Field:   "tools_limit",
+			Message: "must be between 1 and 1000",
+		})
+	}
+
+	// Validate ToolResponseLimit
+	if c.ToolResponseLimit < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "tool_response_limit",
+			Message: "cannot be negative",
+		})
+	}
+
+	// Validate timeout
+	if c.CallToolTimeout.Duration() <= 0 {
+		errors = append(errors, ValidationError{
+			Field:   "call_tool_timeout",
+			Message: "must be a positive duration",
+		})
+	}
+
+	// Validate server configurations
+	serverNames := make(map[string]bool)
+	for i, server := range c.Servers {
+		fieldPrefix := fmt.Sprintf("mcpServers[%d]", i)
+
+		// Validate server name
+		if server.Name == "" {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".name",
+				Message: "server name is required",
+			})
+		} else if serverNames[server.Name] {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".name",
+				Message: fmt.Sprintf("duplicate server name: %s", server.Name),
+			})
+		} else {
+			serverNames[server.Name] = true
+		}
+
+		// Validate protocol
+		validProtocols := map[string]bool{"stdio": true, "http": true, "sse": true, "streamable-http": true, "auto": true}
+		if server.Protocol != "" && !validProtocols[server.Protocol] {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".protocol",
+				Message: fmt.Sprintf("invalid protocol: %s (must be stdio, http, sse, streamable-http, or auto)", server.Protocol),
+			})
+		}
+
+		// Validate stdio server requirements
+		if server.Protocol == "stdio" || (server.Protocol == "" && server.Command != "") {
+			if server.Command == "" {
+				errors = append(errors, ValidationError{
+					Field:   fieldPrefix + ".command",
+					Message: "command is required for stdio protocol",
+				})
+			}
+			// Validate working directory exists if specified
+			if server.WorkingDir != "" {
+				if _, err := os.Stat(server.WorkingDir); os.IsNotExist(err) {
+					errors = append(errors, ValidationError{
+						Field:   fieldPrefix + ".working_dir",
+						Message: fmt.Sprintf("directory does not exist: %s", server.WorkingDir),
+					})
+				}
+			}
+		}
+
+		// Validate HTTP server requirements
+		if server.Protocol == "http" || server.Protocol == "sse" || server.Protocol == "streamable-http" {
+			if server.URL == "" {
+				errors = append(errors, ValidationError{
+					Field:   fieldPrefix + ".url",
+					Message: fmt.Sprintf("url is required for %s protocol", server.Protocol),
+				})
+			}
+		}
+
+		// Validate OAuth configuration if present
+		if server.OAuth != nil {
+			oauthPrefix := fieldPrefix + ".oauth"
+			if server.OAuth.ClientID == "" {
+				errors = append(errors, ValidationError{
+					Field:   oauthPrefix + ".client_id",
+					Message: "client_id is required when oauth is configured",
+				})
+			}
+			// Note: ClientSecret can be a secret reference, so we don't validate it as empty
+		}
+	}
+
+	// Validate DataDir exists (if specified and not empty)
+	if c.DataDir != "" {
+		if _, err := os.Stat(c.DataDir); os.IsNotExist(err) {
+			errors = append(errors, ValidationError{
+				Field:   "data_dir",
+				Message: fmt.Sprintf("directory does not exist: %s", c.DataDir),
+			})
+		}
+	}
+
+	// Validate TLS configuration
+	if c.TLS != nil && c.TLS.Enabled {
+		if c.TLS.CertsDir != "" {
+			if _, err := os.Stat(c.TLS.CertsDir); os.IsNotExist(err) {
+				errors = append(errors, ValidationError{
+					Field:   "tls.certs_dir",
+					Message: fmt.Sprintf("directory does not exist: %s", c.TLS.CertsDir),
+				})
+			}
+		}
+	}
+
+	// Validate logging configuration
+	if c.Logging != nil {
+		validLevels := map[string]bool{"trace": true, "debug": true, "info": true, "warn": true, "error": true}
+		if c.Logging.Level != "" && !validLevels[c.Logging.Level] {
+			errors = append(errors, ValidationError{
+				Field:   "logging.level",
+				Message: fmt.Sprintf("invalid log level: %s (must be trace, debug, info, warn, or error)", c.Logging.Level),
+			})
+		}
+	}
+
+	return errors
+}
+
+// isValidListenAddr checks if the listen address format is valid
+func isValidListenAddr(addr string) bool {
+	// Allow :port format
+	if addr != "" && addr[0] == ':' {
+		return true
+	}
+	// Allow host:port format (simple check)
+	return addr != "" && (addr[0] != ':' || len(addr) > 1)
+}
+
+// Validate validates the configuration (backward compatible)
 func (c *Config) Validate() error {
+	// Apply defaults FIRST (non-validation logic)
 	if c.Listen == "" {
 		c.Listen = defaultPort
 	}
@@ -402,6 +683,23 @@ func (c *Config) Validate() error {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
 	}
 
+	// Then perform detailed validation
+	errors := c.ValidateDetailed()
+	if len(errors) > 0 {
+		// Return first error for backward compatibility
+		return fmt.Errorf("%s", errors[0].Error())
+	}
+
+	// Handle API key generation if not configured
+	// Empty string means authentication disabled, nil means auto-generate
+	if c.APIKey == "" {
+		// Check environment variable for API key
+		if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
+			c.APIKey = envAPIKey
+		}
+		// Note: Empty string explicitly disables authentication
+	}
+
 	// Ensure Environment config is not nil
 	if c.Environment == nil {
 		c.Environment = secureenv.DefaultEnvConfig()
@@ -410,6 +708,35 @@ func (c *Config) Validate() error {
 	// Ensure DockerIsolation config is not nil
 	if c.DockerIsolation == nil {
 		c.DockerIsolation = DefaultDockerIsolationConfig()
+	}
+
+	// Ensure Features config is not nil and validate dependencies
+	if c.Features == nil {
+		flags := DefaultFeatureFlags()
+		c.Features = &flags
+	} else {
+		if err := c.Features.ValidateFeatureFlags(); err != nil {
+			return fmt.Errorf("feature flag validation failed: %w", err)
+		}
+	}
+
+	// Ensure TLS config is not nil
+	if c.TLS == nil {
+		c.TLS = &TLSConfig{
+			Enabled:           false, // HTTPS disabled by default, can be enabled via config or env var
+			RequireClientCert: false, // mTLS disabled by default
+			CertsDir:          "",    // Will default to ${data_dir}/certs
+			HSTS:              true,  // HSTS enabled by default
+		}
+	}
+
+	// Ensure Tokenizer config is not nil
+	if c.Tokenizer == nil {
+		c.Tokenizer = &TokenizerConfig{
+			Enabled:      true,          // Token counting enabled by default
+			DefaultModel: "gpt-4",       // Default to GPT-4 tokenization
+			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
+		}
 	}
 
 	return nil

@@ -296,8 +296,7 @@ func TestE2E_MCPProxyWithLogging(t *testing.T) {
 		"serve",
 		"--config", configFile,
 		"--log-level", "debug",
-		"--log-to-file",
-		"--tray=false")
+		"--log-to-file")
 
 	// Capture output
 	stdout, err := cmd.StdoutPipe()

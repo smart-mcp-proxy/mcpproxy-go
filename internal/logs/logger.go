@@ -89,8 +89,11 @@ func SetupLogger(config *config.LogConfig) (*zap.Logger, error) {
 	// Combine cores
 	core := zapcore.NewTee(cores...)
 
+	// Wrap with secret sanitizer for security
+	sanitizedCore := NewSecretSanitizer(core)
+
 	// Create logger with caller information
-	logger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	logger := zap.New(sanitizedCore, zap.AddCaller(), zap.AddCallerSkip(1))
 
 	return logger, nil
 }
@@ -289,8 +292,11 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 		return nil, fmt.Errorf("failed to create file core for upstream server %s: %w", serverName, err)
 	}
 
+	// Wrap with secret sanitizer for security
+	sanitizedCore := NewSecretSanitizer(fileCore)
+
 	// Create logger with server name prefix
-	logger := zap.New(fileCore, zap.AddCaller(), zap.AddCallerSkip(1))
+	logger := zap.New(sanitizedCore, zap.AddCaller(), zap.AddCallerSkip(1))
 	logger = logger.With(zap.String("server", serverName))
 
 	return logger, nil
@@ -354,9 +360,57 @@ func CreateCLIUpstreamServerLogger(config *config.LogConfig, serverName string) 
 	// Combine cores
 	core := zapcore.NewTee(cores...)
 
+	// Wrap with secret sanitizer for security
+	sanitizedCore := NewSecretSanitizer(core)
+
 	// Create logger with server name prefix
-	logger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	logger := zap.New(sanitizedCore, zap.AddCaller(), zap.AddCallerSkip(1))
 	logger = logger.With(zap.String("server", serverName))
+
+	return logger, nil
+}
+
+// CreateHTTPLogger creates a logger specifically for HTTP API requests
+func CreateHTTPLogger(config *config.LogConfig) (*zap.Logger, error) {
+	if config == nil {
+		config = DefaultLogConfig()
+	}
+
+	// Create a copy of the config for HTTP logging
+	httpConfig := *config
+	httpConfig.Filename = "http.log"
+	httpConfig.EnableConsole = false // HTTP logs only go to file
+	httpConfig.EnableFile = true
+
+	// Parse log level
+	var level zapcore.Level
+	switch httpConfig.Level {
+	case LogLevelTrace:
+		level = zap.DebugLevel
+	case LogLevelDebug:
+		level = zap.DebugLevel
+	case LogLevelInfo:
+		level = zap.InfoLevel
+	case LogLevelWarn:
+		level = zap.WarnLevel
+	case LogLevelError:
+		level = zap.ErrorLevel
+	default:
+		level = zap.InfoLevel
+	}
+
+	// Create file core for HTTP logging
+	fileCore, err := createFileCore(&httpConfig, level)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file core for HTTP logger: %w", err)
+	}
+
+	// Wrap with secret sanitizer for security
+	sanitizedCore := NewSecretSanitizer(fileCore)
+
+	// Create logger without caller info for cleaner HTTP logs
+	logger := zap.New(sanitizedCore)
+	logger = logger.With(zap.String("component", "http_api"))
 
 	return logger, nil
 }

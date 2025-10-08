@@ -11,6 +11,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/oauth"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/upstream/core"
@@ -27,22 +28,31 @@ type Manager struct {
 	globalConfig    *config.Config
 	storage         *storage.BoltDB
 	notificationMgr *NotificationManager
+	secretResolver  *secret.Resolver
 
 	// tokenReconnect keeps last reconnect trigger time per server when detecting
 	// newly available OAuth tokens without explicit DB events (e.g., when CLI
 	// cannot write due to DB lock). Prevents rapid retrigger loops.
 	tokenReconnect map[string]time.Time
+
+	// Context for shutdown coordination
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 // NewManager creates a new upstream manager
-func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storage.BoltDB) *Manager {
+func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) *Manager {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		clients:         make(map[string]*managed.Client),
 		logger:          logger,
 		globalConfig:    globalConfig,
 		storage:         storage,
 		notificationMgr: NewNotificationManager(),
+		secretResolver:  secretResolver,
 		tokenReconnect:  make(map[string]time.Time),
+		shutdownCtx:     shutdownCtx,
+		shutdownCancel:  shutdownCancel,
 	}
 
 	// Set up OAuth completion callback to trigger connection retries (in-process)
@@ -59,7 +69,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storag
 
 	// Start database event monitor for cross-process OAuth completion notifications
 	if storage != nil {
-		go manager.startOAuthEventMonitor()
+		go manager.startOAuthEventMonitor(shutdownCtx)
 	}
 
 	return manager
@@ -80,9 +90,9 @@ func (m *Manager) AddNotificationHandler(handler NotificationHandler) {
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// Check if existing client exists and if config has changed
+	var clientToDisconnect *managed.Client
 	if existingClient, exists := m.clients[id]; exists {
 		existingConfig := existingClient.Config
 
@@ -102,8 +112,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 				zap.String("name", serverConfig.Name),
 				zap.String("current_state", existingClient.GetState().String()),
 				zap.Bool("is_connected", existingClient.IsConnected()))
-			_ = existingClient.Disconnect()
+
+			// Remove from map immediately to prevent new operations
 			delete(m.clients, id)
+			// Save reference to disconnect outside lock
+			clientToDisconnect = existingClient
 		} else {
 			m.logger.Debug("Server configuration unchanged, keeping existing client",
 				zap.String("id", id),
@@ -112,13 +125,19 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 				zap.Bool("is_connected", existingClient.IsConnected()))
 			// Update the client's config reference to the new config but don't recreate the client
 			existingClient.Config = serverConfig
+			m.mu.Unlock()
 			return nil
 		}
 	}
 
 	// Create new client but don't connect yet
-	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storage)
+	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storage, m.secretResolver)
 	if err != nil {
+		m.mu.Unlock()
+		// Disconnect old client if we failed to create new one
+		if clientToDisconnect != nil {
+			_ = clientToDisconnect.Disconnect()
+		}
 		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
 	}
 
@@ -141,6 +160,14 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	m.logger.Info("Added upstream server configuration",
 		zap.String("id", id),
 		zap.String("name", serverConfig.Name))
+
+	// IMPORTANT: Release lock before disconnecting to prevent deadlock
+	m.mu.Unlock()
+
+	// Disconnect old client outside lock to avoid blocking other operations
+	if clientToDisconnect != nil {
+		_ = clientToDisconnect.Disconnect()
+	}
 
 	return nil
 }
@@ -209,15 +236,22 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 
 // RemoveServer removes an upstream server
 func (m *Manager) RemoveServer(id string) {
+	// Get client reference while holding lock briefly
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	client, exists := m.clients[id]
+	if exists {
+		// Remove from map immediately to prevent new operations
+		delete(m.clients, id)
+	}
+	m.mu.Unlock()
 
-	if client, exists := m.clients[id]; exists {
+	// Disconnect outside the lock to avoid blocking other operations
+	if exists {
 		m.logger.Info("Removing upstream server",
 			zap.String("id", id),
 			zap.String("state", client.GetState().String()))
 		_ = client.Disconnect()
-		delete(m.clients, id)
+		m.logger.Debug("upstream.Manager.RemoveServer: disconnect completed", zap.String("id", id))
 	}
 }
 
@@ -293,6 +327,10 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 
 // CallTool calls a tool on the appropriate upstream server
 func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+	m.logger.Debug("CallTool: starting",
+		zap.String("tool_name", toolName),
+		zap.Any("args", args))
+
 	// Parse tool name to extract server and tool components
 	parts := strings.SplitN(toolName, ":", 2)
 	if len(parts) != 2 {
@@ -302,8 +340,16 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	serverName := parts[0]
 	actualToolName := parts[1]
 
+	m.logger.Debug("CallTool: parsed tool name",
+		zap.String("server_name", serverName),
+		zap.String("actual_tool_name", actualToolName))
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	m.logger.Debug("CallTool: acquired read lock, searching for client",
+		zap.String("server_name", serverName),
+		zap.Int("total_clients", len(m.clients)))
 
 	// Find the client for this server
 	var targetClient *managed.Client
@@ -315,8 +361,16 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	}
 
 	if targetClient == nil {
+		m.logger.Error("CallTool: no client found",
+			zap.String("server_name", serverName))
 		return nil, fmt.Errorf("no client found for server: %s", serverName)
 	}
+
+	m.logger.Debug("CallTool: client found",
+		zap.String("server_name", serverName),
+		zap.Bool("enabled", targetClient.Config.Enabled),
+		zap.Bool("connected", targetClient.IsConnected()),
+		zap.String("state", targetClient.GetState().String()))
 
 	if !targetClient.Config.Enabled {
 		return nil, fmt.Errorf("client for server %s is disabled", serverName)
@@ -349,8 +403,18 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, fmt.Errorf("server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 	}
 
+	m.logger.Debug("CallTool: calling client.CallTool",
+		zap.String("server_name", serverName),
+		zap.String("actual_tool_name", actualToolName))
+
 	// Call the tool on the upstream server with enhanced error handling
 	result, err := targetClient.CallTool(ctx, actualToolName, args)
+
+	m.logger.Debug("CallTool: client.CallTool returned",
+		zap.String("server_name", serverName),
+		zap.String("actual_tool_name", actualToolName),
+		zap.Error(err),
+		zap.Bool("has_result", result != nil))
 	if err != nil {
 		// Enrich errors at source with server context
 		errStr := err.Error()
@@ -471,6 +535,11 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 // DisconnectAll disconnects from all servers
 func (m *Manager) DisconnectAll() error {
+	// Cancel shutdown context to stop OAuth event monitor
+	if m.shutdownCancel != nil {
+		m.shutdownCancel()
+	}
+
 	m.mu.RLock()
 	clients := make([]*managed.Client, 0, len(m.clients))
 	for _, client := range m.clients {
@@ -482,6 +551,9 @@ func (m *Manager) DisconnectAll() error {
 	for _, client := range clients {
 		if err := client.Disconnect(); err != nil {
 			lastError = err
+			m.logger.Warn("Client disconnect failed",
+				zap.String("server", client.Config.Name),
+				zap.Error(err))
 		}
 	}
 
@@ -568,7 +640,7 @@ func (m *Manager) GetStats() map[string]interface{} {
 }
 
 // GetTotalToolCount returns the total number of tools across all servers
-// This is optimized to avoid network calls during shutdown for performance
+// Uses cached counts to avoid excessive network calls (2-minute cache per server)
 func (m *Manager) GetTotalToolCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -579,21 +651,13 @@ func (m *Manager) GetTotalToolCount() int {
 			continue
 		}
 
-		// Quick check if client is actually reachable before making network call
-		if !client.IsConnected() {
-			continue
-		}
-
-		// Use timeout for UI status updates (30 seconds for SSE servers)
-		// This allows time for SSE servers to establish connections and respond
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-
-		m.logger.Debug("Starting ListTools for tool counting",
-			zap.Duration("timeout", 30*time.Second))
-		tools, err := client.ListTools(ctx)
+		// Use cached tool count with 2-minute TTL to prevent overload
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		count, err := client.GetCachedToolCount(ctx)
 		cancel()
-		if err == nil && tools != nil {
-			totalTools += len(tools)
+
+		if err == nil {
+			totalTools += count
 		}
 		// Silently ignore errors during tool counting to avoid noise during shutdown
 	}
@@ -692,21 +756,27 @@ func (m *Manager) RetryConnection(serverName string) error {
 }
 
 // startOAuthEventMonitor monitors the database for OAuth completion events from CLI processes
-func (m *Manager) startOAuthEventMonitor() {
+func (m *Manager) startOAuthEventMonitor(ctx context.Context) {
 	m.logger.Info("Starting OAuth event monitor for cross-process notifications")
 
 	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
 	defer ticker.Stop()
 
-	for range ticker.C {
-		if err := m.processOAuthEvents(); err != nil {
-			m.logger.Warn("Failed to process OAuth events", zap.Error(err))
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Info("OAuth event monitor stopped due to context cancellation")
+			return
+		case <-ticker.C:
+			if err := m.processOAuthEvents(); err != nil {
+				m.logger.Warn("Failed to process OAuth events", zap.Error(err))
+			}
 
-		// Also scan for newly available tokens to handle cases where the CLI
-		// could not write a DB event due to a lock. If we see a persisted
-		// token for an errored OAuth server, trigger a reconnect once.
-		m.scanForNewTokens()
+			// Also scan for newly available tokens to handle cases where the CLI
+			// could not write a DB event due to a lock. If we see a persisted
+			// token for an errored OAuth server, trigger a reconnect once.
+			m.scanForNewTokens()
+		}
 	}
 }
 
@@ -846,7 +916,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}
 
 	// Create a transient core client that uses the daemon's storage
-	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false)
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
 	if err != nil {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -869,7 +939,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 			noAuthTransport := transport.DetermineTransportType(&cpy)
 			if noAuthTransport == "http" || noAuthTransport == "streamable-http" || noAuthTransport == "sse" {
 				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
-				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false)
+				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
 				if err2 == nil {
 					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 					_ = testClient.Connect(tctx)
@@ -900,4 +970,18 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}()
 
 	return nil
+}
+
+// InvalidateAllToolCountCaches invalidates tool count caches for all clients
+// This should be called when tools are known to have changed (e.g., after indexing)
+func (m *Manager) InvalidateAllToolCountCaches() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, client := range m.clients {
+		client.InvalidateToolCountCache()
+	}
+
+	m.logger.Debug("Invalidated tool count caches for all clients",
+		zap.Int("client_count", len(m.clients)))
 }

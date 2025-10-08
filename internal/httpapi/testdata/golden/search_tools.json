@@ -1,0 +1,20 @@
+{
+  "data": {
+    "query": "echo",
+    "results": [
+      {
+        "matches": 0,
+        "score": 0.95,
+        "tool": {
+          "description": "A simple echo tool for testing",
+          "name": "echo_tool",
+          "server_name": "test-server",
+          "usage": 10
+        }
+      }
+    ],
+    "took": "0ms",
+    "total": 1
+  },
+  "success": true
+}

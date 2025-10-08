@@ -6,6 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MCPProxy is a Go-based desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
+## Architecture: Core + Tray Split
+
+**Current Architecture** (Next Branch):
+- **Core Server** (`mcpproxy`): Headless HTTP API server with MCP proxy functionality
+- **Tray Application** (`mcpproxy-tray`): Standalone GUI application that manages the core server
+
+**Key Benefits**:
+- **Auto-start**: Tray automatically starts core server if not running
+- **Port conflict resolution**: Built-in detection and handling
+- **Independent operation**: Core can run without tray (headless mode)
+- **Real-time sync**: Tray updates via SSE connection to core API
+
 ## Development Commands
 
 ### Build
@@ -18,6 +30,9 @@ go build -o mcpproxy ./cmd/mcpproxy
 
 # Quick local build
 scripts/build.sh
+
+#Build frontend and backend
+make build
 ```
 
 ### Icon Generation
@@ -37,16 +52,77 @@ python3 -m pip install --break-system-packages Pillow
 
 **Note**: The Windows tray icon uses `.ico` format for better compatibility with the Windows system tray. The macOS/Linux versions use `.png` format. If you modify the logo, regenerate all icon files using the script above.
 
-### Testing
+### Prerelease Builds
+
+**MCPProxy supports automated prerelease builds from the `next` branch with signed and notarized macOS installers.**
+
+#### Branch Strategy
+- **`main` branch**: Stable releases (hotfixes and production builds)
+- **`next` branch**: Prerelease builds with latest features
+
+#### Downloading Prerelease Builds
+
+**Option 1: GitHub Web Interface**
+1. Go to [GitHub Actions](https://github.com/smart-mcp-proxy/mcpproxy-go/actions)
+2. Click on the latest successful "Prerelease" workflow run
+3. Scroll to **Artifacts** section
+4. Download:
+   - `dmg-darwin-arm64` (Apple Silicon Macs)
+   - `dmg-darwin-amd64` (Intel Macs)
+   - `versioned-linux-amd64`, `versioned-windows-amd64`, etc. (other platforms)
+
+**Option 2: Command Line**
 ```bash
+# List recent prerelease runs
+gh run list --workflow="Prerelease" --limit 5
+
+# Download specific artifacts from a run
+gh run download <RUN_ID> --name dmg-darwin-arm64    # Apple Silicon
+gh run download <RUN_ID> --name dmg-darwin-amd64    # Intel Mac
+gh run download <RUN_ID> --name versioned-linux-amd64  # Linux
+```
+
+#### Prerelease Versioning
+- Format: `{last_git_tag}-next.{commit_hash}`
+- Example: `v0.8.4-next.5b63e2d`
+- Version embedded in both `mcpproxy` and `mcpproxy-tray` binaries
+
+#### Security Features
+- **macOS DMG installers**: Signed with Apple Developer ID and notarized
+- **Code signing**: All macOS binaries are signed for Gatekeeper compatibility
+- **Automatic quarantine protection**: New servers are quarantined by default
+
+#### GitHub Workflows
+- **Prerelease workflow**: Triggered on `next` branch pushes
+- **Release workflow**: Triggered on `main` branch tags
+- **Unit Tests**: Run on all branches with comprehensive test coverage
+- **Frontend CI**: Validates web UI components and build process
+
+### Testing
+
+**IMPORTANT: Always run tests before committing changes!**
+
+```bash
+# Quick API E2E test (required before commits)
+./scripts/test-api-e2e.sh
+
+# Full test suite (recommended before major commits)
+./scripts/run-all-tests.sh
+
 # Run unit tests
 go test ./internal/... -v
 
 # Run unit tests with race detection
 go test -race ./internal/... -v
 
-# Run E2E tests
+# Run original E2E tests (internal mocks)
 ./scripts/run-e2e-tests.sh
+
+# Run binary E2E tests (with built mcpproxy)
+go test ./internal/server -run TestBinary -v
+
+# Run MCP protocol E2E tests
+go test ./internal/server -run TestMCP -v
 
 # Run specific test package
 go test ./internal/server -v
@@ -55,6 +131,25 @@ go test ./internal/server -v
 go test -coverprofile=coverage.out ./internal/...
 go tool cover -html=coverage.out
 ```
+
+#### E2E Test Requirements
+
+The E2E tests use `@modelcontextprotocol/server-everything` which provides:
+- **Echo tools** for testing basic functionality
+- **Math operations** for complex calculations
+- **String manipulation** for text processing
+- **File operations** (sandboxed)
+- **Error simulation** for error handling tests
+
+**Prerequisites for E2E tests:**
+- Node.js and npm installed (for everything server)
+- `jq` installed for JSON parsing
+- Built mcpproxy binary: `go build -o mcpproxy ./cmd/mcpproxy`
+
+**Test failure investigation:**
+- Check `/tmp/mcpproxy_e2e.log` for server logs
+- Verify everything server is connecting: look for "Everything server is connected!"
+- Ensure no port conflicts on 8081
 
 ### Linting
 ```bash
@@ -66,12 +161,30 @@ golangci-lint run ./...
 ```
 
 ### Running the Application
+
+#### Core + Tray Architecture (Current)
+
+MCPProxy is split into two separate applications:
+
+1. **Core Server** (`mcpproxy`): Headless API server
+2. **Tray Application** (`mcpproxy-tray`): GUI management interface
+
 ```bash
-# Start server with system tray (default)
+# Build both applications
+CGO_ENABLED=0 go build -o mcpproxy ./cmd/mcpproxy          # Core server
+GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray app
+
+# Start core server (required) - binds to localhost by default for security
 ./mcpproxy serve
 
-# Start without tray
-./mcpproxy serve --tray=false
+# Start core server on all interfaces (CAUTION: Network exposure)
+./mcpproxy serve --listen :8080
+
+# Start with custom API key
+./mcpproxy serve --api-key="your-secret-key"
+
+# Start tray application (optional, connects to core via API with auto-generated API key)
+./mcpproxy-tray
 
 # Custom configuration
 ./mcpproxy serve --config=/path/to/config.json
@@ -83,6 +196,39 @@ golangci-lint run ./...
 ./mcpproxy tools list --server=github-server --log-level=trace
 ```
 
+#### Tray Application Features
+- **Auto-starts core server** if not running
+- **Port conflict resolution** built-in
+- **Real-time updates** via SSE connection to core API
+- **Cross-platform** system tray integration
+- **Server management** via GUI menus
+
+#### Tray Application Architecture (Refactored)
+
+The tray application uses a robust state machine architecture for reliable core management:
+
+**State Machine States**:
+- `StateInitializing` → `StateLaunchingCore` → `StateWaitingForCore` → `StateConnectingAPI` → `StateConnected`
+- Error states: `StateCoreErrorPortConflict`, `StateCoreErrorDBLocked`, `StateCoreErrorGeneral`, `StateCoreErrorConfig`
+- Recovery states: `StateReconnecting`, `StateFailed`, `StateShuttingDown`
+
+**Key Components**:
+- **Process Monitor** (`cmd/mcpproxy-tray/internal/monitor/process.go`): Monitors core subprocess lifecycle
+- **Health Monitor** (`cmd/mcpproxy-tray/internal/monitor/health.go`): Performs HTTP health checks on core API
+- **State Machine** (`cmd/mcpproxy-tray/internal/state/machine.go`): Manages state transitions and retry logic
+
+**Error Classification**:
+Core process exit codes are mapped to specific state machine events:
+- Exit code 2 (port conflict) → `EventPortConflict`
+- Exit code 3 (database locked) → `EventDBLocked`
+- Exit code 4 (config error) → `EventConfigError`
+- Other errors → `EventGeneralError`
+
+**Development Environment Variables**:
+- `MCPPROXY_TRAY_SKIP_CORE=1` - Skip core launch (for development)
+- `MCPPROXY_CORE_URL=http://localhost:8085` - Custom core URL
+- `MCPPROXY_TRAY_PORT=8090` - Custom tray port
+
 ## Architecture Overview
 
 ### Core Components
@@ -93,9 +239,18 @@ golangci-lint run ./...
   - `call_cmd.go` - Tool execution commands
   - `tray_gui.go`/`tray_stub.go` - System tray interface (build-tagged)
 
-- **`internal/server/`** - Core server implementation
-  - `server.go` - Main server lifecycle and HTTP server management
+- **`internal/runtime/`** - Core runtime lifecycle management (Phase 1-3 refactoring)
+  - `runtime.go` - Non-HTTP lifecycle, configuration, and state management
+  - `event_bus.go` - Event system for real-time updates and SSE integration
+  - `lifecycle.go` - Background initialization, connection management, and tool indexing
+  - `events.go` - Event type definitions and payload structures
+
+- **`internal/server/`** - HTTP server and MCP proxy implementation
+  - `server.go` - HTTP server management and delegation to runtime
   - `mcp.go` - MCP protocol implementation and tool routing
+
+- **`internal/httpapi/`** - REST API endpoints with chi router
+  - `server.go` - `/api/v1` endpoints, SSE events, and server controls
 
 - **`internal/upstream/`** - Modular client architecture (3-layer design)
   - `core/` - Basic MCP client (stateless, transport-agnostic)
@@ -115,7 +270,11 @@ golangci-lint run ./...
   - Server configurations and quarantine status
 
 - **`internal/cache/`** - Response caching layer
-- **`internal/tray/`** - Cross-platform system tray UI
+- **`cmd/mcpproxy-tray/`** - Standalone system tray application (separate binary)
+  - `main.go` - Core process launcher with state machine integration
+  - `internal/state/` - State machine for core lifecycle management
+  - `internal/monitor/` - Process and health monitoring systems
+  - `internal/api/` - Enhanced API client with exponential backoff
 - **`internal/logs/`** - Structured logging with per-server log files
 
 ### Key Features
@@ -126,7 +285,8 @@ golangci-lint run ./...
 4. **OAuth 2.1 Support** - RFC 8252 compliant OAuth with PKCE for secure authentication
 5. **System Tray UI** - Native cross-platform tray interface for server management
 6. **Per-Server Logging** - Individual log files for each upstream server
-7. **Hot Configuration Reload** - Real-time config changes via file watching
+7. **Real-time Event System** - Event bus with SSE integration for live updates (Phase 3 refactoring)
+8. **Hot Configuration Reload** - Real-time config changes with event notifications
 
 ## Configuration
 
@@ -139,9 +299,10 @@ golangci-lint run ./...
 ### Example Configuration
 ```json
 {
-  "listen": ":8080",
+  "listen": "127.0.0.1:8080",
   "data_dir": "~/.mcpproxy",
-  "enable_tray": true,
+  "api_key": "your-secret-api-key-here",
+  "enable_web_ui": true,
   "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
@@ -196,6 +357,44 @@ golangci-lint run ./...
     }
   ]
 }
+```
+
+### Environment Variables
+
+MCPProxy supports several environment variables for configuration and security:
+
+**Security Configuration**:
+- `MCPPROXY_LISTEN` - Override network binding (e.g., `127.0.0.1:8080`, `:8080`)
+- `MCPPROXY_API_KEY` - Set API key for REST API authentication
+
+**Debugging**:
+- `MCPPROXY_DEBUG` - Enable debug mode
+- `MCPPROXY_DISABLE_OAUTH` - Disable OAuth for testing
+- `HEADLESS` - Run in headless mode (no browser launching)
+
+**Tray-Core Communication**:
+- `MCPPROXY_API_KEY` - Shared API key for tray-core authentication (auto-generated if not set)
+- `MCPPROXY_TLS_ENABLED` - Enable TLS/HTTPS for both tray and core (automatically passed through)
+- `MCPPROXY_TRAY_SKIP_CORE` - Skip core launch in tray app (for development)
+- `MCPPROXY_CORE_URL` - Custom core URL for tray to connect to
+
+**Examples**:
+```bash
+# Start with custom network binding
+export MCPPROXY_LISTEN=":8080"
+./mcpproxy serve
+
+# Start with custom API key
+export MCPPROXY_API_KEY="my-secret-key"
+./mcpproxy serve
+
+# Disable authentication for testing
+export MCPPROXY_API_KEY=""
+./mcpproxy serve
+
+# Run in headless mode
+export HEADLESS=true
+./mcpproxy serve
 ```
 
 ### Working Directory Configuration
@@ -273,7 +472,70 @@ Working directories are compatible with Docker isolation. When both are configur
 - Format: `<serverName>:<originalToolName>` (e.g., `github:create_issue`)
 - Tools are automatically prefixed with server names to prevent conflicts
 
+### HTTP API Endpoints
+
+The HTTP API provides REST endpoints for server management and monitoring:
+
+**Base Path**: `/api/v1` (legacy `/api` routes removed in Phase 4)
+
+**Core Endpoints**:
+- `GET /api/v1/status` - Server status and statistics
+- `GET /api/v1/servers` - List all upstream servers with connection status
+- `POST /api/v1/servers/{name}/enable` - Enable/disable server
+- `POST /api/v1/servers/{name}/quarantine` - Quarantine/unquarantine server
+- `GET /api/v1/tools` - Search tools across all servers
+- `GET /api/v1/servers/{name}/tools` - List tools for specific server
+
+**Real-time Updates**:
+- `GET /events` - Server-Sent Events (SSE) stream for live updates
+- Streams both status changes and runtime events (`servers.changed`, `config.reloaded`)
+- Used by web UI and tray for real-time synchronization
+
+**API Authentication Examples**:
+```bash
+# Using X-API-Key header (recommended for curl)
+curl -H "X-API-Key: your-api-key" http://127.0.0.1:8080/api/v1/servers
+
+# Using query parameter (for browser/SSE)
+curl "http://127.0.0.1:8080/api/v1/servers?apikey=your-api-key"
+
+# SSE with API key
+curl "http://127.0.0.1:8080/events?apikey=your-api-key"
+
+# Open Web UI with API key (tray app does this automatically)
+open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
+```
+
+**Security Notes**:
+- **MCP endpoints (`/mcp`, `/mcp/`)** remain **unprotected** for client compatibility
+- **REST API** requires authentication when API key is configured
+- **Empty API key** disables authentication (useful for testing)
+
 ## Security Model
+
+### Network Security
+- **Localhost-only binding by default**: Core server binds to `127.0.0.1:8080` by default to prevent network exposure
+- **Override options**: Can be changed via `--listen` flag, `MCPPROXY_LISTEN` environment variable, or config file
+- **API key authentication**: REST API endpoints protected with optional API key authentication
+- **MCP endpoints open**: MCP protocol endpoints (`/mcp`, `/mcp/`) remain unprotected for client compatibility
+
+### API Key Authentication
+- **Automatic generation**: API key generated if not provided and logged for easy access
+- **Multiple authentication methods**: Supports `X-API-Key` header and `?apikey=` query parameter
+- **Tray integration**: Tray app automatically generates and manages API keys for core communication
+- **Configuration options**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
+- **Optional protection**: Empty API key disables authentication (useful for testing)
+- **Protected endpoints**: `/api/v1/*` and `/events` (SSE) require authentication when enabled
+
+#### Tray-Core API Key Coordination
+The tray application ensures secure communication with the core process through coordinated API key management:
+
+1. **Environment Variable Priority**: If `MCPPROXY_API_KEY` is set, both tray and core use the same key
+2. **Auto-Generation**: If no API key is provided, tray generates one and passes it to core via environment
+3. **Core Process Environment**: Tray always passes `MCPPROXY_API_KEY` to the core process it launches
+4. **TLS Configuration**: When `MCPPROXY_TLS_ENABLED=true`, it's automatically passed to the core process
+
+This prevents the "API key auto-generated for security" mismatch that would prevent tray-core communication.
 
 ### Quarantine System
 - **All new servers** added via LLM tools are automatically quarantined
@@ -285,6 +547,21 @@ Working directories are compatible with Docker isolation. When both are configur
 - Automatic detection of malicious tool descriptions
 - Security analysis with comprehensive checklists
 - Protection against hidden instructions and data exfiltration attempts
+
+### Core Process Exit Codes
+
+The core mcpproxy process uses specific exit codes to communicate failure reasons to the tray application:
+
+**Exit Codes** (`cmd/mcpproxy/exit_codes.go`):
+- `0` - Success (normal termination)
+- `1` - General error (default for unclassified errors)
+- `2` - Port conflict (listen address already in use)
+- `3` - Database locked (another mcpproxy instance running)
+- `4` - Configuration error (invalid config file)
+- `5` - Permission error (insufficient file/port access)
+
+**Tray Integration**:
+The tray application's process monitor (`cmd/mcpproxy-tray/internal/monitor/process.go`) maps these exit codes to state machine events, enabling intelligent retry strategies and user-friendly error reporting.
 
 ## Debugging Guide
 
@@ -330,49 +607,7 @@ mcpproxy auth status
 mcpproxy auth login --server=Sentry --force
 ```
 
-#### OAuth Flow Diagnostics
-```bash
-# Debug OAuth with detailed logging
-tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(🔐|🌐|🚀|⏳|✅|❌|oauth|OAuth)"
 
-# Monitor callback server status
-grep -E "(callback|redirect_uri|127\.0\.0\.1)" ~/Library/Logs/mcpproxy/main.log
-
-# Check token store persistence
-grep -E "(token.*store|has_existing_token_store)" ~/Library/Logs/mcpproxy/main.log
-```
-
-#### Common OAuth Issues
-1. **Browser not opening**: Check environment variables (`DISPLAY`, `HEADLESS`, `CI`)
-2. **Token persistence**: Look for `"has_existing_token_store": false` on restart
-3. **Rate limiting**: Search for "rate limited" messages
-4. **Callback failures**: Monitor callback server logs
-
-### Tool Discovery and Indexing Debug
-
-#### Test Tool Availability
-```bash
-# List tools from specific server
-mcpproxy tools list --server=github-server --log-level=debug
-
-# Search for tools (uses BM25 index)
-mcpproxy tools search "create issue" --limit=10
-
-# Test direct tool calls
-mcpproxy call tool --tool-name=Sentry:whoami --json_args='{}'
-```
-
-#### Index Debugging
-```bash
-# Check index status and rebuilds
-grep -E "(index|Index|rebuild|BM25)" ~/Library/Logs/mcpproxy/main.log
-
-# Monitor tool discovery
-grep -E "(tool.*discovered|discovered.*tool)" ~/Library/Logs/mcpproxy/main.log
-
-# Check server connection states
-grep -E "(Ready|Connecting|Error|state.*transition)" ~/Library/Logs/mcpproxy/main.log
-```
 
 ### Server Management Commands
 
@@ -389,18 +624,6 @@ mcpproxy upstream remove --name="old-server"
 
 # Enable/disable server
 mcpproxy upstream update --name="test-server" --enabled=false
-```
-
-#### Quarantine Management
-```bash
-# List quarantined servers
-mcpproxy quarantine list
-
-# Review quarantined server details
-mcpproxy quarantine inspect --name="suspicious-server"
-
-# Manually quarantine server
-mcpproxy quarantine add --name="unsafe-server"
 ```
 
 ### Performance and Resource Debugging
@@ -434,43 +657,15 @@ grep -E "(state.*transition|Connecting|Ready|Error)" ~/Library/Logs/mcpproxy/mai
 pkill mcpproxy
 
 # Start with debug logging
-go build && ./mcpproxy --log-level=debug --tray=false
+go build && ./mcpproxy serve --log-level=debug
 
 # Start with trace-level logging (very verbose)
-./mcpproxy --log-level=trace --tray=false
+./mcpproxy serve --log-level=trace
 
 # Debug specific operations
 ./mcpproxy tools list --server=github-server --log-level=trace
 ```
 
-#### Environment Variables for Debugging
-```bash
-# Disable OAuth for testing
-export MCPPROXY_DISABLE_OAUTH=true
-
-# Enable additional debugging
-export MCPPROXY_DEBUG=true
-
-# Test in headless environment
-export HEADLESS=true
-```
-
-### Troubleshooting Common Issues
-
-1. **Tools not appearing in search**:
-   - Check server authentication status: `mcpproxy auth status`
-   - Verify server can list tools: `mcpproxy tools list --server=<name>`
-   - Check index rebuild: `grep -E "index.*rebuild" ~/Library/Logs/mcpproxy/main.log`
-
-2. **OAuth servers failing**:
-   - Test manual login: `mcpproxy auth login --server=<name> --log-level=debug`
-   - Check browser opening: Look for "Opening browser" in logs
-   - Verify callback server: `grep "callback" ~/Library/Logs/mcpproxy/main.log`
-
-3. **Server connection issues**:
-   - Monitor retry attempts: `grep "retry" ~/Library/Logs/mcpproxy/main.log`
-   - Check Docker isolation: `grep "Docker" ~/Library/Logs/mcpproxy/main.log`
-   - Verify server configuration: `mcpproxy upstream list`
 
 ## Development Guidelines
 
@@ -491,14 +686,59 @@ export HEADLESS=true
 - Handle context cancellation properly in long-running operations
 - Graceful degradation for non-critical failures
 
-### Build Tags
-- System tray functionality uses build tags (`tray_gui.go` vs `tray_stub.go`)
-- Platform-specific code should use appropriate build constraints
 
 ### Configuration Management
 - Config changes should update both storage and file system
 - File watcher triggers automatic config reloads
 - Validate configuration on load and provide sensible defaults
+
+## Runtime Architecture (Phase 1-3 Refactoring)
+
+### Runtime Package (`internal/runtime/`)
+
+The runtime package provides the core non-HTTP lifecycle management, separating concerns from the HTTP server layer:
+
+- **Configuration Management**: Centralized config loading, validation, and hot-reload
+- **Background Services**: Connection management, tool indexing, and health monitoring
+- **State Management**: Thread-safe status tracking and upstream server state
+- **Event System**: Real-time event broadcasting for UI and SSE consumers
+
+### Event Bus System
+
+The event bus enables real-time communication between runtime and UI components:
+
+**Event Types**:
+- `servers.changed` - Server configuration or state changes
+- `config.reloaded` - Configuration file reloaded from disk
+
+**Event Flow**:
+1. Runtime operations trigger events via `emitServersChanged()` and `emitConfigReloaded()`
+2. Events are broadcast to subscribers through buffered channels
+3. Server forwards events to tray UI and SSE endpoints
+4. Tray menus refresh automatically without file watching
+5. Web UI receives live updates via `/events` SSE endpoint
+
+**SSE Integration**:
+- `/events` endpoint streams both status updates and runtime events
+- Automatic connection management with proper cleanup
+- JSON-formatted event payloads for easy consumption
+
+### Runtime Lifecycle
+
+**Initialization**:
+1. Runtime created with config, logger, and manager dependencies
+2. Background initialization starts server connections and tool indexing
+3. Status updates broadcast through event system
+
+**Background Services**:
+- **Connection Management**: Periodic reconnection attempts with exponential backoff
+- **Tool Indexing**: Automatic discovery and search index updates every 15 minutes
+- **Configuration Sync**: File-based config changes trigger runtime resync
+
+**Shutdown**:
+- Graceful context cancellation cascades to all background services
+- Upstream servers disconnected with proper Docker container cleanup
+- Resources closed in dependency order (upstream → cache → index → storage)
 
 ## Important Implementation Details
 
@@ -542,7 +782,4 @@ export HEADLESS=true
 - Double shutdown protection
 
 When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
-- to memory 
-if u want to test tool call in mcpproxy instead of curl call, use mcpproxy call. Example  `mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'`
-- to memory
-Never use curl to interact with mcpproxy, it uses mcp protocol. USE DIRECT mcp server call
+- remember before running mcpproxy core u need to kill all mcpproxy instances, because it locks DB

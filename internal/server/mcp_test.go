@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/upstream"
 )
 
@@ -67,11 +68,7 @@ func TestSecurityConfigValidation(t *testing.T) {
 			}
 
 			// Test logic for security checks
-			allowed := true
-
-			if tt.readOnlyMode && tt.operation != "list" {
-				allowed = false
-			}
+			allowed := !tt.readOnlyMode || tt.operation == "list"
 
 			if tt.disableManagement {
 				allowed = false
@@ -480,7 +477,7 @@ func TestDefaultConfigSettings(t *testing.T) {
 	config := config.DefaultConfig()
 
 	// Test default values
-	assert.Equal(t, ":8080", config.Listen)
+	assert.Equal(t, "127.0.0.1:8080", config.Listen)
 	assert.Equal(t, "", config.DataDir)
 	assert.True(t, config.EnableTray)
 	assert.False(t, config.DebugSearch)
@@ -545,7 +542,7 @@ func TestHandleCallToolErrorRecovery(t *testing.T) {
 	// This test verifies the core issue mentioned in the error logs
 
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil),
+		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil, secret.NewResolver()),
 		logger:          zap.NewNop(),
 	}
 
@@ -587,7 +584,7 @@ func TestHandleCallToolCompleteErrorHandling(t *testing.T) {
 	// Test comprehensive error handling scenarios including self-referential calls
 
 	mockProxy := &MCPProxyServer{
-		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil),
+		upstreamManager: upstream.NewManager(zap.NewNop(), config.DefaultConfig(), nil, secret.NewResolver()),
 		logger:          zap.NewNop(),
 		config:          &config.Config{}, // Add minimal config for testing
 	}

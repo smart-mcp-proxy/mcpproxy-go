@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/upstream/managed"
 )
@@ -59,7 +60,7 @@ func TestClient_Connect_SSE_NotSupported(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create client with all required parameters
-	client, err := managed.NewClient("test-client", cfg, logger, nil, nil, nil)
+	client, err := managed.NewClient("test-client", cfg, logger, nil, nil, nil, secret.NewResolver())
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
@@ -122,7 +123,7 @@ func TestClient_Connect_SSE_ErrorContainsAlternatives(t *testing.T) {
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
 
-	client, err := managed.NewClient("test-client", cfg, logger, nil, nil, nil)
+	client, err := managed.NewClient("test-client", cfg, logger, nil, nil, nil, secret.NewResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -212,7 +213,7 @@ func TestClient_Connect_WorkingTransports(t *testing.T) {
 			logger, err := zap.NewDevelopment()
 			require.NoError(t, err)
 
-			client, err := managed.NewClient("test-client", cfg, logger, nil, nil, nil)
+			client, err := managed.NewClient("test-client", cfg, logger, nil, nil, nil, secret.NewResolver())
 			require.NoError(t, err)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -303,7 +304,7 @@ func TestClient_Headers_Support(t *testing.T) {
 			logger, err := zap.NewDevelopment()
 			require.NoError(t, err)
 
-			client, err := managed.NewClient("test-client", cfg, logger, nil, nil, nil)
+			client, err := managed.NewClient("test-client", cfg, logger, nil, nil, nil, secret.NewResolver())
 			require.NoError(t, err)
 			require.NotNil(t, client)
 

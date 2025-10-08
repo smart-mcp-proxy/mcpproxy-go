@@ -14,6 +14,7 @@ import (
 const (
 	DefaultDataDir = ".mcpproxy"
 	ConfigFileName = "mcp_config.json"
+	trueValue      = "true"
 )
 
 // LoadFromFile loads configuration from a specific file
@@ -39,6 +40,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 	}
+
+	// Apply environment variable overrides for TLS configuration
+	applyTLSEnvOverrides(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -130,6 +134,9 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Apply environment variable overrides for TLS configuration
+	applyTLSEnvOverrides(cfg)
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -150,7 +157,7 @@ func setupViper() {
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 
 	// Set defaults
-	viper.SetDefault("listen", ":8080")
+	viper.SetDefault("listen", "127.0.0.1:8080")
 	viper.SetDefault("top-k", 5)
 	viper.SetDefault("tools-limit", 15)
 	viper.SetDefault("config", "")
@@ -162,6 +169,11 @@ func setupViper() {
 	viper.SetDefault("allow-server-remove", true)
 	viper.SetDefault("enable-prompts", true)
 	viper.SetDefault("check-server-repo", true)
+
+	// TLS defaults
+	viper.SetDefault("tls.enabled", false)
+	viper.SetDefault("tls.require_client_cert", false)
+	viper.SetDefault("tls.hsts", true)
 }
 
 // findAndLoadConfigFile tries to find config file in common locations
@@ -190,6 +202,18 @@ func loadConfigFile(path string, cfg *Config) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// First check if api_key is present in the JSON to distinguish between
+	// "not set" vs "explicitly set to empty"
+	var rawConfig map[string]interface{}
+	if err := json.Unmarshal(data, &rawConfig); err != nil {
+		return fmt.Errorf("failed to parse config file for api_key detection: %w", err)
+	}
+
+	// Check if api_key is explicitly set in the config file
+	if _, exists := rawConfig["api_key"]; exists {
+		cfg.apiKeyExplicitlySet = true
 	}
 
 	if err := json.Unmarshal(data, cfg); err != nil {
@@ -358,4 +382,42 @@ var registriesInitCallback func(*Config)
 // SetRegistriesInitCallback sets the callback function for registries initialization
 func SetRegistriesInitCallback(callback func(*Config)) {
 	registriesInitCallback = callback
+}
+
+// applyTLSEnvOverrides applies environment variable overrides for TLS configuration
+func applyTLSEnvOverrides(cfg *Config) {
+	// Ensure TLS config is initialized
+	if cfg.TLS == nil {
+		cfg.TLS = &TLSConfig{
+			Enabled:           true,
+			RequireClientCert: false,
+			CertsDir:          "",
+			HSTS:              true,
+		}
+	}
+
+	// Override listen address from environment
+	if value := os.Getenv("MCPPROXY_LISTEN"); value != "" {
+		cfg.Listen = value
+	}
+
+	// Override TLS enabled from environment
+	if value := os.Getenv("MCPPROXY_TLS_ENABLED"); value != "" {
+		cfg.TLS.Enabled = (value == trueValue || value == "1")
+	}
+
+	// Override TLS client cert requirement from environment
+	if value := os.Getenv("MCPPROXY_TLS_REQUIRE_CLIENT_CERT"); value != "" {
+		cfg.TLS.RequireClientCert = (value == trueValue || value == "1")
+	}
+
+	// Override TLS certificates directory from environment
+	if value := os.Getenv("MCPPROXY_CERTS_DIR"); value != "" {
+		cfg.TLS.CertsDir = value
+	}
+
+	// Override data directory from environment (for backward compatibility)
+	if value := os.Getenv("MCPPROXY_DATA"); value != "" {
+		cfg.DataDir = value
+	}
 }

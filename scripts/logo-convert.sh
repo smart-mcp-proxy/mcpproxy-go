@@ -10,8 +10,8 @@ inkscape assets/logo.svg --export-width=256 --export-filename=assets/icons/icon-
 inkscape assets/logo.svg --export-width=512 --export-filename=assets/icons/icon-512.png
 
 # Monochrome tray icon (44x44 PNG)
-inkscape assets/logo.svg --export-width=44 --export-filename=internal/tray/icon-mono-44.png
-convert internal/tray/icon-mono-44.png -colorspace Gray internal/tray/icon-mono-44.png
+inkscape assets/logo.svg --export-width=44 --export-filename=cmd/mcpproxy-tray/icon-mono-44.png
+convert cmd/mcpproxy-tray/icon-mono-44.png -colorspace Gray cmd/mcpproxy-tray/icon-mono-44.png
 
 # Create Windows ICO file from PNG assets (requires Python with Pillow)
 if command -v python3 &> /dev/null; then
