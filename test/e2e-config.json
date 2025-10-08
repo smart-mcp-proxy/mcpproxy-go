@@ -12,10 +12,10 @@
         "-y",
         "@modelcontextprotocol/server-everything"
       ],
-      "enabled": false,
+      "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-10-05T21:05:58.786562+03:00"
+      "updated": "2025-10-08T18:17:09.56386+03:00"
     }
   ],
   "top_k": 10,
@@ -47,6 +47,7 @@
     "compress": true,
     "json_format": false
   },
+  "api_key": "8fe19be2087ba7a9ab828bda259472e55e89fc2fc2150359395bb5e041c8f545",
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,

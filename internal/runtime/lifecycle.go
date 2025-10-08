@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -172,11 +171,8 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		storedServerMap[storedServer.Name] = storedServer
 	}
 
-	// Add servers synchronously to avoid deadlock with tool discovery
-	// Wait for all server add/remove operations to complete before returning
-	// This prevents DiscoverAndIndexTools from trying to acquire locks while servers are being modified
-
-	var wg sync.WaitGroup
+	// Add/remove servers asynchronously to prevent blocking on slow connections
+	// All server operations now happen in background goroutines with timeouts
 
 	for _, serverCfg := range cfg.Servers {
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
@@ -202,11 +198,9 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		}
 
 		if serverCfg.Enabled {
-			// Add server synchronously to avoid lock contention with DiscoverAndIndexTools
-			// The actual connection still happens asynchronously inside AddServer
-			wg.Add(1)
+			// Add server asynchronously to prevent blocking
+			// AddServer has its own 30-second timeout for connections
 			go func(cfg *config.ServerConfig, cfgPath string) {
-				defer wg.Done()
 				if err := r.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
 					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
 				} else {
@@ -223,12 +217,13 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 				r.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", serverCfg.Name))
 			}
 		} else {
-			r.upstreamManager.RemoveServer(serverCfg.Name)
-			r.logger.Info("Server is disabled, removing from active connections", zap.String("server", serverCfg.Name))
+			// Remove server asynchronously to prevent blocking
+			go func(name string) {
+				r.upstreamManager.RemoveServer(name)
+				r.logger.Info("Server is disabled, removing from active connections", zap.String("server", name))
+			}(serverCfg.Name)
 		}
 	}
-
-	wg.Wait()
 
 	serversToRemove := []string{}
 
@@ -253,18 +248,21 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		}
 	}
 
+	// Remove servers asynchronously to prevent blocking
 	for _, serverName := range serversToRemove {
-		r.logger.Info("Removing server no longer in config", zap.String("server", serverName))
-		r.upstreamManager.RemoveServer(serverName)
-		if err := r.storageManager.DeleteUpstreamServer(serverName); err != nil {
-			r.logger.Error("Failed to delete server from storage", zap.Error(err), zap.String("server", serverName))
-		}
-		if err := r.indexManager.DeleteServerTools(serverName); err != nil {
-			r.logger.Error("Failed to delete server tools from index", zap.Error(err), zap.String("server", serverName))
-		} else {
-			r.logger.Info("Removed server tools from search index", zap.String("server", serverName))
-		}
 		changed = true
+		go func(name string) {
+			r.logger.Info("Removing server no longer in config", zap.String("server", name))
+			r.upstreamManager.RemoveServer(name)
+			if err := r.storageManager.DeleteUpstreamServer(name); err != nil {
+				r.logger.Error("Failed to delete server from storage", zap.Error(err), zap.String("server", name))
+			}
+			if err := r.indexManager.DeleteServerTools(name); err != nil {
+				r.logger.Error("Failed to delete server tools from index", zap.Error(err), zap.String("server", name))
+			} else {
+				r.logger.Info("Removed server tools from search index", zap.String("server", name))
+			}
+		}(serverName)
 	}
 
 	if len(serversToRemove) > 0 {
