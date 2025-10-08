@@ -120,7 +120,7 @@ jobs:
         run: cd frontend && npm run build
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.5.0
           args: --timeout=5m
