@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -30,6 +31,7 @@ type AsyncManager struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	started bool
+	wg      sync.WaitGroup
 }
 
 // NewAsyncManager creates a new async storage manager
@@ -50,6 +52,7 @@ func (am *AsyncManager) Start() {
 		return
 	}
 	am.started = true
+	am.wg.Add(1)
 	go am.processOperations()
 }
 
@@ -59,11 +62,13 @@ func (am *AsyncManager) Stop() {
 		return
 	}
 	am.cancel()
+	am.wg.Wait() // Wait for the goroutine to finish
 	am.started = false
 }
 
 // processOperations is the main worker loop that processes storage operations
 func (am *AsyncManager) processOperations() {
+	defer am.wg.Done()
 	am.logger.Debug("Storage async manager started")
 	defer am.logger.Debug("Storage async manager stopped")
 
