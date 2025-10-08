@@ -213,9 +213,10 @@ func TestConvertFromCursorFormat(t *testing.T) {
 	var sqliteServer *ServerConfig
 	var httpServer *ServerConfig
 	for _, server := range servers {
-		if server.Name == "sqlite-server" {
+		switch server.Name {
+		case "sqlite-server":
 			sqliteServer = server
-		} else if server.Name == "http-server" {
+		case "http-server":
 			httpServer = server
 		}
 	}

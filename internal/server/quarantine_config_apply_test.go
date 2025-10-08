@@ -18,9 +18,9 @@ import (
 	"mcpproxy-go/internal/contracts"
 )
 
-// TestQuarantineConfigApply tests that changing quarantine state via config apply
+// TestE2E_QuarantineConfigApply tests that changing quarantine state via config apply
 // properly updates server state and tool discoverability
-func TestQuarantineConfigApply(t *testing.T) {
+func TestE2E_QuarantineConfigApply(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
 	}

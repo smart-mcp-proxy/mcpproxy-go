@@ -68,11 +68,7 @@ func TestSecurityConfigValidation(t *testing.T) {
 			}
 
 			// Test logic for security checks
-			allowed := true
-
-			if tt.readOnlyMode && tt.operation != "list" {
-				allowed = false
-			}
+			allowed := !tt.readOnlyMode || tt.operation == "list"
 
 			if tt.disableManagement {
 				allowed = false

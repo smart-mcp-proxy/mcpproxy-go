@@ -180,7 +180,7 @@ func TestDockerArgsOrderWithLogging(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Find the positions of key arguments
-	var logDriverIndex, networkIndex, memoryIndex int = -1, -1, -1
+	logDriverIndex, networkIndex, memoryIndex := -1, -1, -1
 	for i, arg := range args {
 		switch arg {
 		case "--log-driver":

@@ -123,14 +123,14 @@ run_test_stage "Build mcpproxy binary" \
     "go build -o mcpproxy ./cmd/mcpproxy" \
     "required"
 
-# Stage 2: Unit Tests
+# Stage 2: Unit Tests (exclude E2E tests that run in dedicated stages)
 run_test_stage "Unit tests" \
-    "go test ./internal/... -v -race -timeout=5m" \
+    "go test ./internal/... -v -race -timeout=5m -skip '^Test(E2E_|Binary|MCPProtocol)'" \
     "required"
 
-# Stage 3: Unit Tests with Coverage
+# Stage 3: Unit Tests with Coverage (exclude E2E tests that run in dedicated stages)
 run_test_stage "Unit tests with coverage" \
-    "go test -coverprofile=$COVERAGE_FILE -covermode=atomic ./internal/... -timeout=5m" \
+    "go test -coverprofile=$COVERAGE_FILE -covermode=atomic ./internal/... -timeout=5m -skip '^Test(E2E_|Binary|MCPProtocol)'" \
     "optional"
 
 # Generate coverage report if coverage file exists

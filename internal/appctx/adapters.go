@@ -275,7 +275,7 @@ func (c *CacheManagerAdapter) Get(key string) (interface{}, bool) {
 func (c *CacheManagerAdapter) Set(key string, value interface{}, _ time.Duration) error {
 	// The cache manager has a different Store signature, so we adapt it
 	valueStr := fmt.Sprintf("%v", value)
-	return c.Manager.Store(key, "generic_tool", map[string]interface{}{}, valueStr, "", 0)
+	return c.Store(key, "generic_tool", map[string]interface{}{}, valueStr, "", 0)
 }
 
 // Delete removes a cache entry
