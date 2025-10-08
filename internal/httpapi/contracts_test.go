@@ -167,6 +167,24 @@ func (m *MockServerController) GetConfig() (*config.Config, error) {
 // Readiness method
 func (m *MockServerController) IsReady() bool { return true }
 
+// Token statistics
+func (m *MockServerController) GetTokenSavings() (*contracts.ServerTokenMetrics, error) {
+	return &contracts.ServerTokenMetrics{}, nil
+}
+
+// Tool execution
+func (m *MockServerController) CallTool(_ context.Context, _ string, _ map[string]interface{}) (interface{}, error) {
+	return map[string]interface{}{"result": "success"}, nil
+}
+
+// Registry browsing
+func (m *MockServerController) ListRegistries() ([]interface{}, error) {
+	return []interface{}{}, nil
+}
+func (m *MockServerController) SearchRegistryServers(_, _, _ string, _ int) ([]interface{}, error) {
+	return []interface{}{}, nil
+}
+
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()

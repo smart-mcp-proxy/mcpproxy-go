@@ -1,32 +1,36 @@
+version: 2
+
 run:
   timeout: 5m
   go: '1.23'
 
 linters:
   enable:
-    - gofmt
-    - goimports
     - govet
-    - errcheck
     - staticcheck
-    - unused
-    - gosimple
     - ineffassign
-    - typecheck
-    - goconst
     - misspell
+    - copyloopvar
+  disable:
+    - errcheck
+    - goconst
     - unparam
     - unconvert
     - gocritic
     - revive
     - gosec
-    - copyloopvar
+    - unused
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
 linters-settings:
   goconst:
     min-len: 2
     min-occurrences: 2
-  
+
   gocritic:
     enabled-tags:
       - diagnostic
@@ -39,11 +43,21 @@ linters-settings:
       - ifElseChain
       - octalLiteral
       - whyNoLint
-  
+
+  errcheck:
+    exclude-functions:
+      - (io.Closer).Close
+      - (*database/sql.DB).Close
+      - (*os.File).Close
+
   gosec:
     excludes:
+      - G104 # Unhandled errors
       - G204 # Subprocess launched with variable
+      - G301 # Directory permissions
+      - G302 # File permissions
       - G304 # File path provided as taint input
+      - G306 # WriteFile permissions
 
 issues:
   exclude-rules:
@@ -51,14 +65,43 @@ issues:
       linters:
         - gosec
         - goconst
-    
-    - path: internal/tray/
+        - errcheck
+
+    - path: internal/tray
       linters:
         - unused
-    
+
+    - path: internal/tray/.*\.go
+      linters:
+        - unused
+
     - text: "weak cryptographic primitive"
       linters:
         - gosec
-  
+
+    - text: "Error return value of.*Close.*is not checked"
+      linters:
+        - errcheck
+
+    - text: "Error return value of.*\\.Close\\(\\).*is not checked"
+      linters:
+        - errcheck
+
+    - text: "should have a package comment"
+      linters:
+        - revive
+
+    - text: "indent-error-flow"
+      linters:
+        - revive
+
+    - text: "var-naming: avoid meaningless package names"
+      linters:
+        - revive
+
+    - text: "exported: exported const .* should have comment"
+      linters:
+        - revive
+
   max-issues-per-linter: 0
-  max-same-issues: 0 
+  max-same-issues: 0

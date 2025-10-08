@@ -293,7 +293,7 @@ func TestGetEncodingForModel(t *testing.T) {
 
 func TestIsClaudeModel(t *testing.T) {
 	tests := []struct {
-		model   string
+		model    string
 		isClaude bool
 	}{
 		{"claude-3-5-sonnet", true},

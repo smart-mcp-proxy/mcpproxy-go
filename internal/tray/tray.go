@@ -107,7 +107,7 @@ type App struct {
 	statusTooltip string
 
 	// Menu items for dynamic updates
-	statusItem          *systray.MenuItem
+	statusItem *systray.MenuItem
 	// startStopItem removed - tray doesn't directly control core lifecycle
 	upstreamServersMenu *systray.MenuItem
 	quarantineMenu      *systray.MenuItem

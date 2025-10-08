@@ -429,9 +429,9 @@ func DefaultConfig() *Config {
 
 		// Default tokenizer configuration
 		Tokenizer: &TokenizerConfig{
-			Enabled:      true,            // Token counting enabled by default
-			DefaultModel: "gpt-4",         // Default to GPT-4 tokenization
-			Encoding:     "cl100k_base",   // Default encoding (GPT-4, GPT-3.5)
+			Enabled:      true,          // Token counting enabled by default
+			DefaultModel: "gpt-4",       // Default to GPT-4 tokenization
+			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
 		},
 	}
 }

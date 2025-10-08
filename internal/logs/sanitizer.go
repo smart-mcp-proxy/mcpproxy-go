@@ -12,21 +12,22 @@ import (
 type SecretSanitizer struct {
 	zapcore.Core
 	patterns      []*secretPattern
-	resolvedCache sync.Map // Cache of resolved secret values to mask
+	resolvedCache *sync.Map // Cache of resolved secret values to mask
 }
 
 // secretPattern defines a pattern for detecting and masking secrets
 type secretPattern struct {
-	name    string
-	regex   *regexp.Regexp
+	name     string
+	regex    *regexp.Regexp
 	maskFunc func(string) string
 }
 
 // NewSecretSanitizer creates a new sanitizing core that wraps the provided core
 func NewSecretSanitizer(core zapcore.Core) *SecretSanitizer {
 	s := &SecretSanitizer{
-		Core:     core,
-		patterns: make([]*secretPattern, 0),
+		Core:          core,
+		patterns:      make([]*secretPattern, 0),
+		resolvedCache: &sync.Map{},
 	}
 
 	// Register common secret patterns

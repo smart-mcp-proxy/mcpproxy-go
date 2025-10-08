@@ -10,6 +10,7 @@ import (
 	"mcpproxy-go/internal/config"
 
 	"go.etcd.io/bbolt"
+	bboltErrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 )
 
@@ -465,7 +466,7 @@ func (m *Manager) RegisterServerIdentity(server *config.ServerConfig, configPath
 
 	// Try to get existing identity
 	identity, err := m.getServerIdentityByID(serverID)
-	if err != nil && err != bbolt.ErrBucketNotFound {
+	if err != nil && err != bboltErrors.ErrBucketNotFound {
 		return nil, fmt.Errorf("failed to get server identity: %w", err)
 	}
 
@@ -775,12 +776,12 @@ func (m *Manager) getServerIdentityByID(serverID string) (*ServerIdentity, error
 	err := m.db.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte("server_identities"))
 		if bucket == nil {
-			return bbolt.ErrBucketNotFound
+			return bboltErrors.ErrBucketNotFound
 		}
 
 		data := bucket.Get([]byte(serverID))
 		if data == nil {
-			return bbolt.ErrBucketNotFound
+			return bboltErrors.ErrBucketNotFound
 		}
 
 		return json.Unmarshal(data, &identity)

@@ -9,10 +9,10 @@ type ModelEncoding struct {
 // Common model encodings based on tiktoken documentation
 var modelEncodings = map[string]string{
 	// GPT-4o and GPT-4.5 series - o200k_base
-	"gpt-4o":           "o200k_base",
-	"gpt-4o-mini":      "o200k_base",
-	"gpt-4.1":          "o200k_base",
-	"gpt-4.5":          "o200k_base",
+	"gpt-4o":            "o200k_base",
+	"gpt-4o-mini":       "o200k_base",
+	"gpt-4.1":           "o200k_base",
+	"gpt-4.5":           "o200k_base",
 	"gpt-4o-2024-05-13": "o200k_base",
 	"gpt-4o-2024-08-06": "o200k_base",
 
@@ -88,9 +88,9 @@ func SupportedModels() []string {
 // SupportedEncodings returns a list of all supported encodings
 func SupportedEncodings() []string {
 	return []string{
-		"o200k_base",   // GPT-4o, GPT-4.5
-		"cl100k_base",  // GPT-4, GPT-3.5
-		"p50k_base",    // Codex
-		"r50k_base",    // GPT-3
+		"o200k_base",  // GPT-4o, GPT-4.5
+		"cl100k_base", // GPT-4, GPT-3.5
+		"p50k_base",   // Codex
+		"r50k_base",   // GPT-3
 	}
 }

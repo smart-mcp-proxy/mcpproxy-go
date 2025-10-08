@@ -46,56 +46,56 @@ type OAuthAttributes struct {
 
 // TokenMetrics represents token usage statistics for a tool call
 type TokenMetrics struct {
-	InputTokens      int     `json:"input_tokens"`                  // Tokens in the request
-	OutputTokens     int     `json:"output_tokens"`                 // Tokens in the response
-	TotalTokens      int     `json:"total_tokens"`                  // Total tokens (input + output)
-	Model            string  `json:"model"`                         // Model used for tokenization
-	Encoding         string  `json:"encoding"`                      // Encoding used (e.g., cl100k_base)
-	EstimatedCost    float64 `json:"estimated_cost,omitempty"`      // Optional cost estimate
-	TruncatedTokens  int     `json:"truncated_tokens,omitempty"`    // Tokens removed by truncation
-	WasTruncated     bool    `json:"was_truncated"`                 // Whether response was truncated
+	InputTokens     int     `json:"input_tokens"`               // Tokens in the request
+	OutputTokens    int     `json:"output_tokens"`              // Tokens in the response
+	TotalTokens     int     `json:"total_tokens"`               // Total tokens (input + output)
+	Model           string  `json:"model"`                      // Model used for tokenization
+	Encoding        string  `json:"encoding"`                   // Encoding used (e.g., cl100k_base)
+	EstimatedCost   float64 `json:"estimated_cost,omitempty"`   // Optional cost estimate
+	TruncatedTokens int     `json:"truncated_tokens,omitempty"` // Tokens removed by truncation
+	WasTruncated    bool    `json:"was_truncated"`              // Whether response was truncated
 }
 
 // ToolCallRecord represents a tool call with server context
 type ToolCallRecord struct {
-	ID         string                 `json:"id"`         // UUID
-	ServerID   string                 `json:"server_id"`  // Server identity
-	ServerName string                 `json:"server_name"` // For quick reference
-	ToolName   string                 `json:"tool_name"`   // Original tool name (without server prefix)
-	Arguments  map[string]interface{} `json:"arguments"`   // Tool arguments
-	Response   interface{}            `json:"response"`    // Tool response
-	Error      string                 `json:"error"`       // Error if failed
-	Duration   int64                  `json:"duration"`    // Duration in nanoseconds
-	Timestamp  time.Time              `json:"timestamp"`   // When the call was made
-	ConfigPath string                 `json:"config_path"` // Which config was active
-	RequestID  string                 `json:"request_id"`  // For correlation
+	ID         string                 `json:"id"`                // UUID
+	ServerID   string                 `json:"server_id"`         // Server identity
+	ServerName string                 `json:"server_name"`       // For quick reference
+	ToolName   string                 `json:"tool_name"`         // Original tool name (without server prefix)
+	Arguments  map[string]interface{} `json:"arguments"`         // Tool arguments
+	Response   interface{}            `json:"response"`          // Tool response
+	Error      string                 `json:"error"`             // Error if failed
+	Duration   int64                  `json:"duration"`          // Duration in nanoseconds
+	Timestamp  time.Time              `json:"timestamp"`         // When the call was made
+	ConfigPath string                 `json:"config_path"`       // Which config was active
+	RequestID  string                 `json:"request_id"`        // For correlation
 	Metrics    *TokenMetrics          `json:"metrics,omitempty"` // Token usage metrics (nil for older records)
 }
 
 // DiagnosticRecord represents a diagnostic event for a server
 type DiagnosticRecord struct {
-	ServerID     string                 `json:"server_id"`
-	ServerName   string                 `json:"server_name"`
-	Type         string                 `json:"type"`          // error, warning, info
-	Category     string                 `json:"category"`      // oauth, connection, etc.
-	Message      string                 `json:"message"`
-	Details      map[string]interface{} `json:"details"`
-	Timestamp    time.Time              `json:"timestamp"`
-	ConfigPath   string                 `json:"config_path"`
-	Resolved     bool                   `json:"resolved"`
-	ResolvedAt   *time.Time             `json:"resolved_at,omitempty"`
+	ServerID   string                 `json:"server_id"`
+	ServerName string                 `json:"server_name"`
+	Type       string                 `json:"type"`     // error, warning, info
+	Category   string                 `json:"category"` // oauth, connection, etc.
+	Message    string                 `json:"message"`
+	Details    map[string]interface{} `json:"details"`
+	Timestamp  time.Time              `json:"timestamp"`
+	ConfigPath string                 `json:"config_path"`
+	Resolved   bool                   `json:"resolved"`
+	ResolvedAt *time.Time             `json:"resolved_at,omitempty"`
 }
 
 // ServerStatistics represents statistical data for a server
 type ServerStatistics struct {
-	ServerID      string    `json:"server_id"`
-	ServerName    string    `json:"server_name"`
-	TotalCalls    int       `json:"total_calls"`
-	SuccessfulCalls int     `json:"successful_calls"`
-	ErrorCalls    int       `json:"error_calls"`
-	AverageResponseTime int64 `json:"avg_response_time"` // nanoseconds
-	LastCallTime  *time.Time `json:"last_call_time,omitempty"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ServerID            string     `json:"server_id"`
+	ServerName          string     `json:"server_name"`
+	TotalCalls          int        `json:"total_calls"`
+	SuccessfulCalls     int        `json:"successful_calls"`
+	ErrorCalls          int        `json:"error_calls"`
+	AverageResponseTime int64      `json:"avg_response_time"` // nanoseconds
+	LastCallTime        *time.Time `json:"last_call_time,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 // GenerateServerID creates a unique, stable identity for a server

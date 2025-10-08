@@ -69,7 +69,7 @@ func TestValidateDetailed(t *testing.T) {
 				Listen:            ":8080",
 				TopK:              5,
 				ToolsLimit:        15,
-				ToolResponseLimit: -100, // Negative
+				ToolResponseLimit: -100,                  // Negative
 				CallToolTimeout:   Duration(60000000000), // Add valid timeout
 			},
 			expectedErrors: 1,
@@ -257,11 +257,11 @@ func TestIsValidListenAddr(t *testing.T) {
 func TestValidateWithDefaults(t *testing.T) {
 	// Test that Validate applies defaults before validation
 	cfg := &Config{
-		Listen:            "",  // Should default to 127.0.0.1:8080
-		TopK:              0,   // Should default to 5
-		ToolsLimit:        0,   // Should default to 15
-		ToolResponseLimit: -1,  // Should default to 0
-		CallToolTimeout:   0,   // Should default to 2 minutes
+		Listen:            "", // Should default to 127.0.0.1:8080
+		TopK:              0,  // Should default to 5
+		ToolsLimit:        0,  // Should default to 15
+		ToolResponseLimit: -1, // Should default to 0
+		CallToolTimeout:   0,  // Should default to 2 minutes
 		Servers:           []*ServerConfig{},
 	}
 

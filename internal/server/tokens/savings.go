@@ -30,11 +30,11 @@ type SavingsCalculator struct {
 
 // TokenSavingsMetrics represents token savings data
 type TokenSavingsMetrics struct {
-	TotalServerToolListSize int                `json:"total_server_tool_list_size"` // All upstream tools combined (tokens)
-	AverageQueryResultSize  int                `json:"average_query_result_size"`   // Typical retrieve_tools output (tokens)
-	SavedTokens             int                `json:"saved_tokens"`                 // Difference
-	SavedTokensPercentage   float64            `json:"saved_tokens_percentage"`     // Percentage saved
-	PerServerToolListSizes  map[string]int     `json:"per_server_tool_list_sizes"`  // Token size per server
+	TotalServerToolListSize int            `json:"total_server_tool_list_size"` // All upstream tools combined (tokens)
+	AverageQueryResultSize  int            `json:"average_query_result_size"`   // Typical retrieve_tools output (tokens)
+	SavedTokens             int            `json:"saved_tokens"`                // Difference
+	SavedTokensPercentage   float64        `json:"saved_tokens_percentage"`     // Percentage saved
+	PerServerToolListSizes  map[string]int `json:"per_server_tool_list_sizes"`  // Token size per server
 }
 
 // NewSavingsCalculator creates a new token savings calculator

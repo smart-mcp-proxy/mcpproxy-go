@@ -142,7 +142,7 @@ func TestCalculateProxySavings(t *testing.T) {
 		servers := []ServerToolInfo{
 			{
 				ServerName: "empty-server",
-				Tools: []ToolInfo{},
+				Tools:      []ToolInfo{},
 			},
 		}
 

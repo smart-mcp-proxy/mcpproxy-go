@@ -1,9 +1,7 @@
 package runtime
 
 import (
-	"context"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 

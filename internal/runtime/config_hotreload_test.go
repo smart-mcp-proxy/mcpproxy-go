@@ -25,14 +25,14 @@ func TestDetectConfigChanges(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                   string
-		oldConfig              *config.Config
-		newConfig              *config.Config
-		expectSuccess          bool
-		expectAppliedNow       bool
-		expectRequiresRestart  bool
-		expectRestartReason    string
-		expectChangedFields    []string
+		name                  string
+		oldConfig             *config.Config
+		newConfig             *config.Config
+		expectSuccess         bool
+		expectAppliedNow      bool
+		expectRequiresRestart bool
+		expectRestartReason   string
+		expectChangedFields   []string
 	}{
 		{
 			name:                  "no changes",
@@ -199,9 +199,9 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-				TopK:              10,   // Changed
-				ToolsLimit:        20,   // Changed
-				ToolResponseLimit: 2000, // Changed
+				TopK:              10,                                 // Changed
+				ToolsLimit:        20,                                 // Changed
+				ToolResponseLimit: 2000,                               // Changed
 				CallToolTimeout:   config.Duration(120 * time.Second), // Changed
 				Servers:           []*config.ServerConfig{},
 				TLS: &config.TLSConfig{

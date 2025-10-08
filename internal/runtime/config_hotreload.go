@@ -8,12 +8,12 @@ import (
 
 // ConfigApplyResult represents the result of applying a configuration
 type ConfigApplyResult struct {
-	Success            bool                      `json:"success"`
-	AppliedImmediately bool                      `json:"applied_immediately"`
-	RequiresRestart    bool                      `json:"requires_restart"`
-	RestartReason      string                    `json:"restart_reason,omitempty"`
-	ChangedFields      []string                  `json:"changed_fields,omitempty"`
-	ValidationErrors   []config.ValidationError  `json:"validation_errors,omitempty"`
+	Success            bool                     `json:"success"`
+	AppliedImmediately bool                     `json:"applied_immediately"`
+	RequiresRestart    bool                     `json:"requires_restart"`
+	RestartReason      string                   `json:"restart_reason,omitempty"`
+	ChangedFields      []string                 `json:"changed_fields,omitempty"`
+	ValidationErrors   []config.ValidationError `json:"validation_errors,omitempty"`
 }
 
 // DetectConfigChanges compares old and new configurations to determine what changed
