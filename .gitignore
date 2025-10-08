@@ -114,3 +114,6 @@ test-results/
 playwright-report/
 web/index.html
 web/assets/
+
+# Internal documentation (not tracked in git)
+internal_docs/
