@@ -1,12 +1,10 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // PortInUseError indicates that the requested listen address is already occupied.
@@ -23,31 +21,7 @@ func (e *PortInUseError) Unwrap() error {
 	return e.Err
 }
 
-// isAddrInUseError determines whether an error represents an address-in-use condition.
-func isAddrInUseError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if errors.Is(err, syscall.EADDRINUSE) {
-		return true
-	}
-
-	var errno syscall.Errno
-	if errors.As(err, &errno) && errno == syscall.EADDRINUSE {
-		return true
-	}
-
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		if isAddrInUseError(opErr.Err) {
-			return true
-		}
-	}
-
-	// Final fallback for platform-specific error strings.
-	return strings.Contains(strings.ToLower(err.Error()), "address already in use")
-}
+// isAddrInUseError is implemented in platform-specific files (port_unix.go, port_windows.go)
 
 // findAvailableListenAddress returns an available listen address derived from baseAddr.
 // When the base port is 0, the operating system will pick a free port.

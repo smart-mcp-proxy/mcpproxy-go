@@ -17,6 +17,7 @@ func TestUpdateListenAddressValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create runtime: %v", err)
 	}
+	defer rt.Close()
 
 	if err := rt.UpdateListenAddress("127.0.0.1:9090"); err != nil {
 		t.Fatalf("expected UpdateListenAddress to accept valid address: %v", err)

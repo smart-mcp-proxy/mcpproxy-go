@@ -63,6 +63,6 @@ func TestPortInUseDetection(t *testing.T) {
 	}
 
 	if !isAddrInUseError(err) {
-		t.Fatalf("expected isAddrInUseError to detect address in use error")
+		t.Fatalf("expected isAddrInUseError to detect address in use error, got: %v (type: %T)", err, err)
 	}
 }
