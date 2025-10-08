@@ -119,6 +119,12 @@ jobs:
       - name: Build frontend
         run: cd frontend && npm run build
 
+      - name: Copy frontend dist for embedding
+        run: |
+          rm -rf web/frontend
+          mkdir -p web/frontend
+          cp -r frontend/dist web/frontend/
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
