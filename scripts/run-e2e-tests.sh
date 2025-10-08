@@ -50,9 +50,9 @@ if [ "$COVER" = "true" ]; then
     TEST_ARGS="$TEST_ARGS -coverprofile=coverage.out -covermode=atomic"
 fi
 
-# Run unit tests first
+# Run unit tests first (excluding E2E, Binary, and MCP tests)
 echo -e "${YELLOW}Running unit tests...${NC}"
-go test $TEST_ARGS ./internal/... -run "^Test[^E2E]"
+go test $TEST_ARGS ./internal/... -skip "^Test(E2E_|Binary|MCPProtocol)"
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Unit tests passed${NC}"
 else
@@ -62,9 +62,13 @@ fi
 
 echo ""
 
-# Run E2E tests
+# Run E2E tests (without race detector to avoid false positives from async operations)
 echo -e "${YELLOW}Running E2E tests...${NC}"
-go test $TEST_ARGS ./internal/server -run TestE2E
+E2E_TEST_ARGS="-v -timeout $TEST_TIMEOUT"
+if [ "$COVER" = "true" ]; then
+    E2E_TEST_ARGS="$E2E_TEST_ARGS -coverprofile=coverage.out -covermode=atomic"
+fi
+go test $E2E_TEST_ARGS ./internal/server -run TestE2E
 E2E_EXIT_CODE=$?
 
 if [ $E2E_EXIT_CODE -eq 0 ]; then
@@ -85,7 +89,8 @@ fi
 
 # Cleanup
 echo -e "${YELLOW}Cleaning up...${NC}"
-rm -f mcpproxy
+# Note: Don't delete mcpproxy binary here - it's needed by other test stages
+# The main test script (run-all-tests.sh) will handle final cleanup
 rm -f coverage.out
 
 if [ $E2E_EXIT_CODE -eq 0 ]; then

@@ -64,6 +64,9 @@ cleanup() {
     # Kill any remaining mcpproxy processes
     pkill -f "mcpproxy.*serve" 2>/dev/null || true
 
+    # Clean up binary
+    rm -f ./mcpproxy 2>/dev/null || true
+
     # Clean up any test data directories
     rm -rf ./test-data 2>/dev/null || true
 

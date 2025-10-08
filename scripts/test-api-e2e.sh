@@ -131,7 +131,7 @@ wait_for_server() {
         extract_api_key
 
         # Build curl command with CA certificate if it exists, otherwise use insecure for initial check
-        local curl_cmd="curl -s -f"
+        local curl_cmd="curl -s -f --max-time 5"
         if [ "$USE_HTTPS" = "true" ]; then
             if [ -f "./test-data/certs/ca.pem" ]; then
                 curl_cmd="$curl_cmd --cacert ./test-data/certs/ca.pem"
@@ -179,13 +179,15 @@ wait_for_everything_server() {
 
     while [ $attempt -le $max_attempts ]; do
         # Check if everything server is connected
-        local curl_cmd="curl -s $CURL_CA_OPTS"
+        local curl_cmd="curl -s --max-time 5 $CURL_CA_OPTS"
         if [ ! -z "$API_KEY" ]; then
             curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
         fi
         curl_cmd="$curl_cmd \"${API_BASE}/servers\""
 
-        local connected=$(eval $curl_cmd | jq -r '.data.servers[0].connected // false' 2>/dev/null)
+        local response=$(eval $curl_cmd 2>/dev/null)
+        local connected=$(echo "$response" | jq -r '.data.servers[0].connected // false' 2>/dev/null)
+        local enabled=$(echo "$response" | jq -r '.data.servers[0].enabled // false' 2>/dev/null)
 
         if [ "$connected" = "true" ]; then
             echo "Everything server is connected!"
@@ -194,7 +196,7 @@ wait_for_everything_server() {
             return 0
         fi
 
-        echo "Attempt $attempt/$max_attempts - everything server connected: $connected"
+        echo "Attempt $attempt/$max_attempts - connected: $connected, enabled: $enabled"
         sleep 2
         attempt=$((attempt + 1))
     done
@@ -214,7 +216,10 @@ test_api() {
 
     log_test "$test_name"
 
-    local curl_args=("-s" "-w" "%{http_code}" "-o" "$TEST_RESULTS_FILE")
+    # Clear previous test results
+    rm -f "$TEST_RESULTS_FILE"
+
+    local curl_args=("-s" "-w" "%{http_code}" "-o" "$TEST_RESULTS_FILE" "--max-time" "10")
 
     # Add CA certificate for HTTPS if needed
     if [ ! -z "$CURL_CA_OPTS" ]; then
@@ -251,8 +256,13 @@ test_api() {
             return 0
         fi
     else
-        log_fail "$test_name - Expected status $expected_status, got $status_code"
-        if [ -f "$TEST_RESULTS_FILE" ]; then
+        if [ "$status_code" = "000" ]; then
+            log_fail "$test_name - Connection failed (timeout or refused)"
+            echo "Note: Server may be down or not responding. Check server logs."
+        else
+            log_fail "$test_name - Expected status $expected_status, got $status_code"
+        fi
+        if [ -f "$TEST_RESULTS_FILE" ] && [ -s "$TEST_RESULTS_FILE" ]; then
             echo "Response body:"
             cat "$TEST_RESULTS_FILE"
             echo
@@ -345,7 +355,7 @@ test_sse_auth_failure() {
         return 0
     fi
 
-    local status_code=$(curl -s -w "%{http_code}" -o /dev/null $CURL_CA_OPTS -H "X-API-Key: wrong-api-key" "${BASE_URL}/events")
+    local status_code=$(curl -s --max-time 5 -w "%{http_code}" -o /dev/null $CURL_CA_OPTS -H "X-API-Key: wrong-api-key" "${BASE_URL}/events")
 
     if [ "$status_code" = "401" ]; then
         log_pass "$test_name"
@@ -453,6 +463,9 @@ test_api "POST /api/v1/servers/everything/disable" "POST" "${API_BASE}/servers/e
 # Test 7: Enable server
 test_api "POST /api/v1/servers/everything/enable" "POST" "${API_BASE}/servers/everything/enable" "200" "" \
     "jq -e '.success == true and .data.success == true' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Give server time to update config after enable
+sleep 2
 
 # Test 8: Restart server
 test_api "POST /api/v1/servers/everything/restart" "POST" "${API_BASE}/servers/everything/restart" "200" "" \
@@ -573,7 +586,7 @@ test_api "POST /api/v1/tool-calls/nonexistent/replay" "POST" "${API_BASE}/tool-c
 
 # Test 25: List registries (Phase 7)
 log_test "GET /api/v1/registries"
-RESPONSE=$(curl -s $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries")
+RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries")
 echo "$RESPONSE" > "$TEST_RESULTS_FILE"
 if echo "$RESPONSE" | jq -e '.success == true and .data.registries != null and .data.total > 0' >/dev/null; then
     log_pass "GET /api/v1/registries - Response has registries array and total count"
@@ -584,7 +597,7 @@ fi
 
 # Test 26: Search registry servers (Phase 7)
 log_test "GET /api/v1/registries/{id}/servers"
-RESPONSE=$(curl -s $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/pulse/servers?limit=5")
+RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/pulse/servers?limit=5")
 echo "$RESPONSE" > "$TEST_RESULTS_FILE"
 if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.registry_id == "pulse"' >/dev/null; then
     log_pass "GET /api/v1/registries/{id}/servers - Response has servers array and registry_id"
@@ -595,7 +608,7 @@ fi
 
 # Test 27: Search registry servers with query (Phase 7)
 log_test "GET /api/v1/registries/{id}/servers with query parameter"
-RESPONSE=$(curl -s $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/pulse/servers?q=github&limit=3")
+RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/pulse/servers?q=github&limit=3")
 echo "$RESPONSE" > "$TEST_RESULTS_FILE"
 if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.query == "github"' >/dev/null; then
     log_pass "GET /api/v1/registries/{id}/servers?q=github - Response has query field"

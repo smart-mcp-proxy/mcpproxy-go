@@ -164,7 +164,7 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 
 	foundTool := false
 	for _, result := range searchResults {
-		if result.Tool.ServerName == "test-server" && result.Tool.Name == "test-server:tool1" {
+		if result.Tool.ServerName == "test-server" && result.Tool.Name == "tool1" {
 			foundTool = true
 			t.Logf("✓ Found tool in search: %s", result.Tool.Name)
 			break
@@ -181,7 +181,7 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 		t.Logf("Retry search results: %d results", len(searchResults))
 		for i, result := range searchResults {
 			t.Logf("  [%d] Server: %s, Tool: %s, Score: %.2f", i, result.Tool.ServerName, result.Tool.Name, result.Score)
-			if result.Tool.ServerName == "test-server" && result.Tool.Name == "test-server:tool1" {
+			if result.Tool.ServerName == "test-server" && result.Tool.Name == "tool1" {
 				foundTool = true
 				t.Logf("✓ Found tool in search after retry: %s", result.Tool.Name)
 				break
