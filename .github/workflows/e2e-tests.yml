@@ -57,6 +57,9 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
+          echo "Checking for frontend/dist..."
+          find frontend -type d -name dist || true
+          ls -la frontend/dist || true
 
       - name: Build mcpproxy binary for tests (Windows)
         if: matrix.os == 'windows-latest'
