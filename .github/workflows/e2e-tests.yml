@@ -142,7 +142,7 @@ jobs:
           ./mcpproxy --help
 
           # Test logging functionality
-          timeout 10s ./mcpproxy serve --log-to-file --log-level debug --listen :0 --tray=false || true
+          timeout 10s ./mcpproxy serve --log-to-file --log-level debug --listen :0 || true
 
           # Verify log file was created in standard OS location
           if [ "$(uname)" = "Linux" ]; then
@@ -249,7 +249,7 @@ jobs:
           echo "OS Standard: ${{ matrix.log_standard }}"
 
           # Run mcpproxy briefly to create log files
-          ./mcpproxy serve --log-to-file --log-level info --listen :0 --tray=false &
+          ./mcpproxy serve --log-to-file --log-level info --listen :0 &
           MCPPROXY_PID=$!
           sleep 5
           kill $MCPPROXY_PID 2>/dev/null || true
@@ -298,7 +298,7 @@ jobs:
 
           # Run mcpproxy briefly to create log files
           try {
-            $process = Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "serve", "--log-to-file", "--log-level", "info", "--listen", ":0", "--tray=false" -NoNewWindow -PassThru
+            $process = Start-Process -FilePath "./mcpproxy.exe" -ArgumentList "serve", "--log-to-file", "--log-level", "info", "--listen", ":0" -NoNewWindow -PassThru
             Start-Sleep -Seconds 5
             $process | Stop-Process -Force -ErrorAction SilentlyContinue
           } catch {
