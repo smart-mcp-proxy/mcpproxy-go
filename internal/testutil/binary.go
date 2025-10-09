@@ -177,21 +177,21 @@ func (env *BinaryTestEnv) WaitForReady() {
 	}
 }
 
-// WaitForEverythingServer waits for the everything server to connect and be ready
+// WaitForEverythingServer waits for the test server to connect and be ready
 func (env *BinaryTestEnv) WaitForEverythingServer() {
-	timeout := time.After(60 * time.Second) // Longer timeout for everything server
+	timeout := time.After(60 * time.Second) // Longer timeout for test server
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	env.t.Log("Waiting for everything server to connect...")
+	env.t.Log("Waiting for test server to connect...")
 
 	for {
 		select {
 		case <-timeout:
-			env.t.Fatal("Timeout waiting for everything server to connect")
+			env.t.Fatal("Timeout waiting for test server to connect")
 		case <-ticker.C:
 			if env.isEverythingServerReady() {
-				env.t.Log("Everything server is ready")
+				env.t.Log("Test server is ready")
 				// Wait a bit more for indexing to complete
 				time.Sleep(2 * time.Second)
 				return
@@ -211,7 +211,7 @@ func (env *BinaryTestEnv) isServerReady() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// isEverythingServerReady checks if the everything server is connected and ready
+// isEverythingServerReady checks if the test server is connected and ready
 func (env *BinaryTestEnv) isEverythingServerReady() bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(env.apiURL + "/servers")
@@ -241,10 +241,10 @@ func (env *BinaryTestEnv) isEverythingServerReady() bool {
 		return false
 	}
 
-	// Look for everything server
+	// Look for test server (memory)
 	for _, server := range response.Data.Servers {
 		ready := server.ConnectionStatus == "Ready" || (server.Connected && !server.Connecting)
-		if server.Name == "everything" && ready {
+		if server.Name == "memory" && ready {
 			return true
 		}
 	}
@@ -298,12 +298,12 @@ func createTestConfig(t *testing.T, configPath string, port int, dataDir string)
   "call_tool_timeout": "30s",
   "mcpServers": [
     {
-      "name": "everything",
+      "name": "memory",
       "protocol": "stdio",
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-everything"
+        "@modelcontextprotocol/server-memory"
       ],
       "enabled": true,
       "quarantined": false,

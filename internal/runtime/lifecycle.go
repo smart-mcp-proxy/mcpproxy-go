@@ -421,7 +421,7 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 		"enabled": enabled,
 	})
 
-	r.HandleUpstreamServerChange(context.TODO())
+	r.HandleUpstreamServerChange(r.AppContext())
 
 	return nil
 }
@@ -453,7 +453,7 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		"quarantined": quarantined,
 	})
 
-	r.HandleUpstreamServerChange(context.TODO())
+	r.HandleUpstreamServerChange(r.AppContext())
 
 	r.logger.Info("Successfully persisted server quarantine state change",
 		zap.String("server", serverName),

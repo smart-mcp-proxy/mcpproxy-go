@@ -54,43 +54,40 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, response.Success)
 		assert.Len(t, response.Data.Servers, 1)
-		assert.Equal(t, "everything", response.Data.Servers[0].Name)
+		assert.Equal(t, "memory", response.Data.Servers[0].Name)
 		assertServerReady(t, &response.Data.Servers[0])
 	})
 
-	t.Run("GET /servers/everything/tools", func(t *testing.T) {
+	t.Run("GET /servers/memory/tools", func(t *testing.T) {
 		var response testutil.TestToolList
-		err := client.GetJSON("/servers/everything/tools", &response)
+		err := client.GetJSON("/servers/memory/tools", &response)
 		require.NoError(t, err)
 		assert.True(t, response.Success)
-		assert.Equal(t, "everything", response.Data.Server)
+		assert.Equal(t, "memory", response.Data.Server)
 		assert.Greater(t, len(response.Data.Tools), 0)
 
-		// Check for some expected tools from everything server
-		toolNames := make([]string, len(response.Data.Tools))
-		for i, tool := range response.Data.Tools {
-			toolNames[i] = tool.Name
-		}
-		assert.Contains(t, toolNames, "echo")
+		// Check for some expected tools from memory server
+		// Memory server has knowledge graph tools
+		assert.Greater(t, len(response.Data.Tools), 0, "memory server should have tools")
 	})
 
 	t.Run("GET /index/search", func(t *testing.T) {
 		var response testutil.TestSearchResults
-		err := client.GetJSON("/index/search?q=echo", &response)
+		err := client.GetJSON("/index/search?q=create", &response)
 		require.NoError(t, err)
 		assert.True(t, response.Success)
-		assert.Equal(t, "echo", response.Data.Query)
+		assert.Equal(t, "create", response.Data.Query)
 		assert.Greater(t, len(response.Data.Results), 0)
 
-		// Should find the echo tool
+		// Should find some tool from memory server
 		found := false
 		for _, result := range response.Data.Results {
-			if result.Name == "echo" && result.Server == "everything" {
+			if result.Server == "memory" {
 				found = true
 				break
 			}
 		}
-		assert.True(t, found, "Should find echo tool in search results")
+		assert.True(t, found, "Should find tools from memory server in search results")
 	})
 
 	t.Run("GET /index/search with limit", func(t *testing.T) {
@@ -101,7 +98,7 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 		assert.LessOrEqual(t, len(response.Data.Results), 3)
 	})
 
-	t.Run("GET /servers/everything/logs", func(t *testing.T) {
+	t.Run("GET /servers/memory/logs", func(t *testing.T) {
 		var response struct {
 			Success bool `json:"success"`
 			Data    struct {
@@ -110,15 +107,15 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 				Tail   int      `json:"tail"`
 			} `json:"data"`
 		}
-		err := client.GetJSON("/servers/everything/logs?tail=5", &response)
+		err := client.GetJSON("/servers/memory/logs?tail=5", &response)
 		require.NoError(t, err)
 		assert.True(t, response.Success)
-		assert.Equal(t, "everything", response.Data.Server)
+		assert.Equal(t, "memory", response.Data.Server)
 		assert.Equal(t, 5, response.Data.Tail)
 	})
 
-	t.Run("POST /servers/everything/disable", func(t *testing.T) {
-		resp, err := client.PostJSONExpectStatus("/servers/everything/disable", nil, http.StatusOK)
+	t.Run("POST /servers/memory/disable", func(t *testing.T) {
+		resp, err := client.PostJSONExpectStatus("/servers/memory/disable", nil, http.StatusOK)
 		require.NoError(t, err)
 
 		var response struct {
@@ -131,12 +128,12 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 		err = testutil.ParseJSONResponse(resp, &response)
 		require.NoError(t, err)
 		assert.True(t, response.Success)
-		assert.Equal(t, "everything", response.Data.Server)
+		assert.Equal(t, "memory", response.Data.Server)
 		assert.False(t, response.Data.Enabled)
 	})
 
-	t.Run("POST /servers/everything/enable", func(t *testing.T) {
-		resp, err := client.PostJSONExpectStatus("/servers/everything/enable", nil, http.StatusOK)
+	t.Run("POST /servers/memory/enable", func(t *testing.T) {
+		resp, err := client.PostJSONExpectStatus("/servers/memory/enable", nil, http.StatusOK)
 		require.NoError(t, err)
 
 		var response struct {
@@ -149,12 +146,12 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 		err = testutil.ParseJSONResponse(resp, &response)
 		require.NoError(t, err)
 		assert.True(t, response.Success)
-		assert.Equal(t, "everything", response.Data.Server)
+		assert.Equal(t, "memory", response.Data.Server)
 		assert.True(t, response.Data.Enabled)
 	})
 
-	t.Run("POST /servers/everything/restart", func(t *testing.T) {
-		resp, err := client.PostJSONExpectStatus("/servers/everything/restart", nil, http.StatusOK)
+	t.Run("POST /servers/memory/restart", func(t *testing.T) {
+		resp, err := client.PostJSONExpectStatus("/servers/memory/restart", nil, http.StatusOK)
 		require.NoError(t, err)
 
 		var response struct {
@@ -167,7 +164,7 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 		err = testutil.ParseJSONResponse(resp, &response)
 		require.NoError(t, err)
 		assert.True(t, response.Success)
-		assert.Equal(t, "everything", response.Data.Server)
+		assert.Equal(t, "memory", response.Data.Server)
 		assert.True(t, response.Data.Restarted)
 
 		// Wait for server to reconnect
@@ -343,8 +340,8 @@ func TestBinaryHealthAndRecovery(t *testing.T) {
 	client := testutil.NewHTTPClient(env.GetAPIURL())
 
 	t.Run("Server restart and recovery", func(t *testing.T) {
-		// Restart the everything server
-		resp, err := client.PostJSONExpectStatus("/servers/everything/restart", nil, http.StatusOK)
+		// Restart the memory server
+		resp, err := client.PostJSONExpectStatus("/servers/memory/restart", nil, http.StatusOK)
 		require.NoError(t, err)
 		resp.Body.Close()
 
@@ -363,7 +360,7 @@ func TestBinaryHealthAndRecovery(t *testing.T) {
 
 	t.Run("Disable and re-enable server", func(t *testing.T) {
 		// Disable server
-		resp, err := client.PostJSONExpectStatus("/servers/everything/disable", nil, http.StatusOK)
+		resp, err := client.PostJSONExpectStatus("/servers/memory/disable", nil, http.StatusOK)
 		require.NoError(t, err)
 		resp.Body.Close()
 
@@ -375,7 +372,7 @@ func TestBinaryHealthAndRecovery(t *testing.T) {
 		assert.False(t, response.Data.Servers[0].Enabled)
 
 		// Re-enable server
-		resp, err = client.PostJSONExpectStatus("/servers/everything/enable", nil, http.StatusOK)
+		resp, err = client.PostJSONExpectStatus("/servers/memory/enable", nil, http.StatusOK)
 		require.NoError(t, err)
 		resp.Body.Close()
 

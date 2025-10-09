@@ -484,8 +484,16 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 			done <- err
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
-		done <- s.controller.EnableServer(serverID, true)
+		// Wait longer for server to fully disconnect before re-enabling
+		// This gives async operations time to complete
+		time.Sleep(2 * time.Second)
+		if err := s.controller.EnableServer(serverID, true); err != nil {
+			done <- err
+			return
+		}
+		// Wait for server to start reconnecting
+		time.Sleep(1 * time.Second)
+		done <- nil
 	}()
 
 	select {
