@@ -57,6 +57,7 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
+          mkdir -p web/frontend
           cp -r frontend/dist web/frontend/
 
       - name: Build mcpproxy binary for tests (Windows)
@@ -124,6 +125,7 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
+          mkdir -p web/frontend
           cp -r frontend/dist web/frontend/
 
       - name: Build mcpproxy
@@ -218,6 +220,7 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
+          mkdir -p web/frontend
           cp -r frontend/dist web/frontend/
 
       - name: Run logging unit tests
@@ -377,6 +380,7 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
+          mkdir -p web/frontend
           cp -r frontend/dist web/frontend/
 
       - name: Run concurrent stress tests
