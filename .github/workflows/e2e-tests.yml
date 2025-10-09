@@ -57,9 +57,7 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
-          echo "Checking for frontend/dist..."
-          find frontend -type d -name dist || true
-          ls -la frontend/dist || true
+          cp -r frontend/dist web/frontend/
 
       - name: Build mcpproxy binary for tests (Windows)
         if: matrix.os == 'windows-latest'
@@ -126,6 +124,7 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
+          cp -r frontend/dist web/frontend/
 
       - name: Build mcpproxy
         env:
@@ -219,6 +218,7 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
+          cp -r frontend/dist web/frontend/
 
       - name: Run logging unit tests
         run: go test -v -race -timeout 2m ./internal/logs
@@ -377,6 +377,7 @@ jobs:
         run: |
           npm ci --prefix frontend
           npm run build --prefix frontend
+          cp -r frontend/dist web/frontend/
 
       - name: Run concurrent stress tests
         run: |
