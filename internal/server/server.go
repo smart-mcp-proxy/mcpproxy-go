@@ -521,6 +521,11 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 	return s.runtime.EnableServer(serverName, enabled)
 }
 
+// RestartServer restarts an upstream server
+func (s *Server) RestartServer(serverName string) error {
+	return s.runtime.RestartServer(serverName)
+}
+
 // QuarantineServer quarantines/unquarantines a server
 func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	return s.runtime.QuarantineServer(serverName, quarantined)

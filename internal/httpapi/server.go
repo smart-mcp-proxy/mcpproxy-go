@@ -41,6 +41,7 @@ type ServerController interface {
 	// Server management
 	GetAllServers() ([]map[string]interface{}, error)
 	EnableServer(serverName string, enabled bool) error
+	RestartServer(serverName string) error
 	QuarantineServer(serverName string, quarantined bool) error
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
@@ -478,22 +479,10 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Use the new synchronous RestartServer method
 	done := make(chan error, 1)
 	go func() {
-		if err := s.controller.EnableServer(serverID, false); err != nil {
-			done <- err
-			return
-		}
-		// Wait longer for server to fully disconnect before re-enabling
-		// This gives async operations time to complete
-		time.Sleep(2 * time.Second)
-		if err := s.controller.EnableServer(serverID, true); err != nil {
-			done <- err
-			return
-		}
-		// Wait for server to start reconnecting
-		time.Sleep(1 * time.Second)
-		done <- nil
+		done <- s.controller.RestartServer(serverID)
 	}()
 
 	select {
@@ -504,7 +493,8 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Debug("Server restart completed synchronously", "server", serverID)
-	case <-time.After(asyncToggleTimeout):
+	case <-time.After(35 * time.Second):
+		// Longer timeout for restart (30s connect timeout + 5s buffer)
 		s.logger.Debug("Server restart executing asynchronously", "server", serverID)
 		go func() {
 			if err := <-done; err != nil {
@@ -517,7 +507,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 		Server:  serverID,
 		Action:  "restart",
 		Success: true,
-		Async:   false, // restart is handled synchronously
+		Async:   false,
 	}
 
 	s.writeSuccess(w, response)

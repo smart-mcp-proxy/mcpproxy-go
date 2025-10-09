@@ -462,6 +462,80 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	return nil
 }
 
+// RestartServer restarts an upstream server by disconnecting and reconnecting it.
+// This is a synchronous operation that waits for the restart to complete.
+func (r *Runtime) RestartServer(serverName string) error {
+	r.logger.Info("Request to restart server", zap.String("server", serverName))
+
+	// Check if server exists in storage (config)
+	servers, err := r.storageManager.ListUpstreamServers()
+	if err != nil {
+		return fmt.Errorf("failed to list servers: %w", err)
+	}
+
+	var serverConfig *config.ServerConfig
+	for _, srv := range servers {
+		if srv.Name == serverName {
+			serverConfig = srv
+			break
+		}
+	}
+
+	if serverConfig == nil {
+		return fmt.Errorf("server '%s' not found in configuration", serverName)
+	}
+
+	// If server is not enabled, enable it first
+	if !serverConfig.Enabled {
+		r.logger.Info("Server is disabled, enabling it",
+			zap.String("server", serverName))
+		return r.EnableServer(serverName, true)
+	}
+
+	// Get the client to restart
+	client, exists := r.upstreamManager.GetClient(serverName)
+	if !exists {
+		// Server is enabled but client doesn't exist, try to add it
+		r.logger.Info("Server client not found, attempting to create and connect",
+			zap.String("server", serverName))
+		return r.upstreamManager.AddServer(serverName, serverConfig)
+	}
+
+	// Disconnect the server
+	if err := client.Disconnect(); err != nil {
+		r.logger.Warn("Error disconnecting server during restart",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
+
+	// Wait a bit for cleanup
+	time.Sleep(500 * time.Millisecond)
+
+	// Reconnect with timeout
+	ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		r.logger.Error("Failed to reconnect server after restart",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return fmt.Errorf("failed to reconnect server '%s': %w", serverName, err)
+	}
+
+	r.logger.Info("Successfully restarted server", zap.String("server", serverName))
+
+	// Trigger tool reindexing asynchronously
+	go func() {
+		if err := r.DiscoverAndIndexTools(r.AppContext()); err != nil {
+			r.logger.Error("Failed to reindex tools after restart", zap.Error(err))
+		}
+	}()
+
+	r.emitServersChanged("restart", map[string]any{"server": serverName})
+
+	return nil
+}
+
 // HandleUpstreamServerChange should be called when upstream servers change.
 func (r *Runtime) HandleUpstreamServerChange(ctx context.Context) {
 	if ctx == nil {
