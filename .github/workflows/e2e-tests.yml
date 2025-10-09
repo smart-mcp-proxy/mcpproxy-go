@@ -46,6 +46,19 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
       - name: Build mcpproxy binary for tests (Windows)
         if: matrix.os == 'windows-latest'
         env:
@@ -99,6 +112,19 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: "1.23.10"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
 
       - name: Build mcpproxy
         env:
@@ -180,6 +206,19 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: "1.23.10"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
 
       - name: Run logging unit tests
         run: go test -v -race -timeout 2m ./internal/logs
@@ -326,6 +365,19 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: "1.23.10"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
 
       - name: Run concurrent stress tests
         run: |
