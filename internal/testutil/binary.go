@@ -289,6 +289,7 @@ func createTestConfig(t *testing.T, configPath string, port int, dataDir string)
 	config := fmt.Sprintf(`{
   "listen": ":%d",
   "data_dir": "%s",
+  "api_key": "",
   "enable_tray": false,
   "debug_search": true,
   "top_k": 10,
