@@ -654,6 +654,8 @@ func (mc *Client) isNormalReconnectionError(err error) bool {
 		"Failed to reconnect SSE stream",
 		"Maximum reconnection attempts",
 		"TypeError: terminated",
+		"OAuth authorization required",
+		"authentication strategies failed",
 	}
 
 	for _, reconnErr := range normalReconnectionErrors {
