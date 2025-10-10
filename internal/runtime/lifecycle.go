@@ -506,6 +506,9 @@ func (r *Runtime) RestartServer(serverName string) error {
 		r.logger.Warn("Error disconnecting server during restart",
 			zap.String("server", serverName),
 			zap.Error(err))
+	} else {
+		r.logger.Debug("Server disconnect completed for restart",
+			zap.String("server", serverName))
 	}
 
 	// Wait a bit for cleanup
@@ -515,12 +518,19 @@ func (r *Runtime) RestartServer(serverName string) error {
 	ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
 	defer cancel()
 
+	r.logger.Debug("Attempting reconnection after restart",
+		zap.String("server", serverName),
+		zap.Duration("timeout", 30*time.Second))
+
 	if err := client.Connect(ctx); err != nil {
 		r.logger.Error("Failed to reconnect server after restart",
 			zap.String("server", serverName),
 			zap.Error(err))
 		return fmt.Errorf("failed to reconnect server '%s': %w", serverName, err)
 	}
+
+	r.logger.Info("Managed client reconnect completed after restart",
+		zap.String("server", serverName))
 
 	r.logger.Info("Successfully restarted server", zap.String("server", serverName))
 

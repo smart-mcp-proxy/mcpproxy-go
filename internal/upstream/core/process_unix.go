@@ -18,7 +18,7 @@ type ProcessGroup struct {
 
 // createProcessGroupCommandFunc creates a custom CommandFunc that sets process groups for Unix systems
 // This ensures that child processes can be properly cleaned up when the parent exits
-func createProcessGroupCommandFunc(workingDir string, logger *zap.Logger) func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
+func createProcessGroupCommandFunc(client *Client, workingDir string, logger *zap.Logger) func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 	return func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 		cmd := exec.CommandContext(ctx, command, args...)
 		cmd.Env = env
@@ -41,6 +41,16 @@ func createProcessGroupCommandFunc(workingDir string, logger *zap.Logger) func(c
 			zap.String("command", command),
 			zap.Strings("args", args),
 			zap.String("working_dir", workingDir))
+
+		if client != nil {
+			client.processCmd = cmd
+			if pgid := extractProcessGroupID(cmd, logger, client.config.Name); pgid > 0 {
+				client.processGroupID = pgid
+				logger.Info("Process group ID tracked for cleanup",
+					zap.String("server", client.config.Name),
+					zap.Int("pgid", pgid))
+			}
+		}
 
 		return cmd, nil
 	}

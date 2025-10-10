@@ -35,6 +35,7 @@ type Client struct {
 	// ListTools concurrency control
 	listToolsMu         sync.Mutex
 	listToolsInProgress bool
+	listToolsCancel     context.CancelFunc
 
 	// Background monitoring
 	stopMonitoring chan struct{}
@@ -89,12 +90,15 @@ func (mc *Client) Connect(ctx context.Context) error {
 
 	mc.logger.Info("Starting managed connection to upstream server",
 		zap.String("server", mc.Config.Name),
-		zap.String("current_state", mc.StateManager.GetState().String()))
+		zap.String("current_state", mc.StateManager.GetState().String()),
+		zap.Bool("list_tools_in_progress", mc.listToolsInProgress))
 
 	// Transition to connecting state
 	mc.StateManager.TransitionTo(types.StateConnecting)
 
 	// Connect core client
+	mc.logger.Debug("Invoking core client Connect for managed client",
+		zap.String("server", mc.Config.Name))
 	if err := mc.coreClient.Connect(ctx); err != nil {
 		// Check if this is an OAuth authorization requirement (not an error)
 		if mc.isOAuthAuthorizationRequired(err) {
@@ -113,6 +117,9 @@ func (mc *Client) Connect(ctx context.Context) error {
 		}
 		return fmt.Errorf("core client connection failed: %w", err)
 	}
+
+	mc.logger.Debug("Core client Connect returned successfully",
+		zap.String("server", mc.Config.Name))
 
 	// Transition to ready state only if not already ready
 	if mc.StateManager.GetState() != types.StateReady {
@@ -143,10 +150,15 @@ func (mc *Client) Connect(ctx context.Context) error {
 
 // Disconnect closes the connection and stops monitoring
 func (mc *Client) Disconnect() error {
+	mc.cancelInFlightListTools()
+
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
 	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.Config.Name))
+
+	// Ensure no ListTools operations remain after acquiring the lock
+	mc.cancelInFlightListTools()
 
 	// Stop background monitoring
 	mc.stopBackgroundMonitoring()
@@ -158,6 +170,10 @@ func (mc *Client) Disconnect() error {
 
 	// Reset state
 	mc.StateManager.Reset()
+
+	mc.logger.Debug("Managed client disconnect complete",
+		zap.String("server", mc.Config.Name),
+		zap.Bool("list_tools_in_progress", mc.listToolsInProgress))
 
 	return nil
 }
@@ -234,6 +250,30 @@ func (mc *Client) SetStateChangeCallback(callback func(oldState, newState types.
 	mc.StateManager.SetStateChangeCallback(callback)
 }
 
+func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Duration) (context.Context, func() bool, bool) {
+	mc.listToolsMu.Lock()
+	if mc.listToolsInProgress {
+		mc.listToolsMu.Unlock()
+		return nil, nil, false
+	}
+
+	mc.listToolsInProgress = true
+	listCtx, cancel := context.WithTimeout(ctx, timeout)
+	mc.listToolsCancel = cancel
+	mc.listToolsMu.Unlock()
+
+	release := func() bool {
+		cancel()
+		mc.listToolsMu.Lock()
+		mc.listToolsCancel = nil
+		mc.listToolsInProgress = false
+		mc.listToolsMu.Unlock()
+		return mc.IsConnected()
+	}
+
+	return listCtx, release, true
+}
+
 // ListTools retrieves tools with concurrency control
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	mc.logger.Debug("🔍 ListTools called",
@@ -248,28 +288,22 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
-	// Prevent concurrent ListTools calls
-	mc.listToolsMu.Lock()
-	if mc.listToolsInProgress {
-		mc.listToolsMu.Unlock()
+	listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
+	if !ok {
 		mc.logger.Debug("🔍 ListTools already in progress, rejecting",
 			zap.String("server", mc.Config.Name))
 		return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.Config.Name)
 	}
-	mc.listToolsInProgress = true
-	mc.listToolsMu.Unlock()
 
 	defer func() {
-		mc.listToolsMu.Lock()
-		mc.listToolsInProgress = false
-		mc.listToolsMu.Unlock()
-		mc.logger.Debug("🔍 ListTools operation completed, flag reset",
-			zap.String("server", mc.Config.Name))
+		if release() {
+			mc.logger.Debug("🔍 ListTools operation completed, flag reset",
+				zap.String("server", mc.Config.Name))
+		} else {
+			mc.logger.Debug("🔍 ListTools operation completed while disconnected",
+				zap.String("server", mc.Config.Name))
+		}
 	}()
-
-	// Add timeout for tool listing
-	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	tools, err := mc.coreClient.ListTools(listCtx)
 	if err != nil {
@@ -326,6 +360,39 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 	}
 
 	return result, nil
+}
+
+func (mc *Client) cancelInFlightListTools() {
+	mc.listToolsMu.Lock()
+	cancel := mc.listToolsCancel
+	inProgress := mc.listToolsInProgress
+	mc.listToolsMu.Unlock()
+
+	if !inProgress || cancel == nil {
+		return
+	}
+
+	mc.logger.Debug("Cancelling in-flight ListTools operation",
+		zap.String("server", mc.Config.Name))
+
+	cancel()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for time.Now().Before(deadline) {
+		<-ticker.C
+		mc.listToolsMu.Lock()
+		done := !mc.listToolsInProgress
+		mc.listToolsMu.Unlock()
+		if done {
+			return
+		}
+	}
+
+	mc.logger.Debug("Timed out waiting for ListTools operation to cancel",
+		zap.String("server", mc.Config.Name))
 }
 
 // onStateChange handles state transition events
@@ -450,15 +517,16 @@ func (mc *Client) performHealthCheck() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Try a simple operation to check health with concurrency protection
-	if !mc.tryListTools(ctx) {
+	listCtx, release, ok := mc.acquireListToolsContext(ctx, 5*time.Second)
+	if !ok {
 		mc.logger.Debug("Health check skipped - ListTools already in progress",
 			zap.String("server", mc.Config.Name))
 		return
 	}
 
-	_, err := mc.coreClient.ListTools(ctx)
-	mc.listToolsInProgress = false // Reset the flag
+	defer release()
+
+	_, err := mc.coreClient.ListTools(listCtx)
 
 	if err != nil {
 		// Only mark as error if it's a real connection issue, not timeout during high activity
@@ -509,6 +577,7 @@ func (mc *Client) tryReconnect() {
 
 	// First, disconnect the current client to clean up any broken connections
 	// We don't need to hold the mutex here as Disconnect() already handles it
+	mc.cancelInFlightListTools()
 	if err := mc.coreClient.Disconnect(); err != nil {
 		mc.logger.Warn("Failed to disconnect during reconnection attempt",
 			zap.String("server", mc.Config.Name),
@@ -694,23 +763,14 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
-	// Prevent concurrent ListTools calls for tool counting
-	mc.listToolsMu.Lock()
-	if mc.listToolsInProgress {
-		mc.listToolsMu.Unlock()
+	listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
+	if !ok {
 		mc.logger.Debug("🔍 Tool count fetch skipped - ListTools already in progress",
 			zap.String("server", mc.Config.Name))
 		// Return cached count even if expired rather than causing another concurrent call
 		return cachedCount, nil
 	}
-	mc.listToolsInProgress = true
-	mc.listToolsMu.Unlock()
-
-	defer func() {
-		mc.listToolsMu.Lock()
-		mc.listToolsInProgress = false
-		mc.listToolsMu.Unlock()
-	}()
+	defer release()
 
 	mc.logger.Debug("🔍 Tool count cache miss - fetching fresh count",
 		zap.String("server", mc.Config.Name),
@@ -718,9 +778,6 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 		zap.Duration("cache_age", time.Since(cachedTime)))
 
 	// Fetch fresh tool count with timeout
-	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
 	tools, err := mc.coreClient.ListTools(listCtx)
 	if err != nil {
 		mc.logger.Debug("Tool count fetch failed, returning cached value",
@@ -766,19 +823,6 @@ func (mc *Client) InvalidateToolCountCache() {
 
 	mc.logger.Debug("🔍 Tool count cache invalidated",
 		zap.String("server", mc.Config.Name))
-}
-
-// tryListTools attempts to acquire the ListTools lock, returns true if successful
-func (mc *Client) tryListTools(_ context.Context) bool {
-	mc.listToolsMu.Lock()
-	defer mc.listToolsMu.Unlock()
-
-	if mc.listToolsInProgress {
-		return false
-	}
-
-	mc.listToolsInProgress = true
-	return true
 }
 
 // Helper function to check if string contains substring

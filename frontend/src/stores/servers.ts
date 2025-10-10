@@ -52,36 +52,68 @@ export const useServersStore = defineStore('servers', () => {
 
   async function enableServer(serverName: string) {
     try {
+      const server = servers.value.find(s => s.name === serverName)
+
+      // Optimistic update: show "connecting" status immediately
+      if (server) {
+        server.enabled = true
+        server.connecting = true
+        server.connected = false
+      }
+
       const response = await api.enableServer(serverName)
       if (response.success) {
-        const server = servers.value.find(s => s.name === serverName)
-        if (server) {
-          server.enabled = true
-        }
+        // The SSE event will trigger a full refresh with actual state
         return true
       } else {
+        // Revert optimistic update on error
+        if (server) {
+          server.enabled = false
+          server.connecting = false
+        }
         throw new Error(response.error || 'Failed to enable server')
       }
     } catch (error) {
       console.error('Failed to enable server:', error)
+      // Revert optimistic update
+      const server = servers.value.find(s => s.name === serverName)
+      if (server) {
+        server.enabled = false
+        server.connecting = false
+      }
       throw error
     }
   }
 
   async function disableServer(serverName: string) {
     try {
+      const server = servers.value.find(s => s.name === serverName)
+
+      // Optimistic update: show "disconnected" status immediately
+      if (server) {
+        server.enabled = false
+        server.connecting = false
+        server.connected = false
+      }
+
       const response = await api.disableServer(serverName)
       if (response.success) {
-        const server = servers.value.find(s => s.name === serverName)
-        if (server) {
-          server.enabled = false
-        }
+        // The SSE event will trigger a full refresh with actual state
         return true
       } else {
+        // Revert optimistic update on error
+        if (server) {
+          server.enabled = true
+        }
         throw new Error(response.error || 'Failed to disable server')
       }
     } catch (error) {
       console.error('Failed to disable server:', error)
+      // Revert optimistic update
+      const server = servers.value.find(s => s.name === serverName)
+      if (server) {
+        server.enabled = true
+      }
       throw error
     }
   }
@@ -185,6 +217,34 @@ export const useServersStore = defineStore('servers', () => {
     return servers.value.find(s => s.name === name)
   }
 
+  // Set up event listeners for real-time updates
+  function setupEventListeners() {
+    window.addEventListener('mcpproxy:servers-changed', handleServersChanged)
+    window.addEventListener('mcpproxy:config-reloaded', handleConfigReloaded)
+  }
+
+  function cleanupEventListeners() {
+    window.removeEventListener('mcpproxy:servers-changed', handleServersChanged)
+    window.removeEventListener('mcpproxy:config-reloaded', handleConfigReloaded)
+  }
+
+  function handleServersChanged(event: Event) {
+    const customEvent = event as CustomEvent
+    console.log('Servers changed event received, refreshing server list...', customEvent.detail)
+    // Refresh server list to get latest state
+    fetchServers()
+  }
+
+  function handleConfigReloaded(event: Event) {
+    const customEvent = event as CustomEvent
+    console.log('Config reloaded event received, refreshing server list...', customEvent.detail)
+    // Refresh server list after config reload
+    fetchServers()
+  }
+
+  // Initialize event listeners
+  setupEventListeners()
+
   return {
     // State
     servers,
@@ -208,5 +268,6 @@ export const useServersStore = defineStore('servers', () => {
     updateServerStatus,
     getServerByName,
     addServer,
+    cleanupEventListeners,
   }
 })

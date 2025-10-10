@@ -113,6 +113,33 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Listen for servers.changed events to trigger immediate UI updates
+    es.addEventListener('servers.changed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE servers.changed event received:', data)
+
+        // Import and call serversStore.fetchServers() to refresh server list
+        // Note: This creates a circular dependency, so we'll emit a custom event instead
+        window.dispatchEvent(new CustomEvent('mcpproxy:servers-changed', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE servers.changed event:', error)
+      }
+    })
+
+    // Listen for config.reloaded events
+    es.addEventListener('config.reloaded', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE config.reloaded event received:', data)
+
+        // Trigger server list refresh on config reload
+        window.dispatchEvent(new CustomEvent('mcpproxy:config-reloaded', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE config.reloaded event:', error)
+      }
+    })
+
     es.onerror = (event) => {
       connected.value = false
       console.error('EventSource error occurred:', event)

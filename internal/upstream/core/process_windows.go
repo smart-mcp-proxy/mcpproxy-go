@@ -17,7 +17,7 @@ type ProcessGroup struct {
 
 // createProcessGroupCommandFunc creates a custom CommandFunc for Windows systems
 // Note: Windows process group management is different from Unix and requires different approaches
-func createProcessGroupCommandFunc(workingDir string, logger *zap.Logger) func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
+func createProcessGroupCommandFunc(client *Client, workingDir string, logger *zap.Logger) func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 	return func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 		cmd := exec.CommandContext(ctx, command, args...)
 		cmd.Env = env
@@ -35,6 +35,10 @@ func createProcessGroupCommandFunc(workingDir string, logger *zap.Logger) func(c
 			zap.String("command", command),
 			zap.Strings("args", args),
 			zap.String("working_dir", workingDir))
+
+		if client != nil {
+			client.processCmd = cmd
+		}
 
 		return cmd, nil
 	}

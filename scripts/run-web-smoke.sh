@@ -89,6 +89,7 @@ cat <<JSON >"$CONFIG_PATH"
 {
   "listen": "127.0.0.1:18080",
   "data_dir": "${DATA_DIR}",
+  "api_key": "",
   "enable_tray": false,
   "logging": {
     "level": "info",

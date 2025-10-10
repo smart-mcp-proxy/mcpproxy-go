@@ -329,12 +329,12 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	var stdioTransport *uptransport.Stdio
 	if c.config.WorkingDir != "" {
 		// CRITICAL FIX: Use enhanced CommandFunc with process group management for proper cleanup
-		commandFunc := createEnhancedWorkingDirCommandFunc(c.config.WorkingDir, c.logger)
+		commandFunc := createEnhancedWorkingDirCommandFunc(c, c.config.WorkingDir, c.logger)
 		stdioTransport = uptransport.NewStdioWithOptions(finalCommand, envVars, finalArgs,
 			uptransport.WithCommandFunc(commandFunc))
 	} else {
 		// CRITICAL FIX: Use enhanced CommandFunc even without working directory to ensure process groups
-		commandFunc := createEnhancedWorkingDirCommandFunc("", c.logger)
+		commandFunc := createEnhancedWorkingDirCommandFunc(c, "", c.logger)
 		stdioTransport = uptransport.NewStdioWithOptions(finalCommand, envVars, finalArgs,
 			uptransport.WithCommandFunc(commandFunc))
 	}
@@ -418,55 +418,62 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	}
 
 	// CRITICAL FIX: Extract underlying process from mcp-go transport for lifecycle management
-	// Try to access the process via reflection
-	c.logger.Debug("Attempting to extract process from stdio transport for lifecycle management",
-		zap.String("server", c.config.Name),
-		zap.String("transport_type", fmt.Sprintf("%T", stdioTransport)))
+	if c.processCmd != nil && c.processCmd.Process != nil {
+		c.logger.Info("Successfully captured process from stdio transport for lifecycle management",
+			zap.String("server", c.config.Name),
+			zap.Int("pid", c.processCmd.Process.Pid))
 
-	// Use reflection to access the process field from the transport
-	transportValue := reflect.ValueOf(stdioTransport)
-	if transportValue.Kind() == reflect.Ptr {
-		transportValue = transportValue.Elem()
-	}
-
-	// Try to find a process field (common names: cmd, process, proc)
-	var processField reflect.Value
-	if transportValue.IsValid() {
-		for _, fieldName := range []string{"cmd", "process", "proc", "Cmd", "Process", "Proc"} {
-			field := transportValue.FieldByName(fieldName)
-			if field.IsValid() && field.CanInterface() {
-				if cmd, ok := field.Interface().(*exec.Cmd); ok && cmd != nil {
-					processField = field
-					break
-				}
-			}
+		if c.processGroupID <= 0 {
+			c.processGroupID = extractProcessGroupID(c.processCmd, c.logger, c.config.Name)
 		}
-	}
-
-	if processField.IsValid() {
-		if cmd, ok := processField.Interface().(*exec.Cmd); ok && cmd != nil {
-			c.processCmd = cmd
-			c.logger.Info("Successfully extracted process from stdio transport for lifecycle management",
+		if c.processGroupID > 0 {
+			c.logger.Info("Process group ID tracked for cleanup",
 				zap.String("server", c.config.Name),
-				zap.Int("pid", c.processCmd.Process.Pid))
-
-			// CRITICAL FIX: Extract process group ID for proper cleanup
-			c.processGroupID = extractProcessGroupID(cmd, c.logger, c.config.Name)
-			if c.processGroupID > 0 {
-				c.logger.Info("Process group ID tracked for cleanup",
-					zap.String("server", c.config.Name),
-					zap.Int("pgid", c.processGroupID))
-			}
+				zap.Int("pgid", c.processGroupID))
 		}
 	} else {
-		c.logger.Warn("Could not extract process from stdio transport - will use alternative process tracking",
+		// Try to access the process via reflection as a fallback
+		c.logger.Debug("Attempting to extract process from stdio transport via reflection",
 			zap.String("server", c.config.Name),
 			zap.String("transport_type", fmt.Sprintf("%T", stdioTransport)))
 
-		// For Docker commands, we can still monitor via container ID and docker ps
-		if c.isDockerCommand {
-			c.logger.Info("Docker command detected - will monitor via container health checks",
-				zap.String("server", c.config.Name))
+		transportValue := reflect.ValueOf(stdioTransport)
+		if transportValue.Kind() == reflect.Ptr {
+			transportValue = transportValue.Elem()
+		}
+
+		if transportValue.IsValid() {
+			for _, fieldName := range []string{"cmd", "process", "proc", "Cmd", "Process", "Proc"} {
+				field := transportValue.FieldByName(fieldName)
+				if field.IsValid() && field.CanInterface() {
+					if cmd, ok := field.Interface().(*exec.Cmd); ok && cmd != nil {
+						c.processCmd = cmd
+						c.logger.Info("Successfully extracted process from stdio transport for lifecycle management",
+							zap.String("server", c.config.Name),
+							zap.Int("pid", c.processCmd.Process.Pid))
+
+						c.processGroupID = extractProcessGroupID(cmd, c.logger, c.config.Name)
+						if c.processGroupID > 0 {
+							c.logger.Info("Process group ID tracked for cleanup",
+								zap.String("server", c.config.Name),
+								zap.Int("pgid", c.processGroupID))
+						}
+						break
+					}
+				}
+			}
+		}
+
+		if c.processCmd == nil {
+			c.logger.Warn("Could not extract process from stdio transport - will use alternative process tracking",
+				zap.String("server", c.config.Name),
+				zap.String("transport_type", fmt.Sprintf("%T", stdioTransport)))
+
+			// For Docker commands, we can still monitor via container ID and docker ps
+			if c.isDockerCommand {
+				c.logger.Info("Docker command detected - will monitor via container health checks",
+					zap.String("server", c.config.Name))
+			}
 		}
 	}
 
@@ -719,8 +726,8 @@ func createWorkingDirCommandFunc(workingDir string) uptransport.CommandFunc {
 }
 
 // createEnhancedWorkingDirCommandFunc creates a custom CommandFunc with process group management
-func createEnhancedWorkingDirCommandFunc(workingDir string, logger *zap.Logger) uptransport.CommandFunc {
-	return createProcessGroupCommandFunc(workingDir, logger)
+func createEnhancedWorkingDirCommandFunc(client *Client, workingDir string, logger *zap.Logger) uptransport.CommandFunc {
+	return createProcessGroupCommandFunc(client, workingDir, logger)
 }
 
 // connectHTTP establishes HTTP transport connection with auth fallback
@@ -1528,9 +1535,37 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 
 	c.logger.Debug("Closing MCP client connection",
 		zap.String("server", c.config.Name))
-	c.client.Close()
-	c.logger.Debug("MCP client connection closed",
-		zap.String("server", c.config.Name))
+
+	closeDone := make(chan struct{})
+	go func() {
+		c.client.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		c.logger.Debug("MCP client connection closed",
+			zap.String("server", c.config.Name))
+	case <-time.After(2 * time.Second):
+		c.logger.Warn("MCP client close timed out, forcing shutdown",
+			zap.String("server", c.config.Name))
+
+		// Attempt process group cleanup if available
+		if c.processGroupID > 0 {
+			_ = killProcessGroup(c.processGroupID, c.logger, c.config.Name)
+		}
+
+		if c.processCmd != nil && c.processCmd.Process != nil {
+			if err := c.processCmd.Process.Kill(); err != nil {
+				c.logger.Warn("Failed to kill stdio process after close timeout",
+					zap.String("server", c.config.Name),
+					zap.Error(err))
+			} else {
+				c.logger.Info("Killed stdio process after close timeout",
+					zap.String("server", c.config.Name))
+			}
+		}
+	}
 
 	c.client = nil
 	c.serverInfo = nil
