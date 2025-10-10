@@ -466,7 +466,6 @@ Working directories are compatible with Docker isolation. When both are configur
 - **`retrieve_tools`** - BM25 keyword search across all upstream tools
 - **`call_tool`** - Proxy tool calls to upstream servers
 - **`upstream_servers`** - CRUD operations for server management
-- **`tools_stat`** - Usage statistics and analytics
 
 ### Tool Name Format
 - Format: `<serverName>:<originalToolName>` (e.g., `github:create_issue`)

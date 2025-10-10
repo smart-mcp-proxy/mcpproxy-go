@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -193,9 +194,45 @@ func (env *BinaryTestEnv) WaitForEverythingServer() {
 		case <-ticker.C:
 			if env.isEverythingServerReady() {
 				env.t.Log("Test server is ready")
-				// Wait a bit more for indexing to complete
-				time.Sleep(2 * time.Second)
+				// Wait longer for tool indexing to complete in CI environments
+				time.Sleep(5 * time.Second)
+
+				// Verify tools are actually indexed by making a test query
+				env.waitForToolIndexing()
 				return
+			}
+		}
+	}
+}
+
+// waitForToolIndexing waits for tools to be indexed and available
+func (env *BinaryTestEnv) waitForToolIndexing() {
+	timeout := time.After(30 * time.Second) // Longer timeout for CI environments
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			env.t.Log("Warning: Tools may not be fully indexed yet after 30s wait")
+			return
+		case <-ticker.C:
+			// Try to get tool count from server status
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Get(env.apiURL + "/api/v1/servers")
+			if err == nil && resp.StatusCode == http.StatusOK {
+				body, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err == nil {
+					// Check if any server has tools indexed
+					if strings.Contains(string(body), `"tool_count":`) &&
+					   !strings.Contains(string(body), `"tool_count":0`) {
+						env.t.Log("Tools are indexed and available")
+						return
+					}
+				}
+			} else if resp != nil {
+				resp.Body.Close()
 			}
 		}
 	}

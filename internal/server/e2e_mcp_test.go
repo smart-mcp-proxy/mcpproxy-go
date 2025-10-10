@@ -189,9 +189,9 @@ func TestMCPProtocolComplexWorkflows(t *testing.T) {
 	env.WaitForEverythingServer()
 
 	t.Run("Full workflow: search -> discover -> call tool", func(t *testing.T) {
-		// Step 1: Search for tools
+		// Step 1: Search for tools (memory server has knowledge graph tools)
 		output, err := env.CallMCPTool("retrieve_tools", map[string]interface{}{
-			"query": "echo",
+			"query": "create",
 			"limit": 5,
 		})
 		require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestMCPProtocolComplexWorkflows(t *testing.T) {
 		require.NoError(t, err)
 
 		tools, ok := searchResult["tools"].([]interface{})
-		require.True(t, ok)
+		require.True(t, ok, "Expected tools array in result: %v", searchResult)
 		require.Greater(t, len(tools), 0, "Should find at least one tool")
 
 		// Step 2: Get the first tool
@@ -239,16 +239,13 @@ func TestMCPProtocolComplexWorkflows(t *testing.T) {
 		require.True(t, ok)
 		assert.Len(t, servers, 1)
 
-		// Step 2: Get server stats
-		output, err = env.CallMCPTool("tools_stat", map[string]interface{}{
-			"top_n": 5,
-		})
-		require.NoError(t, err)
-
-		var statsResult map[string]interface{}
-		err = json.Unmarshal(output, &statsResult)
-		require.NoError(t, err)
-		assert.Contains(t, statsResult, "stats")
+		// Verify server info
+		if len(servers) > 0 {
+			server, ok := servers[0].(map[string]interface{})
+			require.True(t, ok)
+			assert.Equal(t, "memory", server["name"])
+			assert.NotEmpty(t, server["protocol"])
+		}
 	})
 }
 
