@@ -100,92 +100,78 @@ jobs:
       - name: Import Code-Signing Certificates (macOS)
         if: matrix.goos == 'darwin'
         run: |
-          echo "Converting and importing legacy P12 certificate..."
+          set -euo pipefail
 
-          # Decode the base64 P12 file
-          echo "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" | base64 -d > legacy_cert.p12
-
-          # Try extracting with standard OpenSSL first
-          echo "Attempting extraction with standard OpenSSL..."
-          if openssl pkcs12 -in legacy_cert.p12 \
-            -passin pass:"${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
-            -nodes \
-            -out temp_cert_and_key.pem 2>/dev/null; then
-            echo "✅ Standard OpenSSL extraction succeeded"
-          else
-            echo "❌ Standard OpenSSL failed, installing OpenSSL 3.x with legacy provider..."
-            
-            # Install OpenSSL 3.x with legacy provider support
-            brew install openssl@3
-            export PATH="/opt/homebrew/bin:$PATH"
-            
-            # Verify OpenSSL version
-            openssl version
-            
-            # Extract with legacy provider support
-            openssl pkcs12 -in legacy_cert.p12 \
-              -passin pass:"${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
-              -provider legacy -provider default \
-              -nodes \
-              -out temp_cert_and_key.pem
-            
-            echo "✅ Legacy provider extraction succeeded"
-          fi
-
-          # Verify extraction worked
-          if [ ! -f temp_cert_and_key.pem ]; then
-            echo "❌ Certificate extraction failed"
-            exit 1
-          fi
-
-          echo "Certificates found: $(grep -c "BEGIN CERTIFICATE" temp_cert_and_key.pem)"
-          echo "Private keys found: $(grep -c "BEGIN PRIVATE KEY" temp_cert_and_key.pem)"
-
-          # Import certificate and key separately to avoid P12 compatibility issues
-          openssl x509 -in temp_cert_and_key.pem -out cert_only.pem
-          openssl rsa -in temp_cert_and_key.pem -out key_only.pem
-
-          # Try importing to login keychain first, fallback to temp keychain
-          echo "=== Importing certificates ==="
-
-          # Skip login keychain in CI to avoid conflicts between parallel workers
-          # Go directly to isolated temporary keychain
-          echo "Creating isolated temporary keychain for this worker..."
-
-          # Create unique keychain name for this matrix job to prevent conflicts
+          echo "📦 Preparing isolated keychain for code signing"
           UNIQUE_ID="${{ matrix.goos }}-${{ matrix.goarch }}-$$-$(date +%s)"
           TEMP_KEYCHAIN="mcpproxy-build-${UNIQUE_ID}.keychain"
 
-          echo "Using keychain: ${TEMP_KEYCHAIN}"
-
-          # Create isolated temporary keychain
           security create-keychain -p "temp123" "$TEMP_KEYCHAIN"
-
-          # Add to search list WITHOUT setting as default (avoid conflicts)
           security list-keychains -s "$TEMP_KEYCHAIN" ~/Library/Keychains/login.keychain-db /Library/Keychains/System.keychain
-
-          # Unlock and configure
           security unlock-keychain -p "temp123" "$TEMP_KEYCHAIN"
           security set-keychain-settings -t 3600 -l "$TEMP_KEYCHAIN"
 
-          # Import to isolated keychain
-          security import cert_only.pem -k "$TEMP_KEYCHAIN" -T /usr/bin/codesign
-          security import key_only.pem -k "$TEMP_KEYCHAIN" -T /usr/bin/codesign
+          if [ -z "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" ] || [ -z "${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" ]; then
+            echo "❌ APPLE_DEVELOPER_ID_CERT and APPLE_DEVELOPER_ID_CERT_PASSWORD secrets are required"
+            exit 1
+          fi
 
-          # Set partition list for isolated keychain
+          echo "${{ secrets.APPLE_DEVELOPER_ID_CERT }}" | base64 -d > developer-id.p12
+          security import developer-id.p12 \
+            -k "$TEMP_KEYCHAIN" \
+            -P "${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild \
+            -T /usr/bin/productsign \
+            -T /usr/bin/security
+          rm -f developer-id.p12
+
+          echo "🔍 Checking for separate Developer ID Installer certificate"
+          INSTALLER_ID=$(security find-identity -v -p basic "$TEMP_KEYCHAIN" | grep "Developer ID Installer" || true)
+
+          if [ -z "$INSTALLER_ID" ]; then
+            if [ -z "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT }}" ] || [ -z "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}" ]; then
+              echo "❌ Developer ID Installer identity not found in APPLE_DEVELOPER_ID_CERT"
+              echo "   Provide APPLE_DEVELOPER_ID_INSTALLER_CERT and password secrets"
+              exit 1
+            fi
+
+            echo "Importing dedicated Developer ID Installer certificate"
+            echo "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT }}" | base64 -d > developer-id-installer.p12
+            security import developer-id-installer.p12 \
+              -k "$TEMP_KEYCHAIN" \
+              -P "${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}" \
+              -T /usr/bin/productsign \
+              -T /usr/bin/productbuild \
+              -T /usr/bin/codesign \
+              -T /usr/bin/security
+            rm -f developer-id-installer.p12
+          fi
+
           security set-key-partition-list -S apple-tool:,apple: -s -k "temp123" "$TEMP_KEYCHAIN"
 
-          echo "✅ Imported to isolated temporary keychain: ${TEMP_KEYCHAIN}"
+          APP_CERT_IDENTITY=$(security find-identity -v -p codesigning "$TEMP_KEYCHAIN" | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+          PKG_CERT_IDENTITY=$(security find-identity -v -p basic "$TEMP_KEYCHAIN" | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
 
-          # Store keychain name for cleanup
+          if [ -z "$APP_CERT_IDENTITY" ]; then
+            echo "❌ Developer ID Application identity not found after import"
+            exit 1
+          fi
+
+          if [ -z "$PKG_CERT_IDENTITY" ]; then
+            echo "❌ Developer ID Installer identity not found after import"
+            exit 1
+          fi
+
+          echo "✅ Using Developer ID Application: $APP_CERT_IDENTITY"
+          echo "✅ Using Developer ID Installer: $PKG_CERT_IDENTITY"
+
+          echo "APP_CERT_IDENTITY=$APP_CERT_IDENTITY" >> "$GITHUB_ENV"
+          echo "PKG_CERT_IDENTITY=$PKG_CERT_IDENTITY" >> "$GITHUB_ENV"
           echo "$TEMP_KEYCHAIN" > .keychain_name
 
-          # Verify import
-          echo "=== Available code signing identities ==="
-          security find-identity -v -p codesigning
-
-          # Clean up temporary files
-          rm -f legacy_cert.p12 temp_cert_and_key.pem cert_only.pem key_only.pem
+          echo "=== Available signing identities in temporary keychain ==="
+          security find-identity -v "$TEMP_KEYCHAIN"
 
           echo "✅ Certificate import completed"
 
@@ -438,7 +424,7 @@ jobs:
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
           echo "Signing DMG: ${DMG_NAME}"
 
-                    # Find the Developer ID certificate identity
+          # Find the Developer ID certificate identity
           CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
 
           # Verify we found a valid certificate
@@ -465,64 +451,128 @@ jobs:
 
           echo "✅ DMG created and signed successfully: ${DMG_NAME}"
 
+      - name: Create PKG installer (macOS)
+        if: matrix.goos == 'darwin'
+        env:
+          # Ensure PKG creation also uses correct deployment target
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          CGO_CFLAGS: "-mmacosx-version-min=12.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          chmod +x scripts/create-pkg.sh
+          chmod +x scripts/create-installer-dmg.sh
+
+          # Set up certificate environment for PKG creation (reuse from binary signing)
+          echo "=== Setting up certificate environment for PKG creation ==="
+
+          # Debug: List all available certificates for PKG creation
+          echo "=== Available certificates for PKG creation ==="
+          echo "Codesigning certificates:"
+          security find-identity -v -p codesigning || echo "No codesigning certificates found"
+          echo "Basic certificates:"
+          security find-identity -v -p basic || echo "No basic certificates found"
+          echo "All certificates:"
+          security find-identity -v || echo "No certificates found"
+
+          # Prefer identities exported during certificate import, fallback to keychain lookup
+          APP_CERT_IDENTITY="${APP_CERT_IDENTITY:-}"
+          PKG_CERT_IDENTITY="${PKG_CERT_IDENTITY:-}"
+
+          if [ -z "${APP_CERT_IDENTITY}" ]; then
+            APP_CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+          fi
+
+          if [ -z "${PKG_CERT_IDENTITY}" ]; then
+            PKG_CERT_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+          fi
+
+          if [ -z "${APP_CERT_IDENTITY}" ]; then
+            echo "❌ Developer ID Application certificate not available in the build keychain"
+            exit 1
+          fi
+
+          if [ -z "${PKG_CERT_IDENTITY}" ]; then
+            echo "❌ Developer ID Installer certificate not available in the isolated keychain"
+            echo "   Embed the 'Developer ID Installer' identity in APPLE_DEVELOPER_ID_CERT"
+            exit 1
+          fi
+
+          echo "✅ Using Developer ID Application certificate: ${APP_CERT_IDENTITY}"
+          echo "✅ Using Developer ID Installer certificate: ${PKG_CERT_IDENTITY}"
+
+          export APP_CERT_IDENTITY
+          export PKG_CERT_IDENTITY
+
+          # Determine binary names
+          TRAY_BINARY="mcpproxy-tray"
+          CORE_BINARY="mcpproxy"
+
+          # Create PKG installer with both tray and core binaries
+          echo "Creating signed PKG installer with certificate: ${PKG_CERT_IDENTITY}"
+          ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+
+          # Create installer DMG containing the PKG
+          PKG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.pkg"
+          ./scripts/create-installer-dmg.sh ${PKG_NAME} ${VERSION} ${{ matrix.goarch }}
+
+          echo "✅ PKG installer and installer DMG created successfully"
+
       - name: Submit for notarization (macOS)
         if: matrix.goos == 'darwin'
         run: |
+          set -euo pipefail
+
           VERSION=${GITHUB_REF#refs/tags/}
-          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
+          PKG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.pkg"
+          INSTALLER_DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}-installer.dmg"
 
-          echo "Submitting DMG for notarization..."
+          notarize_and_staple() {
+            local FILE_NAME="$1"
+            local FILE_LABEL="$2"
 
-          # Submit with proper error handling and retries
-          SUBMISSION_SUCCESS=false
-          for attempt in 1 2 3; do
-            echo "Notarization attempt $attempt/3..."
-            
-            # Capture both stdout and stderr
-            SUBMISSION_OUTPUT=$(xcrun notarytool submit "${DMG_NAME}" \
+            if [ ! -f "${FILE_NAME}" ]; then
+              echo "❌ ${FILE_LABEL} (${FILE_NAME}) not found"
+              return 1
+            fi
+
+            echo "Submitting ${FILE_LABEL} for notarization: ${FILE_NAME}"
+
+            local SUBMISSION_OUTPUT
+            if ! SUBMISSION_OUTPUT=$(xcrun notarytool submit "${FILE_NAME}" \
               --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
               --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" \
               --team-id "${{ secrets.APPLE_TEAM_ID }}" \
-              --output-format json 2>&1)
-            
-            SUBMISSION_EXIT_CODE=$?
-            
-            if [ $SUBMISSION_EXIT_CODE -eq 0 ]; then
-              # Extract submission ID with validation
-              SUBMISSION_ID=$(echo "$SUBMISSION_OUTPUT" | jq -r '.id // empty')
-              
-              if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ]; then
-                echo "✅ Notarization submission successful on attempt $attempt"
-                echo "Submission ID: ${SUBMISSION_ID}"
-                
-                # Save submission ID
-                echo "${SUBMISSION_ID}" > "${DMG_NAME}.submission_id"
-                
-                SUBMISSION_SUCCESS=true
-                break
-              else
-                echo "❌ Failed to extract valid submission ID from response"
-                echo "Response: $SUBMISSION_OUTPUT"
-              fi
-            else
-              echo "❌ Notarization submission failed with exit code: $SUBMISSION_EXIT_CODE"
-              echo "Output: $SUBMISSION_OUTPUT"
+              --wait \
+              --output-format json 2>&1); then
+              echo "❌ ${FILE_LABEL} notarization failed"
+              echo "Output: ${SUBMISSION_OUTPUT}"
+              return 1
             fi
-            
-            if [ $attempt -lt 3 ]; then
-              echo "Retrying in 30 seconds..."
-              sleep 30
+
+            local SUBMISSION_ID
+            SUBMISSION_ID=$(echo "${SUBMISSION_OUTPUT}" | jq -r '.id // empty')
+            local STATUS
+            STATUS=$(echo "${SUBMISSION_OUTPUT}" | jq -r '.status // empty')
+
+            if [ -z "${SUBMISSION_ID}" ] || [ "${SUBMISSION_ID}" = "null" ] || [ "${STATUS}" != "Accepted" ]; then
+              echo "❌ ${FILE_LABEL} notarization did not succeed"
+              echo "Response: ${SUBMISSION_OUTPUT}"
+              return 1
             fi
-          done
 
-          if [ "$SUBMISSION_SUCCESS" != "true" ]; then
-            echo "❌ All notarization submission attempts failed"
-            echo "Creating empty submission ID file to skip notarization tracking"
-            # Don't create submission_id file - this will cause the DMG to be uploaded without notarization tracking
-            exit 0  # Don't fail the entire build, just skip notarization
-          fi
+            echo "✅ ${FILE_LABEL} notarization accepted (ID: ${SUBMISSION_ID})"
+            echo "${SUBMISSION_ID}" > "${FILE_NAME}.submission_id"
 
-          echo "✅ DMG submitted for notarization (ID: ${SUBMISSION_ID})"
+            echo "Stapling notarization ticket to ${FILE_LABEL}"
+            xcrun stapler staple "${FILE_NAME}"
+            xcrun stapler validate "${FILE_NAME}"
+          }
+
+          notarize_and_staple "${PKG_NAME}" "PKG installer"
+          notarize_and_staple "${INSTALLER_DMG_NAME}" "Installer DMG"
+
+          echo "✅ Notarization and stapling complete"
 
       - name: Cleanup isolated keychain (macOS)
         if: matrix.goos == 'darwin' && always()
@@ -552,14 +602,41 @@ jobs:
           name: latest-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
-      - name: Upload DMG installer (macOS)
+      - name: Upload macOS installer DMG
+        if: matrix.goos == 'darwin'
+        run: |
+          set -euo pipefail
+
+          VERSION=${GITHUB_REF#refs/tags/}
+          INSTALLER_DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}-installer.dmg"
+
+          echo "Looking for files:"
+          echo "  Installer DMG: ${INSTALLER_DMG_NAME}"
+          if [ ! -f "${INSTALLER_DMG_NAME}" ]; then
+            echo "❌ Installer DMG not found: ${INSTALLER_DMG_NAME}"
+            exit 1
+          fi
+
+          mkdir -p installers-artifact
+          cp "${INSTALLER_DMG_NAME}" installers-artifact/
+
+          SUBMISSION_ID_FILE="${INSTALLER_DMG_NAME}.submission_id"
+          if [ -f "${SUBMISSION_ID_FILE}" ]; then
+            echo "✅ Found submission ID file: ${SUBMISSION_ID_FILE}"
+            cp "${SUBMISSION_ID_FILE}" installers-artifact/
+          else
+            echo "⚠️  No submission ID file found: ${SUBMISSION_ID_FILE}"
+          fi
+
+          echo "Files to upload:"
+          ls -la installers-artifact/
+
+      - name: Upload macOS installers artifact
         if: matrix.goos == 'darwin'
         uses: actions/upload-artifact@v4
         with:
-          name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
-            mcpproxy-*-darwin-${{ matrix.goarch }}.dmg.submission_id
+          name: installers-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: installers-artifact/*
 
   release:
     needs: build
@@ -589,40 +666,41 @@ jobs:
             cp "$file" "release-files/$filename"
           done
 
-          # Handle DMG files and notarization submissions
+          # Handle installer files (DMG and PKG) and notarization submissions
           mkdir -p pending-notarizations
 
-          find dist -path "*/dmg-*" -name "*.dmg" | while read dmg_file; do
-            filename=$(basename "$dmg_file")
-            submission_id_file="${dmg_file}.submission_id"
-            
+          # Process installer artifacts (only notarized installer DMGs)
+          find dist -path "*/installers-*" -name "*.dmg" | while read installer_file; do
+            filename=$(basename "$installer_file")
+            submission_id_file="${installer_file}.submission_id"
+
             if [ -f "$submission_id_file" ]; then
-              # DMG has pending notarization
+              # File has pending notarization
               SUBMISSION_ID=$(cat "$submission_id_file")
-              
+
               # Validate submission ID before creating pending file
               if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ] && [ ${#SUBMISSION_ID} -gt 10 ]; then
                 echo "Found valid pending notarization for $filename (ID: $SUBMISSION_ID)"
-                cp "$dmg_file" "release-files/$filename"
-                
+                cp "$installer_file" "release-files/$filename"
+
                 # Create pending notarization record
                 cat > "pending-notarizations/${filename}.pending" << EOF
           {
             "submission_id": "$SUBMISSION_ID",
-            "dmg_name": "$filename",
+            "file_name": "$filename",
             "version": "$VERSION",
             "submitted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
               else
                 echo "❌ Invalid submission ID for $filename: '$SUBMISSION_ID'"
-                echo "Copying DMG without notarization tracking"
-                cp "$dmg_file" "release-files/$filename"
+                echo "Copying installer file without notarization tracking"
+                cp "$installer_file" "release-files/$filename"
               fi
             else
               # No notarization submission (shouldn't happen, but handle it)
               echo "No submission ID for $filename, copying as-is"
-              cp "$dmg_file" "release-files/$filename"
+              cp "$installer_file" "release-files/$filename"
             fi
           done
 
@@ -657,9 +735,9 @@ jobs:
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
-            **macOS Installers (Recommended):**
-            - [macOS Universal DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.dmg) (Apple Silicon)
-            - [macOS Intel DMG](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.dmg) (Intel)
+            **macOS Installer:**
+            - [Signed DMG (Apple Silicon)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64-installer.dmg)
+            - [Signed DMG (Intel)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64-installer.dmg)
 
             **This Version (${{ github.ref_name }}):**
             - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz)
@@ -671,12 +749,14 @@ jobs:
 
             ### Installation
 
-            **macOS (Recommended - DMG Installer):**
-            1. Download the appropriate DMG file for your Mac (Apple Silicon or Intel)
+            **macOS:**
+            1. Download the signed installer DMG for your Mac (Apple Silicon or Intel)
             2. Double-click the DMG to mount it
-            3. Drag mcpproxy.app to Applications folder
-            4. Launch from Applications or Launchpad
-            5. The app will appear in your system tray with autostart capability
+            3. Double-click the PKG installer inside
+            4. Follow the installation wizard
+            5. CLI tool `mcpproxy` will be available in Terminal
+            6. Launch mcpproxy.app from Applications folder
+            7. The app will appear in your system tray
 
             **Manual Installation (All Platforms):**
             1. Download the appropriate archive for your platform using the links above
