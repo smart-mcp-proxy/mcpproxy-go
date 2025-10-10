@@ -147,6 +147,7 @@ func (env *BinaryTestEnv) Start() {
 	env.cmd = exec.Command(env.binaryPath, "serve", "--config="+env.configPath, "--log-level=debug")
 	env.cmd.Env = append(os.Environ(),
 		"MCPPROXY_DISABLE_OAUTH=true", // Disable OAuth for testing
+		"MCPPROXY_API_KEY=",           // Disable API key for testing
 	)
 
 	err := env.cmd.Start()
@@ -160,7 +161,7 @@ func (env *BinaryTestEnv) Start() {
 
 // WaitForReady waits for the server to be ready to accept requests
 func (env *BinaryTestEnv) WaitForReady() {
-	timeout := time.After(30 * time.Second)
+	timeout := time.After(60 * time.Second) // Increased timeout for CI environments
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
