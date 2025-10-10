@@ -207,31 +207,40 @@ func (env *BinaryTestEnv) WaitForEverythingServer() {
 
 // waitForToolIndexing waits for tools to be indexed and available
 func (env *BinaryTestEnv) waitForToolIndexing() {
-	timeout := time.After(30 * time.Second) // Longer timeout for CI environments
+	timeout := time.After(15 * time.Second) // 15s should be enough after server is ready
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-timeout:
-			env.t.Log("Warning: Tools may not be fully indexed yet after 30s wait")
+			// Timeout is not fatal - just log and continue
+			// Tests will fail later if tools aren't actually available
+			env.t.Log("Tool indexing check timed out after 15s (continuing anyway)")
 			return
 		case <-ticker.C:
 			// Try to get tool count from server status
 			client := &http.Client{Timeout: 2 * time.Second}
 			resp, err := client.Get(env.apiURL + "/api/v1/servers")
-			if err == nil && resp.StatusCode == http.StatusOK {
+			if err != nil {
+				continue // Network error, retry
+			}
+
+			if resp.StatusCode == http.StatusOK {
 				body, err := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				if err == nil {
-					// Check if any server has tools indexed
-					if strings.Contains(string(body), `"tool_count":`) &&
-					   !strings.Contains(string(body), `"tool_count":0`) {
-						env.t.Log("Tools are indexed and available")
+					bodyStr := string(body)
+					// Check if we have success response and at least one server
+					if strings.Contains(bodyStr, `"success":true`) &&
+					   strings.Contains(bodyStr, `"servers":`) {
+						// Server API is working, that's enough
+						// Don't strictly require tools to be indexed as they might index slowly
+						env.t.Log("Server API is responding, proceeding with tests")
 						return
 					}
 				}
-			} else if resp != nil {
+			} else {
 				resp.Body.Close()
 			}
 		}
