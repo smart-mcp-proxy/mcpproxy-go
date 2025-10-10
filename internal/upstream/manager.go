@@ -289,18 +289,46 @@ func (m *Manager) GetAllServerNames() []string {
 
 // DiscoverTools discovers all tools from all connected upstream servers
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	type clientSnapshot struct {
+		id      string
+		name    string
+		enabled bool
+		client  *managed.Client
+	}
+
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	snapshots := make([]clientSnapshot, 0, len(m.clients))
+	for id, client := range m.clients {
+		name := ""
+		if client != nil && client.Config != nil {
+			name = client.Config.Name
+		}
+		snapshots = append(snapshots, clientSnapshot{
+			id:      id,
+			name:    name,
+			enabled: client != nil && client.Config != nil && client.Config.Enabled,
+			client:  client,
+		})
+	}
+	m.mu.RUnlock()
 
 	var allTools []*config.ToolMetadata
 	connectedCount := 0
 
-	for id, client := range m.clients {
-		if !client.Config.Enabled {
+	for _, snapshot := range snapshots {
+		client := snapshot.client
+		if client == nil {
+			continue
+		}
+
+		if !snapshot.enabled {
 			continue
 		}
 		if !client.IsConnected() {
-			m.logger.Debug("Skipping disconnected client", zap.String("id", id), zap.String("state", client.GetState().String()))
+			m.logger.Debug("Skipping disconnected client",
+				zap.String("id", snapshot.id),
+				zap.String("server", snapshot.name),
+				zap.String("state", client.GetState().String()))
 			continue
 		}
 		connectedCount++
@@ -308,7 +336,8 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 		tools, err := client.ListTools(ctx)
 		if err != nil {
 			m.logger.Error("Failed to list tools from client",
-				zap.String("id", id),
+				zap.String("id", snapshot.id),
+				zap.String("server", snapshot.name),
 				zap.Error(err))
 			continue
 		}
