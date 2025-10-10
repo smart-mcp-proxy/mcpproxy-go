@@ -772,9 +772,15 @@ jobs:
 
             ### Usage
 
-            - With tray: `./mcpproxy serve` (default)
-            - Custom port (default: 8080): `./mcpproxy serve --listen :8081`
-            - Headless: `./mcpproxy serve --tray=false`
+            **GUI (Recommended):**
+            - Launch mcpproxy.app from Applications (auto-starts core server)
+            - Manages server via system tray menu
+
+            **CLI:**
+            - Start core server: `mcpproxy serve`
+            - Custom port: `mcpproxy serve --listen 127.0.0.1:8081`
+            - Set API key: `export MCPPROXY_API_KEY=your-secret-key`
+            - Start tray separately: `mcpproxy-tray` (if core already running)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
