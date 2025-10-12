@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -225,6 +226,9 @@ func TestMCPProtocolComplexWorkflows(t *testing.T) {
 	})
 
 	t.Run("Server management workflow", func(t *testing.T) {
+		// Wait briefly to ensure storage sync has completed after first subtest
+		time.Sleep(500 * time.Millisecond)
+
 		// Step 1: List servers
 		output, err := env.CallMCPTool("upstream_servers", map[string]interface{}{
 			"operation": "list",
