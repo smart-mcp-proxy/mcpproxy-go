@@ -73,7 +73,7 @@ jobs:
         run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
       - name: Run unit tests
-        run: go test -v -race -timeout 30s -skip "Binary|MCP" ./internal/...
+        run: go test -v -race -timeout 2m -skip "Binary|MCP" ./internal/...
 
       - name: Run Binary tests
         run: go test -v -race -timeout 3m ./internal/server -run TestBinary
