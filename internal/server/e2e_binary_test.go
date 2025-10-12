@@ -330,6 +330,8 @@ func TestBinaryPerformance(t *testing.T) {
 }
 
 // TestBinaryHealthAndRecovery tests health checks and recovery scenarios
+// Note: This test is skipped in CI due to flakiness with slow server startup/restart times
+// in CI environments. It can take over 60 seconds to complete and may timeout.
 func TestBinaryHealthAndRecovery(t *testing.T) {
 	env := testutil.NewBinaryTestEnv(t)
 	defer env.Cleanup()
