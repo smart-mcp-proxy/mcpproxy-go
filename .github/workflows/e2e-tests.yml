@@ -75,7 +75,16 @@ jobs:
       - name: Run unit tests
         run: go test -v -race -timeout 2m -skip "Binary|MCP" ./internal/...
 
-      - name: Run Binary tests
+      - name: Run Binary tests (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          MCPPROXY_BINARY_PATH: ./mcpproxy.exe
+        run: go test -v -race -timeout 3m ./internal/server -run TestBinary
+
+      - name: Run Binary tests (Unix)
+        if: matrix.os != 'windows-latest'
+        env:
+          MCPPROXY_BINARY_PATH: ./mcpproxy
         run: go test -v -race -timeout 3m ./internal/server -run TestBinary
 
       - name: Run MCP Protocol tests
