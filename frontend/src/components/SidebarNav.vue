@@ -1,9 +1,9 @@
 <template>
   <div class="drawer-side z-40">
     <label for="sidebar-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
-    <aside class="bg-base-100 w-64 min-h-screen flex flex-col border-r border-base-300">
+    <aside class="bg-base-100 w-64 h-screen flex flex-col border-r border-base-300 fixed">
       <!-- Logo Section -->
-      <div class="p-6 border-b border-base-300">
+      <div class="px-6 py-5 border-b border-base-300">
         <router-link to="/" class="flex items-center space-x-3">
           <img src="/src/assets/logo.svg" alt="MCPProxy Logo" class="w-10 h-10" />
           <span class="text-xl font-bold">MCPProxy</span>

@@ -145,8 +145,6 @@ const copyToClipboard = async (text: string) => {
 <style scoped>
 .hints-panel-wrapper {
   margin-top: 2rem;
-  position: sticky;
-  bottom: 1rem;
   z-index: 10;
 }
 
