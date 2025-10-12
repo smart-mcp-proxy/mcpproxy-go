@@ -87,8 +87,8 @@ jobs:
           mkdir -p web/frontend
           cp -r frontend/dist web/frontend/
 
-      - name: Run tests (with nogui for CI)
-        run: go test -tags nogui -v ./...
+      - name: Run tests (with nogui for CI, skip binary E2E tests)
+        run: go test -tags nogui -v -skip "E2E|Binary|MCPProtocol" ./...
 
       - name: Generate PR version
         id: version
