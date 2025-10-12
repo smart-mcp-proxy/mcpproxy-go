@@ -78,13 +78,13 @@ jobs:
       - name: Run Binary tests (Windows)
         if: matrix.os == 'windows-latest'
         env:
-          MCPPROXY_BINARY_PATH: ./mcpproxy.exe
+          MCPPROXY_BINARY_PATH: ${{ github.workspace }}/mcpproxy.exe
         run: go test -v -race -timeout 3m ./internal/server -run TestBinary
 
       - name: Run Binary tests (Unix)
         if: matrix.os != 'windows-latest'
         env:
-          MCPPROXY_BINARY_PATH: ./mcpproxy
+          MCPPROXY_BINARY_PATH: ${{ github.workspace }}/mcpproxy
         run: go test -v -race -timeout 3m ./internal/server -run TestBinary
 
       - name: Run MCP Protocol tests
