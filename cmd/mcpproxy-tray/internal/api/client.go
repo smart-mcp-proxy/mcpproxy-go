@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || windows
 
 package api
 
@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -487,14 +488,24 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 
 // OpenWebUI opens the web control panel in the default browser
 func (c *Client) OpenWebUI() error {
-	url := c.baseURL + "/ui/"
-	if c.apiKey != "" {
-		url += "?apikey=" + c.apiKey
-	}
-	c.logger.Info("Opening web control panel", "url", c.baseURL+"/ui/")
-
-	cmd := exec.Command("open", url)
-	return cmd.Run()
+    url := c.baseURL + "/ui/"
+    if c.apiKey != "" {
+        url += "?apikey=" + c.apiKey
+    }
+    c.logger.Info("Opening web control panel", "url", c.baseURL+"/ui/")
+    switch runtime.GOOS {
+    case "darwin":
+        return exec.Command("open", url).Run()
+    case "windows":
+        // Try rundll32 first
+        if err := exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Run(); err == nil {
+            return nil
+        }
+        // Fallback to cmd start
+        return exec.Command("cmd", "/c", "start", "", url).Run()
+    default:
+        return fmt.Errorf("unsupported OS for OpenWebUI: %s", runtime.GOOS)
+    }
 }
 
 // makeRequest makes an HTTP request to the API with enhanced error handling and retry logic
