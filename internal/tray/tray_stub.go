@@ -50,6 +50,18 @@ func New(_ ServerInterface, logger *zap.SugaredLogger, _ string, _ func()) *App 
 	}
 }
 
+// NewWithAPIClient creates a new tray application with an API client (stub version)
+func NewWithAPIClient(_ ServerInterface, _ interface{ OpenWebUI() error }, logger *zap.SugaredLogger, _ string, _ func()) *App {
+	return &App{
+		logger: logger,
+	}
+}
+
+// SetConnectionState updates the tray's connection state (stub version - does nothing)
+func (a *App) SetConnectionState(_ ConnectionState) {
+	// No-op in stub version
+}
+
 // Run starts the system tray application (stub version - does nothing)
 func (a *App) Run(ctx context.Context) error {
 	a.logger.Info("Tray functionality disabled (nogui/headless build)")

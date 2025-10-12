@@ -12,4 +12,5 @@ const (
 	ConnectionStateConnected    ConnectionState = "connected"
 	ConnectionStateReconnecting ConnectionState = "reconnecting"
 	ConnectionStateDisconnected ConnectionState = "disconnected"
+	ConnectionStateAuthError    ConnectionState = "auth_error"
 )
