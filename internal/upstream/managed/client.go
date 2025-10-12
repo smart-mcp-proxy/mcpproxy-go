@@ -38,8 +38,10 @@ type Client struct {
 	listToolsCancel     context.CancelFunc
 
 	// Background monitoring
-	stopMonitoring chan struct{}
-	monitoringWG   sync.WaitGroup
+	stopMonitoring       chan struct{}
+	monitoringWG         sync.WaitGroup
+	monitoringCancelFunc context.CancelFunc
+	monitoringStarted    bool
 
 	// Reconnection protection
 	reconnectMu         sync.Mutex
@@ -138,11 +140,25 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Debug("🔍 Adding stabilization delay before starting background monitoring",
 		zap.String("server", mc.Config.Name))
 
+	// Create cancellable context for monitoring startup
+	monitoringCtx, monitoringCancel := context.WithCancel(context.Background())
+	mc.monitoringCancelFunc = monitoringCancel
+
 	go func() {
-		time.Sleep(2 * time.Second) // Let connection stabilize
-		mc.logger.Debug("🔍 Starting background monitoring after stabilization delay",
-			zap.String("server", mc.Config.Name))
-		mc.startBackgroundMonitoring()
+		select {
+		case <-time.After(2 * time.Second):
+			// Check if we're still connected before starting monitoring
+			mc.mu.Lock()
+			if mc.monitoringCancelFunc != nil {
+				mc.logger.Debug("🔍 Starting background monitoring after stabilization delay",
+					zap.String("server", mc.Config.Name))
+				mc.startBackgroundMonitoring()
+			}
+			mc.mu.Unlock()
+		case <-monitoringCtx.Done():
+			mc.logger.Debug("🔍 Background monitoring startup cancelled",
+				zap.String("server", mc.Config.Name))
+		}
 	}()
 
 	return nil
@@ -159,6 +175,12 @@ func (mc *Client) Disconnect() error {
 
 	// Ensure no ListTools operations remain after acquiring the lock
 	mc.cancelInFlightListTools()
+
+	// Cancel monitoring startup if it's still pending
+	if mc.monitoringCancelFunc != nil {
+		mc.monitoringCancelFunc()
+		mc.monitoringCancelFunc = nil
+	}
 
 	// Stop background monitoring
 	mc.stopBackgroundMonitoring()
@@ -421,6 +443,8 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 
 // startBackgroundMonitoring starts monitoring the connection health
 func (mc *Client) startBackgroundMonitoring() {
+	// Mark that monitoring has been started
+	mc.monitoringStarted = true
 	mc.monitoringWG.Add(1)
 	go func() {
 		defer mc.monitoringWG.Done()
@@ -430,6 +454,13 @@ func (mc *Client) startBackgroundMonitoring() {
 
 // stopBackgroundMonitoring stops the background monitoring
 func (mc *Client) stopBackgroundMonitoring() {
+	// Only proceed if monitoring was actually started
+	if !mc.monitoringStarted {
+		mc.logger.Debug("Background monitoring was never started, skipping stop",
+			zap.String("server", mc.Config.Name))
+		return
+	}
+
 	close(mc.stopMonitoring)
 
 	// Use a timeout for the wait to prevent hanging during shutdown
@@ -447,6 +478,8 @@ func (mc *Client) stopBackgroundMonitoring() {
 		mc.logger.Warn("Background monitoring stop timed out after 1s, forcing shutdown",
 			zap.String("server", mc.Config.Name))
 	}
+
+	mc.monitoringStarted = false
 
 	// Recreate the channel for potential reuse
 	mc.stopMonitoring = make(chan struct{})

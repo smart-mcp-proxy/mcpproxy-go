@@ -139,13 +139,17 @@ func (s *Server) EventsChannel() <-chan runtime.Event {
 }
 
 // updateStatus updates the current status and notifies subscribers
-func (s *Server) updateStatus(phase, message string) {
+func (s *Server) updateStatus(phase runtime.Phase, message string) {
 	s.runtime.UpdatePhase(phase, message)
 }
 
 func (s *Server) enqueueStatusSnapshot() {
+	snapshot := s.runtime.StatusSnapshot(s.IsRunning())
+	if snapshot != nil {
+		snapshot["listen_addr"] = s.GetListenAddress()
+	}
 	select {
-	case s.statusCh <- s.runtime.StatusSnapshot(s.IsRunning()):
+	case s.statusCh <- snapshot:
 	default:
 	}
 }
@@ -217,20 +221,13 @@ func (s *Server) Start(ctx context.Context) error {
 			return fmt.Errorf("MCP Streamable HTTP server error: %w", err)
 		}
 
-		actualAddr := s.GetListenAddress()
-		if actualAddr == "" {
-			actualAddr = listenAddr
-		}
-
-		// Update status to show server is now running
-		s.updateStatus("Running", fmt.Sprintf("Server is running on %s", actualAddr))
 		s.runtime.SetRunning(true)
 	} else {
 		// Start the MCP server in stdio mode
 		s.logger.Info("Starting MCP server", zap.String("transport", "stdio"))
 
 		// Update status to show server is now running
-		s.updateStatus("Running", "Server is running in stdio mode")
+		s.updateStatus(runtime.PhaseRunning, "Server is running in stdio mode")
 		s.runtime.SetRunning(true)
 
 		// Serve using stdio (standard MCP transport)
@@ -297,44 +294,20 @@ func (s *Server) IsRunning() bool {
 func (s *Server) IsReady() bool {
 	status := s.runtime.CurrentStatus()
 
-	// If server is in error or stopped state, not ready
-	if status.Phase == "Error" || status.Phase == "Stopped" {
+	switch status.Phase {
+	case runtime.PhaseRunning:
+		return true
+	case runtime.PhaseError,
+		runtime.PhaseStopping,
+		runtime.PhaseStopped,
+		runtime.PhaseInitializing,
+		runtime.PhaseLoading,
+		runtime.PhaseStarting:
 		return false
+	default:
+		// Future phases fall back to actual running state.
+		return s.IsRunning()
 	}
-
-	// Get upstream manager to check server connections
-	upstreamManager := s.runtime.UpstreamManager()
-	if upstreamManager == nil {
-		// If no upstream manager, consider ready if server is running
-		return status.Phase != "Loading"
-	}
-
-	// Check all configured servers
-	allClients := upstreamManager.GetAllClients()
-	enabledCount := 0
-	connectedCount := 0
-
-	for _, client := range allClients {
-		if client.Config.Enabled {
-			enabledCount++
-			if client.IsConnected() {
-				connectedCount++
-			}
-		}
-	}
-
-	// Ready if no enabled servers (all disabled or none configured)
-	if enabledCount == 0 {
-		return true
-	}
-
-	// Ready if at least one server is connected
-	if connectedCount > 0 {
-		return true
-	}
-
-	// Still connecting - only ready if we've moved past initial loading
-	return status.Phase == "Ready" || status.Phase == "Starting"
 }
 
 // GetListenAddress returns the address the server is listening on
@@ -615,7 +588,7 @@ func (s *Server) StartServer(ctx context.Context) error {
 			// Only send "Stopped" status if there was no error
 			// If there was an error, the error status should remain
 			if serverError == nil || serverError == context.Canceled {
-				s.updateStatus("Stopped", "Server has stopped")
+				s.updateStatus(runtime.PhaseStopped, "Server has stopped")
 			}
 		}()
 
@@ -625,12 +598,12 @@ func (s *Server) StartServer(ctx context.Context) error {
 		s.runtime.SetRunning(true)
 
 		// Notify about server start
-		s.updateStatus("Starting", "Server is starting...")
+		s.updateStatus(runtime.PhaseStarting, "Server is starting...")
 
 		serverError = s.Start(s.serverCtx)
 		if serverError != nil && serverError != context.Canceled {
 			s.logger.Error("Server error during background start", zap.Error(serverError))
-			s.updateStatus("Error", fmt.Sprintf("Server error: %v", serverError))
+			s.updateStatus(runtime.PhaseError, fmt.Sprintf("Server error: %v", serverError))
 		}
 	}()
 
@@ -680,7 +653,7 @@ func (s *Server) StopServer() error {
 		_ = s.logger.Sync()
 	}
 
-	s.updateStatus("Stopping", "Server is stopping...")
+	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
 
 	// Cancel the server context after cleanup
 	s.logger.Info("STOPSERVER - Cancelling server context")
@@ -703,12 +676,33 @@ func (s *Server) StopServer() error {
 	s.runtime.SetRunning(false)
 
 	// Notify about server stopped with explicit status update
-	s.updateStatus("Stopped", "Server has been stopped")
+	s.updateStatus(runtime.PhaseStopped, "Server has been stopped")
 
 	s.logger.Info("STOPSERVER - All operations completed successfully")
 	_ = s.logger.Sync() // Final log flush
 
 	return nil
+}
+
+func resolveDisplayAddress(actual, requested string) string {
+	host, port, err := net.SplitHostPort(actual)
+	if err != nil {
+		return actual
+	}
+
+	if host == "" || host == "::" || host == "0.0.0.0" {
+		if reqHost, _, reqErr := net.SplitHostPort(requested); reqErr == nil {
+			if reqHost != "" && reqHost != "::" && reqHost != "0.0.0.0" {
+				host = reqHost
+			} else {
+				host = "127.0.0.1"
+			}
+		} else {
+			host = "127.0.0.1"
+		}
+	}
+
+	return net.JoinHostPort(host, port)
 }
 
 // withHSTS adds HTTP Strict Transport Security headers
@@ -819,6 +813,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		return fmt.Errorf("failed to bind to %s: %w", listenAddr, err)
 	}
 	actualAddr := listener.Addr().String()
+	displayAddr := resolveDisplayAddress(actualAddr, listenAddr)
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
@@ -834,8 +829,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	}
 	s.running = true
 	s.runtime.SetRunning(true)
-	s.listenAddr = actualAddr
+	s.listenAddr = displayAddr
 	s.mu.Unlock()
+
+	// Broadcast running status with resolved listen address so readiness checks succeed immediately.
+	s.updateStatus(runtime.PhaseRunning, fmt.Sprintf("Server is running on %s", displayAddr))
 
 	// List all registered endpoints for visibility
 	allEndpoints := []string{
@@ -904,7 +902,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				s.listenAddr = ""
 				s.mu.Unlock()
 				s.runtime.SetRunning(false)
-				s.updateStatus("Error", fmt.Sprintf("HTTPS server failed: %v", err))
+				s.updateStatus(runtime.PhaseError, fmt.Sprintf("HTTPS server failed: %v", err))
 				serverErrCh <- err
 			} else {
 				s.logger.Info("HTTPS server stopped gracefully")
@@ -926,7 +924,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				s.listenAddr = ""
 				s.mu.Unlock()
 				s.runtime.SetRunning(false)
-				s.updateStatus("Error", fmt.Sprintf("HTTP server failed: %v", err))
+				s.updateStatus(runtime.PhaseError, fmt.Sprintf("HTTP server failed: %v", err))
 				serverErrCh <- err
 			} else {
 				s.logger.Info("HTTP server stopped gracefully")

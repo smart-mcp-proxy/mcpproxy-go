@@ -16,16 +16,25 @@ func (r *Runtime) StartBackgroundInitialization() {
 }
 
 func (r *Runtime) backgroundInitialization() {
-	r.UpdatePhase("Loading", "Loading configuration...")
+	if r.CurrentPhase() == PhaseInitializing {
+		r.UpdatePhase(PhaseLoading, "Loading configuration...")
+	} else {
+		r.UpdatePhaseMessage("Loading configuration...")
+	}
 
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("Failed to load configured servers", zap.Error(err))
-		r.UpdatePhase("Error", fmt.Sprintf("Failed to load servers: %v", err))
+		r.UpdatePhase(PhaseError, fmt.Sprintf("Failed to load servers: %v", err))
 		return
 	}
 
 	// Immediately mark as ready - server connections happen in background
-	r.UpdatePhase("Ready", "Server is ready (upstream servers connecting in background)")
+	switch r.CurrentPhase() {
+	case PhaseInitializing, PhaseLoading, PhaseReady:
+		r.UpdatePhase(PhaseReady, "Server is ready (upstream servers connecting in background)")
+	default:
+		r.UpdatePhaseMessage("Server is ready (upstream servers connecting in background)")
+	}
 
 	appCtx := r.AppContext()
 	go r.backgroundConnections(appCtx)
@@ -70,9 +79,7 @@ func (r *Runtime) connectAllWithRetry(ctx context.Context) {
 	}
 
 	if connectedCount < totalCount {
-		if !r.IsRunning() {
-			r.UpdatePhase("Connecting", fmt.Sprintf("Connected to %d/%d servers, retrying...", connectedCount, totalCount))
-		}
+		r.UpdatePhaseMessage(fmt.Sprintf("Connected to %d/%d servers, retrying...", connectedCount, totalCount))
 
 		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()

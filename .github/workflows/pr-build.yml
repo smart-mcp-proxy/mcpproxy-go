@@ -70,8 +70,25 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Run tests (with nogui for CI)
-        run: go test -tags nogui -v ./...
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+
+      - name: Copy frontend dist for embedding
+        run: |
+          rm -rf web/frontend
+          mkdir -p web/frontend
+          cp -r frontend/dist web/frontend/
+
+      - name: Run tests (skip binary E2E tests - not compatible with cross-compilation)
+        run: go test -tags nogui -v -skip "E2E|Binary|MCPProtocol" ./...
 
       - name: Generate PR version
         id: version
@@ -107,17 +124,25 @@ jobs:
             CLEAN_BINARY="mcpproxy"
           fi
 
-          # Create clean binary for archive
+          # Create clean core binary for archive
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
+
+          # Build tray binary for macOS
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "Building mcpproxy-tray for macOS..."
+            go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
+          fi
 
           # Ad-hoc sign macOS binaries (development only)
           if [ "${{ matrix.goos }}" = "darwin" ]; then
-            echo "Ad-hoc signing macOS binary for development..."
+            echo "Ad-hoc signing macOS binaries for development..."
             codesign --force --deep --sign - --identifier "com.smartmcpproxy.mcpproxy.dev" ${CLEAN_BINARY}
-            
+            codesign --force --deep --sign - --identifier "com.smartmcpproxy.mcpproxy-tray.dev" mcpproxy-tray
+
             # Verify signing
             codesign --verify --verbose ${CLEAN_BINARY}
-            echo "Binary signed successfully (development)"
+            codesign --verify --verbose mcpproxy-tray
+            echo "Binaries signed successfully (development)"
           fi
 
           # Create archive with version info
@@ -148,11 +173,12 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           chmod +x scripts/create-dmg.sh
 
-          # Determine binary name
-          CLEAN_BINARY="mcpproxy"
+          # Determine binary names
+          TRAY_BINARY="mcpproxy-tray"
+          CORE_BINARY="mcpproxy"
 
-          # Create DMG
-          ./scripts/create-dmg.sh ${CLEAN_BINARY} ${VERSION} ${{ matrix.goarch }}
+          # Create DMG with both tray and core binaries
+          ./scripts/create-dmg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
 
           # Ad-hoc sign DMG (development only)
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"

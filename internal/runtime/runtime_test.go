@@ -36,7 +36,7 @@ func newTestRuntime(t *testing.T) *Runtime {
 func TestRuntimeUpdateStatusBroadcasts(t *testing.T) {
 	rt := newTestRuntime(t)
 
-	phase := "Ready"
+	phase := PhaseReady
 	message := "All systems go"
 	stats := map[string]interface{}{"total_tools": 3}
 	toolsIndexed := 3
@@ -82,7 +82,7 @@ func TestRuntimeStatusSnapshotReflectsRunningAndListen(t *testing.T) {
 	rt := newTestRuntime(t)
 
 	rt.SetRunning(true)
-	rt.UpdateStatus("Ready", "listening", nil, 0)
+	rt.UpdateStatus(PhaseReady, "listening", nil, 0)
 
 	snapshot := rt.StatusSnapshot(true)
 
@@ -99,11 +99,11 @@ func TestRuntimeUpdatePhaseWithoutUpstreamManager(t *testing.T) {
 
 	rt.upstreamManager = nil
 
-	rt.UpdatePhase("Idle", "No upstream manager")
+	rt.UpdatePhase(PhaseLoading, "No upstream manager")
 
 	status := rt.CurrentStatus()
-	if status.Phase != "Idle" {
-		t.Fatalf("expected phase Idle, got %q", status.Phase)
+	if status.Phase != PhaseLoading {
+		t.Fatalf("expected phase %q, got %q", PhaseLoading, status.Phase)
 	}
 	if status.UpstreamStats != nil {
 		t.Fatalf("expected nil upstream stats, got %#v", status.UpstreamStats)

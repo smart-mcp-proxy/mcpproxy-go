@@ -521,6 +521,74 @@ func buildCoreArgs(coreURL string) []string {
 	return args
 }
 
+func wrapCoreLaunchWithShell(coreBinary string, args []string) (string, []string, error) {
+	shellPath, err := selectUserShell()
+	if err != nil {
+		return "", nil, err
+	}
+
+	command := buildShellExecCommand(coreBinary, args)
+	return shellPath, []string{"-l", "-c", command}, nil
+}
+
+func selectUserShell() (string, error) {
+	candidates := []string{}
+	if shellEnv := strings.TrimSpace(os.Getenv("SHELL")); shellEnv != "" {
+		candidates = append(candidates, shellEnv)
+	}
+	candidates = append(candidates,
+		"/bin/zsh",
+		"/bin/bash",
+		"/bin/sh",
+	)
+
+	seen := make(map[string]struct{})
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("no usable shell found for core launch")
+}
+
+func buildShellExecCommand(binary string, args []string) string {
+	quoted := make([]string, 0, len(args)+1)
+	quoted = append(quoted, shellQuote(binary))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+
+	return "exec " + strings.Join(quoted, " ")
+}
+
+func shellQuote(arg string) string {
+	if arg == "" {
+		return "''"
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(arg) + 2)
+	builder.WriteByte('\'')
+	for i := 0; i < len(arg); i++ {
+		if arg[i] == '\'' {
+			builder.WriteString("'\\''")
+		} else {
+			builder.WriteByte(arg[i])
+		}
+	}
+	builder.WriteByte('\'')
+	return builder.String()
+}
+
 func listenArgFromURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -750,15 +818,34 @@ func (cpl *CoreProcessLauncher) handleLaunchCore(_ context.Context) {
 	args := buildCoreArgs(cpl.coreURL)
 	env := cpl.buildCoreEnvironment()
 
+	launchBinary := coreBinary
+	launchArgs := args
+	wrappedWithShell := false
+
+	if shellBinary, shellArgs, err := wrapCoreLaunchWithShell(coreBinary, args); err != nil {
+		cpl.logger.Warn("Falling back to direct core launch", "error", err)
+	} else {
+		launchBinary = shellBinary
+		launchArgs = shellArgs
+		wrappedWithShell = true
+	}
+
 	cpl.logger.Info("Starting core process",
-		"binary", coreBinary,
-		"args", cpl.maskSensitiveArgs(args),
-		"env_count", len(env))
+		"binary", launchBinary,
+		"args", cpl.maskSensitiveArgs(launchArgs),
+		"env_count", len(env),
+		"wrapped_with_shell", wrappedWithShell)
+
+	if wrappedWithShell {
+		cpl.logger.Debug("Wrapped core command",
+			"core_binary", coreBinary,
+			"core_args", cpl.maskSensitiveArgs(args))
+	}
 
 	// Create process configuration
 	processConfig := monitor.ProcessConfig{
-		Binary:        coreBinary,
-		Args:          args,
+		Binary:        launchBinary,
+		Args:          launchArgs,
 		Env:           env,
 		StartTimeout:  cpl.coreTimeout,
 		CaptureOutput: true,

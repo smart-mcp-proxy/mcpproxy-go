@@ -100,13 +100,11 @@ coverage.txt
 # Cache directories
 .cache/
 *.cache 
-cmd/mcpproxy/mcpproxy
 data/
 .cursor/
 assets/mcpproxy.icns
 build-info.json
 .claude/
-mcpproxy-tray
 config.db.backup.*
 node_modules/
 certs/
@@ -117,3 +115,9 @@ web/assets/
 
 # Internal documentation (not tracked in git)
 internal_docs/
+# Exclude the binary in the root directory
+/mcpproxy-tray
+
+# Keep cmd/mcpproxy-tray/ directory and its contents (this line is optional)
+!cmd/mcpproxy-tray/
+!cmd/mcpproxy-tray/**

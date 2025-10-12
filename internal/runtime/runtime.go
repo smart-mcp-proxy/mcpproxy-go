@@ -28,7 +28,7 @@ import (
 
 // Status captures high-level state for API consumers.
 type Status struct {
-	Phase         string                 `json:"phase"`
+	Phase         Phase                  `json:"phase"`
 	Message       string                 `json:"message"`
 	UpstreamStats map[string]interface{} `json:"upstream_stats"`
 	ToolsIndexed  int                    `json:"tools_indexed"`
@@ -47,6 +47,8 @@ type Runtime struct {
 	statusMu sync.RWMutex
 	status   Status
 	statusCh chan Status
+
+	phaseMachine *phaseMachine
 
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
@@ -130,12 +132,13 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		appCtx:          appCtx,
 		appCancel:       appCancel,
 		status: Status{
-			Phase:       "Initializing",
+			Phase:       PhaseInitializing,
 			Message:     "Runtime is initializing...",
 			LastUpdated: time.Now(),
 		},
-		statusCh:  make(chan Status, 10),
-		eventSubs: make(map[chan Event]struct{}),
+		statusCh:     make(chan Status, 10),
+		eventSubs:    make(map[chan Event]struct{}),
+		phaseMachine: newPhaseMachine(PhaseInitializing),
 	}
 
 	return rt, nil
@@ -203,7 +206,7 @@ func (r *Runtime) IsRunning() bool {
 }
 
 // UpdateStatus mutates the status object and notifies subscribers.
-func (r *Runtime) UpdateStatus(phase, message string, stats map[string]interface{}, toolsIndexed int) {
+func (r *Runtime) UpdateStatus(phase Phase, message string, stats map[string]interface{}, toolsIndexed int) {
 	r.statusMu.Lock()
 	r.status.Phase = phase
 	r.status.Message = message
@@ -213,18 +216,23 @@ func (r *Runtime) UpdateStatus(phase, message string, stats map[string]interface
 	snapshot := r.status
 	r.statusMu.Unlock()
 
+	if r.phaseMachine != nil {
+		// Ensure phase machine mirrors the externally provided phase even if this skips validation
+		r.phaseMachine.Set(phase)
+	}
+
 	select {
 	case r.statusCh <- snapshot:
 	default:
 	}
 
 	if r.logger != nil {
-		r.logger.Info("Status updated", zap.String("phase", phase), zap.String("message", message))
+		r.logger.Info("Status updated", zap.String("phase", string(phase)), zap.String("message", message))
 	}
 }
 
 // UpdatePhase gathers runtime metrics and broadcasts a status update.
-func (r *Runtime) UpdatePhase(phase, message string) {
+func (r *Runtime) UpdatePhase(phase Phase, message string) {
 	var (
 		stats map[string]interface{}
 		tools int
@@ -235,6 +243,34 @@ func (r *Runtime) UpdatePhase(phase, message string) {
 		tools = extractToolCount(stats)
 	}
 
+	if r.phaseMachine != nil {
+		if !r.phaseMachine.Transition(phase) {
+			if r.logger != nil {
+				current := r.phaseMachine.Current()
+				r.logger.Warn("Rejected runtime phase transition",
+					zap.String("from", string(current)),
+					zap.String("to", string(phase)))
+			}
+			phase = r.phaseMachine.Current()
+		}
+	}
+
+	r.UpdateStatus(phase, message, stats, tools)
+}
+
+// UpdatePhaseMessage refreshes the status message without moving to a new phase.
+func (r *Runtime) UpdatePhaseMessage(message string) {
+	var (
+		stats map[string]interface{}
+		tools int
+	)
+
+	if r.upstreamManager != nil {
+		stats = r.upstreamManager.GetStats()
+		tools = extractToolCount(stats)
+	}
+
+	phase := r.CurrentPhase()
 	r.UpdateStatus(phase, message, stats, tools)
 }
 
@@ -273,6 +309,17 @@ func (r *Runtime) CurrentStatus() Status {
 	r.statusMu.RLock()
 	defer r.statusMu.RUnlock()
 	return r.status
+}
+
+// CurrentPhase returns the current lifecycle phase.
+func (r *Runtime) CurrentPhase() Phase {
+	if r.phaseMachine != nil {
+		return r.phaseMachine.Current()
+	}
+
+	r.statusMu.RLock()
+	defer r.statusMu.RUnlock()
+	return r.status.Phase
 }
 
 // Logger returns the runtime logger.
