@@ -677,7 +677,6 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		statusIcon = "⏸️"
 		statusText = "disabled"
 		iconPath = iconPaused
-<<<<<<< HEAD
 	} else if st := strings.ToLower(statusValue); st != "" {
 		switch st {
 		case "ready", "connected":
@@ -709,7 +708,6 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		statusIcon = "🔴"
 		statusText = "disconnected"
 		iconPath = iconDisconnected
-<<<<<<< HEAD
 	}
 
 	// On Windows, use icons instead of emoji for better visual appearance

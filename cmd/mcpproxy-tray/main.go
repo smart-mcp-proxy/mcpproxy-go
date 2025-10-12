@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || windows
 
 package main
 
@@ -446,8 +446,11 @@ func findMcpproxyBinary() (string, error) {
 		}
 	}
 
-	// 2. Working-directory relative binary (local dev workflow).
-	addCandidate(filepath.Join(".", "mcpproxy"))
+    // 2. Working-directory relative binary (local dev workflow).
+    addCandidate(filepath.Join(".", "mcpproxy"))
+    if runtime.GOOS == platformWindows {
+        addCandidate(filepath.Join(".", "mcpproxy-windows-amd64"))
+    }
 
 	// 3. Managed installation directories (Application Support on macOS).
 	if homeDir, err := os.UserHomeDir(); err == nil {
@@ -457,7 +460,7 @@ func findMcpproxyBinary() (string, error) {
 		}
 	}
 
-	// 4. Common package manager locations.
+    // 4. Common package manager locations.
 	addCandidate("/opt/homebrew/bin/mcpproxy")
 	addCandidate("/usr/local/bin/mcpproxy")
 
@@ -477,6 +480,36 @@ func findMcpproxyBinary() (string, error) {
 
 func resolveExecutableCandidate(path string) (string, bool) {
 	var abs string
+	if runtime.GOOS == platformWindows {
+		candidate := path
+		lower := strings.ToLower(candidate)
+		// try adding .exe if not present
+		if !strings.HasSuffix(lower, ".exe") {
+			if filepath.IsAbs(candidate) {
+				candidate = candidate + ".exe"
+			} else {
+				candidate = candidate + ".exe"
+			}
+		}
+
+		if filepath.IsAbs(candidate) {
+			abs = candidate
+		} else {
+			var err error
+			abs, err = filepath.Abs(candidate)
+			if err != nil {
+				return "", false
+			}
+		}
+
+		info, err := os.Stat(abs)
+		if err != nil || info.IsDir() {
+			return "", false
+		}
+		// On Windows, execute bit is not meaningful; presence is enough
+		return abs, true
+	}
+
 	if filepath.IsAbs(path) {
 		abs = path
 	} else {
@@ -946,8 +979,63 @@ func (cpl *CoreProcessLauncher) handleReconnecting(_ context.Context) {
 
 // handlePortConflictError handles port conflict errors
 func (cpl *CoreProcessLauncher) handlePortConflictError() {
-	cpl.logger.Warn("Core failed due to port conflict")
-	// Could implement automatic port resolution here
+    cpl.logger.Warn("Core failed due to port conflict")
+    // Attempt automatic port resolution on Windows/macOS
+    // 1) Parse current coreURL and extract port
+    u, err := url.Parse(cpl.coreURL)
+    if err != nil {
+        cpl.logger.Error("Failed to parse coreURL for port conflict handling", "core_url", cpl.coreURL, "error", err)
+        return
+    }
+    portStr := u.Port()
+    if portStr == "" {
+        portStr = "8080"
+    }
+    baseHost := u.Hostname()
+    if baseHost == "" {
+        baseHost = "127.0.0.1"
+    }
+    // 2) Find next available port
+    startPort, _ := strconv.Atoi(portStr)
+    newPort, err := findNextAvailablePort(startPort + 1, startPort+50)
+    if err != nil {
+        cpl.logger.Error("Failed to find available port after conflict", "start_port", startPort, "error", err)
+        return
+    }
+    // 3) Update coreURL and restart flow
+    u.Host = net.JoinHostPort(baseHost, strconv.Itoa(newPort))
+    cpl.coreURL = u.String()
+    cpl.logger.Info("Auto-selected alternate port after conflict", "new_core_url", cpl.coreURL)
+
+    // Stop monitors so they can be recreated with new URL
+    if cpl.healthMonitor != nil {
+        cpl.healthMonitor.Stop()
+        cpl.healthMonitor = nil
+    }
+    if cpl.processMonitor != nil {
+        cpl.processMonitor.Shutdown()
+        cpl.processMonitor = nil
+    }
+    // Trigger retry which will launch core with updated args based on coreURL
+    cpl.stateMachine.SendEvent(state.EventRetry)
+}
+
+// findNextAvailablePort scans a range and returns the first free port on localhost
+func findNextAvailablePort(start, end int) (int, error) {
+    if start < 1 {
+        start = 1
+    }
+    if end <= start {
+        end = start + 50
+    }
+    for p := start; p <= end; p++ {
+        ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
+        if err == nil {
+            _ = ln.Close()
+            return p, nil
+        }
+    }
+    return 0, fmt.Errorf("no free port in range %d-%d", start, end)
 }
 
 // handleDBLockedError handles database locked errors

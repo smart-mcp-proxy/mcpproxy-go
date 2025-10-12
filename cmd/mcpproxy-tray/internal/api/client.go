@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || windows
 
 package api
 
@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -571,14 +572,32 @@ func (c *Client) OpenWebUI() error {
 		c.logger.Info("Opening web control panel", "url", displayURL)
 	}
 
-	cmd := exec.Command("open", url)
-	if err := cmd.Run(); err != nil {
-		if c.logger != nil {
-			c.logger.Error("Failed to open web control panel", "url", displayURL, "error", err)
+	switch runtime.GOOS {
+	case "darwin":
+		cmd := exec.Command("open", url)
+		if err := cmd.Run(); err != nil {
+			if c.logger != nil {
+				c.logger.Error("Failed to open web control panel", "url", displayURL, "error", err)
+			}
+			return fmt.Errorf("failed to open web control panel: %w", err)
 		}
-		return fmt.Errorf("failed to open web control panel: %w", err)
+		return nil
+	case "windows":
+		// Try rundll32 first
+		if err := exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Run(); err == nil {
+			return nil
+		}
+		// Fallback to cmd start
+		if err := exec.Command("cmd", "/c", "start", "", url).Run(); err != nil {
+			if c.logger != nil {
+				c.logger.Error("Failed to open web control panel", "url", displayURL, "error", err)
+			}
+			return fmt.Errorf("failed to open web control panel: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported OS for OpenWebUI: %s", runtime.GOOS)
 	}
-	return nil
 }
 
 // makeRequest makes an HTTP request to the API with enhanced error handling and retry logic

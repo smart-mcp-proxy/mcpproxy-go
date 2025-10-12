@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "MCPProxy Web Control Panel - Vue 3 + TypeScript + DaisyUI",
   "type": "module",
+  "engines": {
+    "node": ">=18.18.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build",
