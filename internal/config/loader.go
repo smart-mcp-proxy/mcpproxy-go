@@ -204,6 +204,12 @@ func loadConfigFile(path string, cfg *Config) error {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	// Empty file (including /dev/null) is treated as no configuration
+	// This allows --config=/dev/null to work as "use defaults only"
+	if len(data) == 0 {
+		return nil
+	}
+
 	// First check if api_key is present in the JSON to distinguish between
 	// "not set" vs "explicitly set to empty"
 	var rawConfig map[string]interface{}
