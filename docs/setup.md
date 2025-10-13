@@ -7,6 +7,7 @@ A comprehensive guide to connect mcpproxy (http-streamable) to popular MCP clien
 MCPProxy is a smart Model Context Protocol (MCP) proxy that provides intelligent tool discovery and proxying for MCP servers. It runs as an HTTP server that aggregates multiple upstream MCP servers into a single endpoint, making it easy to connect multiple AI tools and services to your favorite IDE or AI assistant.
 
 **Key Features:**
+
 - **HTTP Streamable**: Uses MCP's streamable HTTP transport for efficient communication
 - **Smart Tool Discovery**: Automatically indexes and searches tools from multiple upstream servers
 - **Unified Interface**: Single endpoint for multiple MCP servers
@@ -21,11 +22,13 @@ MCPProxy is a smart Model Context Protocol (MCP) proxy that provides intelligent
 Download the DMG installer from [GitHub Releases](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) for the easiest installation experience.
 
 **macOS (Homebrew):**
+
 ```bash
 brew install smart-mcp-proxy/mcpproxy/mcpproxy
 ```
 
 **Go Install:**
+
 ```bash
 go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest
 ```
@@ -33,6 +36,7 @@ go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest
 ### 2. Run MCPProxy
 
 **From Terminal:**
+
 ```bash
 mcpproxy serve
 ```
@@ -42,6 +46,7 @@ mcpproxy serve
 This starts MCPProxy on the default port `:8080` with HTTP endpoint at `http://localhost:8080/mcp/`
 
 **📝 Note:**
+
 - MCPProxy starts with **HTTP by default** for immediate compatibility
 - HTTPS is available optionally for enhanced security (see [HTTPS Setup](#optional-https-setup) below)
 - At first launch, MCPProxy will automatically generate a minimal configuration file if none exists
@@ -51,6 +56,7 @@ This starts MCPProxy on the default port `:8080` with HTTP endpoint at `http://l
 **Check if port 8080 is already in use:**
 
 **macOS/Linux:**
+
 ```bash
 lsof -i :8080
 # or
@@ -58,11 +64,13 @@ netstat -an | grep 8080
 ```
 
 **Windows:**
+
 ```bash
 netstat -an | findstr 8080
 ```
 
 **Change Default Port:**
+
 ```bash
 mcpproxy serve --listen :8081
 # or set in config file
@@ -72,13 +80,14 @@ mcpproxy serve --listen :8081
 
 MCPProxy looks for configuration in these locations (in order):
 
-| OS | Config Location |
-|---|---|
-| **macOS** | `~/.mcpproxy/mcp_config.json` |
+| OS          | Config Location                           |
+| ----------- | ----------------------------------------- |
+| **macOS**   | `~/.mcpproxy/mcp_config.json`             |
 | **Windows** | `%USERPROFILE%\.mcpproxy\mcp_config.json` |
-| **Linux** | `~/.mcpproxy/mcp_config.json` |
+| **Linux**   | `~/.mcpproxy/mcp_config.json`             |
 
 **Sample Configuration:**
+
 ```jsonc
 {
   "listen": ":8080",
@@ -91,8 +100,19 @@ MCPProxy looks for configuration in these locations (in order):
   "tool_response_limit": 20000,
 
   "mcpServers": [
-    { "name": "local-python", "command": "python", "args": ["-m", "my_server"], "type": "stdio", "enabled": true },
-    { "name": "remote-http", "url": "http://localhost:3001", "type": "http", "enabled": true }
+    {
+      "name": "local-python",
+      "command": "python",
+      "args": ["-m", "my_server"],
+      "type": "stdio",
+      "enabled": true
+    },
+    {
+      "name": "remote-http",
+      "url": "http://localhost:3001",
+      "type": "http",
+      "enabled": true
+    }
   ]
 }
 ```
@@ -104,10 +124,12 @@ MCPProxy looks for configuration in these locations (in order):
 ### 🎯 Cursor IDE
 
 **Method 1: One-Click Install**
+
 1. Visit: https://mcpproxy.app/cursor-install.html
 2. Click "Install in Cursor IDE"
 
 **Method 2: Manual Setup**
+
 1. Open Cursor Settings (`Cmd/Ctrl + ,`)
 2. Click "Tools & Integrations"
 3. Add MCP Server with this configuration:
@@ -122,6 +144,7 @@ MCPProxy looks for configuration in these locations (in order):
 ```
 
 **Verification:**
+
 - **Option 1:** Restart Cursor completely
 - **Option 2:** Disable and re-enable the MCP server in Cursor Settings > Tools & Integrations
 - **⚠️ Important:** Make sure MCPProxy is running (check for tray icon if enabled)
@@ -134,6 +157,7 @@ MCPProxy looks for configuration in these locations (in order):
 VS Code has built-in MCP support starting from version 1.102.
 
 **Setup Steps:**
+
 1. Install **GitHub Copilot** and **Copilot Chat** extensions
 2. Open VS Code Settings (`Cmd/Ctrl + ,`)
 3. Search for "mcp" in settings
@@ -161,7 +185,7 @@ Create `.vscode/mcp.json` in your workspace:
 {
   "servers": {
     "MCPProxy": {
-      "type": "http", 
+      "type": "http",
       "url": "http://localhost:8080/mcp/"
     }
   }
@@ -169,8 +193,9 @@ Create `.vscode/mcp.json` in your workspace:
 ```
 
 **Usage:**
+
 1. Open Copilot Chat
-2. Select **Agent Mode** 
+2. Select **Agent Mode**
 3. Click Tools icon to see available tools
 4. MCPProxy tools will be listed
 
@@ -192,11 +217,11 @@ Add mcpproxy as a remote MCP server via Settings → Connectors → Add Custom C
 
 **Configuration Paths:**
 
-| OS | Claude Desktop Config Path |
-|---|---|
-| **macOS** | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| **Windows** | `%APPDATA%\Claude\claude_desktop_config.json` |
-| **Linux** | `~/.config/Claude/claude_desktop_config.json` |
+| OS          | Claude Desktop Config Path                                        |
+| ----------- | ----------------------------------------------------------------- |
+| **macOS**   | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| **Windows** | `%APPDATA%\Claude\claude_desktop_config.json`                     |
+| **Linux**   | `~/.config/Claude/claude_desktop_config.json`                     |
 
 **Setup Steps:**
 
@@ -205,18 +230,21 @@ Add mcpproxy as a remote MCP server via Settings → Connectors → Add Custom C
 1. Create the config file if it doesn't exist:
 
 **macOS:**
+
 ```bash
 mkdir -p ~/Library/Application\ Support/Claude/
 touch ~/Library/Application\ Support/Claude/claude_desktop_config.json
 ```
 
 **Windows:**
+
 ```bash
 mkdir "%APPDATA%\Claude"
 type nul > "%APPDATA%\Claude\claude_desktop_config.json"
 ```
 
 **Linux:**
+
 ```bash
 mkdir -p ~/.config/Claude/
 touch ~/.config/Claude/claude_desktop_config.json
@@ -259,16 +287,18 @@ touch ~/.config/Claude/claude_desktop_config.json
 Goose is a command-line AI agent that supports MCP servers through its extension system.
 
 **Prerequisites:**
+
 - Python 3.8+ or Go 1.19+
 - Goose installed: https://github.com/block/goose
 
 **Setup via CLI:**
+
 ```bash
 # Configure Goose
 goose configure
 
 # Choose: Add Extension
-# Choose: Remote Extension  
+# Choose: Remote Extension
 # Name: MCPProxy
 # URL: http://localhost:8080/mcp/
 # Timeout: 300 (default)
@@ -286,6 +316,7 @@ extensions:
 ```
 
 **Usage:**
+
 ```bash
 # Start Goose session
 goose
@@ -315,11 +346,14 @@ MCPProxy supports secure HTTPS connections with automatic certificate generation
 ### Quick HTTPS Setup
 
 **Step 1: Install Certificate (One-time setup)**
+
 ```bash
 # Trust the mcpproxy CA certificate
 mcpproxy trust-cert
 ```
+
 This command will:
+
 - Generate a local CA certificate if needed
 - Install it to your system's trusted certificate store
 - Prompt for your password once (required for keychain access)
@@ -329,6 +363,7 @@ This command will:
 Choose one of these methods:
 
 **Option A: Environment Variable (Temporary)**
+
 ```bash
 export MCPPROXY_TLS_ENABLED=true
 mcpproxy serve
@@ -336,6 +371,7 @@ mcpproxy serve
 
 **Option B: Configuration File (Permanent)**
 Edit `~/.mcpproxy/mcp_config.json`:
+
 ```json
 {
   "listen": ":8080",
@@ -352,6 +388,7 @@ Edit `~/.mcpproxy/mcp_config.json`:
 After enabling HTTPS, update your client configurations to use `https://` URLs:
 
 **Cursor IDE:**
+
 ```json
 {
   "MCPProxy": {
@@ -362,6 +399,7 @@ After enabling HTTPS, update your client configurations to use `https://` URLs:
 ```
 
 **VS Code:**
+
 ```json
 {
   "mcp": {
@@ -376,6 +414,7 @@ After enabling HTTPS, update your client configurations to use `https://` URLs:
 ```
 
 **Claude Desktop (with certificate trust):**
+
 ```json
 {
   "mcpServers": {
@@ -393,6 +432,7 @@ After enabling HTTPS, update your client configurations to use `https://` URLs:
 ### HTTPS Configuration Options
 
 **Basic HTTPS (Recommended):**
+
 ```json
 {
   "tls": {
@@ -402,6 +442,7 @@ After enabling HTTPS, update your client configurations to use `https://` URLs:
 ```
 
 **Advanced HTTPS with mTLS:**
+
 ```json
 {
   "tls": {
@@ -414,6 +455,7 @@ After enabling HTTPS, update your client configurations to use `https://` URLs:
 ```
 
 **Configuration Options:**
+
 - `enabled`: Enable/disable HTTPS (default: `false`)
 - `require_client_cert`: Enable mutual TLS (mTLS) for client authentication
 - `certs_dir`: Custom directory for certificates (default: `{data_dir}/certs`)
@@ -422,11 +464,13 @@ After enabling HTTPS, update your client configurations to use `https://` URLs:
 ### Certificate Management
 
 **Certificate Locations:**
+
 - **CA Certificate**: `~/.mcpproxy/certs/ca.pem`
 - **Server Certificate**: `~/.mcpproxy/certs/localhost.pem`
 - **Private Keys**: `~/.mcpproxy/certs/*.key` (automatically secured)
 
 **View Certificate Details:**
+
 ```bash
 # View CA certificate info
 openssl x509 -in ~/.mcpproxy/certs/ca.pem -text -noout
@@ -436,6 +480,7 @@ openssl verify -CAfile ~/.mcpproxy/certs/ca.pem ~/.mcpproxy/certs/localhost.pem
 ```
 
 **Regenerate Certificates:**
+
 ```bash
 # Remove existing certificates
 rm -rf ~/.mcpproxy/certs
@@ -452,6 +497,7 @@ mcpproxy trust-cert
 **Certificate Trust Issues:**
 
 If you get SSL/TLS errors, verify certificate trust:
+
 ```bash
 # Test certificate trust
 curl -f https://localhost:8080/health
@@ -463,6 +509,7 @@ mcpproxy trust-cert --force
 **Claude Desktop Certificate Issues:**
 
 If Claude Desktop shows certificate errors:
+
 1. Ensure `NODE_EXTRA_CA_CERTS` points to the correct certificate path
 2. Use absolute path: `/Users/yourusername/.mcpproxy/certs/ca.pem`
 3. Restart Claude Desktop after configuration changes
@@ -470,6 +517,7 @@ If Claude Desktop shows certificate errors:
 **Browser Certificate Warnings:**
 
 When accessing the Web UI at `https://localhost:8080/ui/`:
+
 1. Click "Advanced" on the certificate warning
 2. Click "Proceed to localhost (unsafe)"
 3. This is expected for self-signed certificates
@@ -488,12 +536,13 @@ When accessing the Web UI at `https://localhost:8080/ui/`:
 ### Check Current Port Usage
 
 **Find MCPProxy Process:**
+
 ```bash
 # macOS/Linux
 ps aux | grep mcpproxy
 lsof -i :8080
 
-# Windows  
+# Windows
 tasklist | findstr mcpproxy
 netstat -ano | findstr :8080
 ```
@@ -501,6 +550,7 @@ netstat -ano | findstr :8080
 ### Change Default Port
 
 **Command Line:**
+
 ```bash
 mcpproxy serve --listen :8081
 mcpproxy serve --listen :9000
@@ -508,14 +558,16 @@ mcpproxy serve --listen 127.0.0.1:8080  # Bind to specific interface
 ```
 
 **Configuration File:**
+
 ```json
 {
-  "listen": ":8081",
+  "listen": ":8081"
   // ... rest of config
 }
 ```
 
 **Environment Variable:**
+
 ```bash
 export MCPPROXY_LISTEN=":8081"
 mcpproxy serve
@@ -528,7 +580,7 @@ mcpproxy serve
 Run multiple MCPProxy instances on different ports:
 
 ```bash
-# Instance 1 - Development  
+# Instance 1 - Development
 mcpproxy serve --config dev_config.json --listen :8080
 
 # Instance 2 - Production
@@ -540,6 +592,7 @@ mcpproxy serve --config prod_config.json --listen :8081
 ### Common Issues
 
 **1. Port Already in Use**
+
 ```bash
 # Kill process using port 8080
 lsof -ti:8080 | xargs kill -9  # macOS/Linux
@@ -548,6 +601,7 @@ taskkill /PID <PID> /F          # Windows
 ```
 
 **2. MCPProxy Not Starting**
+
 ```bash
 # Check logs
 mcpproxy serve --log-level debug
@@ -557,6 +611,7 @@ mcpproxy serve --config ~/.mcpproxy/mcp_config.json --log-level debug
 ```
 
 **3. Client Connection Issues**
+
 - Verify MCPProxy is running: Check process with `ps aux | grep mcpproxy`
 - Check firewall settings
 - Ensure correct URL in client config
@@ -564,6 +619,7 @@ mcpproxy serve --config ~/.mcpproxy/mcp_config.json --log-level debug
 - Check tray icon (if enabled) for status
 
 **4. Tools Not Appearing**
+
 - Check MCPProxy upstream server configuration
 - Verify upstream servers are running
 - Check MCPProxy logs for errors
@@ -571,6 +627,7 @@ mcpproxy serve --config ~/.mcpproxy/mcp_config.json --log-level debug
 - Use `mcpproxy tools list --server=SERVER_NAME` to test individual servers
 
 **5. Server Connection Problems**
+
 - Test individual servers: `mcpproxy tools list --server=SERVER_NAME --log-level=trace`
 - Check authentication: Look for OAuth URLs in console output
 - Verify server configuration: Ensure URL, command, and protocol are correct
@@ -579,6 +636,7 @@ mcpproxy serve --config ~/.mcpproxy/mcp_config.json --log-level debug
 ### Debug Commands
 
 **Test MCPProxy Status:**
+
 ```bash
 # Check if MCPProxy is running
 ps aux | grep mcpproxy
@@ -591,6 +649,7 @@ mcpproxy serve --log-level debug
 ```
 
 **Debug Individual Servers:**
+
 ```bash
 # List tools from a specific server with detailed debugging
 mcpproxy tools list --server=github-server --log-level=trace
@@ -607,6 +666,7 @@ mcpproxy tools list --server=weather-api --output=json
 **📝 Note:** MCPProxy uses the MCP protocol over HTTP, not simple REST endpoints. Use MCP clients to interact with the server, not direct curl commands.
 
 **View Logs:**
+
 ```bash
 # Real-time logs (macOS/Linux)
 tail -f ~/Library/Logs/mcpproxy/main.log
@@ -624,11 +684,11 @@ tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 
 ```json
 {
-  "listen": "127.0.0.1:8080",    // Bind to localhost only
-  "read_only_mode": true,        // Prevent configuration changes
-  "disable_management": true,     // Disable server management tools
-  "allow_server_add": false,     // Prevent adding new servers
-  "allow_server_remove": false   // Prevent removing servers
+  "listen": "127.0.0.1:8080", // Bind to localhost only
+  "read_only_mode": true, // Prevent configuration changes
+  "disable_management": true, // Disable server management tools
+  "allow_server_add": false, // Prevent adding new servers
+  "allow_server_remove": false // Prevent removing servers
 }
 ```
 
@@ -636,9 +696,9 @@ tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 
 ```json
 {
-  "top_k": 10,                   // More search results
-  "tools_limit": 25,             // More tools per request
-  "tool_response_limit": 50000   // Larger response limit
+  "top_k": 10, // More search results
+  "tools_limit": 25, // More tools per request
+  "tool_response_limit": 50000 // Larger response limit
 }
 ```
 
@@ -679,4 +739,4 @@ For servers requiring authentication:
 
 ---
 
-*Need help? Join our community or open an issue on GitHub.* 
+_Need help? Join our community or open an issue on GitHub._
