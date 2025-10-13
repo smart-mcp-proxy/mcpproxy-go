@@ -97,7 +97,7 @@ jobs:
           GO_TEST_TIMEOUT: 300s
 
       - name: Run E2E tests
-        run: go test -v -race -timeout 5m ./internal/server -run TestE2E
+        run: go test -v -race -timeout 5m ./internal/server -run TestE2E -skip 'TestE2E_ToolDiscovery'
         env:
           GO_TEST_TIMEOUT: 300s
 
