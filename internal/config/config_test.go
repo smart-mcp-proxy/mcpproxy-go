@@ -441,6 +441,62 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	}
 }
 
+func TestLoadEmptyConfigFile(t *testing.T) {
+	// Test that empty config files (including /dev/null) are handled gracefully
+	tests := []struct {
+		name     string
+		setupFn  func(t *testing.T) string
+		cleanupFn func(string)
+	}{
+		{
+			name: "empty file",
+			setupFn: func(t *testing.T) string {
+				tempDir, err := os.MkdirTemp("", "mcpproxy_empty_test")
+				require.NoError(t, err)
+				emptyFile := filepath.Join(tempDir, "empty.json")
+				err = os.WriteFile(emptyFile, []byte{}, 0644)
+				require.NoError(t, err)
+				return emptyFile
+			},
+			cleanupFn: func(path string) {
+				os.RemoveAll(filepath.Dir(path))
+			},
+		},
+		{
+			name: "/dev/null",
+			setupFn: func(t *testing.T) string {
+				// Only test /dev/null on Unix-like systems
+				if _, err := os.Stat("/dev/null"); err != nil {
+					t.Skip("Skipping /dev/null test on non-Unix system")
+				}
+				return "/dev/null"
+			},
+			cleanupFn: func(path string) {
+				// No cleanup needed for /dev/null
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := tt.setupFn(t)
+			defer tt.cleanupFn(configPath)
+
+			// Create a config with default values
+			cfg := DefaultConfig()
+
+			// Load from empty file should succeed and not modify the config
+			err := loadConfigFile(configPath, cfg)
+			require.NoError(t, err, "loadConfigFile should handle empty files gracefully")
+
+			// Verify the config still has default values
+			assert.Equal(t, "127.0.0.1:8080", cfg.Listen, "Default listen address should be preserved")
+			assert.True(t, cfg.EnableTray, "Default EnableTray should be preserved")
+			assert.Equal(t, 5, cfg.TopK, "Default TopK should be preserved")
+		})
+	}
+}
+
 func TestCreateSampleConfig(t *testing.T) {
 	// Create a temporary directory for testing
 	tempDir, err := os.MkdirTemp("", "mcpproxy_sample_test")
