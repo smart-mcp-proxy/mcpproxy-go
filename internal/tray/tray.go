@@ -507,6 +507,7 @@ func (a *App) onReady() {
 		a.instrumentation.NotifyMenus()
 	})
 	a.instrumentation.NotifyMenus()
+	a.logger.Info("Tray menus initialized; starting synchronization managers")
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
@@ -541,36 +542,126 @@ func (a *App) onReady() {
 	}
 
 	a.syncManager.Start()
+	a.logger.Info("Tray synchronization loop started")
 
 	// --- Click Handlers ---
-	go func() {
-		for {
-			select {
-			case <-a.portConflictRetry.ClickedCh:
-				go a.handlePortConflictRetry()
-			case <-a.portConflictAuto.ClickedCh:
-				go a.handlePortConflictAuto()
-			case <-a.portConflictCopy.ClickedCh:
-				go a.handlePortConflictCopy()
-			case <-a.portConflictConfig.ClickedCh:
-				a.openConfigDir()
-			case <-updateItem.ClickedCh:
-				go a.checkForUpdates()
-			case <-openConfigItem.ClickedCh:
-				a.openConfigDir()
-			case <-openLogsItem.ClickedCh:
-				a.openLogsDir()
-			case <-quitItem.ClickedCh:
-				a.logger.Info("Quit item clicked, shutting down")
-				if a.shutdown != nil {
-					a.shutdown()
+	if a.portConflictRetry != nil {
+		retryCh := a.portConflictRetry.ClickedCh
+		go func() {
+			for {
+				select {
+				case <-retryCh:
+					go a.handlePortConflictRetry()
+				case <-a.ctx.Done():
+					return
 				}
-				return
-			case <-a.ctx.Done():
-				return
 			}
-		}
-	}()
+		}()
+	}
+
+	if a.portConflictAuto != nil {
+		autoCh := a.portConflictAuto.ClickedCh
+		go func() {
+			for {
+				select {
+				case <-autoCh:
+					go a.handlePortConflictAuto()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	if a.portConflictCopy != nil {
+		copyCh := a.portConflictCopy.ClickedCh
+		go func() {
+			for {
+				select {
+				case <-copyCh:
+					go a.handlePortConflictCopy()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	if a.portConflictConfig != nil {
+		configCh := a.portConflictConfig.ClickedCh
+		go func() {
+			for {
+				select {
+				case <-configCh:
+					a.openConfigDir()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	if updateItem != nil {
+		updateCh := updateItem.ClickedCh
+		go func() {
+			for {
+				select {
+				case <-updateCh:
+					go a.checkForUpdates()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	if openConfigItem != nil {
+		openConfigCh := openConfigItem.ClickedCh
+		go func() {
+			for {
+				select {
+				case <-openConfigCh:
+					a.openConfigDir()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	if openLogsItem != nil {
+		openLogsCh := openLogsItem.ClickedCh
+		go func() {
+			for {
+				select {
+				case <-openLogsCh:
+					a.openLogsDir()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	if quitItem != nil {
+		quitCh := quitItem.ClickedCh
+		go func() {
+			for {
+				select {
+				case <-quitCh:
+					a.logger.Info("Quit item clicked, shutting down")
+					if a.shutdown != nil {
+						a.shutdown()
+					}
+					// Ensure we exit even if cancellation propagation stalls.
+					systray.Quit()
+					return
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	// --- Web UI Click Handler (separate goroutine if available) ---
 	if openWebUIItem != nil {

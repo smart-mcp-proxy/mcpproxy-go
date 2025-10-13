@@ -846,6 +846,15 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 	return freshCount, nil
 }
 
+// GetCachedToolCountNonBlocking returns the cached tool count without any blocking calls
+// Returns 0 if cache is not populated yet. Safe to call from SSE/API handlers.
+func (mc *Client) GetCachedToolCountNonBlocking() int {
+	mc.toolCountMu.RLock()
+	count := mc.toolCount
+	mc.toolCountMu.RUnlock()
+	return count
+}
+
 // InvalidateToolCountCache clears the tool count cache
 // Should be called when tools are known to have changed
 func (mc *Client) InvalidateToolCountCache() {

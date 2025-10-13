@@ -798,10 +798,12 @@ func (m *MenuManager) updateServerActionMenus(serverName string, server map[stri
 
 // SynchronizationManager coordinates between state manager and menu manager
 type SynchronizationManager struct {
-	stateManager *ServerStateManager
-	menuManager  *MenuManager
-	logger       *zap.SugaredLogger
-	onSync       func()
+	stateManager        *ServerStateManager
+	menuManager         *MenuManager
+	logger              *zap.SugaredLogger
+	onSync              func()
+	lastServerCount     int
+	lastQuarantineCount int
 
 	// Background sync control
 	ctx       context.Context
@@ -843,6 +845,7 @@ func (m *SynchronizationManager) Stop() {
 
 // SyncNow performs immediate synchronization
 func (m *SynchronizationManager) SyncNow() error {
+	m.logger.Debug("Running immediate synchronization")
 	return m.performSync()
 }
 
@@ -899,6 +902,15 @@ func (m *SynchronizationManager) performSync() error {
 			return fmt.Errorf("failed to get all servers: %w", err)
 		}
 	} else {
+		if len(allServers) != m.lastServerCount {
+			if len(allServers) == 0 {
+				m.logger.Warn("Synchronization returned zero upstream servers - waiting for core updates")
+			} else {
+				m.logger.Info("Synchronization refreshed upstream servers",
+					zap.Int("count", len(allServers)))
+			}
+			m.lastServerCount = len(allServers)
+		}
 		// Only update menu if we have valid data
 		m.menuManager.UpdateUpstreamServersMenu(allServers)
 	}
@@ -914,6 +926,11 @@ func (m *SynchronizationManager) performSync() error {
 			return fmt.Errorf("failed to get quarantined servers: %w", err)
 		}
 	} else {
+		if len(quarantinedServers) != m.lastQuarantineCount {
+			m.logger.Info("Synchronization refreshed quarantine list",
+				zap.Int("count", len(quarantinedServers)))
+			m.lastQuarantineCount = len(quarantinedServers)
+		}
 		// Only update menu if we have valid data
 		m.menuManager.UpdateQuarantineMenu(quarantinedServers)
 	}

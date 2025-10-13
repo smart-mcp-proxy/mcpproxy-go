@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -314,15 +315,24 @@ func (c *Client) publishConnectionState(state tray.ConnectionState) {
 func (c *Client) GetServers() ([]Server, error) {
 	resp, err := c.makeRequest("GET", "/api/v1/servers", nil)
 	if err != nil {
+		if c.logger != nil {
+			c.logger.Warnw("Failed to fetch upstream servers", "error", err)
+		}
 		return nil, err
 	}
 
 	if !resp.Success {
+		if c.logger != nil {
+			c.logger.Warnw("API reported failure while fetching servers", "error", resp.Error)
+		}
 		return nil, fmt.Errorf("API error: %s", resp.Error)
 	}
 
 	servers, ok := resp.Data["servers"].([]interface{})
 	if !ok {
+		if c.logger != nil {
+			c.logger.Warnw("Unexpected server list payload shape", "data_keys", keys(resp.Data))
+		}
 		return nil, fmt.Errorf("unexpected response format")
 	}
 
@@ -346,6 +356,15 @@ func (c *Client) GetServers() ([]Server, error) {
 			LastError:   getString(serverMap, "last_error"),
 		}
 		result = append(result, server)
+	}
+
+	if c.logger != nil {
+		if len(result) == 0 {
+			c.logger.Warnw("API returned zero upstream servers",
+				"base_url", c.baseURL)
+		} else {
+			c.logger.Infow("Fetched upstream servers via API", "count", len(result))
+		}
 	}
 
 	return result, nil
@@ -531,7 +550,12 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 			req.Header.Set("X-API-Key", c.apiKey)
 		}
 
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		req = req.WithContext(ctx)
+
 		resp, err := c.httpClient.Do(req)
+		cancel()
+
 		if err != nil {
 			if attempt < maxRetries {
 				delay := time.Duration(attempt) * baseDelay
@@ -643,6 +667,19 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return v
 	}
 	return 0.0
+}
+
+func keys(m map[string]interface{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (c *Client) listenAddress() string {

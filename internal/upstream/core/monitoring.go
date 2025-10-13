@@ -184,37 +184,47 @@ func (c *Client) monitorStderr() {
 
 // monitorDockerLogsWithContext monitors Docker container logs using `docker logs` with context cancellation
 func (c *Client) monitorDockerLogsWithContext(ctx context.Context, cidFile string) {
-	// Wait a bit for container to start and CID file to be written
-	select {
-	case <-ctx.Done():
-		c.logger.Debug("Docker logs monitoring canceled before start",
-			zap.String("server", c.config.Name),
-			zap.String("cid_file", cidFile))
-		return
-	case <-time.After(500 * time.Millisecond):
-	}
+	waitTicker := time.NewTicker(100 * time.Millisecond)
+	defer waitTicker.Stop()
 
-	// Read container ID from file
-	cidBytes, err := os.ReadFile(cidFile)
-	if err != nil {
-		c.logger.Debug("Could not read container ID file",
-			zap.String("server", c.config.Name),
-			zap.String("cid_file", cidFile),
-			zap.Error(err))
-		return
-	}
+	waitTimeout := time.NewTimer(10 * time.Second)
+	defer waitTimeout.Stop()
 
-	containerID := strings.TrimSpace(string(cidBytes))
-	if containerID == "" {
-		return
-	}
+	var containerID string
 
-	// Clean up the temp file
-	defer os.Remove(cidFile)
+waitLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			c.logger.Debug("Docker logs monitoring canceled before container ID available",
+				zap.String("server", c.config.Name),
+				zap.String("cid_file", cidFile))
+			return
+		case <-waitTimeout.C:
+			// Fall back to reading the cid file one time in case tracking goroutine failed
+			if data, err := os.ReadFile(cidFile); err == nil {
+				containerID = strings.TrimSpace(string(data))
+				if containerID != "" {
+					break waitLoop
+				}
+			}
+			c.logger.Debug("Docker logs monitoring timed out waiting for container ID",
+				zap.String("server", c.config.Name),
+				zap.String("cid_file", cidFile))
+			return
+		case <-waitTicker.C:
+			c.mu.RLock()
+			containerID = c.containerID
+			c.mu.RUnlock()
+			if containerID != "" {
+				break waitLoop
+			}
+		}
+	}
 
 	c.logger.Info("Starting Docker logs monitoring",
 		zap.String("server", c.config.Name),
-		zap.String("container_id", containerID[:12])) // Show short ID
+		zap.String("container_id", shortContainerID(containerID)))
 
 	// Start docker logs -f command with context cancellation
 	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", "--timestamps", containerID)
@@ -289,6 +299,13 @@ func (c *Client) monitorDockerLogsWithContext(ctx context.Context, cidFile strin
 			zap.String("server", c.config.Name),
 			zap.String("container_id", containerID[:12]))
 	}
+}
+
+func shortContainerID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
 }
 
 // CheckConnectionHealth performs a health check on the connection
