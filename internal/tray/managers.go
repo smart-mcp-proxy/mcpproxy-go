@@ -629,6 +629,7 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	connected, _ := server["connected"].(bool)
 	quarantined, _ := server["quarantined"].(bool)
 	toolCount, _ := server["tool_count"].(int)
+	lastError, _ := server["last_error"].(string)
 
 	var statusIcon string
 	var statusText string
@@ -662,6 +663,9 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	}
 
 	tooltip = fmt.Sprintf("%s - %s", serverName, statusText)
+	if lastError != "" {
+		tooltip = fmt.Sprintf("%s\nLast error: %s", tooltip, lastError)
+	}
 
 	return
 }
