@@ -491,6 +491,8 @@ func (a *App) onReady() {
 	// Mark core menu items as ready - this will release waiting goroutines
 	a.coreMenusReady = true
 	a.logger.Debug("Core menu items initialized successfully - background processes can now start")
+	// Reapply the last known connection state now that UI widgets exist.
+	a.applyConnectionStateToUI(a.getConnectionState())
 	systray.AddSeparator()
 
 	// --- Upstream & Quarantine Menus ---
@@ -691,6 +693,11 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	message, _ := status["message"].(string)
 	listenAddr, _ := status["listen_addr"].(string)
 	serverRunning := a.server != nil && a.server.IsRunning()
+	if listenAddr == "" && a.server != nil {
+		if addr := a.server.GetListenAddress(); addr != "" {
+			listenAddr = addr
+		}
+	}
 
 	lowerMessage := strings.ToLower(message)
 	portConflict := phase == phaseError && strings.Contains(lowerMessage, "port") && strings.Contains(lowerMessage, "in use")
@@ -702,8 +709,8 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 		zap.Bool("port_conflict", portConflict),
 		zap.Any("status_data", status))
 
-	// Use the actual server running state as the authoritative source
-	actuallyRunning := serverRunning
+	// Treat either SSE running flag or RPC running flag as authoritative.
+	actuallyRunning := running || serverRunning
 
 	if portConflict {
 		a.showPortConflictMenu(listenAddr, message)

@@ -9,7 +9,9 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -491,10 +493,22 @@ func (c *Client) OpenWebUI() error {
 	if c.apiKey != "" {
 		url += "?apikey=" + c.apiKey
 	}
-	c.logger.Info("Opening web control panel", "url", c.baseURL+"/ui/")
+	displayURL := url
+	if c.apiKey != "" {
+		displayURL = strings.ReplaceAll(url, c.apiKey, maskForLog(c.apiKey))
+	}
+	if c.logger != nil {
+		c.logger.Info("Opening web control panel", "url", displayURL)
+	}
 
 	cmd := exec.Command("open", url)
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		if c.logger != nil {
+			c.logger.Error("Failed to open web control panel", "url", displayURL, "error", err)
+		}
+		return fmt.Errorf("failed to open web control panel: %w", err)
+	}
+	return nil
 }
 
 // makeRequest makes an HTTP request to the API with enhanced error handling and retry logic
@@ -629,6 +643,36 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return v
 	}
 	return 0.0
+}
+
+func (c *Client) listenAddress() string {
+	parsed, err := url.Parse(c.baseURL)
+	if err != nil {
+		return ""
+	}
+
+	host := parsed.Hostname()
+	if host == "" {
+		host = "127.0.0.1"
+	}
+
+	port := parsed.Port()
+	if port == "" {
+		if strings.EqualFold(parsed.Scheme, "https") {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+
+	return net.JoinHostPort(host, port)
+}
+
+func maskForLog(key string) string {
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + "****" + key[len(key)-4:]
 }
 
 // createTLSConfig creates a TLS config that trusts the local mcpproxy CA

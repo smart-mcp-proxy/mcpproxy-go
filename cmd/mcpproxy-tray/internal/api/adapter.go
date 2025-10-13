@@ -79,11 +79,18 @@ func (a *ServerAdapter) StopServer() error {
 
 // GetStatus returns the current server status
 func (a *ServerAdapter) GetStatus() interface{} {
+	listenAddr := a.client.listenAddress()
+	if listenAddr == "" {
+		listenAddr = ":8080"
+	}
+
 	servers, err := a.client.GetServers()
 	if err != nil {
 		return map[string]interface{}{
-			"phase":   "Error",
-			"message": fmt.Sprintf("API error: %v", err),
+			"phase":       "Error",
+			"message":     fmt.Sprintf("API error: %v", err),
+			"running":     false,
+			"listen_addr": listenAddr,
 		}
 	}
 
@@ -97,6 +104,8 @@ func (a *ServerAdapter) GetStatus() interface{} {
 	return map[string]interface{}{
 		"phase":             "Running",
 		"message":           fmt.Sprintf("API connected - %d servers", len(servers)),
+		"running":           true,
+		"listen_addr":       listenAddr,
 		"connected_servers": connectedCount,
 		"total_servers":     len(servers),
 	}
