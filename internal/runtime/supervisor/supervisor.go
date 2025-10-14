@@ -370,11 +370,21 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 }
 
 // updateSnapshot updates the current state snapshot.
+// Phase 7.1 FIX: Removed GetAllStates() call to prevent blocking on slow servers.
+// State updates now happen via events only, keeping this method fast and non-blocking.
 func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot) {
 	s.version++
 
-	// Get actual state from upstream
-	actualStates := s.upstream.GetAllStates()
+	// Phase 7.1 FIX: Don't call GetAllStates() here! It blocks on ListTools() for all servers.
+	// Instead, rely on existing state and event-driven updates.
+	// Get actual state from existing snapshot (non-blocking)
+	currentSnapshot := s.CurrentSnapshot()
+	actualStates := make(map[string]*ServerState)
+	if currentSnapshot != nil {
+		for name, state := range currentSnapshot.Servers {
+			actualStates[name] = state
+		}
+	}
 
 	// Merge desired and actual state
 	newSnapshot := &ServerStateSnapshot{
