@@ -877,6 +877,12 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// Event handlers may need to acquire locks on other resources
 	r.mu.Unlock()
 
+	// Update configSvc to notify subscribers (like supervisor)
+	// This must happen BEFORE LoadConfiguredServers to ensure supervisor reconciles
+	if err := r.configSvc.Update(&configCopy, configsvc.UpdateTypeModify, "api_apply_config"); err != nil {
+		r.logger.Error("Failed to update config service", zap.Error(err))
+	}
+
 	// Emit config.reloaded event (after releasing lock)
 	r.emitConfigReloaded(cfgPathCopy)
 
