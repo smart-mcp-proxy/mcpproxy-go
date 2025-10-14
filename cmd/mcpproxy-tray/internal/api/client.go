@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +36,10 @@ type Server struct {
 	Command     string `json:"command"`
 	ToolCount   int    `json:"tool_count"`
 	LastError   string `json:"last_error"`
+	Status      string `json:"status"`
+	ShouldRetry bool   `json:"should_retry"`
+	RetryCount  int    `json:"retry_count"`
+	LastRetry   string `json:"last_retry_time"`
 }
 
 // Tool represents a tool from the API
@@ -98,6 +103,21 @@ func NewClient(baseURL string, logger *zap.SugaredLogger) *Client {
 		statusCh:          make(chan StatusUpdate, 10),
 		connectionStateCh: make(chan tray.ConnectionState, 8),
 	}
+}
+
+func (c *Client) buildURL(path string) (string, error) {
+	base := strings.TrimSuffix(c.baseURL, "/")
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL %q: %w", c.baseURL, err)
+	}
+
+	rel, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path %q: %w", path, err)
+	}
+
+	return baseURL.ResolveReference(rel).String(), nil
 }
 
 // SetAPIKey sets the API key for authentication
@@ -226,9 +246,16 @@ func (c *Client) ConnectionStateChannel() <-chan tray.ConnectionState {
 
 // connectSSE establishes the SSE connection and processes events
 func (c *Client) connectSSE(ctx context.Context) error {
-	url := c.baseURL + "/events"
+	url, err := c.buildURL("/events")
+	if err != nil {
+		return err
+	}
 	if c.apiKey != "" {
-		url += "?apikey=" + c.apiKey
+		separator := "?"
+		if strings.Contains(url, "?") {
+			separator = "&"
+		}
+		url += separator + "apikey=" + c.apiKey
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
@@ -314,15 +341,24 @@ func (c *Client) publishConnectionState(state tray.ConnectionState) {
 func (c *Client) GetServers() ([]Server, error) {
 	resp, err := c.makeRequest("GET", "/api/v1/servers", nil)
 	if err != nil {
+		if c.logger != nil {
+			c.logger.Warnw("Failed to fetch upstream servers", "error", err)
+		}
 		return nil, err
 	}
 
 	if !resp.Success {
+		if c.logger != nil {
+			c.logger.Warnw("API reported failure while fetching servers", "error", resp.Error)
+		}
 		return nil, fmt.Errorf("API error: %s", resp.Error)
 	}
 
 	servers, ok := resp.Data["servers"].([]interface{})
 	if !ok {
+		if c.logger != nil {
+			c.logger.Warnw("Unexpected server list payload shape", "data_keys", keys(resp.Data))
+		}
 		return nil, fmt.Errorf("unexpected response format")
 	}
 
@@ -344,8 +380,21 @@ func (c *Client) GetServers() ([]Server, error) {
 			Command:     getString(serverMap, "command"),
 			ToolCount:   getInt(serverMap, "tool_count"),
 			LastError:   getString(serverMap, "last_error"),
+			Status:      getString(serverMap, "status"),
+			ShouldRetry: getBool(serverMap, "should_retry"),
+			RetryCount:  getInt(serverMap, "retry_count"),
+			LastRetry:   getString(serverMap, "last_retry_time"),
 		}
 		result = append(result, server)
+	}
+
+	if c.logger != nil {
+		if len(result) == 0 {
+			c.logger.Warnw("API returned zero upstream servers",
+				"base_url", c.baseURL)
+		} else {
+			c.logger.Infow("Fetched upstream servers via API", "count", len(result))
+		}
 	}
 
 	return result, nil
@@ -489,9 +538,16 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 
 // OpenWebUI opens the web control panel in the default browser
 func (c *Client) OpenWebUI() error {
-	url := c.baseURL + "/ui/"
+	url, err := c.buildURL("/ui/")
+	if err != nil {
+		return err
+	}
 	if c.apiKey != "" {
-		url += "?apikey=" + c.apiKey
+		separator := "?"
+		if strings.Contains(url, "?") {
+			separator = "&"
+		}
+		url += separator + "apikey=" + c.apiKey
 	}
 	displayURL := url
 	if c.apiKey != "" {
@@ -513,7 +569,10 @@ func (c *Client) OpenWebUI() error {
 
 // makeRequest makes an HTTP request to the API with enhanced error handling and retry logic
 func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, error) {
-	url := c.baseURL + path
+	url, err := c.buildURL(path)
+	if err != nil {
+		return nil, err
+	}
 	maxRetries := 3
 	baseDelay := 1 * time.Second
 
@@ -531,7 +590,13 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 			req.Header.Set("X-API-Key", c.apiKey)
 		}
 
+		// Reduced timeout for faster startup - tray should be responsive
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		req = req.WithContext(ctx)
+
 		resp, err := c.httpClient.Do(req)
+		cancel()
+
 		if err != nil {
 			if attempt < maxRetries {
 				delay := time.Duration(attempt) * baseDelay
@@ -643,6 +708,19 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return v
 	}
 	return 0.0
+}
+
+func keys(m map[string]interface{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (c *Client) listenAddress() string {

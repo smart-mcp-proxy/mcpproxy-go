@@ -198,16 +198,20 @@ func (a *ServerAdapter) GetAllServers() ([]map[string]interface{}, error) {
 	var result []map[string]interface{}
 	for _, server := range servers {
 		result = append(result, map[string]interface{}{
-			"name":        server.Name,
-			"url":         server.URL,
-			"command":     server.Command,
-			"protocol":    server.Protocol,
-			"enabled":     server.Enabled,
-			"quarantined": server.Quarantined,
-			"connected":   server.Connected,
-			"connecting":  server.Connecting,
-			"tool_count":  server.ToolCount,
-			"last_error":  server.LastError,
+			"name":            server.Name,
+			"url":             server.URL,
+			"command":         server.Command,
+			"protocol":        server.Protocol,
+			"enabled":         server.Enabled,
+			"quarantined":     server.Quarantined,
+			"connected":       server.Connected,
+			"connecting":      server.Connecting,
+			"tool_count":      server.ToolCount,
+			"last_error":      server.LastError,
+			"status":          server.Status,
+			"should_retry":    server.ShouldRetry,
+			"retry_count":     server.RetryCount,
+			"last_retry_time": server.LastRetry,
 		})
 	}
 

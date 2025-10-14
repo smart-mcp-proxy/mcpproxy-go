@@ -289,12 +289,12 @@ func (s *Server) IsRunning() bool {
 }
 
 // IsReady returns whether the server is fully initialized and ready to serve requests
-// Uses relaxed criteria: ready if at least one upstream server is connected,
-// or if no servers are configured/enabled
 func (s *Server) IsReady() bool {
 	status := s.runtime.CurrentStatus()
 
 	switch status.Phase {
+	case runtime.PhaseReady:
+		return true
 	case runtime.PhaseRunning:
 		return true
 	case runtime.PhaseError,
@@ -374,8 +374,11 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 
 // GetAllServers returns information about all upstream servers for tray UI
 func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
+	s.logger.Debug("GetAllServers called")
+
 	// Check if storage manager is available
 	if s.runtime.StorageManager() == nil {
+		s.logger.Warn("GetAllServers: storage manager is nil")
 		return []map[string]interface{}{}, nil
 	}
 
@@ -386,8 +389,10 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			s.logger.Debug("Database not available for GetAllServers, returning empty list")
 			return []map[string]interface{}{}, nil
 		}
+		s.logger.Error("ListUpstreamServers failed", zap.Error(err))
 		return nil, err
 	}
+	s.logger.Debug("ListUpstreamServers returned", zap.Int("count", len(servers)))
 
 	var result []map[string]interface{}
 	for _, server := range servers {
@@ -396,6 +401,11 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		var connecting bool
 		var lastError string
 		var toolCount int
+
+		var status string
+		var shouldRetry bool
+		var retryCount int
+		var lastRetryTime *time.Time
 
 		if s.runtime.UpstreamManager() != nil {
 			if client, exists := s.runtime.UpstreamManager().GetClient(server.Name); exists {
@@ -409,25 +419,57 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				if e, ok := connectionStatus["last_error"].(string); ok {
 					lastError = e
 				}
+				if st, ok := connectionStatus["state"].(string); ok && st != "" {
+					status = st
+				}
+				if sr, ok := connectionStatus["should_retry"].(bool); ok {
+					shouldRetry = sr
+				}
+				switch rc := connectionStatus["retry_count"].(type) {
+				case int:
+					retryCount = rc
+				case float64:
+					retryCount = int(rc)
+				}
+				if rt, ok := connectionStatus["last_retry_time"].(time.Time); ok && !rt.IsZero() {
+					lastRetryTime = &rt
+				}
 
 				if connected {
 					toolCount = s.getServerToolCount(server.Name)
+					status = "ready"
 				}
 			}
 		}
 
+		if status == "" {
+			if server.Enabled {
+				if connecting {
+					status = "connecting"
+				} else {
+					status = "disconnected"
+				}
+			} else {
+				status = "disabled"
+			}
+		}
+
 		result = append(result, map[string]interface{}{
-			"name":        server.Name,
-			"url":         server.URL,
-			"command":     server.Command,
-			"protocol":    server.Protocol,
-			"enabled":     server.Enabled,
-			"quarantined": server.Quarantined,
-			"created":     server.Created,
-			"connected":   connected,
-			"connecting":  connecting,
-			"tool_count":  toolCount,
-			"last_error":  lastError,
+			"name":            server.Name,
+			"url":             server.URL,
+			"command":         server.Command,
+			"protocol":        server.Protocol,
+			"enabled":         server.Enabled,
+			"quarantined":     server.Quarantined,
+			"created":         server.Created,
+			"connected":       connected,
+			"connecting":      connecting,
+			"tool_count":      toolCount,
+			"last_error":      lastError,
+			"status":          status,
+			"should_retry":    shouldRetry,
+			"retry_count":     retryCount,
+			"last_retry_time": lastRetryTime,
 		})
 	}
 
@@ -505,58 +547,18 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 }
 
 // getServerToolCount returns the number of tools for a specific server
-// Uses cached tool counts with 2-minute TTL to reduce frequent ListTools calls
+// Returns cached tool count only (non-blocking) to avoid stalling SSE/API responses
 func (s *Server) getServerToolCount(serverID string) int {
 	client, exists := s.runtime.UpstreamManager().GetClient(serverID)
-	if !exists || !client.IsConnected() {
+	if !exists {
 		return 0
 	}
 
-	// Use a shorter timeout for tool count requests to avoid blocking SSE updates
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// Use the cached tool count to reduce ListTools calls
-	count, err := client.GetCachedToolCount(ctx)
-	if err != nil {
-		// Classify errors to reduce noise from expected failures
-		if isTimeoutError(err) {
-			// Timeout errors are common for servers that don't support tool listing
-			// Log at debug level to reduce noise
-			s.logger.Debug("Tool count timeout for server (server may not support tools)",
-				zap.String("server_id", serverID),
-				zap.String("error_type", "timeout"))
-		} else if isConnectionError(err) {
-			// Connection errors suggest the server is actually disconnected
-			s.logger.Debug("Connection error during tool count retrieval",
-				zap.String("server_id", serverID),
-				zap.String("error_type", "connection"))
-		} else {
-			// Other errors might be more significant
-			s.logger.Debug("Failed to get tool count for server",
-				zap.String("server_id", serverID),
-				zap.Error(err))
-		}
-		return 0
-	}
+	// Get the cached tool count directly without any blocking calls
+	// This is safe to call from SSE/API handlers as it only reads from cache
+	count := client.GetCachedToolCountNonBlocking()
 
 	return count
-}
-
-// Helper functions for error classification
-func isTimeoutError(err error) bool {
-	errStr := err.Error()
-	return strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "deadline exceeded") ||
-		strings.Contains(errStr, "context canceled")
-}
-
-func isConnectionError(err error) bool {
-	errStr := err.Error()
-	return strings.Contains(errStr, "connection refused") ||
-		strings.Contains(errStr, "no such host") ||
-		strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "broken pipe")
 }
 
 // StartServer starts the server if it's not already running
