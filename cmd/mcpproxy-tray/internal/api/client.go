@@ -36,6 +36,10 @@ type Server struct {
 	Command     string `json:"command"`
 	ToolCount   int    `json:"tool_count"`
 	LastError   string `json:"last_error"`
+	Status      string `json:"status"`
+	ShouldRetry bool   `json:"should_retry"`
+	RetryCount  int    `json:"retry_count"`
+	LastRetry   string `json:"last_retry_time"`
 }
 
 // Tool represents a tool from the API
@@ -99,6 +103,21 @@ func NewClient(baseURL string, logger *zap.SugaredLogger) *Client {
 		statusCh:          make(chan StatusUpdate, 10),
 		connectionStateCh: make(chan tray.ConnectionState, 8),
 	}
+}
+
+func (c *Client) buildURL(path string) (string, error) {
+	base := strings.TrimSuffix(c.baseURL, "/")
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL %q: %w", c.baseURL, err)
+	}
+
+	rel, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path %q: %w", path, err)
+	}
+
+	return baseURL.ResolveReference(rel).String(), nil
 }
 
 // SetAPIKey sets the API key for authentication
@@ -227,9 +246,16 @@ func (c *Client) ConnectionStateChannel() <-chan tray.ConnectionState {
 
 // connectSSE establishes the SSE connection and processes events
 func (c *Client) connectSSE(ctx context.Context) error {
-	url := c.baseURL + "/events"
+	url, err := c.buildURL("/events")
+	if err != nil {
+		return err
+	}
 	if c.apiKey != "" {
-		url += "?apikey=" + c.apiKey
+		separator := "?"
+		if strings.Contains(url, "?") {
+			separator = "&"
+		}
+		url += separator + "apikey=" + c.apiKey
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
@@ -354,6 +380,10 @@ func (c *Client) GetServers() ([]Server, error) {
 			Command:     getString(serverMap, "command"),
 			ToolCount:   getInt(serverMap, "tool_count"),
 			LastError:   getString(serverMap, "last_error"),
+			Status:      getString(serverMap, "status"),
+			ShouldRetry: getBool(serverMap, "should_retry"),
+			RetryCount:  getInt(serverMap, "retry_count"),
+			LastRetry:   getString(serverMap, "last_retry_time"),
 		}
 		result = append(result, server)
 	}
@@ -508,9 +538,16 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 
 // OpenWebUI opens the web control panel in the default browser
 func (c *Client) OpenWebUI() error {
-	url := c.baseURL + "/ui/"
+	url, err := c.buildURL("/ui/")
+	if err != nil {
+		return err
+	}
 	if c.apiKey != "" {
-		url += "?apikey=" + c.apiKey
+		separator := "?"
+		if strings.Contains(url, "?") {
+			separator = "&"
+		}
+		url += separator + "apikey=" + c.apiKey
 	}
 	displayURL := url
 	if c.apiKey != "" {
@@ -532,7 +569,10 @@ func (c *Client) OpenWebUI() error {
 
 // makeRequest makes an HTTP request to the API with enhanced error handling and retry logic
 func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, error) {
-	url := c.baseURL + path
+	url, err := c.buildURL(path)
+	if err != nil {
+		return nil, err
+	}
 	maxRetries := 3
 	baseDelay := 1 * time.Second
 

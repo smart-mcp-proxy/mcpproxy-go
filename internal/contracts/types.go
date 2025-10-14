@@ -38,6 +38,9 @@ type Server struct {
 	Isolation         *IsolationConfig  `json:"isolation,omitempty"`
 	Authenticated     bool              `json:"authenticated"`                  // OAuth authentication status
 	ToolListTokenSize int               `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
+	ShouldRetry       bool              `json:"should_retry,omitempty"`
+	RetryCount        int               `json:"retry_count,omitempty"`
+	LastRetryTime     *time.Time        `json:"last_retry_time,omitempty"`
 }
 
 // OAuthConfig represents OAuth configuration for a server

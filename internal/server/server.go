@@ -397,6 +397,11 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		var lastError string
 		var toolCount int
 
+		var status string
+		var shouldRetry bool
+		var retryCount int
+		var lastRetryTime *time.Time
+
 		if s.runtime.UpstreamManager() != nil {
 			if client, exists := s.runtime.UpstreamManager().GetClient(server.Name); exists {
 				connectionStatus := client.GetConnectionStatus()
@@ -409,25 +414,57 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				if e, ok := connectionStatus["last_error"].(string); ok {
 					lastError = e
 				}
+				if st, ok := connectionStatus["state"].(string); ok && st != "" {
+					status = st
+				}
+				if sr, ok := connectionStatus["should_retry"].(bool); ok {
+					shouldRetry = sr
+				}
+				switch rc := connectionStatus["retry_count"].(type) {
+				case int:
+					retryCount = rc
+				case float64:
+					retryCount = int(rc)
+				}
+				if rt, ok := connectionStatus["last_retry_time"].(time.Time); ok && !rt.IsZero() {
+					lastRetryTime = &rt
+				}
 
 				if connected {
 					toolCount = s.getServerToolCount(server.Name)
+					status = "ready"
 				}
 			}
 		}
 
+		if status == "" {
+			if server.Enabled {
+				if connecting {
+					status = "connecting"
+				} else {
+					status = "disconnected"
+				}
+			} else {
+				status = "disabled"
+			}
+		}
+
 		result = append(result, map[string]interface{}{
-			"name":        server.Name,
-			"url":         server.URL,
-			"command":     server.Command,
-			"protocol":    server.Protocol,
-			"enabled":     server.Enabled,
-			"quarantined": server.Quarantined,
-			"created":     server.Created,
-			"connected":   connected,
-			"connecting":  connecting,
-			"tool_count":  toolCount,
-			"last_error":  lastError,
+			"name":            server.Name,
+			"url":             server.URL,
+			"command":         server.Command,
+			"protocol":        server.Protocol,
+			"enabled":         server.Enabled,
+			"quarantined":     server.Quarantined,
+			"created":         server.Created,
+			"connected":       connected,
+			"connecting":      connecting,
+			"tool_count":      toolCount,
+			"last_error":      lastError,
+			"status":          status,
+			"should_retry":    shouldRetry,
+			"retry_count":     retryCount,
+			"last_retry_time": lastRetryTime,
 		})
 	}
 

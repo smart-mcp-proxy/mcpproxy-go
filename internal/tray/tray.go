@@ -336,9 +336,8 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Listen for real-time status updates
 	if a.server != nil {
-		go func() {
-			a.consumeStatusUpdates()
-		}()
+		a.logger.Debug("Starting status and runtime event listeners")
+		go a.consumeStatusUpdates()
 
 		if eventsCh := a.server.EventsChannel(); eventsCh != nil {
 			go a.consumeRuntimeEvents(eventsCh)
@@ -537,12 +536,14 @@ func (a *App) onReady() {
 	// --- Set Initial State & Start Sync ---
 	a.updateStatus()
 
-	if err := a.syncManager.SyncNow(); err != nil {
-		a.logger.Error("Initial menu sync failed", zap.Error(err))
-	}
-
 	a.syncManager.Start()
 	a.logger.Info("Tray synchronization loop started")
+
+	go func() {
+		if err := a.syncManager.SyncNow(); err != nil {
+			a.logger.Error("Initial menu sync failed", zap.Error(err))
+		}
+	}()
 
 	// --- Click Handlers ---
 	if a.portConflictRetry != nil {

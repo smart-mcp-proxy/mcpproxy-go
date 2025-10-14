@@ -15,6 +15,8 @@ import (
 
 	"fyne.io/systray"
 	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/config"
 )
 
 const (
@@ -157,8 +159,18 @@ func (m *ServerStateManager) GetAllServers() ([]map[string]interface{}, error) {
 			// Return error to indicate data is not available, let caller handle gracefully
 			return nil, fmt.Errorf("database not available and no cached data: %w", err)
 		}
-		m.logger.Error("Failed to get fresh all servers data", zap.Error(err))
-		return nil, err
+		fallback, fbErr := m.loadServersFromConfig()
+		if fbErr != nil || len(fallback) == 0 {
+			m.logger.Error("Failed to get fresh all servers data", zap.Error(err))
+			return nil, err
+		}
+
+		m.logger.Warn("Using fallback server list from configuration",
+			zap.Error(err),
+			zap.Int("servers", len(fallback)))
+		m.allServers = fallback
+		m.lastUpdate = time.Now()
+		return cloneServerData(fallback), nil
 	}
 
 	// Only update cache if we got valid data (non-empty or intentionally empty)
@@ -193,8 +205,19 @@ func (m *ServerStateManager) GetQuarantinedServers() ([]map[string]interface{}, 
 			m.logger.Debug("Database not available and no cached data, preserving quarantine UI state")
 			return nil, fmt.Errorf("database not available and no cached data: %w", err)
 		}
-		m.logger.Error("Failed to get fresh quarantined servers data", zap.Error(err))
-		return nil, err
+		fallback, fbErr := m.loadServersFromConfig()
+		if fbErr != nil || len(fallback) == 0 {
+			m.logger.Error("Failed to get fresh quarantined servers data", zap.Error(err))
+			return nil, err
+		}
+
+		quarantineFallback := filterQuarantinedServers(fallback)
+		m.logger.Warn("Using fallback quarantine list from configuration",
+			zap.Error(err),
+			zap.Int("servers", len(quarantineFallback)))
+		m.quarantinedServers = quarantineFallback
+		m.lastQuarantineUpdate = time.Now()
+		return cloneServerData(quarantineFallback), nil
 	}
 
 	// Only update cache if we got valid data
@@ -630,6 +653,17 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	quarantined, _ := server["quarantined"].(bool)
 	toolCount, _ := server["tool_count"].(int)
 	lastError, _ := server["last_error"].(string)
+	statusValue, _ := server["status"].(string)
+	shouldRetry, _ := server["should_retry"].(bool)
+
+	var retryCount int
+	switch rc := server["retry_count"].(type) {
+	case int:
+		retryCount = rc
+	case float64:
+		retryCount = int(rc)
+	}
+	lastRetryTime, _ := server["last_retry_time"].(string)
 
 	var statusIcon string
 	var statusText string
@@ -643,6 +677,29 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		statusIcon = "⏸️"
 		statusText = "disabled"
 		iconPath = iconPaused
+	} else if st := strings.ToLower(statusValue); st != "" {
+		switch st {
+		case "ready", "connected":
+			statusIcon = "🟢"
+			statusText = fmt.Sprintf("connected (%d tools)", toolCount)
+			iconPath = iconConnected
+		case "connecting":
+			statusIcon = "🟠"
+			statusText = "connecting"
+			iconPath = iconDisconnected
+		case "error", "disconnected":
+			statusIcon = "🔴"
+			statusText = "connection error"
+			iconPath = iconDisconnected
+		case "disabled":
+			statusIcon = "⏸️"
+			statusText = "disabled"
+			iconPath = iconPaused
+		default:
+			statusIcon = "🔴"
+			statusText = st
+			iconPath = iconDisconnected
+		}
 	} else if connected {
 		statusIcon = "🟢"
 		statusText = fmt.Sprintf("connected (%d tools)", toolCount)
@@ -662,10 +719,32 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		displayText = fmt.Sprintf("%s %s", statusIcon, serverName)
 	}
 
-	tooltip = fmt.Sprintf("%s - %s", serverName, statusText)
-	if lastError != "" {
-		tooltip = fmt.Sprintf("%s\nLast error: %s", tooltip, lastError)
+	var tooltipLines []string
+	tooltipLines = append(tooltipLines, fmt.Sprintf("%s - %s", serverName, statusText))
+
+	if statusValue != "" && !strings.EqualFold(statusValue, statusText) {
+		tooltipLines = append(tooltipLines, fmt.Sprintf("Status: %s", statusValue))
 	}
+
+	if lastError != "" {
+		tooltipLines = append(tooltipLines, fmt.Sprintf("Last error: %s", lastError))
+	}
+
+	if shouldRetry {
+		if retryCount > 0 {
+			tooltipLines = append(tooltipLines, fmt.Sprintf("Retry scheduled (attempts: %d)", retryCount))
+		} else {
+			tooltipLines = append(tooltipLines, "Retry scheduled")
+		}
+	} else if retryCount > 0 {
+		tooltipLines = append(tooltipLines, fmt.Sprintf("Retries attempted: %d", retryCount))
+	}
+
+	if lastRetryTime != "" {
+		tooltipLines = append(tooltipLines, fmt.Sprintf("Last retry: %s", lastRetryTime))
+	}
+
+	tooltip = strings.Join(tooltipLines, "\n")
 
 	return
 }
@@ -1023,4 +1102,58 @@ func (m *MenuManager) LatestQuarantineSnapshot() []map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return cloneServerData(m.latestQuarantined)
+}
+
+func filterQuarantinedServers(list []map[string]interface{}) []map[string]interface{} {
+	if len(list) == 0 {
+		return nil
+	}
+
+	var filtered []map[string]interface{}
+	for _, server := range list {
+		if server == nil {
+			continue
+		}
+		if quarantined, ok := server["quarantined"].(bool); ok && quarantined {
+			filtered = append(filtered, server)
+		}
+	}
+	return filtered
+}
+
+func (m *ServerStateManager) loadServersFromConfig() ([]map[string]interface{}, error) {
+	if m.server == nil {
+		return nil, fmt.Errorf("server interface not available")
+	}
+
+	cfgPath := strings.TrimSpace(m.server.GetConfigPath())
+	if cfgPath == "" {
+		return nil, fmt.Errorf("config path unavailable")
+	}
+
+	cfg, err := config.LoadFromFile(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config from %s: %w", cfgPath, err)
+	}
+
+	results := make([]map[string]interface{}, 0, len(cfg.Servers))
+	for _, srv := range cfg.Servers {
+		results = append(results, map[string]interface{}{
+			"name":            srv.Name,
+			"url":             srv.URL,
+			"command":         srv.Command,
+			"protocol":        srv.Protocol,
+			"enabled":         srv.Enabled,
+			"quarantined":     srv.Quarantined,
+			"connected":       false,
+			"connecting":      false,
+			"tool_count":      0,
+			"last_error":      "core API unavailable",
+			"status":          "unavailable",
+			"should_retry":    false,
+			"retry_count":     0,
+			"last_retry_time": time.Time{},
+		})
+	}
+	return results, nil
 }

@@ -187,6 +187,23 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		if authenticated, ok := generic["authenticated"].(bool); ok {
 			server.Authenticated = authenticated
 		}
+		if shouldRetry, ok := generic["should_retry"].(bool); ok {
+			server.ShouldRetry = shouldRetry
+		}
+		switch rc := generic["retry_count"].(type) {
+		case int:
+			server.RetryCount = rc
+		case float64:
+			server.RetryCount = int(rc)
+		}
+		switch v := generic["last_retry_time"].(type) {
+		case time.Time:
+			server.LastRetryTime = &v
+		case *time.Time:
+			if v != nil && !v.IsZero() {
+				server.LastRetryTime = v
+			}
+		}
 
 		// Extract args slice
 		if args, ok := generic["args"].([]interface{}); ok {
