@@ -22,13 +22,17 @@ func (r *Runtime) backgroundInitialization() {
 		r.UpdatePhaseMessage("Loading configuration...")
 	}
 
+	appCtx := r.AppContext()
+
+	// Load configured servers - saves to storage synchronously (fast ~100-200ms),
+	// then starts connections asynchronously (slow 30s+)
+	// We do this synchronously to ensure API /servers endpoint has data immediately
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("Failed to load configured servers", zap.Error(err))
-		r.UpdatePhase(PhaseError, fmt.Sprintf("Failed to load servers: %v", err))
-		return
+		// Don't set error phase - servers can be loaded later via config reload
 	}
 
-	// Immediately mark as ready - server connections happen in background
+	// Mark as ready - storage is now populated with server configs
 	switch r.CurrentPhase() {
 	case PhaseInitializing, PhaseLoading, PhaseReady:
 		r.UpdatePhase(PhaseReady, "Server is ready (upstream servers connecting in background)")
@@ -36,8 +40,10 @@ func (r *Runtime) backgroundInitialization() {
 		r.UpdatePhaseMessage("Server is ready (upstream servers connecting in background)")
 	}
 
-	appCtx := r.AppContext()
+	// Start connection retry attempts in background
 	go r.backgroundConnections(appCtx)
+
+	// Start tool indexing with reduced delay
 	go r.backgroundToolIndexing(appCtx)
 }
 
@@ -181,6 +187,8 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	// Add/remove servers asynchronously to prevent blocking on slow connections
 	// All server operations now happen in background goroutines with timeouts
 
+	// FIRST: Save all servers to storage in one batch (fast, synchronous)
+	// This ensures API /servers endpoint can return data immediately
 	for _, serverCfg := range cfg.Servers {
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
 		hasChanged := !existsInStorage ||
@@ -199,14 +207,17 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined))
 		}
 
+		// Save synchronously to ensure storage is populated for API queries
 		if err := r.storageManager.SaveUpstreamServer(serverCfg); err != nil {
 			r.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
 			continue
 		}
+	}
 
+	// SECOND: Manage upstream connections asynchronously (slow, can take 30s+)
+	for _, serverCfg := range cfg.Servers {
 		if serverCfg.Enabled {
-			// Add server asynchronously to prevent blocking
-			// AddServer has its own 30-second timeout for connections
+			// Add server asynchronously to prevent blocking on connections
 			go func(cfg *config.ServerConfig, cfgPath string) {
 				if err := r.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
 					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
@@ -218,11 +229,11 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 							zap.String("server", cfg.Name))
 					}
 				}
-			}(serverCfg, r.cfgPath)
 
-			if serverCfg.Quarantined {
-				r.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", serverCfg.Name))
-			}
+				if cfg.Quarantined {
+					r.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", cfg.Name))
+				}
+			}(serverCfg, r.cfgPath)
 		} else {
 			// Remove server asynchronously to prevent blocking
 			go func(name string) {

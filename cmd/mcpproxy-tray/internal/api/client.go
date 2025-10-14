@@ -590,7 +590,8 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 			req.Header.Set("X-API-Key", c.apiKey)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// Reduced timeout for faster startup - tray should be responsive
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		req = req.WithContext(ctx)
 
 		resp, err := c.httpClient.Do(req)
