@@ -11,6 +11,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/runtime/configsvc"
+	"mcpproxy-go/internal/runtime/stateview"
 )
 
 // Supervisor manages the desired vs actual state reconciliation for upstream servers.
@@ -28,6 +29,9 @@ type Supervisor struct {
 	snapshot atomic.Value // *ServerStateSnapshot
 	version  int64
 	stateMu  sync.RWMutex
+
+	// State view for read model (Phase 4)
+	stateView *stateview.View
 
 	// Event publishing
 	eventCh   chan Event
@@ -67,6 +71,7 @@ func New(configSvc *configsvc.Service, upstream UpstreamInterface, logger *zap.L
 		configSvc: configSvc,
 		upstream:  upstream,
 		version:   0,
+		stateView: stateview.New(),
 		eventCh:   make(chan Event, 100),
 		listeners: make([]chan Event, 0),
 		ctx:       ctx,
@@ -376,9 +381,52 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot) {
 		}
 
 		newSnapshot.Servers[srv.Name] = state
+
+		// Update stateview (Phase 4)
+		s.updateStateView(srv.Name, state)
 	}
 
 	s.snapshot.Store(newSnapshot)
+
+	// Remove servers from stateview that are no longer in config
+	currentView := s.stateView.Snapshot()
+	for name := range currentView.Servers {
+		if _, exists := newSnapshot.Servers[name]; !exists {
+			s.stateView.RemoveServer(name)
+		}
+	}
+}
+
+// updateStateView updates the stateview with current server state.
+func (s *Supervisor) updateStateView(name string, state *ServerState) {
+	s.stateView.UpdateServer(name, func(status *stateview.ServerStatus) {
+		status.Config = state.Config
+		status.Enabled = state.Enabled
+		status.Quarantined = state.Quarantined
+		status.Connected = state.Connected
+		status.ToolCount = state.ToolCount
+
+		// Map connection state to string
+		if state.Connected {
+			status.State = "connected"
+			if !state.LastSeen.IsZero() {
+				t := state.LastSeen
+				status.ConnectedAt = &t
+			}
+		} else if state.Enabled && !state.Quarantined {
+			status.State = "connecting"
+		} else {
+			status.State = "idle"
+		}
+
+		// Update connection info if available
+		if state.ConnectionInfo != nil {
+			if status.Metadata == nil {
+				status.Metadata = make(map[string]interface{})
+			}
+			status.Metadata["connection_info"] = state.ConnectionInfo
+		}
+	})
 }
 
 // forwardUpstreamEvents forwards upstream events to supervisor listeners.
@@ -417,6 +465,20 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 		if connected, ok := event.Payload["connected"].(bool); ok {
 			state.Connected = connected
 			state.LastSeen = event.Timestamp
+
+			// Update stateview
+			s.stateView.UpdateServer(event.ServerName, func(status *stateview.ServerStatus) {
+				status.Connected = connected
+				if connected {
+					status.State = "connected"
+					t := event.Timestamp
+					status.ConnectedAt = &t
+				} else {
+					status.State = "disconnected"
+					t := event.Timestamp
+					status.DisconnectedAt = &t
+				}
+			})
 		}
 	}
 }
@@ -424,6 +486,12 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 // CurrentSnapshot returns the current state snapshot (lock-free read).
 func (s *Supervisor) CurrentSnapshot() *ServerStateSnapshot {
 	return s.snapshot.Load().(*ServerStateSnapshot)
+}
+
+// StateView returns the read-only state view (Phase 4).
+// This provides a lock-free view of server statuses for API consumers.
+func (s *Supervisor) StateView() *stateview.View {
+	return s.stateView
 }
 
 // Subscribe returns a channel that receives supervisor events.
