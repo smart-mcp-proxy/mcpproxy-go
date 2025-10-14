@@ -334,10 +334,11 @@ We will tackle the decoupling in deliberate phases that map cleanly onto code ow
   - ✅ Document existing REST ↔ runtime dependencies inside `internal/httpapi/server.go` and `internal/server/server.go` to ensure parity expectations.
   - See `docs/PHASE0-COMPLETE.md` for detailed results
 
-- **Phase 1 – Config service extraction**
-  - Introduce `internal/runtime/configsvc` with a `ConfigService` interface.
-  - Update `internal/runtime/runtime.go` to consume snapshots and stop exporting config locks directly.
-  - Adjust configuration entry points (`cmd/mcpproxy/main.go`, `internal/httpapi/server.go`) to request data via the new service.
+- **Phase 1 – Config service extraction** ✅ COMPLETE
+  - ✅ Introduce `internal/runtime/configsvc` with lock-free snapshot-based reads via atomic.Value
+  - ✅ Update `internal/runtime/runtime.go` to use ConfigService while maintaining backward compatibility
+  - ✅ Decouple file I/O from config reads - SaveConfiguration() and ReloadConfiguration() no longer block readers
+  - See `docs/PHASE1-COMPLETE.md` for detailed results
 
 - **Phase 2 – Supervisor shell**
   - Create `internal/runtime/supervisor` hosting desired/actual state reconciliation logic.

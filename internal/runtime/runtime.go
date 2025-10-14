@@ -19,6 +19,7 @@ import (
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/registries"
+	"mcpproxy-go/internal/runtime/configsvc"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/server/tokens"
 	"mcpproxy-go/internal/storage"
@@ -37,9 +38,13 @@ type Status struct {
 
 // Runtime owns the non-HTTP lifecycle for the proxy process.
 type Runtime struct {
+	// Deprecated: Use configSvc.Current() instead. Will be removed in Phase 5.
 	cfg     *config.Config
 	cfgPath string
 	logger  *zap.Logger
+
+	// ConfigService provides lock-free snapshot-based config reads
+	configSvc *configsvc.Service
 
 	mu      sync.RWMutex
 	running bool
@@ -118,10 +123,14 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	appCtx, appCancel := context.WithCancel(context.Background())
 
+	// Initialize ConfigService for lock-free snapshot-based reads
+	configSvc := configsvc.NewService(cfg, cfgPath, logger)
+
 	rt := &Runtime{
 		cfg:             cfg,
 		cfgPath:         cfgPath,
 		logger:          logger,
+		configSvc:       configSvc,
 		storageManager:  storageManager,
 		indexManager:    indexManager,
 		upstreamManager: upstreamManager,
@@ -145,21 +154,65 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 }
 
 // Config returns the underlying configuration pointer.
+// Deprecated: Use ConfigSnapshot() for lock-free reads. This method exists for backward compatibility.
 func (r *Runtime) Config() *config.Config {
+	// Use ConfigService for lock-free read
+	if r.configSvc != nil {
+		snapshot := r.configSvc.Current()
+		return snapshot.Config
+	}
+
+	// Fallback to legacy locked access
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.cfg
 }
 
+// ConfigSnapshot returns an immutable configuration snapshot.
+// This is the preferred way to read configuration - it's lock-free and non-blocking.
+func (r *Runtime) ConfigSnapshot() *configsvc.Snapshot {
+	if r.configSvc != nil {
+		return r.configSvc.Current()
+	}
+	// Fallback if service not initialized
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return &configsvc.Snapshot{
+		Config:    r.cfg,
+		Path:      r.cfgPath,
+		Version:   0,
+		Timestamp: time.Now(),
+	}
+}
+
+// ConfigService returns the configuration service for advanced access patterns.
+func (r *Runtime) ConfigService() *configsvc.Service {
+	return r.configSvc
+}
+
 // ConfigPath returns the tracked config path.
 func (r *Runtime) ConfigPath() string {
+	if r.configSvc != nil {
+		return r.configSvc.Current().Path
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.cfgPath
 }
 
 // UpdateConfig replaces the runtime configuration in-place.
+// This now updates both the legacy field and the ConfigService.
 func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
+	// Update ConfigService first
+	if r.configSvc != nil {
+		if cfgPath != "" {
+			r.configSvc.UpdatePath(cfgPath)
+		}
+		_ = r.configSvc.Update(cfg, configsvc.UpdateTypeModify, "runtime_update")
+	}
+
+	// Update legacy fields for backward compatibility
 	r.mu.Lock()
 	r.cfg = cfg
 	if cfgPath != "" {
@@ -394,6 +447,11 @@ func (r *Runtime) Close() error {
 		if err := r.storageManager.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close storage manager: %w", err))
 		}
+	}
+
+	// Close ConfigService and its subscribers
+	if r.configSvc != nil {
+		r.configSvc.Close()
 	}
 
 	if len(errs) > 0 {
