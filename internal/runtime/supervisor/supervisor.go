@@ -528,30 +528,14 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			state.Connected = connected
 			state.LastSeen = event.Timestamp
 
-			// Phase 7.1 FIX: Fetch tools for ONLY this server, not all servers
-			var tools []stateview.ToolInfo
+			// Phase 7.1 FIX: Don't fetch tools on connect events - let background indexing handle it
+			// Just update the cached tool count from the client (non-blocking)
+			var toolCount int
 			if connected {
-				// Get state for THIS specific server only
 				if actualState, err := s.upstream.GetServerState(event.ServerName); err == nil {
-					state.Tools = actualState.Tools
-					state.ToolCount = actualState.ToolCount
-
-					// Convert ToolMetadata to ToolInfo for StateView
-					if actualState.Tools != nil {
-						tools = make([]stateview.ToolInfo, len(actualState.Tools))
-						for i, tool := range actualState.Tools {
-							tools[i] = stateview.ToolInfo{
-								Name:        tool.Name,
-								Description: tool.Description,
-								InputSchema: map[string]interface{}{
-									"type":       "object",
-									"properties": map[string]interface{}{},
-								},
-							}
-						}
-					}
+					toolCount = actualState.ToolCount
 				} else {
-					s.logger.Warn("Failed to get server state for tools",
+					s.logger.Warn("Failed to get server state for tool count",
 						zap.String("server", event.ServerName),
 						zap.Error(err))
 				}
@@ -564,8 +548,9 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					status.State = "connected"
 					t := event.Timestamp
 					status.ConnectedAt = &t
-					status.Tools = tools // Phase 7.1: Update cached tools
-					status.ToolCount = len(tools)
+					// Don't populate Tools here - background indexing will handle it
+					// Just update the count from cache (non-blocking)
+					status.ToolCount = toolCount
 				} else {
 					status.State = "disconnected"
 					t := event.Timestamp

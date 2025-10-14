@@ -169,14 +169,14 @@ func (p *ActorPoolSimple) GetServerState(name string) (*ServerState, error) {
 	connInfo := client.GetConnectionInfo()
 	state.ConnectionInfo = &connInfo
 
-	// Phase 7.1: Fetch tools for THIS server only (not all servers)
+	// Phase 7.1 FIX: Don't fetch tools here! It blocks on slow servers.
+	// Tools are populated via:
+	// 1. Background tool indexing (runtime.DiscoverAndIndexTools)
+	// 2. Cached tool count from managed client (non-blocking)
+	// State updates happen via events, not synchronous tool fetching.
 	if connected {
-		if tools, err := client.ListTools(context.Background()); err == nil {
-			state.Tools = tools
-			state.ToolCount = len(tools)
-		} else {
-			p.logger.Warn("Failed to fetch tools for server", zap.String("server", name), zap.Error(err))
-		}
+		// Use cached tool count (non-blocking) instead of fetching tools
+		state.ToolCount = client.GetCachedToolCountNonBlocking()
 	}
 
 	return state, nil
@@ -207,12 +207,10 @@ func (p *ActorPoolSimple) GetAllStates() map[string]*ServerState {
 		connInfo := client.GetConnectionInfo()
 		state.ConnectionInfo = &connInfo
 
-		// Phase 7.1: Fetch tools for connected servers
+		// Phase 7.1 FIX: Don't fetch tools synchronously! Use cached data instead.
 		if connected {
-			if tools, err := client.ListTools(context.Background()); err == nil {
-				state.Tools = tools
-				state.ToolCount = len(tools)
-			}
+			// Use cached tool count (non-blocking)
+			state.ToolCount = client.GetCachedToolCountNonBlocking()
 		}
 
 		states[name] = state
