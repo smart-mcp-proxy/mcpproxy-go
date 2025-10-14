@@ -229,7 +229,7 @@ ln -s /Applications "$TEMP_DIR/Applications"
 
 # Create DMG using hdiutil
 echo "Creating DMG..."
-hdiutil create -size 50m -fs HFS+ -volname "mcpproxy ${VERSION#v}" -srcfolder "$TEMP_DIR" "${DMG_NAME}.dmg"
+hdiutil create -size 100m -fs HFS+ -volname "mcpproxy ${VERSION#v}" -srcfolder "$TEMP_DIR" "${DMG_NAME}.dmg"
 
 # Clean up
 rm -rf "$TEMP_DIR"
