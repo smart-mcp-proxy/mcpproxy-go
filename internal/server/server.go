@@ -374,8 +374,11 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 
 // GetAllServers returns information about all upstream servers for tray UI
 func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
+	s.logger.Debug("GetAllServers called")
+
 	// Check if storage manager is available
 	if s.runtime.StorageManager() == nil {
+		s.logger.Warn("GetAllServers: storage manager is nil")
 		return []map[string]interface{}{}, nil
 	}
 
@@ -386,8 +389,10 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			s.logger.Debug("Database not available for GetAllServers, returning empty list")
 			return []map[string]interface{}{}, nil
 		}
+		s.logger.Error("ListUpstreamServers failed", zap.Error(err))
 		return nil, err
 	}
+	s.logger.Debug("ListUpstreamServers returned", zap.Int("count", len(servers)))
 
 	var result []map[string]interface{}
 	for _, server := range servers {

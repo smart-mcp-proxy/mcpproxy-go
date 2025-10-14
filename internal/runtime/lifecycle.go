@@ -189,6 +189,7 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 
 	// FIRST: Save all servers to storage in one batch (fast, synchronous)
 	// This ensures API /servers endpoint can return data immediately
+	r.logger.Debug("Starting synchronous storage save phase", zap.Int("total_servers", len(cfg.Servers)))
 	for _, serverCfg := range cfg.Servers {
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
 		hasChanged := !existsInStorage ||
@@ -208,11 +209,14 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		}
 
 		// Save synchronously to ensure storage is populated for API queries
+		r.logger.Debug("Saving server to storage", zap.String("server", serverCfg.Name), zap.Bool("exists", existsInStorage))
 		if err := r.storageManager.SaveUpstreamServer(serverCfg); err != nil {
 			r.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
 			continue
 		}
+		r.logger.Debug("Successfully saved server to storage", zap.String("server", serverCfg.Name))
 	}
+	r.logger.Debug("Completed synchronous storage save phase")
 
 	// SECOND: Manage upstream connections asynchronously (slow, can take 30s+)
 	for _, serverCfg := range cfg.Servers {
