@@ -561,22 +561,6 @@ func (s *Server) getServerToolCount(serverID string) int {
 	return count
 }
 
-// Helper functions for error classification
-func isTimeoutError(err error) bool {
-	errStr := err.Error()
-	return strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "deadline exceeded") ||
-		strings.Contains(errStr, "context canceled")
-}
-
-func isConnectionError(err error) bool {
-	errStr := err.Error()
-	return strings.Contains(errStr, "connection refused") ||
-		strings.Contains(errStr, "no such host") ||
-		strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "broken pipe")
-}
-
 // StartServer starts the server if it's not already running
 func (s *Server) StartServer(ctx context.Context) error {
 	s.mu.Lock()
