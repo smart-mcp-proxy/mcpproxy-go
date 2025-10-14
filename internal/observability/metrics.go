@@ -28,6 +28,17 @@ type MetricsManager struct {
 	indexSize          prometheus.Gauge
 	storageOps         *prometheus.CounterVec
 	dockerContainers   prometheus.Gauge
+
+	// Supervisor metrics (Phase 5)
+	reconciliations       *prometheus.CounterVec
+	reconciliationLatency prometheus.Histogram
+	serverStateChanges    *prometheus.CounterVec
+
+	// Actor metrics (Phase 5)
+	actorStateTransitions *prometheus.CounterVec
+	actorConnectLatency   *prometheus.HistogramVec
+	actorRetries          *prometheus.CounterVec
+	actorFailures         *prometheus.CounterVec
 }
 
 // NewMetricsManager creates a new metrics manager
@@ -129,6 +140,65 @@ func (mm *MetricsManager) initMetrics() {
 		Name: "mcpproxy_docker_containers_active",
 		Help: "Number of active Docker containers",
 	})
+
+	// Supervisor metrics (Phase 5)
+	mm.reconciliations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_supervisor_reconciliations_total",
+			Help: "Total number of reconciliation cycles",
+		},
+		[]string{"result"}, // result: success, failed
+	)
+
+	mm.reconciliationLatency = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "mcpproxy_supervisor_reconciliation_duration_seconds",
+			Help:    "Time taken to complete a reconciliation cycle",
+			Buckets: []float64{0.01, 0.05, 0.1, 0.5, 1, 2, 5},
+		},
+	)
+
+	mm.serverStateChanges = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_supervisor_state_changes_total",
+			Help: "Total number of server state changes",
+		},
+		[]string{"server", "from_state", "to_state"},
+	)
+
+	// Actor metrics (Phase 5)
+	mm.actorStateTransitions = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_actor_state_transitions_total",
+			Help: "Total number of actor state transitions",
+		},
+		[]string{"server", "from_state", "to_state"},
+	)
+
+	mm.actorConnectLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "mcpproxy_actor_connect_duration_seconds",
+			Help:    "Time taken for actor to connect to server",
+			Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60},
+		},
+		[]string{"server", "result"}, // result: success, failed
+	)
+
+	mm.actorRetries = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_actor_retries_total",
+			Help: "Total number of connection retry attempts",
+		},
+		[]string{"server"},
+	)
+
+	mm.actorFailures = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_actor_failures_total",
+			Help: "Total number of actor failures",
+		},
+		[]string{"server", "error_type"},
+	)
 }
 
 // registerMetrics registers all metrics with the registry
@@ -146,6 +216,14 @@ func (mm *MetricsManager) registerMetrics() {
 		mm.indexSize,
 		mm.storageOps,
 		mm.dockerContainers,
+		// Phase 5 metrics
+		mm.reconciliations,
+		mm.reconciliationLatency,
+		mm.serverStateChanges,
+		mm.actorStateTransitions,
+		mm.actorConnectLatency,
+		mm.actorRetries,
+		mm.actorFailures,
 	)
 
 	// Also register Go runtime metrics
@@ -249,4 +327,37 @@ type StatsUpdater interface {
 // UpdateFromStatsProvider updates metrics from a stats provider
 func (mm *MetricsManager) UpdateFromStatsProvider(provider StatsUpdater) {
 	provider.UpdateMetrics(mm)
+}
+
+// Phase 5: Supervisor and Actor metrics
+
+// RecordReconciliation records a reconciliation cycle
+func (mm *MetricsManager) RecordReconciliation(result string, duration time.Duration) {
+	mm.reconciliations.WithLabelValues(result).Inc()
+	mm.reconciliationLatency.Observe(duration.Seconds())
+}
+
+// RecordServerStateChange records a server state change
+func (mm *MetricsManager) RecordServerStateChange(server, fromState, toState string) {
+	mm.serverStateChanges.WithLabelValues(server, fromState, toState).Inc()
+}
+
+// RecordActorStateTransition records an actor state transition
+func (mm *MetricsManager) RecordActorStateTransition(server, fromState, toState string) {
+	mm.actorStateTransitions.WithLabelValues(server, fromState, toState).Inc()
+}
+
+// RecordActorConnect records an actor connection attempt
+func (mm *MetricsManager) RecordActorConnect(server, result string, duration time.Duration) {
+	mm.actorConnectLatency.WithLabelValues(server, result).Observe(duration.Seconds())
+}
+
+// RecordActorRetry records an actor retry attempt
+func (mm *MetricsManager) RecordActorRetry(server string) {
+	mm.actorRetries.WithLabelValues(server).Inc()
+}
+
+// RecordActorFailure records an actor failure
+func (mm *MetricsManager) RecordActorFailure(server, errorType string) {
+	mm.actorFailures.WithLabelValues(server, errorType).Inc()
 }

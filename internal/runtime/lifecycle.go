@@ -8,10 +8,17 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/runtime/configsvc"
 )
 
 // StartBackgroundInitialization kicks off configuration sync and background loops.
 func (r *Runtime) StartBackgroundInitialization() {
+	// Phase 6: Start Supervisor for state reconciliation and lock-free reads
+	if r.supervisor != nil {
+		r.supervisor.Start()
+		r.logger.Info("Supervisor started for state reconciliation")
+	}
+
 	go r.backgroundInitialization()
 }
 
@@ -315,38 +322,50 @@ func (r *Runtime) SaveConfiguration() error {
 		return err
 	}
 
-	// Get config and path while holding lock briefly
-	r.mu.RLock()
-	cfgPath := r.cfgPath
-	if r.cfg == nil {
-		r.mu.RUnlock()
+	// Get current snapshot (lock-free)
+	snapshot := r.ConfigSnapshot()
+	if snapshot.Config == nil {
 		return fmt.Errorf("runtime configuration is not available")
 	}
 
-	if cfgPath == "" {
-		r.mu.RUnlock()
+	if snapshot.Path == "" {
 		r.logger.Warn("Configuration file path is not available, cannot save configuration")
 		return fmt.Errorf("configuration file path is not available")
 	}
 
-	// Create a copy of config to avoid holding lock during file I/O
-	configCopy := *r.cfg
-	r.mu.RUnlock()
-
-	// Update servers and save without holding runtime lock
-	configCopy.Servers = latestServers
-	if err := config.SaveConfig(&configCopy, cfgPath); err != nil {
-		return err
+	// Create a copy of config to avoid mutations
+	configCopy := snapshot.Clone()
+	if configCopy == nil {
+		return fmt.Errorf("failed to clone configuration")
 	}
 
-	// Update in-memory config with latest servers to keep UI in sync
-	r.mu.Lock()
-	r.cfg.Servers = latestServers
-	r.mu.Unlock()
+	// Update servers with latest from storage
+	configCopy.Servers = latestServers
+
+	// Use ConfigService to save (doesn't hold locks, handles file I/O)
+	if r.configSvc != nil {
+		// Update the config service with latest servers first
+		if err := r.configSvc.Update(configCopy, configsvc.UpdateTypeModify, "save_configuration"); err != nil {
+			return err
+		}
+		// Then persist to disk
+		if err := r.configSvc.SaveToFile(); err != nil {
+			return err
+		}
+	} else {
+		// Fallback to legacy save
+		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
+			return err
+		}
+		// Update in-memory config
+		r.mu.Lock()
+		r.cfg.Servers = latestServers
+		r.mu.Unlock()
+	}
 
 	r.logger.Debug("Configuration saved and in-memory config updated",
 		zap.Int("server_count", len(latestServers)),
-		zap.String("config_path", cfgPath))
+		zap.String("config_path", snapshot.Path))
 
 	return nil
 }
@@ -355,22 +374,31 @@ func (r *Runtime) SaveConfiguration() error {
 func (r *Runtime) ReloadConfiguration() error {
 	r.logger.Info("Reloading configuration from disk")
 
-	r.mu.RLock()
-	dataDir := ""
-	oldServerCount := 0
-	if r.cfg != nil {
-		dataDir = r.cfg.DataDir
-		oldServerCount = len(r.cfg.Servers)
-	}
-	r.mu.RUnlock()
+	// Get current snapshot before reload
+	oldSnapshot := r.ConfigSnapshot()
+	oldServerCount := oldSnapshot.ServerCount()
+	dataDir := oldSnapshot.Config.DataDir
 
 	cfgPath := config.GetConfigPath(dataDir)
-	newConfig, err := config.LoadFromFile(cfgPath)
+
+	// Use ConfigService for file reload (handles disk I/O without holding locks)
+	var newSnapshot *configsvc.Snapshot
+	var err error
+	if r.configSvc != nil {
+		newSnapshot, err = r.configSvc.ReloadFromFile()
+	} else {
+		// Fallback to legacy path
+		newConfig, loadErr := config.LoadFromFile(cfgPath)
+		if loadErr != nil {
+			return fmt.Errorf("failed to reload config: %w", loadErr)
+		}
+		r.UpdateConfig(newConfig, cfgPath)
+		newSnapshot = r.ConfigSnapshot()
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
-
-	r.UpdateConfig(newConfig, cfgPath)
 
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
@@ -380,12 +408,13 @@ func (r *Runtime) ReloadConfiguration() error {
 	go r.postConfigReload()
 
 	r.logger.Info("Configuration reload completed",
-		zap.String("path", cfgPath),
+		zap.String("path", newSnapshot.Path),
+		zap.Int64("version", newSnapshot.Version),
 		zap.Int("old_server_count", oldServerCount),
-		zap.Int("new_server_count", len(newConfig.Servers)),
-		zap.Int("server_delta", len(newConfig.Servers)-oldServerCount))
+		zap.Int("new_server_count", newSnapshot.ServerCount()),
+		zap.Int("server_delta", newSnapshot.ServerCount()-oldServerCount))
 
-	r.emitConfigReloaded(cfgPath)
+	r.emitConfigReloaded(newSnapshot.Path)
 
 	return nil
 }

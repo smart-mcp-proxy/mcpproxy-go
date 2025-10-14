@@ -19,6 +19,8 @@ import (
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/registries"
+	"mcpproxy-go/internal/runtime/configsvc"
+	"mcpproxy-go/internal/runtime/supervisor"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/server/tokens"
 	"mcpproxy-go/internal/storage"
@@ -37,9 +39,13 @@ type Status struct {
 
 // Runtime owns the non-HTTP lifecycle for the proxy process.
 type Runtime struct {
+	// Deprecated: Use configSvc.Current() instead. Will be removed in Phase 5.
 	cfg     *config.Config
 	cfgPath string
 	logger  *zap.Logger
+
+	// ConfigService provides lock-free snapshot-based config reads
+	configSvc *configsvc.Service
 
 	mu      sync.RWMutex
 	running bool
@@ -60,6 +66,9 @@ type Runtime struct {
 	truncator       *truncate.Truncator
 	secretResolver  *secret.Resolver
 	tokenizer       tokens.Tokenizer
+
+	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
+	supervisor *supervisor.Supervisor
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -118,10 +127,18 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	appCtx, appCancel := context.WithCancel(context.Background())
 
+	// Initialize ConfigService for lock-free snapshot-based reads
+	configSvc := configsvc.NewService(cfg, cfgPath, logger)
+
+	// Phase 7.3: Initialize Supervisor with ActorPoolSimple (delegates to UpstreamManager)
+	actorPool := supervisor.NewActorPoolSimple(upstreamManager, logger)
+	supervisorInstance := supervisor.New(configSvc, actorPool, logger)
+
 	rt := &Runtime{
 		cfg:             cfg,
 		cfgPath:         cfgPath,
 		logger:          logger,
+		configSvc:       configSvc,
 		storageManager:  storageManager,
 		indexManager:    indexManager,
 		upstreamManager: upstreamManager,
@@ -129,6 +146,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		truncator:       truncator,
 		secretResolver:  secretResolver,
 		tokenizer:       tokenizer,
+		supervisor:      supervisorInstance,
 		appCtx:          appCtx,
 		appCancel:       appCancel,
 		status: Status{
@@ -145,21 +163,71 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 }
 
 // Config returns the underlying configuration pointer.
+// Deprecated: Use ConfigSnapshot() for lock-free reads. This method exists for backward compatibility.
 func (r *Runtime) Config() *config.Config {
+	// Use ConfigService for lock-free read
+	if r.configSvc != nil {
+		snapshot := r.configSvc.Current()
+		return snapshot.Config
+	}
+
+	// Fallback to legacy locked access
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.cfg
 }
 
+// ConfigSnapshot returns an immutable configuration snapshot.
+// This is the preferred way to read configuration - it's lock-free and non-blocking.
+func (r *Runtime) ConfigSnapshot() *configsvc.Snapshot {
+	if r.configSvc != nil {
+		return r.configSvc.Current()
+	}
+	// Fallback if service not initialized
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return &configsvc.Snapshot{
+		Config:    r.cfg,
+		Path:      r.cfgPath,
+		Version:   0,
+		Timestamp: time.Now(),
+	}
+}
+
+// ConfigService returns the configuration service for advanced access patterns.
+func (r *Runtime) ConfigService() *configsvc.Service {
+	return r.configSvc
+}
+
+// Supervisor returns the supervisor instance for lock-free state reads via StateView.
+// Phase 6: Provides access to fast server status without storage queries.
+func (r *Runtime) Supervisor() *supervisor.Supervisor {
+	return r.supervisor
+}
+
 // ConfigPath returns the tracked config path.
 func (r *Runtime) ConfigPath() string {
+	if r.configSvc != nil {
+		return r.configSvc.Current().Path
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.cfgPath
 }
 
 // UpdateConfig replaces the runtime configuration in-place.
+// This now updates both the legacy field and the ConfigService.
 func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
+	// Update ConfigService first
+	if r.configSvc != nil {
+		if cfgPath != "" {
+			r.configSvc.UpdatePath(cfgPath)
+		}
+		_ = r.configSvc.Update(cfg, configsvc.UpdateTypeModify, "runtime_update")
+	}
+
+	// Update legacy fields for backward compatibility
 	r.mu.Lock()
 	r.cfg = cfg
 	if cfgPath != "" {
@@ -371,6 +439,14 @@ func (r *Runtime) Close() error {
 
 	var errs []error
 
+	// Phase 6: Stop Supervisor first to stop reconciliation
+	if r.supervisor != nil {
+		r.supervisor.Stop()
+		if r.logger != nil {
+			r.logger.Info("Supervisor stopped")
+		}
+	}
+
 	if r.upstreamManager != nil {
 		if err := r.upstreamManager.DisconnectAll(); err != nil {
 			errs = append(errs, fmt.Errorf("disconnect upstream servers: %w", err))
@@ -394,6 +470,11 @@ func (r *Runtime) Close() error {
 		if err := r.storageManager.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close storage manager: %w", err))
 		}
+	}
+
+	// Close ConfigService and its subscribers
+	if r.configSvc != nil {
+		r.configSvc.Close()
 	}
 
 	if len(errs) > 0 {
@@ -795,6 +876,12 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// IMPORTANT: Unlock before emitting events to prevent deadlocks
 	// Event handlers may need to acquire locks on other resources
 	r.mu.Unlock()
+
+	// Update configSvc to notify subscribers (like supervisor)
+	// This must happen BEFORE LoadConfiguredServers to ensure supervisor reconciles
+	if err := r.configSvc.Update(&configCopy, configsvc.UpdateTypeModify, "api_apply_config"); err != nil {
+		r.logger.Error("Failed to update config service", zap.Error(err))
+	}
 
 	// Emit config.reloaded event (after releasing lock)
 	r.emitConfigReloaded(cfgPathCopy)

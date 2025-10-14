@@ -603,16 +603,24 @@ func (m *Manager) HasDockerContainers() bool {
 }
 
 // GetStats returns statistics about upstream connections
+// GetStats returns statistics about all managed clients.
+// Phase 6 Fix: Lock-free implementation to prevent deadlock with async operations.
 func (m *Manager) GetStats() map[string]interface{} {
+	// Phase 6: Copy client references while holding lock briefly
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	clientsCopy := make(map[string]*managed.Client, len(m.clients))
+	for id, client := range m.clients {
+		clientsCopy[id] = client
+	}
+	totalCount := len(m.clients)
+	m.mu.RUnlock()
 
+	// Now process clients without holding lock to avoid deadlock
 	connectedCount := 0
 	connectingCount := 0
-	totalCount := len(m.clients)
-
 	serverStatus := make(map[string]interface{})
-	for id, client := range m.clients {
+
+	for id, client := range clientsCopy {
 		// Get detailed connection info from state manager
 		connectionInfo := client.GetConnectionInfo()
 
@@ -659,23 +667,33 @@ func (m *Manager) GetStats() map[string]interface{} {
 		serverStatus[id] = status
 	}
 
+	// Call GetTotalToolCount without holding manager lock
+	totalTools := m.GetTotalToolCount()
+
 	return map[string]interface{}{
 		"connected_servers":  connectedCount,
 		"connecting_servers": connectingCount,
 		"total_servers":      totalCount,
 		"servers":            serverStatus,
-		"total_tools":        m.GetTotalToolCount(),
+		"total_tools":        totalTools,
 	}
 }
 
-// GetTotalToolCount returns the total number of tools across all servers
-// Uses cached counts to avoid excessive network calls (2-minute cache per server)
+// GetTotalToolCount returns the total number of tools across all servers.
+// Uses cached counts to avoid excessive network calls (2-minute cache per server).
+// Phase 6 Fix: Lock-free implementation to prevent deadlock.
 func (m *Manager) GetTotalToolCount() int {
+	// Phase 6: Copy client references while holding lock briefly
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	totalTools := 0
+	clientsCopy := make([]*managed.Client, 0, len(m.clients))
 	for _, client := range m.clients {
+		clientsCopy = append(clientsCopy, client)
+	}
+	m.mu.RUnlock()
+
+	// Now process clients without holding lock
+	totalTools := 0
+	for _, client := range clientsCopy {
 		if !client.Config.Enabled || !client.IsConnected() {
 			continue
 		}
