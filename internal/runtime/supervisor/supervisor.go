@@ -106,6 +106,17 @@ func (s *Supervisor) Start() {
 	s.wg.Add(1)
 	go s.reconciliationLoop(configUpdates)
 
+	// Phase 7.1: Trigger initial reconciliation to populate StateView
+	go func() {
+		time.Sleep(500 * time.Millisecond) // Give servers time to connect
+		currentConfig := s.configSvc.Current()
+		if err := s.reconcile(currentConfig); err != nil {
+			s.logger.Error("Initial reconciliation failed", zap.Error(err))
+		} else {
+			s.logger.Info("Initial reconciliation completed, StateView populated")
+		}
+	}()
+
 	s.logger.Info("Supervisor started")
 }
 
@@ -393,6 +404,7 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot) {
 			state.ConnectionInfo = actualState.ConnectionInfo
 			state.LastSeen = actualState.LastSeen
 			state.ToolCount = actualState.ToolCount
+			state.Tools = actualState.Tools // Phase 7.1: Copy tools for caching
 		}
 
 		newSnapshot.Servers[srv.Name] = state
@@ -420,6 +432,31 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		status.Quarantined = state.Quarantined
 		status.Connected = state.Connected
 		status.ToolCount = state.ToolCount
+
+		// Phase 7.1: Convert ToolMetadata to ToolInfo and cache in StateView
+		if state.Tools != nil {
+			status.Tools = make([]stateview.ToolInfo, len(state.Tools))
+			for i, tool := range state.Tools {
+				// Parse ParamsJSON into InputSchema
+				var inputSchema map[string]interface{}
+				if tool.ParamsJSON != "" {
+					// ParamsJSON is already a JSON string, we'll store it as-is
+					// The API endpoint will parse it if needed
+					inputSchema = map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{}, // TODO: Parse ParamsJSON
+					}
+				}
+
+				status.Tools[i] = stateview.ToolInfo{
+					Name:        tool.Name,
+					Description: tool.Description,
+					InputSchema: inputSchema,
+				}
+			}
+		} else {
+			status.Tools = nil
+		}
 
 		// Map connection state to string
 		if state.Connected {
@@ -481,6 +518,32 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			state.Connected = connected
 			state.LastSeen = event.Timestamp
 
+			// Phase 7.1: Fetch tools when server connects
+			var tools []stateview.ToolInfo
+			if connected {
+				// Get fresh state with tools from upstream adapter
+				actualStates := s.upstream.GetAllStates()
+				if actualState, ok := actualStates[event.ServerName]; ok {
+					state.Tools = actualState.Tools
+					state.ToolCount = actualState.ToolCount
+
+					// Convert ToolMetadata to ToolInfo for StateView
+					if actualState.Tools != nil {
+						tools = make([]stateview.ToolInfo, len(actualState.Tools))
+						for i, tool := range actualState.Tools {
+							tools[i] = stateview.ToolInfo{
+								Name:        tool.Name,
+								Description: tool.Description,
+								InputSchema: map[string]interface{}{
+									"type":       "object",
+									"properties": map[string]interface{}{},
+								},
+							}
+						}
+					}
+				}
+			}
+
 			// Update stateview
 			s.stateView.UpdateServer(event.ServerName, func(status *stateview.ServerStatus) {
 				status.Connected = connected
@@ -488,10 +551,14 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					status.State = "connected"
 					t := event.Timestamp
 					status.ConnectedAt = &t
+					status.Tools = tools // Phase 7.1: Update cached tools
+					status.ToolCount = len(tools)
 				} else {
 					status.State = "disconnected"
 					t := event.Timestamp
 					status.DisconnectedAt = &t
+					status.Tools = nil // Clear tools on disconnect
+					status.ToolCount = 0
 				}
 			})
 		}

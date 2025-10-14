@@ -20,6 +20,7 @@ type ServerState struct {
 	ConnectionInfo *types.ConnectionInfo
 	LastSeen       time.Time
 	ToolCount      int
+	Tools          []*config.ToolMetadata // Phase 7.1: Cached tools for lock-free reads
 
 	// Reconciliation metadata
 	DesiredVersion int64 // Config version that defines this desired state
@@ -58,6 +59,11 @@ func (s *ServerStateSnapshot) Clone() *ServerStateSnapshot {
 			if state.ConnectionInfo != nil {
 				infoCopy := *state.ConnectionInfo
 				stateCopy.ConnectionInfo = &infoCopy
+			}
+			// Phase 7.1: Clone tools slice
+			if state.Tools != nil {
+				stateCopy.Tools = make([]*config.ToolMetadata, len(state.Tools))
+				copy(stateCopy.Tools, state.Tools)
 			}
 			cloned.Servers[name] = &stateCopy
 		}

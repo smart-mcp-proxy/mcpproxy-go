@@ -8,6 +8,13 @@ import (
 	"mcpproxy-go/internal/config"
 )
 
+// ToolInfo represents a cached tool definition.
+type ToolInfo struct {
+	Name        string
+	Description string
+	InputSchema map[string]interface{}
+}
+
 // ServerStatus represents the runtime status of an upstream server.
 type ServerStatus struct {
 	Name           string
@@ -22,6 +29,7 @@ type ServerStatus struct {
 	DisconnectedAt *time.Time
 	RetryCount     int
 	ToolCount      int
+	Tools          []ToolInfo // Phase 7.1: Cached tool list for lock-free reads
 	Metadata       map[string]interface{}
 }
 
@@ -91,6 +99,11 @@ func (v *View) UpdateServer(name string, fn func(*ServerStatus)) {
 			t := *vs.DisconnectedAt
 			newStatus.DisconnectedAt = &t
 		}
+		if vs.Tools != nil {
+			// Phase 7.1: Clone tools slice
+			newStatus.Tools = make([]ToolInfo, len(vs.Tools))
+			copy(newStatus.Tools, vs.Tools)
+		}
 		if vs.Metadata != nil {
 			newStatus.Metadata = make(map[string]interface{}, len(vs.Metadata))
 			for mk, mv := range vs.Metadata {
@@ -152,6 +165,11 @@ func (v *View) RemoveServer(name string) {
 		if vs.DisconnectedAt != nil {
 			t := *vs.DisconnectedAt
 			newStatus.DisconnectedAt = &t
+		}
+		if vs.Tools != nil {
+			// Phase 7.1: Clone tools slice
+			newStatus.Tools = make([]ToolInfo, len(vs.Tools))
+			copy(newStatus.Tools, vs.Tools)
 		}
 		if vs.Metadata != nil {
 			newStatus.Metadata = make(map[string]interface{}, len(vs.Metadata))

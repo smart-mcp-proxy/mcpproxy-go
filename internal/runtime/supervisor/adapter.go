@@ -175,10 +175,22 @@ func (a *UpstreamAdapter) GetAllStates() map[string]*ServerState {
 	if serversMap, ok := stats["servers"].(map[string]interface{}); ok {
 		for name, serverInfo := range serversMap {
 			if serverMap, ok := serverInfo.(map[string]interface{}); ok {
+				connected := getBool(serverMap, "connected")
+
 				state := &ServerState{
 					Name:      name,
-					Connected: getBool(serverMap, "connected"),
+					Connected: connected,
 					ToolCount: getInt(serverMap, "tool_count"),
+				}
+
+				// Phase 7.1: Fetch tools for connected servers
+				if connected {
+					if client, exists := a.manager.GetClient(name); exists {
+						if tools, err := client.ListTools(context.Background()); err == nil {
+							state.Tools = tools
+							state.ToolCount = len(tools) // Update count from actual tools
+						}
+					}
 				}
 
 				states[name] = state

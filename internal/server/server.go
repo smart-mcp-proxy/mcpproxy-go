@@ -537,45 +537,47 @@ func (s *Server) getAllServersLegacy() ([]map[string]interface{}, error) {
 
 // GetQuarantinedServers returns information about quarantined servers for tray UI
 func (s *Server) GetQuarantinedServers() ([]map[string]interface{}, error) {
-	s.logger.Debug("GetQuarantinedServers called")
+	s.logger.Debug("GetQuarantinedServers called (Phase 7.1: using StateView)")
 
-	// Check if storage manager is available
-	if s.runtime.StorageManager() == nil {
-		s.logger.Warn("Storage manager is nil in GetQuarantinedServers")
+	// Phase 7.1: Use StateView for lock-free read
+	supervisor := s.runtime.Supervisor()
+	if supervisor == nil {
+		s.logger.Warn("Supervisor not available, returning empty list")
 		return []map[string]interface{}{}, nil
 	}
 
-	s.logger.Debug("Calling storage manager ListQuarantinedUpstreamServers")
-	quarantinedServers, err := s.runtime.StorageManager().ListQuarantinedUpstreamServers()
-	if err != nil {
-		// Handle database closed gracefully
-		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
-			s.logger.Debug("Database not available for GetQuarantinedServers, returning empty list")
-			return []map[string]interface{}{}, nil
-		}
-		s.logger.Error("Failed to get quarantined servers from storage", zap.Error(err))
-		return nil, err
-	}
+	snapshot := supervisor.StateView().Snapshot()
 
-	s.logger.Debug("Retrieved quarantined servers from storage",
-		zap.Int("count", len(quarantinedServers)))
-
-	var result []map[string]interface{}
-	for _, server := range quarantinedServers {
-		serverMap := map[string]interface{}{
-			"name":        server.Name,
-			"url":         server.URL,
-			"command":     server.Command,
-			"protocol":    server.Protocol,
-			"enabled":     server.Enabled,
-			"quarantined": server.Quarantined,
-			"created":     server.Created,
+	result := make([]map[string]interface{}, 0)
+	for _, serverStatus := range snapshot.Servers {
+		if !serverStatus.Quarantined {
+			continue
 		}
-		result = append(result, serverMap)
+
+		// Extract config fields
+		var created time.Time
+		var url, command, protocol string
+		if serverStatus.Config != nil {
+			created = serverStatus.Config.Created
+			url = serverStatus.Config.URL
+			command = serverStatus.Config.Command
+			protocol = serverStatus.Config.Protocol
+		}
+
+		result = append(result, map[string]interface{}{
+			"name":        serverStatus.Name,
+			"url":         url,
+			"command":     command,
+			"protocol":    protocol,
+			"enabled":     serverStatus.Enabled,
+			"quarantined": true,
+			"created":     created,
+			"connected":   serverStatus.Connected,
+			"tool_count":  serverStatus.ToolCount,
+		})
 
 		s.logger.Debug("Added quarantined server to result",
-			zap.String("server", server.Name),
-			zap.Bool("quarantined", server.Quarantined))
+			zap.String("server", serverStatus.Name))
 	}
 
 	s.logger.Debug("GetQuarantinedServers completed",
@@ -1127,44 +1129,38 @@ func (s *Server) GetTokenSavings() (*contracts.ServerTokenMetrics, error) {
 
 // GetServerTools returns tools for a specific server
 func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, error) {
-	s.logger.Debug("GetServerTools called", zap.String("server", serverName))
+	s.logger.Debug("GetServerTools called (Phase 7.1: using StateView)", zap.String("server", serverName))
 
-	if s.runtime.UpstreamManager() == nil {
-		return nil, fmt.Errorf("upstream manager not initialized")
+	// Phase 7.1: Use StateView for lock-free cached tool reads
+	supervisor := s.runtime.Supervisor()
+	if supervisor == nil {
+		return nil, fmt.Errorf("supervisor not available")
 	}
 
-	// Get client for the server
-	client, exists := s.runtime.UpstreamManager().GetClient(serverName)
+	snapshot := supervisor.StateView().Snapshot()
+	serverStatus, exists := snapshot.Servers[serverName]
 	if !exists {
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
-	if !client.IsConnected() {
-		return nil, fmt.Errorf("server not connected: %s", serverName)
+	if !serverStatus.Connected {
+		return nil, fmt.Errorf("server %s is not connected", serverName)
 	}
 
-	// Get tools from client
-	ctx := context.Background()
-	tools, err := client.ListTools(ctx)
-	if err != nil {
-		s.logger.Error("Failed to get server tools", zap.String("server", serverName), zap.Error(err))
-		return nil, err
-	}
-
-	// Convert to map format for API
-	var result []map[string]interface{}
-	for _, tool := range tools {
-		toolMap := map[string]interface{}{
+	// Convert cached tools to API response format
+	result := make([]map[string]interface{}, len(serverStatus.Tools))
+	for i, tool := range serverStatus.Tools {
+		result[i] = map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,
-			"server_name": tool.ServerName,
+			"inputSchema": tool.InputSchema,
+			"server_name": serverName,
 		}
-		// Note: ListTools returns ToolMetadata which doesn't have InputSchema
-		// We'd need to get that from the actual tool definition
-		result = append(result, toolMap)
 	}
 
-	s.logger.Debug("Retrieved server tools", zap.String("server", serverName), zap.Int("count", len(result)))
+	s.logger.Debug("Retrieved server tools from cache",
+		zap.String("server", serverName),
+		zap.Int("count", len(result)))
 	return result, nil
 }
 
