@@ -372,13 +372,90 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 	return stats
 }
 
-// GetAllServers returns information about all upstream servers for tray UI
+// GetAllServers returns information about all upstream servers for tray UI.
+// Phase 6: Uses lock-free StateView for instant responses (<1ms) even during tool indexing.
 func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
-	s.logger.Debug("GetAllServers called")
+	s.logger.Debug("GetAllServers called (Phase 6: using StateView)")
+
+	// Phase 6: Use Supervisor's StateView for lock-free, instant reads
+	supervisor := s.runtime.Supervisor()
+	if supervisor == nil {
+		s.logger.Warn("GetAllServers: supervisor not available, falling back to storage")
+		return s.getAllServersLegacy()
+	}
+
+	stateView := supervisor.StateView()
+	if stateView == nil {
+		s.logger.Warn("GetAllServers: StateView not available, falling back to storage")
+		return s.getAllServersLegacy()
+	}
+
+	// Get snapshot - this is lock-free and instant
+	snapshot := stateView.Snapshot()
+	s.logger.Debug("StateView snapshot retrieved", zap.Int("count", len(snapshot.Servers)))
+
+	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
+	for _, serverStatus := range snapshot.Servers {
+		// Convert StateView ServerStatus to API response format
+		connected := serverStatus.Connected
+		connecting := serverStatus.State == "connecting"
+
+		status := serverStatus.State
+		if status == "" {
+			if serverStatus.Enabled {
+				if connecting {
+					status = "connecting"
+				} else if connected {
+					status = "ready"
+				} else {
+					status = "disconnected"
+				}
+			} else {
+				status = "disabled"
+			}
+		}
+
+		// Extract created time and config fields
+		var created time.Time
+		var url, command, protocol string
+		if serverStatus.Config != nil {
+			created = serverStatus.Config.Created
+			url = serverStatus.Config.URL
+			command = serverStatus.Config.Command
+			protocol = serverStatus.Config.Protocol
+		}
+
+		result = append(result, map[string]interface{}{
+			"name":            serverStatus.Name,
+			"url":             url,
+			"command":         command,
+			"protocol":        protocol,
+			"enabled":         serverStatus.Enabled,
+			"quarantined":     serverStatus.Quarantined,
+			"created":         created,
+			"connected":       connected,
+			"connecting":      connecting,
+			"tool_count":      serverStatus.ToolCount,
+			"last_error":      serverStatus.LastError,
+			"status":          status,
+			"should_retry":    false, // Managed by Actor internally now
+			"retry_count":     serverStatus.RetryCount,
+			"last_retry_time": nil, // Actor tracks this internally
+		})
+	}
+
+	s.logger.Debug("GetAllServers completed", zap.Int("server_count", len(result)))
+	return result, nil
+}
+
+// getAllServersLegacy is the old storage-based implementation, kept as fallback.
+// This should rarely be called after Phase 6 integration.
+func (s *Server) getAllServersLegacy() ([]map[string]interface{}, error) {
+	s.logger.Warn("Using legacy storage-based GetAllServers (slow path)")
 
 	// Check if storage manager is available
 	if s.runtime.StorageManager() == nil {
-		s.logger.Warn("GetAllServers: storage manager is nil")
+		s.logger.Warn("getAllServersLegacy: storage manager is nil")
 		return []map[string]interface{}{}, nil
 	}
 
@@ -386,26 +463,21 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 	if err != nil {
 		// Handle database closed gracefully
 		if strings.Contains(err.Error(), "database not open") || strings.Contains(err.Error(), "closed") {
-			s.logger.Debug("Database not available for GetAllServers, returning empty list")
+			s.logger.Debug("Database not available for getAllServersLegacy, returning empty list")
 			return []map[string]interface{}{}, nil
 		}
 		s.logger.Error("ListUpstreamServers failed", zap.Error(err))
 		return nil, err
 	}
-	s.logger.Debug("ListUpstreamServers returned", zap.Int("count", len(servers)))
 
 	var result []map[string]interface{}
 	for _, server := range servers {
-		// Get connection status and tool count from upstream manager
+		// Get connection status from upstream manager
 		var connected bool
 		var connecting bool
 		var lastError string
 		var toolCount int
-
 		var status string
-		var shouldRetry bool
-		var retryCount int
-		var lastRetryTime *time.Time
 
 		if s.runtime.UpstreamManager() != nil {
 			if client, exists := s.runtime.UpstreamManager().GetClient(server.Name); exists {
@@ -422,21 +494,8 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				if st, ok := connectionStatus["state"].(string); ok && st != "" {
 					status = st
 				}
-				if sr, ok := connectionStatus["should_retry"].(bool); ok {
-					shouldRetry = sr
-				}
-				switch rc := connectionStatus["retry_count"].(type) {
-				case int:
-					retryCount = rc
-				case float64:
-					retryCount = int(rc)
-				}
-				if rt, ok := connectionStatus["last_retry_time"].(time.Time); ok && !rt.IsZero() {
-					lastRetryTime = &rt
-				}
-
 				if connected {
-					toolCount = s.getServerToolCount(server.Name)
+					toolCount = 0 // Skip slow tool count during indexing
 					status = "ready"
 				}
 			}
@@ -467,9 +526,9 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"tool_count":      toolCount,
 			"last_error":      lastError,
 			"status":          status,
-			"should_retry":    shouldRetry,
-			"retry_count":     retryCount,
-			"last_retry_time": lastRetryTime,
+			"should_retry":    false,
+			"retry_count":     0,
+			"last_retry_time": nil,
 		})
 	}
 

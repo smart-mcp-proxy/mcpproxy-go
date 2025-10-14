@@ -20,6 +20,7 @@ import (
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/runtime/configsvc"
+	"mcpproxy-go/internal/runtime/supervisor"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/server/tokens"
 	"mcpproxy-go/internal/storage"
@@ -65,6 +66,9 @@ type Runtime struct {
 	truncator       *truncate.Truncator
 	secretResolver  *secret.Resolver
 	tokenizer       tokens.Tokenizer
+
+	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
+	supervisor *supervisor.Supervisor
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -126,6 +130,10 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Initialize ConfigService for lock-free snapshot-based reads
 	configSvc := configsvc.NewService(cfg, cfgPath, logger)
 
+	// Phase 6: Initialize Supervisor with UpstreamAdapter for lock-free state reads
+	upstreamAdapter := supervisor.NewUpstreamAdapter(upstreamManager, logger)
+	supervisorInstance := supervisor.New(configSvc, upstreamAdapter, logger)
+
 	rt := &Runtime{
 		cfg:             cfg,
 		cfgPath:         cfgPath,
@@ -138,6 +146,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		truncator:       truncator,
 		secretResolver:  secretResolver,
 		tokenizer:       tokenizer,
+		supervisor:      supervisorInstance,
 		appCtx:          appCtx,
 		appCancel:       appCancel,
 		status: Status{
@@ -188,6 +197,12 @@ func (r *Runtime) ConfigSnapshot() *configsvc.Snapshot {
 // ConfigService returns the configuration service for advanced access patterns.
 func (r *Runtime) ConfigService() *configsvc.Service {
 	return r.configSvc
+}
+
+// Supervisor returns the supervisor instance for lock-free state reads via StateView.
+// Phase 6: Provides access to fast server status without storage queries.
+func (r *Runtime) Supervisor() *supervisor.Supervisor {
+	return r.supervisor
 }
 
 // ConfigPath returns the tracked config path.
@@ -423,6 +438,14 @@ func (r *Runtime) Close() error {
 	r.mu.Unlock()
 
 	var errs []error
+
+	// Phase 6: Stop Supervisor first to stop reconciliation
+	if r.supervisor != nil {
+		r.supervisor.Stop()
+		if r.logger != nil {
+			r.logger.Info("Supervisor stopped")
+		}
+	}
 
 	if r.upstreamManager != nil {
 		if err := r.upstreamManager.DisconnectAll(); err != nil {

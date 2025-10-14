@@ -13,6 +13,12 @@ import (
 
 // StartBackgroundInitialization kicks off configuration sync and background loops.
 func (r *Runtime) StartBackgroundInitialization() {
+	// Phase 6: Start Supervisor for state reconciliation and lock-free reads
+	if r.supervisor != nil {
+		r.supervisor.Start()
+		r.logger.Info("Supervisor started for state reconciliation")
+	}
+
 	go r.backgroundInitialization()
 }
 

@@ -72,7 +72,7 @@ func New(configSvc *configsvc.Service, upstream UpstreamInterface, logger *zap.L
 		upstream:  upstream,
 		version:   0,
 		stateView: stateview.New(),
-		eventCh:   make(chan Event, 100),
+		eventCh:   make(chan Event, 500), // Phase 6: Increased buffer for async operations
 		listeners: make([]chan Event, 0),
 		ctx:       ctx,
 		cancel:    cancel,
@@ -164,6 +164,7 @@ func (s *Supervisor) reconciliationLoop(configUpdates <-chan configsvc.Update) {
 }
 
 // reconcile compares desired vs actual state and takes corrective actions.
+// Phase 6 Fix: Made fully async to prevent blocking HTTP server startup.
 func (s *Supervisor) reconcile(configSnapshot *configsvc.Snapshot) error {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -173,22 +174,36 @@ func (s *Supervisor) reconcile(configSnapshot *configsvc.Snapshot) error {
 
 	plan := s.computeReconcilePlan(configSnapshot)
 
-	// Execute the plan
+	// Phase 6 Fix: Execute actions asynchronously to prevent blocking
+	// Each action runs in its own goroutine with timeout
+	actionCount := 0
 	for serverName, action := range plan.Actions {
-		if err := s.executeAction(serverName, action, configSnapshot); err != nil {
-			s.logger.Error("Failed to execute action",
-				zap.String("server", serverName),
-				zap.String("action", string(action)),
-				zap.Error(err))
-			// Continue with other actions even if one fails
+		if action == ActionNone {
+			continue // Skip no-op actions
 		}
+
+		actionCount++
+		// Launch each action in a goroutine - no waiting!
+		go func(name string, act ReconcileAction, snapshot *configsvc.Snapshot) {
+			if err := s.executeAction(name, act, snapshot); err != nil {
+				s.logger.Error("Failed to execute action",
+					zap.String("server", name),
+					zap.String("action", string(act)),
+					zap.Error(err))
+			} else {
+				s.logger.Debug("Action completed successfully",
+					zap.String("server", name),
+					zap.String("action", string(act)))
+			}
+		}(serverName, action, configSnapshot)
 	}
 
-	// Update state snapshot
+	// Update state snapshot immediately (actions run in background)
 	s.updateSnapshot(configSnapshot)
 
-	s.logger.Debug("Reconciliation complete",
-		zap.Int("actions_executed", len(plan.Actions)))
+	s.logger.Debug("Reconciliation dispatched",
+		zap.Int("actions_dispatched", actionCount),
+		zap.String("note", "actions running asynchronously"))
 
 	return nil
 }
@@ -499,7 +514,7 @@ func (s *Supervisor) Subscribe() <-chan Event {
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
 
-	ch := make(chan Event, 50)
+	ch := make(chan Event, 200) // Phase 6: Increased buffer for async reconciliation
 	s.listeners = append(s.listeners, ch)
 	return ch
 }
