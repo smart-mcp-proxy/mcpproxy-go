@@ -1,0 +1,431 @@
+2025-10-14T11:14:31.197+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-sse-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.198+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-sse-server"}
+2025-10-14T11:14:31.198+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-sse-server"}
+2025-10-14T11:14:31.198+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "server": "test-sse-server", "url": "http://127.0.0.1:56870/sse", "command": "", "protocol": "sse"}
+2025-10-14T11:14:31.198+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "server": "test-sse-server", "command": "", "url": "http://127.0.0.1:56870/sse", "protocol": "sse", "determined_transport": "sse"}
+2025-10-14T11:14:31.198+0300	DEBUG	core/connection.go:114	📡 Using SSE transport	{"upstream_id": "test-client", "upstream_name": "test-sse-server"}
+2025-10-14T11:14:31.198+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.198+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "strategy_index": 0, "strategy": "headers", "error": "no headers configured"}
+2025-10-14T11:14:31.198+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "strategy_index": 1, "strategy": "no-auth"}
+2025-10-14T11:14:31.199+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "strategy_index": 1, "strategy": "no-auth", "error": "unexpected status code: 503"}
+2025-10-14T11:14:31.199+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-sse-server"}
+2025-10-14T11:14:31.199+0300	ERROR	managed/client.go:436	Connection error	{"component": "managed_client", "server": "test-sse-server", "error": "failed to connect: unexpected status code: 503", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:436
+2025-10-14T11:14:31.199+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-sse-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.199+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-sse-server"}
+2025-10-14T11:14:31.199+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-sse-server"}
+2025-10-14T11:14:31.199+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "server": "test-sse-server", "url": "http://127.0.0.1:56872/sse", "command": "", "protocol": "sse"}
+2025-10-14T11:14:31.199+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "server": "test-sse-server", "command": "", "url": "http://127.0.0.1:56872/sse", "protocol": "sse", "determined_transport": "sse"}
+2025-10-14T11:14:31.199+0300	DEBUG	core/connection.go:114	📡 Using SSE transport	{"upstream_id": "test-client", "upstream_name": "test-sse-server"}
+2025-10-14T11:14:31.199+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.199+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "strategy_index": 0, "strategy": "headers", "error": "no headers configured"}
+2025-10-14T11:14:31.199+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "strategy_index": 1, "strategy": "no-auth"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-sse-server", "strategy_index": 1, "strategy": "no-auth", "error": "unexpected status code: 503"}
+2025-10-14T11:14:31.200+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-sse-server"}
+2025-10-14T11:14:31.200+0300	ERROR	managed/client.go:436	Connection error	{"component": "managed_client", "server": "test-sse-server", "error": "failed to connect: unexpected status code: 503", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:436
+2025-10-14T11:14:31.200+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.200+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-server"}
+2025-10-14T11:14:31.200+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-server"}
+2025-10-14T11:14:31.200+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "url": "http://127.0.0.1:56874/sse", "command": "", "protocol": "sse"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "command": "", "url": "http://127.0.0.1:56874/sse", "protocol": "sse", "determined_transport": "sse"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:114	📡 Using SSE transport	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 0, "strategy": "headers", "error": "no headers configured"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 1, "strategy": "no-auth"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 1, "strategy": "no-auth", "error": "unexpected status code: 503"}
+2025-10-14T11:14:31.200+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-server"}
+2025-10-14T11:14:31.200+0300	ERROR	managed/client.go:436	Connection error	{"component": "managed_client", "server": "test-server", "error": "failed to connect: unexpected status code: 503", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:436
+2025-10-14T11:14:31.200+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.200+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-server"}
+2025-10-14T11:14:31.200+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-server"}
+2025-10-14T11:14:31.200+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "url": "http://127.0.0.1:56874", "command": "", "protocol": "http"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "command": "", "url": "http://127.0.0.1:56874", "protocol": "http", "determined_transport": "http"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:111	🌐 Using HTTP transport	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 0, "strategy": "headers", "error": "no headers configured"}
+2025-10-14T11:14:31.200+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 1, "strategy": "no-auth"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 1, "strategy": "no-auth", "error": "MCP initialize failed during no-auth strategy: MCP initialize failed: transport error: request failed with status 503: Service Unavailable"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 2, "strategy": "OAuth"}
+2025-10-14T11:14:31.201+0300	ERROR	core/connection.go:887	🚨 OAUTH AUTH FUNCTION CALLED - START	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:887
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Connect_WorkingTransports.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:222
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:907	🔐 Attempting OAuth authentication	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "url": "http://127.0.0.1:56874"}
+2025-10-14T11:14:31.201+0300	INFO	core/connection.go:916	🔍 HTTP OAuth strategy token store status	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "has_existing_token_store": false, "strategy": "HTTP OAuth"}
+2025-10-14T11:14:31.201+0300	ERROR	core/connection.go:921	🚨 ABOUT TO CALL oauth.CreateOAuthConfig	{"upstream_id": "test-client", "upstream_name": "test-server"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:921
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Connect_WorkingTransports.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:222
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.201+0300	ERROR	core/connection.go:926	🚨 oauth.CreateOAuthConfig RETURNED	{"upstream_id": "test-client", "upstream_name": "test-server", "config_nil": false}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:926
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Connect_WorkingTransports.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:222
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.201+0300	INFO	core/connection.go:934	🌟 Starting OAuth authentication flow	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "redirect_uri": "http://127.0.0.1:56877/oauth/callback", "scopes": ["mcp.read", "mcp.write"], "pkce_enabled": true}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:941	🛠️ Creating HTTP transport config for OAuth	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:944	🔨 Calling transport.CreateHTTPClient with OAuth config	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:952	✅ HTTP client created, storing in c.client	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:954	🔗 OAuth HTTP client created, starting connection	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.201+0300	INFO	core/connection.go:958	🚀 Starting OAuth client - this should trigger browser opening	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "callback_uri": "http://127.0.0.1:56877/oauth/callback"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:963	🔍 OAuth environment diagnostics	{"upstream_id": "test-client", "upstream_name": "test-server", "DISPLAY": "", "PATH": "/usr/local/go/bin:/Users/user/.local/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/usr/local/go/bin:/opt/homebrew/bin", "GOOS": "darwin", "has_open_command": true, "has_xdg_open": false, "BROWSER": "", "XDG_SESSION_TYPE": "", "WAYLAND_DISPLAY": "", "CI": false, "HEADLESS": false, "NO_BROWSER": false, "SSH_CLIENT": "", "SSH_TTY": ""}
+2025-10-14T11:14:31.201+0300	INFO	core/connection.go:1003	🚀 Starting OAuth client - using proper mcp-go OAuth error handling	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.201+0300	INFO	core/connection.go:1041	✅ OAuth client started successfully	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.201+0300	INFO	core/connection.go:1044	✅ OAuth setup complete - using proper mcp-go OAuth error handling pattern	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:1049	🔍 Starting MCP initialization after OAuth setup	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.201+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.201+0300	ERROR	core/connection.go:1053	❌ MCP initialization failed after OAuth setup	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "error": "MCP initialize failed: transport error: failed to send request: no valid token available, authorization required"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:1053
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Connect_WorkingTransports.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:222
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.201+0300	INFO	core/connection.go:1059	🎯 OAuth authorization required during MCP init - deferring OAuth for background processing	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:2103	Deferring OAuth during automatic connection attempt	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:1066	⏳ Deferring OAuth to prevent tray UI blocking - will retry in background	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:1070	💡 OAuth login available via system tray menu	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 2, "strategy": "OAuth", "error": "OAuth authorization required - deferred for background processing"}
+2025-10-14T11:14:31.202+0300	INFO	managed/client.go:107	🎯 OAuth authorization required during MCP initialization	{"component": "managed_client", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	WARN	managed/client.go:430	Connection error, will attempt automatic reconnection	{"component": "managed_client", "server": "test-server", "error_type": "normal_reconnection", "error": "failed to connect: all authentication strategies failed, last error: OAuth authorization required - deferred for background processing", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:430
+2025-10-14T11:14:31.202+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.202+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "url": "http://127.0.0.1:56874", "command": "", "protocol": "streamable-http"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "command": "", "url": "http://127.0.0.1:56874", "protocol": "streamable-http", "determined_transport": "streamable-http"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:111	🌐 Using HTTP transport	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 0, "strategy": "headers", "error": "no headers configured"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 1, "strategy": "no-auth"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 1, "strategy": "no-auth", "error": "MCP initialize failed during no-auth strategy: MCP initialize failed: transport error: request failed with status 503: Service Unavailable"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 2, "strategy": "OAuth"}
+2025-10-14T11:14:31.202+0300	ERROR	core/connection.go:887	🚨 OAUTH AUTH FUNCTION CALLED - START	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:887
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Connect_WorkingTransports.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:222
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:907	🔐 Attempting OAuth authentication	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "url": "http://127.0.0.1:56874"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:916	🔍 HTTP OAuth strategy token store status	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "has_existing_token_store": true, "strategy": "HTTP OAuth"}
+2025-10-14T11:14:31.202+0300	ERROR	core/connection.go:921	🚨 ABOUT TO CALL oauth.CreateOAuthConfig	{"upstream_id": "test-client", "upstream_name": "test-server"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:921
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Connect_WorkingTransports.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:222
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.202+0300	ERROR	core/connection.go:926	🚨 oauth.CreateOAuthConfig RETURNED	{"upstream_id": "test-client", "upstream_name": "test-server", "config_nil": false}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:926
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Connect_WorkingTransports.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:222
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:934	🌟 Starting OAuth authentication flow	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "redirect_uri": "http://127.0.0.1:56877/oauth/callback", "scopes": ["mcp.read", "mcp.write"], "pkce_enabled": true}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:941	🛠️ Creating HTTP transport config for OAuth	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:944	🔨 Calling transport.CreateHTTPClient with OAuth config	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:952	✅ HTTP client created, storing in c.client	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:954	🔗 OAuth HTTP client created, starting connection	{"upstream_id": "test-client", "upstream_name": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:958	🚀 Starting OAuth client - this should trigger browser opening	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "callback_uri": "http://127.0.0.1:56877/oauth/callback"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:963	🔍 OAuth environment diagnostics	{"upstream_id": "test-client", "upstream_name": "test-server", "DISPLAY": "", "PATH": "/usr/local/go/bin:/Users/user/.local/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/usr/local/go/bin:/opt/homebrew/bin", "GOOS": "darwin", "has_open_command": true, "has_xdg_open": false, "BROWSER": "", "XDG_SESSION_TYPE": "", "WAYLAND_DISPLAY": "", "CI": false, "HEADLESS": false, "NO_BROWSER": false, "SSH_CLIENT": "", "SSH_TTY": ""}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:1003	🚀 Starting OAuth client - using proper mcp-go OAuth error handling	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:1041	✅ OAuth client started successfully	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:1044	✅ OAuth setup complete - using proper mcp-go OAuth error handling pattern	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:1049	🔍 Starting MCP initialization after OAuth setup	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.202+0300	ERROR	core/connection.go:1053	❌ MCP initialization failed after OAuth setup	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server", "error": "MCP initialize failed: transport error: failed to send request: no valid token available, authorization required"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:1053
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Connect_WorkingTransports.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:222
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:1059	🎯 OAuth authorization required during MCP init - deferring OAuth for background processing	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:2103	Deferring OAuth during automatic connection attempt	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:1066	⏳ Deferring OAuth to prevent tray UI blocking - will retry in background	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:1070	💡 OAuth login available via system tray menu	{"upstream_id": "test-client", "upstream_name": "test-server", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-server", "strategy_index": 2, "strategy": "OAuth", "error": "OAuth authorization required - deferred for background processing"}
+2025-10-14T11:14:31.202+0300	INFO	managed/client.go:107	🎯 OAuth authorization required during MCP initialization	{"component": "managed_client", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-server"}
+2025-10-14T11:14:31.202+0300	WARN	managed/client.go:430	Connection error, will attempt automatic reconnection	{"component": "managed_client", "server": "test-server", "error_type": "normal_reconnection", "error": "failed to connect: all authentication strategies failed, last error: OAuth authorization required - deferred for background processing", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:430
+2025-10-14T11:14:31.202+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-headers-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.202+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-headers-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-headers-server"}
+2025-10-14T11:14:31.202+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "url": "http://127.0.0.1:56878/sse", "command": "", "protocol": "sse"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "command": "", "url": "http://127.0.0.1:56878/sse", "protocol": "sse", "determined_transport": "sse"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:114	📡 Using SSE transport	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.202+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 0, "strategy": "headers", "error": "unexpected status code: 503"}
+2025-10-14T11:14:31.203+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	ERROR	managed/client.go:436	Connection error	{"component": "managed_client", "server": "test-headers-server", "error": "failed to connect: unexpected status code: 503", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:436
+2025-10-14T11:14:31.203+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-headers-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.203+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "url": "http://127.0.0.1:56878", "command": "", "protocol": "streamable-http"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "command": "", "url": "http://127.0.0.1:56878", "protocol": "streamable-http", "determined_transport": "streamable-http"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:111	🌐 Using HTTP transport	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 0, "strategy": "headers", "error": "MCP initialize failed during headers-auth strategy: MCP initialize failed: transport error: request failed with status 503: Service Unavailable"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 1, "strategy": "no-auth"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 1, "strategy": "no-auth", "error": "MCP initialize failed during no-auth strategy: MCP initialize failed: transport error: request failed with status 503: Service Unavailable"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 2, "strategy": "OAuth"}
+2025-10-14T11:14:31.203+0300	ERROR	core/connection.go:887	🚨 OAUTH AUTH FUNCTION CALLED - START	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:887
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Headers_Support.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:317
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:907	🔐 Attempting OAuth authentication	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "url": "http://127.0.0.1:56878"}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:916	🔍 HTTP OAuth strategy token store status	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "has_existing_token_store": false, "strategy": "HTTP OAuth"}
+2025-10-14T11:14:31.203+0300	ERROR	core/connection.go:921	🚨 ABOUT TO CALL oauth.CreateOAuthConfig	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:921
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Headers_Support.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:317
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.203+0300	ERROR	core/connection.go:926	🚨 oauth.CreateOAuthConfig RETURNED	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "config_nil": false}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:926
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Headers_Support.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:317
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:934	🌟 Starting OAuth authentication flow	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "redirect_uri": "http://127.0.0.1:56881/oauth/callback", "scopes": ["mcp.read", "mcp.write"], "pkce_enabled": true}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:941	🛠️ Creating HTTP transport config for OAuth	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:944	🔨 Calling transport.CreateHTTPClient with OAuth config	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:952	✅ HTTP client created, storing in c.client	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:954	🔗 OAuth HTTP client created, starting connection	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:958	🚀 Starting OAuth client - this should trigger browser opening	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "callback_uri": "http://127.0.0.1:56881/oauth/callback"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:963	🔍 OAuth environment diagnostics	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "DISPLAY": "", "PATH": "/usr/local/go/bin:/Users/user/.local/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/usr/local/go/bin:/opt/homebrew/bin", "GOOS": "darwin", "has_open_command": true, "has_xdg_open": false, "BROWSER": "", "XDG_SESSION_TYPE": "", "WAYLAND_DISPLAY": "", "CI": false, "HEADLESS": false, "NO_BROWSER": false, "SSH_CLIENT": "", "SSH_TTY": ""}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:1003	🚀 Starting OAuth client - using proper mcp-go OAuth error handling	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:1041	✅ OAuth client started successfully	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:1044	✅ OAuth setup complete - using proper mcp-go OAuth error handling pattern	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:1049	🔍 Starting MCP initialization after OAuth setup	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.203+0300	ERROR	core/connection.go:1053	❌ MCP initialization failed after OAuth setup	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "error": "MCP initialize failed: transport error: failed to send request: no valid token available, authorization required"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:1053
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Headers_Support.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:317
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:1059	🎯 OAuth authorization required during MCP init - deferring OAuth for background processing	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:2103	Deferring OAuth during automatic connection attempt	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:1066	⏳ Deferring OAuth to prevent tray UI blocking - will retry in background	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:1070	💡 OAuth login available via system tray menu	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 2, "strategy": "OAuth", "error": "OAuth authorization required - deferred for background processing"}
+2025-10-14T11:14:31.203+0300	INFO	managed/client.go:107	🎯 OAuth authorization required during MCP initialization	{"component": "managed_client", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	WARN	managed/client.go:430	Connection error, will attempt automatic reconnection	{"component": "managed_client", "server": "test-headers-server", "error_type": "normal_reconnection", "error": "failed to connect: all authentication strategies failed, last error: OAuth authorization required - deferred for background processing", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:430
+2025-10-14T11:14:31.203+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-headers-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.203+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "url": "http://127.0.0.1:56878/sse", "command": "", "protocol": "sse"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "command": "", "url": "http://127.0.0.1:56878/sse", "protocol": "sse", "determined_transport": "sse"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:114	📡 Using SSE transport	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 0, "strategy": "headers", "error": "no headers configured"}
+2025-10-14T11:14:31.203+0300	DEBUG	core/connection.go:793	🔐 Trying SSE authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 1, "strategy": "no-auth"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:799	🚫 SSE auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 1, "strategy": "no-auth", "error": "unexpected status code: 503"}
+2025-10-14T11:14:31.204+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	ERROR	managed/client.go:436	Connection error	{"component": "managed_client", "server": "test-headers-server", "error": "failed to connect: unexpected status code: 503", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:436
+2025-10-14T11:14:31.204+0300	INFO	managed/client.go:93	Starting managed connection to upstream server	{"component": "managed_client", "server": "test-headers-server", "current_state": "Disconnected", "list_tools_in_progress": false}
+2025-10-14T11:14:31.204+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Disconnected", "to": "Connecting", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	managed/client.go:102	Invoking core client Connect for managed client	{"component": "managed_client", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:78	Connecting to upstream MCP server	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "url": "http://127.0.0.1:56878", "command": "", "protocol": "streamable-http"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:97	🔍 Transport Type Determination	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "command": "", "url": "http://127.0.0.1:56878", "protocol": "streamable-http", "determined_transport": "streamable-http"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:111	🌐 Using HTTP transport	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 0, "strategy": "headers"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 0, "strategy": "headers", "error": "no headers configured"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 1, "strategy": "no-auth"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 1, "strategy": "no-auth", "error": "MCP initialize failed during no-auth strategy: MCP initialize failed: transport error: request failed with status 503: Service Unavailable"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:745	🔐 Trying authentication strategy	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 2, "strategy": "OAuth"}
+2025-10-14T11:14:31.204+0300	ERROR	core/connection.go:887	🚨 OAUTH AUTH FUNCTION CALLED - START	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:887
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Headers_Support.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:317
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:907	🔐 Attempting OAuth authentication	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "url": "http://127.0.0.1:56878"}
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:916	🔍 HTTP OAuth strategy token store status	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "has_existing_token_store": true, "strategy": "HTTP OAuth"}
+2025-10-14T11:14:31.204+0300	ERROR	core/connection.go:921	🚨 ABOUT TO CALL oauth.CreateOAuthConfig	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:921
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Headers_Support.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:317
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.204+0300	ERROR	core/connection.go:926	🚨 oauth.CreateOAuthConfig RETURNED	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "config_nil": false}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:926
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Headers_Support.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:317
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:934	🌟 Starting OAuth authentication flow	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "redirect_uri": "http://127.0.0.1:56881/oauth/callback", "scopes": ["mcp.read", "mcp.write"], "pkce_enabled": true}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:941	🛠️ Creating HTTP transport config for OAuth	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:944	🔨 Calling transport.CreateHTTPClient with OAuth config	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:952	✅ HTTP client created, storing in c.client	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:954	🔗 OAuth HTTP client created, starting connection	{"upstream_id": "test-client", "upstream_name": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:958	🚀 Starting OAuth client - this should trigger browser opening	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "callback_uri": "http://127.0.0.1:56881/oauth/callback"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:963	🔍 OAuth environment diagnostics	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "DISPLAY": "", "PATH": "/usr/local/go/bin:/Users/user/.local/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/usr/local/go/bin:/opt/homebrew/bin", "GOOS": "darwin", "has_open_command": true, "has_xdg_open": false, "BROWSER": "", "XDG_SESSION_TYPE": "", "WAYLAND_DISPLAY": "", "CI": false, "HEADLESS": false, "NO_BROWSER": false, "SSH_CLIENT": "", "SSH_TTY": ""}
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:1003	🚀 Starting OAuth client - using proper mcp-go OAuth error handling	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:1041	✅ OAuth client started successfully	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:1044	✅ OAuth setup complete - using proper mcp-go OAuth error handling pattern	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:1049	🔍 Starting MCP initialization after OAuth setup	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:1401	🔍 JSON-RPC INITIALIZE REQUEST	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "method": "initialize", "formatted_json": "{\n  \"method\": \"\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"mcpproxy-go\",\n      \"version\": \"1.0.0\"\n    }\n  }\n}"}
+2025-10-14T11:14:31.204+0300	ERROR	core/connection.go:1053	❌ MCP initialization failed after OAuth setup	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server", "error": "MCP initialize failed: transport error: failed to send request: no valid token available, authorization required"}
+mcpproxy-go/internal/upstream/core.(*Client).tryOAuthAuth
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:1053
+mcpproxy-go/internal/upstream/core.(*Client).connectHTTP
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:749
+mcpproxy-go/internal/upstream/core.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/core/connection.go:112
+mcpproxy-go/internal/upstream/managed.(*Client).Connect
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:104
+mcpproxy-go/internal/upstream.TestClient_Headers_Support.func2
+	/Users/user/repos/mcpproxy-go/internal/upstream/client_test.go:317
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:1059	🎯 OAuth authorization required during MCP init - deferring OAuth for background processing	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:2103	Deferring OAuth during automatic connection attempt	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:1066	⏳ Deferring OAuth to prevent tray UI blocking - will retry in background	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	INFO	core/connection.go:1070	💡 OAuth login available via system tray menu	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	DEBUG	core/connection.go:751	🚫 Auth strategy failed	{"upstream_id": "test-client", "upstream_name": "test-headers-server", "strategy_index": 2, "strategy": "OAuth", "error": "OAuth authorization required - deferred for background processing"}
+2025-10-14T11:14:31.204+0300	INFO	managed/client.go:107	🎯 OAuth authorization required during MCP initialization	{"component": "managed_client", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	INFO	managed/client.go:422	State transition	{"component": "managed_client", "from": "Connecting", "to": "Error", "server": "test-headers-server"}
+2025-10-14T11:14:31.204+0300	WARN	managed/client.go:430	Connection error, will attempt automatic reconnection	{"component": "managed_client", "server": "test-headers-server", "error_type": "normal_reconnection", "error": "failed to connect: all authentication strategies failed, last error: OAuth authorization required - deferred for background processing", "retry_count": 1}
+mcpproxy-go/internal/upstream/managed.(*Client).onStateChange
+	/Users/user/repos/mcpproxy-go/internal/upstream/managed/client.go:430
+goos: darwin
+goarch: arm64
+pkg: mcpproxy-go/internal/upstream
+cpu: Apple M4 Pro
+BenchmarkAddServer-14           	    4226	    279010 ns/op	   45254 B/op	     486 allocs/op
+BenchmarkConnectAll-14          	    3139	    419170 ns/op	  190574 B/op	    2055 allocs/op
+BenchmarkDiscoverTools-14       	 5501295	       221.1 ns/op	     848 B/op	       5 allocs/op
+BenchmarkGetStats-14            	  486625	      2206 ns/op	    5288 B/op	      67 allocs/op
+BenchmarkCallToolWithLock-14    	 3605709	       328.4 ns/op	     896 B/op	      10 allocs/op
+BenchmarkRemoveServer-14        	

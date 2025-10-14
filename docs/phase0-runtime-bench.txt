@@ -1,0 +1,357 @@
+goos: darwin
+goarch: arm64
+pkg: mcpproxy-go/internal/runtime
+cpu: Apple M4 Pro
+BenchmarkLoadConfiguredServers-14    	      48	  26325959 ns/op	  142146 B/op	    1033 allocs/op
+BenchmarkBackgroundConnections-14    	 8920711	       132.2 ns/op	     384 B/op	       3 allocs/op
+BenchmarkDiscoverAndIndexTools-14    	28151970	        41.46 ns/op	     128 B/op	       1 allocs/op
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle802827681/001/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle802827681/001/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle802827681/001/config.json
+BenchmarkEnableServerToggle-14       	[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=false, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkEnableServerToggle948261503/002/config.json
+      66	  20021515 ns/op	   74050 B/op	     452 allocs/op
+[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkConfigReload1950297977/001/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkConfigReload1950297977/001/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkConfigReload1950297977/001/config.json
+BenchmarkConfigReload-14             	[DEBUG] SaveConfig called with path: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkConfigReload2667214346/002/config.json
+[DEBUG] SaveConfig - server count: 1
+[DEBUG] SaveConfig - server test-server: enabled=true, quarantined=false
+[DEBUG] SaveConfig - about to write file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkConfigReload2667214346/002/config.json
+[DEBUG] SaveConfig - successfully wrote file: /var/folders/4g/2h26g7ks4fg23brxvvj6p6hr0000gn/T/BenchmarkConfigReload2667214346/002/config.json
+      22	  51271015 ns/op	    5397 B/op	      32 allocs/op
+BenchmarkUpdateStatus-14             	17042024	        68.83 ns/op	     128 B/op	       1 allocs/op
+PASS
+ok  	mcpproxy-go/internal/runtime	9.760s

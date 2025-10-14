@@ -251,6 +251,116 @@ if s.observability != nil {
 }
 ```
 
+## Current Implementation References
+
+- **Runtime bootstrap** (`internal/runtime/runtime.go:38`): constructs storage, index, upstream, cache, tokenizer, and phase tracking inside a single struct guarded by shared mutexes. Downstream callers (HTTP, tray, CLI) interact with this type directly, so slow upstream operations can block configuration reads.
+- **Startup lifecycle** (`internal/runtime/lifecycle.go:18`): `backgroundInitialization` saves server configs to BoltDB and immediately launches asynchronous connection goroutines. Errors from `LoadConfiguredServers` surface through shared status updates and impact `/api/v1/servers` responses.
+- **Upstream manager** (`internal/upstream/manager.go:22`): maintains a `map[string]*managed.Client` under an RWMutex. Methods like `AddServer` and `ConnectAll` hold read locks while calling into clients, coupling configuration sync with long-running network calls.
+- **Managed client state** (`internal/upstream/managed/client.go:19`): embeds multiple mutexes and ad-hoc flags to track connection, list-tools, monitoring, and reconnection state. Failures during `Connect` propagate synchronously to managers and runtime status messages.
+- **HTTP `/servers` endpoint** (`internal/server/server.go:375` and `internal/httpapi/server.go:396`): merges storage results with live upstream client inspection during every request. If the upstream manager blocks or storage is slow, API consumers and the tray feel the impact immediately.
+- **Tray state cache** (`internal/tray/managers.go:113`): polls `GetAllServers` over HTTP, inheriting the coupling between REST responses and upstream connection retries.
+
+These references highlight where orchestration, REST responses, and upstream lifecycle are currently intertwined.
+
+## Target State Examples
+
+- **Per-server actor**: each upstream server runs in its own goroutine with an explicit state machine.
+
+  ```go
+  type ServerState string
+
+  const (
+      StateIdle        ServerState = "idle"
+      StateConnecting  ServerState = "connecting"
+      StateReady       ServerState = "ready"
+      StateFailed      ServerState = "failed"
+      StateQuarantined ServerState = "quarantined"
+  )
+
+  type Command struct {
+      DesiredEnabled bool
+      DesiredConfig  *config.ServerConfig
+  }
+
+  // Each actor listens for reconcile commands and emits events.
+  func runServerActor(cfg Command, events chan<- Event) {
+      state := StateIdle
+      for cmd := range reconcileQueue {
+          next := transition(state, cmd)
+          if next == StateConnecting {
+              go dialUpstream(cmd.DesiredConfig, events)
+          }
+          state = next
+          events <- NewStateEvent(cmd.DesiredConfig.Name, state)
+      }
+  }
+  ```
+
+  The supervisor translates configuration snapshots into `Command`s and leaves connection retries to the actor, avoiding shared locks.
+
+- **Read model for REST/UI**: the HTTP layer consumes a snapshot API instead of reaching into storage or upstream clients.
+
+  ```go
+  type StateReader interface {
+      ServerList() []contracts.ServerSummary // populated from event stream
+      RuntimeStatus() contracts.RuntimeStatus
+  }
+
+  func (api *Server) handleServers(w http.ResponseWriter, r *http.Request) {
+      writeJSON(w, api.stateReader.ServerList())
+  }
+  ```
+
+  Snapshots are updated by subscribing to supervisor events, so `/servers` responds instantly even while connections retry in the background.
+
+- **Config service boundaries**: disk IO, validation, and live config snapshots are isolated.
+
+  ```go
+  type ConfigService interface {
+      Snapshot() *config.Config
+      Updates() <-chan config.Config
+      Apply(ctx context.Context, cfg *config.Config) error
+  }
+  ```
+
+  Runtime bootstrap simply wires services together and reacts to config updates rather than holding locks around mutable state.
+
+## Refactoring Roadmap
+
+We will tackle the decoupling in deliberate phases that map cleanly onto code owned by separate packages.
+
+- **Phase 0 – Baseline audit** ✅ COMPLETE
+  - ✅ Add benchmarks and tracing around the hot paths in `internal/runtime/lifecycle.go` and `internal/upstream/manager.go` to capture current latency and failure modes.
+  - ✅ Document existing REST ↔ runtime dependencies inside `internal/httpapi/server.go` and `internal/server/server.go` to ensure parity expectations.
+  - See `docs/PHASE0-COMPLETE.md` for detailed results
+
+- **Phase 1 – Config service extraction**
+  - Introduce `internal/runtime/configsvc` with a `ConfigService` interface.
+  - Update `internal/runtime/runtime.go` to consume snapshots and stop exporting config locks directly.
+  - Adjust configuration entry points (`cmd/mcpproxy/main.go`, `internal/httpapi/server.go`) to request data via the new service.
+
+- **Phase 2 – Supervisor shell**
+  - Create `internal/runtime/supervisor` hosting desired/actual state reconciliation logic.
+  - Wrap the current `upstream.Manager` behind an adapter that the supervisor commands while emitting events to the runtime bus (`internal/runtime/event_bus.go`).
+  - Ensure existing tests in `internal/upstream/...` still pass by driving the adapter during `go test ./internal/upstream/...`.
+
+- **Phase 3 – Server actors**
+  - Move per-server connection logic out of `internal/upstream/managed/client.go` into dedicated actor goroutines.
+  - Replace mutex-based state tracking with a transition table and explicit events (`StateReady`, `StateFailed`, etc.).
+  - Update the supervisor to spin up an actor per server and to publish lifecycle events to the runtime bus.
+
+- **Phase 4 – Read model and API decoupling**
+  - Add `internal/runtime/stateview` to maintain server/status snapshots from supervisor events.
+  - Refactor `internal/httpapi/server.go` and tray adapters (`internal/tray/managers.go`, `cmd/mcpproxy-tray/internal/api/adapter.go`) to use the read model instead of hitting storage and upstream clients directly.
+  - Keep BoltDB as persistence for history, but remove it from the `/servers` request path.
+
+- **Phase 5 – Cleanup and observability**
+  - Remove deprecated methods from `internal/runtime/runtime.go` and `internal/upstream/manager.go` once supervisor parity is confirmed.
+  - Extend observability (`internal/observability`) to record supervisor and actor metrics (connect latency, failure counts).
+  - Update documentation (`ARCHITECTURE.md`, `docs/`) with the new actor/supervisor diagrams and ensure smoke tests (`scripts/run-web-smoke.sh`) still green.
+
+Breaking the work into these phases keeps each change set small enough for LLM-assisted execution while preserving a clear migration path.
+
 ## Testing Strategy
 
 ### 1. Interface Mocking
