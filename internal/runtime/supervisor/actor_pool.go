@@ -9,99 +9,84 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/runtime/supervisor/actor"
 	"mcpproxy-go/internal/upstream"
 )
 
-// ActorPool manages the lifecycle of server actors and provides stats for Supervisor.
-// This replaces UpstreamAdapter with direct Actor integration (Phase 7.2).
-type ActorPool struct {
-	actors   map[string]*actor.Actor
-	mu       sync.RWMutex
-	logger   *zap.Logger
-	manager  *upstream.Manager // Use existing manager for client creation
+// ActorPoolSimple is a simplified facade over UpstreamManager that delegates all operations.
+// Phase 7.3: Avoids double lifecycle management by using UpstreamManager's existing client management.
+type ActorPoolSimple struct {
+	manager *upstream.Manager
+	logger  *zap.Logger
 
-	// Event aggregation
+	// Event forwarding
 	eventCh   chan Event
 	listeners []chan Event
 	eventMu   sync.RWMutex
 }
 
-// NewActorPool creates a new actor pool.
-func NewActorPool(manager *upstream.Manager, logger *zap.Logger) *ActorPool {
+// NewActorPoolSimple creates a simplified actor pool that delegates to UpstreamManager.
+func NewActorPoolSimple(manager *upstream.Manager, logger *zap.Logger) *ActorPoolSimple {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 
-	return &ActorPool{
-		actors:    make(map[string]*actor.Actor),
-		logger:    logger,
+	pool := &ActorPoolSimple{
 		manager:   manager,
+		logger:    logger,
 		eventCh:   make(chan Event, 100),
 		listeners: make([]chan Event, 0),
 	}
+
+	// Subscribe to manager notifications and forward as events
+	manager.AddNotificationHandler(pool)
+
+	return pool
 }
 
-// AddServer creates and starts an actor for the given server.
-// If the actor already exists, it updates the configuration.
-func (p *ActorPool) AddServer(name string, cfg *config.ServerConfig) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// SendNotification implements upstream.NotificationHandler interface
+func (p *ActorPoolSimple) SendNotification(notification *upstream.Notification) {
+	// Convert upstream notifications to supervisor events
+	var eventType EventType
 
-	// Phase 7.2: If actor already exists, just update config instead of failing
-	if a, exists := p.actors[name]; exists {
-		p.logger.Debug("Actor already exists, updating config", zap.String("server", name))
-		// Update client config in manager
-		if err := p.manager.AddServerConfig(name, cfg); err != nil {
-			return fmt.Errorf("failed to update server config: %w", err)
+	switch notification.Level {
+	case upstream.NotificationInfo:
+		if notification.Title == "Server Connected" {
+			eventType = EventServerConnected
+		} else {
+			eventType = EventServerStateChanged
 		}
-		// Send update command to actor
-		a.SendCommand(actor.Command{
-			Type: actor.CommandUpdateConfig,
-			Data: map[string]interface{}{
-				"config": cfg,
-			},
-		})
-		return nil
+	case upstream.NotificationWarning, upstream.NotificationError:
+		if notification.Title == "Server Disconnected" {
+			eventType = EventServerDisconnected
+		} else {
+			eventType = EventServerStateChanged
+		}
+	default:
+		eventType = EventServerStateChanged
 	}
 
-	// Phase 7.2: Use UpstreamManager to add server config and get client
-	// This maintains compatibility with existing OAuth, notifications, etc.
+	event := Event{
+		Type:       eventType,
+		ServerName: notification.ServerName,
+		Timestamp:  notification.Timestamp,
+		Payload: map[string]interface{}{
+			"level":     notification.Level.String(),
+			"title":     notification.Title,
+			"message":   notification.Message,
+			"connected": notification.Title == "Server Connected",
+		},
+	}
+
+	p.emitEvent(event)
+}
+
+// AddServer adds a server configuration to the manager.
+func (p *ActorPoolSimple) AddServer(name string, cfg *config.ServerConfig) error {
+	p.logger.Debug("Adding server via manager", zap.String("name", name))
+
 	if err := p.manager.AddServerConfig(name, cfg); err != nil {
 		return fmt.Errorf("failed to add server config: %w", err)
 	}
-
-	client, exists := p.manager.GetClient(name)
-	if !exists {
-		return fmt.Errorf("failed to get client for %s after adding config", name)
-	}
-
-	// Create actor with config
-	actorCfg := actor.ActorConfig{
-		Name:           name,
-		ServerConfig:   cfg,
-		MaxRetries:     5,
-		RetryInterval:  5 * time.Second,
-		ConnectTimeout: 30 * time.Second,
-	}
-
-	a := actor.New(actorCfg, client, p.logger)
-
-	// Subscribe to actor events
-	go p.forwardActorEvents(name, a)
-
-	// Start actor
-	a.Start()
-
-	// Send connect command if enabled
-	if cfg.Enabled && !cfg.Quarantined {
-		a.SendCommand(actor.Command{
-			Type: actor.CommandConnect,
-		})
-	}
-
-	p.actors[name] = a
-	p.logger.Info("Actor started", zap.String("server", name))
 
 	// Emit event
 	p.emitEvent(Event{
@@ -117,23 +102,11 @@ func (p *ActorPool) AddServer(name string, cfg *config.ServerConfig) error {
 	return nil
 }
 
-// RemoveServer stops and removes an actor.
-func (p *ActorPool) RemoveServer(name string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// RemoveServer removes a server from the manager.
+func (p *ActorPoolSimple) RemoveServer(name string) error {
+	p.logger.Debug("Removing server via manager", zap.String("name", name))
 
-	a, exists := p.actors[name]
-	if !exists {
-		return fmt.Errorf("actor not found: %s", name)
-	}
-
-	a.Stop()
-	delete(p.actors, name)
-
-	// Also remove from manager
 	p.manager.RemoveServer(name)
-
-	p.logger.Info("Actor stopped", zap.String("server", name))
 
 	// Emit event
 	p.emitEvent(Event{
@@ -146,74 +119,36 @@ func (p *ActorPool) RemoveServer(name string) error {
 	return nil
 }
 
-// ConnectServer sends a connect command to an actor.
-func (p *ActorPool) ConnectServer(ctx context.Context, name string) error {
-	p.mu.RLock()
-	a, exists := p.actors[name]
-	p.mu.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("actor not found: %s", name)
-	}
-
-	a.SendCommand(actor.Command{
-		Type: actor.CommandConnect,
-	})
-
+// ConnectServer tells the manager to connect a server.
+func (p *ActorPoolSimple) ConnectServer(ctx context.Context, name string) error {
+	p.logger.Debug("Connecting server via manager", zap.String("name", name))
+	// Manager handles connection automatically via managed clients
 	return nil
 }
 
-// DisconnectServer sends a disconnect command to an actor.
-func (p *ActorPool) DisconnectServer(name string) error {
-	p.mu.RLock()
-	a, exists := p.actors[name]
-	p.mu.RUnlock()
+// DisconnectServer tells the manager to disconnect a server.
+func (p *ActorPoolSimple) DisconnectServer(name string) error {
+	p.logger.Debug("Disconnecting server via manager", zap.String("name", name))
 
+	client, exists := p.manager.GetClient(name)
 	if !exists {
-		return fmt.Errorf("actor not found: %s", name)
+		return fmt.Errorf("server %s not found", name)
 	}
 
-	a.SendCommand(actor.Command{
-		Type: actor.CommandDisconnect,
-	})
-
-	return nil
+	return client.Disconnect()
 }
 
-// ConnectAll sends connect commands to all actors.
-func (p *ActorPool) ConnectAll(ctx context.Context) error {
-	p.mu.RLock()
-	actors := make([]*actor.Actor, 0, len(p.actors))
-	for _, a := range p.actors {
-		actors = append(actors, a)
-	}
-	p.mu.RUnlock()
-
-	for _, a := range actors {
-		a.SendCommand(actor.Command{
-			Type: actor.CommandConnect,
-		})
-	}
-
-	return nil
+// ConnectAll tells the manager to connect all servers.
+func (p *ActorPoolSimple) ConnectAll(ctx context.Context) error {
+	p.logger.Debug("Connecting all servers via manager")
+	return p.manager.ConnectAll(ctx)
 }
 
-// GetServerState returns the current state of a server from its actor.
-func (p *ActorPool) GetServerState(name string) (*ServerState, error) {
-	p.mu.RLock()
-	a, exists := p.actors[name]
-	p.mu.RUnlock()
-
+// GetServerState returns the current state of a server from the manager.
+func (p *ActorPoolSimple) GetServerState(name string) (*ServerState, error) {
+	client, exists := p.manager.GetClient(name)
 	if !exists {
-		return nil, fmt.Errorf("actor not found: %s", name)
-	}
-
-	client := a.GetClient()
-	if client == nil {
-		return &ServerState{
-			Name:      name,
-			Connected: false,
-		}, nil
+		return nil, fmt.Errorf("server %s not found", name)
 	}
 
 	state := &ServerState{
@@ -234,28 +169,16 @@ func (p *ActorPool) GetServerState(name string) (*ServerState, error) {
 	return state, nil
 }
 
-// GetAllStates returns the current state of all servers.
-func (p *ActorPool) GetAllStates() map[string]*ServerState {
-	p.mu.RLock()
-	actors := make(map[string]*actor.Actor, len(p.actors))
-	for name, a := range p.actors {
-		actors[name] = a
-	}
-	p.mu.RUnlock()
+// GetAllStates returns the current state of all servers from the manager.
+func (p *ActorPoolSimple) GetAllStates() map[string]*ServerState {
+	states := make(map[string]*ServerState)
 
-	states := make(map[string]*ServerState, len(actors))
+	// Get all clients from manager
+	clients := p.manager.GetAllClients()
 
-	for name, a := range actors {
-		client := a.GetClient()
-		if client == nil {
-			states[name] = &ServerState{
-				Name:      name,
-				Connected: false,
-			}
-			continue
-		}
-
+	for name, client := range clients {
 		connected := client.IsConnected()
+
 		state := &ServerState{
 			Name:      name,
 			Config:    client.Config,
@@ -271,7 +194,7 @@ func (p *ActorPool) GetAllStates() map[string]*ServerState {
 		connInfo := client.GetConnectionInfo()
 		state.ConnectionInfo = &connInfo
 
-		// Phase 7.2: Fetch tools for connected servers
+		// Phase 7.1: Fetch tools for connected servers
 		if connected {
 			if tools, err := client.ListTools(context.Background()); err == nil {
 				state.Tools = tools
@@ -285,41 +208,8 @@ func (p *ActorPool) GetAllStates() map[string]*ServerState {
 	return states
 }
 
-// forwardActorEvents subscribes to actor events and forwards them as supervisor events.
-func (p *ActorPool) forwardActorEvents(name string, a *actor.Actor) {
-	events := a.Events()
-
-	for event := range events {
-		// Convert actor events to supervisor events
-		var eventType EventType
-
-		switch event.Type {
-		case actor.EventConnected:
-			eventType = EventServerConnected
-		case actor.EventDisconnected:
-			eventType = EventServerDisconnected
-		case actor.EventStateChanged, actor.EventRetrying, actor.EventError:
-			eventType = EventServerStateChanged
-		default:
-			continue
-		}
-
-		// Emit supervisor event
-		p.emitEvent(Event{
-			Type:       eventType,
-			ServerName: name,
-			Timestamp:  event.Timestamp,
-			Payload: map[string]interface{}{
-				"connected":    event.State == actor.StateConnected,
-				"state":        string(event.State),
-				"actor_event":  string(event.Type),
-			},
-		})
-	}
-}
-
 // Subscribe returns a channel that receives supervisor events.
-func (p *ActorPool) Subscribe() <-chan Event {
+func (p *ActorPoolSimple) Subscribe() <-chan Event {
 	p.eventMu.Lock()
 	defer p.eventMu.Unlock()
 
@@ -329,7 +219,7 @@ func (p *ActorPool) Subscribe() <-chan Event {
 }
 
 // Unsubscribe removes a subscriber channel.
-func (p *ActorPool) Unsubscribe(ch <-chan Event) {
+func (p *ActorPoolSimple) Unsubscribe(ch <-chan Event) {
 	p.eventMu.Lock()
 	defer p.eventMu.Unlock()
 
@@ -343,7 +233,7 @@ func (p *ActorPool) Unsubscribe(ch <-chan Event) {
 }
 
 // emitEvent sends an event to all subscribers.
-func (p *ActorPool) emitEvent(event Event) {
+func (p *ActorPoolSimple) emitEvent(event Event) {
 	p.eventMu.RLock()
 	defer p.eventMu.RUnlock()
 
@@ -358,23 +248,13 @@ func (p *ActorPool) emitEvent(event Event) {
 	}
 }
 
-// Close cleans up the actor pool.
-func (p *ActorPool) Close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Stop all actors
-	for name, a := range p.actors {
-		a.Stop()
-		p.logger.Info("Actor stopped during cleanup", zap.String("server", name))
-	}
-	p.actors = nil
-
-	// Close event channels
+// Close cleans up the pool.
+func (p *ActorPoolSimple) Close() {
 	p.eventMu.Lock()
+	defer p.eventMu.Unlock()
+
 	for _, ch := range p.listeners {
 		close(ch)
 	}
 	p.listeners = nil
-	p.eventMu.Unlock()
 }

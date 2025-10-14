@@ -130,9 +130,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Initialize ConfigService for lock-free snapshot-based reads
 	configSvc := configsvc.NewService(cfg, cfgPath, logger)
 
-	// Phase 6: Initialize Supervisor with UpstreamAdapter for lock-free state reads
-	upstreamAdapter := supervisor.NewUpstreamAdapter(upstreamManager, logger)
-	supervisorInstance := supervisor.New(configSvc, upstreamAdapter, logger)
+	// Phase 7.3: Initialize Supervisor with ActorPoolSimple (delegates to UpstreamManager)
+	actorPool := supervisor.NewActorPoolSimple(upstreamManager, logger)
+	supervisorInstance := supervisor.New(configSvc, actorPool, logger)
 
 	rt := &Runtime{
 		cfg:             cfg,
