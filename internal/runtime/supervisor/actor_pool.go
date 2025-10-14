@@ -145,17 +145,20 @@ func (p *ActorPoolSimple) ConnectAll(ctx context.Context) error {
 }
 
 // GetServerState returns the current state of a server from the manager.
+// Phase 7.1 FIX: Fetches tools for the specific server to avoid blocking all servers.
 func (p *ActorPoolSimple) GetServerState(name string) (*ServerState, error) {
 	client, exists := p.manager.GetClient(name)
 	if !exists {
 		return nil, fmt.Errorf("server %s not found", name)
 	}
 
+	connected := client.IsConnected()
+
 	state := &ServerState{
 		Name:      name,
 		Config:    client.Config,
 		Enabled:   client.Config.Enabled,
-		Connected: client.IsConnected(),
+		Connected: connected,
 	}
 
 	if client.Config.Quarantined {
@@ -165,6 +168,16 @@ func (p *ActorPoolSimple) GetServerState(name string) (*ServerState, error) {
 	// Get connection info
 	connInfo := client.GetConnectionInfo()
 	state.ConnectionInfo = &connInfo
+
+	// Phase 7.1: Fetch tools for THIS server only (not all servers)
+	if connected {
+		if tools, err := client.ListTools(context.Background()); err == nil {
+			state.Tools = tools
+			state.ToolCount = len(tools)
+		} else {
+			p.logger.Warn("Failed to fetch tools for server", zap.String("server", name), zap.Error(err))
+		}
+	}
 
 	return state, nil
 }

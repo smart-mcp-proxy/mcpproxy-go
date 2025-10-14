@@ -518,12 +518,11 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			state.Connected = connected
 			state.LastSeen = event.Timestamp
 
-			// Phase 7.1: Fetch tools when server connects
+			// Phase 7.1 FIX: Fetch tools for ONLY this server, not all servers
 			var tools []stateview.ToolInfo
 			if connected {
-				// Get fresh state with tools from upstream adapter
-				actualStates := s.upstream.GetAllStates()
-				if actualState, ok := actualStates[event.ServerName]; ok {
+				// Get state for THIS specific server only
+				if actualState, err := s.upstream.GetServerState(event.ServerName); err == nil {
 					state.Tools = actualState.Tools
 					state.ToolCount = actualState.ToolCount
 
@@ -541,6 +540,10 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 							}
 						}
 					}
+				} else {
+					s.logger.Warn("Failed to get server state for tools",
+						zap.String("server", event.ServerName),
+						zap.Error(err))
 				}
 			}
 
