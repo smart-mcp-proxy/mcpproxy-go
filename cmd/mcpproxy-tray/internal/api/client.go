@@ -5,6 +5,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -84,6 +85,9 @@ type Client struct {
 	statusCh          chan StatusUpdate
 	sseCancel         context.CancelFunc
 	connectionStateCh chan tray.ConnectionState
+
+	// State tracking to reduce logging noise
+	lastServerState string // Hash of server states to detect changes
 }
 
 // NewClient creates a new API client
@@ -388,13 +392,23 @@ func (c *Client) GetServers() ([]Server, error) {
 		result = append(result, server)
 	}
 
+	// Compute state hash to detect changes and reduce logging noise
+	stateHash := c.computeServerStateHash(result)
+	stateChanged := stateHash != c.lastServerState
+
 	if c.logger != nil {
 		if len(result) == 0 {
 			c.logger.Warnw("API returned zero upstream servers",
 				"base_url", c.baseURL)
-		} else {
-			c.logger.Infow("Fetched upstream servers via API", "count", len(result))
+		} else if stateChanged {
+			// Only log when server states actually change
+			c.logger.Infow("Server state changed",
+				"count", len(result),
+				"connected", countConnected(result),
+				"quarantined", countQuarantined(result))
+			c.lastServerState = stateHash
 		}
+		// Silent when no changes - reduces log noise from frequent polling
 	}
 
 	return result, nil
@@ -805,4 +819,44 @@ func getLocalCAPath() string {
 	}
 
 	return filepath.Join(homeDir, ".mcpproxy", "certs", "ca.pem")
+}
+
+// computeServerStateHash generates a hash of server states to detect changes
+func (c *Client) computeServerStateHash(servers []Server) string {
+	// Build a deterministic string representation of server states
+	var parts []string
+	for _, s := range servers {
+		// Include relevant state fields that matter for logging changes
+		state := fmt.Sprintf("%s:%t:%t:%t:%d:%s",
+			s.Name, s.Connected, s.Enabled, s.Quarantined, s.ToolCount, s.Status)
+		parts = append(parts, state)
+	}
+	sort.Strings(parts) // Sort for consistency
+
+	// Hash the combined state
+	combined := strings.Join(parts, "|")
+	hash := sha256.Sum256([]byte(combined))
+	return fmt.Sprintf("%x", hash[:8]) // Use first 8 bytes for compact representation
+}
+
+// countConnected returns the number of connected servers
+func countConnected(servers []Server) int {
+	count := 0
+	for _, s := range servers {
+		if s.Connected {
+			count++
+		}
+	}
+	return count
+}
+
+// countQuarantined returns the number of quarantined servers
+func countQuarantined(servers []Server) int {
+	count := 0
+	for _, s := range servers {
+		if s.Quarantined {
+			count++
+		}
+	}
+	return count
 }
