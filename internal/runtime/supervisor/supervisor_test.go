@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 // MockUpstreamAdapter is a test double for UpstreamAdapter
 type MockUpstreamAdapter struct {
+	mu              sync.Mutex
 	addedServers    map[string]*config.ServerConfig
 	removedServers  []string
 	connected       map[string]bool
@@ -33,6 +35,8 @@ func NewMockUpstreamAdapter() *MockUpstreamAdapter {
 }
 
 func (m *MockUpstreamAdapter) AddServer(name string, cfg *config.ServerConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.addedServers[name] = cfg
 	m.states[name] = &ServerState{
 		Name:      name,
@@ -44,12 +48,16 @@ func (m *MockUpstreamAdapter) AddServer(name string, cfg *config.ServerConfig) e
 }
 
 func (m *MockUpstreamAdapter) RemoveServer(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.removedServers = append(m.removedServers, name)
 	delete(m.states, name)
 	return nil
 }
 
 func (m *MockUpstreamAdapter) ConnectServer(ctx context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.connected[name] = true
 	if state, ok := m.states[name]; ok {
 		state.Connected = true
@@ -58,6 +66,8 @@ func (m *MockUpstreamAdapter) ConnectServer(ctx context.Context, name string) er
 }
 
 func (m *MockUpstreamAdapter) DisconnectServer(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.disconnected = append(m.disconnected, name)
 	if state, ok := m.states[name]; ok {
 		state.Connected = false
@@ -66,6 +76,8 @@ func (m *MockUpstreamAdapter) DisconnectServer(name string) error {
 }
 
 func (m *MockUpstreamAdapter) ConnectAll(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for name := range m.states {
 		m.connected[name] = true
 	}
@@ -73,6 +85,8 @@ func (m *MockUpstreamAdapter) ConnectAll(ctx context.Context) error {
 }
 
 func (m *MockUpstreamAdapter) GetServerState(name string) (*ServerState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if state, ok := m.states[name]; ok {
 		return state, nil
 	}
@@ -80,7 +94,14 @@ func (m *MockUpstreamAdapter) GetServerState(name string) (*ServerState, error) 
 }
 
 func (m *MockUpstreamAdapter) GetAllStates() map[string]*ServerState {
-	return m.states
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Return a copy to prevent data races
+	statesCopy := make(map[string]*ServerState, len(m.states))
+	for k, v := range m.states {
+		statesCopy[k] = v
+	}
+	return statesCopy
 }
 
 func (m *MockUpstreamAdapter) Subscribe() <-chan Event {
@@ -145,13 +166,21 @@ func TestSupervisor_Reconcile_AddServer(t *testing.T) {
 		t.Fatalf("Reconcile failed: %v", err)
 	}
 
-	// Verify server was added
-	if _, ok := mockUpstream.addedServers["test-server"]; !ok {
+	// Wait a bit for goroutines to complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify server was added (with lock)
+	mockUpstream.mu.Lock()
+	_, addedOk := mockUpstream.addedServers["test-server"]
+	connectedOk := mockUpstream.connected["test-server"]
+	mockUpstream.mu.Unlock()
+
+	if !addedOk {
 		t.Error("Expected server to be added")
 	}
 
 	// Verify server was connected
-	if !mockUpstream.connected["test-server"] {
+	if !connectedOk {
 		t.Error("Expected server to be connected")
 	}
 }
@@ -176,6 +205,9 @@ func TestSupervisor_Reconcile_RemoveServer(t *testing.T) {
 	configSnapshot := configSvc.Current()
 	_ = supervisor.reconcile(configSnapshot)
 
+	// Wait for first reconciliation to complete
+	time.Sleep(50 * time.Millisecond)
+
 	// Update config to remove server
 	newCfg := &config.Config{
 		Listen:  "127.0.0.1:8080",
@@ -191,9 +223,17 @@ func TestSupervisor_Reconcile_RemoveServer(t *testing.T) {
 		t.Fatalf("Reconcile failed: %v", err)
 	}
 
-	// Verify server was removed
+	// Wait for goroutines to complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify server was removed (with lock)
+	mockUpstream.mu.Lock()
+	removedServers := make([]string, len(mockUpstream.removedServers))
+	copy(removedServers, mockUpstream.removedServers)
+	mockUpstream.mu.Unlock()
+
 	found := false
-	for _, name := range mockUpstream.removedServers {
+	for _, name := range removedServers {
 		if name == "test-server" {
 			found = true
 			break
@@ -224,10 +264,15 @@ func TestSupervisor_Reconcile_DisableServer(t *testing.T) {
 	// First reconciliation - add and connect
 	_ = supervisor.reconcile(configSvc.Current())
 
-	// Mark as connected in mock
+	// Wait for first reconciliation to complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Mark as connected in mock (with lock)
+	mockUpstream.mu.Lock()
 	if state, ok := mockUpstream.states["test-server"]; ok {
 		state.Connected = true
 	}
+	mockUpstream.mu.Unlock()
 
 	// Update config to disable server
 	newCfg := &config.Config{
@@ -245,9 +290,17 @@ func TestSupervisor_Reconcile_DisableServer(t *testing.T) {
 		t.Fatalf("Reconcile failed: %v", err)
 	}
 
-	// Verify server was disconnected
+	// Wait for goroutines to complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify server was disconnected (with lock)
+	mockUpstream.mu.Lock()
+	disconnected := make([]string, len(mockUpstream.disconnected))
+	copy(disconnected, mockUpstream.disconnected)
+	mockUpstream.mu.Unlock()
+
 	found := false
-	for _, name := range mockUpstream.disconnected {
+	for _, name := range disconnected {
 		if name == "test-server" {
 			found = true
 			break
