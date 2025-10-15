@@ -53,6 +53,60 @@ func NewIsolationManager(globalConfig *config.DockerIsolationConfig) *IsolationM
 	}
 }
 
+// HasLocalFilePath checks if server arguments contain local file paths
+func (im *IsolationManager) HasLocalFilePath(serverConfig *config.ServerConfig) bool {
+	for _, arg := range serverConfig.Args {
+		if isLocalFilePath(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLocalFilePath checks if a path is a local file path
+func isLocalFilePath(path string) bool {
+	if path == "" {
+		return false
+	}
+
+	// Check if path starts with / or ./ or ../ or ~/
+	if strings.HasPrefix(path, "/") ||
+		strings.HasPrefix(path, "./") ||
+		strings.HasPrefix(path, "../") ||
+		strings.HasPrefix(path, "~/") {
+		return true
+	}
+
+	// Check if it looks like a file path with extension
+	// (e.g., script.py, index.js, but not git+https://...)
+	if !strings.Contains(path, "://") &&
+	   (strings.HasSuffix(path, ".py") ||
+	    strings.HasSuffix(path, ".js") ||
+	    strings.HasSuffix(path, ".ts") ||
+	    strings.HasSuffix(path, ".sh") ||
+	    strings.HasSuffix(path, ".rb") ||
+	    strings.HasSuffix(path, ".php")) {
+		return true
+	}
+
+	return false
+}
+
+// GetDockerIsolationWarning returns a warning message if Docker isolation is enabled with local files
+func (im *IsolationManager) GetDockerIsolationWarning(serverConfig *config.ServerConfig) string {
+	if !im.ShouldIsolate(serverConfig) {
+		return ""
+	}
+
+	if im.HasLocalFilePath(serverConfig) {
+		return "⚠️  Docker isolation is enabled, but the server uses local file paths. " +
+			"The files must be available inside the Docker container, or you can disable " +
+			"Docker isolation for this server by setting isolation.enabled=false in the server config."
+	}
+
+	return ""
+}
+
 // ShouldIsolate determines if a server should be isolated based on global and server config
 func (im *IsolationManager) ShouldIsolate(serverConfig *config.ServerConfig) bool {
 	// Check if global isolation is disabled

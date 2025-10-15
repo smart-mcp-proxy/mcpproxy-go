@@ -604,12 +604,13 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 			req.Header.Set("X-API-Key", c.apiKey)
 		}
 
-		// Reduced timeout for faster startup - tray should be responsive
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Increased timeout to 15s to allow core to gather status from all servers
+		// With 14 servers, some may be connecting/Docker starting which takes time
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel() // Defer cancel to ensure response body is fully read before canceling
 		req = req.WithContext(ctx)
 
 		resp, err := c.httpClient.Do(req)
-		cancel()
 
 		if err != nil {
 			if attempt < maxRetries {

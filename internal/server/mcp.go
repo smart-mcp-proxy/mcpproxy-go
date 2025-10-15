@@ -1077,6 +1077,7 @@ type IsolationChecker interface {
 	ShouldIsolate(serverConfig *config.ServerConfig) bool
 	DetectRuntimeType(command string) string
 	GetDockerImage(serverConfig *config.ServerConfig, runtimeType string) (string, error)
+	GetDockerIsolationWarning(serverConfig *config.ServerConfig) string
 }
 
 // getDockerContainerInfo extracts Docker container information from client
@@ -1454,6 +1455,14 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		p.mainServer.OnUpstreamServerChange()
 	}
 
+	// Check for Docker isolation warnings
+	var dockerWarnings []string
+	if isolationManager := p.getIsolationManager(); isolationManager != nil {
+		if warning := isolationManager.GetDockerIsolationWarning(serverConfig); warning != "" {
+			dockerWarnings = append(dockerWarnings, warning)
+		}
+	}
+
 	// Enhanced response with clear quarantine instructions and connection status for LLMs
 	responseMap := map[string]interface{}{
 		"name":               name,
@@ -1464,6 +1473,10 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		"connection_status":  connectionStatus,
 		"connection_message": connectionMessage,
 		"quarantined":        quarantined,
+	}
+
+	if len(dockerWarnings) > 0 {
+		responseMap["docker_warnings"] = dockerWarnings
 	}
 
 	if quarantined {
@@ -1619,14 +1632,23 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		p.mainServer.OnUpstreamServerChange()
 	}
 
-	jsonResult, err := json.Marshal(map[string]interface{}{
+	// Check for Docker isolation warnings
+	responseMap := map[string]interface{}{
 		"id":                 serverID,
 		"name":               name,
 		"updated":            true,
 		"enabled":            updatedServer.Enabled,
 		"connection_status":  connectionStatus,
 		"connection_message": connectionMessage,
-	})
+	}
+
+	if isolationManager := p.getIsolationManager(); isolationManager != nil {
+		if warning := isolationManager.GetDockerIsolationWarning(&updatedServer); warning != "" {
+			responseMap["docker_warnings"] = []string{warning}
+		}
+	}
+
+	jsonResult, err := json.Marshal(responseMap)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
 	}
@@ -1695,12 +1717,21 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		p.mainServer.OnUpstreamServerChange()
 	}
 
-	jsonResult, err := json.Marshal(map[string]interface{}{
+	// Check for Docker isolation warnings
+	responseMap := map[string]interface{}{
 		"id":      serverID,
 		"name":    name,
 		"updated": true,
 		"enabled": updatedServer.Enabled,
-	})
+	}
+
+	if isolationManager := p.getIsolationManager(); isolationManager != nil {
+		if warning := isolationManager.GetDockerIsolationWarning(&updatedServer); warning != "" {
+			responseMap["docker_warnings"] = []string{warning}
+		}
+	}
+
+	jsonResult, err := json.Marshal(responseMap)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
 	}

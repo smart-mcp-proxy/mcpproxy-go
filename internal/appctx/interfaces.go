@@ -137,6 +137,7 @@ type DockerIsolationManager interface {
 	// Isolation detection and management
 	ShouldIsolate(command string, args []string) bool
 	IsDockerAvailable() bool
+	GetDockerIsolationWarning(serverConfig *config.ServerConfig) string
 
 	// Container lifecycle
 	StartIsolatedCommand(ctx context.Context, command string, args []string, env map[string]string, workingDir string) (interface{}, error) // Returns Process or equivalent
