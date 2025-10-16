@@ -813,7 +813,27 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		return result, fmt.Errorf("failed to detect config changes")
 	}
 
-	// If restart is required, don't apply changes (let user restart)
+	// Save configuration to disk BEFORE checking if restart is required
+	// This ensures config changes that require restart are persisted and take effect on next startup
+	savePath := cfgPath
+	if savePath == "" {
+		savePath = r.cfgPath
+	}
+	saveErr := config.SaveConfig(newCfg, savePath)
+	if saveErr != nil {
+		r.logger.Error("Failed to save configuration to disk",
+			zap.String("path", savePath),
+			zap.Error(saveErr))
+		r.mu.Unlock() // Unlock before returning
+		return &ConfigApplyResult{
+			Success: false,
+		}, fmt.Errorf("failed to save configuration: %w", saveErr)
+	} else {
+		r.logger.Info("Configuration successfully saved to disk",
+			zap.String("path", savePath))
+	}
+
+	// If restart is required, don't apply changes in-memory (let user restart)
 	if result.RequiresRestart {
 		r.logger.Warn("Configuration changes require restart",
 			zap.String("reason", result.RestartReason),
@@ -827,19 +847,6 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	r.cfg = newCfg
 	if cfgPath != "" {
 		r.cfgPath = cfgPath
-	}
-
-	// Save configuration to disk
-	saveErr := config.SaveConfig(newCfg, r.cfgPath)
-	if saveErr != nil {
-		r.logger.Error("Failed to save configuration to disk",
-			zap.String("path", r.cfgPath),
-			zap.Error(saveErr))
-		// Don't fail the entire operation, but log the error
-		// In-memory changes are still applied
-	} else {
-		r.logger.Info("Configuration successfully saved to disk",
-			zap.String("path", r.cfgPath))
 	}
 
 	// Apply configuration changes to components
