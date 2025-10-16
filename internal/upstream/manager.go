@@ -518,6 +518,13 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
+		if client.Config.Quarantined {
+			m.logger.Info("Skipping quarantined client",
+				zap.String("id", id),
+				zap.String("name", client.Config.Name))
+			continue
+		}
+
 		// Check connection eligibility with detailed logging
 		if client.IsConnected() {
 			m.logger.Debug("Client already connected, skipping",
@@ -530,6 +537,16 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			m.logger.Debug("Client already connecting, skipping",
 				zap.String("id", id),
 				zap.String("name", client.Config.Name))
+			continue
+		}
+
+		if client.GetState() == types.StateError && !client.ShouldRetry() {
+			info := client.GetConnectionInfo()
+			m.logger.Debug("Client backoff active, skipping connect attempt",
+				zap.String("id", id),
+				zap.String("name", client.Config.Name),
+				zap.Int("retry_count", info.RetryCount),
+				zap.Time("last_retry_time", info.LastRetryTime))
 			continue
 		}
 
