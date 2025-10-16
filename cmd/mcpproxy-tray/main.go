@@ -910,7 +910,10 @@ func (cpl *CoreProcessLauncher) monitorAPIConnection(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case connState := <-connectionStateCh:
+		case connState, ok := <-connectionStateCh:
+			if !ok {
+				return
+			}
 			switch connState {
 			case tray.ConnectionStateConnected:
 				cpl.stateMachine.SendEvent(state.EventAPIConnected)

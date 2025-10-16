@@ -11,6 +11,8 @@ import (
 	"mcpproxy-go/internal/runtime/configsvc"
 )
 
+const connectAttemptTimeout = 45 * time.Second
+
 // StartBackgroundInitialization kicks off configuration sync and background loops.
 func (r *Runtime) StartBackgroundInitialization() {
 	// Phase 6: Start Supervisor for state reconciliation and lock-free reads
@@ -94,7 +96,7 @@ func (r *Runtime) connectAllWithRetry(ctx context.Context) {
 	if connectedCount < totalCount {
 		r.UpdatePhaseMessage(fmt.Sprintf("Connected to %d/%d servers, retrying...", connectedCount, totalCount))
 
-		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		connectCtx, cancel := context.WithTimeout(ctx, connectAttemptTimeout)
 		defer cancel()
 
 		if err := r.upstreamManager.ConnectAll(connectCtx); err != nil {
