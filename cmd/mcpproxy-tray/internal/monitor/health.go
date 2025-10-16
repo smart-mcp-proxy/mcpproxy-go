@@ -73,15 +73,15 @@ func NewHealthMonitor(baseURL string, logger *zap.SugaredLogger, stateMachine *s
 		stateMachine:  stateMachine,
 		currentStatus: HealthStatusUnknown,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: 10 * time.Second,
 		},
 		resultsCh:        make(chan HealthCheck, 10),
 		shutdownCh:       make(chan struct{}),
 		ctx:              ctx,
 		cancel:           cancel,
-		checkInterval:    5 * time.Second,
-		timeout:          5 * time.Second,
-		readinessTimeout: 30 * time.Second,
+		checkInterval:    10 * time.Second, // Reduced from 5s to 10s to lower system load
+		timeout:          10 * time.Second, // Increased to match longer operations
+		readinessTimeout: 60 * time.Second, // Increased to allow slow Docker container startups
 	}
 }
 

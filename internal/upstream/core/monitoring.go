@@ -222,83 +222,27 @@ waitLoop:
 		}
 	}
 
-	c.logger.Info("Starting Docker logs monitoring",
+	// Docker container log streaming disabled by default to prevent log flooding and performance issues.
+	// Container logs are already captured by Docker's logging driver (json-file with rotation).
+	// Use `docker logs <container_id>` to view container logs when debugging.
+	c.logger.Debug("Docker container started - logs available via 'docker logs' command",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", shortContainerID(containerID)),
+		zap.String("command", fmt.Sprintf("docker logs -f %s", containerID[:12])))
+
+	// Note: We intentionally do NOT stream container logs to mcpproxy logs because:
+	// 1. It causes massive log file bloat (multiple GB per day with active containers)
+	// 2. It floods tray application logs and Web UI event streams
+	// 3. Docker's built-in logging driver already handles log rotation and persistence
+	// 4. Users can access container logs directly via `docker logs <container_id>`
+	//
+	// If log streaming is needed for debugging, enable it with a feature flag in config.
+
+	// Simply wait for context cancellation - no log streaming
+	<-ctx.Done()
+	c.logger.Debug("Docker logs monitoring ended",
 		zap.String("server", c.config.Name),
 		zap.String("container_id", shortContainerID(containerID)))
-
-	// Start docker logs -f command with context cancellation
-	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", "--timestamps", containerID)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		c.logger.Warn("Failed to create docker logs stdout pipe", zap.Error(err))
-		return
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		c.logger.Warn("Failed to create docker logs stderr pipe", zap.Error(err))
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		c.logger.Warn("Failed to start docker logs command", zap.Error(err))
-		return
-	}
-
-	// Monitor both stdout and stderr from docker logs with context cancellation
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				line := strings.TrimSpace(scanner.Text())
-				if line != "" {
-					c.logger.Info("container logs (stdout)",
-						zap.String("server", c.config.Name),
-						zap.String("container_id", containerID[:12]),
-						zap.String("message", line))
-				}
-			}
-		}
-	}()
-
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				line := strings.TrimSpace(scanner.Text())
-				if line != "" {
-					c.logger.Info("container logs (stderr)",
-						zap.String("server", c.config.Name),
-						zap.String("container_id", containerID[:12]),
-						zap.String("message", line))
-				}
-			}
-		}
-	}()
-
-	// Wait for docker logs command to finish (when container stops) or context cancellation
-	if err := cmd.Wait(); err != nil {
-		if ctx.Err() != nil {
-			c.logger.Debug("Docker logs command canceled",
-				zap.String("server", c.config.Name),
-				zap.String("container_id", containerID[:12]))
-		} else {
-			c.logger.Debug("Docker logs command ended with error",
-				zap.String("server", c.config.Name),
-				zap.String("container_id", containerID[:12]),
-				zap.Error(err))
-		}
-	} else {
-		c.logger.Debug("Docker logs monitoring ended",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", containerID[:12]))
-	}
 }
 
 func shortContainerID(id string) string {

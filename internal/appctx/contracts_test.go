@@ -374,6 +374,11 @@ func TestDockerIsolationManagerContract(t *testing.T) {
 			in:   []reflect.Type{},
 			out:  []reflect.Type{reflect.TypeOf(true)},
 		},
+		"GetDockerIsolationWarning": {
+			name: "GetDockerIsolationWarning",
+			in:   []reflect.Type{reflect.TypeOf((*config.ServerConfig)(nil))},
+			out:  []reflect.Type{reflect.TypeOf("")},
+		},
 		"StartIsolatedCommand": {
 			name: "StartIsolatedCommand",
 			in:   []reflect.Type{reflect.TypeOf((*context.Context)(nil)).Elem(), reflect.TypeOf(""), reflect.TypeOf([]string{}), reflect.TypeOf(map[string]string{}), reflect.TypeOf("")},

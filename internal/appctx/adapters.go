@@ -110,6 +110,14 @@ func (d *DockerIsolationManagerImpl) IsDockerAvailable() bool {
 	return true
 }
 
+// GetDockerIsolationWarning returns a warning if Docker isolation might cause issues
+func (d *DockerIsolationManagerImpl) GetDockerIsolationWarning(serverConfig *config.ServerConfig) string {
+	if d.isolationManager == nil {
+		return ""
+	}
+	return d.isolationManager.GetDockerIsolationWarning(serverConfig)
+}
+
 // StartIsolatedCommand starts a command in Docker isolation
 func (d *DockerIsolationManagerImpl) StartIsolatedCommand(_ context.Context, command string, args []string, _ map[string]string, workingDir string) (interface{}, error) {
 	if d.isolationManager == nil {
