@@ -63,17 +63,36 @@ func (im *IsolationManager) HasLocalFilePath(serverConfig *config.ServerConfig) 
 	return false
 }
 
-// isLocalFilePath checks if a path is a local file path
+// isLocalFilePath checks if a path is a local file path (supports both Unix and Windows paths)
 func isLocalFilePath(path string) bool {
 	if path == "" {
 		return false
 	}
 
-	// Check if path starts with / or ./ or ../ or ~/
-	if strings.HasPrefix(path, "/") ||
-		strings.HasPrefix(path, "./") ||
+	// Unix-style absolute paths: /path/to/file
+	if strings.HasPrefix(path, "/") {
+		return true
+	}
+
+	// Unix-style relative paths: ./file, ../file, ~/file
+	if strings.HasPrefix(path, "./") ||
 		strings.HasPrefix(path, "../") ||
 		strings.HasPrefix(path, "~/") {
+		return true
+	}
+
+	// Windows-style absolute paths: C:\path, D:\path, etc.
+	if len(path) >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/') {
+		return true
+	}
+
+	// Windows-style relative paths: .\file, ..\file
+	if strings.HasPrefix(path, ".\\") || strings.HasPrefix(path, "..\\") {
+		return true
+	}
+
+	// Windows UNC paths: \\server\share
+	if strings.HasPrefix(path, "\\\\") {
 		return true
 	}
 
