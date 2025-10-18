@@ -217,6 +217,17 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 		switch event {
 		case EventCoreReady:
 			return StateConnectingAPI
+
+		// ADD: Handle error events that can occur while waiting for core
+		case EventPortConflict:
+			return StateCoreErrorPortConflict
+		case EventDBLocked:
+			return StateCoreErrorDBLocked
+		case EventConfigError:
+			return StateCoreErrorConfig
+		case EventGeneralError:
+			return StateCoreErrorGeneral
+
 		case EventTimeout, EventCoreExited:
 			return StateCoreErrorGeneral
 		case EventRetry:
@@ -229,6 +240,17 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 		switch event {
 		case EventAPIConnected:
 			return StateConnected
+
+		// ADD: Handle core crashes during API connection
+		case EventCoreExited:
+			return StateCoreErrorGeneral
+		case EventPortConflict:
+			return StateCoreErrorPortConflict
+		case EventDBLocked:
+			return StateCoreErrorDBLocked
+		case EventConfigError:
+			return StateCoreErrorConfig
+
 		case EventConnectionLost, EventTimeout:
 			return StateReconnecting
 		case EventShutdown:
@@ -354,6 +376,32 @@ func (m *Machine) handleStateEntry(state State) {
 		m.setStateTimeout(*stateInfo.Timeout)
 	} else {
 		m.clearStateTimeout()
+	}
+
+	// ADD: Auto-transition config errors to failed state
+	if state == StateCoreErrorConfig {
+		go func() {
+			select {
+			case <-time.After(3 * time.Second):
+				m.logger.Error("Config error timeout - transitioning to failed state")
+				// Transition directly to failed (no retry)
+				m.mu.Lock()
+				m.currentState = StateFailed
+				m.mu.Unlock()
+
+				// Notify subscribers
+				transition := Transition{
+					From:      StateCoreErrorConfig,
+					To:        StateFailed,
+					Event:     EventTimeout,
+					Timestamp: time.Now(),
+					Error:     m.lastError,
+				}
+				m.notifySubscribers(&transition)
+			case <-m.ctx.Done():
+				return
+			}
+		}()
 	}
 
 	// Handle retry-eligible error states

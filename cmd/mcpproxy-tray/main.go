@@ -786,8 +786,17 @@ func (cpl *CoreProcessLauncher) updateTrayConnectionState(machineState state.Sta
 		trayState = tray.ConnectionStateConnected
 	case state.StateReconnecting:
 		trayState = tray.ConnectionStateReconnecting
-	case state.StateCoreErrorPortConflict, state.StateCoreErrorDBLocked, state.StateCoreErrorConfig, state.StateCoreErrorGeneral:
-		trayState = tray.ConnectionStateDisconnected
+	// ADD: Map specific error states to detailed tray states
+	case state.StateCoreErrorPortConflict:
+		trayState = tray.ConnectionStateErrorPortConflict
+	case state.StateCoreErrorDBLocked:
+		trayState = tray.ConnectionStateErrorDBLocked
+	case state.StateCoreErrorConfig:
+		trayState = tray.ConnectionStateErrorConfig
+	case state.StateCoreErrorGeneral:
+		trayState = tray.ConnectionStateErrorGeneral
+	case state.StateFailed:
+		trayState = tray.ConnectionStateFailed
 	default:
 		trayState = tray.ConnectionStateDisconnected
 	}
