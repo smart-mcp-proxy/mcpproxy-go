@@ -3,6 +3,7 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"go.uber.org/zap"
@@ -105,6 +106,12 @@ func TestApplyConfig_HotReloadableChange(t *testing.T) {
 
 // TestApplyConfig_SaveFailure tests handling of save errors
 func TestApplyConfig_SaveFailure(t *testing.T) {
+	// Skip on Windows: chmod on directories doesn't reliably prevent file creation
+	// Windows has different permission semantics (ACLs vs POSIX permissions)
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping on Windows: directory chmod doesn't reliably prevent file creation")
+	}
+
 	// Create temp directory and config file
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.json")
