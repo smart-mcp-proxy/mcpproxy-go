@@ -109,6 +109,7 @@ func GetInfo(state State) Info {
 	timeout30s := 30 * time.Second
 	timeout5s := 5 * time.Second
 	timeout10s := 10 * time.Second
+	timeout3s := 3 * time.Second // ADD: Timeout for config error state
 
 	stateInfoMap := map[State]Info{
 		StateInitializing: {
@@ -163,9 +164,10 @@ func GetInfo(state State) Info {
 		StateCoreErrorConfig: {
 			Name:        StateCoreErrorConfig,
 			Description: "Core failed due to configuration error",
-			UserMessage: "Configuration error",
+			UserMessage: "Configuration error - check config file",
 			IsError:     true,
 			CanRetry:    false,
+			Timeout:     &timeout3s, // ADD: Auto-transition after 3s
 		},
 		StateCoreErrorGeneral: {
 			Name:        StateCoreErrorGeneral,
@@ -217,6 +219,9 @@ func CanTransition(from, to State) bool {
 		},
 		StateWaitingForCore: {
 			StateConnectingAPI,
+			StateCoreErrorPortConflict, // ADD: Handle port conflict
+			StateCoreErrorDBLocked,     // ADD: Handle DB lock
+			StateCoreErrorConfig,       // ADD: Handle config error
 			StateCoreErrorGeneral,
 			StateLaunchingCore, // Retry
 			StateShuttingDown,
@@ -224,6 +229,9 @@ func CanTransition(from, to State) bool {
 		StateConnectingAPI: {
 			StateConnected,
 			StateReconnecting,
+			StateCoreErrorPortConflict, // ADD: Handle port conflict during connection
+			StateCoreErrorDBLocked,     // ADD: Handle DB lock during connection
+			StateCoreErrorConfig,       // ADD: Handle config error during connection
 			StateCoreErrorGeneral,
 			StateShuttingDown,
 		},
