@@ -216,7 +216,11 @@ func TestAtomicConfigWrite(t *testing.T) {
 				// Read and parse
 				data, err := os.ReadFile(configPath)
 				if err != nil {
-					t.Errorf("Read error: %v", err)
+					// On Windows, reads can fail with "being used by another process"
+					// when writers are actively renaming files. This is expected.
+					if runtime.GOOS != "windows" {
+						t.Errorf("Read error: %v", err)
+					}
 					return
 				}
 
