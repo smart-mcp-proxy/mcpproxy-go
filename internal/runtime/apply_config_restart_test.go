@@ -3,6 +3,7 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"go.uber.org/zap"
@@ -105,6 +106,12 @@ func TestApplyConfig_HotReloadableChange(t *testing.T) {
 
 // TestApplyConfig_SaveFailure tests handling of save errors
 func TestApplyConfig_SaveFailure(t *testing.T) {
+	// Skip on Windows: chmod on directories doesn't reliably prevent file creation
+	// Windows has different permission semantics (ACLs vs POSIX permissions)
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping on Windows: directory chmod doesn't reliably prevent file creation")
+	}
+
 	// Create temp directory and config file
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.json")
@@ -125,11 +132,13 @@ func TestApplyConfig_SaveFailure(t *testing.T) {
 		_ = rt.Close()
 	}()
 
-	// Make config file read-only to force save failure
-	err = os.Chmod(cfgPath, 0444)
+	// Make directory read-only to force save failure
+	// (With atomic writes, making the file read-only doesn't prevent writes
+	// because we create a new temp file. We need to make the directory read-only.)
+	err = os.Chmod(tmpDir, 0555)
 	require.NoError(t, err)
 	defer func() {
-		_ = os.Chmod(cfgPath, 0644)
+		_ = os.Chmod(tmpDir, 0755)
 	}()
 
 	// Create new config
@@ -137,7 +146,7 @@ func TestApplyConfig_SaveFailure(t *testing.T) {
 	newCfg.Listen = "127.0.0.1:30080"
 	newCfg.DataDir = tmpDir
 
-	// Apply should fail because config can't be saved
+	// Apply should fail because config can't be saved (directory is read-only)
 	result, err := rt.ApplyConfig(newCfg, cfgPath)
 	assert.Error(t, err, "Should fail when config cannot be saved")
 	assert.NotNil(t, result)
