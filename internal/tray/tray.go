@@ -256,6 +256,22 @@ func (a *App) applyConnectionStateToUI(state ConnectionState) {
 	case ConnectionStateAuthError:
 		statusText = "Status: Authentication error"
 		tooltip = "Core is running but API key authentication failed"
+	// ADD: Detailed error state messages
+	case ConnectionStateErrorPortConflict:
+		statusText = "Status: Port conflict"
+		tooltip = "Port already in use - another instance may be running"
+	case ConnectionStateErrorDBLocked:
+		statusText = "Status: Database locked"
+		tooltip = "Database locked - another mcpproxy instance running?"
+	case ConnectionStateErrorConfig:
+		statusText = "Status: Configuration error"
+		tooltip = "Configuration error - check ~/.mcpproxy/mcp_config.json"
+	case ConnectionStateErrorGeneral:
+		statusText = "Status: Core startup failed"
+		tooltip = "Core failed to start - check logs for details"
+	case ConnectionStateFailed:
+		statusText = "Status: Failed"
+		tooltip = "Core failed to start after multiple attempts"
 	case ConnectionStateConnected:
 		statusText = "Status: Connected"
 		tooltip = "Core runtime is responding"
