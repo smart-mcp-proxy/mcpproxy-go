@@ -283,22 +283,18 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 
 	case StateCoreErrorPortConflict, StateCoreErrorDBLocked, StateCoreErrorGeneral:
 		switch event {
-		case EventRetry:
-			if m.shouldRetry(currentState) {
-				return StateLaunchingCore
-			}
-			return StateFailed
 		case EventShutdown:
 			return StateShuttingDown
+		// Error states persist - require user to fix issue manually
+		// Stay in current error state for all other events
 		}
 
 	case StateCoreErrorConfig:
 		switch event {
 		case EventShutdown:
 			return StateShuttingDown
-		default:
-			// Config errors are usually not recoverable
-			return StateFailed
+		// Config errors persist - require user to fix config manually
+		// Stay in StateCoreErrorConfig for all other events
 		}
 
 	case StateFailed:
@@ -378,46 +374,8 @@ func (m *Machine) handleStateEntry(state State) {
 		m.clearStateTimeout()
 	}
 
-	// ADD: Auto-transition config errors to failed state
-	if state == StateCoreErrorConfig {
-		go func() {
-			select {
-			case <-time.After(3 * time.Second):
-				m.logger.Error("Config error timeout - transitioning to failed state")
-				// Transition directly to failed (no retry)
-				m.mu.Lock()
-				m.currentState = StateFailed
-				m.mu.Unlock()
-
-				// Notify subscribers
-				transition := Transition{
-					From:      StateCoreErrorConfig,
-					To:        StateFailed,
-					Event:     EventTimeout,
-					Timestamp: time.Now(),
-					Error:     m.lastError,
-				}
-				m.notifySubscribers(&transition)
-			case <-m.ctx.Done():
-				return
-			}
-		}()
-	}
-
-	// Handle retry-eligible error states
-	if stateInfo.IsError && stateInfo.CanRetry {
-		// Schedule retry after delay
-		if delay, exists := m.retryDelay[state]; exists {
-			go func() {
-				select {
-				case <-time.After(delay):
-					m.SendEvent(EventRetry)
-				case <-m.ctx.Done():
-					return
-				}
-			}()
-		}
-	}
+	// All error states now persist until user fixes the issue or shuts down
+	// No auto-retry or auto-transition to failed state for any error states
 }
 
 // shouldRetry checks if we should retry for the given state

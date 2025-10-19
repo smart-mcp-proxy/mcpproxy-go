@@ -109,7 +109,6 @@ func GetInfo(state State) Info {
 	timeout30s := 30 * time.Second
 	timeout5s := 5 * time.Second
 	timeout10s := 10 * time.Second
-	timeout3s := 3 * time.Second // ADD: Timeout for config error state
 
 	stateInfoMap := map[State]Info{
 		StateInitializing: {
@@ -150,16 +149,18 @@ func GetInfo(state State) Info {
 		StateCoreErrorPortConflict: {
 			Name:        StateCoreErrorPortConflict,
 			Description: "Core failed due to port conflict",
-			UserMessage: "Port already in use",
+			UserMessage: "Port already in use - kill other instance or change port",
 			IsError:     true,
-			CanRetry:    true,
+			CanRetry:    false,
+			// No timeout - port conflicts persist until user fixes manually
 		},
 		StateCoreErrorDBLocked: {
 			Name:        StateCoreErrorDBLocked,
 			Description: "Core failed due to database lock",
-			UserMessage: "Database locked by another process",
+			UserMessage: "Database locked - kill other mcpproxy instance",
 			IsError:     true,
-			CanRetry:    true,
+			CanRetry:    false,
+			// No timeout - DB locks persist until user fixes manually
 		},
 		StateCoreErrorConfig: {
 			Name:        StateCoreErrorConfig,
@@ -167,14 +168,15 @@ func GetInfo(state State) Info {
 			UserMessage: "Configuration error - check config file",
 			IsError:     true,
 			CanRetry:    false,
-			Timeout:     &timeout3s, // ADD: Auto-transition after 3s
+			// No timeout - config errors persist until user fixes the config
 		},
 		StateCoreErrorGeneral: {
 			Name:        StateCoreErrorGeneral,
 			Description: "Core failed with general error",
-			UserMessage: "Core startup failed",
+			UserMessage: "Core startup failed - check logs",
 			IsError:     true,
-			CanRetry:    true,
+			CanRetry:    false,
+			// No timeout - general errors persist until user investigates
 		},
 		StateShuttingDown: {
 			Name:        StateShuttingDown,
@@ -246,22 +248,19 @@ func CanTransition(from, to State) bool {
 			StateShuttingDown,
 		},
 		StateCoreErrorPortConflict: {
-			StateLaunchingCore, // Retry with different port
-			StateFailed,
+			// Error persists - only shutdown allowed
 			StateShuttingDown,
 		},
 		StateCoreErrorDBLocked: {
-			StateLaunchingCore, // Retry after delay
-			StateFailed,
+			// Error persists - only shutdown allowed
 			StateShuttingDown,
 		},
 		StateCoreErrorConfig: {
-			StateFailed, // Config errors usually can't be retried
+			// Error persists - only shutdown allowed
 			StateShuttingDown,
 		},
 		StateCoreErrorGeneral: {
-			StateLaunchingCore, // Retry
-			StateFailed,
+			// Error persists - only shutdown allowed
 			StateShuttingDown,
 		},
 		StateFailed: {
