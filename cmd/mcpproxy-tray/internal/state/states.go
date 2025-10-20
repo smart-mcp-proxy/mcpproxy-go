@@ -106,7 +106,7 @@ type Info struct {
 
 // GetInfo returns metadata for a given state
 func GetInfo(state State) Info {
-	timeout30s := 30 * time.Second
+	timeout90s := 90 * time.Second  // Must exceed health monitor's readinessTimeout (60s)
 	timeout5s := 5 * time.Second
 	timeout10s := 10 * time.Second
 
@@ -127,7 +127,7 @@ func GetInfo(state State) Info {
 			Name:        StateWaitingForCore,
 			Description: "Waiting for core to become ready",
 			UserMessage: "Core starting up...",
-			Timeout:     &timeout30s,
+			Timeout:     &timeout90s,  // Increased to 90s to allow Docker isolation startup (health timeout is 60s)
 		},
 		StateConnectingAPI: {
 			Name:        StateConnectingAPI,

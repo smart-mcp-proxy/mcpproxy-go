@@ -371,16 +371,30 @@ func (pm *ProcessMonitor) setupOutputCapture() error {
 		return fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
+	// Use a WaitGroup to ensure capture goroutines are ready before starting process
+	var captureReady sync.WaitGroup
+	captureReady.Add(2) // stdout + stderr
+
 	// Start output capture goroutines
-	go pm.captureOutput(stdoutPipe, &pm.stdoutBuf, "stdout")
-	go pm.captureOutput(stderrPipe, &pm.stderrBuf, "stderr")
+	go pm.captureOutput(stdoutPipe, &pm.stdoutBuf, "stdout", &captureReady)
+	go pm.captureOutput(stderrPipe, &pm.stderrBuf, "stderr", &captureReady)
+
+	// Wait for both capture goroutines to be ready
+	captureReady.Wait()
+	pm.logger.Debug("Output capture goroutines ready")
 
 	return nil
 }
 
 // captureOutput captures output from a pipe
-func (pm *ProcessMonitor) captureOutput(pipe io.ReadCloser, buf *strings.Builder, streamName string) {
+func (pm *ProcessMonitor) captureOutput(pipe io.ReadCloser, buf *strings.Builder, streamName string, ready *sync.WaitGroup) {
 	defer pipe.Close()
+
+	// Signal that this goroutine is ready to read
+	if ready != nil {
+		pm.logger.Debug("Output capture goroutine starting", "stream", streamName)
+		ready.Done()
+	}
 
 	scanner := bufio.NewScanner(pipe)
 	for scanner.Scan() {
