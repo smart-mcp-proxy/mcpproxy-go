@@ -20,8 +20,18 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.supervisor.Start()
 		r.logger.Info("Supervisor started for state reconciliation")
 
-		// Set up reactive tool discovery callback
+		// Set up reactive tool discovery callback with deduplication
 		r.supervisor.SetOnServerConnectedCallback(func(serverName string) {
+			// Deduplication: Check if discovery is already in progress for this server
+			if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
+				r.logger.Debug("Tool discovery already in progress for server, skipping duplicate",
+					zap.String("server", serverName))
+				return
+			}
+
+			// Ensure we clean up the in-progress marker
+			defer r.discoveryInProgress.Delete(serverName)
+
 			ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
 			defer cancel()
 
@@ -182,6 +192,7 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 
 // DiscoverAndIndexToolsForServer discovers and indexes tools for a single server.
 // This is used for reactive tool discovery when a server connects.
+// Implements retry logic with exponential backoff for robustness.
 func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName string) error {
 	if r.upstreamManager == nil || r.indexManager == nil {
 		return fmt.Errorf("runtime managers not initialized")
@@ -195,10 +206,50 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 		return fmt.Errorf("client not found for server %s", serverName)
 	}
 
-	// Discover tools from this server
-	tools, err := client.ListTools(ctx)
+	// Retry logic: Sometimes connection events fire slightly before the server is fully ready
+	// We retry up to 3 times with exponential backoff (500ms, 1s, 2s)
+	var tools []*config.ToolMetadata
+	var err error
+	maxRetries := 3
+	baseDelay := 500 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := baseDelay * time.Duration(1<<uint(attempt-1)) // Exponential backoff
+			r.logger.Debug("Retrying tool discovery after delay",
+				zap.String("server", serverName),
+				zap.Int("attempt", attempt+1),
+				zap.Duration("delay", delay))
+
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during retry backoff: %w", ctx.Err())
+			}
+		}
+
+		// Discover tools from this server
+		tools, err = client.ListTools(ctx)
+		if err == nil {
+			break // Success!
+		}
+
+		// Log the error for debugging
+		r.logger.Warn("Tool discovery attempt failed",
+			zap.String("server", serverName),
+			zap.Int("attempt", attempt+1),
+			zap.Int("max_retries", maxRetries),
+			zap.Error(err))
+
+		// Don't retry on context cancellation
+		if ctx.Err() != nil {
+			return fmt.Errorf("context cancelled during tool discovery: %w", ctx.Err())
+		}
+	}
+
+	// After all retries, check if we still have an error
 	if err != nil {
-		return fmt.Errorf("failed to list tools for server %s: %w", serverName, err)
+		return fmt.Errorf("failed to list tools for server %s after %d attempts: %w", serverName, maxRetries, err)
 	}
 
 	if len(tools) == 0 {

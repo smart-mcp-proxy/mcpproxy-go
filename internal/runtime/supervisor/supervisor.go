@@ -549,6 +549,17 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 	// Update StateView for each server
 	for serverName, serverTools := range toolsByServer {
 		s.stateView.UpdateServer(serverName, func(status *stateview.ServerStatus) {
+			// Defensive check: Only update if we have more or equal tools than currently shown
+			// This prevents overwriting valid tools with stale data from delayed discoveries
+			// Exception: Always update if current tools is 0 (initial population)
+			if len(status.Tools) > 0 && len(serverTools) < len(status.Tools) {
+				s.logger.Debug("StateView already has more tools, skipping update to prevent stale data",
+					zap.String("server", serverName),
+					zap.Int("current_tools", len(status.Tools)),
+					zap.Int("new_tools", len(serverTools)))
+				return
+			}
+
 			status.ToolCount = len(serverTools)
 			status.Tools = make([]stateview.ToolInfo, len(serverTools))
 

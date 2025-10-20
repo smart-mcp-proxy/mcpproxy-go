@@ -70,6 +70,10 @@ type Runtime struct {
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
 
+	// Tool discovery deduplication: tracks servers with in-progress reactive discovery
+	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
+	discoveryInProgress sync.Map
+
 	appCtx    context.Context
 	appCancel context.CancelFunc
 }
