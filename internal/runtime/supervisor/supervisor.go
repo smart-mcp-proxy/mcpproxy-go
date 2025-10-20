@@ -38,6 +38,10 @@ type Supervisor struct {
 	listeners []chan Event
 	eventMu   sync.RWMutex
 
+	// Callback for reactive tool discovery on server connection
+	onServerConnectedCallback func(serverName string)
+	callbackMu                sync.RWMutex
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -491,7 +495,15 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 	})
 }
 
-// RefreshToolsFromDiscovery updates the StateView with tools from background discovery.
+// SetOnServerConnectedCallback sets a callback to be invoked when a server connects.
+// This allows for reactive tool discovery instead of relying on periodic polling.
+func (s *Supervisor) SetOnServerConnectedCallback(callback func(serverName string)) {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	s.onServerConnectedCallback = callback
+}
+
+// RefreshToolsFromDiscovery updates both the Supervisor snapshot and StateView with tools from background discovery.
 // This is called after DiscoverAndIndexTools completes to populate the UI cache.
 func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) error {
 	if tools == nil {
@@ -503,6 +515,36 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 	for _, tool := range tools {
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
 	}
+
+	// Update Supervisor's snapshot first (source of truth for StateView)
+	s.stateMu.Lock()
+	currentSnapshot := s.snapshot.Load().(*ServerStateSnapshot)
+
+	// Clone the snapshot
+	newServers := make(map[string]*ServerState)
+	for name, state := range currentSnapshot.Servers {
+		// Shallow copy of ServerState
+		newState := *state
+		newServers[name] = &newState
+	}
+
+	// Update tool counts and tools for servers with discovered tools
+	for serverName, serverTools := range toolsByServer {
+		if state, exists := newServers[serverName]; exists {
+			state.ToolCount = len(serverTools)
+			state.Tools = serverTools
+		}
+	}
+
+	newSnapshot := &ServerStateSnapshot{
+		Servers:   newServers,
+		Timestamp: time.Now(),
+		Version:   currentSnapshot.Version + 1,
+	}
+
+	s.snapshot.Store(newSnapshot)
+	s.version++
+	s.stateMu.Unlock()
 
 	// Update StateView for each server
 	for serverName, serverTools := range toolsByServer {
@@ -530,7 +572,7 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 		})
 	}
 
-	s.logger.Debug("Refreshed tools in StateView from discovery",
+	s.logger.Debug("Refreshed tools in Supervisor snapshot and StateView from discovery",
 		zap.Int("server_count", len(toolsByServer)),
 		zap.Int("total_tools", len(tools)))
 
@@ -609,6 +651,18 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					status.ToolCount = 0
 				}
 			})
+
+			// Trigger reactive tool discovery when server connects
+			if connected {
+				s.callbackMu.RLock()
+				callback := s.onServerConnectedCallback
+				s.callbackMu.RUnlock()
+
+				if callback != nil {
+					// Run callback asynchronously to avoid blocking supervisor
+					go callback(event.ServerName)
+				}
+			}
 		}
 	}
 }

@@ -19,6 +19,20 @@ func (r *Runtime) StartBackgroundInitialization() {
 	if r.supervisor != nil {
 		r.supervisor.Start()
 		r.logger.Info("Supervisor started for state reconciliation")
+
+		// Set up reactive tool discovery callback
+		r.supervisor.SetOnServerConnectedCallback(func(serverName string) {
+			ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
+			defer cancel()
+
+			r.logger.Info("Reactive tool discovery triggered", zap.String("server", serverName))
+			if err := r.DiscoverAndIndexToolsForServer(ctx, serverName); err != nil {
+				r.logger.Error("Failed to discover tools for connected server",
+					zap.String("server", serverName),
+					zap.Error(err))
+			}
+		})
+		r.logger.Info("Reactive tool discovery callback registered")
 	}
 
 	go r.backgroundInitialization()
@@ -163,6 +177,59 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 	}
 
 	r.logger.Info("Successfully indexed tools", zap.Int("count", len(tools)))
+	return nil
+}
+
+// DiscoverAndIndexToolsForServer discovers and indexes tools for a single server.
+// This is used for reactive tool discovery when a server connects.
+func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName string) error {
+	if r.upstreamManager == nil || r.indexManager == nil {
+		return fmt.Errorf("runtime managers not initialized")
+	}
+
+	r.logger.Info("Discovering and indexing tools for server", zap.String("server", serverName))
+
+	// Get the upstream client for this server
+	client, ok := r.upstreamManager.GetClient(serverName)
+	if !ok {
+		return fmt.Errorf("client not found for server %s", serverName)
+	}
+
+	// Discover tools from this server
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list tools for server %s: %w", serverName, err)
+	}
+
+	if len(tools) == 0 {
+		r.logger.Warn("No tools discovered from server", zap.String("server", serverName))
+		return nil
+	}
+
+	// Index the tools
+	if err := r.indexManager.BatchIndexTools(tools); err != nil {
+		return fmt.Errorf("failed to index tools for server %s: %w", serverName, err)
+	}
+
+	// Invalidate tool count caches since tools may have changed
+	r.upstreamManager.InvalidateAllToolCountCaches()
+
+	// Update StateView with discovered tools
+	if r.supervisor != nil {
+		if err := r.supervisor.RefreshToolsFromDiscovery(tools); err != nil {
+			r.logger.Warn("Failed to refresh tools in StateView for server",
+				zap.String("server", serverName),
+				zap.Error(err))
+		} else {
+			r.logger.Debug("Successfully refreshed tools in StateView for server",
+				zap.String("server", serverName),
+				zap.Int("tool_count", len(tools)))
+		}
+	}
+
+	r.logger.Info("Successfully indexed tools for server",
+		zap.String("server", serverName),
+		zap.Int("count", len(tools)))
 	return nil
 }
 
