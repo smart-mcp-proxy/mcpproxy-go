@@ -116,6 +116,16 @@ func (m *MockUpstreamAdapter) Close() {
 	close(m.eventCh)
 }
 
+// SetServerTools sets tools for a specific server (for testing)
+func (m *MockUpstreamAdapter) SetServerTools(name string, tools []*config.ToolMetadata) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if state, ok := m.states[name]; ok {
+		state.Tools = tools
+		state.ToolCount = len(tools)
+	}
+}
+
 func TestSupervisor_New(t *testing.T) {
 	cfg := &config.Config{
 		Listen:  "127.0.0.1:8080",
@@ -428,4 +438,117 @@ func TestSupervisor_Subscribe(t *testing.T) {
 	}
 
 	supervisor.Unsubscribe(eventCh)
+}
+
+func TestSupervisor_RefreshToolsFromDiscovery(t *testing.T) {
+	cfg := &config.Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{
+			{Name: "server1", Enabled: true},
+			{Name: "server2", Enabled: true},
+		},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	supervisor := New(configSvc, mockUpstream, zap.NewNop())
+
+	// Reconcile to populate initial state
+	_ = supervisor.reconcile(configSvc.Current())
+	time.Sleep(50 * time.Millisecond)
+
+	// Create discovered tools
+	tools := []*config.ToolMetadata{
+		{
+			Name:        "tool1",
+			ServerName:  "server1",
+			Description: "Test tool 1",
+			ParamsJSON:  `{"type":"object","properties":{"arg1":{"type":"string"}}}`,
+		},
+		{
+			Name:        "tool2",
+			ServerName:  "server1",
+			Description: "Test tool 2",
+			ParamsJSON:  `{"type":"object","properties":{"arg2":{"type":"number"}}}`,
+		},
+		{
+			Name:        "tool3",
+			ServerName:  "server2",
+			Description: "Test tool 3",
+			ParamsJSON:  `{"type":"object","properties":{"arg3":{"type":"boolean"}}}`,
+		},
+	}
+
+	// Refresh tools from discovery
+	err := supervisor.RefreshToolsFromDiscovery(tools)
+	if err != nil {
+		t.Fatalf("RefreshToolsFromDiscovery failed: %v", err)
+	}
+
+	// Verify StateView was updated
+	snapshot := supervisor.StateView().Snapshot()
+
+	// Check server1 has 2 tools
+	if server1, ok := snapshot.Servers["server1"]; ok {
+		if server1.ToolCount != 2 {
+			t.Errorf("Expected server1 to have 2 tools, got %d", server1.ToolCount)
+		}
+		if len(server1.Tools) != 2 {
+			t.Errorf("Expected server1 Tools array to have 2 items, got %d", len(server1.Tools))
+		}
+		if server1.Tools[0].Name != "tool1" {
+			t.Errorf("Expected first tool to be 'tool1', got '%s'", server1.Tools[0].Name)
+		}
+		if server1.Tools[0].Description != "Test tool 1" {
+			t.Errorf("Expected first tool description to be 'Test tool 1', got '%s'", server1.Tools[0].Description)
+		}
+	} else {
+		t.Error("Expected server1 in StateView snapshot")
+	}
+
+	// Check server2 has 1 tool
+	if server2, ok := snapshot.Servers["server2"]; ok {
+		if server2.ToolCount != 1 {
+			t.Errorf("Expected server2 to have 1 tool, got %d", server2.ToolCount)
+		}
+		if len(server2.Tools) != 1 {
+			t.Errorf("Expected server2 Tools array to have 1 item, got %d", len(server2.Tools))
+		}
+		if server2.Tools[0].Name != "tool3" {
+			t.Errorf("Expected tool to be 'tool3', got '%s'", server2.Tools[0].Name)
+		}
+	} else {
+		t.Error("Expected server2 in StateView snapshot")
+	}
+}
+
+func TestSupervisor_RefreshToolsFromDiscovery_EmptyTools(t *testing.T) {
+	cfg := &config.Config{
+		Listen:  "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	supervisor := New(configSvc, mockUpstream, zap.NewNop())
+
+	// Test with nil tools
+	err := supervisor.RefreshToolsFromDiscovery(nil)
+	if err != nil {
+		t.Errorf("Expected no error with nil tools, got %v", err)
+	}
+
+	// Test with empty tools slice
+	err = supervisor.RefreshToolsFromDiscovery([]*config.ToolMetadata{})
+	if err != nil {
+		t.Errorf("Expected no error with empty tools, got %v", err)
+	}
 }

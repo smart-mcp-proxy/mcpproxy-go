@@ -152,6 +152,16 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
+	// Update StateView with discovered tools
+	if r.supervisor != nil {
+		if err := r.supervisor.RefreshToolsFromDiscovery(tools); err != nil {
+			r.logger.Warn("Failed to refresh tools in StateView", zap.Error(err))
+			// Don't fail the entire operation if StateView update fails
+		} else {
+			r.logger.Debug("Successfully refreshed tools in StateView", zap.Int("tool_count", len(tools)))
+		}
+	}
+
 	r.logger.Info("Successfully indexed tools", zap.Int("count", len(tools)))
 	return nil
 }

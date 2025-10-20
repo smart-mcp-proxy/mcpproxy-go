@@ -491,6 +491,52 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 	})
 }
 
+// RefreshToolsFromDiscovery updates the StateView with tools from background discovery.
+// This is called after DiscoverAndIndexTools completes to populate the UI cache.
+func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) error {
+	if tools == nil {
+		return nil
+	}
+
+	// Group tools by server name
+	toolsByServer := make(map[string][]*config.ToolMetadata)
+	for _, tool := range tools {
+		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
+	}
+
+	// Update StateView for each server
+	for serverName, serverTools := range toolsByServer {
+		s.stateView.UpdateServer(serverName, func(status *stateview.ServerStatus) {
+			status.ToolCount = len(serverTools)
+			status.Tools = make([]stateview.ToolInfo, len(serverTools))
+
+			for i, tool := range serverTools {
+				// Parse ParamsJSON into InputSchema
+				var inputSchema map[string]interface{}
+				if tool.ParamsJSON != "" {
+					// ParamsJSON is already a JSON string
+					inputSchema = map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{}, // TODO: Parse ParamsJSON
+					}
+				}
+
+				status.Tools[i] = stateview.ToolInfo{
+					Name:        tool.Name,
+					Description: tool.Description,
+					InputSchema: inputSchema,
+				}
+			}
+		})
+	}
+
+	s.logger.Debug("Refreshed tools in StateView from discovery",
+		zap.Int("server_count", len(toolsByServer)),
+		zap.Int("total_tools", len(tools)))
+
+	return nil
+}
+
 // forwardUpstreamEvents forwards upstream events to supervisor listeners.
 func (s *Supervisor) forwardUpstreamEvents(upstreamEvents <-chan Event) {
 	defer s.wg.Done()
@@ -549,8 +595,12 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					t := event.Timestamp
 					status.ConnectedAt = &t
 					// Don't populate Tools here - background indexing will handle it
-					// Just update the count from cache (non-blocking)
-					status.ToolCount = toolCount
+					// Only update the count if tools haven't been discovered yet
+					// This prevents overwriting tool data from background discovery
+					if len(status.Tools) == 0 {
+						status.ToolCount = toolCount
+					}
+					// If tools are already populated, keep the existing count
 				} else {
 					status.State = "disconnected"
 					t := event.Timestamp
