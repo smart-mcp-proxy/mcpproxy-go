@@ -9,6 +9,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/runtime/configsvc"
+	"mcpproxy-go/internal/runtime/supervisor"
 )
 
 const connectAttemptTimeout = 45 * time.Second
@@ -43,6 +44,9 @@ func (r *Runtime) StartBackgroundInitialization() {
 			}
 		})
 		r.logger.Info("Reactive tool discovery callback registered")
+
+		// Subscribe to supervisor events and emit servers.changed for Web UI updates
+		go r.supervisorEventForwarder()
 	}
 
 	go r.backgroundInitialization()
@@ -762,4 +766,52 @@ func (r *Runtime) cleanupOrphanedIndexEntries() {
 	// Placeholder for future cleanup strategy; mirrors previous behaviour.
 	r.logger.Debug("Orphaned index cleanup completed",
 		zap.Int("active_servers", len(activeServers)))
+}
+
+// supervisorEventForwarder subscribes to supervisor events and emits runtime events
+// to notify Web UI via SSE when server connection state changes.
+func (r *Runtime) supervisorEventForwarder() {
+	eventCh := r.supervisor.Subscribe()
+	defer r.supervisor.Unsubscribe(eventCh)
+
+	r.logger.Info("Supervisor event forwarder started - will emit servers.changed on connection state changes")
+
+	for {
+		select {
+		case event, ok := <-eventCh:
+			if !ok {
+				r.logger.Info("Supervisor event channel closed, stopping event forwarder")
+				return
+			}
+
+			// Emit servers.changed event for connection state changes
+			// This triggers Web UI to refresh server list via SSE
+			switch event.Type {
+			case supervisor.EventServerConnected:
+				r.logger.Info("Server connected - emitting servers.changed event",
+					zap.String("server", event.ServerName))
+				r.emitServersChanged("server_connected", map[string]any{
+					"server": event.ServerName,
+				})
+
+			case supervisor.EventServerDisconnected:
+				r.logger.Info("Server disconnected - emitting servers.changed event",
+					zap.String("server", event.ServerName))
+				r.emitServersChanged("server_disconnected", map[string]any{
+					"server": event.ServerName,
+				})
+
+			case supervisor.EventServerStateChanged:
+				r.logger.Debug("Server state changed - emitting servers.changed event",
+					zap.String("server", event.ServerName))
+				r.emitServersChanged("server_state_changed", map[string]any{
+					"server": event.ServerName,
+				})
+			}
+
+		case <-r.appCtx.Done():
+			r.logger.Info("App context cancelled, stopping supervisor event forwarder")
+			return
+		}
+	}
 }

@@ -223,6 +223,22 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
+			// Check if this is an OAuth error - don't fail AddServer for OAuth
+			errStr := err.Error()
+			isOAuthError := strings.Contains(errStr, "OAuth") ||
+				strings.Contains(errStr, "oauth") ||
+				strings.Contains(errStr, "authorization required")
+
+			if isOAuthError {
+				m.logger.Info("Server requires OAuth authorization - connection will complete after OAuth login",
+					zap.String("id", id),
+					zap.String("name", serverConfig.Name),
+					zap.Error(err))
+				// Don't return error - server is added successfully, just needs OAuth
+				return nil
+			}
+
+			// For non-OAuth errors, still return error
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
 		}
 	} else {
