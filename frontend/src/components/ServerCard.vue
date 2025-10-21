@@ -3,9 +3,9 @@
     <div class="card-body">
       <!-- Header -->
       <div class="flex justify-between items-start mb-4">
-        <div>
-          <h3 class="card-title text-lg">{{ server.name }}</h3>
-          <p class="text-sm text-base-content/70">
+        <div class="flex-1 min-w-0 mr-2">
+          <h3 class="card-title text-lg truncate">{{ server.name }}</h3>
+          <p class="text-sm text-base-content/70 truncate">
             {{ server.protocol }} • {{ server.url || server.command || 'No endpoint' }}
           </p>
         </div>
@@ -13,7 +13,7 @@
         <!-- Status indicator -->
         <div
           :class="[
-            'badge',
+            'badge badge-sm flex-shrink-0',
             server.connected ? 'badge-success' :
             server.connecting ? 'badge-warning' :
             'badge-error'
@@ -125,12 +125,27 @@ const systemStore = useSystemStore()
 const loading = ref(false)
 
 const needsOAuth = computed(() => {
-  // Simplified check - in reality, you'd check if the server supports OAuth
-  // and if authentication is required
-  return (props.server.protocol === 'http' || props.server.protocol === 'streamable-http') &&
-         !props.server.connected &&
-         props.server.enabled &&
-         props.server.last_error?.includes('authorization')
+  // Check if server requires OAuth authentication
+  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
+  const notConnected = !props.server.connected
+  const isEnabled = props.server.enabled
+
+  // Check for OAuth-related errors in last_error
+  const hasOAuthError = props.server.last_error && (
+    props.server.last_error.includes('authorization') ||
+    props.server.last_error.includes('OAuth') ||
+    props.server.last_error.includes('401') ||
+    props.server.last_error.includes('invalid_token') ||
+    props.server.last_error.includes('Missing or invalid access token')
+  )
+
+  // Check if server has OAuth configuration
+  const hasOAuthConfig = props.server.oauth !== null && props.server.oauth !== undefined
+
+  // Check if server is authenticated
+  const notAuthenticated = !props.server.authenticated
+
+  return isHttpProtocol && notConnected && isEnabled && (hasOAuthError || (hasOAuthConfig && notAuthenticated))
 })
 
 async function toggleEnabled() {

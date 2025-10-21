@@ -12,6 +12,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/runtime/configsvc"
 	"mcpproxy-go/internal/runtime/stateview"
+	"mcpproxy-go/internal/upstream/types"
 )
 
 // Supervisor manages the desired vs actual state reconciliation for upstream servers.
@@ -487,6 +488,30 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 
 		// Update connection info if available
 		if state.ConnectionInfo != nil {
+			// Extract LastError from ConnectionInfo and convert to string with limit
+			if state.ConnectionInfo.LastError != nil {
+				errorStr := state.ConnectionInfo.LastError.Error()
+				// Limit error string to 500 characters to prevent UI hangs
+				const maxErrorLen = 500
+				if len(errorStr) > maxErrorLen {
+					errorStr = errorStr[:maxErrorLen] + "... (truncated)"
+				}
+				status.LastError = errorStr
+
+				// Set last error time if available
+				if !state.ConnectionInfo.LastRetryTime.IsZero() {
+					t := state.ConnectionInfo.LastRetryTime
+					status.LastErrorTime = &t
+				}
+			} else {
+				status.LastError = ""
+				status.LastErrorTime = nil
+			}
+
+			// Copy retry count
+			status.RetryCount = state.ConnectionInfo.RetryCount
+
+			// Store full connection info in metadata for debugging
 			if status.Metadata == nil {
 				status.Metadata = make(map[string]interface{})
 			}
@@ -628,16 +653,18 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			state.LastSeen = event.Timestamp
 
 			// Phase 7.1 FIX: Don't fetch tools on connect events - let background indexing handle it
-			// Just update the cached tool count from the client (non-blocking)
+			// Just update the cached tool count and connection info from the client (non-blocking)
 			var toolCount int
-			if connected {
-				if actualState, err := s.upstream.GetServerState(event.ServerName); err == nil {
-					toolCount = actualState.ToolCount
-				} else {
-					s.logger.Warn("Failed to get server state for tool count",
-						zap.String("server", event.ServerName),
-						zap.Error(err))
-				}
+			var connInfo *types.ConnectionInfo
+			if actualState, err := s.upstream.GetServerState(event.ServerName); err == nil {
+				toolCount = actualState.ToolCount
+				// Update ConnectionInfo for error propagation to UI
+				state.ConnectionInfo = actualState.ConnectionInfo
+				connInfo = actualState.ConnectionInfo
+			} else {
+				s.logger.Warn("Failed to get server state for tool count",
+					zap.String("server", event.ServerName),
+					zap.Error(err))
 			}
 
 			// Update stateview
@@ -660,6 +687,27 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					status.DisconnectedAt = &t
 					status.Tools = nil // Clear tools on disconnect
 					status.ToolCount = 0
+				}
+
+				// Update ConnectionInfo for immediate error propagation to UI
+				if connInfo != nil {
+					if connInfo.LastError != nil {
+						errorStr := connInfo.LastError.Error()
+						const maxErrorLen = 500
+						if len(errorStr) > maxErrorLen {
+							errorStr = errorStr[:maxErrorLen] + "... (truncated)"
+						}
+						status.LastError = errorStr
+
+						if !connInfo.LastRetryTime.IsZero() {
+							t := connInfo.LastRetryTime
+							status.LastErrorTime = &t
+						}
+					} else {
+						status.LastError = ""
+						status.LastErrorTime = nil
+					}
+					status.RetryCount = connInfo.RetryCount
 				}
 			})
 

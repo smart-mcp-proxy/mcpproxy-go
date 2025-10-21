@@ -488,6 +488,30 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	select {
 	case err := <-done:
 		if err != nil {
+			// Check if error is OAuth-related (expected state, not a failure)
+			errStr := err.Error()
+			isOAuthError := strings.Contains(errStr, "OAuth authorization") ||
+				strings.Contains(errStr, "oauth") ||
+				strings.Contains(errStr, "authorization required") ||
+				strings.Contains(errStr, "no valid token")
+
+			if isOAuthError {
+				// OAuth required is not a failure - restart succeeded but OAuth is needed
+				s.logger.Info("Server restart completed, OAuth login required",
+					"server", serverID,
+					"error", errStr)
+
+				response := contracts.ServerActionResponse{
+					Server:  serverID,
+					Action:  "restart",
+					Success: true,
+					Async:   false,
+				}
+				s.writeSuccess(w, response)
+				return
+			}
+
+			// Non-OAuth error - treat as failure
 			s.logger.Error("Failed to restart server", "server", serverID, "error", err)
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
 			return
