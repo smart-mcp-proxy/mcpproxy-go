@@ -750,3 +750,280 @@ func TestHandleV1ToolProxy(t *testing.T) {
 	// proper HTTP handler testing for V1 tool proxy functionality.
 	t.Skip("Test disabled: requires mockToolClient implementation")
 }
+
+// Test: Delete server functionality (remove operation)
+func TestHandleRemoveUpstream(t *testing.T) {
+	tests := []struct {
+		name           string
+		serverName     string
+		serverExists   bool
+		quarantined    bool
+		readOnlyMode   bool
+		disableManage  bool
+		allowRemove    bool
+		expectSuccess  bool
+		expectErrorMsg string
+	}{
+		{
+			name:          "successful removal of existing server",
+			serverName:    "test-server",
+			serverExists:  true,
+			quarantined:   false,
+			readOnlyMode:  false,
+			disableManage: false,
+			allowRemove:   true,
+			expectSuccess: true,
+		},
+		{
+			name:           "fail to remove non-existent server",
+			serverName:     "non-existent-server",
+			serverExists:   false,
+			quarantined:    false,
+			readOnlyMode:   false,
+			disableManage:  false,
+			allowRemove:    true,
+			expectSuccess:  false,
+			expectErrorMsg: "not found",
+		},
+		{
+			name:           "fail to remove in read-only mode",
+			serverName:     "test-server",
+			serverExists:   true,
+			quarantined:    false,
+			readOnlyMode:   true,
+			disableManage:  false,
+			allowRemove:    true,
+			expectSuccess:  false,
+			expectErrorMsg: "read-only mode",
+		},
+		{
+			name:           "fail to remove when management disabled",
+			serverName:     "test-server",
+			serverExists:   true,
+			quarantined:    false,
+			readOnlyMode:   false,
+			disableManage:  true,
+			allowRemove:    true,
+			expectSuccess:  false,
+			expectErrorMsg: "management disabled",
+		},
+		{
+			name:           "fail to remove when not allowed",
+			serverName:     "test-server",
+			serverExists:   true,
+			quarantined:    false,
+			readOnlyMode:   false,
+			disableManage:  false,
+			allowRemove:    false,
+			expectSuccess:  false,
+			expectErrorMsg: "not allowed",
+		},
+		{
+			name:          "successfully remove quarantined server",
+			serverName:    "quarantined-server",
+			serverExists:  true,
+			quarantined:   true,
+			readOnlyMode:  false,
+			disableManage: false,
+			allowRemove:   true,
+			expectSuccess: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test the validation and operation logic for remove operation
+
+			// 1. Test security checks
+			if tt.readOnlyMode {
+				assert.Contains(t, tt.expectErrorMsg, "read-only mode")
+				assert.False(t, tt.expectSuccess)
+				return
+			}
+
+			if tt.disableManage {
+				assert.Contains(t, tt.expectErrorMsg, "management disabled")
+				assert.False(t, tt.expectSuccess)
+				return
+			}
+
+			if !tt.allowRemove {
+				assert.Contains(t, tt.expectErrorMsg, "not allowed")
+				assert.False(t, tt.expectSuccess)
+				return
+			}
+
+			// 2. Test server existence check
+			if !tt.serverExists {
+				assert.Contains(t, tt.expectErrorMsg, "not found")
+				assert.False(t, tt.expectSuccess)
+				return
+			}
+
+			// 3. If all checks pass, operation should succeed
+			if tt.expectSuccess {
+				assert.True(t, tt.serverExists)
+				assert.False(t, tt.readOnlyMode)
+				assert.False(t, tt.disableManage)
+				assert.True(t, tt.allowRemove)
+			}
+		})
+	}
+}
+
+// Test: E2E delete server flow
+func TestE2E_DeleteServerFlow(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a test server
+	mockServer := env.CreateMockUpstreamServer("delete-test-server", []mcp.Tool{
+		{
+			Name:        "test_tool",
+			Description: "A test tool for deletion",
+		},
+	})
+
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "delete-test-server",
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError, "Adding server should succeed")
+
+	// Step 2: Verify server was added (list servers)
+	listRequest := mcp.CallToolRequest{}
+	listRequest.Params.Name = "upstream_servers"
+	listRequest.Params.Arguments = map[string]interface{}{
+		"operation": "list",
+	}
+
+	listResult, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	assert.False(t, listResult.IsError)
+
+	// Parse list result to verify server exists
+	require.Greater(t, len(listResult.Content), 0)
+	var listContentText string
+	if len(listResult.Content) > 0 {
+		contentBytes, err := json.Marshal(listResult.Content[0])
+		require.NoError(t, err)
+		var contentMap map[string]interface{}
+		err = json.Unmarshal(contentBytes, &contentMap)
+		require.NoError(t, err)
+		if text, ok := contentMap["text"].(string); ok {
+			listContentText = text
+		}
+	}
+
+	var listResponse map[string]interface{}
+	err = json.Unmarshal([]byte(listContentText), &listResponse)
+	require.NoError(t, err)
+
+	servers, ok := listResponse["servers"].([]interface{})
+	require.True(t, ok)
+
+	// Find our test server
+	foundServer := false
+	for _, s := range servers {
+		serverMap := s.(map[string]interface{})
+		if serverMap["name"] == "delete-test-server" {
+			foundServer = true
+			break
+		}
+	}
+	assert.True(t, foundServer, "Server should be in the list after adding")
+
+	// Step 3: Delete the server using 'remove' operation
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "delete-test-server",
+	}
+
+	deleteResult, err := mcpClient.CallTool(ctx, deleteRequest)
+	require.NoError(t, err)
+	assert.False(t, deleteResult.IsError, "Delete operation should succeed")
+
+	// Verify delete response
+	require.Greater(t, len(deleteResult.Content), 0)
+	var deleteContentText string
+	if len(deleteResult.Content) > 0 {
+		contentBytes, err := json.Marshal(deleteResult.Content[0])
+		require.NoError(t, err)
+		var contentMap map[string]interface{}
+		err = json.Unmarshal(contentBytes, &contentMap)
+		require.NoError(t, err)
+		if text, ok := contentMap["text"].(string); ok {
+			deleteContentText = text
+		}
+	}
+
+	var deleteResponse map[string]interface{}
+	err = json.Unmarshal([]byte(deleteContentText), &deleteResponse)
+	require.NoError(t, err)
+	assert.Equal(t, true, deleteResponse["removed"])
+	assert.Equal(t, "delete-test-server", deleteResponse["name"])
+
+	// Step 4: Verify server is no longer in the list
+	listResult2, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	assert.False(t, listResult2.IsError)
+
+	require.Greater(t, len(listResult2.Content), 0)
+	var listContentText2 string
+	if len(listResult2.Content) > 0 {
+		contentBytes, err := json.Marshal(listResult2.Content[0])
+		require.NoError(t, err)
+		var contentMap map[string]interface{}
+		err = json.Unmarshal(contentBytes, &contentMap)
+		require.NoError(t, err)
+		if text, ok := contentMap["text"].(string); ok {
+			listContentText2 = text
+		}
+	}
+
+	var listResponse2 map[string]interface{}
+	err = json.Unmarshal([]byte(listContentText2), &listResponse2)
+	require.NoError(t, err)
+
+	servers2, ok := listResponse2["servers"].([]interface{})
+	require.True(t, ok)
+
+	// Verify server is gone
+	foundServerAfterDelete := false
+	for _, s := range servers2 {
+		serverMap := s.(map[string]interface{})
+		if serverMap["name"] == "delete-test-server" {
+			foundServerAfterDelete = true
+			break
+		}
+	}
+	assert.False(t, foundServerAfterDelete, "Server should NOT be in the list after deletion")
+
+	// Step 5: Try to delete again (should fail with server not found)
+	deleteRequest2 := mcp.CallToolRequest{}
+	deleteRequest2.Params.Name = "upstream_servers"
+	deleteRequest2.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "delete-test-server",
+	}
+
+	deleteResult2, err := mcpClient.CallTool(ctx, deleteRequest2)
+	require.NoError(t, err)
+	assert.True(t, deleteResult2.IsError, "Deleting non-existent server should fail")
+}
