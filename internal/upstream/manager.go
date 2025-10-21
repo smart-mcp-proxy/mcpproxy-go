@@ -124,8 +124,9 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 				zap.String("current_state", existingClient.GetState().String()),
 				zap.Bool("is_connected", existingClient.IsConnected()))
 			// Update the client's config reference to the new config but don't recreate the client
-			existingClient.Config = serverConfig
+			// Use thread-safe setter to avoid race with GetServerState()
 			m.mu.Unlock()
+			existingClient.SetConfig(serverConfig)
 			return nil
 		}
 	}
