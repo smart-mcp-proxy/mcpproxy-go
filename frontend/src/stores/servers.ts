@@ -39,7 +39,10 @@ export const useServersStore = defineStore('servers', () => {
     try {
       const response = await api.getServers()
       if (response.success && response.data) {
-        servers.value = response.data.servers
+        // Sort servers alphabetically by name to match tray menu order
+        servers.value = response.data.servers.sort((a, b) =>
+          a.name.localeCompare(b.name)
+        )
       } else {
         loading.value.error = response.error || 'Failed to fetch servers'
       }
@@ -188,6 +191,22 @@ export const useServersStore = defineStore('servers', () => {
     }
   }
 
+  async function deleteServer(serverName: string) {
+    try {
+      const response = await api.deleteServer(serverName)
+      if (response.success) {
+        // Remove server from local state
+        servers.value = servers.value.filter(s => s.name !== serverName)
+        return true
+      } else {
+        throw new Error(response.error || 'Failed to delete server')
+      }
+    } catch (error) {
+      console.error('Failed to delete server:', error)
+      throw error
+    }
+  }
+
   function updateServerStatus(statusUpdate: any) {
     // Update servers based on real-time status updates
     if (statusUpdate.upstream_stats) {
@@ -265,6 +284,7 @@ export const useServersStore = defineStore('servers', () => {
     triggerOAuthLogin,
     quarantineServer,
     unquarantineServer,
+    deleteServer,
     updateServerStatus,
     getServerByName,
     addServer,

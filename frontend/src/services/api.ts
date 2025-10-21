@@ -237,6 +237,13 @@ class APIService {
     })
   }
 
+  async deleteServer(serverName: string): Promise<APIResponse> {
+    return this.callTool('upstream_servers', {
+      operation: 'remove',
+      name: serverName
+    })
+  }
+
   async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
     return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
   }

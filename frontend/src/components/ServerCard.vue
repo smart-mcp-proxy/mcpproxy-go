@@ -103,6 +103,44 @@
         >
           Details
         </router-link>
+
+        <button
+          @click="showDeleteConfirmation = true"
+          :disabled="loading"
+          class="btn btn-sm btn-error"
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div v-if="showDeleteConfirmation" class="modal modal-open">
+      <div class="modal-box">
+        <h3 class="font-bold text-lg mb-4">Delete Server</h3>
+        <p class="mb-4">
+          Are you sure you want to delete the server <strong>{{ server.name }}</strong>?
+        </p>
+        <p class="text-sm text-base-content/70 mb-6">
+          This action cannot be undone. The server will be removed from your configuration.
+        </p>
+        <div class="modal-action">
+          <button
+            @click="showDeleteConfirmation = false"
+            :disabled="loading"
+            class="btn btn-outline"
+          >
+            Cancel
+          </button>
+          <button
+            @click="confirmDelete"
+            :disabled="loading"
+            class="btn btn-error"
+          >
+            <span v-if="loading" class="loading loading-spinner loading-xs"></span>
+            Delete Server
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -123,6 +161,7 @@ const props = defineProps<Props>()
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const loading = ref(false)
+const showDeleteConfirmation = ref(false)
 
 const needsOAuth = computed(() => {
   // Check if server requires OAuth authentication
@@ -230,6 +269,27 @@ async function unquarantine() {
     systemStore.addToast({
       type: 'error',
       title: 'Unquarantine Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } finally {
+    loading.value = false
+  }
+}
+
+async function confirmDelete() {
+  loading.value = true
+  try {
+    await serversStore.deleteServer(props.server.name)
+    systemStore.addToast({
+      type: 'success',
+      title: 'Server Deleted',
+      message: `${props.server.name} has been deleted successfully`,
+    })
+    showDeleteConfirmation.value = false
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Delete Failed',
       message: error instanceof Error ? error.message : 'Unknown error',
     })
   } finally {
