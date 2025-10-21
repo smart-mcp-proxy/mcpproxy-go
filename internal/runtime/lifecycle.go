@@ -776,6 +776,9 @@ func (r *Runtime) supervisorEventForwarder() {
 
 	r.logger.Info("Supervisor event forwarder started - will emit servers.changed on connection state changes")
 
+	// Get app context once with proper locking
+	appCtx := r.AppContext()
+
 	for {
 		select {
 		case event, ok := <-eventCh:
@@ -809,7 +812,7 @@ func (r *Runtime) supervisorEventForwarder() {
 				})
 			}
 
-		case <-r.appCtx.Done():
+		case <-appCtx.Done():
 			r.logger.Info("App context cancelled, stopping supervisor event forwarder")
 			return
 		}
