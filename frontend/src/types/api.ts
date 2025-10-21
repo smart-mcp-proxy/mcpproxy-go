@@ -15,9 +15,15 @@ export interface Server {
   quarantined: boolean
   connected: boolean
   connecting: boolean
+  authenticated?: boolean
   tool_count: number
   last_error: string
   tool_list_token_size?: number
+  oauth?: {
+    client_id: string
+    auth_url: string
+    token_url: string
+  }
 }
 
 // Tool types

@@ -1430,29 +1430,32 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
 	}
 
-	// Add to upstream manager and connect
+	// Trigger configuration save which will notify supervisor to reconcile and connect
+	if p.mainServer != nil {
+		// Save configuration first to ensure servers are persisted to config file
+		// This triggers ConfigService update which notifies supervisor to reconcile
+		// Note: SaveConfiguration may fail in test environments without config file - that's OK
+		if err := p.mainServer.SaveConfiguration(); err != nil {
+			p.logger.Warn("Failed to save configuration after adding server (may be test environment)",
+				zap.Error(err))
+			// Continue anyway - server is saved to storage, supervisor will reconcile
+		}
+		p.mainServer.OnUpstreamServerChange()
+	}
+
+	// Wait briefly for supervisor to reconcile and connect (if enabled)
+	// This gives us immediate status for the response
 	var connectionStatus, connectionMessage string
 	if enabled {
-		if err := p.upstreamManager.AddServer(name, serverConfig); err != nil {
-			p.logger.Warn("Failed to add and connect upstream server", zap.String("name", name), zap.Error(err))
-			connectionStatus = statusError
-			connectionMessage = fmt.Sprintf("Failed to add server: %v", err)
-		} else {
-			// Monitor connection status for 1 minute to see final state
-			connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
-		}
+		// Give supervisor time to reconcile and attempt connection
+		time.Sleep(2 * time.Second)
+
+		// Monitor connection status for up to 10 seconds to get immediate state
+		// This quickly detects OAuth requirements, connection errors, or success
+		connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 10*time.Second)
 	} else {
 		connectionStatus = statusDisabled
 		connectionMessage = messageServerDisabled
-	}
-
-	// Trigger configuration save and update
-	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after adding server", zap.Error(err))
-		}
-		p.mainServer.OnUpstreamServerChange()
 	}
 
 	// Check for Docker isolation warnings
