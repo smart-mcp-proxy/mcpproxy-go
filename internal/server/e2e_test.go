@@ -96,7 +96,9 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 	err = env.proxyServer.StartServer(ctx)
 	require.NoError(t, err)
 
-	env.proxyAddr = fmt.Sprintf("http://localhost%s/mcp", env.proxyServer.GetListenAddress())
+	// Set proxy address using 127.0.0.1 instead of localhost for reliable connection
+	// across all platforms (avoids IPv4/IPv6 resolution issues)
+	env.proxyAddr = fmt.Sprintf("http://127.0.0.1:%d/mcp", testPort)
 	require.NotEmpty(t, env.proxyAddr)
 
 	// Wait for server to be ready
@@ -373,12 +375,19 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
-	// Trigger connection to the unquarantined server
-	err = env.proxyServer.runtime.UpstreamManager().ConnectAll(ctx)
+	// Get all servers from storage and reload configuration
+	// This properly triggers supervisor reconciliation and creates the client
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
 
-	// Wait for connection to establish
-	time.Sleep(1 * time.Second)
+	// Update runtime config with the unquarantined server
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	require.NoError(t, err)
+
+	// Wait for supervisor to reconcile and client to connect
+	time.Sleep(3 * time.Second)
 
 	// Manually trigger tool discovery and indexing
 	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
@@ -474,12 +483,19 @@ func TestE2E_ToolCalling(t *testing.T) {
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
-	// Trigger connection to the unquarantined server
-	err = env.proxyServer.runtime.UpstreamManager().ConnectAll(ctx)
+	// Get all servers from storage and reload configuration
+	// This properly triggers supervisor reconciliation and creates the client
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
 
-	// Wait for connection to establish
-	time.Sleep(1 * time.Second)
+	// Update runtime config with the unquarantined server
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	require.NoError(t, err)
+
+	// Wait for supervisor to reconcile and client to connect
+	time.Sleep(3 * time.Second)
 
 	// Manually trigger tool discovery and indexing
 	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
