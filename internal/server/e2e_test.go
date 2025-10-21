@@ -96,7 +96,9 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 	err = env.proxyServer.StartServer(ctx)
 	require.NoError(t, err)
 
-	env.proxyAddr = fmt.Sprintf("http://localhost%s/mcp", env.proxyServer.GetListenAddress())
+	// Set proxy address using 127.0.0.1 instead of localhost for reliable connection
+	// across all platforms (avoids IPv4/IPv6 resolution issues)
+	env.proxyAddr = fmt.Sprintf("http://127.0.0.1:%d/mcp", testPort)
 	require.NotEmpty(t, env.proxyAddr)
 
 	// Wait for server to be ready
