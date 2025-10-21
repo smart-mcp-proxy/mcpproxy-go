@@ -220,6 +220,20 @@ func (mc *Client) GetConnectionInfo() types.ConnectionInfo {
 	return mc.StateManager.GetConnectionInfo()
 }
 
+// GetConfig returns a thread-safe copy of the server configuration
+func (mc *Client) GetConfig() *config.ServerConfig {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	return mc.Config
+}
+
+// SetConfig updates the server configuration in a thread-safe manner
+func (mc *Client) SetConfig(config *config.ServerConfig) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.Config = config
+}
+
 // GetServerInfo returns server information
 func (mc *Client) GetServerInfo() *mcp.InitializeResult {
 	return mc.coreClient.GetServerInfo()
