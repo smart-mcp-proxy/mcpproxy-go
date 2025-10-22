@@ -46,3 +46,8 @@ func (r *Runtime) emitConfigReloaded(path string) {
 	payload := map[string]any{"path": path}
 	r.publishEvent(newEvent(EventTypeConfigReloaded, payload))
 }
+
+func (r *Runtime) emitConfigSaved(path string) {
+	payload := map[string]any{"path": path}
+	r.publishEvent(newEvent(EventTypeConfigSaved, payload))
+}

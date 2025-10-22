@@ -316,6 +316,11 @@ func (env *BinaryTestEnv) GetAPIURL() string {
 	return env.apiURL
 }
 
+// GetConfigPath returns the path to the test config file
+func (env *BinaryTestEnv) GetConfigPath() string {
+	return env.configPath
+}
+
 // GetPort returns the port the server is running on
 func (env *BinaryTestEnv) GetPort() int {
 	return env.port
