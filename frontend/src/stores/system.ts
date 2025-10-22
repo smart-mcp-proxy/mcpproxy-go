@@ -140,6 +140,19 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Listen for config.saved events to notify Configuration page
+    es.addEventListener('config.saved', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE config.saved event received:', data)
+
+        // Dispatch event for Configuration page to refresh
+        window.dispatchEvent(new CustomEvent('mcpproxy:config-saved', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE config.saved event:', error)
+      }
+    })
+
     es.onerror = (event) => {
       connected.value = false
       console.error('EventSource error occurred:', event)

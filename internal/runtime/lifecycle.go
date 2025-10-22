@@ -476,30 +476,49 @@ func (r *Runtime) SaveConfiguration() error {
 	// Update servers with latest from storage
 	configCopy.Servers = latestServers
 
+	r.logger.Debug("Saving configuration to disk",
+		zap.Int("server_count", len(latestServers)),
+		zap.String("config_path", snapshot.Path),
+		zap.Bool("using_config_service", r.configSvc != nil))
+
 	// Use ConfigService to save (doesn't hold locks, handles file I/O)
 	if r.configSvc != nil {
 		// Update the config service with latest servers first
 		if err := r.configSvc.Update(configCopy, configsvc.UpdateTypeModify, "save_configuration"); err != nil {
+			r.logger.Error("Failed to update config service", zap.Error(err))
 			return err
 		}
 		// Then persist to disk
 		if err := r.configSvc.SaveToFile(); err != nil {
+			r.logger.Error("Failed to save config to file via config service", zap.Error(err))
 			return err
 		}
+		r.logger.Debug("Config saved to disk via config service")
 	} else {
 		// Fallback to legacy save
 		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
+			r.logger.Error("Failed to save config to file (legacy path)", zap.Error(err))
 			return err
 		}
-		// Update in-memory config
-		r.mu.Lock()
-		r.cfg.Servers = latestServers
-		r.mu.Unlock()
+		r.logger.Debug("Config saved to disk via legacy path")
 	}
 
+	// Update in-memory config (applies to both configSvc and legacy paths)
+	r.logger.Debug("Updating in-memory config with latest servers",
+		zap.Int("server_count", len(latestServers)))
+
+	r.mu.Lock()
+	oldServerCount := len(r.cfg.Servers)
+	r.cfg.Servers = latestServers
+	r.mu.Unlock()
+
 	r.logger.Debug("Configuration saved and in-memory config updated",
-		zap.Int("server_count", len(latestServers)),
+		zap.Int("old_server_count", oldServerCount),
+		zap.Int("new_server_count", len(latestServers)),
 		zap.String("config_path", snapshot.Path))
+
+	// Emit config.saved event to notify subscribers (Web UI, tray, etc.)
+	r.emitConfigSaved(snapshot.Path)
 
 	return nil
 }

@@ -112,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import { useServersStore } from '@/stores/servers'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
@@ -330,8 +330,25 @@ const settingsHints = computed<Hint[]>(() => {
   ]
 })
 
+// Configuration reload event listener
+function handleConfigSaved(event: Event) {
+  const customEvent = event as CustomEvent
+  console.log('Configuration saved event received, reloading config:', customEvent.detail)
+
+  // Reload configuration to show updated servers
+  loadConfig()
+}
+
 // Initialize component
 onMounted(() => {
   loadConfig() // Load configuration when component mounts
+
+  // Listen for config.saved events from SSE
+  window.addEventListener('mcpproxy:config-saved', handleConfigSaved)
+})
+
+onUnmounted(() => {
+  // Clean up event listener
+  window.removeEventListener('mcpproxy:config-saved', handleConfigSaved)
 })
 </script>
