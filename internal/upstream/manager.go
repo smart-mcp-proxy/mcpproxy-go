@@ -940,8 +940,11 @@ func (m *Manager) scanForNewTokens() {
 
 	now := time.Now()
 	for id, c := range clients {
+		// Get config in a thread-safe manner to avoid race conditions
+		cfg := c.GetConfig()
+
 		// Only consider enabled, HTTP/SSE servers not currently connected
-		if !c.Config.Enabled || c.IsConnected() {
+		if !cfg.Enabled || c.IsConnected() {
 			continue
 		}
 
@@ -957,19 +960,19 @@ func (m *Manager) scanForNewTokens() {
 		}
 
 		// Check for a persisted token
-		ts := oauth.NewPersistentTokenStore(c.Config.Name, c.Config.URL, m.storage)
+		ts := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, m.storage)
 		tok, err := ts.GetToken()
 		if err != nil || tok == nil {
 			continue
 		}
 
 		m.logger.Info("Detected persisted OAuth token; triggering reconnect",
-			zap.String("server", c.Config.Name),
+			zap.String("server", cfg.Name),
 			zap.Time("token_expires_at", tok.ExpiresAt))
 
 		// Remember trigger time and retry connection
 		m.tokenReconnect[id] = now
-		_ = m.RetryConnection(c.Config.Name)
+		_ = m.RetryConnection(cfg.Name)
 	}
 }
 
