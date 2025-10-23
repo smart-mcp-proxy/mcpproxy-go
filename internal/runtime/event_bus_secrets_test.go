@@ -131,17 +131,21 @@ func TestNotifySecretsChanged_WithAffectedServers(t *testing.T) {
 	eventsCh := rt.SubscribeEvents()
 	defer rt.UnsubscribeEvents(eventsCh)
 
-	// Collect events in background
+	// Collect events with proper synchronization
+	var eventsMu sync.Mutex
 	events := make([]Event, 0)
-	eventsDone := make(chan bool)
+	stopCollecting := make(chan struct{})
+	collectorDone := make(chan struct{})
+
 	go func() {
-		timeout := time.After(5 * time.Second)
+		defer close(collectorDone)
 		for {
 			select {
 			case evt := <-eventsCh:
+				eventsMu.Lock()
 				events = append(events, evt)
-			case <-timeout:
-				eventsDone <- true
+				eventsMu.Unlock()
+			case <-stopCollecting:
 				return
 			}
 		}
@@ -151,11 +155,15 @@ func TestNotifySecretsChanged_WithAffectedServers(t *testing.T) {
 	err = rt.NotifySecretsChanged(rt.AppContext(), "store", "my_secret")
 	assert.NoError(t, err)
 
-	// Wait a bit for restart to be triggered
-	time.Sleep(2 * time.Second)
-	close(eventsDone)
+	// Wait for events to be processed
+	time.Sleep(1 * time.Second)
 
-	// Should have received secrets.changed event
+	// Stop collecting events and wait for collector to finish
+	close(stopCollecting)
+	<-collectorDone
+
+	// Check that we received secrets.changed event
+	eventsMu.Lock()
 	foundSecretsChanged := false
 	for _, evt := range events {
 		if evt.Type == EventTypeSecretsChanged {
@@ -164,6 +172,8 @@ func TestNotifySecretsChanged_WithAffectedServers(t *testing.T) {
 			assert.Equal(t, "my_secret", evt.Payload["secret_name"])
 		}
 	}
+	eventsMu.Unlock()
+
 	assert.True(t, foundSecretsChanged, "Should have received secrets.changed event")
 
 	// Note: Server restart events (servers.changed) would also be emitted,
