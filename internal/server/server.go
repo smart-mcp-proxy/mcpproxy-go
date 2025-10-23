@@ -1240,6 +1240,11 @@ func (s *Server) GetSecretResolver() *secret.Resolver {
 	return s.runtime.GetSecretResolver()
 }
 
+// NotifySecretsChanged notifies the runtime that secrets have changed
+func (s *Server) NotifySecretsChanged(ctx context.Context, operation, secretName string) error {
+	return s.runtime.NotifySecretsChanged(ctx, operation, secretName)
+}
+
 // GetCurrentConfig returns the current configuration
 func (s *Server) GetCurrentConfig() interface{} {
 	return s.runtime.GetCurrentConfig()

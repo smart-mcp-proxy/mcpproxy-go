@@ -51,3 +51,13 @@ func (r *Runtime) emitConfigSaved(path string) {
 	payload := map[string]any{"path": path}
 	r.publishEvent(newEvent(EventTypeConfigSaved, payload))
 }
+
+func (r *Runtime) emitSecretsChanged(operation string, secretName string, extra map[string]any) {
+	payload := make(map[string]any, len(extra)+2)
+	for k, v := range extra {
+		payload[k] = v
+	}
+	payload["operation"] = operation
+	payload["secret_name"] = secretName
+	r.publishEvent(newEvent(EventTypeSecretsChanged, payload))
+}

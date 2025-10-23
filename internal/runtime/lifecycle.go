@@ -705,35 +705,36 @@ func (r *Runtime) RestartServer(serverName string) error {
 		return r.upstreamManager.AddServer(serverName, serverConfig)
 	}
 
-	// Disconnect the server
+	// CRITICAL FIX: Remove and recreate the client to pick up new secrets
+	// Simply reconnecting reuses the old client with old (unresolved) secrets
+	r.logger.Info("Removing existing client to recreate with fresh secret resolution",
+		zap.String("server", serverName))
+
+	// Disconnect and remove the old client
 	if err := client.Disconnect(); err != nil {
 		r.logger.Warn("Error disconnecting server during restart",
 			zap.String("server", serverName),
 			zap.Error(err))
-	} else {
-		r.logger.Debug("Server disconnect completed for restart",
-			zap.String("server", serverName))
 	}
+
+	// Remove the client from the manager (this will clean up resources)
+	r.upstreamManager.RemoveServer(serverName)
 
 	// Wait a bit for cleanup
 	time.Sleep(500 * time.Millisecond)
 
-	// Reconnect with timeout
-	ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
-	defer cancel()
+	// Create a completely new client with fresh secret resolution
+	r.logger.Info("Creating new client with fresh secret resolution",
+		zap.String("server", serverName))
 
-	r.logger.Debug("Attempting reconnection after restart",
-		zap.String("server", serverName),
-		zap.Duration("timeout", 30*time.Second))
-
-	if err := client.Connect(ctx); err != nil {
-		r.logger.Error("Failed to reconnect server after restart",
+	if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
+		r.logger.Error("Failed to recreate server after restart",
 			zap.String("server", serverName),
 			zap.Error(err))
-		return fmt.Errorf("failed to reconnect server '%s': %w", serverName, err)
+		return fmt.Errorf("failed to recreate server '%s': %w", serverName, err)
 	}
 
-	r.logger.Info("Managed client reconnect completed after restart",
+	r.logger.Info("Successfully recreated server with fresh secrets",
 		zap.String("server", serverName))
 
 	r.logger.Info("Successfully restarted server", zap.String("server", serverName))
