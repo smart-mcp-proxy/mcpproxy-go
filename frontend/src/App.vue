@@ -3,12 +3,12 @@
     <input id="sidebar-drawer" type="checkbox" class="drawer-toggle" />
 
     <!-- Main content area -->
-    <div class="drawer-content flex flex-col min-h-screen bg-base-200">
+    <div class="drawer-content grid grid-rows-[auto_1fr] h-screen bg-base-200 lg:pl-64">
       <!-- Top Header -->
       <TopHeader />
 
       <!-- Page content -->
-      <main class="flex-1 p-6 overflow-x-hidden max-w-full">
+      <main class="overflow-y-auto p-6">
         <router-view v-slot="{ Component }">
           <transition name="page" mode="out-in">
             <component :is="Component" />
