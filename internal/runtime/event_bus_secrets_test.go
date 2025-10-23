@@ -78,6 +78,7 @@ func TestNotifySecretsChanged_NoAffectedServers(t *testing.T) {
 	rt, err := New(cfg, "", logger)
 	assert.NoError(t, err)
 	assert.NotNil(t, rt)
+	defer rt.Close()
 
 	// Subscribe to events
 	eventsCh := rt.SubscribeEvents()
@@ -126,6 +127,7 @@ func TestNotifySecretsChanged_WithAffectedServers(t *testing.T) {
 	rt, err := New(cfg, "", logger)
 	assert.NoError(t, err)
 	assert.NotNil(t, rt)
+	defer rt.Close()
 
 	// Subscribe to events
 	eventsCh := rt.SubscribeEvents()
