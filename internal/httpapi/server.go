@@ -62,6 +62,7 @@ type ServerController interface {
 	// Secrets management
 	GetSecretResolver() *secret.Resolver
 	GetCurrentConfig() interface{}
+	NotifySecretsChanged(ctx context.Context, operation, secretName string) error
 
 	// Tool call history
 	GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error)
@@ -1013,6 +1014,15 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Notify runtime that secrets changed (this will restart affected servers)
+	if runtime := s.controller; runtime != nil {
+		if err := runtime.NotifySecretsChanged(ctx, "store", request.Name); err != nil {
+			s.logger.Warn("Failed to notify runtime of secret change",
+				"name", request.Name,
+				"error", err)
+		}
+	}
+
 	s.writeSuccess(w, map[string]interface{}{
 		"message":   fmt.Sprintf("Secret '%s' stored successfully in %s", request.Name, request.Type),
 		"name":      request.Name,
@@ -1064,6 +1074,15 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to delete secret", "name", name, "error", err)
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete secret: %v", err))
 		return
+	}
+
+	// Notify runtime that secrets changed (this will restart affected servers)
+	if runtime := s.controller; runtime != nil {
+		if err := runtime.NotifySecretsChanged(ctx, "delete", name); err != nil {
+			s.logger.Warn("Failed to notify runtime of secret deletion",
+				"name", name,
+				"error", err)
+		}
 	}
 
 	s.writeSuccess(w, map[string]interface{}{

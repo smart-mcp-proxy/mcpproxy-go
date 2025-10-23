@@ -519,6 +519,73 @@ func (r *Runtime) GetSecretResolver() *secret.Resolver {
 	return r.secretResolver
 }
 
+// NotifySecretsChanged notifies the runtime that secrets have changed and restarts affected servers.
+// This method should be called by the HTTP API when secrets are added, updated, or deleted.
+func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretName string) error {
+	r.logger.Info("Secrets changed, finding affected servers",
+		zap.String("operation", operation),
+		zap.String("secret_name", secretName))
+
+	// Emit the secrets.changed event
+	r.emitSecretsChanged(operation, secretName, map[string]any{})
+
+	// Get current config to find servers that use this secret
+	cfg := r.Config()
+	if cfg == nil {
+		return fmt.Errorf("config not available")
+	}
+
+	// Find all servers that reference this secret in their env vars or args
+	secretRef := fmt.Sprintf("${keyring:%s}", secretName)
+	var affectedServers []string
+
+	for _, server := range cfg.Servers {
+		// Check environment variables
+		for _, value := range server.Env {
+			if strings.Contains(value, secretRef) {
+				affectedServers = append(affectedServers, server.Name)
+				break
+			}
+		}
+
+		// Check arguments
+		for _, arg := range server.Args {
+			if strings.Contains(arg, secretRef) {
+				affectedServers = append(affectedServers, server.Name)
+				break
+			}
+		}
+	}
+
+	if len(affectedServers) == 0 {
+		r.logger.Info("No servers affected by secret change",
+			zap.String("secret_name", secretName))
+		return nil
+	}
+
+	r.logger.Info("Restarting servers affected by secret change",
+		zap.String("secret_name", secretName),
+		zap.Strings("servers", affectedServers))
+
+	// Restart affected servers in the background
+	go func() {
+		for _, serverName := range affectedServers {
+			r.logger.Info("Restarting server due to secret change",
+				zap.String("server", serverName),
+				zap.String("secret_name", secretName))
+
+			if err := r.RestartServer(serverName); err != nil {
+				r.logger.Error("Failed to restart server after secret change",
+					zap.String("server", serverName),
+					zap.String("secret_name", secretName),
+					zap.Error(err))
+			}
+		}
+	}()
+
+	return nil
+}
+
 // GetCurrentConfig returns the current configuration
 func (r *Runtime) GetCurrentConfig() interface{} {
 	r.mu.RLock()

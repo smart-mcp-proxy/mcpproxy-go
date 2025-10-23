@@ -101,12 +101,18 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 			for k, v := range resolvedServerConfig.Env {
 				resolvedValue, err := secretResolver.ExpandSecretRefs(ctx, v)
 				if err != nil {
-					logger.Warn("Failed to resolve secret in environment variable",
+					logger.Error("CRITICAL: Failed to resolve secret in environment variable - server will use UNRESOLVED placeholder",
 						zap.String("server", serverConfig.Name),
-						zap.String("key", k),
-						zap.String("value", v),
-						zap.Error(err))
-					resolvedValue = v // Use original value on error
+						zap.String("env_var", k),
+						zap.String("reference", v),
+						zap.Error(err),
+						zap.String("help", "Use Web UI (http://localhost:8080/ui/) or API to add the secret to keyring"))
+					resolvedValue = v // Use original value on error - THIS IS THE PROBLEM!
+				} else if resolvedValue != v {
+					logger.Debug("Secret resolved successfully",
+						zap.String("server", serverConfig.Name),
+						zap.String("env_var", k),
+						zap.String("reference", v))
 				}
 				resolvedEnv[k] = resolvedValue
 			}
@@ -119,12 +125,18 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 			for i, arg := range resolvedServerConfig.Args {
 				resolvedValue, err := secretResolver.ExpandSecretRefs(ctx, arg)
 				if err != nil {
-					logger.Warn("Failed to resolve secret in argument",
+					logger.Error("CRITICAL: Failed to resolve secret in argument - server will use UNRESOLVED placeholder",
 						zap.String("server", serverConfig.Name),
 						zap.Int("arg_index", i),
-						zap.String("value", arg),
-						zap.Error(err))
-					resolvedValue = arg // Use original value on error
+						zap.String("reference", arg),
+						zap.Error(err),
+						zap.String("help", "Use Web UI (http://localhost:8080/ui/) or API to add the secret to keyring"))
+					resolvedValue = arg // Use original value on error - THIS IS THE PROBLEM!
+				} else if resolvedValue != arg {
+					logger.Debug("Secret resolved successfully",
+						zap.String("server", serverConfig.Name),
+						zap.Int("arg_index", i),
+						zap.String("reference", arg))
 				}
 				resolvedArgs[i] = resolvedValue
 			}

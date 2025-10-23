@@ -12,6 +12,8 @@ const (
 	EventTypeConfigReloaded EventType = "config.reloaded"
 	// EventTypeConfigSaved is emitted after configuration is successfully saved to disk.
 	EventTypeConfigSaved EventType = "config.saved"
+	// EventTypeSecretsChanged is emitted when secrets are added, updated, or deleted.
+	EventTypeSecretsChanged EventType = "secrets.changed"
 )
 
 // Event is a typed notification published by the runtime event bus.

@@ -123,7 +123,10 @@ func (m *MockServerController) TriggerOAuthLogin(_ string) error { return nil }
 
 // Secrets management methods
 func (m *MockServerController) GetSecretResolver() *secret.Resolver { return nil }
-func (m *MockServerController) GetCurrentConfig() interface{}       { return map[string]interface{}{} }
+func (m *MockServerController) NotifySecretsChanged(_ context.Context, _, _ string) error {
+	return nil
+}
+func (m *MockServerController) GetCurrentConfig() interface{} { return map[string]interface{}{} }
 
 // Tool call history methods
 func (m *MockServerController) GetToolCalls(_ int, _ int) ([]*contracts.ToolCallRecord, int, error) {
