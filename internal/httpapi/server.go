@@ -19,17 +19,13 @@ import (
 	"mcpproxy-go/internal/observability"
 	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/transport"
 )
 
 const (
 	asyncToggleTimeout = 5 * time.Second
 	secretTypeKeyring  = "keyring"
 )
-
-// Context key for connection source (must match internal/server/listener.go)
-type contextKey string
-
-const connSourceContextKey contextKey = "connection_source"
 
 // ServerController defines the interface for core server functionality
 type ServerController interface {
@@ -128,10 +124,12 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// SECURITY: Trust connections from tray (Unix socket/named pipe)
 			// These connections are authenticated via OS-level permissions (UID/SID matching)
-			if source := r.Context().Value(connSourceContextKey); source == "tray" {
+			source := transport.GetConnectionSource(r.Context())
+			if source == transport.ConnectionSourceTray {
 				s.logger.Debug("Tray connection - skipping API key validation",
 					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr))
+					zap.String("remote_addr", r.RemoteAddr),
+					zap.String("source", string(source)))
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -11,22 +11,17 @@ import (
 	"syscall"
 
 	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/transport"
 )
 
-// ConnectionSource identifies the origin of a connection
-type ConnectionSource string
+// Re-export transport types for backward compatibility
+type ConnectionSource = transport.ConnectionSource
 
 const (
-	// ConnectionSourceTCP identifies connections from TCP listener (browsers, remote clients)
-	ConnectionSourceTCP ConnectionSource = "tcp"
-	// ConnectionSourceTray identifies connections from tray via Unix socket or named pipe
-	ConnectionSourceTray ConnectionSource = "tray"
+	ConnectionSourceTCP  = transport.ConnectionSourceTCP
+	ConnectionSourceTray = transport.ConnectionSourceTray
 )
-
-// Context key for connection source tagging
-type contextKey string
-
-const connSourceKey contextKey = "connection_source"
 
 // ListenerConfig contains configuration for creating listeners
 type ListenerConfig struct {
@@ -262,14 +257,12 @@ func ValidateDataDirectory(dataDir string, logger *zap.Logger) error {
 }
 
 // TagConnectionContext tags a context with the connection source
+// TagConnectionContext wraps transport.TagConnectionContext for backward compatibility
 func TagConnectionContext(ctx context.Context, source ConnectionSource) context.Context {
-	return context.WithValue(ctx, connSourceKey, source)
+	return transport.TagConnectionContext(ctx, source)
 }
 
-// GetConnectionSource extracts the connection source from a context
+// GetConnectionSource wraps transport.GetConnectionSource for backward compatibility
 func GetConnectionSource(ctx context.Context) ConnectionSource {
-	if source, ok := ctx.Value(connSourceKey).(ConnectionSource); ok {
-		return source
-	}
-	return ConnectionSourceTCP // Default to TCP (most restrictive)
+	return transport.GetConnectionSource(ctx)
 }

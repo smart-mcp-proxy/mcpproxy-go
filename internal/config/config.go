@@ -46,7 +46,8 @@ func (d Duration) Duration() time.Duration {
 // Config represents the main configuration structure
 type Config struct {
 	Listen            string          `json:"listen" mapstructure:"listen"`
-	TrayEndpoint      string          `json:"tray_endpoint,omitempty" mapstructure:"tray-endpoint"` // Tray endpoint override (unix:// or npipe://)
+	TrayEndpoint      string          `json:"tray_endpoint,omitempty" mapstructure:"tray-endpoint"`       // Tray endpoint override (unix:// or npipe://)
+	EnableSocket      bool            `json:"enable_socket" mapstructure:"enable-socket"`                 // Enable Unix socket/named pipe for local IPC (default: true)
 	DataDir           string          `json:"data_dir" mapstructure:"data-dir"`
 	EnableTray        bool            `json:"enable_tray" mapstructure:"tray"`
 	DebugSearch       bool            `json:"debug_search" mapstructure:"debug-search"`
@@ -325,6 +326,7 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 func DefaultConfig() *Config {
 	return &Config{
 		Listen:            defaultPort,
+		EnableSocket:      true, // Enable Unix socket/named pipe by default for local IPC
 		DataDir:           "", // Will be set to ~/.mcpproxy by loader
 		EnableTray:        true,
 		DebugSearch:       false,

@@ -318,10 +318,45 @@ MCPProxy uses platform-specific local IPC for secure, low-latency communication 
 - `cmd/mcpproxy-tray/internal/api/dialer_unix.go` - Unix socket dialer (macOS/Linux)
 - `cmd/mcpproxy-tray/internal/api/dialer_windows.go` - Named pipe dialer (Windows)
 
+**Configuration**:
+
+Socket/pipe communication is **enabled by default**. You can disable it using:
+
+**1. Command-line Flag**:
+```bash
+# Disable socket communication (clients will use TCP + API key)
+./mcpproxy serve --enable-socket=false
+
+# Explicitly enable (default behavior)
+./mcpproxy serve --enable-socket=true
+```
+
+**2. JSON Configuration File**:
+```json
+{
+  "listen": "127.0.0.1:8080",
+  "enable_socket": false,
+  "mcpServers": [...]
+}
+```
+
+**3. When Running via Tray (Launchpad/Autostart)**:
+
+If you're running the core server via the tray application (e.g., automatically at startup), and want to disable socket communication:
+
+- Edit your config file at `~/.mcpproxy/mcp_config.json`
+- Add or update: `"enable_socket": false`
+- Restart the core server (via tray menu: "Stop Core" → "Start Core")
+
+When socket communication is disabled, the tray application will fall back to TCP connections using the auto-generated API key.
+
 **Usage Examples**:
 ```bash
 # Default: Socket auto-created in data directory
 ./mcpproxy serve
+
+# Disable socket, use TCP only
+./mcpproxy serve --enable-socket=false
 
 # Custom socket path
 ./mcpproxy serve --tray-endpoint=unix:///tmp/custom.sock
@@ -368,6 +403,7 @@ ls -la ~/.mcpproxy/mcpproxy.sock
   "listen": "127.0.0.1:8080",
   "data_dir": "~/.mcpproxy",
   "api_key": "your-secret-api-key-here",
+  "enable_socket": true,
   "enable_web_ui": true,
   "top_k": 5,
   "tools_limit": 15,

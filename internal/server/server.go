@@ -819,12 +819,17 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		return err
 	}
 
-	// Create tray listener (Unix socket or named pipe)
-	trayListener, err := listenerManager.CreateTrayListener()
-	if err != nil {
-		s.logger.Warn("Failed to create tray listener, tray will use TCP fallback",
-			zap.Error(err))
-		// Continue without tray listener - tray will fall back to TCP
+	// Create tray listener (Unix socket or named pipe) if enabled
+	var trayListener *Listener
+	if cfg.EnableSocket {
+		trayListener, err = listenerManager.CreateTrayListener()
+		if err != nil {
+			s.logger.Warn("Failed to create tray listener, tray will use TCP fallback",
+				zap.Error(err))
+			// Continue without tray listener - tray will fall back to TCP
+		}
+	} else {
+		s.logger.Info("Socket communication disabled by configuration, clients will use TCP")
 	}
 
 	// Store listener manager for cleanup
