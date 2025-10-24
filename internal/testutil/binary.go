@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"mcpproxy-go/internal/config"
 )
 
 // BinaryTestEnv manages a test environment with the actual mcpproxy binary
@@ -464,20 +462,6 @@ func (env *BinaryTestEnv) CallMCPTool(toolName string, args map[string]interface
 
 	text := mcpResponse.Result.Content[0].Text
 	return []byte(text), nil
-}
-
-func (env *BinaryTestEnv) prepareIsolatedConfig() string {
-	cfg, err := config.LoadFromFile(env.configPath)
-	require.NoError(env.t, err)
-
-	cliTempDir := env.t.TempDir()
-	cfgCopy := *cfg
-	cfgCopy.DataDir = ""
-
-	cliConfigPath := filepath.Join(cliTempDir, "config.json")
-	require.NoError(env.t, config.SaveConfig(&cfgCopy, cliConfigPath))
-
-	return cliConfigPath
 }
 
 // TestServerList represents a simplified server list response
