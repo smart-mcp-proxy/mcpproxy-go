@@ -9,10 +9,8 @@ import (
 
 // getPeerCredentialsPlatform gets peer credentials using Linux SO_PEERCRED
 func getPeerCredentialsPlatform(fd int) (*Ucred, error) {
-	var ucred syscall.Ucred
-
 	// Linux: Use SO_PEERCRED to get peer UID/GID/PID
-	err := syscall.GetsockoptUcred(fd, syscall.SOL_SOCKET, syscall.SO_PEERCRED, &ucred)
+	ucred, err := syscall.GetsockoptUcred(fd, syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	if err != nil {
 		return nil, fmt.Errorf("SO_PEERCRED failed: %w", err)
 	}
