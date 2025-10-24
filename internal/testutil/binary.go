@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -395,78 +394,76 @@ type MCPCallRequest struct {
 	Args     map[string]interface{} `json:"args"`
 }
 
-// CallMCPTool calls an MCP tool through the proxy using the mcpproxy binary
+// CallMCPTool calls an MCP tool through the proxy using HTTP API
 func (env *BinaryTestEnv) CallMCPTool(toolName string, args map[string]interface{}) ([]byte, error) {
-	// Use the mcpproxy binary to call the tool
-	cliConfigPath := env.prepareIsolatedConfig()
-	cmdArgs := []string{"call", "tool", "--tool-name=" + toolName, "--output=json", "--config=" + cliConfigPath}
-
-	if len(args) > 0 {
-		argsJSON, err := ParseJSONToString(args)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal args: %w", err)
-		}
-		cmdArgs = append(cmdArgs, "--json_args="+argsJSON)
+	// Build MCP request
+	mcpRequest := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      toolName,
+			"arguments": args,
+		},
 	}
 
-	cmd := exec.Command(env.binaryPath, cmdArgs...)
-	cmd.Env = append(os.Environ(),
-		"MCPPROXY_DISABLE_OAUTH=true",
-	)
-
-	output, err := cmd.Output()
+	requestBody, err := json.Marshal(mcpRequest)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("tool call failed: %s", string(exitErr.Stderr))
-		}
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal MCP request: %w", err)
 	}
 
-	lines := strings.Split(string(output), "\n")
-	var candidate string
-	for i, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine == "" {
-			continue
-		}
-		firstRune, _ := utf8.DecodeRuneInString(trimmedLine)
-		if firstRune == '{' || firstRune == '[' {
-			candidate = strings.Join(lines[i:], "\n")
-			break
-		}
+	// Call the server via HTTP /mcp endpoint (use baseURL, not apiURL)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(
+		env.baseURL+"/mcp",
+		"application/json",
+		bytes.NewReader(requestBody),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call MCP endpoint: %w", err)
 	}
-	if candidate == "" {
-		candidate = string(output)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("MCP call failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	trimmed := bytes.TrimSpace([]byte(candidate))
-	if len(trimmed) == 0 {
-		return trimmed, nil
+	// Parse MCP response
+	var mcpResponse struct {
+		Result struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 
-	end := bytes.LastIndexAny(trimmed, "}]")
-	if end >= 0 && end < len(trimmed)-1 {
-		trimmed = trimmed[:end+1]
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	var envelope struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(trimmed, &envelope); err == nil {
-		if len(envelope.Content) > 0 {
-			inner := strings.TrimSpace(envelope.Content[0].Text)
-			if inner != "" {
-				var raw json.RawMessage
-				if json.Unmarshal([]byte(inner), &raw) == nil {
-					return []byte(inner), nil
-				}
-			}
-		}
+	if err := json.Unmarshal(body, &mcpResponse); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal MCP response: %w", err)
 	}
 
-	return trimmed, nil
+	// Check for MCP error
+	if mcpResponse.Error != nil {
+		return nil, fmt.Errorf("MCP error %d: %s", mcpResponse.Error.Code, mcpResponse.Error.Message)
+	}
+
+	// Extract text content from response
+	if len(mcpResponse.Result.Content) == 0 {
+		return []byte("{}"), nil
+	}
+
+	text := mcpResponse.Result.Content[0].Text
+	return []byte(text), nil
 }
 
 func (env *BinaryTestEnv) prepareIsolatedConfig() string {
