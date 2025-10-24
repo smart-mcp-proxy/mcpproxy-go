@@ -189,6 +189,10 @@ func TestUnixSocketHTTPClient(t *testing.T) {
 }
 
 func TestDialerFallbackToTCP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix socket test not applicable on Windows")
+	}
+
 	// Test that invalid socket path falls back gracefully
 	invalidEndpoint := "unix:///nonexistent/path.sock"
 	dialer, baseURL, err := CreateDialer(invalidEndpoint)
