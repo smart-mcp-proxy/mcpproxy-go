@@ -1125,10 +1125,18 @@ func (rw *responseWriter) WriteHeader(code int) {
 
 // logConnectionState logs HTTP connection state changes for debugging client issues
 func (s *Server) logConnectionState(conn net.Conn, state http.ConnState) {
+	// Handle cases where conn or RemoteAddr might be nil
+	remoteAddr := "unknown"
+	if conn != nil {
+		if addr := conn.RemoteAddr(); addr != nil {
+			remoteAddr = addr.String()
+		}
+	}
+
 	switch state {
 	case http.StateNew:
 		s.logger.Debug("New client connection established",
-			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("remote_addr", remoteAddr),
 			zap.String("state", "new"))
 	// StateActive and StateIdle removed - too noisy with keep-alive connections and SSE streams
 	// case http.StateActive:
@@ -1141,11 +1149,11 @@ func (s *Server) logConnectionState(conn net.Conn, state http.ConnState) {
 	// 		zap.String("state", "idle"))
 	case http.StateHijacked:
 		s.logger.Debug("Client connection hijacked (likely for upgrade)",
-			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("remote_addr", remoteAddr),
 			zap.String("state", "hijacked"))
 	case http.StateClosed:
 		s.logger.Debug("Client connection closed",
-			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("remote_addr", remoteAddr),
 			zap.String("state", "closed"))
 	}
 }
