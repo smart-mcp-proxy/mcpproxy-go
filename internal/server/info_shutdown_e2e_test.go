@@ -262,11 +262,14 @@ func TestSocketInfoEndpoint(t *testing.T) {
 	t.Run("GET /api/v1/info via Unix socket", func(t *testing.T) {
 		// Use curl to test Unix socket communication
 		curlCmd := exec.Command("curl",
+			"-s", // Silent mode to suppress progress meter
 			"--unix-socket", socketPath,
 			"http://localhost/api/v1/info")
 
 		output, err := curlCmd.CombinedOutput()
 		require.NoError(t, err, "curl command failed: %s", string(output))
+
+		t.Logf("Curl output: %s", string(output))
 
 		var result map[string]interface{}
 		require.NoError(t, json.Unmarshal(output, &result))
