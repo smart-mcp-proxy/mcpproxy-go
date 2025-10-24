@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -115,8 +116,12 @@ func main() {
 	coreURL := resolveCoreURL()
 	logger.Info("Resolved core URL", zap.String("core_url", coreURL))
 
+	// Determine if we're using socket/pipe communication (which doesn't need API key)
+	usingSocketCommunication := isSocketEndpoint(coreURL)
+
 	// Setup API key for secure communication between tray and core
-	if trayAPIKey == "" {
+	// Skip API key generation for socket/pipe connections as they're trusted by default
+	if trayAPIKey == "" && !usingSocketCommunication {
 		// Check environment variable first (for consistency with core behavior)
 		if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
 			trayAPIKey = envAPIKey
@@ -129,6 +134,9 @@ func main() {
 				zap.String("api_key_source", "auto-generated"),
 				zap.String("api_key_prefix", maskAPIKey(trayAPIKey)))
 		}
+	} else if usingSocketCommunication {
+		logger.Info("Using socket/pipe communication - API key not required",
+			zap.String("connection_type", "socket"))
 	}
 
 	// Create state machine
@@ -160,16 +168,29 @@ func main() {
 		coreTimeout,
 	)
 
-	// Send the appropriate initial event based on SKIP_CORE flag
+	// Send the appropriate initial event based on:
+	// 1. SKIP_CORE environment variable (explicit override)
+	// 2. Existing running core detection (auto-detect)
+	// 3. Default: launch core as subprocess
+
+	// Start launcher FIRST to ensure it subscribes to transitions before events are sent
+	go launcher.Start(ctx)
+
+	// Give the launcher goroutine a moment to subscribe to state transitions
+	// This prevents race condition where initial event is sent before subscription is ready
+	time.Sleep(10 * time.Millisecond)
+
 	if shouldSkipCoreLaunch() {
-		logger.Info("Skipping core launch, will connect to existing core")
+		logger.Info("Skipping core launch (MCPPROXY_TRAY_SKIP_CORE=1)")
+		stateMachine.SendEvent(state.EventSkipCore)
+	} else if isCoreAlreadyRunning(coreURL, logger) {
+		logger.Info("Detected existing running core, will use it instead of launching subprocess",
+			zap.String("core_url", coreURL))
 		stateMachine.SendEvent(state.EventSkipCore)
 	} else {
-		logger.Info("Will launch new core process")
+		logger.Info("No running core detected, will launch new core process")
 		stateMachine.SendEvent(state.EventStart)
 	}
-
-	go launcher.Start(ctx)
 
 	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -224,8 +245,9 @@ func setupLogging() (*zap.Logger, error) {
 		LineEnding:     zapcore.DefaultLineEnding,
 		EncodeLevel:    zapcore.LowercaseLevelEncoder,
 		EncodeTime:     zapcore.ISO8601TimeEncoder,
-		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeDuration: zapcore.StringDurationEncoder,
 		EncodeCaller:   zapcore.ShortCallerEncoder,
+		EncodeName:     zapcore.FullNameEncoder,
 	}
 
 	// Log to both file and stdout
@@ -247,10 +269,22 @@ func setupLogging() (*zap.Logger, error) {
 }
 
 func resolveCoreURL() string {
+	// Priority 1: Explicit override via environment variable
 	if override := strings.TrimSpace(os.Getenv("MCPPROXY_CORE_URL")); override != "" {
 		return override
 	}
 
+	// Priority 2: Try socket/pipe communication first (preferred for local tray-core communication)
+	// This provides better security (no API key needed) and performance
+	socketPath := api.DetectSocketPath("") // Empty dataDir uses default ~/.mcpproxy
+	if socketPath != "" {
+		// Check if socket/pipe actually exists before using it
+		if isSocketAvailable(socketPath) {
+			return socketPath
+		}
+	}
+
+	// Priority 3: Fall back to TCP (HTTP/HTTPS)
 	// Determine protocol based on TLS setting
 	protocol := "http"
 	if strings.TrimSpace(os.Getenv("MCPPROXY_TLS_ENABLED")) == "true" {
@@ -272,9 +306,118 @@ func resolveCoreURL() string {
 	return defaultCoreURL
 }
 
+// isSocketAvailable checks if a socket/pipe endpoint is accessible
+func isSocketAvailable(endpoint string) bool {
+	// Parse endpoint to extract scheme
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+
+	switch parsed.Scheme {
+	case "unix":
+		// Check if Unix socket file exists
+		socketPath := parsed.Path
+		if socketPath == "" {
+			socketPath = parsed.Opaque
+		}
+		_, err := os.Stat(socketPath)
+		return err == nil
+	case "npipe":
+		// For Windows named pipes, we can't easily check existence
+		// Return true and let the connection attempt fail if needed
+		return true
+	default:
+		// Not a socket endpoint
+		return false
+	}
+}
+
 func shouldSkipCoreLaunch() bool {
 	value := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_SKIP_CORE"))
 	return value == "1" || strings.EqualFold(value, "true")
+}
+
+// isSocketEndpoint returns true if the endpoint uses socket/pipe communication
+func isSocketEndpoint(endpoint string) bool {
+	return strings.HasPrefix(endpoint, "unix://") || strings.HasPrefix(endpoint, "npipe://")
+}
+
+// isCoreAlreadyRunning checks if a core instance is already running and healthy
+// Returns true if core is accessible and responding to health checks
+func isCoreAlreadyRunning(coreURL string, logger *zap.Logger) bool {
+	// For socket endpoints, first verify the socket file exists
+	if isSocketEndpoint(coreURL) {
+		parsed, err := url.Parse(coreURL)
+		if err != nil {
+			return false
+		}
+
+		if parsed.Scheme == "unix" {
+			socketPath := parsed.Path
+			if socketPath == "" {
+				socketPath = parsed.Opaque
+			}
+			// Check if socket file exists and is a socket
+			info, err := os.Stat(socketPath)
+			if err != nil {
+				logger.Debug("Socket file does not exist", zap.String("path", socketPath))
+				return false
+			}
+			// Check if it's a socket (not a regular file)
+			if info.Mode()&os.ModeSocket == 0 {
+				logger.Debug("Path exists but is not a socket", zap.String("path", socketPath))
+				return false
+			}
+		}
+	}
+
+	// Try to connect and perform health check
+	client := &http.Client{
+		Timeout: 2 * time.Second, // Short timeout for quick detection
+	}
+
+	// Create custom dialer if using socket
+	if isSocketEndpoint(coreURL) {
+		dialer, baseURL, err := api.CreateDialer(coreURL)
+		if err != nil {
+			logger.Debug("Failed to create dialer for core health check", zap.Error(err))
+			return false
+		}
+
+		transport := &http.Transport{}
+		if dialer != nil {
+			transport.DialContext = dialer
+		}
+		client.Transport = transport
+
+		// Use the base URL for the request
+		coreURL = baseURL
+	}
+
+	// Try the /ready endpoint (lightweight health check)
+	healthURL := fmt.Sprintf("%s/ready", strings.TrimSuffix(coreURL, "/"))
+	resp, err := client.Get(healthURL)
+	if err != nil {
+		logger.Debug("Core health check failed",
+			zap.String("url", healthURL),
+			zap.Error(err))
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Check if response is successful
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		logger.Debug("Core health check successful",
+			zap.String("url", healthURL),
+			zap.Int("status", resp.StatusCode))
+		return true
+	}
+
+	logger.Debug("Core health check returned non-success status",
+		zap.String("url", healthURL),
+		zap.Int("status", resp.StatusCode))
+	return false
 }
 
 // Legacy functions removed - replaced by state machine architecture
@@ -757,7 +900,7 @@ func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, tran
 			return
 
 		case transition := <-transitionsCh:
-			cpl.logger.Info("State transition",
+			cpl.logger.Infow("State transition",
 				"from", transition.From,
 				"to", transition.To,
 				"event", transition.Event,
@@ -769,19 +912,19 @@ func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, tran
 			// Handle specific state entries
 			switch transition.To {
 			case state.StateLaunchingCore:
-				go cpl.handleLaunchCore(ctx)
+				go cpl.safeHandleLaunchCore(ctx)
 
 			case state.StateWaitingForCore:
-				go cpl.handleWaitForCore(ctx)
+				go cpl.safeHandleWaitForCore(ctx)
 
 			case state.StateConnectingAPI:
-				go cpl.handleConnectAPI(ctx)
+				go cpl.safeHandleConnectAPI(ctx)
 
 			case state.StateConnected:
 				cpl.handleConnected()
 
 			case state.StateReconnecting:
-				go cpl.handleReconnecting(ctx)
+				go cpl.safeHandleReconnecting(ctx)
 
 			case state.StateCoreErrorPortConflict:
 				cpl.handlePortConflictError()
@@ -837,6 +980,58 @@ func (cpl *CoreProcessLauncher) updateTrayConnectionState(machineState state.Sta
 	cpl.trayApp.SetConnectionState(trayState)
 }
 
+// safeHandleLaunchCore wraps handleLaunchCore with panic recovery
+func (cpl *CoreProcessLauncher) safeHandleLaunchCore(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("panic in handleLaunchCore: %v", r)
+			cpl.logger.Error("PANIC recovered in handleLaunchCore", "panic", r, "error", err)
+			cpl.stateMachine.SetError(err)
+			cpl.stateMachine.SendEvent(state.EventGeneralError)
+		}
+	}()
+	cpl.handleLaunchCore(ctx)
+}
+
+// safeHandleWaitForCore wraps handleWaitForCore with panic recovery
+func (cpl *CoreProcessLauncher) safeHandleWaitForCore(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("panic in handleWaitForCore: %v", r)
+			cpl.logger.Error("PANIC recovered in handleWaitForCore", "panic", r, "error", err)
+			cpl.stateMachine.SetError(err)
+			cpl.stateMachine.SendEvent(state.EventGeneralError)
+		}
+	}()
+	cpl.handleWaitForCore(ctx)
+}
+
+// safeHandleConnectAPI wraps handleConnectAPI with panic recovery
+func (cpl *CoreProcessLauncher) safeHandleConnectAPI(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("panic in handleConnectAPI: %v", r)
+			cpl.logger.Error("PANIC recovered in handleConnectAPI", "panic", r, "error", err)
+			cpl.stateMachine.SetError(err)
+			cpl.stateMachine.SendEvent(state.EventConnectionLost)
+		}
+	}()
+	cpl.handleConnectAPI(ctx)
+}
+
+// safeHandleReconnecting wraps handleReconnecting with panic recovery
+func (cpl *CoreProcessLauncher) safeHandleReconnecting(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("panic in handleReconnecting: %v", r)
+			cpl.logger.Error("PANIC recovered in handleReconnecting", "panic", r, "error", err)
+			cpl.stateMachine.SetError(err)
+			cpl.stateMachine.SendEvent(state.EventConnectionLost)
+		}
+	}()
+	cpl.handleReconnecting(ctx)
+}
+
 // handleLaunchCore handles launching the core process
 func (cpl *CoreProcessLauncher) handleLaunchCore(_ context.Context) {
 	cpl.logger.Info("Launching mcpproxy core process")
@@ -885,12 +1080,14 @@ func (cpl *CoreProcessLauncher) handleLaunchCore(_ context.Context) {
 	}
 
 	// Create process configuration
+	// Note: CaptureOutput is false because core logs to its own files
+	// Tray only monitors exit codes for failure detection
 	processConfig := monitor.ProcessConfig{
 		Binary:        launchBinary,
 		Args:          launchArgs,
 		Env:           env,
 		StartTimeout:  cpl.coreTimeout,
-		CaptureOutput: true,
+		CaptureOutput: false,
 	}
 
 	// Create process monitor
@@ -932,20 +1129,65 @@ func (cpl *CoreProcessLauncher) handleWaitForCore(_ context.Context) {
 func (cpl *CoreProcessLauncher) handleConnectAPI(ctx context.Context) {
 	cpl.logger.Info("Connecting to core API")
 
-	// Start SSE connection
-	if err := cpl.apiClient.StartSSE(ctx); err != nil {
-		cpl.logger.Error("Failed to start SSE connection", "error", err)
+	// First, do a quick readiness check to verify the API is reachable
+	// This provides instant feedback to the user
+	if err := cpl.verifyAPIReadiness(ctx); err != nil {
+		cpl.logger.Error("API readiness check failed", "error", err)
 		cpl.stateMachine.SetError(err)
 		cpl.stateMachine.SendEvent(state.EventConnectionLost)
 		return
 	}
 
+	// API is ready! Send EventAPIConnected immediately for fast status update
+	cpl.logger.Info("API is ready, transitioning to connected state")
+	cpl.stateMachine.SendEvent(state.EventAPIConnected)
+
+	// Start SSE connection in background for real-time updates
+	if err := cpl.apiClient.StartSSE(ctx); err != nil {
+		cpl.logger.Error("Failed to start SSE connection", "error", err)
+		// Don't send EventConnectionLost here - we're already connected via HTTP
+		// Just log the error and SSE will retry in the background
+	}
+
 	// Subscribe to API client connection state changes
-	go cpl.monitorAPIConnection(ctx)
+	// Pass alreadyConnected=true since we verified API is ready via HTTP
+	// This tells the monitor to ignore SSE connection failures
+	go cpl.monitorAPIConnection(ctx, true)
+}
+
+// verifyAPIReadiness does a quick check to verify the core API is responding
+func (cpl *CoreProcessLauncher) verifyAPIReadiness(ctx context.Context) error {
+	// Try up to 3 times with short delays
+	for attempt := 1; attempt <= 3; attempt++ {
+		// Simple GET /ready check
+		err := cpl.apiClient.GetReady(ctx)
+		if err == nil {
+			cpl.logger.Infow("API readiness verified", "attempt", attempt)
+			return nil
+		}
+
+		cpl.logger.Warn("API readiness check failed",
+			"attempt", attempt,
+			"error", err)
+
+		if attempt < 3 {
+			// Short delay before retry
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+				// Continue to next attempt
+			}
+		}
+	}
+
+	return fmt.Errorf("API not ready after 3 attempts")
 }
 
 // monitorAPIConnection monitors the API client connection state
-func (cpl *CoreProcessLauncher) monitorAPIConnection(ctx context.Context) {
+// When alreadyConnected is true, this only monitors for successful SSE connections
+// and ignores connection failures (since we're already connected via HTTP)
+func (cpl *CoreProcessLauncher) monitorAPIConnection(ctx context.Context, alreadyConnected bool) {
 	connectionStateCh := cpl.apiClient.ConnectionStateChannel()
 
 	for {
@@ -958,9 +1200,18 @@ func (cpl *CoreProcessLauncher) monitorAPIConnection(ctx context.Context) {
 			}
 			switch connState {
 			case tray.ConnectionStateConnected:
-				cpl.stateMachine.SendEvent(state.EventAPIConnected)
+				// SSE connection established successfully
+				// If we weren't already connected, send EventAPIConnected now
+				if !alreadyConnected {
+					cpl.stateMachine.SendEvent(state.EventAPIConnected)
+				}
 			case tray.ConnectionStateReconnecting, tray.ConnectionStateDisconnected:
-				cpl.stateMachine.SendEvent(state.EventConnectionLost)
+				// SSE connection lost or reconnecting
+				// Only send EventConnectionLost if we were relying on SSE for connection
+				// If we're already connected via HTTP, ignore SSE failures
+				if !alreadyConnected {
+					cpl.stateMachine.SendEvent(state.EventConnectionLost)
+				}
 			}
 		}
 	}
@@ -1050,9 +1301,29 @@ func (cpl *CoreProcessLauncher) handleConfigError() {
 	// Configuration errors are usually not recoverable without user intervention
 }
 
-// handleGeneralError handles general errors
+// handleGeneralError handles general errors with retry logic
 func (cpl *CoreProcessLauncher) handleGeneralError() {
-	cpl.logger.Error("Core failed with general error")
+	currentState := cpl.stateMachine.GetCurrentState()
+	cpl.logger.Error("Core failed with general error", "state", currentState)
+
+	// Check if we should retry
+	if cpl.stateMachine.ShouldRetry(currentState) {
+		retryCount := cpl.stateMachine.GetRetryCount(currentState)
+		retryDelay := cpl.stateMachine.GetRetryDelay(currentState)
+
+		cpl.logger.Info("Will retry after delay",
+			"state", currentState,
+			"retry_attempt", retryCount+1,
+			"delay", retryDelay)
+
+		// Wait for retry delay
+		time.Sleep(retryDelay)
+
+		// Send retry event
+		cpl.stateMachine.SendEvent(state.EventRetry)
+	} else {
+		cpl.logger.Error("Max retries exceeded, giving up", "state", currentState)
+	}
 }
 
 // handleShutdown handles graceful shutdown

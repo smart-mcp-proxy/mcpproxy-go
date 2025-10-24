@@ -35,7 +35,15 @@ func (m *multiplexListener) Accept() (net.Conn, error) {
 	})
 
 	select {
-	case conn := <-m.connCh:
+	case conn, ok := <-m.connCh:
+		if !ok {
+			// Channel closed, listener is shutting down
+			return nil, net.ErrClosed
+		}
+		if conn == nil {
+			// Should never happen, but protect against it
+			return nil, net.ErrClosed
+		}
 		return conn, nil
 	case err := <-m.errCh:
 		return nil, err

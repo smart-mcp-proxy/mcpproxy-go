@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
 )
 
@@ -64,17 +65,39 @@ type HealthMonitor struct {
 }
 
 // NewHealthMonitor creates a new health monitor
-func NewHealthMonitor(baseURL string, logger *zap.SugaredLogger, stateMachine *state.Machine) *HealthMonitor {
+func NewHealthMonitor(endpoint string, logger *zap.SugaredLogger, stateMachine *state.Machine) *HealthMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Create socket/TCP-aware HTTP client using the same dialer as API client
+	// The timeout is set in the httpClient itself
+	httpClient := api.CreateHTTPClient(endpoint, 10*time.Second, logger)
+
+	// Transform the endpoint to get the proper base URL for HTTP requests
+	// For Unix sockets: unix:///path/socket.sock -> http://localhost
+	// For TCP: http://localhost:8080 -> http://localhost:8080
+	_, transformedBaseURL, err := api.CreateDialer(endpoint)
+	if err != nil {
+		// If CreateDialer fails, use the original endpoint (it's likely already HTTP)
+		transformedBaseURL = endpoint
+		if logger != nil {
+			logger.Debug("Using original endpoint as base URL",
+				"endpoint", endpoint,
+				"error", err)
+		}
+	} else {
+		if logger != nil {
+			logger.Debug("Transformed endpoint for health checks",
+				"original", endpoint,
+				"transformed", transformedBaseURL)
+		}
+	}
+
 	return &HealthMonitor{
-		baseURL:       strings.TrimSuffix(baseURL, "/"),
+		baseURL:       strings.TrimSuffix(transformedBaseURL, "/"),
 		logger:        logger,
 		stateMachine:  stateMachine,
 		currentStatus: HealthStatusUnknown,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		httpClient:    httpClient,
 		resultsCh:        make(chan HealthCheck, 10),
 		shutdownCh:       make(chan struct{}),
 		ctx:              ctx,
@@ -87,7 +110,7 @@ func NewHealthMonitor(baseURL string, logger *zap.SugaredLogger, stateMachine *s
 
 // Start starts the health monitoring
 func (hm *HealthMonitor) Start() {
-	hm.logger.Info("Starting health monitor", "base_url", hm.baseURL)
+	hm.logger.Infow("Starting health monitor", "base_url", hm.baseURL)
 	go hm.monitor()
 }
 
@@ -126,7 +149,7 @@ func (hm *HealthMonitor) ResultsChannel() <-chan HealthCheck {
 
 // WaitForReady waits for the service to become ready within the timeout
 func (hm *HealthMonitor) WaitForReady() error {
-	hm.logger.Info("Waiting for core service to become ready", "timeout", hm.readinessTimeout)
+	hm.logger.Infow("Waiting for core service to become ready", "timeout", hm.readinessTimeout)
 
 	startTime := time.Now()
 	ctx, cancel := context.WithTimeout(hm.ctx, hm.readinessTimeout)
@@ -147,7 +170,7 @@ func (hm *HealthMonitor) WaitForReady() error {
 		case <-ticker.C:
 			if hm.checkReadiness() {
 				elapsed := time.Since(startTime)
-				hm.logger.Info("Core service is ready", "elapsed", elapsed)
+				hm.logger.Infow("Core service is ready", "elapsed", elapsed)
 
 				// Notify state machine
 				if hm.stateMachine != nil {
@@ -213,13 +236,13 @@ func (hm *HealthMonitor) performHealthCheck() {
 	// Log status changes
 	if status != previousStatus {
 		if checkError != nil {
-			hm.logger.Warn("Health status changed",
+			hm.logger.Warnw("Health status changed",
 				"from", previousStatus,
 				"to", status,
 				"error", checkError,
 				"duration", time.Since(startTime))
 		} else {
-			hm.logger.Info("Health status changed",
+			hm.logger.Infow("Health status changed",
 				"from", previousStatus,
 				"to", status,
 				"duration", time.Since(startTime))

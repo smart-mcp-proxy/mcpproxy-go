@@ -199,7 +199,7 @@ GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray 
 #### Tray Application Features
 - **Auto-starts core server** if not running
 - **Port conflict resolution** built-in
-- **Real-time updates** via SSE connection to core API
+- **Real-time updates** via Server-Sent Events (SSE) over socket/pipe connection
 - **Cross-platform** system tray integration
 - **Server management** via GUI menus
 
@@ -214,15 +214,24 @@ The tray application uses a robust state machine architecture for reliable core 
 
 **Key Components**:
 - **Process Monitor** (`cmd/mcpproxy-tray/internal/monitor/process.go`): Monitors core subprocess lifecycle
-- **Health Monitor** (`cmd/mcpproxy-tray/internal/monitor/health.go`): Performs HTTP health checks on core API
-- **State Machine** (`cmd/mcpproxy-tray/internal/state/machine.go`): Manages state transitions and retry logic
+- **Health Monitor** (`cmd/mcpproxy-tray/internal/monitor/health.go`): Performs socket-aware HTTP health checks on core API (`/healthz`, `/readyz`)
+- **State Machine** (`cmd/mcpproxy-tray/internal/state/machine.go`): Manages state transitions and automatic retry logic
 
 **Error Classification**:
 Core process exit codes are mapped to specific state machine events:
 - Exit code 2 (port conflict) → `EventPortConflict`
 - Exit code 3 (database locked) → `EventDBLocked`
 - Exit code 4 (config error) → `EventConfigError`
+- Exit code 5 (permission error) → `EventPermissionError`
 - Other errors → `EventGeneralError`
+
+**Automatic Retry Logic**:
+Error states automatically retry core launch with exponential backoff:
+- `StateCoreErrorGeneral`: 2 retries with 3s delay (3 total attempts)
+- `StateCoreErrorPortConflict`: 2 retries with 10s delay
+- `StateCoreErrorDBLocked`: 3 retries with 5s delay
+- After max retries exceeded → transitions to `StateFailed`
+- Retry count and attempts logged for transparency
 
 **Development Environment Variables**:
 - `MCPPROXY_TRAY_SKIP_CORE=1` - Skip core launch (for development)
@@ -283,6 +292,8 @@ MCPProxy uses platform-specific local IPC for secure, low-latency communication 
 
 **Architecture**:
 - **Dual Listener Design**: Core server accepts connections on both TCP (for browsers/remote) and socket/pipe (for tray)
+- **Unified Socket Transport**: Tray uses socket/pipe for ALL communication - both API calls AND Server-Sent Events (SSE)
+- **No Hybrid Mode**: All HTTP traffic (including persistent SSE connection) is routed through the socket - no TCP fallback
 - **Automatic Detection**: Tray auto-detects socket path from data directory configuration
 - **Zero Configuration**: Works out-of-the-box with no manual setup required
 - **Platform-Specific**: Unix sockets (macOS/Linux), Named pipes (Windows)
@@ -317,6 +328,17 @@ MCPProxy uses platform-specific local IPC for secure, low-latency communication 
 - `cmd/mcpproxy-tray/internal/api/dialer.go` - Tray client socket dialer with auto-detection
 - `cmd/mcpproxy-tray/internal/api/dialer_unix.go` - Unix socket dialer (macOS/Linux)
 - `cmd/mcpproxy-tray/internal/api/dialer_windows.go` - Named pipe dialer (Windows)
+- `cmd/mcpproxy-tray/internal/api/client.go` - HTTP client with socket transport (lines 100-118, 318-377)
+
+**How SSE Works Over Socket**:
+
+The tray application uses a unified HTTP client that routes all traffic through the socket:
+
+1. **Custom HTTP Transport**: Creates `http.Transport` with socket-based `DialContext` function
+2. **API Calls**: Standard HTTP requests (`GET /api/v1/info`, `POST /api/v1/servers/{name}/enable`) use socket transport
+3. **SSE Connection**: Persistent HTTP connection to `/events` endpoint also uses socket transport
+4. **Real-time Updates**: Core sends `event: status` messages with `listen_addr` field for tray UI updates
+5. **Single Source of Truth**: Tray UI reads `listen_addr` exclusively from SSE status events (no local fallbacks)
 
 **Configuration**:
 

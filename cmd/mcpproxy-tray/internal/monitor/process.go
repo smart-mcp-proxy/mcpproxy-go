@@ -122,7 +122,7 @@ func (pm *ProcessMonitor) Start() error {
 		return fmt.Errorf("process already running or starting")
 	}
 
-	pm.logger.Info("Starting process",
+	pm.logger.Infow("Starting process",
 		"binary", pm.config.Binary,
 		"args", pm.maskSensitiveArgs(pm.config.Args),
 		"env_count", len(pm.config.Env),
@@ -167,7 +167,7 @@ func (pm *ProcessMonitor) Start() error {
 	pm.pid = pm.cmd.Process.Pid
 	pm.status = ProcessStatusRunning
 
-	pm.logger.Info("Process started successfully",
+	pm.logger.Infow("Process started successfully",
 		"pid", pm.pid,
 		"startup_time", time.Since(pm.startTime))
 
@@ -203,7 +203,7 @@ func (pm *ProcessMonitor) Stop() error {
 		return fmt.Errorf("no process to stop")
 	}
 
-	pm.logger.Info("Stopping process", "pid", pid)
+	pm.logger.Infow("Stopping process", "pid", pid)
 
 	// Send SIGTERM to process group
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -218,7 +218,7 @@ func (pm *ProcessMonitor) Stop() error {
 
 	select {
 	case err := <-done:
-		pm.logger.Info("Process stopped gracefully", "pid", pid, "error", err)
+		pm.logger.Infow("Process stopped gracefully", "pid", pid, "error", err)
 		return err
 	case <-time.After(10 * time.Second):
 		// Force kill

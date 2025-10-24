@@ -90,7 +90,7 @@ func NewMachine(logger *zap.SugaredLogger) *Machine {
 
 // Start starts the state machine
 func (m *Machine) Start() {
-	m.logger.Info("State machine starting", "initial_state", m.currentState)
+	m.logger.Infow("State machine starting", "initial_state", m.currentState)
 	go m.run()
 	// Note: Initial event is now sent by the caller to allow proper SKIP_CORE handling
 }
@@ -289,10 +289,18 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 
 	case StateCoreErrorPortConflict, StateCoreErrorDBLocked, StateCoreErrorGeneral:
 		switch event {
+		case EventRetry:
+			// Check retry count before allowing retry
+			if m.shouldRetry(currentState) {
+				m.logger.Infow("Retrying after error", "state", currentState, "retry_count", m.retryCount[currentState]+1)
+				m.retryCount[currentState]++
+				return StateLaunchingCore
+			}
+			m.logger.Warn("Max retries exceeded for error state", "state", currentState, "retry_count", m.retryCount[currentState])
+			return StateFailed
 		case EventShutdown:
 			return StateShuttingDown
-		// Error states persist - require user to fix issue manually
-		// Stay in current error state for all other events
+		// Error states can retry up to max attempts, then transition to failed
 		}
 
 	case StateCoreErrorConfig:
@@ -339,7 +347,7 @@ func (m *Machine) transition(from, to State, event Event, data map[string]interf
 		Error:     m.lastError,
 	}
 
-	m.logger.Info("State transition",
+	m.logger.Infow("State transition",
 		"from", from,
 		"to", to,
 		"event", event,
@@ -382,6 +390,27 @@ func (m *Machine) handleStateEntry(state State) {
 
 	// All error states now persist until user fixes the issue or shuts down
 	// No auto-retry or auto-transition to failed state for any error states
+}
+
+// ShouldRetry checks if we should retry for the given state (exported for error handlers)
+func (m *Machine) ShouldRetry(state State) bool {
+	return m.shouldRetry(state)
+}
+
+// GetRetryCount returns the current retry count for the given state
+func (m *Machine) GetRetryCount(state State) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.retryCount[state]
+}
+
+// GetRetryDelay returns the retry delay for the given state
+func (m *Machine) GetRetryDelay(state State) time.Duration {
+	delay, exists := m.retryDelay[state]
+	if !exists {
+		return 3 * time.Second // Default delay
+	}
+	return delay
 }
 
 // shouldRetry checks if we should retry for the given state

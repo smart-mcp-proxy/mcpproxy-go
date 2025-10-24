@@ -692,27 +692,53 @@ func (s *Server) StopServer() error {
 	_ = s.logger.Sync()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !s.running {
+		s.mu.Unlock()
 		// Return nil instead of error to prevent race condition logs
 		s.logger.Debug("Server stop requested but server is not running")
 		return nil
 	}
 
+	// Capture httpServer reference while holding the lock
+	httpServer := s.httpServer
+	s.mu.Unlock()
+
 	// Notify about server stopping
 	s.logger.Info("STOPSERVER - Server is running, proceeding with stop")
 	_ = s.logger.Sync()
 
-	// Disconnect upstream servers FIRST to ensure Docker containers are cleaned up
-	// Do this before canceling contexts to avoid interruption
-	s.logger.Info("STOPSERVER - Disconnecting upstream servers EARLY")
+	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
+
+	// STEP 1: Gracefully shutdown HTTP server FIRST to stop accepting new connections
+	// This must happen before we disconnect upstream servers to prevent new requests
+	if httpServer != nil {
+		s.logger.Info("STOPSERVER - Shutting down HTTP server gracefully")
+		_ = s.logger.Sync()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			s.logger.Warn("STOPSERVER - HTTP server forced shutdown due to timeout", zap.Error(err))
+			// Force close if graceful shutdown times out
+			if closeErr := httpServer.Close(); closeErr != nil {
+				s.logger.Error("STOPSERVER - Failed to force close HTTP server", zap.Error(closeErr))
+			}
+		} else {
+			s.logger.Info("STOPSERVER - HTTP server shutdown completed gracefully")
+		}
+		_ = s.logger.Sync()
+	}
+
+	// STEP 2: Disconnect upstream servers AFTER HTTP server is shut down
+	// This ensures no new requests can come in while we're disconnecting
+	s.logger.Info("STOPSERVER - Disconnecting upstream servers")
 	_ = s.logger.Sync()
 	if err := s.runtime.UpstreamManager().DisconnectAll(); err != nil {
-		s.logger.Error("STOPSERVER - Failed to disconnect upstream servers early", zap.Error(err))
+		s.logger.Error("STOPSERVER - Failed to disconnect upstream servers", zap.Error(err))
 		_ = s.logger.Sync()
 	} else {
-		s.logger.Info("STOPSERVER - Successfully disconnected all upstream servers early")
+		s.logger.Info("STOPSERVER - Successfully disconnected all upstream servers")
 		_ = s.logger.Sync()
 	}
 
@@ -729,26 +755,18 @@ func (s *Server) StopServer() error {
 		_ = s.logger.Sync()
 	}
 
-	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
-
-	// Cancel the server context after cleanup
+	// STEP 3: Cancel the server context to signal other components
 	s.logger.Info("STOPSERVER - Cancelling server context")
 	_ = s.logger.Sync()
+	s.mu.Lock()
 	if s.serverCancel != nil {
 		s.serverCancel()
 	}
 
-	// HTTP server shutdown is now handled by context cancellation in startCustomHTTPServer
-	s.logger.Info("STOPSERVER - HTTP server shutdown is handled by context cancellation")
-	_ = s.logger.Sync()
-
-	// Upstream servers already disconnected early in this method
-	s.logger.Info("STOPSERVER - Upstream servers already disconnected early")
-	_ = s.logger.Sync()
-
 	// Set running to false immediately after server is shut down
 	s.running = false
 	s.listenAddr = ""
+	s.mu.Unlock()
 	s.runtime.SetRunning(false)
 
 	// Notify about server stopped with explicit status update
@@ -1091,17 +1109,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Wait for either context cancellation or server error
 	select {
 	case <-ctx.Done():
-		s.logger.Info("Server context cancelled, initiating graceful shutdown")
-		// Gracefully shutdown the HTTP server
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			s.logger.Warn("HTTP server forced shutdown due to timeout", zap.Error(err))
-			s.httpServer.Close()
-		} else {
-			s.logger.Info("HTTP server shutdown completed gracefully")
-		}
+		s.logger.Info("Server context cancelled, shutdown will be handled by StopServer")
+		// HTTP server shutdown is now handled synchronously in StopServer()
+		// to avoid race conditions during graceful shutdown
 		return ctx.Err()
 	case err := <-serverErrCh:
 		return err
