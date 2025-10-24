@@ -31,9 +31,9 @@ func createNamedPipeListenerPlatform(pipeName string, logger *zap.Logger) (*List
 
 	listener := &Listener{
 		Listener: &namedPipeListener{
-			PipeListener: ln,
-			pipeName:     pipeName,
-			logger:       logger,
+			Listener: ln,
+			pipeName: pipeName,
+			logger:   logger,
 		},
 		Source:  ConnectionSourceTray,
 		Address: pipeName,
@@ -46,9 +46,9 @@ func createNamedPipeListenerPlatform(pipeName string, logger *zap.Logger) (*List
 	return listener, nil
 }
 
-// namedPipeListener wraps winio.PipeListener to add logging
+// namedPipeListener wraps net.Listener to add logging
 type namedPipeListener struct {
-	*winio.PipeListener
+	net.Listener
 	pipeName string
 	logger   *zap.Logger
 }
@@ -56,12 +56,12 @@ type namedPipeListener struct {
 // Close closes the pipe listener
 func (pl *namedPipeListener) Close() error {
 	pl.logger.Info("Closing Windows named pipe listener", zap.String("pipe", pl.pipeName))
-	return pl.PipeListener.Close()
+	return pl.Listener.Close()
 }
 
 // Accept accepts a connection from the named pipe
 func (pl *namedPipeListener) Accept() (net.Conn, error) {
-	conn, err := pl.PipeListener.Accept()
+	conn, err := pl.Listener.Accept()
 	if err != nil {
 		return nil, err
 	}
