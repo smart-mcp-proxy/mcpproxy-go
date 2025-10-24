@@ -290,6 +290,8 @@ func (pm *ProcessMonitor) monitor() {
 			pm.stateMachine.SendEvent(state.EventDBLocked)
 		case 4:
 			pm.stateMachine.SendEvent(state.EventConfigError)
+		case 5:
+			pm.stateMachine.SendEvent(state.EventPermissionError)
 		default:
 			pm.stateMachine.SendEvent(state.EventGeneralError)
 		}

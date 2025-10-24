@@ -46,6 +46,7 @@ func (d Duration) Duration() time.Duration {
 // Config represents the main configuration structure
 type Config struct {
 	Listen            string          `json:"listen" mapstructure:"listen"`
+	TrayEndpoint      string          `json:"tray_endpoint,omitempty" mapstructure:"tray-endpoint"` // Tray endpoint override (unix:// or npipe://)
 	DataDir           string          `json:"data_dir" mapstructure:"data-dir"`
 	EnableTray        bool            `json:"enable_tray" mapstructure:"tray"`
 	DebugSearch       bool            `json:"debug_search" mapstructure:"debug-search"`

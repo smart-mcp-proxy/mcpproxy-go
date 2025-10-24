@@ -26,6 +26,11 @@ const (
 	secretTypeKeyring  = "keyring"
 )
 
+// Context key for connection source (must match internal/server/listener.go)
+type contextKey string
+
+const connSourceContextKey contextKey = "connection_source"
+
 // ServerController defines the interface for core server functionality
 type ServerController interface {
 	IsRunning() bool
@@ -117,9 +122,20 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 }
 
 // apiKeyAuthMiddleware creates middleware for API key authentication
+// Connections from Unix socket/named pipe (tray) are trusted and skip API key validation
 func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// SECURITY: Trust connections from tray (Unix socket/named pipe)
+			// These connections are authenticated via OS-level permissions (UID/SID matching)
+			if source := r.Context().Value(connSourceContextKey); source == "tray" {
+				s.logger.Debug("Tray connection - skipping API key validation",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr))
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Get config from controller
 			configInterface := s.controller.GetCurrentConfig()
 			if configInterface == nil {
@@ -142,12 +158,18 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Validate API key
+			// TCP connections require API key validation
 			if !s.validateAPIKey(r, cfg.APIKey) {
+				s.logger.Warn("TCP connection with invalid API key",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, http.StatusUnauthorized, "Invalid or missing API key")
 				return
 			}
 
+			s.logger.Debug("TCP connection with valid API key",
+				zap.String("path", r.URL.Path),
+				zap.String("remote_addr", r.RemoteAddr))
 			next.ServeHTTP(w, r)
 		})
 	}

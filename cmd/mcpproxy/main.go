@@ -27,6 +27,7 @@ var (
 	configFile        string
 	dataDir           string
 	listen            string
+	trayEndpoint      string
 	logLevel          string
 	debugSearch       bool
 	toolResponseLimit int
@@ -82,6 +83,7 @@ func main() {
 
 	// Add server-specific flags
 	serverCmd.Flags().StringVarP(&listen, "listen", "l", "", "Listen address (for HTTP mode, not used in stdio mode)")
+	serverCmd.Flags().StringVar(&trayEndpoint, "tray-endpoint", "", "Tray endpoint override (unix:///path/socket.sock or npipe:////./pipe/name). Default: auto-detect from data-dir")
 	serverCmd.Flags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	serverCmd.Flags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
 	serverCmd.Flags().BoolVar(&readOnlyMode, "read-only", false, "Enable read-only mode")
@@ -479,6 +481,10 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 		listenFlag, _ := cmd.Flags().GetString("listen")
 		cfg.Listen = listenFlag
 	}
+	if cmd.Flags().Changed("tray-endpoint") {
+		trayEndpointFlag, _ := cmd.Flags().GetString("tray-endpoint")
+		cfg.TrayEndpoint = trayEndpointFlag
+	}
 	if toolResponseLimit != 0 {
 		cfg.ToolResponseLimit = toolResponseLimit
 	}
@@ -513,6 +519,12 @@ func classifyError(err error) int {
 		return ExitCodeDBLocked
 	}
 
+	// Check for permission errors (exit code 5)
+	var permErr *server.PermissionError
+	if errors.As(err, &permErr) {
+		return ExitCodePermissionError
+	}
+
 	// Check for string-based error messages from various sources
 	errMsg := strings.ToLower(err.Error())
 
@@ -537,7 +549,7 @@ func classifyError(err error) int {
 		return ExitCodeConfigError
 	}
 
-	// Permission error indicators
+	// Permission error indicators (fallback for string-based errors)
 	if strings.Contains(errMsg, "permission denied") ||
 		strings.Contains(errMsg, "access denied") ||
 		strings.Contains(errMsg, "operation not permitted") {

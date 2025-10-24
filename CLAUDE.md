@@ -277,6 +277,71 @@ Core process exit codes are mapped to specific state machine events:
   - `internal/api/` - Enhanced API client with exponential backoff
 - **`internal/logs/`** - Structured logging with per-server log files
 
+### Tray-Core Communication (Unix Sockets / Named Pipes)
+
+MCPProxy uses platform-specific local IPC for secure, low-latency communication between the tray application and core server:
+
+**Architecture**:
+- **Dual Listener Design**: Core server accepts connections on both TCP (for browsers/remote) and socket/pipe (for tray)
+- **Automatic Detection**: Tray auto-detects socket path from data directory configuration
+- **Zero Configuration**: Works out-of-the-box with no manual setup required
+- **Platform-Specific**: Unix sockets (macOS/Linux), Named pipes (Windows)
+
+**Security Model** (8 layers):
+1. **Data Directory Permissions**: Must be `0700` (user-only access) or server refuses to start (exit code 5)
+2. **Socket File Permissions**: Created with `0600` (user read/write only)
+3. **UID Verification**: Server verifies connecting process belongs to same user
+4. **GID Verification**: Group ownership validated on macOS/Linux
+5. **SID/ACL Verification**: Windows ACLs ensure current user-only access
+6. **Stale Socket Cleanup**: Automatic removal of leftover socket files from crashed processes
+7. **Ownership Validation**: Socket file ownership verified before use
+8. **Connection Source Tagging**: Middleware distinguishes socket vs TCP connections
+
+**API Key Authentication**:
+- **Socket/Pipe connections**: Trusted by default (skip API key validation)
+- **TCP connections**: Require API key authentication
+- **Middleware**: `internal/httpapi/server.go` checks connection source via context
+
+**File Locations**:
+- **macOS/Linux**: `<data-dir>/mcpproxy.sock` (default: `~/.mcpproxy/mcpproxy.sock`)
+- **Windows**: `\\.\pipe\mcpproxy-<username>` (or hashed for custom data-dir)
+- **Override**: `--tray-endpoint` flag or `MCPPROXY_TRAY_ENDPOINT` environment variable
+
+**Implementation Files**:
+- `internal/server/listener.go` - Listener manager and abstraction layer
+- `internal/server/listener_unix.go` - Unix socket implementation (macOS/Linux)
+- `internal/server/listener_darwin.go` - macOS-specific peer credential verification
+- `internal/server/listener_linux.go` - Linux-specific peer credential verification
+- `internal/server/listener_windows.go` - Windows named pipe implementation
+- `internal/server/listener_mux.go` - Multiplexing listener combining TCP + socket/pipe
+- `cmd/mcpproxy-tray/internal/api/dialer.go` - Tray client socket dialer with auto-detection
+- `cmd/mcpproxy-tray/internal/api/dialer_unix.go` - Unix socket dialer (macOS/Linux)
+- `cmd/mcpproxy-tray/internal/api/dialer_windows.go` - Named pipe dialer (Windows)
+
+**Usage Examples**:
+```bash
+# Default: Socket auto-created in data directory
+./mcpproxy serve
+
+# Custom socket path
+./mcpproxy serve --tray-endpoint=unix:///tmp/custom.sock
+
+# Windows named pipe
+mcpproxy.exe serve --tray-endpoint=npipe:////./pipe/mycustompipe
+
+# Verify socket creation
+ls -la ~/.mcpproxy/mcpproxy.sock
+# Should show: srw------- (socket, user-only permissions)
+
+# Tray automatically connects via socket (no API key needed)
+./mcpproxy-tray
+```
+
+**Testing**:
+- Unit tests: `internal/server/listener_test.go` (13 tests covering TCP, Unix socket, permissions, multiplexing)
+- Dialer tests: `cmd/mcpproxy-tray/internal/api/dialer_test.go` (14 tests covering dialers, auto-detection, URL parsing)
+- E2E tests: `internal/server/socket_e2e_test.go` (3 scenarios: socket without API key, TCP with/without API key, concurrent requests)
+
 ### Key Features
 
 1. **Tool Discovery** - BM25 search across all upstream MCP server tools
@@ -287,6 +352,7 @@ Core process exit codes are mapped to specific state machine events:
 6. **Per-Server Logging** - Individual log files for each upstream server
 7. **Real-time Event System** - Event bus with SSE integration for live updates (Phase 3 refactoring)
 8. **Hot Configuration Reload** - Real-time config changes with event notifications
+9. **Unix Socket/Named Pipe IPC** - Secure local communication between tray and core without API keys (macOS/Linux: Unix sockets, Windows: Named pipes)
 
 ## Configuration
 

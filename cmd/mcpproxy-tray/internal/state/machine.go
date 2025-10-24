@@ -207,6 +207,8 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 			return StateCoreErrorDBLocked
 		case EventConfigError:
 			return StateCoreErrorConfig
+		case EventPermissionError:
+			return StateCoreErrorPermission
 		case EventGeneralError, EventTimeout:
 			return StateCoreErrorGeneral
 		case EventShutdown:
@@ -225,6 +227,8 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 			return StateCoreErrorDBLocked
 		case EventConfigError:
 			return StateCoreErrorConfig
+		case EventPermissionError:
+			return StateCoreErrorPermission
 		case EventGeneralError:
 			return StateCoreErrorGeneral
 
@@ -250,6 +254,8 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 			return StateCoreErrorDBLocked
 		case EventConfigError:
 			return StateCoreErrorConfig
+		case EventPermissionError:
+			return StateCoreErrorPermission
 
 		case EventConnectionLost, EventTimeout:
 			return StateReconnecting

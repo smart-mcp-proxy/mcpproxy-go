@@ -91,18 +91,47 @@ type Client struct {
 	lastServerState string // Hash of server states to detect changes
 }
 
-// NewClient creates a new API client
-func NewClient(baseURL string, logger *zap.SugaredLogger) *Client {
+// NewClient creates a new API client with automatic socket/pipe support
+func NewClient(endpoint string, logger *zap.SugaredLogger) *Client {
 	// Create TLS config that trusts the local CA
 	tlsConfig := createTLSConfig(logger)
+
+	// Create custom transport
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+
+	// Check if we should use a custom dialer (Unix socket or Windows pipe)
+	dialer, baseURL, err := CreateDialer(endpoint)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("Failed to create custom dialer, falling back to TCP",
+				"endpoint", endpoint,
+				"error", err)
+		}
+		baseURL = endpoint
+		dialer = nil
+	}
+
+	// Apply custom dialer if available
+	if dialer != nil {
+		transport.DialContext = dialer
+		if logger != nil {
+			logger.Info("Using socket/pipe connection",
+				"endpoint", endpoint,
+				"base_url", baseURL)
+		}
+	} else {
+		if logger != nil {
+			logger.Info("Using TCP connection", "endpoint", endpoint)
+		}
+	}
 
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 0,
-			Transport: &http.Transport{
-				TLSClientConfig: tlsConfig,
-			},
+			Timeout:   0,
+			Transport: transport,
 		},
 		logger:            logger,
 		statusCh:          make(chan StatusUpdate, 10),

@@ -353,6 +353,8 @@ func (pm *ProcessMonitor) handleProcessExit(exitCode int) {
 		pm.stateMachine.SendEvent(state.EventDBLocked)
 	case 4: // Configuration error
 		pm.stateMachine.SendEvent(state.EventConfigError)
+	case 5: // Permission error
+		pm.stateMachine.SendEvent(state.EventPermissionError)
 	default: // General error
 		pm.stateMachine.SendEvent(state.EventGeneralError)
 	}
