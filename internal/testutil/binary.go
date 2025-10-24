@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -61,15 +62,20 @@ func resolveBinaryPath() string {
 		}
 	}
 
+	binaryName := "mcpproxy"
+	if runtime.GOOS == "windows" {
+		binaryName = "mcpproxy.exe"
+	}
+
 	for _, dir := range searchDirs {
-		candidate := filepath.Join(dir, "mcpproxy")
+		candidate := filepath.Join(dir, binaryName)
 		absCandidate := ensureAbsolute(candidate)
 		if info, err := os.Stat(absCandidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
 			return absCandidate
 		}
 	}
 
-	return ensureAbsolute("./mcpproxy")
+	return ensureAbsolute(filepath.Join(".", binaryName))
 }
 
 func ensureAbsolute(path string) string {
@@ -92,7 +98,7 @@ func NewBinaryTestEnv(t *testing.T) *BinaryTestEnv {
 	require.NoError(t, err)
 
 	dataDir := filepath.Join(tempDir, "data")
-	err = os.MkdirAll(dataDir, 0755)
+	err = os.MkdirAll(dataDir, 0700) // Secure permissions required for socket creation
 	require.NoError(t, err)
 
 	// Create test config
