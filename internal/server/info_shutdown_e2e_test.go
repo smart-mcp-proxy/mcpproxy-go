@@ -78,13 +78,21 @@ func TestInfoEndpoint(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected 200 OK")
 
+		// Read the body first for debugging
+		bodyBytes, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		t.Logf("Response body: %s", string(bodyBytes))
+
 		var result map[string]interface{}
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+		require.NoError(t, json.Unmarshal(bodyBytes, &result))
 
 		// Verify response structure
 		assert.True(t, result["success"].(bool), "Expected success=true")
 
-		data := result["data"].(map[string]interface{})
+		// Check if data exists before type assertion
+		require.NotNil(t, result["data"], "Expected data field to exist")
+		data, ok := result["data"].(map[string]interface{})
+		require.True(t, ok, "Expected data to be a map[string]interface{}")
 		assert.NotEmpty(t, data["version"], "Expected version to be set")
 		assert.NotEmpty(t, data["web_ui_url"], "Expected web_ui_url to be set")
 		assert.Equal(t, listenAddr, data["listen_addr"], "Expected listen_addr to match")

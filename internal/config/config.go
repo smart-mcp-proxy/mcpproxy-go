@@ -476,8 +476,9 @@ func (s APIKeySource) String() string {
 // Returns the API key, whether it was auto-generated, and the source
 func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource) {
 	// Check environment variable for API key first - this overrides config file
-	if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
-		c.APIKey = envAPIKey
+	// Use LookupEnv to distinguish between "not set" and "set to empty string"
+	if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists {
+		c.APIKey = envAPIKey // Allow empty string to explicitly disable authentication
 		return c.APIKey, false, APIKeySourceEnvironment
 	}
 
@@ -697,10 +698,10 @@ func (c *Config) Validate() error {
 	// Empty string means authentication disabled, nil means auto-generate
 	if c.APIKey == "" {
 		// Check environment variable for API key
-		if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
-			c.APIKey = envAPIKey
+		// Use LookupEnv to distinguish between "not set" and "set to empty string"
+		if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists {
+			c.APIKey = envAPIKey // Allow empty string to explicitly disable authentication
 		}
-		// Note: Empty string explicitly disables authentication
 	}
 
 	// Ensure Environment config is not nil
