@@ -26,7 +26,7 @@ func CreateDialer(endpoint string) (func(context.Context, string, string) (net.C
 	case "unix":
 		// Unix domain socket (macOS/Linux)
 		if runtime.GOOS == "windows" {
-			return nil, "", fmt.Errorf("Unix domain sockets not supported on Windows")
+			return nil, "", fmt.Errorf("unix domain sockets not supported on Windows")
 		}
 
 		socketPath := parsed.Path
@@ -45,7 +45,7 @@ func CreateDialer(endpoint string) (func(context.Context, string, string) (net.C
 	case "npipe":
 		// Windows named pipe
 		if runtime.GOOS != "windows" {
-			return nil, "", fmt.Errorf("Named pipes only supported on Windows")
+			return nil, "", fmt.Errorf("named pipes only supported on Windows")
 		}
 
 		// Named pipe path is in the form npipe:////./pipe/mcpproxy

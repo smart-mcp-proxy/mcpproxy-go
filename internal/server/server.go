@@ -998,7 +998,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 	// Determine protocol for logging
 	protocol := "HTTP"
-	if cfg != nil && cfg.TLS != nil && cfg.TLS.Enabled {
+	if cfg.TLS != nil && cfg.TLS.Enabled {
 		protocol = "HTTPS"
 	}
 
@@ -1017,7 +1017,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	serverErrCh := make(chan error, 1)
 
 	// Apply TLS configuration if enabled
-	if cfg != nil && cfg.TLS != nil && cfg.TLS.Enabled {
+	if cfg.TLS != nil && cfg.TLS.Enabled {
 		// Setup TLS configuration
 		certsDir := cfg.TLS.CertsDir
 		if certsDir == "" {
