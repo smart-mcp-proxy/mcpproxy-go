@@ -25,7 +25,7 @@ import (
 // 2. Simulated tray client connects via socket
 // 3. API requests work without API key
 // 4. TCP connections still require API key
-func TestEndToEnd_TrayToCore_UnixSocket(t *testing.T) {
+func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix socket E2E test not applicable on Windows (use named pipe test)")
 	}
@@ -178,7 +178,7 @@ func TestEndToEnd_TrayToCore_UnixSocket(t *testing.T) {
 }
 
 // TestEndToEnd_DualListener_Concurrent tests concurrent requests over both TCP and socket
-func TestEndToEnd_DualListener_Concurrent(t *testing.T) {
+func TestE2E_DualListener_Concurrent(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix socket E2E test not applicable on Windows")
 	}
@@ -275,7 +275,7 @@ func TestEndToEnd_DualListener_Concurrent(t *testing.T) {
 }
 
 // TestEndToEnd_SocketPermissions tests that socket has correct permissions
-func TestEndToEnd_SocketPermissions(t *testing.T) {
+func TestE2E_SocketPermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission test not applicable on Windows")
 	}
