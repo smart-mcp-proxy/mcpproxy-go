@@ -289,18 +289,10 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 
 	case StateCoreErrorPortConflict, StateCoreErrorDBLocked, StateCoreErrorGeneral:
 		switch event {
-		case EventRetry:
-			// Check retry count before allowing retry
-			if m.shouldRetry(currentState) {
-				m.logger.Infow("Retrying after error", "state", currentState, "retry_count", m.retryCount[currentState]+1)
-				m.retryCount[currentState]++
-				return StateLaunchingCore
-			}
-			m.logger.Warn("Max retries exceeded for error state", "state", currentState, "retry_count", m.retryCount[currentState])
-			return StateFailed
 		case EventShutdown:
 			return StateShuttingDown
-		// Error states can retry up to max attempts, then transition to failed
+		// Error states persist - require user to fix issue manually
+		// No auto-retry or auto-transition to failed state
 		}
 
 	case StateCoreErrorConfig:
