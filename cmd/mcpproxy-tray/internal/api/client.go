@@ -234,7 +234,7 @@ func (c *Client) StartSSE(ctx context.Context) error {
 
 			if attemptCount > 1 {
 				if c.logger != nil {
-					c.logger.Info("SSE reconnection attempt",
+					c.logger.Infow("SSE reconnection attempt",
 						"attempt", attemptCount,
 						"max_retries", maxRetries,
 						"delay", delay,
@@ -253,7 +253,7 @@ func (c *Client) StartSSE(ctx context.Context) error {
 			// Check if we've exceeded max retries
 			if attemptCount > maxRetries {
 				if c.logger != nil {
-					c.logger.Error("SSE connection failed after max retries",
+					c.logger.Errorw("SSE connection failed after max retries",
 						"attempts", attemptCount,
 						"max_retries", maxRetries,
 						"base_url", c.baseURL)
@@ -266,7 +266,7 @@ func (c *Client) StartSSE(ctx context.Context) error {
 
 			if err := c.connectSSE(sseCtx); err != nil {
 				if c.logger != nil {
-					c.logger.Error("SSE connection error",
+					c.logger.Errorw("SSE connection error",
 						"error", err,
 						"attempt", attemptCount,
 						"max_retries", maxRetries,
@@ -285,7 +285,7 @@ func (c *Client) StartSSE(ctx context.Context) error {
 
 			// Successful connection - reset attempt count
 			if attemptCount > 1 && c.logger != nil {
-				c.logger.Info("SSE connection established successfully",
+				c.logger.Infow("SSE connection established successfully",
 					"after_attempts", attemptCount,
 					"base_url", c.baseURL)
 			}
@@ -381,7 +381,7 @@ func (c *Client) processSSEEvent(eventType, data string) {
 		var statusUpdate StatusUpdate
 		if err := json.Unmarshal([]byte(data), &statusUpdate); err != nil {
 			if c.logger != nil {
-				c.logger.Error("Failed to parse SSE status data", "error", err)
+				c.logger.Errorw("Failed to parse SSE status data", "error", err)
 			}
 			return
 		}
@@ -401,7 +401,7 @@ func (c *Client) publishConnectionState(state tray.ConnectionState) {
 	case c.connectionStateCh <- state:
 	default:
 		if c.logger != nil {
-			c.logger.Debug("Dropping connection state update", "state", state)
+			c.logger.Debugw("Dropping connection state update", "state", state)
 		}
 	}
 }
@@ -667,7 +667,7 @@ func (c *Client) OpenWebUI() error {
 	resp, err := c.makeRequest("GET", "/api/v1/info", nil)
 	if err != nil {
 		if c.logger != nil {
-			c.logger.Error("Failed to get server info", "error", err)
+			c.logger.Errorw("Failed to get server info", "error", err)
 		}
 		return fmt.Errorf("failed to get server info: %w", err)
 	}
@@ -705,7 +705,7 @@ func (c *Client) OpenWebUI() error {
 		cmd := exec.Command("open", url)
 		if err := cmd.Run(); err != nil {
 			if c.logger != nil {
-				c.logger.Error("Failed to open web control panel", "url", displayURL, "error", err)
+				c.logger.Errorw("Failed to open web control panel", "url", displayURL, "error", err)
 			}
 			return fmt.Errorf("failed to open web control panel: %w", err)
 		}
@@ -718,7 +718,7 @@ func (c *Client) OpenWebUI() error {
 		// Fallback to cmd start
 		if err := exec.Command("cmd", "/c", "start", "", url).Run(); err != nil {
 			if c.logger != nil {
-				c.logger.Error("Failed to open web control panel", "url", displayURL, "error", err)
+				c.logger.Errorw("Failed to open web control panel", "url", displayURL, "error", err)
 			}
 			return fmt.Errorf("failed to open web control panel: %w", err)
 		}
@@ -763,7 +763,7 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 			if attempt < maxRetries {
 				delay := time.Duration(attempt) * baseDelay
 				if c.logger != nil {
-					c.logger.Debug("Request failed, retrying",
+					c.logger.Debugw("Request failed, retrying",
 						"attempt", attempt,
 						"max_retries", maxRetries,
 						"delay", delay,
@@ -806,7 +806,7 @@ func (c *Client) processResponse(resp *http.Response, attempt, maxRetries int, b
 		if attempt < maxRetries {
 			delay := time.Duration(attempt*attempt) * baseDelay
 			if c.logger != nil {
-				c.logger.Warn("Rate limited, retrying",
+				c.logger.Warnw("Rate limited, retrying",
 					"attempt", attempt,
 					"delay", delay,
 					"status", resp.StatusCode)
@@ -820,7 +820,7 @@ func (c *Client) processResponse(resp *http.Response, attempt, maxRetries int, b
 		if attempt < maxRetries {
 			delay := time.Duration(attempt) * baseDelay
 			if c.logger != nil {
-				c.logger.Warn("Server error, retrying",
+				c.logger.Warnw("Server error, retrying",
 					"attempt", attempt,
 					"status", resp.StatusCode,
 					"delay", delay)

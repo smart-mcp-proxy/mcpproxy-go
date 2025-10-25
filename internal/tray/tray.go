@@ -386,6 +386,11 @@ func (a *App) cleanup() {
 	a.cancel()
 }
 
+// Quit exits the system tray application
+func (a *App) Quit() {
+	systray.Quit()
+}
+
 func (a *App) consumeStatusUpdates() {
 	statusCh := a.server.StatusChannel()
 	if statusCh == nil {
@@ -527,8 +532,17 @@ func (a *App) onReady() {
 	a.syncManager.SetOnSync(func() {
 		a.instrumentation.NotifyMenus()
 	})
+
+	// Set initial connection state on sync manager
+	// This ensures sync works when connecting to existing core (not launched by tray)
+	currentState := a.getConnectionState()
+	connected := (currentState == ConnectionStateConnected)
+	a.syncManager.SetConnected(connected)
+	a.logger.Info("Tray menus initialized; starting synchronization managers",
+		zap.String("initial_state", string(currentState)),
+		zap.Bool("sync_enabled", connected))
+
 	a.instrumentation.NotifyMenus()
-	a.logger.Info("Tray menus initialized; starting synchronization managers")
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions

@@ -146,20 +146,36 @@ func main() {
 	apiClient := api.NewClient(coreURL, logger.Sugar())
 	apiClient.SetAPIKey(trayAPIKey)
 
+	// Create launcher variable that will be set after tray app is created
+	var launcher *CoreProcessLauncher
+	var trayApp *tray.App
+
 	// Create tray application early so icon appears
 	shutdownFunc := func() {
 		logger.Info("Tray shutdown requested")
+		// IMPORTANT: Send shutdown event to trigger state transition
+		stateMachine.SendEvent(state.EventShutdown)
+		// IMPORTANT: Call handleShutdown() directly to terminate core process
+		// We can't rely on the state transition goroutine because cancel() will kill it
+		if launcher != nil {
+			launcher.handleShutdown()
+		}
+		// IMPORTANT: Quit the tray UI BEFORE cancelling context
+		// This prevents reconnection attempts from SSE goroutine
+		logger.Info("Quitting system tray")
+		trayApp.Quit()
+		// Now shutdown state machine and cancel context
 		stateMachine.Shutdown()
 		cancel()
 	}
 
-	trayApp := tray.NewWithAPIClient(api.NewServerAdapter(apiClient), apiClient, logger.Sugar(), version, shutdownFunc)
+	trayApp = tray.NewWithAPIClient(api.NewServerAdapter(apiClient), apiClient, logger.Sugar(), version, shutdownFunc)
 
 	// Start the state machine (without automatic initial event)
 	stateMachine.Start()
 
 	// Launch core management with state machine
-	launcher := NewCoreProcessLauncher(
+	launcher = NewCoreProcessLauncher(
 		coreURL,
 		logger.Sugar(),
 		stateMachine,
@@ -199,6 +215,15 @@ func main() {
 		<-sigCh
 		logger.Info("Received shutdown signal")
 		stateMachine.SendEvent(state.EventShutdown)
+		// IMPORTANT: Call handleShutdown() directly to terminate core process
+		// Same as shutdownFunc - we can't rely on state transition goroutine
+		if launcher != nil {
+			launcher.handleShutdown()
+		}
+		// IMPORTANT: Quit the tray UI BEFORE cancelling context
+		logger.Info("Quitting system tray from signal handler")
+		trayApp.Quit()
+		stateMachine.Shutdown()
 		cancel()
 	}()
 
@@ -276,12 +301,12 @@ func resolveCoreURL() string {
 
 	// Priority 2: Try socket/pipe communication first (preferred for local tray-core communication)
 	// This provides better security (no API key needed) and performance
+	// Note: We return the socket path even if it doesn't exist yet, because:
+	//   - When launching core: Core will create the socket
+	//   - When connecting: isCoreAlreadyRunning() will check existence and fall back if needed
 	socketPath := api.DetectSocketPath("") // Empty dataDir uses default ~/.mcpproxy
 	if socketPath != "" {
-		// Check if socket/pipe actually exists before using it
-		if isSocketAvailable(socketPath) {
-			return socketPath
-		}
+		return socketPath
 	}
 
 	// Priority 3: Fall back to TCP (HTTP/HTTPS)
@@ -684,10 +709,14 @@ func buildCoreArgs(coreURL string) []string {
 		args = append(args, "--config", cfg)
 	}
 
-	if listen := listenArgFromURL(coreURL); listen != "" {
-		args = append(args, "--listen", listen)
-	} else if listenEnv := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listenEnv != "" {
-		args = append(args, "--listen", listenEnv)
+	// IMPORTANT: Only add --listen for TCP/HTTP connections
+	// Socket/pipe connections should NOT have --listen (core enables socket by default)
+	if !isSocketEndpoint(coreURL) {
+		if listen := listenArgFromURL(coreURL); listen != "" {
+			args = append(args, "--listen", listen)
+		} else if listenEnv := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listenEnv != "" {
+			args = append(args, "--listen", listenEnv)
+		}
 	}
 
 	if extra := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_EXTRA_ARGS")); extra != "" {
@@ -939,7 +968,9 @@ func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, tran
 				cpl.handleGeneralError()
 
 			case state.StateShuttingDown:
-				cpl.handleShutdown()
+				// handleShutdown() is called directly in shutdownFunc and signal handler
+				// to ensure it executes before context cancellation kills the goroutines.
+				// No action needed here.
 			}
 		}
 	}
