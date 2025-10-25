@@ -68,3 +68,8 @@ func (a *App) Run(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
+
+// Quit stops the system tray application (stub version - does nothing)
+func (a *App) Quit() {
+	// No-op in stub version
+}
