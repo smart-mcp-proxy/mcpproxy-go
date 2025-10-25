@@ -167,9 +167,11 @@ func TestValidateDataDirectory_InsecurePermissions(t *testing.T) {
 	require.NoError(t, err)
 
 	err = ValidateDataDirectory(tmpDir, logger)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "insecure permissions")
-	assert.Contains(t, err.Error(), "chmod 0700")
+	require.NoError(t, err)
+
+	info, statErr := os.Stat(tmpDir)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0700), info.Mode().Perm(), "validate should tighten permissions automatically")
 }
 
 func TestValidateDataDirectory_CreateIfNotExists(t *testing.T) {

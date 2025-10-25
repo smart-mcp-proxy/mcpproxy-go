@@ -39,7 +39,7 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 
 	// Create data directory if it doesn't exist
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 	}
 
@@ -91,7 +91,7 @@ func Load() (*Config, error) {
 			}
 
 			// Create data directory if it doesn't exist
-			if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+			if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 				return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 			}
 
@@ -124,7 +124,7 @@ func Load() (*Config, error) {
 	}
 
 	// Create data directory if it doesn't exist
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 	}
 
@@ -350,7 +350,7 @@ func SaveConfig(cfg *Config, path string) error {
 
 	// Ensure directory exists
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		fmt.Printf("[DEBUG] SaveConfig - MkdirAll failed: %v\n", err)
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
