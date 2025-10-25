@@ -19,6 +19,7 @@ import (
 	"mcpproxy-go/internal/observability"
 	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/transport"
 )
 
 const (
@@ -117,9 +118,22 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 }
 
 // apiKeyAuthMiddleware creates middleware for API key authentication
+// Connections from Unix socket/named pipe (tray) are trusted and skip API key validation
 func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// SECURITY: Trust connections from tray (Unix socket/named pipe)
+			// These connections are authenticated via OS-level permissions (UID/SID matching)
+			source := transport.GetConnectionSource(r.Context())
+			if source == transport.ConnectionSourceTray {
+				s.logger.Debug("Tray connection - skipping API key validation",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr),
+					zap.String("source", string(source)))
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Get config from controller
 			configInterface := s.controller.GetCurrentConfig()
 			if configInterface == nil {
@@ -142,12 +156,18 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Validate API key
+			// TCP connections require API key validation
 			if !s.validateAPIKey(r, cfg.APIKey) {
+				s.logger.Warn("TCP connection with invalid API key",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, http.StatusUnauthorized, "Invalid or missing API key")
 				return
 			}
 
+			s.logger.Debug("TCP connection with valid API key",
+				zap.String("path", r.URL.Path),
+				zap.String("remote_addr", r.RemoteAddr))
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -252,6 +272,9 @@ func (s *Server) setupRoutes() {
 
 		// Status endpoint
 		r.Get("/status", s.handleGetStatus)
+
+		// Info endpoint (server version, web UI URL, etc.)
+		r.Get("/info", s.handleGetInfo)
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
@@ -391,6 +414,83 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// handleGetInfo returns server information including version and web UI URL
+// This endpoint is designed for tray-core communication and returns essential
+// server metadata without requiring detailed status information
+func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
+	listenAddr := s.controller.GetListenAddress()
+
+	// Build web UI URL from listen address (includes API key if configured)
+	webUIURL := s.buildWebUIURLWithAPIKey(listenAddr, r)
+
+	// Get version from build info or environment
+	version := getBuildVersion()
+
+	response := map[string]interface{}{
+		"version":     version,
+		"web_ui_url":  webUIURL,
+		"listen_addr": listenAddr,
+		"endpoints": map[string]interface{}{
+			"http":   listenAddr,
+			"socket": getSocketPath(), // Returns socket path if enabled, empty otherwise
+		},
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// buildWebUIURL constructs the web UI URL based on listen address and request
+func buildWebUIURL(listenAddr string, r *http.Request) string {
+	if listenAddr == "" {
+		return ""
+	}
+
+	// Determine protocol from request
+	protocol := "http"
+	if r.TLS != nil {
+		protocol = "https"
+	}
+
+	// If listen address is just a port, use localhost
+	if strings.HasPrefix(listenAddr, ":") {
+		return fmt.Sprintf("%s://127.0.0.1%s/ui/", protocol, listenAddr)
+	}
+
+	// Use the listen address as-is
+	return fmt.Sprintf("%s://%s/ui/", protocol, listenAddr)
+}
+
+// buildWebUIURLWithAPIKey constructs the web UI URL with API key included if configured
+func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) string {
+	baseURL := buildWebUIURL(listenAddr, r)
+	if baseURL == "" {
+		return ""
+	}
+
+	// Add API key if configured
+	cfg, err := s.controller.GetConfig()
+	if err == nil && cfg.APIKey != "" {
+		return baseURL + "?apikey=" + cfg.APIKey
+	}
+
+	return baseURL
+}
+
+// getBuildVersion returns the build version from build-time variables
+// This should be set during build using -ldflags
+var buildVersion = "development"
+
+func getBuildVersion() string {
+	return buildVersion
+}
+
+// getSocketPath returns the socket path if socket communication is enabled
+func getSocketPath() string {
+	// This would ideally be retrieved from the config
+	// For now, return empty string as socket info is not critical for this endpoint
+	return ""
 }
 
 func (s *Server) handleGetServers(w http.ResponseWriter, _ *http.Request) {

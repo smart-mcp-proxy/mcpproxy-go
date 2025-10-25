@@ -196,6 +196,12 @@ func (a *App) SetConnectionState(state ConnectionState) {
 	a.logger.Debug("Updated connection state", zap.String("state", string(state)))
 	a.instrumentation.NotifyConnectionState(state)
 
+	// Update sync manager connection state - only sync when fully connected
+	if a.syncManager != nil {
+		connected := (state == ConnectionStateConnected)
+		a.syncManager.SetConnected(connected)
+	}
+
 	if !a.coreMenusReady || a.statusItem == nil {
 		return
 	}
@@ -380,6 +386,11 @@ func (a *App) cleanup() {
 	a.cancel()
 }
 
+// Quit exits the system tray application
+func (a *App) Quit() {
+	systray.Quit()
+}
+
 func (a *App) consumeStatusUpdates() {
 	statusCh := a.server.StatusChannel()
 	if statusCh == nil {
@@ -517,12 +528,21 @@ func (a *App) onReady() {
 
 	// --- Initialize Managers ---
 	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
-	a.syncManager = NewSynchronizationManager(a.stateManager, a.menuManager, a.logger)
+	a.syncManager = NewSynchronizationManager(a.stateManager, a.server, a.menuManager, a.logger)
 	a.syncManager.SetOnSync(func() {
 		a.instrumentation.NotifyMenus()
 	})
+
+	// Set initial connection state on sync manager
+	// This ensures sync works when connecting to existing core (not launched by tray)
+	currentState := a.getConnectionState()
+	connected := (currentState == ConnectionStateConnected)
+	a.syncManager.SetConnected(connected)
+	a.logger.Info("Tray menus initialized; starting synchronization managers",
+		zap.String("initial_state", string(currentState)),
+		zap.Bool("sync_enabled", connected))
+
 	a.instrumentation.NotifyMenus()
-	a.logger.Info("Tray menus initialized; starting synchronization managers")
 
 	// --- Set Action Callback ---
 	// Centralized action handler for all menu-driven server actions
@@ -801,11 +821,8 @@ func (a *App) updateStatusFromData(statusData interface{}) {
 	message, _ := status["message"].(string)
 	listenAddr, _ := status["listen_addr"].(string)
 	serverRunning := a.server != nil && a.server.IsRunning()
-	if listenAddr == "" && a.server != nil {
-		if addr := a.server.GetListenAddress(); addr != "" {
-			listenAddr = addr
-		}
-	}
+	// IMPORTANT: Only use listen_addr from SSE status (source of truth from core /api/v1/info)
+	// Do NOT fall back to a.server.GetListenAddress() as it may be stale/wrong
 
 	lowerMessage := strings.ToLower(message)
 	portConflict := phase == phaseError && strings.Contains(lowerMessage, "port") && strings.Contains(lowerMessage, "in use")

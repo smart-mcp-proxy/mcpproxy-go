@@ -16,7 +16,6 @@ import (
 	"fyne.io/systray"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
 )
 
 const (
@@ -154,23 +153,13 @@ func (m *ServerStateManager) GetAllServers() ([]map[string]interface{}, error) {
 				m.logger.Debug("Database not available, returning cached server data")
 				return m.allServers, nil
 			}
-			// No cached data available, return cached data or fallback to avoid UI flickering
+			// No cached data available, return error
 			m.logger.Debug("Database not available and no cached data, preserving UI state")
-			// Return error to indicate data is not available, let caller handle gracefully
 			return nil, fmt.Errorf("database not available and no cached data: %w", err)
 		}
-		fallback, fbErr := m.loadServersFromConfig()
-		if fbErr != nil || len(fallback) == 0 {
-			m.logger.Error("Failed to get fresh all servers data", zap.Error(err))
-			return nil, err
-		}
-
-		m.logger.Warn("Using fallback server list from configuration",
-			zap.Error(err),
-			zap.Int("servers", len(fallback)))
-		m.allServers = fallback
-		m.lastUpdate = time.Now()
-		return cloneServerData(fallback), nil
+		// API error - return error without fallback to enforce tray/core separation
+		m.logger.Error("Failed to get fresh all servers data", zap.Error(err))
+		return nil, err
 	}
 
 	// Only update cache if we got valid data (non-empty or intentionally empty)
@@ -201,23 +190,13 @@ func (m *ServerStateManager) GetQuarantinedServers() ([]map[string]interface{}, 
 				m.logger.Debug("Database not available, returning cached quarantine data")
 				return m.quarantinedServers, nil
 			}
-			// No cached data available, return error to preserve UI state
+			// No cached data available, return error
 			m.logger.Debug("Database not available and no cached data, preserving quarantine UI state")
 			return nil, fmt.Errorf("database not available and no cached data: %w", err)
 		}
-		fallback, fbErr := m.loadServersFromConfig()
-		if fbErr != nil || len(fallback) == 0 {
-			m.logger.Error("Failed to get fresh quarantined servers data", zap.Error(err))
-			return nil, err
-		}
-
-		quarantineFallback := filterQuarantinedServers(fallback)
-		m.logger.Warn("Using fallback quarantine list from configuration",
-			zap.Error(err),
-			zap.Int("servers", len(quarantineFallback)))
-		m.quarantinedServers = quarantineFallback
-		m.lastQuarantineUpdate = time.Now()
-		return cloneServerData(quarantineFallback), nil
+		// API error - return error without fallback to enforce tray/core separation
+		m.logger.Error("Failed to get fresh quarantined servers data", zap.Error(err))
+		return nil, err
 	}
 
 	// Only update cache if we got valid data
@@ -878,6 +857,7 @@ func (m *MenuManager) updateServerActionMenus(serverName string, server map[stri
 // SynchronizationManager coordinates between state manager and menu manager
 type SynchronizationManager struct {
 	stateManager        *ServerStateManager
+	server              ServerInterface // Added to support API mode
 	menuManager         *MenuManager
 	logger              *zap.SugaredLogger
 	onSync              func()
@@ -888,13 +868,18 @@ type SynchronizationManager struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	syncTimer *time.Timer
+
+	// Connection state tracking
+	connMu    sync.RWMutex
+	connected bool
 }
 
 // NewSynchronizationManager creates a new synchronization manager
-func NewSynchronizationManager(stateManager *ServerStateManager, menuManager *MenuManager, logger *zap.SugaredLogger) *SynchronizationManager {
+func NewSynchronizationManager(stateManager *ServerStateManager, server ServerInterface, menuManager *MenuManager, logger *zap.SugaredLogger) *SynchronizationManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &SynchronizationManager{
 		stateManager: stateManager,
+		server:       server,
 		menuManager:  menuManager,
 		logger:       logger,
 		ctx:          ctx,
@@ -905,6 +890,34 @@ func NewSynchronizationManager(stateManager *ServerStateManager, menuManager *Me
 // SetOnSync registers a callback invoked after successful menu synchronization.
 func (m *SynchronizationManager) SetOnSync(cb func()) {
 	m.onSync = cb
+}
+
+// SetConnected updates the connection state and controls whether syncing is allowed
+func (m *SynchronizationManager) SetConnected(connected bool) {
+	m.connMu.Lock()
+	defer m.connMu.Unlock()
+
+	wasConnected := m.connected
+	m.connected = connected
+
+	if connected && !wasConnected {
+		m.logger.Info("Core connected - enabling menu synchronization")
+		// Trigger immediate sync when transitioning to connected
+		go func() {
+			if err := m.SyncNow(); err != nil {
+				m.logger.Error("Initial sync after connection failed", zap.Error(err))
+			}
+		}()
+	} else if !connected && wasConnected {
+		m.logger.Info("Core disconnected - pausing menu synchronization")
+	}
+}
+
+// isConnected checks if core connection is established
+func (m *SynchronizationManager) isConnected() bool {
+	m.connMu.RLock()
+	defer m.connMu.RUnlock()
+	return m.connected
 }
 
 // Start begins background synchronization
@@ -959,18 +972,14 @@ func (m *SynchronizationManager) syncLoop() {
 
 // performSync performs the actual synchronization
 func (m *SynchronizationManager) performSync() error {
-	// Check if the state manager's server is available and running
-	// If not, skip the sync to avoid database errors
-	//
-	// FIXME: remove this if no issue with DB connection
-	//
-	// if m.stateManager.server != nil && !m.stateManager.server.IsRunning() {
-	// 	m.logger.Debug("Server is stopped, skipping synchronization")
-	// 	return nil
-	// }
+	// Only perform sync if core is connected
+	if !m.isConnected() {
+		m.logger.Debug("Core not connected, skipping synchronization")
+		return nil
+	}
 
-	// Get current state with error handling for database issues
-	allServers, err := m.stateManager.GetAllServers()
+	// Use server interface to get all servers (works in both local and API mode)
+	allServers, err := m.server.GetAllServers()
 	if err != nil {
 		// Check if it's a database closed error and handle gracefully
 		if strings.Contains(err.Error(), "database not available") {
@@ -994,7 +1003,8 @@ func (m *SynchronizationManager) performSync() error {
 		m.menuManager.UpdateUpstreamServersMenu(allServers)
 	}
 
-	quarantinedServers, err := m.stateManager.GetQuarantinedServers()
+	// Use server interface to get quarantined servers (works in both local and API mode)
+	quarantinedServers, err := m.server.GetQuarantinedServers()
 	if err != nil {
 		// Check if it's a database closed error and handle gracefully
 		if strings.Contains(err.Error(), "database not available") {
@@ -1104,56 +1114,3 @@ func (m *MenuManager) LatestQuarantineSnapshot() []map[string]interface{} {
 	return cloneServerData(m.latestQuarantined)
 }
 
-func filterQuarantinedServers(list []map[string]interface{}) []map[string]interface{} {
-	if len(list) == 0 {
-		return nil
-	}
-
-	var filtered []map[string]interface{}
-	for _, server := range list {
-		if server == nil {
-			continue
-		}
-		if quarantined, ok := server["quarantined"].(bool); ok && quarantined {
-			filtered = append(filtered, server)
-		}
-	}
-	return filtered
-}
-
-func (m *ServerStateManager) loadServersFromConfig() ([]map[string]interface{}, error) {
-	if m.server == nil {
-		return nil, fmt.Errorf("server interface not available")
-	}
-
-	cfgPath := strings.TrimSpace(m.server.GetConfigPath())
-	if cfgPath == "" {
-		return nil, fmt.Errorf("config path unavailable")
-	}
-
-	cfg, err := config.LoadFromFile(cfgPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load config from %s: %w", cfgPath, err)
-	}
-
-	results := make([]map[string]interface{}, 0, len(cfg.Servers))
-	for _, srv := range cfg.Servers {
-		results = append(results, map[string]interface{}{
-			"name":            srv.Name,
-			"url":             srv.URL,
-			"command":         srv.Command,
-			"protocol":        srv.Protocol,
-			"enabled":         srv.Enabled,
-			"quarantined":     srv.Quarantined,
-			"connected":       false,
-			"connecting":      false,
-			"tool_count":      0,
-			"last_error":      "core API unavailable",
-			"status":          "unavailable",
-			"should_retry":    false,
-			"retry_count":     0,
-			"last_retry_time": time.Time{},
-		})
-	}
-	return results, nil
-}

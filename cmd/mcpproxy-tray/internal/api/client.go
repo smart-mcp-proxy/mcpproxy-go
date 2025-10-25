@@ -10,7 +10,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -91,22 +90,87 @@ type Client struct {
 	lastServerState string // Hash of server states to detect changes
 }
 
-// NewClient creates a new API client
-func NewClient(baseURL string, logger *zap.SugaredLogger) *Client {
+// NewClient creates a new API client with automatic socket/pipe support
+func NewClient(endpoint string, logger *zap.SugaredLogger) *Client {
 	// Create TLS config that trusts the local CA
 	tlsConfig := createTLSConfig(logger)
+
+	// Create custom transport
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+
+	// Check if we should use a custom dialer (Unix socket or Windows pipe)
+	dialer, baseURL, err := CreateDialer(endpoint)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("Failed to create custom dialer, falling back to TCP",
+				"endpoint", endpoint,
+				"error", err)
+		}
+		baseURL = endpoint
+		dialer = nil
+	}
+
+	// Apply custom dialer if available
+	if dialer != nil {
+		transport.DialContext = dialer
+		if logger != nil {
+			logger.Infow("Using socket/pipe connection",
+				"endpoint", endpoint,
+				"base_url", baseURL)
+		}
+	} else {
+		if logger != nil {
+			logger.Infow("Using TCP connection", "endpoint", endpoint)
+		}
+	}
 
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 0,
-			Transport: &http.Transport{
-				TLSClientConfig: tlsConfig,
-			},
+			Timeout:   0,
+			Transport: transport,
 		},
 		logger:            logger,
 		statusCh:          make(chan StatusUpdate, 10),
 		connectionStateCh: make(chan tray.ConnectionState, 8),
+	}
+}
+
+// CreateHTTPClient creates an HTTP client with socket/pipe awareness and optional timeout.
+// This is used by both the API client and health monitor to ensure consistent behavior.
+func CreateHTTPClient(endpoint string, timeout time.Duration, logger *zap.SugaredLogger) *http.Client {
+	// Create TLS config that trusts the local CA
+	tlsConfig := createTLSConfig(logger)
+
+	// Create custom transport
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+
+	// Check if we should use a custom dialer (Unix socket or Windows pipe)
+	dialer, _, err := CreateDialer(endpoint)
+	if err != nil {
+		if logger != nil {
+			logger.Debug("Using standard TCP dialer",
+				"endpoint", endpoint,
+				"error", err)
+		}
+	}
+
+	// Apply custom dialer if available
+	if dialer != nil {
+		transport.DialContext = dialer
+		if logger != nil {
+			logger.Debug("Using socket/pipe dialer for HTTP client",
+				"endpoint", endpoint)
+		}
+	}
+
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
 	}
 }
 
@@ -132,7 +196,7 @@ func (c *Client) SetAPIKey(apiKey string) {
 
 // StartSSE starts the Server-Sent Events connection for real-time updates with enhanced retry logic
 func (c *Client) StartSSE(ctx context.Context) error {
-	c.logger.Info("Starting enhanced SSE connection for real-time updates")
+	c.logger.Info("Starting enhanced SSE connection for real-time updates over socket/pipe transport")
 
 	sseCtx, cancel := context.WithCancel(ctx)
 	c.sseCancel = cancel
@@ -170,7 +234,7 @@ func (c *Client) StartSSE(ctx context.Context) error {
 
 			if attemptCount > 1 {
 				if c.logger != nil {
-					c.logger.Info("SSE reconnection attempt",
+					c.logger.Infow("SSE reconnection attempt",
 						"attempt", attemptCount,
 						"max_retries", maxRetries,
 						"delay", delay,
@@ -189,7 +253,7 @@ func (c *Client) StartSSE(ctx context.Context) error {
 			// Check if we've exceeded max retries
 			if attemptCount > maxRetries {
 				if c.logger != nil {
-					c.logger.Error("SSE connection failed after max retries",
+					c.logger.Errorw("SSE connection failed after max retries",
 						"attempts", attemptCount,
 						"max_retries", maxRetries,
 						"base_url", c.baseURL)
@@ -202,7 +266,7 @@ func (c *Client) StartSSE(ctx context.Context) error {
 
 			if err := c.connectSSE(sseCtx); err != nil {
 				if c.logger != nil {
-					c.logger.Error("SSE connection error",
+					c.logger.Errorw("SSE connection error",
 						"error", err,
 						"attempt", attemptCount,
 						"max_retries", maxRetries,
@@ -221,7 +285,7 @@ func (c *Client) StartSSE(ctx context.Context) error {
 
 			// Successful connection - reset attempt count
 			if attemptCount > 1 && c.logger != nil {
-				c.logger.Info("SSE connection established successfully",
+				c.logger.Infow("SSE connection established successfully",
 					"after_attempts", attemptCount,
 					"base_url", c.baseURL)
 			}
@@ -317,7 +381,7 @@ func (c *Client) processSSEEvent(eventType, data string) {
 		var statusUpdate StatusUpdate
 		if err := json.Unmarshal([]byte(data), &statusUpdate); err != nil {
 			if c.logger != nil {
-				c.logger.Error("Failed to parse SSE status data", "error", err)
+				c.logger.Errorw("Failed to parse SSE status data", "error", err)
 			}
 			return
 		}
@@ -337,9 +401,34 @@ func (c *Client) publishConnectionState(state tray.ConnectionState) {
 	case c.connectionStateCh <- state:
 	default:
 		if c.logger != nil {
-			c.logger.Debug("Dropping connection state update", "state", state)
+			c.logger.Debugw("Dropping connection state update", "state", state)
 		}
 	}
+}
+
+// GetReady checks if the core API is ready to serve requests
+func (c *Client) GetReady(ctx context.Context) error {
+	url, err := c.buildURL("/ready")
+	if err != nil {
+		return fmt.Errorf("failed to build ready URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("failed to create ready request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("ready request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ready endpoint returned status %d", resp.StatusCode)
+	}
+
+	return nil
 }
 
 // GetServers fetches the list of servers from the API
@@ -510,6 +599,26 @@ func (c *Client) GetServerTools(serverName string) ([]Tool, error) {
 }
 
 // SearchTools searches for tools
+// GetInfo fetches server information from /api/v1/info endpoint
+func (c *Client) GetInfo() (map[string]interface{}, error) {
+	resp, err := c.makeRequest("GET", "/api/v1/info", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("API error: %s", resp.Error)
+	}
+
+	// Return the full response including the "data" field
+	result := map[string]interface{}{
+		"success": resp.Success,
+		"data":    resp.Data,
+	}
+
+	return result, nil
+}
+
 func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 	endpoint := fmt.Sprintf("/api/v1/index/search?q=%s&limit=%d", query, limit)
 
@@ -553,23 +662,42 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 
 // OpenWebUI opens the web control panel in the default browser
 func (c *Client) OpenWebUI() error {
-	url, err := c.buildURL("/ui/")
+	// Get the actual web UI URL from the /api/v1/info endpoint
+	// This ensures we use the correct HTTP URL even when connected via socket
+	resp, err := c.makeRequest("GET", "/api/v1/info", nil)
 	if err != nil {
-		return err
+		if c.logger != nil {
+			c.logger.Errorw("Failed to get server info", "error", err)
+		}
+		return fmt.Errorf("failed to get server info: %w", err)
 	}
-	if c.apiKey != "" {
+
+	// Extract web_ui_url from response
+	if resp.Data == nil {
+		return fmt.Errorf("no data in response from /api/v1/info")
+	}
+
+	webUIURL, ok := resp.Data["web_ui_url"].(string)
+	if !ok || webUIURL == "" {
+		return fmt.Errorf("web_ui_url not found in server info")
+	}
+
+	// Add API key if not using socket communication
+	url := webUIURL
+	if c.apiKey != "" && !strings.HasPrefix(c.baseURL, "unix://") && !strings.HasPrefix(c.baseURL, "npipe://") {
 		separator := "?"
 		if strings.Contains(url, "?") {
 			separator = "&"
 		}
 		url += separator + "apikey=" + c.apiKey
 	}
+
 	displayURL := url
 	if c.apiKey != "" {
 		displayURL = strings.ReplaceAll(url, c.apiKey, maskForLog(c.apiKey))
 	}
 	if c.logger != nil {
-		c.logger.Info("Opening web control panel", "url", displayURL)
+		c.logger.Infow("Opening web control panel", "url", displayURL)
 	}
 
 	switch runtime.GOOS {
@@ -577,7 +705,7 @@ func (c *Client) OpenWebUI() error {
 		cmd := exec.Command("open", url)
 		if err := cmd.Run(); err != nil {
 			if c.logger != nil {
-				c.logger.Error("Failed to open web control panel", "url", displayURL, "error", err)
+				c.logger.Errorw("Failed to open web control panel", "url", displayURL, "error", err)
 			}
 			return fmt.Errorf("failed to open web control panel: %w", err)
 		}
@@ -590,7 +718,7 @@ func (c *Client) OpenWebUI() error {
 		// Fallback to cmd start
 		if err := exec.Command("cmd", "/c", "start", "", url).Run(); err != nil {
 			if c.logger != nil {
-				c.logger.Error("Failed to open web control panel", "url", displayURL, "error", err)
+				c.logger.Errorw("Failed to open web control panel", "url", displayURL, "error", err)
 			}
 			return fmt.Errorf("failed to open web control panel: %w", err)
 		}
@@ -635,7 +763,7 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 			if attempt < maxRetries {
 				delay := time.Duration(attempt) * baseDelay
 				if c.logger != nil {
-					c.logger.Debug("Request failed, retrying",
+					c.logger.Debugw("Request failed, retrying",
 						"attempt", attempt,
 						"max_retries", maxRetries,
 						"delay", delay,
@@ -678,7 +806,7 @@ func (c *Client) processResponse(resp *http.Response, attempt, maxRetries int, b
 		if attempt < maxRetries {
 			delay := time.Duration(attempt*attempt) * baseDelay
 			if c.logger != nil {
-				c.logger.Warn("Rate limited, retrying",
+				c.logger.Warnw("Rate limited, retrying",
 					"attempt", attempt,
 					"delay", delay,
 					"status", resp.StatusCode)
@@ -692,7 +820,7 @@ func (c *Client) processResponse(resp *http.Response, attempt, maxRetries int, b
 		if attempt < maxRetries {
 			delay := time.Duration(attempt) * baseDelay
 			if c.logger != nil {
-				c.logger.Warn("Server error, retrying",
+				c.logger.Warnw("Server error, retrying",
 					"attempt", attempt,
 					"status", resp.StatusCode,
 					"delay", delay)
@@ -755,29 +883,6 @@ func keys(m map[string]interface{}) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func (c *Client) listenAddress() string {
-	parsed, err := url.Parse(c.baseURL)
-	if err != nil {
-		return ""
-	}
-
-	host := parsed.Hostname()
-	if host == "" {
-		host = "127.0.0.1"
-	}
-
-	port := parsed.Port()
-	if port == "" {
-		if strings.EqualFold(parsed.Scheme, "https") {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-
-	return net.JoinHostPort(host, port)
 }
 
 func maskForLog(key string) string {

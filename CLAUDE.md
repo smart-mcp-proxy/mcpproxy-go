@@ -199,7 +199,7 @@ GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray 
 #### Tray Application Features
 - **Auto-starts core server** if not running
 - **Port conflict resolution** built-in
-- **Real-time updates** via SSE connection to core API
+- **Real-time updates** via Server-Sent Events (SSE) over socket/pipe connection
 - **Cross-platform** system tray integration
 - **Server management** via GUI menus
 
@@ -214,15 +214,24 @@ The tray application uses a robust state machine architecture for reliable core 
 
 **Key Components**:
 - **Process Monitor** (`cmd/mcpproxy-tray/internal/monitor/process.go`): Monitors core subprocess lifecycle
-- **Health Monitor** (`cmd/mcpproxy-tray/internal/monitor/health.go`): Performs HTTP health checks on core API
-- **State Machine** (`cmd/mcpproxy-tray/internal/state/machine.go`): Manages state transitions and retry logic
+- **Health Monitor** (`cmd/mcpproxy-tray/internal/monitor/health.go`): Performs socket-aware HTTP health checks on core API (`/healthz`, `/readyz`)
+- **State Machine** (`cmd/mcpproxy-tray/internal/state/machine.go`): Manages state transitions and automatic retry logic
 
 **Error Classification**:
 Core process exit codes are mapped to specific state machine events:
 - Exit code 2 (port conflict) → `EventPortConflict`
 - Exit code 3 (database locked) → `EventDBLocked`
 - Exit code 4 (config error) → `EventConfigError`
+- Exit code 5 (permission error) → `EventPermissionError`
 - Other errors → `EventGeneralError`
+
+**Automatic Retry Logic**:
+Error states automatically retry core launch with exponential backoff:
+- `StateCoreErrorGeneral`: 2 retries with 3s delay (3 total attempts)
+- `StateCoreErrorPortConflict`: 2 retries with 10s delay
+- `StateCoreErrorDBLocked`: 3 retries with 5s delay
+- After max retries exceeded → transitions to `StateFailed`
+- Retry count and attempts logged for transparency
 
 **Development Environment Variables**:
 - `MCPPROXY_TRAY_SKIP_CORE=1` - Skip core launch (for development)
@@ -277,6 +286,119 @@ Core process exit codes are mapped to specific state machine events:
   - `internal/api/` - Enhanced API client with exponential backoff
 - **`internal/logs/`** - Structured logging with per-server log files
 
+### Tray-Core Communication (Unix Sockets / Named Pipes)
+
+MCPProxy uses platform-specific local IPC for secure, low-latency communication between the tray application and core server:
+
+**Architecture**:
+- **Dual Listener Design**: Core server accepts connections on both TCP (for browsers/remote) and socket/pipe (for tray)
+- **Unified Socket Transport**: Tray uses socket/pipe for ALL communication - both API calls AND Server-Sent Events (SSE)
+- **No Hybrid Mode**: All HTTP traffic (including persistent SSE connection) is routed through the socket - no TCP fallback
+- **Automatic Detection**: Tray auto-detects socket path from data directory configuration
+- **Zero Configuration**: Works out-of-the-box with no manual setup required
+- **Platform-Specific**: Unix sockets (macOS/Linux), Named pipes (Windows)
+
+**Security Model** (8 layers):
+1. **Data Directory Permissions**: Must be `0700` (user-only access) or server refuses to start (exit code 5)
+2. **Socket File Permissions**: Created with `0600` (user read/write only)
+3. **UID Verification**: Server verifies connecting process belongs to same user
+4. **GID Verification**: Group ownership validated on macOS/Linux
+5. **SID/ACL Verification**: Windows ACLs ensure current user-only access
+6. **Stale Socket Cleanup**: Automatic removal of leftover socket files from crashed processes
+7. **Ownership Validation**: Socket file ownership verified before use
+8. **Connection Source Tagging**: Middleware distinguishes socket vs TCP connections
+
+**API Key Authentication**:
+- **Socket/Pipe connections**: Trusted by default (skip API key validation)
+- **TCP connections**: Require API key authentication
+- **Middleware**: `internal/httpapi/server.go` checks connection source via context
+
+**File Locations**:
+- **macOS/Linux**: `<data-dir>/mcpproxy.sock` (default: `~/.mcpproxy/mcpproxy.sock`)
+- **Windows**: `\\.\pipe\mcpproxy-<username>` (or hashed for custom data-dir)
+- **Override**: `--tray-endpoint` flag or `MCPPROXY_TRAY_ENDPOINT` environment variable
+
+**Implementation Files**:
+- `internal/server/listener.go` - Listener manager and abstraction layer
+- `internal/server/listener_unix.go` - Unix socket implementation (macOS/Linux)
+- `internal/server/listener_darwin.go` - macOS-specific peer credential verification
+- `internal/server/listener_linux.go` - Linux-specific peer credential verification
+- `internal/server/listener_windows.go` - Windows named pipe implementation
+- `internal/server/listener_mux.go` - Multiplexing listener combining TCP + socket/pipe
+- `cmd/mcpproxy-tray/internal/api/dialer.go` - Tray client socket dialer with auto-detection
+- `cmd/mcpproxy-tray/internal/api/dialer_unix.go` - Unix socket dialer (macOS/Linux)
+- `cmd/mcpproxy-tray/internal/api/dialer_windows.go` - Named pipe dialer (Windows)
+- `cmd/mcpproxy-tray/internal/api/client.go` - HTTP client with socket transport (lines 100-118, 318-377)
+
+**How SSE Works Over Socket**:
+
+The tray application uses a unified HTTP client that routes all traffic through the socket:
+
+1. **Custom HTTP Transport**: Creates `http.Transport` with socket-based `DialContext` function
+2. **API Calls**: Standard HTTP requests (`GET /api/v1/info`, `POST /api/v1/servers/{name}/enable`) use socket transport
+3. **SSE Connection**: Persistent HTTP connection to `/events` endpoint also uses socket transport
+4. **Real-time Updates**: Core sends `event: status` messages with `listen_addr` field for tray UI updates
+5. **Single Source of Truth**: Tray UI reads `listen_addr` exclusively from SSE status events (no local fallbacks)
+
+**Configuration**:
+
+Socket/pipe communication is **enabled by default**. You can disable it using:
+
+**1. Command-line Flag**:
+```bash
+# Disable socket communication (clients will use TCP + API key)
+./mcpproxy serve --enable-socket=false
+
+# Explicitly enable (default behavior)
+./mcpproxy serve --enable-socket=true
+```
+
+**2. JSON Configuration File**:
+```json
+{
+  "listen": "127.0.0.1:8080",
+  "enable_socket": false,
+  "mcpServers": [...]
+}
+```
+
+**3. When Running via Tray (Launchpad/Autostart)**:
+
+If you're running the core server via the tray application (e.g., automatically at startup), and want to disable socket communication:
+
+- Edit your config file at `~/.mcpproxy/mcp_config.json`
+- Add or update: `"enable_socket": false`
+- Restart the core server (via tray menu: "Stop Core" → "Start Core")
+
+When socket communication is disabled, the tray application will fall back to TCP connections using the auto-generated API key.
+
+**Usage Examples**:
+```bash
+# Default: Socket auto-created in data directory
+./mcpproxy serve
+
+# Disable socket, use TCP only
+./mcpproxy serve --enable-socket=false
+
+# Custom socket path
+./mcpproxy serve --tray-endpoint=unix:///tmp/custom.sock
+
+# Windows named pipe
+mcpproxy.exe serve --tray-endpoint=npipe:////./pipe/mycustompipe
+
+# Verify socket creation
+ls -la ~/.mcpproxy/mcpproxy.sock
+# Should show: srw------- (socket, user-only permissions)
+
+# Tray automatically connects via socket (no API key needed)
+./mcpproxy-tray
+```
+
+**Testing**:
+- Unit tests: `internal/server/listener_test.go` (13 tests covering TCP, Unix socket, permissions, multiplexing)
+- Dialer tests: `cmd/mcpproxy-tray/internal/api/dialer_test.go` (14 tests covering dialers, auto-detection, URL parsing)
+- E2E tests: `internal/server/socket_e2e_test.go` (3 scenarios: socket without API key, TCP with/without API key, concurrent requests)
+
 ### Key Features
 
 1. **Tool Discovery** - BM25 search across all upstream MCP server tools
@@ -287,6 +409,7 @@ Core process exit codes are mapped to specific state machine events:
 6. **Per-Server Logging** - Individual log files for each upstream server
 7. **Real-time Event System** - Event bus with SSE integration for live updates (Phase 3 refactoring)
 8. **Hot Configuration Reload** - Real-time config changes with event notifications
+9. **Unix Socket/Named Pipe IPC** - Secure local communication between tray and core without API keys (macOS/Linux: Unix sockets, Windows: Named pipes)
 
 ## Configuration
 
@@ -302,6 +425,7 @@ Core process exit codes are mapped to specific state machine events:
   "listen": "127.0.0.1:8080",
   "data_dir": "~/.mcpproxy",
   "api_key": "your-secret-api-key-here",
+  "enable_socket": true,
   "enable_web_ui": true,
   "top_k": 5,
   "tools_limit": 15,

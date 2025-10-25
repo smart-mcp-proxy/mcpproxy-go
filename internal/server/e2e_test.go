@@ -64,9 +64,9 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 		logger:      logger,
 	}
 
-	// Create data directory
+	// Create data directory with secure permissions (0700 required for Unix socket security)
 	dataDir := filepath.Join(tempDir, "data")
-	err = os.MkdirAll(dataDir, 0755)
+	err = os.MkdirAll(dataDir, 0700)
 	require.NoError(t, err)
 
 	// Find available port for test server

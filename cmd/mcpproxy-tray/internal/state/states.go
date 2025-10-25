@@ -37,6 +37,9 @@ const (
 	// StateCoreErrorConfig represents core failed due to configuration error
 	StateCoreErrorConfig State = "core_error_config"
 
+	// StateCoreErrorPermission represents core failed due to permission error
+	StateCoreErrorPermission State = "core_error_permission"
+
 	// StateCoreErrorGeneral represents core failed with general error
 	StateCoreErrorGeneral State = "core_error_general"
 
@@ -77,6 +80,9 @@ const (
 
 	// EventConfigError indicates core failed due to configuration error
 	EventConfigError Event = "config_error"
+
+	// EventPermissionError indicates core failed due to permission error
+	EventPermissionError Event = "permission_error"
 
 	// EventGeneralError indicates core failed with general error
 	EventGeneralError Event = "general_error"
@@ -169,6 +175,14 @@ func GetInfo(state State) Info {
 			IsError:     true,
 			CanRetry:    false,
 			// No timeout - config errors persist until user fixes the config
+		},
+		StateCoreErrorPermission: {
+			Name:        StateCoreErrorPermission,
+			Description: "Core failed due to permission error",
+			UserMessage: "Permission error - data directory must have 0700 permissions (chmod 0700 ~/.mcpproxy)",
+			IsError:     true,
+			CanRetry:    false,
+			// No timeout - permission errors persist until user fixes permissions
 		},
 		StateCoreErrorGeneral: {
 			Name:        StateCoreErrorGeneral,

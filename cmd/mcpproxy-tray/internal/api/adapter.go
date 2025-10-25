@@ -34,10 +34,19 @@ func (a *ServerAdapter) IsRunning() bool {
 	return true
 }
 
-// GetListenAddress returns the listen address (hardcoded since API is available)
+// GetListenAddress returns the listen address from the core's /api/v1/info endpoint
 func (a *ServerAdapter) GetListenAddress() string {
-	// Since we can reach the API, we know it's listening on this address
-	return ":8080"
+	// Get the actual listen address from the core
+	info, err := a.client.GetInfo()
+	if err == nil && info != nil {
+		if data, ok := info["data"].(map[string]interface{}); ok {
+			if addr, ok := data["listen_addr"].(string); ok {
+				return addr
+			}
+		}
+	}
+	// Return empty string if we couldn't get the address (don't return hardcoded value)
+	return ""
 }
 
 // GetUpstreamStats returns upstream server statistics
@@ -79,16 +88,27 @@ func (a *ServerAdapter) StopServer() error {
 
 // GetStatus returns the current server status
 func (a *ServerAdapter) GetStatus() interface{} {
-	listenAddr := a.client.listenAddress()
-	if listenAddr == "" {
-		listenAddr = ":8080"
+	// Get the actual listen address from the core's /api/v1/info endpoint
+	info, err := a.client.GetInfo()
+	listenAddr := ""
+	if err == nil && info != nil {
+		if data, ok := info["data"].(map[string]interface{}); ok {
+			if addr, ok := data["listen_addr"].(string); ok {
+				listenAddr = addr
+			}
+		}
 	}
 
-	servers, err := a.client.GetServers()
-	if err != nil {
+	// Fallback to empty if we couldn't get it
+	if listenAddr == "" {
+		listenAddr = ""  // Empty means tray will show "Status: Running" without address
+	}
+
+	servers, serverErr := a.client.GetServers()
+	if serverErr != nil {
 		return map[string]interface{}{
 			"phase":       "Error",
-			"message":     fmt.Sprintf("API error: %v", err),
+			"message":     fmt.Sprintf("API error: %v", serverErr),
 			"running":     false,
 			"listen_addr": listenAddr,
 		}

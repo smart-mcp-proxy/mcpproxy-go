@@ -2,10 +2,9 @@ module mcpproxy-go
 
 go 1.23.0
 
-toolchain go1.24.5
-
 require (
 	fyne.io/systray v1.11.0
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/blevesearch/bleve/v2 v2.5.2
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf

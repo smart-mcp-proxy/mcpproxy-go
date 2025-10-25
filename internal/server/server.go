@@ -42,10 +42,11 @@ type Server struct {
 	mcpProxy *MCPProxyServer
 
 	// Server control
-	httpServer *http.Server
-	running    bool
-	listenAddr string
-	mu         sync.RWMutex
+	httpServer      *http.Server
+	listenerManager *ListenerManager
+	running         bool
+	listenAddr      string
+	mu              sync.RWMutex
 
 	serverCtx    context.Context
 	serverCancel context.CancelFunc
@@ -631,6 +632,18 @@ func (s *Server) StartServer(ctx context.Context) error {
 		return fmt.Errorf("server is already running")
 	}
 
+	// CRITICAL: Validate data directory security BEFORE starting background goroutine
+	// This ensures permission errors are returned synchronously with proper exit codes
+	cfg := s.runtime.Config()
+	if cfg != nil && cfg.DataDir != "" {
+		if err := ValidateDataDirectory(cfg.DataDir, s.logger); err != nil {
+			s.logger.Error("Data directory security validation failed",
+				zap.Error(err),
+				zap.String("fix", fmt.Sprintf("chmod 0700 %s", cfg.DataDir)))
+			return &PermissionError{Path: cfg.DataDir, Err: err}
+		}
+	}
+
 	// Cancel the old context before creating a new one to avoid race conditions
 	if s.serverCancel != nil {
 		s.serverCancel()
@@ -679,27 +692,53 @@ func (s *Server) StopServer() error {
 	_ = s.logger.Sync()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !s.running {
+		s.mu.Unlock()
 		// Return nil instead of error to prevent race condition logs
 		s.logger.Debug("Server stop requested but server is not running")
 		return nil
 	}
 
+	// Capture httpServer reference while holding the lock
+	httpServer := s.httpServer
+	s.mu.Unlock()
+
 	// Notify about server stopping
 	s.logger.Info("STOPSERVER - Server is running, proceeding with stop")
 	_ = s.logger.Sync()
 
-	// Disconnect upstream servers FIRST to ensure Docker containers are cleaned up
-	// Do this before canceling contexts to avoid interruption
-	s.logger.Info("STOPSERVER - Disconnecting upstream servers EARLY")
+	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
+
+	// STEP 1: Gracefully shutdown HTTP server FIRST to stop accepting new connections
+	// This must happen before we disconnect upstream servers to prevent new requests
+	if httpServer != nil {
+		s.logger.Info("STOPSERVER - Shutting down HTTP server gracefully")
+		_ = s.logger.Sync()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			s.logger.Warn("STOPSERVER - HTTP server forced shutdown due to timeout", zap.Error(err))
+			// Force close if graceful shutdown times out
+			if closeErr := httpServer.Close(); closeErr != nil {
+				s.logger.Error("STOPSERVER - Failed to force close HTTP server", zap.Error(closeErr))
+			}
+		} else {
+			s.logger.Info("STOPSERVER - HTTP server shutdown completed gracefully")
+		}
+		_ = s.logger.Sync()
+	}
+
+	// STEP 2: Disconnect upstream servers AFTER HTTP server is shut down
+	// This ensures no new requests can come in while we're disconnecting
+	s.logger.Info("STOPSERVER - Disconnecting upstream servers")
 	_ = s.logger.Sync()
 	if err := s.runtime.UpstreamManager().DisconnectAll(); err != nil {
-		s.logger.Error("STOPSERVER - Failed to disconnect upstream servers early", zap.Error(err))
+		s.logger.Error("STOPSERVER - Failed to disconnect upstream servers", zap.Error(err))
 		_ = s.logger.Sync()
 	} else {
-		s.logger.Info("STOPSERVER - Successfully disconnected all upstream servers early")
+		s.logger.Info("STOPSERVER - Successfully disconnected all upstream servers")
 		_ = s.logger.Sync()
 	}
 
@@ -716,26 +755,18 @@ func (s *Server) StopServer() error {
 		_ = s.logger.Sync()
 	}
 
-	s.updateStatus(runtime.PhaseStopping, "Server is stopping...")
-
-	// Cancel the server context after cleanup
+	// STEP 3: Cancel the server context to signal other components
 	s.logger.Info("STOPSERVER - Cancelling server context")
 	_ = s.logger.Sync()
+	s.mu.Lock()
 	if s.serverCancel != nil {
 		s.serverCancel()
 	}
 
-	// HTTP server shutdown is now handled by context cancellation in startCustomHTTPServer
-	s.logger.Info("STOPSERVER - HTTP server shutdown is handled by context cancellation")
-	_ = s.logger.Sync()
-
-	// Upstream servers already disconnected early in this method
-	s.logger.Info("STOPSERVER - Upstream servers already disconnected early")
-	_ = s.logger.Sync()
-
 	// Set running to false immediately after server is shut down
 	s.running = false
 	s.listenAddr = ""
+	s.mu.Unlock()
 	s.runtime.SetRunning(false)
 
 	// Notify about server stopped with explicit status update
@@ -777,7 +808,53 @@ func withHSTS(next http.Handler) http.Handler {
 }
 
 // startCustomHTTPServer creates a custom HTTP server that handles MCP endpoints
+// It supports both TCP (for browsers) and Unix socket/named pipe (for tray) listeners
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		return fmt.Errorf("configuration not available")
+	}
+
+	// CRITICAL: Validate data directory security before starting
+	if err := ValidateDataDirectory(cfg.DataDir, s.logger); err != nil {
+		s.logger.Error("Data directory security validation failed",
+			zap.Error(err),
+			zap.String("fix", fmt.Sprintf("chmod 0700 %s", cfg.DataDir)))
+		return &PermissionError{Path: cfg.DataDir, Err: err}
+	}
+
+	// Create listener manager
+	listenerManager := NewListenerManager(&ListenerConfig{
+		DataDir:      cfg.DataDir,
+		TrayEndpoint: cfg.TrayEndpoint, // From config/CLI/env or auto-detect
+		TCPAddress:   cfg.Listen,
+		Logger:       s.logger,
+	})
+
+	// Create TCP listener (for browsers and remote clients)
+	tcpListener, err := listenerManager.CreateTCPListener()
+	if err != nil {
+		return err
+	}
+
+	// Create tray listener (Unix socket or named pipe) if enabled
+	var trayListener *Listener
+	if cfg.EnableSocket {
+		trayListener, err = listenerManager.CreateTrayListener()
+		if err != nil {
+			s.logger.Warn("Failed to create tray listener, tray will use TCP fallback",
+				zap.Error(err))
+			// Continue without tray listener - tray will fall back to TCP
+		}
+	} else {
+		s.logger.Info("Socket communication disabled by configuration, clients will use TCP")
+	}
+
+	// Store listener manager for cleanup
+	s.mu.Lock()
+	s.listenerManager = listenerManager
+	s.mu.Unlock()
+
 	mux := http.NewServeMux()
 
 	// Create a logging wrapper for debugging client connections
@@ -785,11 +862,15 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 
+			// Extract connection source from context
+			source := GetConnectionSource(r.Context())
+
 			// Log incoming request with connection details
 			s.logger.Debug("MCP client request received",
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
 				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("source", string(source)),
 				zap.String("user_agent", r.UserAgent()),
 				zap.String("content_type", r.Header.Get("Content-Type")),
 				zap.String("connection", r.Header.Get("Connection")),
@@ -810,6 +891,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 					zap.String("method", r.Method),
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr),
+					zap.String("source", string(source)),
 					zap.Int("status_code", wrappedWriter.statusCode),
 					zap.Duration("duration", duration),
 				)
@@ -818,6 +900,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 					zap.String("method", r.Method),
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr),
+					zap.String("source", string(source)),
 					zap.Int("status_code", wrappedWriter.statusCode),
 					zap.Duration("duration", duration),
 				)
@@ -862,25 +945,41 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	})
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 
-	cfg := s.runtime.Config()
-	listenAddr := ""
-	if cfg != nil {
-		listenAddr = cfg.Listen
+	// Determine actual TCP address for logging
+	var actualAddr, displayAddr string
+	if tcpListener != nil {
+		actualAddr = tcpListener.Addr().String()
+		displayAddr = resolveDisplayAddress(actualAddr, cfg.Listen)
 	}
 
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		if isAddrInUseError(err) {
-			return &PortInUseError{Address: listenAddr, Err: err}
-		}
-		return fmt.Errorf("failed to bind to %s: %w", listenAddr, err)
+	// Log active listeners
+	activeListeners := []string{}
+	if tcpListener != nil {
+		activeListeners = append(activeListeners, fmt.Sprintf("TCP: %s", displayAddr))
 	}
-	actualAddr := listener.Addr().String()
-	displayAddr := resolveDisplayAddress(actualAddr, listenAddr)
+	if trayListener != nil {
+		activeListeners = append(activeListeners, fmt.Sprintf("Tray: %s", trayListener.Address))
+	}
+
+	s.logger.Info("Active listeners created",
+		zap.Strings("listeners", activeListeners),
+		zap.Int("count", len(activeListeners)))
+
+	// Create multiplexing listener that combines TCP and tray listeners
+	muxListener := &multiplexListener{
+		listeners: []*Listener{},
+		logger:    s.logger,
+	}
+	if tcpListener != nil {
+		muxListener.listeners = append(muxListener.listeners, tcpListener)
+	}
+	if trayListener != nil {
+		muxListener.listeners = append(muxListener.listeners, trayListener)
+	}
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
-		Addr:              listenAddr,
+		Addr:              cfg.Listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 60 * time.Second,  // Increased for better client compatibility
 		ReadTimeout:       120 * time.Second, // Full request read timeout
@@ -889,6 +988,14 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		MaxHeaderBytes:    1 << 20,           // 1MB max header size
 		// Enable connection state tracking for better debugging
 		ConnState: s.logConnectionState,
+		// Tag connections with their source (TCP vs Tray)
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			// Extract source from tagged connection
+			if tc, ok := c.(*taggedConn); ok {
+				return TagConnectionContext(ctx, tc.source)
+			}
+			return TagConnectionContext(ctx, ConnectionSourceTCP) // Default to TCP
+		},
 	}
 	s.running = true
 	s.runtime.SetRunning(true)
@@ -909,26 +1016,26 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 	// Determine protocol for logging
 	protocol := "HTTP"
-	if cfg != nil && cfg.TLS != nil && cfg.TLS.Enabled {
+	if cfg.TLS != nil && cfg.TLS.Enabled {
 		protocol = "HTTPS"
 	}
 
 	s.logger.Info(fmt.Sprintf("Starting MCP %s server with enhanced client stability", protocol),
 		zap.String("protocol", protocol),
 		zap.String("address", actualAddr),
-		zap.String("requested_address", listenAddr),
+		zap.String("requested_address", cfg.Listen),
 		zap.Strings("endpoints", allEndpoints),
 		zap.Duration("read_timeout", 120*time.Second),
 		zap.Duration("write_timeout", 120*time.Second),
 		zap.Duration("idle_timeout", 180*time.Second),
-		zap.String("features", "connection_tracking,graceful_shutdown,enhanced_logging"),
+		zap.String("features", "connection_tracking,graceful_shutdown,enhanced_logging,dual_listener"),
 	)
 
 	// Setup error channel for server communication
 	serverErrCh := make(chan error, 1)
 
 	// Apply TLS configuration if enabled
-	if cfg != nil && cfg.TLS != nil && cfg.TLS.Enabled {
+	if cfg.TLS != nil && cfg.TLS.Enabled {
 		// Setup TLS configuration
 		certsDir := cfg.TLS.CertsDir
 		if certsDir == "" {
@@ -958,7 +1065,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 		// Run the HTTPS server in a goroutine to enable graceful shutdown
 		go func() {
-			if err := tlslocal.ServeWithTLS(s.httpServer, listener, tlsCfg); err != nil && err != http.ErrServerClosed {
+			if err := tlslocal.ServeWithTLS(s.httpServer, muxListener, tlsCfg); err != nil && err != http.ErrServerClosed {
 				s.logger.Error("HTTPS server error", zap.Error(err))
 				s.mu.Lock()
 				s.running = false
@@ -980,7 +1087,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 		// Run the HTTP server in a goroutine to enable graceful shutdown
 		go func() {
-			if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+			if err := s.httpServer.Serve(muxListener); err != nil && err != http.ErrServerClosed {
 				s.logger.Error("HTTP server error", zap.Error(err))
 				s.mu.Lock()
 				s.running = false
@@ -1002,17 +1109,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Wait for either context cancellation or server error
 	select {
 	case <-ctx.Done():
-		s.logger.Info("Server context cancelled, initiating graceful shutdown")
-		// Gracefully shutdown the HTTP server
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			s.logger.Warn("HTTP server forced shutdown due to timeout", zap.Error(err))
-			s.httpServer.Close()
-		} else {
-			s.logger.Info("HTTP server shutdown completed gracefully")
-		}
+		s.logger.Info("Server context cancelled, shutdown will be handled by StopServer")
+		// HTTP server shutdown is now handled synchronously in StopServer()
+		// to avoid race conditions during graceful shutdown
 		return ctx.Err()
 	case err := <-serverErrCh:
 		return err
@@ -1036,10 +1135,18 @@ func (rw *responseWriter) WriteHeader(code int) {
 
 // logConnectionState logs HTTP connection state changes for debugging client issues
 func (s *Server) logConnectionState(conn net.Conn, state http.ConnState) {
+	// Handle cases where conn or RemoteAddr might be nil
+	remoteAddr := "unknown"
+	if conn != nil {
+		if addr := conn.RemoteAddr(); addr != nil {
+			remoteAddr = addr.String()
+		}
+	}
+
 	switch state {
 	case http.StateNew:
 		s.logger.Debug("New client connection established",
-			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("remote_addr", remoteAddr),
 			zap.String("state", "new"))
 	// StateActive and StateIdle removed - too noisy with keep-alive connections and SSE streams
 	// case http.StateActive:
@@ -1052,11 +1159,11 @@ func (s *Server) logConnectionState(conn net.Conn, state http.ConnState) {
 	// 		zap.String("state", "idle"))
 	case http.StateHijacked:
 		s.logger.Debug("Client connection hijacked (likely for upgrade)",
-			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("remote_addr", remoteAddr),
 			zap.String("state", "hijacked"))
 	case http.StateClosed:
 		s.logger.Debug("Client connection closed",
-			zap.String("remote_addr", conn.RemoteAddr().String()),
+			zap.String("remote_addr", remoteAddr),
 			zap.String("state", "closed"))
 	}
 }
