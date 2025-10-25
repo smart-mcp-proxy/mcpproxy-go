@@ -138,7 +138,7 @@ func TestApplyConfig_SaveFailure(t *testing.T) {
 	err = os.Chmod(tmpDir, 0555)
 	require.NoError(t, err)
 	defer func() {
-		_ = os.Chmod(tmpDir, 0755)
+		_ = os.Chmod(tmpDir, 0700)
 	}()
 
 	// Create new config
