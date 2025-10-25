@@ -58,6 +58,13 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.23.10"
+          cache: false  # Disable built-in cache to use explicit cache step below
+
+      - name: Clean Go module cache (macOS workaround)
+        if: runner.os == 'macOS'
+        run: |
+          # Remove potentially corrupted toolchain files
+          rm -rf ~/go/pkg/mod/golang.org/toolchain* || true
 
       - name: Cache Go modules
         uses: actions/cache@v4
