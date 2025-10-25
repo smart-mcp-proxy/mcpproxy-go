@@ -260,8 +260,8 @@ cat > "$TEMP_DIR/Distribution.xml" << EOF
     <options customize="never" require-scripts="true" rootVolumeOnly="true" />
 
     <!-- Define documents displayed at various steps -->
-    <welcome language="en" mime-type="text/rtf">welcome_en.rtf</welcome>
-    <conclusion language="en" mime-type="text/rtf">conclusion_en.rtf</conclusion>
+    <welcome file="welcome_en.rtf" mime-type="text/rtf"/>
+    <conclusion file="conclusion_en.rtf" mime-type="text/rtf"/>
 
     <!-- List all component packages -->
     <pkg-ref id="$BUNDLE_ID.pkg"/>
@@ -290,6 +290,7 @@ EOF
 if [ -f "scripts/installer-resources/welcome_en.rtf" ]; then
     echo "Using external welcome_en.rtf from installer-resources/"
     cp "scripts/installer-resources/welcome_en.rtf" "$TEMP_DIR/welcome_en.rtf"
+    ls -la "$TEMP_DIR/welcome_en.rtf"
 else
     echo "Warning: scripts/installer-resources/welcome_en.rtf not found, using inline fallback"
     cat > "$TEMP_DIR/welcome_en.rtf" << 'EOF'
@@ -312,6 +313,7 @@ fi
 if [ -f "scripts/installer-resources/conclusion_en.rtf" ]; then
     echo "Using external conclusion_en.rtf from installer-resources/"
     cp "scripts/installer-resources/conclusion_en.rtf" "$TEMP_DIR/conclusion_en.rtf"
+    ls -la "$TEMP_DIR/conclusion_en.rtf"
 else
     echo "Warning: scripts/installer-resources/conclusion_en.rtf not found, using inline fallback"
     cat > "$TEMP_DIR/conclusion_en.rtf" << 'EOF'
@@ -332,6 +334,12 @@ Thank you for installing MCP Proxy—enjoy faster, safer MCP tooling.
 }
 EOF
 fi
+
+    # Verify RTF files are in place
+    echo "=== Verifying resources for product PKG ==="
+    ls -la "$TEMP_DIR"/*.rtf 2>/dev/null || echo "Warning: No RTF files found in $TEMP_DIR"
+    echo "=== Distribution.xml contents ==="
+    grep -A2 -E "(welcome|conclusion)" "$TEMP_DIR/Distribution.xml"
 
     # Create product PKG (installer)
     echo "Creating product PKG..."
