@@ -41,8 +41,10 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 	}
 
 	// Skip on Go < 1.23 due to listener address resolution issues
-	if runtime.Version() < "go1.23" {
-		t.Skip("Unix socket E2E test requires Go 1.23+")
+	// Use string prefix matching to properly handle version formats like "go1.21.x", "go1.22.x", etc.
+	goVersion := runtime.Version()
+	if len(goVersion) >= 6 && (goVersion[:6] == "go1.21" || goVersion[:6] == "go1.22") {
+		t.Skip("Unix socket E2E test requires Go 1.23+ (current: " + goVersion + ")")
 	}
 
 	logger := zap.NewNop()
@@ -222,6 +224,12 @@ func TestE2E_DualListener_Concurrent(t *testing.T) {
 		t.Skip("Unix socket E2E test not applicable on Windows")
 	}
 
+	// Skip on Go < 1.23 due to listener address resolution issues
+	goVersion := runtime.Version()
+	if len(goVersion) >= 6 && (goVersion[:6] == "go1.21" || goVersion[:6] == "go1.22") {
+		t.Skip("Unix socket E2E test requires Go 1.23+ (current: " + goVersion + ")")
+	}
+
 	logger := zap.NewNop()
 
 	// Use shorter path in /tmp to avoid macOS socket path length limit (104 chars)
@@ -336,6 +344,12 @@ func TestE2E_SocketPermissions(t *testing.T) {
 
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission test not applicable on Windows")
+	}
+
+	// Skip on Go < 1.23 due to listener address resolution issues
+	goVersion := runtime.Version()
+	if len(goVersion) >= 6 && (goVersion[:6] == "go1.21" || goVersion[:6] == "go1.22") {
+		t.Skip("Unix socket E2E test requires Go 1.23+ (current: " + goVersion + ")")
 	}
 
 	logger := zap.NewNop()
