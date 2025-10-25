@@ -18,10 +18,6 @@ import (
 	"mcpproxy-go/internal/contracts"
 )
 
-// raceEnabled is set to true when tests are run with -race flag
-// This is detected via build tag in race_detector.go
-var raceEnabled = false
-
 // TestE2E_QuarantineConfigApply tests that changing quarantine state via config apply
 // properly updates server state and tool discoverability
 func TestE2E_QuarantineConfigApply(t *testing.T) {
