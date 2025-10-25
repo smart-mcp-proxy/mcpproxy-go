@@ -40,6 +40,11 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 		t.Skip("Unix socket E2E test not applicable on Windows (use named pipe test)")
 	}
 
+	// Skip on Go < 1.23 due to listener address resolution issues
+	if runtime.Version() < "go1.23" {
+		t.Skip("Unix socket E2E test requires Go 1.23+")
+	}
+
 	logger := zap.NewNop()
 
 	// Use shorter path in /tmp to avoid macOS socket path length limit (104 chars)
