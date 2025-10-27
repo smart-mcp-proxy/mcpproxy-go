@@ -138,6 +138,7 @@ jobs:
       - name: Run tests (skip binary E2E tests - not compatible with cross-compilation)
         # Skip tests for Windows ARM64 (cross-compilation - can't run ARM64 binaries on AMD64 runner)
         if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
+        shell: bash
         run: |
           # On Windows, skip internal/server tests (E2E tests timeout after 11 minutes)
           if [ "${{ matrix.goos }}" = "windows" ]; then
