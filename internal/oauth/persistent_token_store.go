@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"mcpproxy-go/internal/storage"
 
 	"github.com/mark3labs/mcp-go/client"
+	transport "github.com/mark3labs/mcp-go/client/transport"
 	"go.uber.org/zap"
 )
 
@@ -46,7 +48,14 @@ func generateServerKey(serverName, serverURL string) string {
 }
 
 // GetToken retrieves the OAuth token from persistent storage
-func (p *PersistentTokenStore) GetToken() (*client.Token, error) {
+func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	p.logger.Info("🔍 Loading OAuth token from persistent storage",
 		zap.String("server_key", p.serverKey))
 
@@ -55,7 +64,7 @@ func (p *PersistentTokenStore) GetToken() (*client.Token, error) {
 		p.logger.Info("❌ No stored OAuth token found",
 			zap.String("server_key", p.serverKey),
 			zap.Error(err))
-		return nil, err
+		return nil, transport.ErrNoToken
 	}
 
 	// Check if token is expired
@@ -88,7 +97,14 @@ func (p *PersistentTokenStore) GetToken() (*client.Token, error) {
 }
 
 // SaveToken stores the OAuth token to persistent storage
-func (p *PersistentTokenStore) SaveToken(token *client.Token) error {
+func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Token) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	p.logger.Info("💾 Saving OAuth token to persistent storage",
 		zap.String("token_type", token.TokenType),
 		zap.Time("expires_at", token.ExpiresAt))

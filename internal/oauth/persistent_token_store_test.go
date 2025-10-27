@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func TestPersistentTokenStore(t *testing.T) {
 	tokenStore := NewPersistentTokenStore("test-server", "https://test.example.com/mcp", db)
 
 	// Test case 1: Get non-existent token
-	_, err = tokenStore.GetToken()
+	_, err = tokenStore.GetToken(context.Background())
 	if err == nil {
 		t.Error("Expected error when getting non-existent token")
 	}
@@ -42,13 +43,13 @@ func TestPersistentTokenStore(t *testing.T) {
 		Scope:        "mcp.read mcp.write",
 	}
 
-	err = tokenStore.SaveToken(originalToken)
+	err = tokenStore.SaveToken(context.Background(), originalToken)
 	if err != nil {
 		t.Fatalf("Failed to save token: %v", err)
 	}
 
 	// Test case 3: Retrieve the saved token
-	retrievedToken, err := tokenStore.GetToken()
+	retrievedToken, err := tokenStore.GetToken(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to get token: %v", err)
 	}
@@ -79,12 +80,12 @@ func TestPersistentTokenStore(t *testing.T) {
 		Scope:        "mcp.read mcp.write admin",
 	}
 
-	err = tokenStore.SaveToken(updatedToken)
+	err = tokenStore.SaveToken(context.Background(), updatedToken)
 	if err != nil {
 		t.Fatalf("Failed to save updated token: %v", err)
 	}
 
-	retrievedUpdatedToken, err := tokenStore.GetToken()
+	retrievedUpdatedToken, err := tokenStore.GetToken(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to get updated token: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestPersistentTokenStore(t *testing.T) {
 		t.Fatalf("Failed to clear token: %v", err)
 	}
 
-	_, err = tokenStore.GetToken()
+	_, err = tokenStore.GetToken(context.Background())
 	if err == nil {
 		t.Error("Expected error when getting cleared token")
 	}
@@ -114,12 +115,12 @@ func TestPersistentTokenStore(t *testing.T) {
 		Scope:        "mcp.read",
 	}
 
-	err = tokenStore.SaveToken(expiredToken)
+	err = tokenStore.SaveToken(context.Background(), expiredToken)
 	if err != nil {
 		t.Fatalf("Failed to save expired token: %v", err)
 	}
 
-	retrievedExpiredToken, err := tokenStore.GetToken()
+	retrievedExpiredToken, err := tokenStore.GetToken(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to get expired token: %v", err)
 	}
@@ -162,23 +163,23 @@ func TestPersistentTokenStoreMultipleServers(t *testing.T) {
 		Scope:       "mcp.write",
 	}
 
-	err = tokenStore1.SaveToken(token1)
+	err = tokenStore1.SaveToken(context.Background(), token1)
 	if err != nil {
 		t.Fatalf("Failed to save token1: %v", err)
 	}
 
-	err = tokenStore2.SaveToken(token2)
+	err = tokenStore2.SaveToken(context.Background(), token2)
 	if err != nil {
 		t.Fatalf("Failed to save token2: %v", err)
 	}
 
 	// Retrieve tokens and verify they are separate
-	retrievedToken1, err := tokenStore1.GetToken()
+	retrievedToken1, err := tokenStore1.GetToken(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to get token1: %v", err)
 	}
 
-	retrievedToken2, err := tokenStore2.GetToken()
+	retrievedToken2, err := tokenStore2.GetToken(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to get token2: %v", err)
 	}
@@ -233,23 +234,23 @@ func TestPersistentTokenStoreSameNameDifferentURL(t *testing.T) {
 		Scope:       "mcp.write",
 	}
 
-	err = tokenStore1.SaveToken(token1)
+	err = tokenStore1.SaveToken(context.Background(), token1)
 	if err != nil {
 		t.Fatalf("Failed to save token1: %v", err)
 	}
 
-	err = tokenStore2.SaveToken(token2)
+	err = tokenStore2.SaveToken(context.Background(), token2)
 	if err != nil {
 		t.Fatalf("Failed to save token2: %v", err)
 	}
 
 	// Retrieve tokens and verify they are separate despite same server name
-	retrievedToken1, err := tokenStore1.GetToken()
+	retrievedToken1, err := tokenStore1.GetToken(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to get token1: %v", err)
 	}
 
-	retrievedToken2, err := tokenStore2.GetToken()
+	retrievedToken2, err := tokenStore2.GetToken(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to get token2: %v", err)
 	}
@@ -279,13 +280,13 @@ func TestPersistentTokenStoreSameNameDifferentURL(t *testing.T) {
 	}
 
 	// Token 1 should be gone
-	_, err = tokenStore1.GetToken()
+	_, err = tokenStore1.GetToken(context.Background())
 	if err == nil {
 		t.Error("Expected error when getting cleared token1")
 	}
 
 	// Token 2 should still exist
-	retrievedToken2Again, err := tokenStore2.GetToken()
+	retrievedToken2Again, err := tokenStore2.GetToken(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to get token2 after clearing token1: %v", err)
 	}
