@@ -31,16 +31,16 @@ jobs:
             cgo: "0"
             name: mcpproxy-linux-arm64
             archive_format: tar.gz
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: amd64
-            cgo: "0"
+            cgo: "1"
             name: mcpproxy-windows-amd64.exe
             archive_format: zip
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: arm64
-            cgo: "0"
+            cgo: "1"
             name: mcpproxy-windows-arm64.exe
             archive_format: zip
           - os: macos-14
@@ -92,6 +92,7 @@ jobs:
         run: cd frontend && npm run build
 
       - name: Copy frontend dist to embed location
+        shell: bash
         run: |
           rm -rf web/frontend
           mkdir -p web/frontend
@@ -176,6 +177,7 @@ jobs:
           echo "✅ Certificate import completed"
 
       - name: Build binary and create archives
+        shell: bash
         env:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
@@ -199,10 +201,18 @@ jobs:
           # Create clean core binary for archive
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
-          # Build tray binary for macOS
-          if [ "${{ matrix.goos }}" = "darwin" ]; then
-            echo "Building mcpproxy-tray for macOS..."
-            go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
+          # Build tray binary for platforms with GUI support (macOS and Windows)
+          if [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; then
+            echo "Building mcpproxy-tray for ${{ matrix.goos }}..."
+
+            # Determine tray binary name
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              TRAY_BINARY="mcpproxy-tray.exe"
+            else
+              TRAY_BINARY="mcpproxy-tray"
+            fi
+
+            go build -ldflags "${LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
           fi
 
           # Code sign macOS binaries
@@ -384,16 +394,37 @@ jobs:
           ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
           LATEST_ARCHIVE_BASE="mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}"
 
+          # Determine files to include in archive
+          FILES_TO_ARCHIVE="${CLEAN_BINARY}"
+
+          # Add tray binary if it exists (Windows and macOS)
+          if [ "${{ matrix.goos }}" = "windows" ] && [ -f "mcpproxy-tray.exe" ]; then
+            FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray.exe"
+            echo "Including mcpproxy-tray.exe in archive"
+          elif [ "${{ matrix.goos }}" = "darwin" ] && [ -f "mcpproxy-tray" ]; then
+            FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray"
+            echo "Including mcpproxy-tray in archive"
+          fi
+
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
-            # Create versioned archive
-            zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
-            # Create latest archive
-            zip "${LATEST_ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+            # Create ZIP archive (Windows)
+            # Use PowerShell Compress-Archive on Windows since zip command isn't available
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              # Convert space-separated list to comma-separated for PowerShell
+              PS_FILES=$(echo ${FILES_TO_ARCHIVE} | sed 's/ /,/g')
+              powershell -Command "Compress-Archive -Path ${PS_FILES} -DestinationPath '${ARCHIVE_BASE}.zip'"
+              powershell -Command "Compress-Archive -Path ${PS_FILES} -DestinationPath '${LATEST_ARCHIVE_BASE}.zip'"
+            else
+              # Create versioned archive
+              zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+              # Create latest archive
+              zip "${LATEST_ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+            fi
           else
             # Create versioned archive
-            tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
-            # Create latest archive  
-            tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
+            tar -czf "${ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
+            # Create latest archive
+            tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 
       - name: Create .icns icon (macOS)
