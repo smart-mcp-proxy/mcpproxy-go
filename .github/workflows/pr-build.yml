@@ -249,6 +249,9 @@ jobs:
       - build
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       CLEAN_VERSION: ${{ needs.prepare.outputs.clean_version }}
