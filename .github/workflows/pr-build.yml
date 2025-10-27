@@ -63,16 +63,16 @@ jobs:
             cgo: "0"
             name: mcpproxy-linux-arm64
             archive_format: tar.gz
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: amd64
-            cgo: "0"
+            cgo: "1"
             name: mcpproxy-windows-amd64.exe
             archive_format: zip
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: arm64
-            cgo: "0"
+            cgo: "1"
             name: mcpproxy-windows-arm64.exe
             archive_format: zip
           - os: macos-14
@@ -161,10 +161,18 @@ jobs:
           # Create clean core binary for archive
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
-          # Build tray binary for macOS
-          if [ "${{ matrix.goos }}" = "darwin" ]; then
-            echo "Building mcpproxy-tray for macOS..."
-            go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
+          # Build tray binary for platforms with GUI support (macOS and Windows)
+          if [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; then
+            echo "Building mcpproxy-tray for ${{ matrix.goos }}..."
+
+            # Determine tray binary name
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              TRAY_BINARY="mcpproxy-tray.exe"
+            else
+              TRAY_BINARY="mcpproxy-tray"
+            fi
+
+            go build -ldflags "${LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
           fi
 
           # Ad-hoc sign macOS binaries (development only)
@@ -182,12 +190,24 @@ jobs:
           # Create archive with version info
           ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
 
+          # Determine files to include in archive
+          FILES_TO_ARCHIVE="${CLEAN_BINARY}"
+
+          # Add tray binary if it exists (Windows and macOS)
+          if [ "${{ matrix.goos }}" = "windows" ] && [ -f "mcpproxy-tray.exe" ]; then
+            FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray.exe"
+            echo "Including mcpproxy-tray.exe in archive"
+          elif [ "${{ matrix.goos }}" = "darwin" ] && [ -f "mcpproxy-tray" ]; then
+            FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray"
+            echo "Including mcpproxy-tray in archive"
+          fi
+
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
             # Create archive
-            zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+            zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
           else
             # Create archive
-            tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
+            tar -czf "${ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 
       - name: Create .icns icon (macOS)
