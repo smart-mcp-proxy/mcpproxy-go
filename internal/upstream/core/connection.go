@@ -996,12 +996,22 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	if len(browserBlockingConditions) > 0 {
 		c.logger.Warn("⚠️ Detected conditions that may prevent browser opening",
 			zap.String("server", c.config.Name),
-			zap.Strings("blocking_conditions", browserBlockingConditions))
+			zap.Strings("blocking_conditions", browserBlockingConditions),
+			zap.String("recommendation", "You may need to manually open the OAuth URL when prompted"))
+
+		// For remote scenarios, log additional guidance
+		if os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != "" {
+			c.logger.Info("📡 Remote SSH session detected - extended OAuth timeout enabled",
+				zap.String("server", c.config.Name),
+				zap.Duration("timeout", 120*time.Second),
+				zap.String("note", "OAuth URL will be displayed for manual opening"))
+		}
 	}
 
 	// Start the OAuth client and handle OAuth authorization errors properly
 	c.logger.Info("🚀 Starting OAuth client - using proper mcp-go OAuth error handling",
-		zap.String("server", c.config.Name))
+		zap.String("server", c.config.Name),
+		zap.Duration("callback_timeout", 120*time.Second))
 
 	err = c.client.Start(ctx)
 	if err != nil {
@@ -1263,12 +1273,22 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	if len(browserBlockingConditions) > 0 {
 		c.logger.Warn("⚠️ Detected conditions that may prevent browser opening for SSE OAuth",
 			zap.String("server", c.config.Name),
-			zap.Strings("blocking_conditions", browserBlockingConditions))
+			zap.Strings("blocking_conditions", browserBlockingConditions),
+			zap.String("recommendation", "You may need to manually open the OAuth URL when prompted"))
+
+		// For remote scenarios, log additional guidance
+		if os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != "" {
+			c.logger.Info("📡 Remote SSH session detected - extended OAuth timeout enabled",
+				zap.String("server", c.config.Name),
+				zap.Duration("timeout", 120*time.Second),
+				zap.String("note", "OAuth URL will be displayed for manual opening"))
+		}
 	}
 
 	// Start the OAuth client and handle OAuth authorization errors properly
 	c.logger.Info("🚀 Starting SSE OAuth client - using proper mcp-go OAuth error handling",
-		zap.String("server", c.config.Name))
+		zap.String("server", c.config.Name),
+		zap.Duration("callback_timeout", 120*time.Second))
 
 	var contextStatus string
 	if ctx.Err() != nil {
@@ -1699,8 +1719,11 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 	}
 
 	// Wait for the callback using our callback server coordination system
+	waitStartTime := time.Now()
 	c.logger.Info("⏳ Waiting for OAuth authorization callback...",
-		zap.String("server", c.config.Name))
+		zap.String("server", c.config.Name),
+		zap.Duration("timeout", 120*time.Second),
+		zap.Time("wait_start", waitStartTime))
 
 	// Get our callback server that was started in OAuth config creation
 	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
@@ -1708,11 +1731,14 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		return fmt.Errorf("callback server not found for %s", c.config.Name)
 	}
 
-	// Wait for the authorization code with shorter timeout to prevent UI freezing
+	// Wait for the authorization code with extended timeout for remote/systemd scenarios
 	select {
 	case params := <-callbackServer.CallbackChan:
+		waitDuration := time.Since(waitStartTime)
 		c.logger.Info("🎯 OAuth callback received",
-			zap.String("server", c.config.Name))
+			zap.String("server", c.config.Name),
+			zap.Duration("wait_duration", waitDuration),
+			zap.String("note", fmt.Sprintf("User completed authorization in %.1f seconds", waitDuration.Seconds())))
 
 		// Verify state parameter
 		if params["state"] != state {
@@ -1753,10 +1779,11 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 
 		return nil
 
-	case <-time.After(30 * time.Second):
-		c.logger.Warn("⏱️ OAuth authorization timeout - user did not complete authorization within 30 seconds",
-			zap.String("server", c.config.Name))
-		return fmt.Errorf("OAuth authorization timeout - user did not complete authorization within 30 seconds")
+	case <-time.After(120 * time.Second):
+		c.logger.Warn("⏱️ OAuth authorization timeout - user did not complete authorization within 120 seconds",
+			zap.String("server", c.config.Name),
+			zap.String("note", "Extended timeout for remote/systemd scenarios where manual browser opening may be needed"))
+		return fmt.Errorf("OAuth authorization timeout - user did not complete authorization within 120 seconds (extended for remote access)")
 	case <-ctx.Done():
 		return ctx.Err()
 	}

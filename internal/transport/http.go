@@ -221,22 +221,27 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	// Use regular SSE client
 	if len(cfg.Headers) > 0 {
 		logger.Debug("Adding SSE headers", zap.Int("header_count", len(cfg.Headers)))
-		// Create custom HTTP client with longer timeout for SSE
+		// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
+		// The Timeout field covers the entire request duration, which kills long-lived SSE streams
+		// Instead, we rely on IdleConnTimeout to detect dead connections
 		httpClient := &http.Client{
-			Timeout: 180 * time.Second, // Increased timeout for SSE connections
 			Transport: &http.Transport{
 				MaxIdleConns:        10,
-				IdleConnTimeout:     90 * time.Second,
+				IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
 				DisableCompression:  false,
 				DisableKeepAlives:   false, // Enable keep-alives for SSE stability
 				MaxIdleConnsPerHost: 5,
+				// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
+				ResponseHeaderTimeout: 30 * time.Second,
 			},
 		}
 
-		zap.L().Debug("Creating SSE MCP client with custom HTTP timeout and headers",
+		logger.Info("Creating SSE MCP client with indefinite timeout for long-lived streams",
 			zap.String("url", cfg.URL),
-			zap.Duration("timeout", 180*time.Second),
-			zap.Int("header_count", len(cfg.Headers)))
+			zap.Duration("idle_timeout", 300*time.Second),
+			zap.Duration("header_timeout", 30*time.Second),
+			zap.Int("header_count", len(cfg.Headers)),
+			zap.String("note", "Removed http.Client.Timeout to allow SSE streams longer than 3 minutes"))
 
 		sseClient, err := client.NewSSEMCPClient(cfg.URL,
 			client.WithHTTPClient(httpClient),
@@ -247,29 +252,35 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		return sseClient, nil
 	}
 
-	// Create custom HTTP client with longer timeout for SSE
+	// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
+	// The Timeout field covers the entire request duration, which kills long-lived SSE streams
+	// Instead, we rely on IdleConnTimeout to detect dead connections
 	httpClient := &http.Client{
-		Timeout: 180 * time.Second, // Increased timeout for SSE connections
 		Transport: &http.Transport{
 			MaxIdleConns:        10,
-			IdleConnTimeout:     90 * time.Second,
+			IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
 			DisableCompression:  false,
 			DisableKeepAlives:   false, // Enable keep-alives for SSE stability
 			MaxIdleConnsPerHost: 5,
+			// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
+			ResponseHeaderTimeout: 30 * time.Second,
 		},
 	}
 
-	zap.L().Debug("Creating SSE MCP client with custom HTTP timeout",
+	logger.Info("Creating SSE MCP client with indefinite timeout for long-lived streams",
 		zap.String("url", cfg.URL),
-		zap.Duration("timeout", 180*time.Second))
+		zap.Duration("idle_timeout", 300*time.Second),
+		zap.Duration("header_timeout", 30*time.Second),
+		zap.String("note", "Removed http.Client.Timeout to allow SSE streams longer than 3 minutes"))
 
 	// Enhanced trace-level debugging for SSE transport
-	if zap.L().Core().Enabled(zap.DebugLevel - 1) { // Trace level
-		zap.L().Debug("TRACE SSE TRANSPORT SETUP",
+	if logger.Core().Enabled(zap.DebugLevel - 1) { // Trace level
+		logger.Debug("TRACE SSE TRANSPORT SETUP",
 			zap.String("transport_type", "sse"),
 			zap.String("url", cfg.URL),
-			zap.Duration("http_timeout", 180*time.Second),
-			zap.String("debug_note", "SSE client will establish persistent connection for JSON-RPC over SSE"))
+			zap.Duration("idle_timeout", 300*time.Second),
+			zap.Duration("response_header_timeout", 30*time.Second),
+			zap.String("debug_note", "SSE client will establish persistent connection for JSON-RPC over SSE with no overall timeout"))
 	}
 
 	sseClient, err := client.NewSSEMCPClient(cfg.URL,
