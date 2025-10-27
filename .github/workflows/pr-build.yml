@@ -2,10 +2,52 @@ name: PR Build
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches:
+      - "*"
+  workflow_dispatch:
 
 jobs:
+  prepare:
+    name: Prepare Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      clean_version: ${{ steps.version.outputs.clean_version }}
+      latest_tag: ${{ steps.version.outputs.latest_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate PR version
+        id: version
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.number }}
+        run: |
+          set -eo pipefail
+
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+
+          if [ -n "${PR_NUMBER}" ]; then
+            VERSION="${LATEST_TAG}-dev-${COMMIT_HASH}-pr${PR_NUMBER}"
+          else
+            VERSION="${LATEST_TAG}-dev-${COMMIT_HASH}"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "clean_version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Generated version: ${VERSION}"
+
   build:
+    name: Build Binaries
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
     strategy:
       matrix:
         include:
@@ -45,8 +87,6 @@ jobs:
             cgo: "1"
             name: mcpproxy-darwin-arm64
             archive_format: tar.gz
-
-    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -97,31 +137,18 @@ jobs:
       - name: Run tests (skip binary E2E tests - not compatible with cross-compilation)
         run: go test -tags nogui -v -skip "E2E|Binary|MCPProtocol" ./...
 
-      - name: Generate PR version
-        id: version
-        shell: bash
-        run: |
-          # Get the latest tag
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          # Get short commit hash
-          COMMIT_HASH=$(git rev-parse --short HEAD)
-          # Create version: last-tag-dev-hash
-          VERSION="${LATEST_TAG}-dev-${COMMIT_HASH}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Generated PR version: ${VERSION}"
-
       - name: Build binary and create archives
         env:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ env.VERSION }}
           # ✅ Force minimum supported macOS version for compatibility
           MACOSX_DEPLOYMENT_TARGET: "12.0"
           # Defensive CGO flags to ensure proper deployment target
           CGO_CFLAGS: "-mmacosx-version-min=12.0"
           CGO_LDFLAGS: "-mmacosx-version-min=12.0"
         run: |
-          VERSION=${{ steps.version.outputs.version }}
           LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION}"
 
           # Determine clean binary name
@@ -169,30 +196,50 @@ jobs:
           chmod +x scripts/create-icns.sh
           ./scripts/create-icns.sh
 
-      - name: Create DMG installer (macOS)
+      - name: Create app bundle and DMG installer (macOS)
         if: matrix.goos == 'darwin'
         env:
+          VERSION: ${{ env.VERSION }}
           # Ensure DMG creation also uses correct deployment target
           MACOSX_DEPLOYMENT_TARGET: "12.0"
           CGO_CFLAGS: "-mmacosx-version-min=12.0"
           CGO_LDFLAGS: "-mmacosx-version-min=12.0"
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          chmod +x scripts/create-dmg.sh
+          chmod +x scripts/create-pkg.sh
+          chmod +x scripts/create-app-dmg.sh
+
+          # Set up ad-hoc signing for PR builds
+          echo "=== Creating app bundle and DMG for PR build (ad-hoc signed) ==="
 
           # Determine binary names
           TRAY_BINARY="mcpproxy-tray"
           CORE_BINARY="mcpproxy"
 
-          # Create DMG with both tray and core binaries
-          ./scripts/create-dmg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          # Create app bundle using create-pkg.sh in adhoc mode
+          # This creates the app bundle but skips PKG creation
+          export APP_CERT_IDENTITY=""  # Empty = ad-hoc signing for app bundle
+          export PKG_CERT_IDENTITY="adhoc"  # Skip PKG creation, just create app bundle
 
-          # Ad-hoc sign DMG (development only)
-          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
-          echo "Ad-hoc signing DMG for development: ${DMG_NAME}"
-          codesign --force --deep --sign - "${DMG_NAME}"
+          # Create app bundle
+          ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
 
-          echo "DMG created and signed (development): ${DMG_NAME}"
+          # App bundle is created at pkg_temp/pkg_root/Applications/mcpproxy.app
+          APP_BUNDLE_PATH="pkg_temp/pkg_root/Applications/mcpproxy.app"
+
+          if [ -d "$APP_BUNDLE_PATH" ]; then
+            echo "✅ App bundle created successfully"
+
+            # Create DMG containing the app bundle (with Applications symlink for drag-and-drop)
+            ./scripts/create-app-dmg.sh "$APP_BUNDLE_PATH" ${VERSION} ${{ matrix.goarch }}
+
+            # Clean up temp directory now that DMG is created
+            rm -rf pkg_temp
+
+            echo "✅ Installer DMG created successfully (ad-hoc signed, for testing)"
+          else
+            echo "❌ App bundle creation failed"
+            exit 1
+          fi
 
       - name: Skip notarization (PR Build)
         if: matrix.goos == 'darwin'
@@ -205,12 +252,152 @@ jobs:
         with:
           name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
-          retention-days: 7
+          retention-days: 14
 
-      - name: Upload DMG installer (macOS)
+      - name: Upload macOS installer DMG
         if: matrix.goos == 'darwin'
         uses: actions/upload-artifact@v4
         with:
-          name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
-          retention-days: 7
+          name: installer-dmg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-darwin-${{ matrix.goarch }}-installer.dmg
+          retention-days: 14
+          if-no-files-found: warn
+
+  announce:
+    name: Share Artifacts
+    needs:
+      - prepare
+      - build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      CLEAN_VERSION: ${{ needs.prepare.outputs.clean_version }}
+      LATEST_TAG: ${{ needs.prepare.outputs.latest_tag }}
+      RETENTION_DAYS: "14"
+    steps:
+      - name: Publish artifact summary
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request?.number;
+            if (!prNumber) {
+              core.info('No pull request context; skipping comment.');
+              return;
+            }
+
+            const runId = context.runId;
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100
+              }
+            );
+
+            if (artifacts.length === 0) {
+              core.info('No artifacts found for this run.');
+              return;
+            }
+
+            const formatSize = (bytes) => {
+              if (!bytes) {
+                return '0 B';
+              }
+              const units = ['B', 'KB', 'MB', 'GB'];
+              const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+              const value = bytes / Math.pow(1024, exponent);
+              return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+            };
+
+            const artifactLines = artifacts.map((artifact) => {
+              const size = formatSize(artifact.size_in_bytes);
+              return `- [${artifact.name}](${artifact.archive_download_url}) -> ${size}`;
+            });
+
+            const tableRows = artifacts
+              .map((artifact) => `| ${artifact.name} | ${formatSize(artifact.size_in_bytes)} | [Download](${artifact.archive_download_url}) |`)
+              .join('\n');
+
+            await core.summary
+              .addHeading('Pull Request Artifacts')
+              .addRaw(`| Name | Size | Link |\n| --- | --- | --- |\n${tableRows}`, true)
+              .addRaw(`\n\nVersion: ${process.env.VERSION}`)
+              .addRaw(`\nLatest tag: ${process.env.LATEST_TAG}`)
+              .addRaw(`\nLinks expire in ${process.env.RETENTION_DAYS} days.`)
+              .write();
+
+            const marker = '<!-- mcpproxy-pr-artifacts -->';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
+
+            const bodyLines = [
+              marker,
+              `## 📦 Build Artifacts for PR #${prNumber}`,
+              '',
+              `**Version:** \`${process.env.VERSION}\``,
+              `**Latest tag:** \`${process.env.LATEST_TAG}\``,
+              '',
+              '### Available Artifacts',
+              '',
+              ...artifacts.map((artifact) => {
+                const size = formatSize(artifact.size_in_bytes);
+                return `- **${artifact.name}** (${size})`;
+              }),
+              '',
+              '### How to Download',
+              '',
+              '**Option 1: GitHub Web UI** (easiest)',
+              `1. Go to the [workflow run page](${runUrl})`,
+              '2. Scroll to the bottom "Artifacts" section',
+              '3. Click on the artifact you want to download',
+              '',
+              '**Option 2: GitHub CLI**',
+              '```bash',
+              `gh run download ${runId} --repo ${context.repo.owner}/${context.repo.repo}`,
+              '',
+              '# Or download a specific artifact:',
+              `gh run download ${runId} --name dmg-darwin-arm64`,
+              '```',
+              '',
+              `> **Note:** Artifacts expire in ${process.env.RETENTION_DAYS} days.`
+            ];
+            const body = bodyLines.join('\n');
+
+            const existingComments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber
+              }
+            );
+
+            const previous = existingComments.find(
+              (comment) =>
+                comment.user?.login === 'github-actions[bot]' &&
+                comment.body?.includes(marker)
+            );
+
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: previous.id,
+                body
+              });
+              core.info(`Updated existing artifact comment (${previous.id}).`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body
+              });
+              core.info('Created new artifact comment.');
+            }
