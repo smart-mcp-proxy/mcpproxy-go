@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -20,9 +22,9 @@ const (
     <string>com.smartmcpproxy.mcpproxy</string>
     <key>ProgramArguments</key>
     <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
         <string>%s</string>
-        <string>--tray=true</string>
-        <string>--log-to-file=true</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -34,46 +36,11 @@ const (
     <string>%s/main-error.log</string>
     <key>WorkingDirectory</key>
     <string>%s</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>%s</string>
-        <key>HOME</key>
-        <string>%s</string>
-        <key>SHELL</key>
-        <string>%s</string>
-        <key>HOMEBREW_PREFIX</key>
-        <string>%s</string>
-        <key>HOMEBREW_CELLAR</key>
-        <string>%s</string>
-        <key>HOMEBREW_REPOSITORY</key>
-        <string>%s</string>
-    </dict>
-</dict>
-</plist>`
-
-	// Environment setup launch agent that runs at login to set global environment variables
-	envSetupAgentTemplate = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.smartmcpproxy.environment</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>sh</string>
-        <string>-c</string>
-        <string>%s</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>%s/env-setup.log</string>
-    <key>StandardErrorPath</key>
-    <string>%s/env-setup-error.log</string>
 </dict>
 </plist>`
 )
+
+const launchAgentLabel = "com.smartmcpproxy.mcpproxy"
 
 // AutostartManager handles autostart functionality across platforms
 type AutostartManager struct {
@@ -162,6 +129,41 @@ func (m *AutostartManager) discoverEnvironmentPaths() (discoveredPath string, en
 	}
 
 	return strings.Join(validPaths, ":"), envVars
+}
+
+// buildLaunchScript constructs the shell script that prepares the environment and
+// executes the tray binary. Using a shell wrapper lets us avoid registering a
+// second LaunchAgent purely for environment setup.
+func (m *AutostartManager) buildLaunchScript(discoveredPath string, envVars map[string]string, homeDir, shell, brewPrefix, brewCellar, brewRepository string) string {
+	assignments := map[string]string{
+		"PATH":                discoveredPath,
+		"HOME":                homeDir,
+		"SHELL":               shell,
+		"HOMEBREW_PREFIX":     brewPrefix,
+		"HOMEBREW_CELLAR":     brewCellar,
+		"HOMEBREW_REPOSITORY": brewRepository,
+	}
+
+	// Allow discovered env vars (e.g. from brew detection) to override defaults.
+	for key, value := range envVars {
+		assignments[key] = value
+	}
+
+	var keys []string
+	for key := range assignments {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var scriptBuilder strings.Builder
+	scriptBuilder.WriteString("set -e\n")
+	for _, key := range keys {
+		value := assignments[key]
+		scriptBuilder.WriteString(fmt.Sprintf("export %s=%s\n", key, strconv.Quote(value)))
+	}
+	scriptBuilder.WriteString(fmt.Sprintf("exec %s --tray=true --log-to-file=true\n", strconv.Quote(m.executablePath)))
+
+	return scriptBuilder.String()
 }
 
 // discoverBrewPaths discovers Homebrew installation paths
@@ -292,32 +294,6 @@ func (m *AutostartManager) containsPath(paths []string, path string) bool {
 	return false
 }
 
-// buildEnvironmentSetupScript builds the script for setting up global environment variables
-func (m *AutostartManager) buildEnvironmentSetupScript() string {
-	discoveredPath, envVars := m.discoverEnvironmentPaths()
-
-	var script strings.Builder
-
-	// Set PATH
-	script.WriteString(fmt.Sprintf("launchctl setenv PATH %q;\n", discoveredPath))
-
-	// Set other environment variables
-	for key, value := range envVars {
-		script.WriteString(fmt.Sprintf("launchctl setenv %s %q;\n", key, value))
-	}
-
-	// Set HOME and SHELL
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		script.WriteString(fmt.Sprintf("launchctl setenv HOME %q;\n", homeDir))
-	}
-
-	if shell := os.Getenv("SHELL"); shell != "" {
-		script.WriteString(fmt.Sprintf("launchctl setenv SHELL %q;\n", shell))
-	}
-
-	return script.String()
-}
-
 // IsEnabled checks if autostart is currently enabled
 func (m *AutostartManager) IsEnabled() bool {
 	if runtime.GOOS != osDarwin {
@@ -329,7 +305,7 @@ func (m *AutostartManager) IsEnabled() bool {
 		return false
 	}
 
-	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.smartmcpproxy.mcpproxy.plist")
+	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", launchAgentLabel+".plist")
 	_, err = os.Stat(plistPath)
 	return err == nil
 }
@@ -380,54 +356,27 @@ func (m *AutostartManager) Enable() error {
 		brewRepository = brewPrefix
 	}
 
-	// Create main application plist content
+	launchScript := m.buildLaunchScript(discoveredPath, envVars, homeDir, shell, brewPrefix, brewCellar, brewRepository)
+
 	plistContent := fmt.Sprintf(launchAgentTemplate,
-		m.executablePath,
+		launchScript,
 		m.logDir,
 		m.logDir,
 		m.workingDir,
-		discoveredPath,
-		homeDir,
-		shell,
-		brewPrefix,
-		brewCellar,
-		brewRepository,
 	)
 
-	// Write main application plist file
-	plistPath := filepath.Join(launchAgentsDir, "com.smartmcpproxy.mcpproxy.plist")
-	if err := os.WriteFile(plistPath, []byte(plistContent), 0600); err != nil {
-		return fmt.Errorf("failed to write plist file: %w", err)
+	plistPath := filepath.Join(launchAgentsDir, launchAgentLabel+".plist")
+	plistChanged, err := m.ensurePlistContents(plistPath, plistContent)
+	if err != nil {
+		return err
 	}
 
-	// Create environment setup plist for global environment variables
-	envScript := m.buildEnvironmentSetupScript()
-	envPlistContent := fmt.Sprintf(envSetupAgentTemplate,
-		envScript,
-		m.logDir,
-		m.logDir,
-	)
-
-	// Write environment setup plist file
-	envPlistPath := filepath.Join(launchAgentsDir, "com.smartmcpproxy.environment.plist")
-	if err := os.WriteFile(envPlistPath, []byte(envPlistContent), 0600); err != nil {
-		return fmt.Errorf("failed to write environment plist file: %w", err)
+	if !plistChanged && m.isAgentLoaded(launchAgentLabel) {
+		return nil
 	}
 
-	// Load the environment setup agent first
-	cmd := exec.Command("launchctl", "load", "-w", envPlistPath)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if !strings.Contains(string(output), "already loaded") {
-			return fmt.Errorf("failed to load environment setup agent: %w, output: %s", err, output)
-		}
-	}
-
-	// Load the main application launch agent
-	cmd = exec.Command("launchctl", "load", "-w", plistPath)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if !strings.Contains(string(output), "already loaded") {
-			return fmt.Errorf("failed to load main launch agent: %w, output: %s", err, output)
-		}
+	if err := m.loadLaunchAgent(plistPath); err != nil {
+		return err
 	}
 
 	return nil
@@ -444,35 +393,15 @@ func (m *AutostartManager) Disable() error {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// Paths to both plist files
-	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.smartmcpproxy.mcpproxy.plist")
-	envPlistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.smartmcpproxy.environment.plist")
+	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", launchAgentLabel+".plist")
 
-	// Unload and remove main application launch agent
 	if _, err := os.Stat(plistPath); err == nil {
-		cmd := exec.Command("launchctl", "unload", "-w", plistPath)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			if !strings.Contains(string(output), "not loaded") {
-				return fmt.Errorf("failed to unload main launch agent: %w, output: %s", err, output)
-			}
+		if err := m.unloadLaunchAgent(plistPath); err != nil {
+			return err
 		}
 
 		if err := os.Remove(plistPath); err != nil {
-			return fmt.Errorf("failed to remove main plist file: %w", err)
-		}
-	}
-
-	// Unload and remove environment setup launch agent
-	if _, err := os.Stat(envPlistPath); err == nil {
-		cmd := exec.Command("launchctl", "unload", "-w", envPlistPath)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			if !strings.Contains(string(output), "not loaded") {
-				return fmt.Errorf("failed to unload environment setup agent: %w, output: %s", err, output)
-			}
-		}
-
-		if err := os.Remove(envPlistPath); err != nil {
-			return fmt.Errorf("failed to remove environment plist file: %w", err)
+			return fmt.Errorf("failed to remove launch agent plist: %w", err)
 		}
 	}
 
@@ -485,4 +414,49 @@ func (m *AutostartManager) Toggle() error {
 		return m.Disable()
 	}
 	return m.Enable()
+}
+
+// ensurePlistContents writes the desired plist content only when it changes.
+// Returns true when the file was created or updated.
+func (m *AutostartManager) ensurePlistContents(path, content string) (bool, error) {
+	if existing, err := os.ReadFile(path); err == nil {
+		if string(existing) == content {
+			return false, nil
+		}
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		return false, fmt.Errorf("failed to write plist file: %w", err)
+	}
+
+	return true, nil
+}
+
+// isAgentLoaded checks whether the LaunchAgent is currently registered with launchd.
+func (m *AutostartManager) isAgentLoaded(label string) bool {
+	return exec.Command("launchctl", "list", label).Run() == nil
+}
+
+// loadLaunchAgent loads the plist with launchctl when required.
+func (m *AutostartManager) loadLaunchAgent(plistPath string) error {
+	cmd := exec.Command("launchctl", "load", "-w", plistPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(output), "already loaded") {
+			return nil
+		}
+		return fmt.Errorf("failed to load launch agent: %w, output: %s", err, output)
+	}
+	return nil
+}
+
+// unloadLaunchAgent unloads the plist from launchd.
+func (m *AutostartManager) unloadLaunchAgent(plistPath string) error {
+	cmd := exec.Command("launchctl", "unload", "-w", plistPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(output), "not loaded") {
+			return nil
+		}
+		return fmt.Errorf("failed to unload launch agent: %w, output: %s", err, output)
+	}
+	return nil
 }
