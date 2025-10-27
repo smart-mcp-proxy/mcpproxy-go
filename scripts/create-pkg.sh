@@ -218,6 +218,36 @@ else
     codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$PKG_ROOT/Applications/$APP_BUNDLE"
 fi
 
+# Resolve installer signing identity (must be Developer ID Installer)
+INSTALLER_CERT_IDENTITY="${PKG_CERT_IDENTITY}"
+
+if [ -z "${INSTALLER_CERT_IDENTITY}" ]; then
+    INSTALLER_CERT_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+fi
+
+if [ -n "${INSTALLER_CERT_IDENTITY}" ] && echo "${INSTALLER_CERT_IDENTITY}" | grep -q "Developer ID Installer"; then
+    echo "Using product PKG approach with Installer certificate: ${INSTALLER_CERT_IDENTITY}"
+    CREATE_PRODUCT_PKG=true
+elif [ "${PKG_CERT_IDENTITY}" = "adhoc" ] || [ "${PKG_CERT_IDENTITY}" = "skip" ]; then
+    echo "⚠️  Skipping PKG creation (adhoc mode for development/PR builds)"
+    echo "   App bundle will be created but not packaged into PKG"
+    echo "   Use create-app-dmg.sh to create a DMG with the app bundle for distribution"
+    CREATE_PRODUCT_PKG=false
+
+    # Export the app bundle path for follow-up scripts
+    echo "APP_BUNDLE_PATH=$PKG_ROOT/Applications/$APP_BUNDLE" >> "$GITHUB_ENV" || true
+
+    # Don't exit - let the script complete with app bundle creation only
+else
+    echo "❌ Developer ID Installer certificate not available"
+    echo "   PKG installers must be signed with a 'Developer ID Installer' identity to satisfy Gatekeeper"
+    echo "   Ensure the certificate is imported and expose it to this script via PKG_CERT_IDENTITY"
+    echo "   For PR builds, set PKG_CERT_IDENTITY=adhoc to create app bundle without PKG"
+    exit 1
+fi
+
+if [ "$CREATE_PRODUCT_PKG" = "true" ]; then
+
 # Copy postinstall script
 cp "scripts/postinstall.sh" "$PKG_SCRIPTS/postinstall"
 chmod +x "$PKG_SCRIPTS/postinstall"
@@ -230,25 +260,6 @@ pkgbuild --root "$PKG_ROOT" \
          --version "${VERSION#v}" \
          --install-location "/" \
          "${PKG_NAME}-component.pkg"
-
-# Resolve installer signing identity (must be Developer ID Installer)
-INSTALLER_CERT_IDENTITY="${PKG_CERT_IDENTITY}"
-
-if [ -z "${INSTALLER_CERT_IDENTITY}" ]; then
-    INSTALLER_CERT_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | head -1 | grep -o '"[^"]*"' | tr -d '"')
-fi
-
-if [ -n "${INSTALLER_CERT_IDENTITY}" ] && echo "${INSTALLER_CERT_IDENTITY}" | grep -q "Developer ID Installer"; then
-    echo "Using product PKG approach with Installer certificate: ${INSTALLER_CERT_IDENTITY}"
-    CREATE_PRODUCT_PKG=true
-else
-    echo "❌ Developer ID Installer certificate not available"
-    echo "   PKG installers must be signed with a 'Developer ID Installer' identity to satisfy Gatekeeper"
-    echo "   Ensure the certificate is imported and expose it to this script via PKG_CERT_IDENTITY"
-    exit 1
-fi
-
-if [ "$CREATE_PRODUCT_PKG" = "true" ]; then
 
 # Create Distribution.xml for product archive
 cat > "$TEMP_DIR/Distribution.xml" << EOF
@@ -371,9 +382,13 @@ if [ "$CREATE_PRODUCT_PKG" = "true" ]; then
     fi
 
     echo "✅ PKG signed successfully with Developer ID Installer certificate"
+
+    # Clean up temp directory after PKG creation
+    rm -rf "$TEMP_DIR"
+    echo "PKG installer created successfully: ${PKG_NAME}.pkg"
+elif [ "$CREATE_PRODUCT_PKG" = "false" ]; then
+    echo "⚠️  PKG creation skipped (adhoc mode)"
+    echo "   App bundle created at: $PKG_ROOT/Applications/$APP_BUNDLE"
+    echo "   To create a DMG: scripts/create-app-dmg.sh \"$PKG_ROOT/Applications/$APP_BUNDLE\" ${VERSION} ${ARCH}"
+    # Don't clean up TEMP_DIR yet - the app bundle is still there for DMG creation
 fi
-
-# Clean up
-rm -rf "$TEMP_DIR"
-
-echo "PKG installer created successfully: ${PKG_NAME}.pkg"

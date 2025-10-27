@@ -196,7 +196,7 @@ jobs:
           chmod +x scripts/create-icns.sh
           ./scripts/create-icns.sh
 
-      - name: Create DMG installer (macOS)
+      - name: Create app bundle and DMG installer (macOS)
         if: matrix.goos == 'darwin'
         env:
           VERSION: ${{ env.VERSION }}
@@ -205,21 +205,41 @@ jobs:
           CGO_CFLAGS: "-mmacosx-version-min=12.0"
           CGO_LDFLAGS: "-mmacosx-version-min=12.0"
         run: |
-          chmod +x scripts/create-dmg.sh
+          chmod +x scripts/create-pkg.sh
+          chmod +x scripts/create-app-dmg.sh
+
+          # Set up ad-hoc signing for PR builds
+          echo "=== Creating app bundle and DMG for PR build (ad-hoc signed) ==="
 
           # Determine binary names
           TRAY_BINARY="mcpproxy-tray"
           CORE_BINARY="mcpproxy"
 
-          # Create DMG with both tray and core binaries
-          ./scripts/create-dmg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          # Create app bundle using create-pkg.sh in adhoc mode
+          # This creates the app bundle but skips PKG creation
+          export APP_CERT_IDENTITY=""  # Empty = ad-hoc signing for app bundle
+          export PKG_CERT_IDENTITY="adhoc"  # Skip PKG creation, just create app bundle
 
-          # Ad-hoc sign DMG (development only)
-          DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
-          echo "Ad-hoc signing DMG for development: ${DMG_NAME}"
-          codesign --force --deep --sign - "${DMG_NAME}"
+          # Create app bundle
+          ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
 
-          echo "DMG created and signed (development): ${DMG_NAME}"
+          # App bundle is created at pkg_temp/pkg_root/Applications/mcpproxy.app
+          APP_BUNDLE_PATH="pkg_temp/pkg_root/Applications/mcpproxy.app"
+
+          if [ -d "$APP_BUNDLE_PATH" ]; then
+            echo "✅ App bundle created successfully"
+
+            # Create DMG containing the app bundle (with Applications symlink for drag-and-drop)
+            ./scripts/create-app-dmg.sh "$APP_BUNDLE_PATH" ${VERSION} ${{ matrix.goarch }}
+
+            # Clean up temp directory now that DMG is created
+            rm -rf pkg_temp
+
+            echo "✅ Installer DMG created successfully (ad-hoc signed, for testing)"
+          else
+            echo "❌ App bundle creation failed"
+            exit 1
+          fi
 
       - name: Skip notarization (PR Build)
         if: matrix.goos == 'darwin'
@@ -234,13 +254,14 @@ jobs:
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
           retention-days: 14
 
-      - name: Upload DMG installer (macOS)
+      - name: Upload macOS installer DMG
         if: matrix.goos == 'darwin'
         uses: actions/upload-artifact@v4
         with:
-          name: dmg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: mcpproxy-*-darwin-${{ matrix.goarch }}.dmg
+          name: installer-dmg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcpproxy-*-darwin-${{ matrix.goarch }}-installer.dmg
           retention-days: 14
+          if-no-files-found: warn
 
   announce:
     name: Share Artifacts
