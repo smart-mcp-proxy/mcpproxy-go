@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -289,8 +290,12 @@ func TestSocketInfoEndpoint(t *testing.T) {
 func buildTestBinary(t *testing.T) (string, func()) {
 	t.Helper()
 
-	// Build binary
-	binaryPath := filepath.Join(t.TempDir(), "mcpproxy-test")
+	// Build binary with proper extension for Windows
+	binaryName := "mcpproxy-test"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binaryPath := filepath.Join(t.TempDir(), binaryName)
 
 	buildCmd := exec.Command("go", "build",
 		"-o", binaryPath,
