@@ -257,7 +257,7 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 			zap.String("storage", "BBolt database"))
 
 		// Check if token exists in persistent storage
-		existingToken, err := tokenStore.GetToken()
+		existingToken, err := tokenStore.GetToken(context.Background())
 		if err != nil {
 			logger.Info("🔍 No existing token found in persistent storage",
 				zap.String("server", serverConfig.Name),

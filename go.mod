@@ -8,7 +8,7 @@ require (
 	github.com/blevesearch/bleve/v2 v2.5.2
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf
-	github.com/mark3labs/mcp-go v0.38.0
+	github.com/mark3labs/mcp-go v0.42.0
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/cobra v1.9.1

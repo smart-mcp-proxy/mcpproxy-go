@@ -796,7 +796,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 	var tokenExpires time.Time
 	if m.storage != nil {
 		ts := oauth.NewPersistentTokenStore(client.Config.Name, client.Config.URL, m.storage)
-		if tok, err := ts.GetToken(); err == nil && tok != nil {
+		if tok, err := ts.GetToken(context.Background()); err == nil && tok != nil {
 			hasToken = true
 			tokenExpires = tok.ExpiresAt
 		}
@@ -961,7 +961,7 @@ func (m *Manager) scanForNewTokens() {
 
 		// Check for a persisted token
 		ts := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, m.storage)
-		tok, err := ts.GetToken()
+		tok, err := ts.GetToken(context.Background())
 		if err != nil || tok == nil {
 			continue
 		}

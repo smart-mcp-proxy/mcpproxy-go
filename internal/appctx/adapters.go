@@ -57,7 +57,7 @@ func (o *OAuthTokenManagerImpl) GetToken(serverName string) (interface{}, error)
 
 	// Use persistent token store to get token
 	tokenStore := oauth.NewPersistentTokenStore(serverName, "", o.storage)
-	return tokenStore.GetToken()
+	return tokenStore.GetToken(context.Background())
 }
 
 // SaveToken saves a token for the given server
