@@ -129,6 +129,7 @@ jobs:
         run: cd frontend && npm run build
 
       - name: Copy frontend dist for embedding
+        shell: bash
         run: |
           rm -rf web/frontend
           mkdir -p web/frontend
@@ -138,6 +139,7 @@ jobs:
         run: go test -tags nogui -v -skip "E2E|Binary|MCPProtocol" ./...
 
       - name: Build binary and create archives
+        shell: bash
         env:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
