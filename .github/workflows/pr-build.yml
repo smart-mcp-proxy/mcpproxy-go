@@ -207,10 +207,15 @@ jobs:
           fi
 
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
-            # Create archive
-            zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+            # Create ZIP archive (Windows)
+            # Use PowerShell Compress-Archive on Windows since zip command isn't available
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              powershell -Command "Compress-Archive -Path ${FILES_TO_ARCHIVE} -DestinationPath '${ARCHIVE_BASE}.zip'"
+            else
+              zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+            fi
           else
-            # Create archive
+            # Create tar.gz archive (Unix)
             tar -czf "${ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 

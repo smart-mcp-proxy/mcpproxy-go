@@ -407,10 +407,17 @@ jobs:
           fi
 
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
-            # Create versioned archive
-            zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
-            # Create latest archive
-            zip "${LATEST_ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+            # Create ZIP archive (Windows)
+            # Use PowerShell Compress-Archive on Windows since zip command isn't available
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              powershell -Command "Compress-Archive -Path ${FILES_TO_ARCHIVE} -DestinationPath '${ARCHIVE_BASE}.zip'"
+              powershell -Command "Compress-Archive -Path ${FILES_TO_ARCHIVE} -DestinationPath '${LATEST_ARCHIVE_BASE}.zip'"
+            else
+              # Create versioned archive
+              zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+              # Create latest archive
+              zip "${LATEST_ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+            fi
           else
             # Create versioned archive
             tar -czf "${ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
