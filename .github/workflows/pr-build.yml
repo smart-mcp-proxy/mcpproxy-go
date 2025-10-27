@@ -210,7 +210,9 @@ jobs:
             # Create ZIP archive (Windows)
             # Use PowerShell Compress-Archive on Windows since zip command isn't available
             if [ "${{ matrix.goos }}" = "windows" ]; then
-              powershell -Command "Compress-Archive -Path ${FILES_TO_ARCHIVE} -DestinationPath '${ARCHIVE_BASE}.zip'"
+              # Convert space-separated list to comma-separated for PowerShell
+              PS_FILES=$(echo ${FILES_TO_ARCHIVE} | sed 's/ /,/g')
+              powershell -Command "Compress-Archive -Path ${PS_FILES} -DestinationPath '${ARCHIVE_BASE}.zip'"
             else
               zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
             fi
