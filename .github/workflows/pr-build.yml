@@ -313,16 +313,38 @@ jobs:
               .write();
 
             const marker = '<!-- mcpproxy-pr-artifacts -->';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
+
             const bodyLines = [
               marker,
-              `Build artifacts for PR #${prNumber}`,
+              `## 📦 Build Artifacts for PR #${prNumber}`,
               '',
-              `Version: \`${process.env.VERSION}\``,
-              `Latest tag: \`${process.env.LATEST_TAG}\``,
+              `**Version:** \`${process.env.VERSION}\``,
+              `**Latest tag:** \`${process.env.LATEST_TAG}\``,
               '',
-              ...artifactLines,
+              '### Available Artifacts',
               '',
-              `Links expire in ${process.env.RETENTION_DAYS} days.`
+              ...artifacts.map((artifact) => {
+                const size = formatSize(artifact.size_in_bytes);
+                return `- **${artifact.name}** (${size})`;
+              }),
+              '',
+              '### How to Download',
+              '',
+              '**Option 1: GitHub Web UI** (easiest)',
+              `1. Go to the [workflow run page](${runUrl})`,
+              '2. Scroll to the bottom "Artifacts" section',
+              '3. Click on the artifact you want to download',
+              '',
+              '**Option 2: GitHub CLI**',
+              '```bash',
+              `gh run download ${runId} --repo ${context.repo.owner}/${context.repo.repo}`,
+              '',
+              '# Or download a specific artifact:',
+              `gh run download ${runId} --name dmg-darwin-arm64`,
+              '```',
+              '',
+              `> **Note:** Artifacts expire in ${process.env.RETENTION_DAYS} days.`
             ];
             const body = bodyLines.join('\n');
 
