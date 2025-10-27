@@ -136,6 +136,8 @@ jobs:
           cp -r frontend/dist web/frontend/
 
       - name: Run tests (skip binary E2E tests - not compatible with cross-compilation)
+        # Skip tests for Windows ARM64 (cross-compilation - can't run ARM64 binaries on AMD64 runner)
+        if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
         run: go test -tags nogui -v -skip "E2E|Binary|MCPProtocol" ./...
 
       - name: Build binary and create archives
