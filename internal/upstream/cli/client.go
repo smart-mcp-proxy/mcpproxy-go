@@ -108,17 +108,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		zap.String("url", c.config.URL),
 		zap.String("command", c.config.Command))
 
-	// Add timeout for CLI operations
-	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
 	// Enable JSON-RPC frame logging if trace level is enabled
 	if c.debugMode {
 		c.logger.Debug("🔍 TRACE MODE ENABLED - JSON-RPC frames will be logged")
 	}
 
-	// Connect core client
-	if err := c.coreClient.Connect(connectCtx); err != nil {
+	// Connect core client - use caller's context directly (respects --timeout flag)
+	if err := c.coreClient.Connect(ctx); err != nil {
 		c.logger.Error("❌ Connection failed", zap.Error(err))
 		return err
 	}

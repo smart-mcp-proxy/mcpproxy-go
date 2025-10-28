@@ -19,6 +19,12 @@ const (
 	TransportStdio          = "stdio"
 )
 
+var (
+	// GlobalTraceEnabled controls whether HTTP/SSE frame tracing is enabled
+	// This can be set by CLI flags or other callers
+	GlobalTraceEnabled = false
+)
+
 // HTTPError represents detailed HTTP error information for debugging
 type HTTPError struct {
 	StatusCode int               `json:"status_code"`
@@ -84,10 +90,11 @@ func NewJSONRPCError(code int, message string, data interface{}, httpErr *HTTPEr
 
 // HTTPTransportConfig holds configuration for HTTP transport
 type HTTPTransportConfig struct {
-	URL         string
-	Headers     map[string]string
-	OAuthConfig *client.OAuthConfig
-	UseOAuth    bool
+	URL          string
+	Headers      map[string]string
+	OAuthConfig  *client.OAuthConfig
+	UseOAuth     bool
+	TraceEnabled bool // Enable detailed HTTP/SSE frame tracing
 }
 
 // CreateHTTPClient creates a new MCP client using HTTP transport
@@ -149,6 +156,37 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	}
 
 	logger.Debug("Creating regular HTTP client", zap.String("url", cfg.URL))
+
+	// If tracing is enabled, create HTTP client with logging transport
+	if cfg.TraceEnabled {
+		logger.Info("🔍 HTTP TRACE MODE ENABLED - All HTTP traffic will be logged")
+		baseTransport := &http.Transport{
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		}
+		loggingTransport := NewLoggingTransport(baseTransport, logger)
+		httpClient := &http.Client{
+			Transport: loggingTransport,
+			Timeout:   180 * time.Second,
+		}
+
+		var httpTransport transport.Interface
+		var err error
+		if len(cfg.Headers) > 0 {
+			httpTransport, err = transport.NewStreamableHTTP(cfg.URL,
+				transport.WithHTTPHeaders(cfg.Headers),
+				transport.WithHTTPBasicClient(httpClient))
+		} else {
+			httpTransport, err = transport.NewStreamableHTTP(cfg.URL,
+				transport.WithHTTPBasicClient(httpClient))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to create HTTP transport with tracing: %w", err)
+		}
+		return client.NewClient(httpTransport), nil
+	}
+
 	// Use regular HTTP client
 	if len(cfg.Headers) > 0 {
 		logger.Debug("Adding HTTP headers", zap.Int("header_count", len(cfg.Headers)))
@@ -224,16 +262,24 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
 		// The Timeout field covers the entire request duration, which kills long-lived SSE streams
 		// Instead, we rely on IdleConnTimeout to detect dead connections
+		baseTransport := &http.Transport{
+			MaxIdleConns:        10,
+			IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
+			DisableCompression:  false,
+			DisableKeepAlives:   false, // Enable keep-alives for SSE stability
+			MaxIdleConnsPerHost: 5,
+			// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
+			ResponseHeaderTimeout: 30 * time.Second,
+		}
+
+		var transport http.RoundTripper = baseTransport
+		if cfg.TraceEnabled {
+			logger.Info("🔍 SSE TRACE MODE ENABLED - All HTTP traffic and SSE frames will be logged")
+			transport = NewLoggingTransport(baseTransport, logger)
+		}
+
 		httpClient := &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
-				DisableCompression:  false,
-				DisableKeepAlives:   false, // Enable keep-alives for SSE stability
-				MaxIdleConnsPerHost: 5,
-				// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
-				ResponseHeaderTimeout: 30 * time.Second,
-			},
+			Transport: transport,
 		}
 
 		logger.Info("Creating SSE MCP client with indefinite timeout for long-lived streams",
@@ -255,16 +301,24 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
 	// The Timeout field covers the entire request duration, which kills long-lived SSE streams
 	// Instead, we rely on IdleConnTimeout to detect dead connections
+	baseTransport := &http.Transport{
+		MaxIdleConns:        10,
+		IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
+		DisableCompression:  false,
+		DisableKeepAlives:   false, // Enable keep-alives for SSE stability
+		MaxIdleConnsPerHost: 5,
+		// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
+
+	var transport http.RoundTripper = baseTransport
+	if cfg.TraceEnabled {
+		logger.Info("🔍 SSE TRACE MODE ENABLED - All HTTP traffic and SSE frames will be logged")
+		transport = NewLoggingTransport(baseTransport, logger)
+	}
+
 	httpClient := &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
-			DisableCompression:  false,
-			DisableKeepAlives:   false, // Enable keep-alives for SSE stability
-			MaxIdleConnsPerHost: 5,
-			// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
+		Transport: transport,
 	}
 
 	logger.Info("Creating SSE MCP client with indefinite timeout for long-lived streams",
@@ -293,23 +347,12 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 // CreateHTTPTransportConfig creates an HTTP transport config from server config
 func CreateHTTPTransportConfig(serverConfig *config.ServerConfig, oauthConfig *client.OAuthConfig) *HTTPTransportConfig {
-	logger := zap.L().Named("transport")
-	logger.Error("🚨 TRANSPORT CONFIG CREATION",
-		zap.String("server", serverConfig.Name),
-		zap.Bool("oauth_config_nil", oauthConfig == nil),
-		zap.Bool("use_oauth", oauthConfig != nil))
-
-	if oauthConfig != nil {
-		logger.Error("🚨 OAUTH CONFIG DETAILS",
-			zap.String("redirect_uri", oauthConfig.RedirectURI),
-			zap.Strings("scopes", oauthConfig.Scopes))
-	}
-
 	return &HTTPTransportConfig{
-		URL:         serverConfig.URL,
-		Headers:     serverConfig.Headers,
-		OAuthConfig: oauthConfig,
-		UseOAuth:    oauthConfig != nil,
+		URL:          serverConfig.URL,
+		Headers:      serverConfig.Headers,
+		OAuthConfig:  oauthConfig,
+		UseOAuth:     oauthConfig != nil,
+		TraceEnabled: GlobalTraceEnabled, // Use global trace flag
 	}
 }
 

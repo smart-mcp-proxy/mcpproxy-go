@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/upstream/cli"
 
 	"github.com/spf13/cobra"
@@ -29,16 +30,18 @@ This command is primarily used for debugging upstream server connections and too
 Examples:
   mcpproxy tools list --server=github-server --log-level=trace
   mcpproxy tools list --server=weather-api --log-level=debug
-  mcpproxy tools list --server=local-script --log-level=info`,
+  mcpproxy tools list --server=local-script --log-level=info
+  mcpproxy tools list --server=jetbrains-sse --trace-transport  # Enable HTTP/SSE frame tracing`,
 		RunE: runToolsList,
 	}
 
 	// Command flags
-	serverName    string
-	toolsLogLevel string
-	configPath    string
-	timeout       time.Duration
-	outputFormat  string
+	serverName     string
+	toolsLogLevel  string
+	configPath     string
+	timeout        time.Duration
+	outputFormat   string
+	traceTransport bool // Enable HTTP/SSE frame-by-frame tracing
 )
 
 // GetToolsCommand returns the tools command for adding to the root command
@@ -56,6 +59,7 @@ func init() {
 	toolsListCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	toolsListCmd.Flags().DurationVarP(&timeout, "timeout", "t", 30*time.Second, "Connection timeout")
 	toolsListCmd.Flags().StringVarP(&outputFormat, "output", "o", "table", "Output format (table, json, yaml)")
+	toolsListCmd.Flags().BoolVar(&traceTransport, "trace-transport", false, "Enable detailed HTTP/SSE frame-by-frame tracing (useful for debugging SSE connection issues)")
 
 	// Mark required flags
 	err := toolsListCmd.MarkFlagRequired("server")
@@ -80,6 +84,14 @@ func init() {
 func runToolsList(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	// Enable transport tracing if requested
+	if traceTransport {
+		transport.GlobalTraceEnabled = true
+		fmt.Println("🔍 HTTP/SSE TRANSPORT TRACING ENABLED")
+		fmt.Println("   All HTTP requests/responses and SSE frames will be logged")
+		fmt.Println()
+	}
 
 	// Load configuration
 	globalConfig, err := loadToolsConfig()
