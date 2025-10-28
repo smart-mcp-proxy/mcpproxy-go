@@ -1130,6 +1130,15 @@ func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
 
 	c.client = sseClient
 
+	// Register connection lost handler for SSE transport to detect GOAWAY/disconnects
+	c.client.OnConnectionLost(func(err error) {
+		c.logger.Warn("⚠️ SSE connection lost detected",
+			zap.String("server", c.config.Name),
+			zap.Error(err),
+			zap.String("transport", "sse"),
+			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
+	})
+
 	// Start the client
 	if err := c.client.Start(ctx); err != nil {
 		return err
@@ -1157,6 +1166,15 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	}
 
 	c.client = sseClient
+
+	// Register connection lost handler for SSE transport to detect GOAWAY/disconnects
+	c.client.OnConnectionLost(func(err error) {
+		c.logger.Warn("⚠️ SSE connection lost detected",
+			zap.String("server", c.config.Name),
+			zap.Error(err),
+			zap.String("transport", "sse"),
+			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
+	})
 
 	// Start the client
 	if err := c.client.Start(ctx); err != nil {
@@ -1233,6 +1251,15 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 
 	c.logger.Debug("🔗 OAuth SSE client created, starting connection")
 	c.client = sseClient
+
+	// Register connection lost handler for SSE transport to detect GOAWAY/disconnects
+	c.client.OnConnectionLost(func(err error) {
+		c.logger.Warn("⚠️ SSE OAuth connection lost detected",
+			zap.String("server", c.config.Name),
+			zap.Error(err),
+			zap.String("transport", "sse-oauth"),
+			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
+	})
 
 	// Add detailed logging before starting the OAuth client
 	c.logger.Info("🚀 Starting OAuth SSE client - this should trigger browser opening",

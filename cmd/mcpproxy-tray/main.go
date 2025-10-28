@@ -331,33 +331,6 @@ func resolveCoreURL() string {
 	return defaultCoreURL
 }
 
-// isSocketAvailable checks if a socket/pipe endpoint is accessible
-func isSocketAvailable(endpoint string) bool {
-	// Parse endpoint to extract scheme
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-
-	switch parsed.Scheme {
-	case "unix":
-		// Check if Unix socket file exists
-		socketPath := parsed.Path
-		if socketPath == "" {
-			socketPath = parsed.Opaque
-		}
-		_, err := os.Stat(socketPath)
-		return err == nil
-	case "npipe":
-		// For Windows named pipes, we can't easily check existence
-		// Return true and let the connection attempt fail if needed
-		return true
-	default:
-		// Not a socket endpoint
-		return false
-	}
-}
-
 func shouldSkipCoreLaunch() bool {
 	value := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_SKIP_CORE"))
 	return value == "1" || strings.EqualFold(value, "true")
