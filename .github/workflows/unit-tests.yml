@@ -171,7 +171,41 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install frontend dependencies
+      - name: Install frontend dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd frontend
+          $maxRetries = 3
+          $retryCount = 0
+
+          while ($retryCount -lt $maxRetries) {
+            $retryCount++
+            Write-Host "Attempting npm ci (attempt $retryCount/$maxRetries)..."
+
+            npm ci --prefer-offline --no-audit 2>&1 | Out-Host
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "npm ci succeeded"
+              break
+            }
+
+            if ($retryCount -lt $maxRetries) {
+              Write-Host "npm ci failed with exit code $LASTEXITCODE, waiting 5 seconds before retry..."
+              Start-Sleep -Seconds 5
+
+              if (Test-Path node_modules) {
+                Write-Host "Cleaning up node_modules..."
+                Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
+              }
+            } else {
+              Write-Host "npm ci failed after $maxRetries attempts"
+              exit 1
+            }
+          }
+
+      - name: Install frontend dependencies (Unix)
+        if: matrix.os != 'windows-latest'
         run: cd frontend && npm ci
 
       - name: Build frontend

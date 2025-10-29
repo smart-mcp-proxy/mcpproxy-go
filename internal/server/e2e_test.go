@@ -1070,7 +1070,10 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	// Verify the result contains information about the tools
 	var resultText string
 	for _, content := range inspectResult.Content {
+		// Handle both pointer and value types
 		if textContent, ok := content.(*mcp.TextContent); ok {
+			resultText += textContent.Text
+		} else if textContent, ok := content.(mcp.TextContent); ok {
 			resultText += textContent.Text
 		}
 	}
