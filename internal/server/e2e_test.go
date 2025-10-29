@@ -1029,9 +1029,9 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 
 	t.Log("🔍 Calling inspect_quarantined for quarantined-server...")
 
-	// Call inspect_quarantined
+	// Call inspect_quarantined (use quarantine_security tool, not upstream_servers)
 	inspectRequest := mcp.CallToolRequest{}
-	inspectRequest.Params.Name = "upstream_servers"
+	inspectRequest.Params.Name = "quarantine_security"
 	inspectRequest.Params.Arguments = map[string]interface{}{
 		"operation": "inspect_quarantined",
 		"name":      "quarantined-server",
@@ -1039,19 +1039,33 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 
 	inspectResult, err := mcpClient.CallTool(ctx, inspectRequest)
 	require.NoError(t, err, "inspect_quarantined should not return error")
-	if inspectResult.IsError {
-		// Print the error for debugging
-		for _, content := range inspectResult.Content {
-			if textContent, ok := content.(*mcp.TextContent); ok {
-				t.Logf("❌ Error from inspect_quarantined: %s", textContent.Text)
-			}
+
+	// Debug: Print all content items with their types
+	t.Logf("📋 Inspection result - IsError: %v, Content count: %d", inspectResult.IsError, len(inspectResult.Content))
+	for i, content := range inspectResult.Content {
+		t.Logf("Content[%d] type: %T", i, content)
+		// Handle both pointer and value types
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			t.Logf("Content[%d] text (pointer): %s", i, textContent.Text)
+		} else if textContent, ok := content.(mcp.TextContent); ok {
+			t.Logf("Content[%d] text (value): %s", i, textContent.Text)
 		}
 	}
-	assert.False(t, inspectResult.IsError, "inspect_quarantined should succeed")
+
+	if inspectResult.IsError {
+		// Print the error for debugging - handle both pointer and value types
+		for _, content := range inspectResult.Content {
+			if textContent, ok := content.(*mcp.TextContent); ok {
+				t.Logf("❌ Error from inspect_quarantined (pointer): %s", textContent.Text)
+			} else if textContent, ok := content.(mcp.TextContent); ok {
+				t.Logf("❌ Error from inspect_quarantined (value): %s", textContent.Text)
+			}
+		}
+		t.Fatal("inspect_quarantined returned an error - see logs above")
+	}
 
 	// Verify result contains tool data
 	require.NotEmpty(t, inspectResult.Content, "Result should have content")
-	t.Logf("✅ Inspection result received: %d content items", len(inspectResult.Content))
 
 	// Verify the result contains information about the tools
 	var resultText string

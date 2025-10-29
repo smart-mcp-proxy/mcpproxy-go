@@ -1130,13 +1130,22 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not quarantined", serverName)), nil
 	}
 
+	// CIRCUIT BREAKER: Check if inspection is allowed (Issue #105)
+	supervisor := p.mainServer.runtime.Supervisor()
+	allowed, reason, cooldown := supervisor.CanInspect(serverName)
+	if !allowed {
+		p.logger.Warn("⚠️ Inspection blocked by circuit breaker",
+			zap.String("server", serverName),
+			zap.Duration("cooldown_remaining", cooldown))
+		return mcp.NewToolResultError(reason), nil
+	}
+
 	var toolsAnalysis []map[string]interface{}
 
 	// REQUEST TEMPORARY CONNECTION EXEMPTION FOR INSPECTION
 	p.logger.Warn("⚠️ Requesting temporary connection exemption for quarantined server inspection",
 		zap.String("server", serverName))
 
-	supervisor := p.mainServer.runtime.Supervisor()
 	// Exemption duration: 60s to allow for async connection (20s) + tool retrieval (10s) + buffer
 	if err := supervisor.RequestInspectionExemption(serverName, 60*time.Second); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to request inspection exemption: %v", err)), nil
@@ -1150,47 +1159,113 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 	}()
 
 	// Wait for client to be created and server to connect (with timeout)
+	// NON-BLOCKING IMPLEMENTATION: Uses goroutine + channel to prevent MCP handler thread blocking
 	// The supervisor's reconciliation is async, so client creation and connection may take several seconds
 	p.logger.Info("Waiting for quarantined server client to be created and connected for inspection",
 		zap.String("server", serverName),
 		zap.String("note", "Supervisor reconciliation triggered, waiting for async client creation and connection..."))
 
-	connectionDeadline := time.Now().Add(20 * time.Second) // Increased from 10s to 20s for SSE connections
-	connected := false
-	attemptCount := 0
+	// Channel for signaling connection success
+	type connectionResult struct {
+		client   *managed.Client
+		attempts int
+		err      error
+	}
+	resultChan := make(chan connectionResult, 1)
+
+	// Start non-blocking connection wait in goroutine
+	go func() {
+		startTime := time.Now()
+		attemptCount := 0
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		logTicker := time.NewTicker(2 * time.Second) // Log progress every 2 seconds
+		defer logTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				// Context cancelled - stop immediately
+				resultChan <- connectionResult{
+					err: fmt.Errorf("context cancelled while waiting for connection: %w", ctx.Err()),
+				}
+				return
+
+			case <-logTicker.C:
+				// Periodic progress logging
+				p.logger.Debug("Still waiting for quarantined server connection...",
+					zap.String("server", serverName),
+					zap.Int("attempts", attemptCount),
+					zap.Duration("elapsed", time.Since(startTime)))
+
+			case <-ticker.C:
+				attemptCount++
+
+				// Try to get the client (it may not exist yet if reconciliation is still creating it)
+				client, exists := p.upstreamManager.GetClient(serverName)
+
+				if exists && client.IsConnected() {
+					// Success!
+					p.logger.Info("✅ Quarantined server connected successfully for inspection",
+						zap.String("server", serverName),
+						zap.Int("attempts", attemptCount),
+						zap.Duration("elapsed", time.Since(startTime)))
+					resultChan <- connectionResult{
+						client:   client,
+						attempts: attemptCount,
+					}
+					return
+				}
+
+				// Continue waiting...
+			}
+		}
+	}()
+
+	// Wait for connection with timeout or context cancellation
+	connectionTimeout := 20 * time.Second // SSE connections may need longer
 	var client *managed.Client
 
-	for time.Now().Before(connectionDeadline) {
-		attemptCount++
+	select {
+	case <-ctx.Done():
+		// Context cancelled - return immediately
+		p.logger.Warn("⚠️ Inspection cancelled by context",
+			zap.String("server", serverName),
+			zap.Error(ctx.Err()))
+		supervisor.RecordInspectionFailure(serverName)
+		return mcp.NewToolResultError(fmt.Sprintf("Inspection cancelled: %v", ctx.Err())), nil
 
-		// Try to get the client (it may not exist yet if reconciliation is still creating it)
-		var exists bool
-		client, exists = p.upstreamManager.GetClient(serverName)
-
-		if exists && client.IsConnected() {
-			connected = true
-			p.logger.Info("✅ Quarantined server connected successfully for inspection",
-				zap.String("server", serverName),
-				zap.Int("attempts", attemptCount))
-			break
-		}
-		if attemptCount%10 == 0 { // Log every second
-			p.logger.Debug("Still waiting for connection...",
-				zap.String("server", serverName),
-				zap.Int("attempts", attemptCount),
-				zap.Duration("elapsed", time.Since(time.Now().Add(-20*time.Second).Add(time.Duration(attemptCount)*100*time.Millisecond))))
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	if !connected {
-		// Connection timeout - provide diagnostic information
-		connectionStatus := client.GetConnectionStatus()
+	case <-time.After(connectionTimeout):
+		// Connection timeout - provide diagnostic information (Issue #105)
 		p.logger.Error("⚠️ Quarantined server connection timeout",
 			zap.String("server", serverName),
-			zap.Int("total_attempts", attemptCount),
-			zap.Duration("timeout", 20*time.Second))
-		return mcp.NewToolResultError(fmt.Sprintf("Quarantined server '%s' failed to connect within 20 second timeout. Connection status: %v. This may indicate the server process is not running or there's a network issue.", serverName, connectionStatus)), nil
+			zap.Duration("timeout", connectionTimeout),
+			zap.String("diagnostic", "Server may be unstable or not running"))
+
+		// Record failure for circuit breaker
+		supervisor.RecordInspectionFailure(serverName)
+
+		// Try to get connection status for diagnostics
+		if c, exists := p.upstreamManager.GetClient(serverName); exists {
+			connectionStatus := c.GetConnectionStatus()
+			return mcp.NewToolResultError(fmt.Sprintf("Quarantined server '%s' failed to connect within %v timeout. Connection status: %v. This may indicate the server process is not running, there's a network issue, or the server is unstable (see issue #105).", serverName, connectionTimeout, connectionStatus)), nil
+		}
+
+		return mcp.NewToolResultError(fmt.Sprintf("Quarantined server '%s' failed to connect within %v timeout. Client was never created, indicating the server may not be properly configured.", serverName, connectionTimeout)), nil
+
+	case result := <-resultChan:
+		// Connection attempt completed (success or error)
+		if result.err != nil {
+			p.logger.Error("⚠️ Connection wait failed",
+				zap.String("server", serverName),
+				zap.Error(result.err))
+			supervisor.RecordInspectionFailure(serverName)
+			return mcp.NewToolResultError(fmt.Sprintf("Connection wait failed: %v", result.err)), nil
+		}
+
+		client = result.client
+		// Attempts logged in goroutine already
 	}
 
 	if client.IsConnected() {
@@ -1303,8 +1378,13 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
+		// Record failure before returning
+		supervisor.RecordInspectionFailure(serverName)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize quarantined tools analysis: %v", err)), nil
 	}
+
+	// SUCCESS: Record successful inspection (resets failure counter)
+	supervisor.RecordInspectionSuccess(serverName)
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
@@ -1485,13 +1565,26 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 
 	// Trigger configuration save which will notify supervisor to reconcile and connect
 	if p.mainServer != nil {
+		// Update runtime's in-memory config with the new server
+		// This is CRITICAL for test environments where SaveConfiguration() might fail
+		// Without this, the ConfigService won't know about the new server
+		currentConfig := p.mainServer.runtime.Config()
+		if currentConfig != nil {
+			// Add server to config's server list
+			currentConfig.Servers = append(currentConfig.Servers, serverConfig)
+			p.mainServer.runtime.UpdateConfig(currentConfig, "")
+			p.logger.Debug("Updated runtime config with new server",
+				zap.String("server", name),
+				zap.Int("total_servers", len(currentConfig.Servers)))
+		}
+
 		// Save configuration first to ensure servers are persisted to config file
 		// This triggers ConfigService update which notifies supervisor to reconcile
 		// Note: SaveConfiguration may fail in test environments without config file - that's OK
 		if err := p.mainServer.SaveConfiguration(); err != nil {
 			p.logger.Warn("Failed to save configuration after adding server (may be test environment)",
 				zap.Error(err))
-			// Continue anyway - server is saved to storage, supervisor will reconcile
+			// Continue anyway - UpdateConfig above already notified the supervisor
 		}
 		p.mainServer.OnUpstreamServerChange()
 	}

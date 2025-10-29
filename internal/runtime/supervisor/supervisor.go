@@ -47,10 +47,21 @@ type Supervisor struct {
 	inspectionExemptions   map[string]time.Time
 	inspectionExemptionsMu sync.RWMutex
 
+	// Circuit breaker for inspection failures (Phase 2: Issue #105 stability)
+	inspectionFailures   map[string]*inspectionFailureInfo
+	inspectionFailuresMu sync.RWMutex
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+}
+
+// inspectionFailureInfo tracks inspection failures for circuit breaker pattern
+type inspectionFailureInfo struct {
+	consecutiveFailures int
+	lastFailureTime     time.Time
+	cooldownUntil       time.Time
 }
 
 // UpstreamInterface defines the interface for upstream adapters.
@@ -84,6 +95,7 @@ func New(configSvc *configsvc.Service, upstream UpstreamInterface, logger *zap.L
 		eventCh:              make(chan Event, 500), // Phase 6: Increased buffer for async operations
 		listeners:            make([]chan Event, 0),
 		inspectionExemptions: make(map[string]time.Time),
+		inspectionFailures:   make(map[string]*inspectionFailureInfo),
 		ctx:                  ctx,
 		cancel:               cancel,
 	}
@@ -928,4 +940,120 @@ func (s *Supervisor) IsInspectionExempted(serverName string) bool {
 	}
 
 	return true
+}
+
+// ===== Circuit Breaker for Inspection Failures (Issue #105) =====
+
+const (
+	maxInspectionFailures  = 3                // Max consecutive failures before cooldown
+	inspectionCooldown     = 5 * time.Minute  // Cooldown duration after max failures
+	failureResetTimeout    = 10 * time.Minute // Reset counter if no failures for this long
+)
+
+// CanInspect checks if inspection is allowed for a server (circuit breaker)
+// Returns (allowed bool, reason string, cooldownRemaining time.Duration)
+func (s *Supervisor) CanInspect(serverName string) (bool, string, time.Duration) {
+	s.inspectionFailuresMu.RLock()
+	defer s.inspectionFailuresMu.RUnlock()
+
+	info, exists := s.inspectionFailures[serverName]
+	if !exists {
+		// No failure history - allow inspection
+		return true, "", 0
+	}
+
+	now := time.Now()
+
+	// Check if cooldown is active
+	if now.Before(info.cooldownUntil) {
+		remaining := info.cooldownUntil.Sub(now)
+		reason := fmt.Sprintf("Server '%s' has failed inspection %d times. Circuit breaker active - please wait %v before retrying. This prevents cascading failures with unstable servers (see issue #105).",
+			serverName, info.consecutiveFailures, remaining.Round(time.Second))
+		return false, reason, remaining
+	}
+
+	// Check if failures should be reset (no failures for failureResetTimeout)
+	if now.Sub(info.lastFailureTime) > failureResetTimeout {
+		// Failures are old - will be reset on next inspection
+		return true, "", 0
+	}
+
+	// Within failure window but not in cooldown
+	return true, "", 0
+}
+
+// RecordInspectionFailure records an inspection failure for circuit breaker
+func (s *Supervisor) RecordInspectionFailure(serverName string) {
+	s.inspectionFailuresMu.Lock()
+	defer s.inspectionFailuresMu.Unlock()
+
+	now := time.Now()
+
+	info, exists := s.inspectionFailures[serverName]
+	if !exists {
+		info = &inspectionFailureInfo{}
+		s.inspectionFailures[serverName] = info
+	}
+
+	// Reset counter if last failure was too long ago
+	if now.Sub(info.lastFailureTime) > failureResetTimeout {
+		info.consecutiveFailures = 0
+	}
+
+	info.consecutiveFailures++
+	info.lastFailureTime = now
+
+	s.logger.Warn("Inspection failure recorded",
+		zap.String("server", serverName),
+		zap.Int("consecutive_failures", info.consecutiveFailures),
+		zap.Int("max_before_cooldown", maxInspectionFailures))
+
+	// Activate cooldown if max failures reached
+	if info.consecutiveFailures >= maxInspectionFailures {
+		info.cooldownUntil = now.Add(inspectionCooldown)
+		s.logger.Error("⚠️ Inspection circuit breaker activated - too many failures",
+			zap.String("server", serverName),
+			zap.Int("failures", info.consecutiveFailures),
+			zap.Duration("cooldown", inspectionCooldown),
+			zap.Time("cooldown_until", info.cooldownUntil),
+			zap.String("issue", "#105 - preventing cascading failures"))
+	}
+}
+
+// RecordInspectionSuccess records a successful inspection, resetting failure counter
+func (s *Supervisor) RecordInspectionSuccess(serverName string) {
+	s.inspectionFailuresMu.Lock()
+	defer s.inspectionFailuresMu.Unlock()
+
+	info, exists := s.inspectionFailures[serverName]
+	if !exists {
+		return
+	}
+
+	if info.consecutiveFailures > 0 {
+		s.logger.Info("Inspection succeeded - resetting failure counter",
+			zap.String("server", serverName),
+			zap.Int("previous_failures", info.consecutiveFailures))
+	}
+
+	// Reset failure counter
+	delete(s.inspectionFailures, serverName)
+}
+
+// GetInspectionStats returns inspection failure statistics for a server
+func (s *Supervisor) GetInspectionStats(serverName string) (failures int, inCooldown bool, cooldownRemaining time.Duration) {
+	s.inspectionFailuresMu.RLock()
+	defer s.inspectionFailuresMu.RUnlock()
+
+	info, exists := s.inspectionFailures[serverName]
+	if !exists {
+		return 0, false, 0
+	}
+
+	now := time.Now()
+	if now.Before(info.cooldownUntil) {
+		return info.consecutiveFailures, true, info.cooldownUntil.Sub(now)
+	}
+
+	return info.consecutiveFailures, false, 0
 }
