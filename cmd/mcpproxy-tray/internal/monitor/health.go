@@ -58,6 +58,10 @@ type HealthMonitor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// Shutdown synchronization
+	stopOnce sync.Once
+	stopped  bool
+
 	// Configuration
 	checkInterval    time.Duration
 	timeout          time.Duration
@@ -114,11 +118,16 @@ func (hm *HealthMonitor) Start() {
 	go hm.monitor()
 }
 
-// Stop stops the health monitoring
+// Stop stops the health monitoring (safe to call multiple times)
 func (hm *HealthMonitor) Stop() {
-	hm.logger.Info("Stopping health monitor")
-	hm.cancel()
-	close(hm.shutdownCh)
+	hm.stopOnce.Do(func() {
+		hm.logger.Info("Stopping health monitor")
+		hm.mu.Lock()
+		hm.stopped = true
+		hm.mu.Unlock()
+		hm.cancel()
+		close(hm.shutdownCh)
+	})
 }
 
 // GetStatus returns the current health status
