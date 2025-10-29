@@ -1139,13 +1139,17 @@ func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
 			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
 	})
 
-	// Start the client
-	if err := c.client.Start(ctx); err != nil {
+	// Start the client with persistent context so SSE stream keeps running
+	// even if the connect context is short-lived (same as stdio transport).
+	// SSE stream runs in a background goroutine and needs context to stay alive.
+	persistentCtx := context.Background()
+	if err := c.client.Start(persistentCtx); err != nil {
 		return err
 	}
 
 	// CRITICAL FIX: Test initialize() to detect OAuth errors during auth strategy phase
 	// This ensures OAuth strategy will be tried if SSE headers-auth fails during MCP initialization
+	// Use caller's context for initialize() to respect timeouts
 	if err := c.initialize(ctx); err != nil {
 		return fmt.Errorf("MCP initialize failed during SSE headers-auth strategy: %w", err)
 	}
@@ -1176,13 +1180,17 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
 	})
 
-	// Start the client
-	if err := c.client.Start(ctx); err != nil {
+	// Start the client with persistent context so SSE stream keeps running
+	// even if the connect context is short-lived (same as stdio transport).
+	// SSE stream runs in a background goroutine and needs context to stay alive.
+	persistentCtx := context.Background()
+	if err := c.client.Start(persistentCtx); err != nil {
 		return err
 	}
 
 	// CRITICAL FIX: Test initialize() to detect OAuth errors during auth strategy phase
 	// This ensures OAuth strategy will be tried if SSE no-auth fails during MCP initialization
+	// Use caller's context for initialize() to respect timeouts
 	if err := c.initialize(ctx); err != nil {
 		return fmt.Errorf("MCP initialize failed during SSE no-auth strategy: %w", err)
 	}
@@ -1317,17 +1325,14 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 		zap.String("server", c.config.Name),
 		zap.Duration("callback_timeout", 120*time.Second))
 
-	var contextStatus string
-	if ctx.Err() != nil {
-		contextStatus = "canceled"
-	} else {
-		contextStatus = "active"
-	}
-	c.logger.Debug("🔍 Starting SSE client with context",
-		zap.String("server", c.config.Name),
-		zap.String("context_status", contextStatus))
+	// Start the client with persistent context so SSE stream keeps running
+	// even if the connect context is short-lived (same as stdio transport).
+	// SSE stream runs in a background goroutine and needs context to stay alive.
+	persistentCtx := context.Background()
+	c.logger.Debug("🔍 Starting SSE OAuth client with persistent context",
+		zap.String("server", c.config.Name))
 
-	err = c.client.Start(ctx)
+	err = c.client.Start(persistentCtx)
 	if err != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(err) {

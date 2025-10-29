@@ -57,6 +57,11 @@ type Client struct {
 	oauthCompleted     bool
 	lastOAuthTimestamp time.Time
 
+	// SSE request serialization (prevent concurrent requests on SSE transport)
+	// SSE transport has limitations with concurrent requests - responses can get lost
+	// when multiple requests are in-flight simultaneously
+	sseRequestMu sync.Mutex
+
 	// Transport type and stderr access (for stdio)
 	transportType string
 	stderr        io.Reader
@@ -241,6 +246,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	c.mu.RLock()
 	client := c.client
 	serverInfo := c.serverInfo
+	transportType := c.transportType
 	c.mu.RUnlock()
 
 	if !c.IsConnected() || client == nil {
@@ -256,6 +262,18 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	if serverInfo.Capabilities.Tools == nil {
 		c.logger.Debug("Server does not support tools")
 		return nil, nil
+	}
+
+	// SSE transport requires request serialization to prevent concurrent request issues
+	// Background: SSE sends requests via HTTP POST but receives responses via persistent stream
+	// Concurrent requests can cause response delivery failures in mcp-go v0.42.0
+	if transportType == "sse" {
+		c.logger.Debug("SSE transport detected - serializing ListTools request",
+			zap.String("server", c.config.Name))
+		c.sseRequestMu.Lock()
+		defer c.sseRequestMu.Unlock()
+		c.logger.Debug("SSE request lock acquired",
+			zap.String("server", c.config.Name))
 	}
 
 	// Always make direct call to upstream server (no caching)
@@ -300,10 +318,23 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
 	c.mu.RLock()
 	client := c.client
+	transportType := c.transportType
 	c.mu.RUnlock()
 
 	if !c.IsConnected() || client == nil {
 		return nil, fmt.Errorf("client not connected")
+	}
+
+	// SSE transport requires request serialization to prevent concurrent request issues
+	if transportType == "sse" {
+		c.logger.Debug("SSE transport detected - serializing CallTool request",
+			zap.String("server", c.config.Name),
+			zap.String("tool", toolName))
+		c.sseRequestMu.Lock()
+		defer c.sseRequestMu.Unlock()
+		c.logger.Debug("SSE request lock acquired for CallTool",
+			zap.String("server", c.config.Name),
+			zap.String("tool", toolName))
 	}
 
 	request := mcp.CallToolRequest{}
