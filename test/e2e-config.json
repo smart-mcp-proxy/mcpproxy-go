@@ -1,5 +1,6 @@
 {
   "listen": ":8081",
+  "enable_socket": true,
   "data_dir": "./test-data",
   "enable_tray": false,
   "debug_search": false,
@@ -15,7 +16,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-10-14T11:17:16.913244+03:00"
+      "updated": "2025-10-28T14:20:34.857673+02:00"
     }
   ],
   "top_k": 10,

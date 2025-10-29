@@ -43,10 +43,25 @@ type Supervisor struct {
 	onServerConnectedCallback func(serverName string)
 	callbackMu                sync.RWMutex
 
+	// Inspection exemptions for temporary connections to quarantined servers
+	inspectionExemptions   map[string]time.Time
+	inspectionExemptionsMu sync.RWMutex
+
+	// Circuit breaker for inspection failures (Phase 2: Issue #105 stability)
+	inspectionFailures   map[string]*inspectionFailureInfo
+	inspectionFailuresMu sync.RWMutex
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+}
+
+// inspectionFailureInfo tracks inspection failures for circuit breaker pattern
+type inspectionFailureInfo struct {
+	consecutiveFailures int
+	lastFailureTime     time.Time
+	cooldownUntil       time.Time
 }
 
 // UpstreamInterface defines the interface for upstream adapters.
@@ -72,15 +87,17 @@ func New(configSvc *configsvc.Service, upstream UpstreamInterface, logger *zap.L
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Supervisor{
-		logger:    logger,
-		configSvc: configSvc,
-		upstream:  upstream,
-		version:   0,
-		stateView: stateview.New(),
-		eventCh:   make(chan Event, 500), // Phase 6: Increased buffer for async operations
-		listeners: make([]chan Event, 0),
-		ctx:       ctx,
-		cancel:    cancel,
+		logger:               logger,
+		configSvc:            configSvc,
+		upstream:             upstream,
+		version:              0,
+		stateView:            stateview.New(),
+		eventCh:              make(chan Event, 500), // Phase 6: Increased buffer for async operations
+		listeners:            make([]chan Event, 0),
+		inspectionExemptions: make(map[string]time.Time),
+		inspectionFailures:   make(map[string]*inspectionFailureInfo),
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
 
 	// Initialize empty snapshot
@@ -110,6 +127,10 @@ func (s *Supervisor) Start() {
 	// Start reconciliation loop
 	s.wg.Add(1)
 	go s.reconciliationLoop(configUpdates)
+
+	// Start exemption cleanup loop
+	s.wg.Add(1)
+	go s.exemptionCleanupLoop()
 
 	// Phase 7.1: Trigger initial reconciliation to populate StateView
 	go func() {
@@ -174,6 +195,47 @@ func (s *Supervisor) reconciliationLoop(configUpdates <-chan configsvc.Update) {
 			currentConfig := s.configSvc.Current()
 			if err := s.reconcile(currentConfig); err != nil {
 				s.logger.Error("Periodic reconciliation failed", zap.Error(err))
+			}
+		}
+	}
+}
+
+// exemptionCleanupLoop periodically checks for expired inspection exemptions.
+func (s *Supervisor) exemptionCleanupLoop() {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			s.logger.Info("Exemption cleanup loop stopping")
+			return
+
+		case <-ticker.C:
+			// Check for expired exemptions
+			s.inspectionExemptionsMu.Lock()
+			expiredServers := make([]string, 0)
+			for serverName, expiryTime := range s.inspectionExemptions {
+				if time.Now().After(expiryTime) {
+					expiredServers = append(expiredServers, serverName)
+					delete(s.inspectionExemptions, serverName)
+				}
+			}
+			s.inspectionExemptionsMu.Unlock()
+
+			// Trigger reconciliation for each expired exemption to disconnect servers
+			for _, serverName := range expiredServers {
+				s.logger.Warn("⚠️ Inspection exemption expired, triggering disconnect",
+					zap.String("server", serverName))
+
+				currentConfig := s.configSvc.Current()
+				if err := s.reconcile(currentConfig); err != nil {
+					s.logger.Error("Failed to trigger reconciliation after exemption expiry",
+						zap.String("server", serverName),
+						zap.Error(err))
+				}
 			}
 		}
 	}
@@ -246,7 +308,7 @@ func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot) *R
 
 		if !exists {
 			// New server needs to be added
-			if desiredServer.Enabled && !desiredServer.Quarantined {
+			if desiredServer.Enabled && (!desiredServer.Quarantined || s.IsInspectionExempted(name)) {
 				plan.Actions[name] = ActionConnect
 			} else {
 				plan.Actions[name] = ActionNone
@@ -255,11 +317,11 @@ func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot) *R
 			// Existing server - check if config changed
 			if s.configChanged(currentState.Config, desiredServer) {
 				plan.Actions[name] = ActionReconnect
-			} else if desiredServer.Enabled && !desiredServer.Quarantined && !currentState.Connected {
-				// Should be connected but isn't
+			} else if desiredServer.Enabled && (!desiredServer.Quarantined || s.IsInspectionExempted(name)) && !currentState.Connected {
+				// Should be connected but isn't (or has inspection exemption)
 				plan.Actions[name] = ActionConnect
-			} else if (!desiredServer.Enabled || desiredServer.Quarantined) && currentState.Connected {
-				// Shouldn't be connected but is
+			} else if (!desiredServer.Enabled || (desiredServer.Quarantined && !s.IsInspectionExempted(name))) && currentState.Connected {
+				// Shouldn't be connected but is (or exemption expired)
 				plan.Actions[name] = ActionDisconnect
 			} else {
 				plan.Actions[name] = ActionNone
@@ -322,7 +384,14 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 			return fmt.Errorf("failed to add server: %w", err)
 		}
 
-		if serverConfig.Enabled && !serverConfig.Quarantined {
+		// Connect if enabled and (not quarantined OR has inspection exemption)
+		if serverConfig.Enabled && (!serverConfig.Quarantined || s.IsInspectionExempted(serverName)) {
+			// Log security event when connecting quarantined server via exemption
+			if serverConfig.Quarantined && s.IsInspectionExempted(serverName) {
+				s.logger.Warn("⚠️ Connecting quarantined server for inspection",
+					zap.String("server", serverName))
+			}
+
 			if err := s.upstream.ConnectServer(ctx, serverName); err != nil {
 				s.logger.Warn("Failed to connect server (will retry)",
 					zap.String("server", serverName),
@@ -355,8 +424,14 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 			return fmt.Errorf("failed to add server: %w", err)
 		}
 
-		// Connect if enabled
-		if serverConfig.Enabled && !serverConfig.Quarantined {
+		// Connect if enabled and (not quarantined OR has inspection exemption)
+		if serverConfig.Enabled && (!serverConfig.Quarantined || s.IsInspectionExempted(serverName)) {
+			// Log security event when connecting quarantined server via exemption
+			if serverConfig.Quarantined && s.IsInspectionExempted(serverName) {
+				s.logger.Warn("⚠️ Reconnecting quarantined server for inspection",
+					zap.String("server", serverName))
+			}
+
 			if err := s.upstream.ConnectServer(ctx, serverName); err != nil {
 				s.logger.Warn("Failed to reconnect server (will retry)",
 					zap.String("server", serverName),
@@ -794,4 +869,191 @@ func (s *Supervisor) Stop() {
 	s.eventMu.Unlock()
 
 	s.logger.Info("Supervisor stopped")
+}
+
+// RequestInspectionExemption grants temporary connection permission for a quarantined server.
+// This allows security inspection to temporarily connect to quarantined servers.
+// Triggers immediate reconciliation to connect the server.
+func (s *Supervisor) RequestInspectionExemption(serverName string, duration time.Duration) error {
+	s.inspectionExemptionsMu.Lock()
+	expiryTime := time.Now().Add(duration)
+	s.inspectionExemptions[serverName] = expiryTime
+	s.inspectionExemptionsMu.Unlock()
+
+	s.logger.Warn("⚠️ Temporary connection exemption granted for quarantined server inspection",
+		zap.String("server", serverName),
+		zap.Duration("duration", duration),
+		zap.Time("expires_at", expiryTime))
+
+	// Trigger immediate reconciliation to connect the server
+	currentConfig := s.configSvc.Current()
+	if err := s.reconcile(currentConfig); err != nil {
+		s.logger.Error("Failed to trigger reconciliation after exemption grant",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return fmt.Errorf("failed to trigger reconciliation: %w", err)
+	}
+
+	return nil
+}
+
+// RevokeInspectionExemption revokes the temporary connection permission and triggers disconnection.
+func (s *Supervisor) RevokeInspectionExemption(serverName string) {
+	s.inspectionExemptionsMu.Lock()
+	_, exists := s.inspectionExemptions[serverName]
+	if exists {
+		delete(s.inspectionExemptions, serverName)
+	}
+	s.inspectionExemptionsMu.Unlock()
+
+	if exists {
+		s.logger.Warn("⚠️ Inspection exemption revoked for quarantined server",
+			zap.String("server", serverName))
+
+		// Trigger immediate reconciliation to disconnect the server
+		currentConfig := s.configSvc.Current()
+		if err := s.reconcile(currentConfig); err != nil {
+			s.logger.Error("Failed to trigger reconciliation after exemption revocation",
+				zap.String("server", serverName),
+				zap.Error(err))
+		}
+	}
+}
+
+// IsInspectionExempted checks if a server has an active inspection exemption.
+// Automatically cleans up expired exemptions.
+func (s *Supervisor) IsInspectionExempted(serverName string) bool {
+	s.inspectionExemptionsMu.Lock()
+	defer s.inspectionExemptionsMu.Unlock()
+
+	expiryTime, exists := s.inspectionExemptions[serverName]
+	if !exists {
+		return false
+	}
+
+	// Check if exemption has expired
+	if time.Now().After(expiryTime) {
+		delete(s.inspectionExemptions, serverName)
+		s.logger.Warn("⚠️ Inspection exemption expired, forcing disconnect",
+			zap.String("server", serverName))
+		return false
+	}
+
+	return true
+}
+
+// ===== Circuit Breaker for Inspection Failures (Issue #105) =====
+
+const (
+	maxInspectionFailures  = 3                // Max consecutive failures before cooldown
+	inspectionCooldown     = 5 * time.Minute  // Cooldown duration after max failures
+	failureResetTimeout    = 10 * time.Minute // Reset counter if no failures for this long
+)
+
+// CanInspect checks if inspection is allowed for a server (circuit breaker)
+// Returns (allowed bool, reason string, cooldownRemaining time.Duration)
+func (s *Supervisor) CanInspect(serverName string) (bool, string, time.Duration) {
+	s.inspectionFailuresMu.RLock()
+	defer s.inspectionFailuresMu.RUnlock()
+
+	info, exists := s.inspectionFailures[serverName]
+	if !exists {
+		// No failure history - allow inspection
+		return true, "", 0
+	}
+
+	now := time.Now()
+
+	// Check if cooldown is active
+	if now.Before(info.cooldownUntil) {
+		remaining := info.cooldownUntil.Sub(now)
+		reason := fmt.Sprintf("Server '%s' has failed inspection %d times. Circuit breaker active - please wait %v before retrying. This prevents cascading failures with unstable servers (see issue #105).",
+			serverName, info.consecutiveFailures, remaining.Round(time.Second))
+		return false, reason, remaining
+	}
+
+	// Check if failures should be reset (no failures for failureResetTimeout)
+	if now.Sub(info.lastFailureTime) > failureResetTimeout {
+		// Failures are old - will be reset on next inspection
+		return true, "", 0
+	}
+
+	// Within failure window but not in cooldown
+	return true, "", 0
+}
+
+// RecordInspectionFailure records an inspection failure for circuit breaker
+func (s *Supervisor) RecordInspectionFailure(serverName string) {
+	s.inspectionFailuresMu.Lock()
+	defer s.inspectionFailuresMu.Unlock()
+
+	now := time.Now()
+
+	info, exists := s.inspectionFailures[serverName]
+	if !exists {
+		info = &inspectionFailureInfo{}
+		s.inspectionFailures[serverName] = info
+	}
+
+	// Reset counter if last failure was too long ago
+	if now.Sub(info.lastFailureTime) > failureResetTimeout {
+		info.consecutiveFailures = 0
+	}
+
+	info.consecutiveFailures++
+	info.lastFailureTime = now
+
+	s.logger.Warn("Inspection failure recorded",
+		zap.String("server", serverName),
+		zap.Int("consecutive_failures", info.consecutiveFailures),
+		zap.Int("max_before_cooldown", maxInspectionFailures))
+
+	// Activate cooldown if max failures reached
+	if info.consecutiveFailures >= maxInspectionFailures {
+		info.cooldownUntil = now.Add(inspectionCooldown)
+		s.logger.Error("⚠️ Inspection circuit breaker activated - too many failures",
+			zap.String("server", serverName),
+			zap.Int("failures", info.consecutiveFailures),
+			zap.Duration("cooldown", inspectionCooldown),
+			zap.Time("cooldown_until", info.cooldownUntil),
+			zap.String("issue", "#105 - preventing cascading failures"))
+	}
+}
+
+// RecordInspectionSuccess records a successful inspection, resetting failure counter
+func (s *Supervisor) RecordInspectionSuccess(serverName string) {
+	s.inspectionFailuresMu.Lock()
+	defer s.inspectionFailuresMu.Unlock()
+
+	info, exists := s.inspectionFailures[serverName]
+	if !exists {
+		return
+	}
+
+	if info.consecutiveFailures > 0 {
+		s.logger.Info("Inspection succeeded - resetting failure counter",
+			zap.String("server", serverName),
+			zap.Int("previous_failures", info.consecutiveFailures))
+	}
+
+	// Reset failure counter
+	delete(s.inspectionFailures, serverName)
+}
+
+// GetInspectionStats returns inspection failure statistics for a server
+func (s *Supervisor) GetInspectionStats(serverName string) (failures int, inCooldown bool, cooldownRemaining time.Duration) {
+	s.inspectionFailuresMu.RLock()
+	defer s.inspectionFailuresMu.RUnlock()
+
+	info, exists := s.inspectionFailures[serverName]
+	if !exists {
+		return 0, false, 0
+	}
+
+	now := time.Now()
+	if now.Before(info.cooldownUntil) {
+		return info.consecutiveFailures, true, info.cooldownUntil.Sub(now)
+	}
+
+	return info.consecutiveFailures, false, 0
 }

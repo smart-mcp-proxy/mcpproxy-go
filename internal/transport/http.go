@@ -19,6 +19,12 @@ const (
 	TransportStdio          = "stdio"
 )
 
+var (
+	// GlobalTraceEnabled controls whether HTTP/SSE frame tracing is enabled
+	// This can be set by CLI flags or other callers
+	GlobalTraceEnabled = false
+)
+
 // HTTPError represents detailed HTTP error information for debugging
 type HTTPError struct {
 	StatusCode int               `json:"status_code"`
@@ -84,10 +90,11 @@ func NewJSONRPCError(code int, message string, data interface{}, httpErr *HTTPEr
 
 // HTTPTransportConfig holds configuration for HTTP transport
 type HTTPTransportConfig struct {
-	URL         string
-	Headers     map[string]string
-	OAuthConfig *client.OAuthConfig
-	UseOAuth    bool
+	URL          string
+	Headers      map[string]string
+	OAuthConfig  *client.OAuthConfig
+	UseOAuth     bool
+	TraceEnabled bool // Enable detailed HTTP/SSE frame tracing
 }
 
 // CreateHTTPClient creates a new MCP client using HTTP transport
@@ -149,6 +156,37 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	}
 
 	logger.Debug("Creating regular HTTP client", zap.String("url", cfg.URL))
+
+	// If tracing is enabled, create HTTP client with logging transport
+	if cfg.TraceEnabled {
+		logger.Info("🔍 HTTP TRACE MODE ENABLED - All HTTP traffic will be logged")
+		baseTransport := &http.Transport{
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		}
+		loggingTransport := NewLoggingTransport(baseTransport, logger)
+		httpClient := &http.Client{
+			Transport: loggingTransport,
+			Timeout:   180 * time.Second,
+		}
+
+		var httpTransport transport.Interface
+		var err error
+		if len(cfg.Headers) > 0 {
+			httpTransport, err = transport.NewStreamableHTTP(cfg.URL,
+				transport.WithHTTPHeaders(cfg.Headers),
+				transport.WithHTTPBasicClient(httpClient))
+		} else {
+			httpTransport, err = transport.NewStreamableHTTP(cfg.URL,
+				transport.WithHTTPBasicClient(httpClient))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to create HTTP transport with tracing: %w", err)
+		}
+		return client.NewClient(httpTransport), nil
+	}
+
 	// Use regular HTTP client
 	if len(cfg.Headers) > 0 {
 		logger.Debug("Adding HTTP headers", zap.Int("header_count", len(cfg.Headers)))
@@ -221,22 +259,35 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	// Use regular SSE client
 	if len(cfg.Headers) > 0 {
 		logger.Debug("Adding SSE headers", zap.Int("header_count", len(cfg.Headers)))
-		// Create custom HTTP client with longer timeout for SSE
-		httpClient := &http.Client{
-			Timeout: 180 * time.Second, // Increased timeout for SSE connections
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				IdleConnTimeout:     90 * time.Second,
-				DisableCompression:  false,
-				DisableKeepAlives:   false, // Enable keep-alives for SSE stability
-				MaxIdleConnsPerHost: 5,
-			},
+		// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
+		// The Timeout field covers the entire request duration, which kills long-lived SSE streams
+		// Instead, we rely on IdleConnTimeout to detect dead connections
+		baseTransport := &http.Transport{
+			MaxIdleConns:        10,
+			IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
+			DisableCompression:  false,
+			DisableKeepAlives:   false, // Enable keep-alives for SSE stability
+			MaxIdleConnsPerHost: 5,
+			// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
+			ResponseHeaderTimeout: 30 * time.Second,
 		}
 
-		zap.L().Debug("Creating SSE MCP client with custom HTTP timeout and headers",
+		var transport http.RoundTripper = baseTransport
+		if cfg.TraceEnabled {
+			logger.Info("🔍 SSE TRACE MODE ENABLED - All HTTP traffic and SSE frames will be logged")
+			transport = NewLoggingTransport(baseTransport, logger)
+		}
+
+		httpClient := &http.Client{
+			Transport: transport,
+		}
+
+		logger.Info("Creating SSE MCP client with indefinite timeout for long-lived streams",
 			zap.String("url", cfg.URL),
-			zap.Duration("timeout", 180*time.Second),
-			zap.Int("header_count", len(cfg.Headers)))
+			zap.Duration("idle_timeout", 300*time.Second),
+			zap.Duration("header_timeout", 30*time.Second),
+			zap.Int("header_count", len(cfg.Headers)),
+			zap.String("note", "Removed http.Client.Timeout to allow SSE streams longer than 3 minutes"))
 
 		sseClient, err := client.NewSSEMCPClient(cfg.URL,
 			client.WithHTTPClient(httpClient),
@@ -247,29 +298,43 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		return sseClient, nil
 	}
 
-	// Create custom HTTP client with longer timeout for SSE
-	httpClient := &http.Client{
-		Timeout: 180 * time.Second, // Increased timeout for SSE connections
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			IdleConnTimeout:     90 * time.Second,
-			DisableCompression:  false,
-			DisableKeepAlives:   false, // Enable keep-alives for SSE stability
-			MaxIdleConnsPerHost: 5,
-		},
+	// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
+	// The Timeout field covers the entire request duration, which kills long-lived SSE streams
+	// Instead, we rely on IdleConnTimeout to detect dead connections
+	baseTransport := &http.Transport{
+		MaxIdleConns:        10,
+		IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
+		DisableCompression:  false,
+		DisableKeepAlives:   false, // Enable keep-alives for SSE stability
+		MaxIdleConnsPerHost: 5,
+		// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
+		ResponseHeaderTimeout: 30 * time.Second,
 	}
 
-	zap.L().Debug("Creating SSE MCP client with custom HTTP timeout",
+	var transport http.RoundTripper = baseTransport
+	if cfg.TraceEnabled {
+		logger.Info("🔍 SSE TRACE MODE ENABLED - All HTTP traffic and SSE frames will be logged")
+		transport = NewLoggingTransport(baseTransport, logger)
+	}
+
+	httpClient := &http.Client{
+		Transport: transport,
+	}
+
+	logger.Info("Creating SSE MCP client with indefinite timeout for long-lived streams",
 		zap.String("url", cfg.URL),
-		zap.Duration("timeout", 180*time.Second))
+		zap.Duration("idle_timeout", 300*time.Second),
+		zap.Duration("header_timeout", 30*time.Second),
+		zap.String("note", "Removed http.Client.Timeout to allow SSE streams longer than 3 minutes"))
 
 	// Enhanced trace-level debugging for SSE transport
-	if zap.L().Core().Enabled(zap.DebugLevel - 1) { // Trace level
-		zap.L().Debug("TRACE SSE TRANSPORT SETUP",
+	if logger.Core().Enabled(zap.DebugLevel - 1) { // Trace level
+		logger.Debug("TRACE SSE TRANSPORT SETUP",
 			zap.String("transport_type", "sse"),
 			zap.String("url", cfg.URL),
-			zap.Duration("http_timeout", 180*time.Second),
-			zap.String("debug_note", "SSE client will establish persistent connection for JSON-RPC over SSE"))
+			zap.Duration("idle_timeout", 300*time.Second),
+			zap.Duration("response_header_timeout", 30*time.Second),
+			zap.String("debug_note", "SSE client will establish persistent connection for JSON-RPC over SSE with no overall timeout"))
 	}
 
 	sseClient, err := client.NewSSEMCPClient(cfg.URL,
@@ -282,23 +347,12 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 // CreateHTTPTransportConfig creates an HTTP transport config from server config
 func CreateHTTPTransportConfig(serverConfig *config.ServerConfig, oauthConfig *client.OAuthConfig) *HTTPTransportConfig {
-	logger := zap.L().Named("transport")
-	logger.Error("🚨 TRANSPORT CONFIG CREATION",
-		zap.String("server", serverConfig.Name),
-		zap.Bool("oauth_config_nil", oauthConfig == nil),
-		zap.Bool("use_oauth", oauthConfig != nil))
-
-	if oauthConfig != nil {
-		logger.Error("🚨 OAUTH CONFIG DETAILS",
-			zap.String("redirect_uri", oauthConfig.RedirectURI),
-			zap.Strings("scopes", oauthConfig.Scopes))
-	}
-
 	return &HTTPTransportConfig{
-		URL:         serverConfig.URL,
-		Headers:     serverConfig.Headers,
-		OAuthConfig: oauthConfig,
-		UseOAuth:    oauthConfig != nil,
+		URL:          serverConfig.URL,
+		Headers:      serverConfig.Headers,
+		OAuthConfig:  oauthConfig,
+		UseOAuth:     oauthConfig != nil,
+		TraceEnabled: GlobalTraceEnabled, // Use global trace flag
 	}
 }
 

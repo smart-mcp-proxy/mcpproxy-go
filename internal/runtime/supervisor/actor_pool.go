@@ -122,7 +122,23 @@ func (p *ActorPoolSimple) RemoveServer(name string) error {
 // ConnectServer tells the manager to connect a server.
 func (p *ActorPoolSimple) ConnectServer(ctx context.Context, name string) error {
 	p.logger.Debug("Connecting server via manager", zap.String("name", name))
-	// Manager handles connection automatically via managed clients
+
+	client, exists := p.manager.GetClient(name)
+	if !exists {
+		return fmt.Errorf("server %s not found", name)
+	}
+
+	// Attempt to connect (managed client will handle state checks)
+	// If client is already connecting/connected, Connect() will return an error
+	// which we log but don't treat as fatal (supervisor will retry)
+	if err := client.Connect(ctx); err != nil {
+		p.logger.Debug("Connect returned error (may be already connecting/connected)",
+			zap.String("server", name),
+			zap.Error(err))
+		// Not returning error - this is expected if client is already connecting
+		// Supervisor's reconciliation logic will handle retries if needed
+	}
+
 	return nil
 }
 

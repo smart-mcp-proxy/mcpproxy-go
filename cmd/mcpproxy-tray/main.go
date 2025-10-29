@@ -42,6 +42,7 @@ var (
 	defaultCoreURL   = "http://127.0.0.1:8080"
 	errNoBundledCore = errors.New("no bundled core binary found")
 	trayAPIKey       = "" // API key generated for core communication
+	shutdownComplete = make(chan struct{}) // Signal when shutdown is complete
 )
 
 // getLogDir returns the standard log directory for the current OS.
@@ -152,21 +153,32 @@ func main() {
 
 	// Create tray application early so icon appears
 	shutdownFunc := func() {
+		defer close(shutdownComplete) // Signal when shutdown is done
+
 		logger.Info("Tray shutdown requested")
-		// IMPORTANT: Send shutdown event to trigger state transition
+
+		// Send shutdown event to state machine
 		stateMachine.SendEvent(state.EventShutdown)
-		// IMPORTANT: Call handleShutdown() directly to terminate core process
-		// We can't rely on the state transition goroutine because cancel() will kill it
+
+		// Shutdown launcher (stops SSE, health monitor, kills core)
 		if launcher != nil {
 			launcher.handleShutdown()
 		}
-		// IMPORTANT: Quit the tray UI BEFORE cancelling context
-		// This prevents reconnection attempts from SSE goroutine
+
+		// Shutdown state machine
+		stateMachine.Shutdown()
+
+		// CRITICAL: Cancel context LAST, after all cleanup
+		// This prevents the tray.Run() goroutine from quitting prematurely
+		logger.Info("Cancelling context after cleanup complete")
+		cancel()
+
+		// Give tray.Run() goroutine a moment to see cancellation
+		time.Sleep(100 * time.Millisecond)
+
+		// Finally, quit the tray UI
 		logger.Info("Quitting system tray")
 		trayApp.Quit()
-		// Now shutdown state machine and cancel context
-		stateMachine.Shutdown()
-		cancel()
 	}
 
 	trayApp = tray.NewWithAPIClient(api.NewServerAdapter(apiClient), apiClient, logger.Sugar(), version, shutdownFunc)
@@ -214,17 +226,9 @@ func main() {
 	go func() {
 		<-sigCh
 		logger.Info("Received shutdown signal")
-		stateMachine.SendEvent(state.EventShutdown)
-		// IMPORTANT: Call handleShutdown() directly to terminate core process
-		// Same as shutdownFunc - we can't rely on state transition goroutine
-		if launcher != nil {
-			launcher.handleShutdown()
-		}
-		// IMPORTANT: Quit the tray UI BEFORE cancelling context
-		logger.Info("Quitting system tray from signal handler")
-		trayApp.Quit()
-		stateMachine.Shutdown()
-		cancel()
+
+		// Use the same shutdown flow as Quit menu item
+		shutdownFunc()
 	}()
 
 	logger.Info("Starting tray event loop")
@@ -232,7 +236,15 @@ func main() {
 		logger.Error("Tray application error", zap.Error(err))
 	}
 
-	// Wait for state machine to shut down gracefully
+	// Wait for shutdown to complete (with timeout)
+	select {
+	case <-shutdownComplete:
+		logger.Info("Shutdown completed successfully")
+	case <-time.After(5 * time.Second):
+		logger.Warn("Shutdown timeout - forcing exit")
+	}
+
+	// Final cleanup
 	stateMachine.Shutdown()
 
 	logger.Info("mcpproxy-tray shutdown complete")
@@ -329,33 +341,6 @@ func resolveCoreURL() string {
 		return "https://127.0.0.1:8080"
 	}
 	return defaultCoreURL
-}
-
-// isSocketAvailable checks if a socket/pipe endpoint is accessible
-func isSocketAvailable(endpoint string) bool {
-	// Parse endpoint to extract scheme
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-
-	switch parsed.Scheme {
-	case "unix":
-		// Check if Unix socket file exists
-		socketPath := parsed.Path
-		if socketPath == "" {
-			socketPath = parsed.Opaque
-		}
-		_, err := os.Stat(socketPath)
-		return err == nil
-	case "npipe":
-		// For Windows named pipes, we can't easily check existence
-		// Return true and let the connection attempt fail if needed
-		return true
-	default:
-		// Not a socket endpoint
-		return false
-	}
 }
 
 func shouldSkipCoreLaunch() bool {
@@ -1361,15 +1346,25 @@ func (cpl *CoreProcessLauncher) handleGeneralError() {
 func (cpl *CoreProcessLauncher) handleShutdown() {
 	cpl.logger.Info("Core process launcher shutting down")
 
-	if cpl.processMonitor != nil {
-		cpl.processMonitor.Shutdown()
-	}
+	// CRITICAL: Stop SSE FIRST before killing core
+	// This prevents SSE from detecting disconnection and trying to reconnect
+	cpl.logger.Info("Stopping SSE connection")
+	cpl.apiClient.StopSSE()
 
+	// Give SSE goroutine a moment to see cancellation and exit cleanly
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop health monitor before killing core
 	if cpl.healthMonitor != nil {
+		cpl.logger.Info("Stopping health monitor")
 		cpl.healthMonitor.Stop()
 	}
 
-	cpl.apiClient.StopSSE()
+	// Finally, kill the core process
+	if cpl.processMonitor != nil {
+		cpl.logger.Info("Shutting down core process")
+		cpl.processMonitor.Shutdown()
+	}
 }
 
 // buildCoreEnvironment builds the environment for the core process
