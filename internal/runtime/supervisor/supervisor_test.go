@@ -552,3 +552,180 @@ func TestSupervisor_RefreshToolsFromDiscovery_EmptyTools(t *testing.T) {
 		t.Errorf("Expected no error with empty tools, got %v", err)
 	}
 }
+
+func TestSupervisor_InspectionExemption_GrantAndRevoke(t *testing.T) {
+	cfg := &config.Config{
+		Listen:  "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	supervisor := New(configSvc, mockUpstream, zap.NewNop())
+
+	// Test: Server starts with no exemptions
+	if supervisor.IsInspectionExempted("test-server") {
+		t.Error("Expected no exemption initially")
+	}
+
+	// Test: Grant exemption
+	err := supervisor.RequestInspectionExemption("test-server", 5*time.Second)
+	if err != nil {
+		t.Fatalf("RequestInspectionExemption failed: %v", err)
+	}
+
+	// Test: Exemption is active
+	if !supervisor.IsInspectionExempted("test-server") {
+		t.Error("Expected exemption to be active after request")
+	}
+
+	// Test: Revoke exemption
+	supervisor.RevokeInspectionExemption("test-server")
+
+	// Test: Exemption is revoked
+	if supervisor.IsInspectionExempted("test-server") {
+		t.Error("Expected exemption to be revoked")
+	}
+}
+
+func TestSupervisor_InspectionExemption_AutoExpiry(t *testing.T) {
+	cfg := &config.Config{
+		Listen:  "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	supervisor := New(configSvc, mockUpstream, zap.NewNop())
+
+	// Grant short-lived exemption (100ms)
+	err := supervisor.RequestInspectionExemption("test-server", 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RequestInspectionExemption failed: %v", err)
+	}
+
+	// Exemption should be active immediately
+	if !supervisor.IsInspectionExempted("test-server") {
+		t.Error("Expected exemption to be active")
+	}
+
+	// Wait for expiry
+	time.Sleep(150 * time.Millisecond)
+
+	// Exemption should be expired now
+	if supervisor.IsInspectionExempted("test-server") {
+		t.Error("Expected exemption to be expired")
+	}
+}
+
+func TestSupervisor_InspectionExemption_QuarantinedServerConnects(t *testing.T) {
+	cfg := &config.Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{
+			{Name: "quarantined-server", Enabled: true, Quarantined: true},
+		},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	supervisor := New(configSvc, mockUpstream, zap.NewNop())
+
+	// Initial reconciliation - quarantined server should NOT connect (no exemption)
+	_ = supervisor.reconcile(configSvc.Current())
+	time.Sleep(50 * time.Millisecond)
+
+	mockUpstream.mu.Lock()
+	connected := mockUpstream.connected["quarantined-server"]
+	mockUpstream.mu.Unlock()
+
+	if connected {
+		t.Error("Expected quarantined server NOT to connect initially without exemption")
+	}
+
+	// Grant exemption
+	err := supervisor.RequestInspectionExemption("quarantined-server", 5*time.Second)
+	if err != nil {
+		t.Fatalf("RequestInspectionExemption failed: %v", err)
+	}
+
+	// Wait for reconciliation triggered by RequestInspectionExemption to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Now quarantined server SHOULD be connected due to exemption
+	mockUpstream.mu.Lock()
+	connected = mockUpstream.connected["quarantined-server"]
+	mockUpstream.mu.Unlock()
+
+	if !connected {
+		t.Error("Expected quarantined server to connect with active exemption")
+	}
+
+	// Revoke exemption
+	supervisor.RevokeInspectionExemption("quarantined-server")
+
+	// Exemption should no longer be active
+	if supervisor.IsInspectionExempted("quarantined-server") {
+		t.Error("Expected exemption to be revoked")
+	}
+
+	// Note: In a unit test, we can verify the exemption logic works correctly.
+	// Full disconnection behavior is best tested in integration tests where
+	// the supervisor's event loop and state synchronization are fully active.
+}
+
+func TestSupervisor_InspectionExemption_MultipleServers(t *testing.T) {
+	cfg := &config.Config{
+		Listen:  "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	supervisor := New(configSvc, mockUpstream, zap.NewNop())
+
+	// Grant exemptions for multiple servers
+	_ = supervisor.RequestInspectionExemption("server1", 5*time.Second)
+	_ = supervisor.RequestInspectionExemption("server2", 5*time.Second)
+	_ = supervisor.RequestInspectionExemption("server3", 5*time.Second)
+
+	// All should be exempted
+	if !supervisor.IsInspectionExempted("server1") {
+		t.Error("Expected server1 to be exempted")
+	}
+	if !supervisor.IsInspectionExempted("server2") {
+		t.Error("Expected server2 to be exempted")
+	}
+	if !supervisor.IsInspectionExempted("server3") {
+		t.Error("Expected server3 to be exempted")
+	}
+
+	// Revoke one exemption
+	supervisor.RevokeInspectionExemption("server2")
+
+	// server2 should be revoked, others still active
+	if !supervisor.IsInspectionExempted("server1") {
+		t.Error("Expected server1 to still be exempted")
+	}
+	if supervisor.IsInspectionExempted("server2") {
+		t.Error("Expected server2 exemption to be revoked")
+	}
+	if !supervisor.IsInspectionExempted("server3") {
+		t.Error("Expected server3 to still be exempted")
+	}
+}

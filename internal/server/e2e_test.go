@@ -981,3 +981,99 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, removeResult.IsError, "Remove operation should succeed")
 }
+
+// Test: Inspect quarantined server with temporary exemption
+func TestE2E_InspectQuarantined(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	// Create MCP client
+	mcpClient := env.CreateProxyClient()
+	env.ConnectClient(mcpClient)
+	defer mcpClient.Close()
+
+	// Create mock server with some tools
+	mockTools := []mcp.Tool{
+		{
+			Name:        "test_tool_1",
+			Description: "First test tool",
+			InputSchema: mcp.ToolInputSchema{Type: "object"},
+		},
+		{
+			Name:        "test_tool_2",
+			Description: "Second test tool",
+			InputSchema: mcp.ToolInputSchema{Type: "object"},
+		},
+	}
+	mockServer := env.CreateMockUpstreamServer("quarantined-server", mockTools)
+
+	ctx := context.Background()
+
+	// Add server (will be automatically quarantined)
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "quarantined-server",
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError, "Add operation should succeed")
+
+	// Wait for server to be added to storage (quarantined servers don't get clients created immediately)
+	time.Sleep(500 * time.Millisecond)
+
+	t.Log("🔍 Calling inspect_quarantined for quarantined-server...")
+
+	// Call inspect_quarantined
+	inspectRequest := mcp.CallToolRequest{}
+	inspectRequest.Params.Name = "upstream_servers"
+	inspectRequest.Params.Arguments = map[string]interface{}{
+		"operation": "inspect_quarantined",
+		"name":      "quarantined-server",
+	}
+
+	inspectResult, err := mcpClient.CallTool(ctx, inspectRequest)
+	require.NoError(t, err, "inspect_quarantined should not return error")
+	if inspectResult.IsError {
+		// Print the error for debugging
+		for _, content := range inspectResult.Content {
+			if textContent, ok := content.(*mcp.TextContent); ok {
+				t.Logf("❌ Error from inspect_quarantined: %s", textContent.Text)
+			}
+		}
+	}
+	assert.False(t, inspectResult.IsError, "inspect_quarantined should succeed")
+
+	// Verify result contains tool data
+	require.NotEmpty(t, inspectResult.Content, "Result should have content")
+	t.Logf("✅ Inspection result received: %d content items", len(inspectResult.Content))
+
+	// Verify the result contains information about the tools
+	var resultText string
+	for _, content := range inspectResult.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			resultText += textContent.Text
+		}
+	}
+	assert.Contains(t, resultText, "test_tool_1", "Result should mention test_tool_1")
+	assert.Contains(t, resultText, "test_tool_2", "Result should mention test_tool_2")
+
+	// After inspection, server should be disconnected again (exemption revoked)
+	time.Sleep(1 * time.Second)
+
+	// Now check if client exists and is disconnected
+	upstreamManager := env.proxyServer.runtime.UpstreamManager()
+	client, exists := upstreamManager.GetClient("quarantined-server")
+	if exists {
+		assert.False(t, client.IsConnected(), "Server should be disconnected after inspection")
+	} else {
+		t.Log("Client no longer exists after exemption revoked (acceptable)")
+	}
+
+	t.Log("✅ Test passed: Quarantine inspection with temporary exemption works correctly")
+}

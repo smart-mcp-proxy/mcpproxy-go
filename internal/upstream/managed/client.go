@@ -795,10 +795,7 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 
 	// Check if cache is valid and not expired
 	if !cachedTime.IsZero() && time.Since(cachedTime) < cacheTimeout {
-		mc.logger.Debug("🔍 Tool count cache hit",
-			zap.String("server", mc.Config.Name),
-			zap.Int("cached_count", cachedCount),
-			zap.Duration("cache_age", time.Since(cachedTime)))
+		// Cache hit - return cached count without logging to reduce noise
 		return cachedCount, nil
 	}
 

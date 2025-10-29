@@ -1130,21 +1130,87 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not quarantined", serverName)), nil
 	}
 
-	// Get the client for this quarantined server to retrieve actual tool descriptions
-	client, exists := p.upstreamManager.GetClient(serverName)
-	if !exists {
-		return mcp.NewToolResultError(fmt.Sprintf("No client found for quarantined server '%s'", serverName)), nil
+	var toolsAnalysis []map[string]interface{}
+
+	// REQUEST TEMPORARY CONNECTION EXEMPTION FOR INSPECTION
+	p.logger.Warn("⚠️ Requesting temporary connection exemption for quarantined server inspection",
+		zap.String("server", serverName))
+
+	supervisor := p.mainServer.runtime.Supervisor()
+	// Exemption duration: 60s to allow for async connection (20s) + tool retrieval (10s) + buffer
+	if err := supervisor.RequestInspectionExemption(serverName, 60*time.Second); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to request inspection exemption: %v", err)), nil
 	}
 
-	var toolsAnalysis []map[string]interface{}
+	// Ensure exemption is revoked on exit
+	defer func() {
+		supervisor.RevokeInspectionExemption(serverName)
+		p.logger.Warn("⚠️ Inspection complete, exemption revoked",
+			zap.String("server", serverName))
+	}()
+
+	// Wait for client to be created and server to connect (with timeout)
+	// The supervisor's reconciliation is async, so client creation and connection may take several seconds
+	p.logger.Info("Waiting for quarantined server client to be created and connected for inspection",
+		zap.String("server", serverName),
+		zap.String("note", "Supervisor reconciliation triggered, waiting for async client creation and connection..."))
+
+	connectionDeadline := time.Now().Add(20 * time.Second) // Increased from 10s to 20s for SSE connections
+	connected := false
+	attemptCount := 0
+	var client *managed.Client
+
+	for time.Now().Before(connectionDeadline) {
+		attemptCount++
+
+		// Try to get the client (it may not exist yet if reconciliation is still creating it)
+		var exists bool
+		client, exists = p.upstreamManager.GetClient(serverName)
+
+		if exists && client.IsConnected() {
+			connected = true
+			p.logger.Info("✅ Quarantined server connected successfully for inspection",
+				zap.String("server", serverName),
+				zap.Int("attempts", attemptCount))
+			break
+		}
+		if attemptCount%10 == 0 { // Log every second
+			p.logger.Debug("Still waiting for connection...",
+				zap.String("server", serverName),
+				zap.Int("attempts", attemptCount),
+				zap.Duration("elapsed", time.Since(time.Now().Add(-20*time.Second).Add(time.Duration(attemptCount)*100*time.Millisecond))))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !connected {
+		// Connection timeout - provide diagnostic information
+		connectionStatus := client.GetConnectionStatus()
+		p.logger.Error("⚠️ Quarantined server connection timeout",
+			zap.String("server", serverName),
+			zap.Int("total_attempts", attemptCount),
+			zap.Duration("timeout", 20*time.Second))
+		return mcp.NewToolResultError(fmt.Sprintf("Quarantined server '%s' failed to connect within 20 second timeout. Connection status: %v. This may indicate the server process is not running or there's a network issue.", serverName, connectionStatus)), nil
+	}
 
 	if client.IsConnected() {
 		// Server is connected - retrieve actual tools for security analysis
-		// Add timeout and better error handling for broken connections
-		toolsCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		// Use shorter timeout for quarantined servers to avoid long hangs
+		// SSE/HTTP transports may have stream cancellation issues that require shorter timeout
+		toolsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
+		p.logger.Info("🔍 INSPECT_QUARANTINED: About to call ListTools",
+			zap.String("server", serverName),
+			zap.String("timeout", "10s"))
+
 		tools, err := client.ListTools(toolsCtx)
+
+		p.logger.Info("🔍 INSPECT_QUARANTINED: ListTools call completed",
+			zap.String("server", serverName),
+			zap.Bool("success", err == nil),
+			zap.Int("tool_count", len(tools)),
+			zap.Error(err))
 		if err != nil {
 			// Handle broken pipe and other connection errors gracefully
 			p.logger.Warn("Failed to retrieve tools from quarantined server, treating as disconnected",
@@ -1221,21 +1287,8 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 				toolsAnalysis = append(toolsAnalysis, toolAnalysis)
 			}
 		}
-	} else {
-		// Server is not connected - provide connection instructions
-		connectionStatus := client.GetConnectionStatus()
-
-		toolsAnalysis = []map[string]interface{}{
-			{
-				"server_name":     serverName,
-				"status":          "QUARANTINED_DISCONNECTED",
-				"message":         fmt.Sprintf("Server '%s' is quarantined but not currently connected. Cannot retrieve tool descriptions for analysis.", serverName),
-				"connection_info": connectionStatus,
-				"next_steps":      "The server needs to be connected first to retrieve tool descriptions. Check server configuration and connectivity.",
-				"security_note":   "Tools cannot be analyzed until server connection is established.",
-			},
-		}
 	}
+	// Note: No else block needed - we already validated connection above and returned error if not connected
 
 	// Create comprehensive response
 	response := map[string]interface{}{
