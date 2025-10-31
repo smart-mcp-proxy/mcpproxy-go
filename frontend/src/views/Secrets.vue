@@ -119,10 +119,10 @@
       </button>
     </div>
 
-    <!-- Secrets List -->
-    <div v-else class="space-y-4">
+    <!-- Secrets List with Smooth Transitions -->
+    <TransitionGroup v-else name="secret-list" tag="div" class="space-y-4">
       <!-- Keyring Secrets -->
-      <div v-for="secret in filteredSecrets" :key="secret.secret_ref.name" class="card bg-base-100 shadow" :class="{ 'border-l-4 border-error': !secret.is_set }">
+      <div v-for="secret in filteredSecrets" :key="`secret-${secret.secret_ref.name}`" class="card bg-base-100 shadow" :class="{ 'border-l-4 border-error': !secret.is_set }">
         <div class="card-body">
           <div class="flex justify-between items-start">
             <div class="flex-1">
@@ -159,7 +159,7 @@
       </div>
 
       <!-- Environment Variables -->
-      <div v-for="envVar in filteredEnvVars" :key="envVar.secret_ref.name" class="card bg-base-100 shadow" :class="{ 'border-l-4 border-error': !envVar.is_set }">
+      <div v-for="envVar in filteredEnvVars" :key="`env-${envVar.secret_ref.name}`" class="card bg-base-100 shadow" :class="{ 'border-l-4 border-error': !envVar.is_set }">
         <div class="card-body">
           <div class="flex justify-between items-start">
             <div class="flex-1">
@@ -182,7 +182,7 @@
           </div>
         </div>
       </div>
-    </div>
+    </TransitionGroup>
 
     <!-- Migration Candidates Section -->
     <div v-if="migrationCandidates.length > 0" class="card bg-base-100 shadow">

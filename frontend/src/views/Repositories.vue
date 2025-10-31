@@ -95,8 +95,12 @@
         <p class="text-sm text-base-content/70">Found {{ servers.length }} server(s)</p>
       </div>
 
-      <!-- Server Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <!-- Server Cards with Smooth Transitions -->
+      <TransitionGroup
+        name="repo-card"
+        tag="div"
+        class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
+      >
         <div v-for="server in servers" :key="server.id" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
           <div class="card-body">
             <div class="flex justify-between items-start">
@@ -165,7 +169,7 @@
             </div>
           </div>
         </div>
-      </div>
+      </TransitionGroup>
     </div>
 
     <!-- Empty State (no search yet) -->

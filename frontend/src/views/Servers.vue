@@ -121,14 +121,28 @@
       </button>
     </div>
 
-    <!-- Servers Grid -->
-    <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+    <!-- Servers Grid with Smooth Transitions -->
+    <TransitionGroup
+      v-else
+      name="server-list"
+      tag="div"
+      class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
+    >
       <ServerCard
         v-for="server in filteredServers"
         :key="server.name"
         :server="server"
+        v-memo="[
+          server.connected,
+          server.connecting,
+          server.enabled,
+          server.quarantined,
+          server.tool_count,
+          server.last_error,
+          server.authenticated
+        ]"
       />
-    </div>
+    </TransitionGroup>
 
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="serversHints" />

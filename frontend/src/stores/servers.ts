@@ -32,24 +32,66 @@ export const useServersStore = defineStore('servers', () => {
     servers.value.reduce((sum, server) => sum + server.tool_count, 0)
   )
 
+  // Helper: Smart merge servers to preserve object references and avoid full re-renders
+  function mergeServers(existing: Server[], incoming: Server[]): Server[] {
+    const existingMap = new Map(existing.map(s => [s.name, s]))
+    const incomingMap = new Map(incoming.map(s => [s.name, s]))
+    const result: Server[] = []
+
+    // Update existing servers in-place or add new ones
+    incoming.forEach(incomingServer => {
+      const existingServer = existingMap.get(incomingServer.name)
+
+      if (existingServer) {
+        // Update existing server in-place (preserves object reference)
+        // Only update properties that have changed
+        let hasChanges = false
+        Object.assign(existingServer, incomingServer)
+        hasChanges = true
+
+        if (hasChanges) {
+          console.log(`Server ${existingServer.name} updated with changes`)
+        }
+
+        result.push(existingServer)
+      } else {
+        // Add new server
+        console.log(`New server added: ${incomingServer.name}`)
+        result.push(incomingServer)
+      }
+    })
+
+    // Log removed servers
+    existing.forEach(existingServer => {
+      if (!incomingMap.has(existingServer.name)) {
+        console.log(`Server removed: ${existingServer.name}`)
+      }
+    })
+
+    // Sort alphabetically by name to match tray menu order
+    return result.sort((a, b) => a.name.localeCompare(b.name))
+  }
+
   // Actions
-  async function fetchServers() {
-    loading.value = { loading: true, error: null }
+  async function fetchServers(silent = false) {
+    if (!silent) {
+      loading.value = { loading: true, error: null }
+    }
 
     try {
       const response = await api.getServers()
       if (response.success && response.data) {
-        // Sort servers alphabetically by name to match tray menu order
-        servers.value = response.data.servers.sort((a, b) =>
-          a.name.localeCompare(b.name)
-        )
+        // Use smart merge to preserve object references and avoid unnecessary re-renders
+        servers.value = mergeServers(servers.value, response.data.servers)
       } else {
         loading.value.error = response.error || 'Failed to fetch servers'
       }
     } catch (error) {
       loading.value.error = error instanceof Error ? error.message : 'Unknown error'
     } finally {
-      loading.value.loading = false
+      if (!silent) {
+        loading.value.loading = false
+      }
     }
   }
 
@@ -249,16 +291,16 @@ export const useServersStore = defineStore('servers', () => {
 
   function handleServersChanged(event: Event) {
     const customEvent = event as CustomEvent
-    console.log('Servers changed event received, refreshing server list...', customEvent.detail)
-    // Refresh server list to get latest state
-    fetchServers()
+    console.log('Servers changed event received, updating in background...', customEvent.detail)
+    // Silent background refresh to avoid scroll jumps and loading states
+    fetchServers(true)
   }
 
   function handleConfigReloaded(event: Event) {
     const customEvent = event as CustomEvent
-    console.log('Config reloaded event received, refreshing server list...', customEvent.detail)
-    // Refresh server list after config reload
-    fetchServers()
+    console.log('Config reloaded event received, updating in background...', customEvent.detail)
+    // Silent background refresh to avoid scroll jumps and loading states
+    fetchServers(true)
   }
 
   // Initialize event listeners
