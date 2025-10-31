@@ -358,6 +358,9 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		return nil, fmt.Errorf("ListTools failed: %w", err)
 	}
 
+	// Cache the latest tool count for non-blocking stats consumers
+	mc.setToolCountCache(len(tools))
+
 	return tools, nil
 }
 
@@ -843,11 +846,8 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 
 	freshCount := len(tools)
 
-	// Update cache
-	mc.toolCountMu.Lock()
-	mc.toolCount = freshCount
-	mc.toolCountTime = time.Now()
-	mc.toolCountMu.Unlock()
+	// Update cache with the latest count
+	mc.setToolCountCache(freshCount)
 
 	mc.logger.Debug("🔍 Tool count cache updated",
 		zap.String("server", mc.Config.Name),
@@ -898,6 +898,14 @@ func containsString(str, substr string) bool {
 // IsDockerCommand returns whether this client is running a Docker command
 func (mc *Client) IsDockerCommand() bool {
 	return mc.isDockerServer()
+}
+
+// setToolCountCache records the latest tool count and timestamp for non-blocking consumers.
+func (mc *Client) setToolCountCache(count int) {
+	mc.toolCountMu.Lock()
+	mc.toolCount = count
+	mc.toolCountTime = time.Now()
+	mc.toolCountMu.Unlock()
 }
 
 // isDockerServer checks if the server is running via Docker

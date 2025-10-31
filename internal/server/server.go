@@ -23,6 +23,7 @@ import (
 	"mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/tlslocal"
+	"mcpproxy-go/internal/upstream/types"
 	"mcpproxy-go/web"
 )
 
@@ -357,15 +358,120 @@ func (s *Server) SuggestAlternateListen(baseAddr string) (string, error) {
 
 // GetUpstreamStats returns statistics about upstream servers
 func (s *Server) GetUpstreamStats() map[string]interface{} {
+	if supervisor := s.runtime.Supervisor(); supervisor != nil {
+		if view := supervisor.StateView(); view != nil {
+			snapshot := view.Snapshot()
+
+			connectedCount := 0
+			connectingCount := 0
+			totalTools := 0
+
+			serverStats := make(map[string]interface{}, len(snapshot.Servers))
+
+			for name, status := range snapshot.Servers {
+				if status == nil {
+					continue
+				}
+
+				var connInfo *types.ConnectionInfo
+				if meta, ok := status.Metadata["connection_info"]; ok {
+					if info, ok := meta.(*types.ConnectionInfo); ok {
+						connInfo = info
+					}
+				}
+
+				state := status.State
+				if connInfo != nil {
+					state = connInfo.State.String()
+				}
+				if state == "" {
+					if status.Enabled {
+						if status.Connected {
+							state = "Ready"
+						} else {
+							state = "Disconnected"
+						}
+					} else {
+						state = "Disabled"
+					}
+				}
+
+				connecting := strings.EqualFold(state, "connecting")
+
+				entry := map[string]interface{}{
+					"state":        state,
+					"connected":    status.Connected,
+					"connecting":   connecting,
+					"retry_count":  status.RetryCount,
+					"should_retry": false,
+					"name":         status.Name,
+					"tool_count":   status.ToolCount,
+				}
+
+				if entry["name"] == "" {
+					entry["name"] = name
+				}
+
+				if status.Config != nil {
+					if status.Config.URL != "" {
+						entry["url"] = status.Config.URL
+					}
+					if status.Config.Protocol != "" {
+						entry["protocol"] = status.Config.Protocol
+					}
+				}
+
+				if connInfo != nil {
+					entry["retry_count"] = connInfo.RetryCount
+					if connInfo.LastError != nil {
+						entry["last_error"] = connInfo.LastError.Error()
+					}
+					if !connInfo.LastRetryTime.IsZero() {
+						entry["last_retry_time"] = connInfo.LastRetryTime
+					}
+					if connInfo.ServerName != "" {
+						entry["server_name"] = connInfo.ServerName
+					}
+					if connInfo.ServerVersion != "" {
+						entry["server_version"] = connInfo.ServerVersion
+					}
+				} else {
+					if status.LastError != "" {
+						entry["last_error"] = status.LastError
+					}
+					if status.LastErrorTime != nil {
+						entry["last_retry_time"] = *status.LastErrorTime
+					}
+				}
+
+				if status.Connected {
+					connectedCount++
+				}
+				if connecting {
+					connectingCount++
+				}
+				totalTools += status.ToolCount
+
+				serverStats[name] = entry
+			}
+
+			return map[string]interface{}{
+				"connected_servers":  connectedCount,
+				"connecting_servers": connectingCount,
+				"total_servers":      len(snapshot.Servers),
+				"servers":            serverStats,
+				"total_tools":        totalTools,
+			}
+		}
+	}
+
 	stats := s.runtime.UpstreamManager().GetStats()
 
-	// Enhance stats with tool counts per server
+	// Enhance stats with tool counts per server when falling back
 	if servers, ok := stats["servers"].(map[string]interface{}); ok {
 		for id, serverInfo := range servers {
 			if serverMap, ok := serverInfo.(map[string]interface{}); ok {
-				// Get tool count for this server
-				toolCount := s.getServerToolCount(id)
-				serverMap["tool_count"] = toolCount
+				serverMap["tool_count"] = s.getServerToolCount(id)
 			}
 		}
 	}
