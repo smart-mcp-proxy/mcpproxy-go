@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
-	"mcpproxy-go/internal/upstream/cli"
+	"mcpproxy-go/internal/upstream/managed"
 
 	"github.com/spf13/cobra"
 )
@@ -99,8 +102,15 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Validate server exists in config
-	if !serverExistsInConfig(serverName, globalConfig) {
+	// Find server config
+	var serverConfig *config.ServerConfig
+	for _, server := range globalConfig.Servers {
+		if server.Name == serverName {
+			serverConfig = server
+			break
+		}
+	}
+	if serverConfig == nil {
 		return fmt.Errorf("server '%s' not found in configuration. Available servers: %v",
 			serverName, getAvailableServerNames(globalConfig))
 	}
@@ -110,28 +120,55 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 	fmt.Printf("⏱️  Timeout: %v\n", timeout)
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-	// Create CLI client
-	cliClient, err := cli.NewClient(serverName, globalConfig, toolsLogLevel)
+	// Create logger
+	logConfig := &config.LogConfig{
+		Level:         toolsLogLevel,
+		EnableConsole: true,
+		EnableFile:    false,
+		JSONFormat:    false,
+	}
+	logger, err := logs.SetupLogger(logConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create CLI client: %w", err)
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	// Create storage (optional, for OAuth persistence)
+	var db *storage.BoltDB
+	if globalConfig.DataDir != "" {
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
+		if err != nil {
+			logger.Warn("Failed to create storage, OAuth will use in-memory")
+		} else {
+			db = boltDB
+			defer db.Close()
+		}
+	}
+
+	// Create secret resolver
+	secretResolver := secret.NewResolver()
+
+	// Create managed client (same as serve mode!)
+	managedClient, err := managed.NewClient(serverName, serverConfig, logger, logConfig, globalConfig, db, secretResolver)
+	if err != nil {
+		return fmt.Errorf("failed to create managed client: %w", err)
 	}
 
 	// Connect to server
 	fmt.Printf("🔗 Connecting to server '%s'...\n", serverName)
-	if err := cliClient.Connect(ctx); err != nil {
+	if err := managedClient.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
 	}
 
-	// Ensure cleanup on exit with timeout context
+	// Ensure cleanup on exit
 	defer func() {
 		fmt.Printf("🔌 Disconnecting from server...\n")
-		if disconnectErr := cliClient.DisconnectWithContext(ctx); disconnectErr != nil {
+		if disconnectErr := managedClient.Disconnect(); disconnectErr != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
 		}
 	}()
 
 	// List tools
-	tools, err := cliClient.ListTools(ctx)
+	tools, err := managedClient.ListTools(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list tools: %w", err)
 	}
@@ -142,10 +179,9 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 		return outputToolsAsJSON(tools)
 	case "yaml":
 		return outputToolsAsYAML(tools)
-	case "table":
 	default:
-		// Table format is handled by the CLI client's displayTools method
-		fmt.Printf("✅ Tool discovery completed successfully!\n")
+		// Table format (default)
+		fmt.Printf("✅ Tool discovery completed successfully!\n\n")
 
 		if len(tools) == 0 {
 			fmt.Printf("⚠️  No tools found on server '%s'\n", serverName)
@@ -154,8 +190,9 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 			fmt.Printf("   • Server is not properly configured\n")
 			fmt.Printf("   • Connection issues during tool discovery\n")
 		} else {
-			fmt.Printf("🎉 Found %d tool(s) on server '%s'\n", len(tools), serverName)
-			fmt.Printf("💡 Use these tools with: mcpproxy call_tool --tool=%s:<tool_name>\n", serverName)
+			fmt.Printf("🎉 Found %d tool(s) on server '%s'\n\n", len(tools), serverName)
+			displayToolsTable(tools, serverName)
+			fmt.Printf("\n💡 Use these tools with: mcpproxy call_tool --tool=%s:<tool_name>\n", serverName)
 		}
 	}
 
@@ -191,16 +228,6 @@ func loadToolsConfig() (*config.Config, error) {
 	return globalConfig, nil
 }
 
-// serverExistsInConfig checks if a server exists in the configuration
-func serverExistsInConfig(serverName string, globalConfig *config.Config) bool {
-	for _, server := range globalConfig.Servers {
-		if server.Name == serverName {
-			return true
-		}
-	}
-	return false
-}
-
 // getAvailableServerNames returns a list of available server names
 func getAvailableServerNames(globalConfig *config.Config) []string {
 	var names []string
@@ -208,6 +235,34 @@ func getAvailableServerNames(globalConfig *config.Config) []string {
 		names = append(names, server.Name)
 	}
 	return names
+}
+
+// displayToolsTable displays tools in a formatted table
+func displayToolsTable(tools []*config.ToolMetadata, serverName string) {
+	fmt.Printf("📚 Discovered Tools (%d):\n", len(tools))
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+	for i, tool := range tools {
+		fmt.Printf("%d. %s\n", i+1, tool.Name)
+		if tool.Description != "" {
+			fmt.Printf("   📝 %s\n", tool.Description)
+		}
+
+		// Show schema in debug/trace mode
+		if toolsLogLevel == "debug" || toolsLogLevel == "trace" {
+			if tool.ParamsJSON != "" {
+				fmt.Printf("   🔧 Schema: %s\n", tool.ParamsJSON)
+			}
+		}
+
+		fmt.Printf("   🏷️  Format: %s:%s\n", serverName, tool.Name)
+
+		if i < len(tools)-1 {
+			fmt.Println()
+		}
+	}
+
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 }
 
 // outputToolsAsJSON outputs tools in JSON format
