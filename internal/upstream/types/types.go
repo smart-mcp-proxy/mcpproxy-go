@@ -138,6 +138,8 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 	if newState == StateReady {
 		sm.lastError = nil
 		sm.retryCount = 0
+		sm.isOAuthError = false
+		sm.oauthRetryCount = 0
 	}
 
 	info := ConnectionInfo{
