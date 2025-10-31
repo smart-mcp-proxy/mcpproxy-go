@@ -728,19 +728,12 @@ func (m *Manager) GetTotalToolCount() int {
 	// Now process clients without holding lock
 	totalTools := 0
 	for _, client := range clientsCopy {
-		if !client.Config.Enabled || !client.IsConnected() {
+		if client == nil || client.Config == nil || !client.Config.Enabled || !client.IsConnected() {
 			continue
 		}
 
-		// Use cached tool count with 2-minute TTL to prevent overload
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		count, err := client.GetCachedToolCount(ctx)
-		cancel()
-
-		if err == nil {
-			totalTools += count
-		}
-		// Silently ignore errors during tool counting to avoid noise during shutdown
+		// Use non-blocking cached count to avoid stalling API handlers
+		totalTools += client.GetCachedToolCountNonBlocking()
 	}
 	return totalTools
 }
