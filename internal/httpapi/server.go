@@ -43,6 +43,7 @@ type ServerController interface {
 	GetAllServers() ([]map[string]interface{}, error)
 	EnableServer(serverName string, enabled bool) error
 	RestartServer(serverName string) error
+	ForceReconnectAllServers(reason string) error
 	QuarantineServer(serverName string, quarantined bool) error
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
@@ -278,6 +279,7 @@ func (s *Server) setupRoutes() {
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
+		r.Post("/servers/reconnect", s.handleForceReconnectServers)
 		r.Route("/servers/{id}", func(r chi.Router) {
 			r.Post("/enable", s.handleEnableServer)
 			r.Post("/disable", s.handleDisableServer)
@@ -568,6 +570,26 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 		Action:  "disable",
 		Success: true,
 		Async:   async,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Request) {
+	reason := r.URL.Query().Get("reason")
+
+	if err := s.controller.ForceReconnectAllServers(reason); err != nil {
+		s.logger.Error("Failed to trigger force reconnect for servers",
+			"reason", reason,
+			"error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to reconnect servers: %v", err))
+		return
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  "*",
+		Action:  "reconnect_all",
+		Success: true,
 	}
 
 	s.writeSuccess(w, response)

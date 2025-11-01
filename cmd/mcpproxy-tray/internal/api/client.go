@@ -541,6 +541,25 @@ func (c *Client) RestartServer(serverName string) error {
 	return nil
 }
 
+// ForceReconnectAllServers triggers reconnection attempts for all upstream servers
+func (c *Client) ForceReconnectAllServers(reason string) error {
+	endpoint := "/api/v1/servers/reconnect"
+	if reason != "" {
+		endpoint = endpoint + "?reason=" + url.QueryEscape(reason)
+	}
+
+	resp, err := c.makeRequest("POST", endpoint, nil)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("API error: %s", resp.Error)
+	}
+
+	return nil
+}
+
 // TriggerOAuthLogin triggers OAuth login for a server
 func (c *Client) TriggerOAuthLogin(serverName string) error {
 	endpoint := fmt.Sprintf("/api/v1/servers/%s/login", serverName)

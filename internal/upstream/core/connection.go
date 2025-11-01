@@ -25,6 +25,8 @@ const (
 	osDarwin  = "darwin"
 	osWindows = "windows"
 
+	dockerCleanupTimeout = 30 * time.Second
+
 	// Transport types
 	transportHTTP           = "http"
 	transportHTTPStreamable = "streamable-http"
@@ -135,7 +137,7 @@ func (c *Client) Connect(ctx context.Context) error {
 				zap.String("container_id", c.containerID),
 				zap.Error(err))
 
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 			defer cleanupCancel()
 
 			// Try to cleanup using container name first, then ID, then pattern matching
@@ -382,7 +384,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 				zap.String("container_id", c.containerID),
 				zap.Error(err))
 
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 			defer cleanupCancel()
 
 			// Try to cleanup using container name first, then ID, then pattern matching
@@ -1534,7 +1536,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 
 		// Create a fresh context for Docker cleanup with its own timeout
 		// This ensures cleanup can complete even if the main context expires
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 		defer cleanupCancel()
 
 		if c.containerID != "" {

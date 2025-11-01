@@ -3,6 +3,8 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +40,44 @@ type Manager struct {
 	// Context for shutdown coordination
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+}
+
+func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
+	if cfg == nil {
+		return nil
+	}
+
+	clone := *cfg
+
+	if cfg.Args != nil {
+		clone.Args = slices.Clone(cfg.Args)
+	}
+
+	if cfg.Env != nil {
+		clone.Env = maps.Clone(cfg.Env)
+	}
+
+	if cfg.Headers != nil {
+		clone.Headers = maps.Clone(cfg.Headers)
+	}
+
+	if cfg.OAuth != nil {
+		o := *cfg.OAuth
+		if cfg.OAuth.Scopes != nil {
+			o.Scopes = slices.Clone(cfg.OAuth.Scopes)
+		}
+		clone.OAuth = &o
+	}
+
+	if cfg.Isolation != nil {
+		iso := *cfg.Isolation
+		if cfg.Isolation.ExtraArgs != nil {
+			iso.ExtraArgs = slices.Clone(cfg.Isolation.ExtraArgs)
+		}
+		clone.Isolation = &iso
+	}
+
+	return &clone
 }
 
 // NewManager creates a new upstream manager
@@ -827,6 +867,61 @@ func (m *Manager) RetryConnection(serverName string) error {
 	}()
 
 	return nil
+}
+
+// ForceReconnectAll triggers reconnection attempts for all managed clients that are not currently connected.
+func (m *Manager) ForceReconnectAll(reason string) {
+	m.mu.RLock()
+	clientMap := make(map[string]*managed.Client, len(m.clients))
+	for id, client := range m.clients {
+		clientMap[id] = client
+	}
+	m.mu.RUnlock()
+
+	if len(clientMap) == 0 {
+		m.logger.Debug("ForceReconnectAll: no managed clients registered")
+		return
+	}
+
+	m.logger.Info("ForceReconnectAll: recreating managed clients",
+		zap.Int("client_count", len(clientMap)),
+		zap.String("reason", reason))
+
+	for id, client := range clientMap {
+		if client == nil {
+			continue
+		}
+
+		if client.IsConnected() {
+			continue
+		}
+
+		cfg := cloneServerConfig(client.GetConfig())
+		if cfg == nil {
+			continue
+		}
+
+		if !cfg.Enabled {
+			continue
+		}
+
+		m.logger.Info("ForceReconnectAll: rebuilding client",
+			zap.String("server", cfg.Name),
+			zap.String("id", id),
+			zap.String("reason", reason))
+
+		m.RemoveServer(id)
+
+		// Small delay to allow container/process cleanup before restart
+		time.Sleep(200 * time.Millisecond)
+
+		if err := m.AddServer(id, cfg); err != nil {
+			m.logger.Error("ForceReconnectAll: failed to rebuild client",
+				zap.String("server", cfg.Name),
+				zap.String("id", id),
+				zap.Error(err))
+		}
+	}
 }
 
 // startOAuthEventMonitor monitors the database for OAuth completion events from CLI processes

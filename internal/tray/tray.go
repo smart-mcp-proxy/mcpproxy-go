@@ -269,6 +269,9 @@ func (a *App) applyConnectionStateToUI(state ConnectionState) {
 	case ConnectionStateErrorDBLocked:
 		statusText = "Status: Database locked"
 		tooltip = "Database locked by another mcpproxy instance. Kill other instance with: pkill mcpproxy"
+	case ConnectionStateErrorDocker:
+		statusText = "Status: Docker unavailable"
+		tooltip = "Docker Desktop is paused or unavailable. Resume Docker and retry."
 	case ConnectionStateErrorConfig:
 		statusText = "Status: Configuration error"
 		tooltip = "Invalid configuration file. Fix ~/.mcpproxy/mcp_config.json and restart."
