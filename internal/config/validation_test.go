@@ -202,6 +202,77 @@ func TestValidateDetailed(t *testing.T) {
 			expectedErrors: 1,
 			errorFields:    []string{"logging.level"},
 		},
+		{
+			name: "oauth with empty client_id (DCR mode)",
+			config: &Config{
+				Listen:            ":8080",
+				TopK:              5,
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				Servers: []*ServerConfig{
+					{
+						Name:     "test-oauth",
+						Protocol: "http",
+						URL:      "https://api.example.com/mcp",
+						OAuth: &OAuthConfig{
+							ClientID: "", // Empty - should use DCR
+							Scopes:   []string{"mcp.read", "mcp.write"},
+						},
+					},
+				},
+			},
+			expectedErrors: 0,
+			errorFields:    []string{},
+		},
+		{
+			name: "oauth with only scopes and pkce",
+			config: &Config{
+				Listen:            ":8080",
+				TopK:              5,
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				Servers: []*ServerConfig{
+					{
+						Name:     "test-oauth-dcr",
+						Protocol: "http",
+						URL:      "https://api.example.com/mcp",
+						OAuth: &OAuthConfig{
+							Scopes:      []string{"mcp.read"},
+							PKCEEnabled: true,
+						},
+					},
+				},
+			},
+			expectedErrors: 0,
+			errorFields:    []string{},
+		},
+		{
+			name: "oauth with client_id provided",
+			config: &Config{
+				Listen:            ":8080",
+				TopK:              5,
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				Servers: []*ServerConfig{
+					{
+						Name:     "test-oauth-client",
+						Protocol: "http",
+						URL:      "https://api.example.com/mcp",
+						OAuth: &OAuthConfig{
+							ClientID:     "my-client-id",
+							ClientSecret: "my-secret",
+							Scopes:       []string{"mcp.read", "mcp.write"},
+							PKCEEnabled:  true,
+						},
+					},
+				},
+			},
+			expectedErrors: 0,
+			errorFields:    []string{},
+		},
 	}
 
 	for _, tt := range tests {
