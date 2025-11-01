@@ -609,11 +609,8 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			}
 		}
 
-		// Validate OAuth configuration if present
-		if server.OAuth != nil {
-			// Note: client_id is optional - uses Dynamic Client Registration (RFC 7591) if empty
-			// Note: ClientSecret can be a secret reference, so we don't validate it as empty
-		}
+		// Note: OAuth configuration is optional. client_id is optional (uses Dynamic Client Registration RFC 7591 if empty).
+		// ClientSecret can be a secret reference, so we don't validate it as empty.
 	}
 
 	// Validate DataDir exists (if specified and not empty)
