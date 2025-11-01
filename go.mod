@@ -1,6 +1,6 @@
 module mcpproxy-go
 
-go 1.23.0
+go 1.23.10
 
 require (
 	fyne.io/systray v1.11.0

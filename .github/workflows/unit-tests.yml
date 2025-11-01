@@ -7,8 +7,37 @@ on:
     branches: ["*"]
 
 jobs:
+  # Build frontend once and share across all jobs
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 1
+
   test:
     name: Unit Tests
+    needs: build-frontend
     runs-on: ${{ matrix.os }}
 
     env:
@@ -16,8 +45,10 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: ["1.23.10", "1.24.5", "1.25"]
+        # On PRs: test only latest Go on ubuntu-latest
+        # On main/push: test full matrix
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') }}
+        go-version: ${{ github.event_name == 'pull_request' && fromJSON('["1.25"]') || fromJSON('["1.23.10", "1.24.5", "1.25"]') }}
 
     steps:
       - name: Checkout code
@@ -28,7 +59,7 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
-      - name: Cache Go modules
+      - name: Cache Go modules and build
         uses: actions/cache@v4
         with:
           path: |
@@ -45,16 +76,11 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
         with:
-          node-version: '20'
-
-      - name: Install frontend dependencies
-        run: cd frontend && npm ci
-
-      - name: Build frontend
-        run: cd frontend && npm run build
+          name: frontend-dist
+          path: frontend/dist
 
       - name: Copy frontend dist for embedding
         if: matrix.os != 'windows-latest'
@@ -109,6 +135,7 @@ jobs:
 
   lint:
     name: Lint
+    needs: build-frontend
     runs-on: ubuntu-latest
 
     env:
@@ -121,18 +148,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23.10"
+          go-version: "1.25"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
         with:
-          node-version: '20'
-
-      - name: Install frontend dependencies
-        run: cd frontend && npm ci
-
-      - name: Build frontend
-        run: cd frontend && npm run build
+          name: frontend-dist
+          path: frontend/dist
 
       - name: Copy frontend dist for embedding
         run: |
@@ -148,6 +170,7 @@ jobs:
 
   build:
     name: Build
+    needs: build-frontend
     runs-on: ${{ matrix.os }}
 
     env:
@@ -155,7 +178,9 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # On PRs: build only on ubuntu-latest
+        # On main/push: build on all platforms
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') }}
 
     steps:
       - name: Checkout code
@@ -164,52 +189,24 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23.10"
+          go-version: "1.25"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Cache Go modules and build
+        uses: actions/cache@v4
         with:
-          node-version: '20'
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/AppData/Local/go-build
+          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.25-
 
-      - name: Install frontend dependencies (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          cd frontend
-          $maxRetries = 3
-          $retryCount = 0
-
-          while ($retryCount -lt $maxRetries) {
-            $retryCount++
-            Write-Host "Attempting npm ci (attempt $retryCount/$maxRetries)..."
-
-            npm ci --prefer-offline --no-audit 2>&1 | Out-Host
-
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "npm ci succeeded"
-              break
-            }
-
-            if ($retryCount -lt $maxRetries) {
-              Write-Host "npm ci failed with exit code $LASTEXITCODE, waiting 5 seconds before retry..."
-              Start-Sleep -Seconds 5
-
-              if (Test-Path node_modules) {
-                Write-Host "Cleaning up node_modules..."
-                Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
-              }
-            } else {
-              Write-Host "npm ci failed after $maxRetries attempts"
-              exit 1
-            }
-          }
-
-      - name: Install frontend dependencies (Unix)
-        if: matrix.os != 'windows-latest'
-        run: cd frontend && npm ci
-
-      - name: Build frontend
-        run: cd frontend && npm run build
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
 
       - name: Copy frontend dist for embedding (Windows)
         if: matrix.os == 'windows-latest'
