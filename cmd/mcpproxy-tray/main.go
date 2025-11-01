@@ -179,6 +179,12 @@ func main() {
 		// Finally, quit the tray UI
 		logger.Info("Quitting system tray")
 		trayApp.Quit()
+
+		// CRITICAL: Explicitly exit the process after cleanup
+		// Without this, lingering goroutines may prevent process termination
+		logger.Info("Shutdown complete - exiting process")
+		time.Sleep(50 * time.Millisecond) // Brief delay to ensure log is written
+		os.Exit(0)
 	}
 
 	trayApp = tray.NewWithAPIClient(api.NewServerAdapter(apiClient), apiClient, logger.Sugar(), version, shutdownFunc)
@@ -1346,7 +1352,14 @@ func (cpl *CoreProcessLauncher) handleGeneralError() {
 func (cpl *CoreProcessLauncher) handleShutdown() {
 	cpl.logger.Info("Core process launcher shutting down")
 
-	// CRITICAL: Stop SSE FIRST before killing core
+	// CRITICAL: Disable menu sync FIRST to prevent API calls after shutdown
+	// This prevents the menu sync from trying to fetch servers after core is killed
+	if cpl.trayApp != nil {
+		cpl.logger.Info("Disabling menu synchronization")
+		cpl.trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
+	}
+
+	// Stop SSE connection before killing core
 	// This prevents SSE from detecting disconnection and trying to reconnect
 	cpl.logger.Info("Stopping SSE connection")
 	cpl.apiClient.StopSSE()
