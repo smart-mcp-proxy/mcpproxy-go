@@ -42,9 +42,37 @@ jobs:
           echo "latest_tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
           echo "Generated version: ${VERSION}"
 
+  # Build frontend once and share across all jobs
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-pr
+          path: frontend/dist/
+          retention-days: 1
+
   build:
     name: Build Binaries
-    needs: prepare
+    needs: [prepare, build-frontend]
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -97,7 +125,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23.10"
+          go-version: "1.25"
           cache: false  # Disable built-in cache to use explicit cache step below
 
       - name: Clean Go module cache (macOS workaround)
@@ -106,27 +134,25 @@ jobs:
           # Remove potentially corrupted toolchain files
           rm -rf ~/go/pkg/mod/golang.org/toolchain* || true
 
-      - name: Cache Go modules
+      - name: Cache Go modules and build
         uses: actions/cache@v4
         with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/AppData/Local/go-build
+          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-
+            ${{ runner.os }}-go-1.25-
 
       - name: Download dependencies
         run: go mod download
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
         with:
-          node-version: '20'
-
-      - name: Install frontend dependencies
-        run: cd frontend && npm ci
-
-      - name: Build frontend
-        run: cd frontend && npm run build
+          name: frontend-dist-pr
+          path: frontend/dist
 
       - name: Copy frontend dist for embedding
         shell: bash
