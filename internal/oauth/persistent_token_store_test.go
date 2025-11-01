@@ -67,8 +67,10 @@ func TestPersistentTokenStore(t *testing.T) {
 	if retrievedToken.Scope != originalToken.Scope {
 		t.Errorf("Scope mismatch: got %s, want %s", retrievedToken.Scope, originalToken.Scope)
 	}
-	if retrievedToken.ExpiresAt.Unix() != originalToken.ExpiresAt.Unix() {
-		t.Errorf("ExpiresAt mismatch: got %v, want %v", retrievedToken.ExpiresAt, originalToken.ExpiresAt)
+	// ExpiresAt should be adjusted by grace period for proactive refresh
+	expectedExpiresAt := originalToken.ExpiresAt.Add(-TokenRefreshGracePeriod)
+	if retrievedToken.ExpiresAt.Unix() != expectedExpiresAt.Unix() {
+		t.Errorf("ExpiresAt mismatch (should be adjusted by grace period): got %v, want %v", retrievedToken.ExpiresAt, expectedExpiresAt)
 	}
 
 	// Test case 4: Update token
