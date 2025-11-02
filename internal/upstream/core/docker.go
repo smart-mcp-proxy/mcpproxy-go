@@ -62,9 +62,53 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 		}
 	}
 
-	c.logger.Warn("Failed to read Docker container ID from cidfile after 10 seconds",
+	c.logger.Warn("Failed to read container ID from cidfile, attempting recovery via container name",
 		zap.String("server", c.config.Name),
-		zap.String("cid_file", cidFile))
+		zap.String("cid_file", cidFile),
+		zap.String("container_name", c.containerName))
+
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Warn("cidfile read timeout - attempting name lookup recovery")
+	}
+
+	// Fallback: Find container by name
+	if c.containerName != "" {
+		listCmd := exec.CommandContext(ctx, "docker", "ps",
+			"--filter", fmt.Sprintf("name=^%s$", c.containerName),
+			"--format", "{{.ID}}")
+
+		if output, err := listCmd.Output(); err == nil {
+			foundID := strings.TrimSpace(string(output))
+			if foundID != "" {
+				c.mu.Lock()
+				c.containerID = foundID
+				c.mu.Unlock()
+
+				c.logger.Info("Successfully recovered container ID via name lookup",
+					zap.String("server", c.config.Name),
+					zap.String("container_id", foundID[:12]),
+					zap.String("full_container_id", foundID),
+					zap.String("container_name", c.containerName))
+
+				if c.upstreamLogger != nil {
+					c.upstreamLogger.Info("Container ID recovered via name lookup",
+						zap.String("container_id", foundID))
+				}
+
+				// Clean up the cidfile since we got the ID
+				os.Remove(cidFile)
+				return
+			}
+		}
+	}
+
+	c.logger.Error("Failed to recover container ID - container will be orphaned on disconnect",
+		zap.String("server", c.config.Name),
+		zap.String("container_name", c.containerName))
+
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Error("Failed to recover container ID - may be orphaned")
+	}
 }
 
 // killDockerContainerWithContext kills the Docker container if one is running with context timeout

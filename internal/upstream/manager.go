@@ -915,9 +915,24 @@ func (m *Manager) verifyContainerHealthy(client *managed.Client) (bool, error) {
 	return true, nil
 }
 
+// ReconnectResult tracks the results of a ForceReconnectAll operation
+type ReconnectResult struct {
+	TotalServers      int
+	AttemptedServers  int
+	SuccessfulServers []string
+	FailedServers     map[string]error
+	SkippedServers    map[string]string // server name -> skip reason
+}
+
 // ForceReconnectAll triggers reconnection attempts for all managed clients.
 // For Docker-based servers, this includes container health verification to catch frozen containers.
-func (m *Manager) ForceReconnectAll(reason string) {
+// Returns detailed results about which servers were reconnected, skipped, or failed.
+func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
+	result := &ReconnectResult{
+		SuccessfulServers: []string{},
+		FailedServers:     make(map[string]error),
+		SkippedServers:    make(map[string]string),
+	}
 	m.mu.RLock()
 	clientMap := make(map[string]*managed.Client, len(m.clients))
 	for id, client := range m.clients {
@@ -925,9 +940,11 @@ func (m *Manager) ForceReconnectAll(reason string) {
 	}
 	m.mu.RUnlock()
 
+	result.TotalServers = len(clientMap)
+
 	if len(clientMap) == 0 {
 		m.logger.Debug("ForceReconnectAll: no managed clients registered")
-		return
+		return result
 	}
 
 	m.logger.Info("ForceReconnectAll: processing managed clients",
@@ -936,6 +953,7 @@ func (m *Manager) ForceReconnectAll(reason string) {
 
 	for id, client := range clientMap {
 		if client == nil {
+			result.SkippedServers[id] = "nil client"
 			continue
 		}
 
@@ -950,12 +968,14 @@ func (m *Manager) ForceReconnectAll(reason string) {
 						zap.Error(err))
 					// Fall through to reconnect logic
 				} else {
+					result.SkippedServers[id] = "container healthy"
 					m.logger.Debug("Skipping reconnect - container healthy",
 						zap.String("server", id))
 					continue
 				}
 			} else {
 				// Non-Docker server, connection state is sufficient
+				result.SkippedServers[id] = "already connected"
 				m.logger.Debug("Skipping reconnect - already connected",
 					zap.String("server", id))
 				continue
@@ -964,6 +984,7 @@ func (m *Manager) ForceReconnectAll(reason string) {
 
 		// Filter: Only reconnect Docker-based servers (skip HTTP/SSE/non-Docker stdio)
 		if !client.IsDockerCommand() {
+			result.SkippedServers[id] = "not a Docker server"
 			m.logger.Debug("Skipping reconnect - not a Docker server",
 				zap.String("server", id),
 				zap.String("reason", reason))
@@ -972,14 +993,18 @@ func (m *Manager) ForceReconnectAll(reason string) {
 
 		cfg := cloneServerConfig(client.GetConfig())
 		if cfg == nil {
+			result.SkippedServers[id] = "failed to clone config"
 			continue
 		}
 
 		if !cfg.Enabled {
+			result.SkippedServers[id] = "server disabled"
 			m.logger.Debug("Skipping reconnect - server disabled",
 				zap.String("server", id))
 			continue
 		}
+
+		result.AttemptedServers++
 
 		m.logger.Info("ForceReconnectAll: rebuilding Docker client",
 			zap.String("server", cfg.Name),
@@ -992,12 +1017,27 @@ func (m *Manager) ForceReconnectAll(reason string) {
 		time.Sleep(200 * time.Millisecond)
 
 		if err := m.AddServer(id, cfg); err != nil {
+			result.FailedServers[id] = err
 			m.logger.Error("ForceReconnectAll: failed to rebuild client",
 				zap.String("server", cfg.Name),
 				zap.String("id", id),
 				zap.Error(err))
+		} else {
+			result.SuccessfulServers = append(result.SuccessfulServers, id)
+			m.logger.Info("ForceReconnectAll: successfully rebuilt client",
+				zap.String("server", cfg.Name),
+				zap.String("id", id))
 		}
 	}
+
+	m.logger.Info("ForceReconnectAll completed",
+		zap.Int("total", result.TotalServers),
+		zap.Int("attempted", result.AttemptedServers),
+		zap.Int("successful", len(result.SuccessfulServers)),
+		zap.Int("failed", len(result.FailedServers)),
+		zap.Int("skipped", len(result.SkippedServers)))
+
+	return result
 }
 
 // startOAuthEventMonitor monitors the database for OAuth completion events from CLI processes

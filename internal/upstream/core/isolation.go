@@ -263,6 +263,10 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 	containerName := generateContainerName(serverConfig.Name)
 	args = append(args, "--name", containerName)
 
+	// Add labels for ownership tracking and cleanup
+	labels := formatContainerLabels(serverConfig.Name)
+	args = append(args, labels...)
+
 	// Add log driver only if explicitly configured
 	logDriver := ""
 	if serverConfig.Isolation != nil && serverConfig.Isolation.LogDriver != "" {

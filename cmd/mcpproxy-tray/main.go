@@ -1375,6 +1375,7 @@ func (cpl *CoreProcessLauncher) handleDockerRecovering(ctx context.Context) {
 }
 
 // handleDockerUnavailable handles scenarios where Docker Desktop is paused or unavailable.
+// Uses exponential backoff to avoid wasting resources while waiting for Docker recovery.
 func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 	lastErr := cpl.stateMachine.GetLastError()
 	if lastErr != nil {
@@ -1392,26 +1393,54 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 	cpl.dockerRetryMu.Unlock()
 
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
+		// Exponential backoff intervals: fast when Docker just paused, slower when off for longer
+		intervals := []time.Duration{
+			2 * time.Second,   // Immediate retry (Docker just paused)
+			5 * time.Second,   // Quick retry
+			10 * time.Second,  // Normal retry
+			30 * time.Second,  // Slow retry
+			60 * time.Second,  // Very slow retry (max backoff)
+		}
+
+		attempt := 0
+		startTime := time.Now()
+
 		for {
+			// Calculate current interval (stay at max after reaching it)
+			currentInterval := intervals[min(attempt, len(intervals)-1)]
+
 			select {
 			case <-retryCtx.Done():
 				return
-			case <-ticker.C:
+			case <-time.After(currentInterval):
 				if err := cpl.ensureDockerAvailable(retryCtx); err == nil {
-					cpl.logger.Info("Docker engine available - transitioning to recovery state")
+					elapsed := time.Since(startTime)
+					cpl.logger.Info("Docker engine available - transitioning to recovery state",
+						zap.Int("attempts", attempt+1),
+						zap.Duration("total_wait", elapsed))
 					cpl.setDockerReconnectPending(true)
 					cpl.cancelDockerRetry()
 					// Transition to recovering state instead of directly retrying
 					cpl.stateMachine.SendEvent(state.EventDockerRecovered)
 					return
 				} else if err != nil {
-					cpl.logger.Debug("Docker still unavailable", zap.Error(err))
+					cpl.logger.Debug("Docker still unavailable",
+						zap.Int("attempt", attempt+1),
+						zap.Duration("next_check_in", intervals[min(attempt+1, len(intervals)-1)]),
+						zap.Error(err))
 				}
+				attempt++
 			}
 		}
 	}()
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // cancelDockerRetry stops any pending Docker retry loop.

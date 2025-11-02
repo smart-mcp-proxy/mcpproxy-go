@@ -762,7 +762,17 @@ func (r *Runtime) ForceReconnectAllServers(reason string) error {
 			zap.String("reason", reason))
 	}
 
-	r.upstreamManager.ForceReconnectAll(reason)
+	result := r.upstreamManager.ForceReconnectAll(reason)
+
+	if r.logger != nil {
+		r.logger.Info("Force reconnect completed",
+			zap.Int("total_servers", result.TotalServers),
+			zap.Int("attempted", result.AttemptedServers),
+			zap.Int("successful", len(result.SuccessfulServers)),
+			zap.Int("failed", len(result.FailedServers)),
+			zap.Int("skipped", len(result.SkippedServers)))
+	}
+
 	return nil
 }
 
