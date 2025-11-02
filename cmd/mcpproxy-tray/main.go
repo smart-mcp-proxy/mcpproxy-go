@@ -1078,6 +1078,29 @@ func NewCoreProcessLauncher(
 func (cpl *CoreProcessLauncher) Start(ctx context.Context) {
 	cpl.logger.Info("Core process launcher starting")
 
+	// Log Docker recovery configuration
+	cpl.logger.Infow("Docker recovery configuration",
+		"intervals", cpl.recoverySettings.intervals,
+		"max_retries", cpl.recoverySettings.maxRetries,
+		"notify_on_start", cpl.recoverySettings.notifyOnStart,
+		"notify_on_success", cpl.recoverySettings.notifyOnSuccess,
+		"notify_on_failure", cpl.recoverySettings.notifyOnFailure,
+		"notify_on_retry", cpl.recoverySettings.notifyOnRetry,
+		"persistent_state", cpl.recoverySettings.persistentState)
+
+	// Load and log existing recovery state for observability
+	if cpl.recoverySettings.persistentState {
+		if state, err := loadDockerRecoveryState(cpl.logger); err == nil && state != nil {
+			cpl.logger.Infow("Existing Docker recovery state detected",
+				"last_attempt", state.LastAttempt,
+				"failure_count", state.FailureCount,
+				"docker_available", state.DockerAvailable,
+				"recovery_mode", state.RecoveryMode,
+				"attempts_since_up", state.AttemptsSinceUp,
+				"last_successful_at", state.LastSuccessfulAt)
+		}
+	}
+
 	// Subscribe to state machine transitions
 	transitionsCh := cpl.stateMachine.Subscribe()
 
@@ -1587,9 +1610,15 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 				checkErr := cpl.ensureDockerAvailable(retryCtx)
 				if checkErr == nil {
 					elapsed := time.Since(startTime)
-					cpl.logger.Info("Docker engine available - transitioning to recovery state",
-						zap.Int("attempts", attempt),
-						zap.Duration("total_wait", elapsed))
+
+					// Log detailed recovery metrics
+					cpl.logger.Infow("Docker recovery successful",
+						"total_attempts", attempt,
+						"total_duration", elapsed.String(),
+						"avg_interval", (elapsed / time.Duration(attempt)).String(),
+						"resumed_from_attempt", failureCount,
+						"intervals_used", intervals[:min(attempt, len(intervals))],
+						"metric_type", "docker_recovery_success")
 
 					// Clear persistent state since Docker is available
 					if clearErr := clearDockerRecoveryState(cpl.logger); clearErr != nil {
@@ -1605,14 +1634,20 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 					return
 				}
 
-				// Docker still unavailable, save state
+				// Docker still unavailable, save state and log metrics
 				lastErrMsg := ""
 				if checkErr != nil {
 					lastErrMsg = checkErr.Error()
-					cpl.logger.Debug("Docker still unavailable",
-						zap.Int("attempt", attempt),
-						zap.Duration("next_check_in", intervals[min(attempt, len(intervals)-1)]),
-						zap.Error(checkErr))
+					nextInterval := intervals[min(attempt, len(intervals)-1)]
+
+					// Log retry metrics for observability
+					cpl.logger.Infow("Docker recovery retry",
+						"attempt", attempt,
+						"resumed_from", failureCount,
+						"elapsed_time", time.Since(startTime).String(),
+						"next_retry_in", nextInterval.String(),
+						"error", lastErrMsg,
+						"metric_type", "docker_recovery_retry")
 				}
 
 				// Show retry notification if enabled
@@ -1750,9 +1785,12 @@ func (cpl *CoreProcessLauncher) triggerForceReconnect(reason string) {
 			continue
 		}
 
-		cpl.logger.Info("Triggered upstream reconnection after Docker recovery",
-			zap.String("reason", reason),
-			zap.Int("attempt", attempt))
+		// Log detailed reconnection success metrics
+		cpl.logger.Infow("Upstream reconnection successful after Docker recovery",
+			"reason", reason,
+			"reconnect_attempt", attempt,
+			"max_attempts", maxAttempts,
+			"metric_type", "docker_recovery_reconnect_success")
 
 		// Clear recovery state since recovery is complete (if persistent state is enabled)
 		if cpl.recoverySettings.persistentState {
@@ -1770,9 +1808,11 @@ func (cpl *CoreProcessLauncher) triggerForceReconnect(reason string) {
 		return
 	}
 
-	cpl.logger.Error("Exhausted attempts to trigger upstream reconnection after Docker recovery",
-		zap.String("reason", reason),
-		zap.Int("attempts", maxAttempts))
+	// Log detailed reconnection failure metrics
+	cpl.logger.Errorw("Failed to trigger upstream reconnection after Docker recovery",
+		"reason", reason,
+		"attempts_exhausted", maxAttempts,
+		"metric_type", "docker_recovery_reconnect_failure")
 
 	// Save failure state (if persistent state is enabled)
 	if cpl.recoverySettings.persistentState {
