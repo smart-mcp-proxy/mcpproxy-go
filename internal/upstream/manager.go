@@ -313,6 +313,177 @@ func (m *Manager) RemoveServer(id string) {
 	}
 }
 
+// ShutdownAll disconnects all clients and ensures all Docker containers are stopped
+// This should be called during application shutdown to ensure clean exit
+func (m *Manager) ShutdownAll(ctx context.Context) error {
+	m.logger.Info("Shutting down all upstream servers")
+
+	m.mu.RLock()
+	clientMap := make(map[string]*managed.Client, len(m.clients))
+	for id, client := range m.clients {
+		clientMap[id] = client
+	}
+	m.mu.RUnlock()
+
+	if len(clientMap) == 0 {
+		m.logger.Debug("No upstream servers to shutdown")
+		return nil
+	}
+
+	m.logger.Info("Disconnecting all upstream servers (in parallel)",
+		zap.Int("count", len(clientMap)))
+
+	// Disconnect all clients in parallel using goroutines
+	// This ensures shutdown is fast even with many servers
+	var wg sync.WaitGroup
+	for id, client := range clientMap {
+		if client == nil {
+			continue
+		}
+
+		wg.Add(1)
+		go func(clientID string, c *managed.Client) {
+			defer wg.Done()
+
+			serverName := c.GetConfig().Name
+			m.logger.Debug("Disconnecting server",
+				zap.String("id", clientID),
+				zap.String("server", serverName))
+
+			if err := c.Disconnect(); err != nil {
+				m.logger.Warn("Error disconnecting server",
+					zap.String("id", clientID),
+					zap.String("server", serverName),
+					zap.Error(err))
+			} else {
+				m.logger.Debug("Successfully disconnected server",
+					zap.String("id", clientID),
+					zap.String("server", serverName))
+			}
+		}(id, client)
+	}
+
+	// Wait for all disconnections to complete (with timeout from context)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		m.logger.Info("All upstream servers disconnected successfully")
+	case <-ctx.Done():
+		m.logger.Warn("Shutdown context cancelled, some servers may not have disconnected cleanly")
+	}
+
+	// Additional cleanup: Find and stop ALL mcpproxy-managed containers
+	// This catches any orphaned containers from previous crashes
+	m.cleanupAllManagedContainers(ctx)
+
+	m.logger.Info("All upstream servers shut down successfully")
+	return nil
+}
+
+// cleanupAllManagedContainers finds and stops all Docker containers managed by mcpproxy
+// Uses labels to identify containers across all instances
+func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
+	m.logger.Info("Cleaning up all mcpproxy-managed Docker containers")
+
+	// Find all containers with our management label
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
+		"--filter", "label=com.mcpproxy.managed=true",
+		"--format", "{{.ID}}\t{{.Names}}\t{{.Label \"com.mcpproxy.server\"}}")
+
+	output, err := listCmd.Output()
+	if err != nil {
+		m.logger.Debug("No Docker containers found or Docker unavailable", zap.Error(err))
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		m.logger.Debug("No mcpproxy-managed containers found")
+		return
+	}
+
+	m.logger.Info("Found mcpproxy-managed containers to cleanup",
+		zap.Int("count", len(lines)))
+
+	// Grace period for graceful shutdown
+	gracePeriod := 10 * time.Second
+	graceCtx, graceCancel := context.WithTimeout(ctx, gracePeriod)
+	defer graceCancel()
+
+	containerIDs := []string{}
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) >= 1 {
+			containerID := parts[0]
+			containerName := ""
+			serverName := ""
+			if len(parts) >= 2 {
+				containerName = parts[1]
+			}
+			if len(parts) >= 3 {
+				serverName = parts[2]
+			}
+
+			m.logger.Info("Stopping container",
+				zap.String("container_id", containerID),
+				zap.String("container_name", containerName),
+				zap.String("server", serverName))
+
+			containerIDs = append(containerIDs, containerID)
+
+			// Try graceful stop first
+			stopCmd := exec.CommandContext(graceCtx, "docker", "stop", containerID)
+			if err := stopCmd.Run(); err != nil {
+				m.logger.Warn("Graceful stop failed, will force kill",
+					zap.String("container_id", containerID),
+					zap.Error(err))
+			} else {
+				m.logger.Info("Container stopped gracefully",
+					zap.String("container_id", containerID))
+			}
+		}
+	}
+
+	// Force kill any remaining containers after grace period
+	if graceCtx.Err() != nil || len(containerIDs) > 0 {
+		m.logger.Info("Force killing any remaining containers")
+
+		killCtx, killCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer killCancel()
+
+		for _, containerID := range containerIDs {
+			// Check if container is still running
+			psCmd := exec.CommandContext(killCtx, "docker", "ps", "-q",
+				"--filter", "id="+containerID)
+			if output, err := psCmd.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
+				// Still running, force kill
+				m.logger.Info("Force killing container",
+					zap.String("container_id", containerID))
+
+				killCmd := exec.CommandContext(killCtx, "docker", "kill", containerID)
+				if err := killCmd.Run(); err != nil {
+					m.logger.Error("Failed to force kill container",
+						zap.String("container_id", containerID),
+						zap.Error(err))
+				} else {
+					m.logger.Info("Container force killed",
+						zap.String("container_id", containerID))
+				}
+			}
+		}
+	}
+
+	m.logger.Info("Container cleanup completed")
+}
+
 // GetClient returns a client by ID
 func (m *Manager) GetClient(id string) (*managed.Client, bool) {
 	m.mu.RLock()
