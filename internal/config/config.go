@@ -82,6 +82,9 @@ type Config struct {
 	// Docker isolation settings
 	DockerIsolation *DockerIsolationConfig `json:"docker_isolation,omitempty" mapstructure:"docker-isolation"`
 
+	// Docker recovery settings
+	DockerRecovery *DockerRecoveryConfig `json:"docker_recovery,omitempty" mapstructure:"docker-recovery"`
+
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
 
@@ -176,6 +179,98 @@ type IsolationConfig struct {
 	LogDriver   string   `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
 	LogMaxSize  string   `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
 	LogMaxFiles string   `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
+}
+
+// DockerRecoveryConfig represents Docker recovery settings for the tray application
+type DockerRecoveryConfig struct {
+	Enabled          bool       `json:"enabled" mapstructure:"enabled"`                       // Enable Docker recovery monitoring (default: true)
+	CheckIntervals   []Duration `json:"check_intervals,omitempty" mapstructure:"intervals"`   // Custom health check intervals (exponential backoff)
+	MaxRetries       int        `json:"max_retries,omitempty" mapstructure:"max_retries"`     // Maximum retry attempts (0 = unlimited)
+	NotifyOnStart    bool       `json:"notify_on_start" mapstructure:"notify_on_start"`       // Show notification when recovery starts (default: true)
+	NotifyOnSuccess  bool       `json:"notify_on_success" mapstructure:"notify_on_success"`   // Show notification on successful recovery (default: true)
+	NotifyOnFailure  bool       `json:"notify_on_failure" mapstructure:"notify_on_failure"`   // Show notification on recovery failure (default: true)
+	NotifyOnRetry    bool       `json:"notify_on_retry" mapstructure:"notify_on_retry"`       // Show notification on each retry (default: false)
+	PersistentState  bool       `json:"persistent_state" mapstructure:"persistent_state"`     // Save recovery state across restarts (default: true)
+}
+
+// DefaultCheckIntervals returns the default Docker recovery check intervals
+func DefaultCheckIntervals() []time.Duration {
+	return []time.Duration{
+		2 * time.Second,   // Immediate retry (Docker just paused)
+		5 * time.Second,   // Quick retry
+		10 * time.Second,  // Normal retry
+		30 * time.Second,  // Slow retry
+		60 * time.Second,  // Very slow retry (max backoff)
+	}
+}
+
+// GetCheckIntervals returns the configured check intervals as time.Duration slice, or defaults if not set
+func (d *DockerRecoveryConfig) GetCheckIntervals() []time.Duration {
+	if d == nil || len(d.CheckIntervals) == 0 {
+		return DefaultCheckIntervals()
+	}
+
+	intervals := make([]time.Duration, len(d.CheckIntervals))
+	for i, dur := range d.CheckIntervals {
+		intervals[i] = dur.Duration()
+	}
+	return intervals
+}
+
+// IsEnabled returns whether Docker recovery is enabled (default: true)
+func (d *DockerRecoveryConfig) IsEnabled() bool {
+	if d == nil {
+		return true // Enabled by default
+	}
+	return d.Enabled
+}
+
+// ShouldNotifyOnStart returns whether to notify when recovery starts (default: true)
+func (d *DockerRecoveryConfig) ShouldNotifyOnStart() bool {
+	if d == nil {
+		return true
+	}
+	return d.NotifyOnStart
+}
+
+// ShouldNotifyOnSuccess returns whether to notify on successful recovery (default: true)
+func (d *DockerRecoveryConfig) ShouldNotifyOnSuccess() bool {
+	if d == nil {
+		return true
+	}
+	return d.NotifyOnSuccess
+}
+
+// ShouldNotifyOnFailure returns whether to notify on recovery failure (default: true)
+func (d *DockerRecoveryConfig) ShouldNotifyOnFailure() bool {
+	if d == nil {
+		return true
+	}
+	return d.NotifyOnFailure
+}
+
+// ShouldNotifyOnRetry returns whether to notify on each retry (default: false)
+func (d *DockerRecoveryConfig) ShouldNotifyOnRetry() bool {
+	if d == nil {
+		return false
+	}
+	return d.NotifyOnRetry
+}
+
+// ShouldPersistState returns whether to persist recovery state across restarts (default: true)
+func (d *DockerRecoveryConfig) ShouldPersistState() bool {
+	if d == nil {
+		return true
+	}
+	return d.PersistentState
+}
+
+// GetMaxRetries returns the maximum number of retries (0 = unlimited)
+func (d *DockerRecoveryConfig) GetMaxRetries() int {
+	if d == nil {
+		return 0 // Unlimited by default
+	}
+	return d.MaxRetries
 }
 
 // RegistryEntry represents a registry in the configuration

@@ -32,6 +32,7 @@ import (
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/monitor"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/tray"
 )
@@ -887,6 +888,73 @@ func maskAPIKey(apiKey string) string {
 	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
 }
 
+// dockerRecoverySettings holds Docker recovery configuration
+type dockerRecoverySettings struct {
+	intervals       []time.Duration
+	maxRetries      int
+	notifyOnStart   bool
+	notifyOnSuccess bool
+	notifyOnFailure bool
+	notifyOnRetry   bool
+	persistentState bool
+}
+
+// loadDockerRecoverySettings loads Docker recovery settings from environment or defaults
+func loadDockerRecoverySettings() *dockerRecoverySettings {
+	settings := &dockerRecoverySettings{
+		intervals:       config.DefaultCheckIntervals(),
+		maxRetries:      0, // Unlimited by default
+		notifyOnStart:   true,
+		notifyOnSuccess: true,
+		notifyOnFailure: true,
+		notifyOnRetry:   false,
+		persistentState: true,
+	}
+
+	// Check for environment variable overrides
+	if intervalsStr := os.Getenv("MCPPROXY_DOCKER_RECOVERY_INTERVALS"); intervalsStr != "" {
+		// Parse comma-separated duration strings: "2s,5s,10s,30s,60s"
+		parts := strings.Split(intervalsStr, ",")
+		intervals := make([]time.Duration, 0, len(parts))
+		for _, part := range parts {
+			if dur, err := time.ParseDuration(strings.TrimSpace(part)); err == nil {
+				intervals = append(intervals, dur)
+			}
+		}
+		if len(intervals) > 0 {
+			settings.intervals = intervals
+		}
+	}
+
+	if maxRetriesStr := os.Getenv("MCPPROXY_DOCKER_RECOVERY_MAX_RETRIES"); maxRetriesStr != "" {
+		if val, err := strconv.Atoi(maxRetriesStr); err == nil {
+			settings.maxRetries = val
+		}
+	}
+
+	if val := os.Getenv("MCPPROXY_DOCKER_RECOVERY_NOTIFY_ON_START"); val != "" {
+		settings.notifyOnStart = val == "1" || strings.EqualFold(val, "true")
+	}
+
+	if val := os.Getenv("MCPPROXY_DOCKER_RECOVERY_NOTIFY_ON_SUCCESS"); val != "" {
+		settings.notifyOnSuccess = val == "1" || strings.EqualFold(val, "true")
+	}
+
+	if val := os.Getenv("MCPPROXY_DOCKER_RECOVERY_NOTIFY_ON_FAILURE"); val != "" {
+		settings.notifyOnFailure = val == "1" || strings.EqualFold(val, "true")
+	}
+
+	if val := os.Getenv("MCPPROXY_DOCKER_RECOVERY_NOTIFY_ON_RETRY"); val != "" {
+		settings.notifyOnRetry = val == "1" || strings.EqualFold(val, "true")
+	}
+
+	if val := os.Getenv("MCPPROXY_DOCKER_RECOVERY_PERSISTENT_STATE"); val != "" {
+		settings.persistentState = val == "1" || strings.EqualFold(val, "true")
+	}
+
+	return settings
+}
+
 // getDockerRecoveryStateFilePath returns the path to the tray's Docker recovery state file
 func getDockerRecoveryStateFilePath() (string, error) {
 	homeDir, err := os.UserHomeDir()
@@ -983,6 +1051,7 @@ type CoreProcessLauncher struct {
 	dockerRetryMu          sync.Mutex
 	dockerRetryCancel      context.CancelFunc
 	dockerReconnectPending bool
+	recoverySettings       *dockerRecoverySettings
 }
 
 // NewCoreProcessLauncher creates a new core process launcher
@@ -995,12 +1064,13 @@ func NewCoreProcessLauncher(
 	coreTimeout time.Duration,
 ) *CoreProcessLauncher {
 	return &CoreProcessLauncher{
-		coreURL:      coreURL,
-		logger:       logger,
-		stateMachine: stateMachine,
-		apiClient:    apiClient,
-		trayApp:      trayApp,
-		coreTimeout:  coreTimeout,
+		coreURL:          coreURL,
+		logger:           logger,
+		stateMachine:     stateMachine,
+		apiClient:        apiClient,
+		trayApp:          trayApp,
+		coreTimeout:      coreTimeout,
+		recoverySettings: loadDockerRecoverySettings(),
 	}
 }
 
@@ -1467,25 +1537,25 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 		cpl.logger.Warn("Docker engine unavailable - waiting for recovery")
 	}
 
-	// Load existing recovery state to resume or initialize new state
-	recoveryState, err := loadDockerRecoveryState(cpl.logger)
-	if err != nil {
-		cpl.logger.Warn("Failed to load Docker recovery state, starting fresh", zap.Error(err))
-		recoveryState = nil
-	}
-
-	// Initialize failure count from persistent state if available
+	// Load existing recovery state to resume or initialize new state (if persistent state is enabled)
 	failureCount := 0
-	if recoveryState != nil && !recoveryState.DockerAvailable {
-		failureCount = recoveryState.FailureCount
-		cpl.logger.Infow("Resuming Docker recovery from persistent state",
-			"previous_attempts", failureCount,
-			"last_attempt", recoveryState.LastAttempt)
+	if cpl.recoverySettings.persistentState {
+		recoveryState, err := loadDockerRecoveryState(cpl.logger)
+		if err != nil {
+			cpl.logger.Warn("Failed to load Docker recovery state, starting fresh", zap.Error(err))
+		} else if recoveryState != nil && !recoveryState.DockerAvailable {
+			failureCount = recoveryState.FailureCount
+			cpl.logger.Infow("Resuming Docker recovery from persistent state",
+				"previous_attempts", failureCount,
+				"last_attempt", recoveryState.LastAttempt)
+		}
 	}
 
-	// Show notification that Docker recovery has started
-	if err := tray.ShowDockerRecoveryStarted(); err != nil {
-		cpl.logger.Warn("Failed to show Docker recovery notification", zap.Error(err))
+	// Show notification that Docker recovery has started (if enabled)
+	if cpl.recoverySettings.notifyOnStart {
+		if err := tray.ShowDockerRecoveryStarted(); err != nil {
+			cpl.logger.Warn("Failed to show Docker recovery notification", zap.Error(err))
+		}
 	}
 
 	cpl.dockerRetryMu.Lock()
@@ -1497,14 +1567,8 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 	cpl.dockerRetryMu.Unlock()
 
 	go func() {
-		// Exponential backoff intervals: fast when Docker just paused, slower when off for longer
-		intervals := []time.Duration{
-			2 * time.Second,   // Immediate retry (Docker just paused)
-			5 * time.Second,   // Quick retry
-			10 * time.Second,  // Normal retry
-			30 * time.Second,  // Slow retry
-			60 * time.Second,  // Very slow retry (max backoff)
-		}
+		// Use configured intervals or defaults
+		intervals := cpl.recoverySettings.intervals
 
 		// Resume from persistent state if available
 		attempt := failureCount
@@ -1520,7 +1584,8 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 			case <-time.After(currentInterval):
 				attempt++
 
-				if err := cpl.ensureDockerAvailable(retryCtx); err == nil {
+				checkErr := cpl.ensureDockerAvailable(retryCtx)
+				if checkErr == nil {
 					elapsed := time.Since(startTime)
 					cpl.logger.Info("Docker engine available - transitioning to recovery state",
 						zap.Int("attempts", attempt),
@@ -1542,26 +1607,36 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 
 				// Docker still unavailable, save state
 				lastErrMsg := ""
-				if err != nil {
-					lastErrMsg = err.Error()
+				if checkErr != nil {
+					lastErrMsg = checkErr.Error()
 					cpl.logger.Debug("Docker still unavailable",
 						zap.Int("attempt", attempt),
 						zap.Duration("next_check_in", intervals[min(attempt, len(intervals)-1)]),
-						zap.Error(err))
+						zap.Error(checkErr))
 				}
 
-				// Save recovery state for persistence across restarts
-				stateToSave := &storage.DockerRecoveryState{
-					LastAttempt:      time.Now(),
-					FailureCount:     attempt,
-					DockerAvailable:  false,
-					RecoveryMode:     true,
-					LastError:        lastErrMsg,
-					AttemptsSinceUp:  attempt,
-					LastSuccessfulAt: time.Time{},
+				// Show retry notification if enabled
+				if cpl.recoverySettings.notifyOnRetry && attempt > 1 {
+					nextRetryIn := intervals[min(attempt, len(intervals)-1)].String()
+					if notifyErr := tray.ShowDockerRecoveryRetry(attempt, nextRetryIn); notifyErr != nil {
+						cpl.logger.Warn("Failed to show Docker recovery retry notification", zap.Error(notifyErr))
+					}
 				}
-				if saveErr := saveDockerRecoveryState(stateToSave, cpl.logger); saveErr != nil {
-					cpl.logger.Warn("Failed to save Docker recovery state", zap.Error(saveErr))
+
+				// Save recovery state for persistence across restarts (if enabled)
+				if cpl.recoverySettings.persistentState {
+					stateToSave := &storage.DockerRecoveryState{
+						LastAttempt:      time.Now(),
+						FailureCount:     attempt,
+						DockerAvailable:  false,
+						RecoveryMode:     true,
+						LastError:        lastErrMsg,
+						AttemptsSinceUp:  attempt,
+						LastSuccessfulAt: time.Time{},
+					}
+					if saveErr := saveDockerRecoveryState(stateToSave, cpl.logger); saveErr != nil {
+						cpl.logger.Warn("Failed to save Docker recovery state", zap.Error(saveErr))
+					}
 				}
 			}
 		}
@@ -1679,14 +1754,18 @@ func (cpl *CoreProcessLauncher) triggerForceReconnect(reason string) {
 			zap.String("reason", reason),
 			zap.Int("attempt", attempt))
 
-		// Clear recovery state since recovery is complete
-		if clearErr := clearDockerRecoveryState(cpl.logger); clearErr != nil {
-			cpl.logger.Warn("Failed to clear Docker recovery state", zap.Error(clearErr))
+		// Clear recovery state since recovery is complete (if persistent state is enabled)
+		if cpl.recoverySettings.persistentState {
+			if clearErr := clearDockerRecoveryState(cpl.logger); clearErr != nil {
+				cpl.logger.Warn("Failed to clear Docker recovery state", zap.Error(clearErr))
+			}
 		}
 
-		// Show success notification
-		if err := tray.ShowDockerRecoverySuccess(0); err != nil {
-			cpl.logger.Warn("Failed to show recovery success notification", zap.Error(err))
+		// Show success notification (if enabled)
+		if cpl.recoverySettings.notifyOnSuccess {
+			if err := tray.ShowDockerRecoverySuccess(0); err != nil {
+				cpl.logger.Warn("Failed to show recovery success notification", zap.Error(err))
+			}
 		}
 		return
 	}
@@ -1695,23 +1774,27 @@ func (cpl *CoreProcessLauncher) triggerForceReconnect(reason string) {
 		zap.String("reason", reason),
 		zap.Int("attempts", maxAttempts))
 
-	// Save failure state
-	failedState := &storage.DockerRecoveryState{
-		LastAttempt:      time.Now(),
-		FailureCount:     maxAttempts,
-		DockerAvailable:  true, // Docker is available, but reconnection failed
-		RecoveryMode:     false,
-		LastError:        "Max reconnection attempts exceeded",
-		AttemptsSinceUp:  maxAttempts,
-		LastSuccessfulAt: time.Time{},
-	}
-	if saveErr := saveDockerRecoveryState(failedState, cpl.logger); saveErr != nil {
-		cpl.logger.Warn("Failed to save recovery failure state", zap.Error(saveErr))
+	// Save failure state (if persistent state is enabled)
+	if cpl.recoverySettings.persistentState {
+		failedState := &storage.DockerRecoveryState{
+			LastAttempt:      time.Now(),
+			FailureCount:     maxAttempts,
+			DockerAvailable:  true, // Docker is available, but reconnection failed
+			RecoveryMode:     false,
+			LastError:        "Max reconnection attempts exceeded",
+			AttemptsSinceUp:  maxAttempts,
+			LastSuccessfulAt: time.Time{},
+		}
+		if saveErr := saveDockerRecoveryState(failedState, cpl.logger); saveErr != nil {
+			cpl.logger.Warn("Failed to save recovery failure state", zap.Error(saveErr))
+		}
 	}
 
-	// Show failure notification
-	if err := tray.ShowDockerRecoveryFailed("Max reconnection attempts exceeded"); err != nil {
-		cpl.logger.Warn("Failed to show recovery failure notification", zap.Error(err))
+	// Show failure notification (if enabled)
+	if cpl.recoverySettings.notifyOnFailure {
+		if err := tray.ShowDockerRecoveryFailed("Max reconnection attempts exceeded"); err != nil {
+			cpl.logger.Warn("Failed to show recovery failure notification", zap.Error(err))
+		}
 	}
 }
 
