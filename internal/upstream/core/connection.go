@@ -25,6 +25,8 @@ const (
 	osDarwin  = "darwin"
 	osWindows = "windows"
 
+	dockerCleanupTimeout = 30 * time.Second
+
 	// Transport types
 	transportHTTP           = "http"
 	transportHTTPStreamable = "streamable-http"
@@ -135,7 +137,7 @@ func (c *Client) Connect(ctx context.Context) error {
 				zap.String("container_id", c.containerID),
 				zap.Error(err))
 
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 			defer cleanupCancel()
 
 			// Try to cleanup using container name first, then ID, then pattern matching
@@ -267,10 +269,24 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	}
 
 	if willUseDocker {
+		// CRITICAL: Acquire per-server lock to prevent concurrent container creation
+		// This prevents race conditions when multiple goroutines try to reconnect the same server
+		lock := globalContainerLock.Lock(c.config.Name)
+		defer lock.Unlock()
+
 		c.logger.Debug("Docker command detected, setting up container ID tracking",
 			zap.String("server", c.config.Name),
 			zap.String("command", c.config.Command),
 			zap.Strings("original_args", args))
+
+		// CRITICAL: Clean up any existing containers first to prevent duplicates
+		// This makes container creation idempotent and safe to call multiple times
+		if err := c.ensureNoExistingContainers(ctx); err != nil {
+			c.logger.Error("Failed to ensure no existing containers",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			// Continue anyway - we'll try to create the container
+		}
 
 		// Create temp file for container ID
 		tmpFile, err := os.CreateTemp("", "mcpproxy-cid-*.txt")
@@ -382,7 +398,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 				zap.String("container_id", c.containerID),
 				zap.Error(err))
 
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 			defer cleanupCancel()
 
 			// Try to cleanup using container name first, then ID, then pattern matching
@@ -1534,7 +1550,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 
 		// Create a fresh context for Docker cleanup with its own timeout
 		// This ensures cleanup can complete even if the main context expires
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 		defer cleanupCancel()
 
 		if c.containerID != "" {

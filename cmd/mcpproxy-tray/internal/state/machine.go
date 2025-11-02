@@ -205,6 +205,8 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 			return StateCoreErrorPortConflict
 		case EventDBLocked:
 			return StateCoreErrorDBLocked
+		case EventDockerUnavailable:
+			return StateCoreErrorDocker
 		case EventConfigError:
 			return StateCoreErrorConfig
 		case EventPermissionError:
@@ -225,6 +227,8 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 			return StateCoreErrorPortConflict
 		case EventDBLocked:
 			return StateCoreErrorDBLocked
+		case EventDockerUnavailable:
+			return StateCoreErrorDocker
 		case EventConfigError:
 			return StateCoreErrorConfig
 		case EventPermissionError:
@@ -252,6 +256,8 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 			return StateCoreErrorPortConflict
 		case EventDBLocked:
 			return StateCoreErrorDBLocked
+		case EventDockerUnavailable:
+			return StateCoreErrorDocker
 		case EventConfigError:
 			return StateCoreErrorConfig
 		case EventPermissionError:
@@ -287,20 +293,28 @@ func (m *Machine) determineNewState(currentState State, event Event) State {
 			return StateShuttingDown
 		}
 
-	case StateCoreErrorPortConflict, StateCoreErrorDBLocked, StateCoreErrorGeneral:
+	case StateCoreErrorPortConflict, StateCoreErrorDBLocked, StateCoreErrorPermission, StateCoreErrorGeneral:
 		switch event {
 		case EventShutdown:
 			return StateShuttingDown
-		// Error states persist - require user to fix issue manually
-		// No auto-retry or auto-transition to failed state
+			// Error states persist - require user to fix issue manually
+			// No auto-retry or auto-transition to failed state
 		}
 
 	case StateCoreErrorConfig:
 		switch event {
 		case EventShutdown:
 			return StateShuttingDown
-		// Config errors persist - require user to fix config manually
-		// Stay in StateCoreErrorConfig for all other events
+			// Config errors persist - require user to fix config manually
+			// Stay in StateCoreErrorConfig for all other events
+		}
+
+	case StateCoreErrorDocker:
+		switch event {
+		case EventRetry:
+			return StateLaunchingCore
+		case EventShutdown:
+			return StateShuttingDown
 		}
 
 	case StateFailed:

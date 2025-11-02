@@ -3,6 +3,9 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"maps"
+	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +41,44 @@ type Manager struct {
 	// Context for shutdown coordination
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+}
+
+func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
+	if cfg == nil {
+		return nil
+	}
+
+	clone := *cfg
+
+	if cfg.Args != nil {
+		clone.Args = slices.Clone(cfg.Args)
+	}
+
+	if cfg.Env != nil {
+		clone.Env = maps.Clone(cfg.Env)
+	}
+
+	if cfg.Headers != nil {
+		clone.Headers = maps.Clone(cfg.Headers)
+	}
+
+	if cfg.OAuth != nil {
+		o := *cfg.OAuth
+		if cfg.OAuth.Scopes != nil {
+			o.Scopes = slices.Clone(cfg.OAuth.Scopes)
+		}
+		clone.OAuth = &o
+	}
+
+	if cfg.Isolation != nil {
+		iso := *cfg.Isolation
+		if cfg.Isolation.ExtraArgs != nil {
+			iso.ExtraArgs = slices.Clone(cfg.Isolation.ExtraArgs)
+		}
+		clone.Isolation = &iso
+	}
+
+	return &clone
 }
 
 // NewManager creates a new upstream manager
@@ -270,6 +311,177 @@ func (m *Manager) RemoveServer(id string) {
 		_ = client.Disconnect()
 		m.logger.Debug("upstream.Manager.RemoveServer: disconnect completed", zap.String("id", id))
 	}
+}
+
+// ShutdownAll disconnects all clients and ensures all Docker containers are stopped
+// This should be called during application shutdown to ensure clean exit
+func (m *Manager) ShutdownAll(ctx context.Context) error {
+	m.logger.Info("Shutting down all upstream servers")
+
+	m.mu.RLock()
+	clientMap := make(map[string]*managed.Client, len(m.clients))
+	for id, client := range m.clients {
+		clientMap[id] = client
+	}
+	m.mu.RUnlock()
+
+	if len(clientMap) == 0 {
+		m.logger.Debug("No upstream servers to shutdown")
+		return nil
+	}
+
+	m.logger.Info("Disconnecting all upstream servers (in parallel)",
+		zap.Int("count", len(clientMap)))
+
+	// Disconnect all clients in parallel using goroutines
+	// This ensures shutdown is fast even with many servers
+	var wg sync.WaitGroup
+	for id, client := range clientMap {
+		if client == nil {
+			continue
+		}
+
+		wg.Add(1)
+		go func(clientID string, c *managed.Client) {
+			defer wg.Done()
+
+			serverName := c.GetConfig().Name
+			m.logger.Debug("Disconnecting server",
+				zap.String("id", clientID),
+				zap.String("server", serverName))
+
+			if err := c.Disconnect(); err != nil {
+				m.logger.Warn("Error disconnecting server",
+					zap.String("id", clientID),
+					zap.String("server", serverName),
+					zap.Error(err))
+			} else {
+				m.logger.Debug("Successfully disconnected server",
+					zap.String("id", clientID),
+					zap.String("server", serverName))
+			}
+		}(id, client)
+	}
+
+	// Wait for all disconnections to complete (with timeout from context)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		m.logger.Info("All upstream servers disconnected successfully")
+	case <-ctx.Done():
+		m.logger.Warn("Shutdown context cancelled, some servers may not have disconnected cleanly")
+	}
+
+	// Additional cleanup: Find and stop ALL mcpproxy-managed containers
+	// This catches any orphaned containers from previous crashes
+	m.cleanupAllManagedContainers(ctx)
+
+	m.logger.Info("All upstream servers shut down successfully")
+	return nil
+}
+
+// cleanupAllManagedContainers finds and stops all Docker containers managed by mcpproxy
+// Uses labels to identify containers across all instances
+func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
+	m.logger.Info("Cleaning up all mcpproxy-managed Docker containers")
+
+	// Find all containers with our management label
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
+		"--filter", "label=com.mcpproxy.managed=true",
+		"--format", "{{.ID}}\t{{.Names}}\t{{.Label \"com.mcpproxy.server\"}}")
+
+	output, err := listCmd.Output()
+	if err != nil {
+		m.logger.Debug("No Docker containers found or Docker unavailable", zap.Error(err))
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		m.logger.Debug("No mcpproxy-managed containers found")
+		return
+	}
+
+	m.logger.Info("Found mcpproxy-managed containers to cleanup",
+		zap.Int("count", len(lines)))
+
+	// Grace period for graceful shutdown
+	gracePeriod := 10 * time.Second
+	graceCtx, graceCancel := context.WithTimeout(ctx, gracePeriod)
+	defer graceCancel()
+
+	containerIDs := []string{}
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) >= 1 {
+			containerID := parts[0]
+			containerName := ""
+			serverName := ""
+			if len(parts) >= 2 {
+				containerName = parts[1]
+			}
+			if len(parts) >= 3 {
+				serverName = parts[2]
+			}
+
+			m.logger.Info("Stopping container",
+				zap.String("container_id", containerID),
+				zap.String("container_name", containerName),
+				zap.String("server", serverName))
+
+			containerIDs = append(containerIDs, containerID)
+
+			// Try graceful stop first
+			stopCmd := exec.CommandContext(graceCtx, "docker", "stop", containerID)
+			if err := stopCmd.Run(); err != nil {
+				m.logger.Warn("Graceful stop failed, will force kill",
+					zap.String("container_id", containerID),
+					zap.Error(err))
+			} else {
+				m.logger.Info("Container stopped gracefully",
+					zap.String("container_id", containerID))
+			}
+		}
+	}
+
+	// Force kill any remaining containers after grace period
+	if graceCtx.Err() != nil || len(containerIDs) > 0 {
+		m.logger.Info("Force killing any remaining containers")
+
+		killCtx, killCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer killCancel()
+
+		for _, containerID := range containerIDs {
+			// Check if container is still running
+			psCmd := exec.CommandContext(killCtx, "docker", "ps", "-q",
+				"--filter", "id="+containerID)
+			if output, err := psCmd.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
+				// Still running, force kill
+				m.logger.Info("Force killing container",
+					zap.String("container_id", containerID))
+
+				killCmd := exec.CommandContext(killCtx, "docker", "kill", containerID)
+				if err := killCmd.Run(); err != nil {
+					m.logger.Error("Failed to force kill container",
+						zap.String("container_id", containerID),
+						zap.Error(err))
+				} else {
+					m.logger.Info("Container force killed",
+						zap.String("container_id", containerID))
+				}
+			}
+		}
+	}
+
+	m.logger.Info("Container cleanup completed")
 }
 
 // GetClient returns a client by ID
@@ -827,6 +1039,176 @@ func (m *Manager) RetryConnection(serverName string) error {
 	}()
 
 	return nil
+}
+
+// verifyContainerHealthy checks if a Docker container is actually running and responsive
+// This is critical for detecting "zombie" containers where the socket is open but the process is frozen
+func (m *Manager) verifyContainerHealthy(client *managed.Client) (bool, error) {
+	// Only check Docker-based servers
+	if !client.IsDockerCommand() {
+		return true, nil // Non-Docker servers don't need container health check
+	}
+
+	containerID := client.GetContainerID()
+	if containerID == "" {
+		return false, fmt.Errorf("no container ID available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Check 1: Container exists and is running
+	inspectCmd := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{.State.Running}},{{.State.Status}}",
+		containerID)
+
+	output, err := inspectCmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("container not found or unreachable: %w", err)
+	}
+
+	parts := strings.Split(strings.TrimSpace(string(output)), ",")
+	if len(parts) < 2 {
+		return false, fmt.Errorf("unexpected docker inspect output: %s", string(output))
+	}
+
+	running := parts[0] == "true"
+	status := parts[1]
+
+	if !running {
+		return false, fmt.Errorf("container not running (status: %s)", status)
+	}
+
+	m.logger.Debug("Container health check passed",
+		zap.String("container_id", containerID[:12]),
+		zap.String("status", status))
+
+	return true, nil
+}
+
+// ReconnectResult tracks the results of a ForceReconnectAll operation
+type ReconnectResult struct {
+	TotalServers      int
+	AttemptedServers  int
+	SuccessfulServers []string
+	FailedServers     map[string]error
+	SkippedServers    map[string]string // server name -> skip reason
+}
+
+// ForceReconnectAll triggers reconnection attempts for all managed clients.
+// For Docker-based servers, this includes container health verification to catch frozen containers.
+// Returns detailed results about which servers were reconnected, skipped, or failed.
+func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
+	result := &ReconnectResult{
+		SuccessfulServers: []string{},
+		FailedServers:     make(map[string]error),
+		SkippedServers:    make(map[string]string),
+	}
+	m.mu.RLock()
+	clientMap := make(map[string]*managed.Client, len(m.clients))
+	for id, client := range m.clients {
+		clientMap[id] = client
+	}
+	m.mu.RUnlock()
+
+	result.TotalServers = len(clientMap)
+
+	if len(clientMap) == 0 {
+		m.logger.Debug("ForceReconnectAll: no managed clients registered")
+		return result
+	}
+
+	m.logger.Info("ForceReconnectAll: processing managed clients",
+		zap.Int("client_count", len(clientMap)),
+		zap.String("reason", reason))
+
+	for id, client := range clientMap {
+		if client == nil {
+			result.SkippedServers[id] = "nil client"
+			continue
+		}
+
+		// CRITICAL: For Docker servers, verify container health even if connected
+		// This catches frozen containers when Docker is paused/resumed
+		if client.IsConnected() {
+			if client.IsDockerCommand() {
+				healthy, err := m.verifyContainerHealthy(client)
+				if !healthy {
+					m.logger.Warn("Container unhealthy despite active connection - forcing reconnect",
+						zap.String("server", id),
+						zap.Error(err))
+					// Fall through to reconnect logic
+				} else {
+					result.SkippedServers[id] = "container healthy"
+					m.logger.Debug("Skipping reconnect - container healthy",
+						zap.String("server", id))
+					continue
+				}
+			} else {
+				// Non-Docker server, connection state is sufficient
+				result.SkippedServers[id] = "already connected"
+				m.logger.Debug("Skipping reconnect - already connected",
+					zap.String("server", id))
+				continue
+			}
+		}
+
+		// Filter: Only reconnect Docker-based servers (skip HTTP/SSE/non-Docker stdio)
+		if !client.IsDockerCommand() {
+			result.SkippedServers[id] = "not a Docker server"
+			m.logger.Debug("Skipping reconnect - not a Docker server",
+				zap.String("server", id),
+				zap.String("reason", reason))
+			continue
+		}
+
+		cfg := cloneServerConfig(client.GetConfig())
+		if cfg == nil {
+			result.SkippedServers[id] = "failed to clone config"
+			continue
+		}
+
+		if !cfg.Enabled {
+			result.SkippedServers[id] = "server disabled"
+			m.logger.Debug("Skipping reconnect - server disabled",
+				zap.String("server", id))
+			continue
+		}
+
+		result.AttemptedServers++
+
+		m.logger.Info("ForceReconnectAll: rebuilding Docker client",
+			zap.String("server", cfg.Name),
+			zap.String("id", id),
+			zap.String("reason", reason))
+
+		m.RemoveServer(id)
+
+		// Small delay to allow container/process cleanup before restart
+		time.Sleep(200 * time.Millisecond)
+
+		if err := m.AddServer(id, cfg); err != nil {
+			result.FailedServers[id] = err
+			m.logger.Error("ForceReconnectAll: failed to rebuild client",
+				zap.String("server", cfg.Name),
+				zap.String("id", id),
+				zap.Error(err))
+		} else {
+			result.SuccessfulServers = append(result.SuccessfulServers, id)
+			m.logger.Info("ForceReconnectAll: successfully rebuilt client",
+				zap.String("server", cfg.Name),
+				zap.String("id", id))
+		}
+	}
+
+	m.logger.Info("ForceReconnectAll completed",
+		zap.Int("total", result.TotalServers),
+		zap.Int("attempted", result.AttemptedServers),
+		zap.Int("successful", len(result.SuccessfulServers)),
+		zap.Int("failed", len(result.FailedServers)),
+		zap.Int("skipped", len(result.SkippedServers)))
+
+	return result
 }
 
 // startOAuthEventMonitor monitors the database for OAuth completion events from CLI processes

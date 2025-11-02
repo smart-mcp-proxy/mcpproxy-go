@@ -75,7 +75,10 @@ func (m *MockServerController) GetAllServers() ([]map[string]interface{}, error)
 }
 
 func (m *MockServerController) EnableServer(_ string, _ bool) error { return nil }
-func (m *MockServerController) RestartServer(_ string) error          { return nil }
+func (m *MockServerController) RestartServer(_ string) error        { return nil }
+func (m *MockServerController) ForceReconnectAllServers(_ string) error {
+	return nil
+}
 func (m *MockServerController) QuarantineServer(_ string, _ bool) error {
 	return nil
 }

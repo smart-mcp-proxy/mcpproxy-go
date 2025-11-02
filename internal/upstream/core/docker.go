@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -61,9 +62,53 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 		}
 	}
 
-	c.logger.Warn("Failed to read Docker container ID from cidfile after 10 seconds",
+	c.logger.Warn("Failed to read container ID from cidfile, attempting recovery via container name",
 		zap.String("server", c.config.Name),
-		zap.String("cid_file", cidFile))
+		zap.String("cid_file", cidFile),
+		zap.String("container_name", c.containerName))
+
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Warn("cidfile read timeout - attempting name lookup recovery")
+	}
+
+	// Fallback: Find container by name
+	if c.containerName != "" {
+		listCmd := exec.CommandContext(ctx, "docker", "ps",
+			"--filter", fmt.Sprintf("name=^%s$", c.containerName),
+			"--format", "{{.ID}}")
+
+		if output, err := listCmd.Output(); err == nil {
+			foundID := strings.TrimSpace(string(output))
+			if foundID != "" {
+				c.mu.Lock()
+				c.containerID = foundID
+				c.mu.Unlock()
+
+				c.logger.Info("Successfully recovered container ID via name lookup",
+					zap.String("server", c.config.Name),
+					zap.String("container_id", foundID[:12]),
+					zap.String("full_container_id", foundID),
+					zap.String("container_name", c.containerName))
+
+				if c.upstreamLogger != nil {
+					c.upstreamLogger.Info("Container ID recovered via name lookup",
+						zap.String("container_id", foundID))
+				}
+
+				// Clean up the cidfile since we got the ID
+				os.Remove(cidFile)
+				return
+			}
+		}
+	}
+
+	c.logger.Error("Failed to recover container ID - container will be orphaned on disconnect",
+		zap.String("server", c.config.Name),
+		zap.String("container_name", c.containerName))
+
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Error("Failed to recover container ID - may be orphaned")
+	}
 }
 
 // killDockerContainerWithContext kills the Docker container if one is running with context timeout
@@ -420,6 +465,90 @@ func (c *Client) killDockerContainerByNameWithContext(ctx context.Context, conta
 		zap.String("container_id", containerID))
 
 	return true
+}
+
+// ensureNoExistingContainers removes all existing containers for this server before creating a new one
+// This makes container creation idempotent and prevents duplicate container spawning
+func (c *Client) ensureNoExistingContainers(ctx context.Context) error {
+	sanitized := sanitizeServerNameForContainer(c.config.Name)
+	namePattern := "mcpproxy-" + sanitized + "-"
+
+	c.logger.Info("Checking for existing containers before creation",
+		zap.String("server", c.config.Name),
+		zap.String("name_pattern", namePattern))
+
+	// Find ALL containers matching our server (running or stopped)
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
+		"--filter", "name="+namePattern,
+		"--format", "{{.ID}}\t{{.Names}}\t{{.Status}}")
+
+	output, err := listCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to list existing containers: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		c.logger.Debug("No existing containers found - safe to create new one",
+			zap.String("server", c.config.Name))
+		return nil
+	}
+
+	// Found existing containers - clean them up first
+	c.logger.Warn("Found existing containers - cleaning up before creating new one",
+		zap.String("server", c.config.Name),
+		zap.Int("container_count", len(lines)))
+
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Warn("Cleaning up existing containers before creating new one",
+			zap.Int("container_count", len(lines)))
+	}
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) >= 2 {
+			containerID := parts[0]
+			containerName := parts[1]
+			status := ""
+			if len(parts) >= 3 {
+				status = parts[2]
+			}
+
+			c.logger.Info("Removing existing container",
+				zap.String("server", c.config.Name),
+				zap.String("container_id", containerID),
+				zap.String("container_name", containerName),
+				zap.String("status", status))
+
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Info("Removing existing container",
+					zap.String("container_id", containerID),
+					zap.String("container_name", containerName))
+			}
+
+			// Force remove (works for running and stopped containers)
+			rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
+			if err := rmCmd.Run(); err != nil {
+				c.logger.Error("Failed to remove existing container",
+					zap.String("container_id", containerID),
+					zap.Error(err))
+				// Continue anyway - try to remove others
+			} else {
+				c.logger.Info("Successfully removed existing container",
+					zap.String("container_id", containerID))
+
+				if c.upstreamLogger != nil {
+					c.upstreamLogger.Info("Successfully removed existing container",
+						zap.String("container_id", containerID))
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // checkDockerContainerHealth checks if Docker containers are still running

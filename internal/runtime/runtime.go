@@ -452,10 +452,15 @@ func (r *Runtime) Close() error {
 	}
 
 	if r.upstreamManager != nil {
-		if err := r.upstreamManager.DisconnectAll(); err != nil {
-			errs = append(errs, fmt.Errorf("disconnect upstream servers: %w", err))
+		// Use ShutdownAll instead of DisconnectAll to ensure proper container cleanup
+		// ShutdownAll handles both graceful disconnection and Docker container cleanup
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer shutdownCancel()
+
+		if err := r.upstreamManager.ShutdownAll(shutdownCtx); err != nil {
+			errs = append(errs, fmt.Errorf("shutdown upstream servers: %w", err))
 			if r.logger != nil {
-				r.logger.Error("Failed to disconnect upstream servers", zap.Error(err))
+				r.logger.Error("Failed to shutdown upstream servers", zap.Error(err))
 			}
 		}
 	}

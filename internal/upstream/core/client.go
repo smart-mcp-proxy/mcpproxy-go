@@ -447,6 +447,13 @@ func (c *Client) GetServerInfo() *mcp.InitializeResult {
 	return c.serverInfo
 }
 
+// GetContainerID returns the Docker container ID if this is a Docker-based server
+func (c *Client) GetContainerID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.containerID
+}
+
 // GetTransportType returns the transport type being used
 func (c *Client) GetTransportType() string {
 	return c.transportType

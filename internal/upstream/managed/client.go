@@ -597,6 +597,39 @@ func (mc *Client) performHealthCheck() {
 		zap.String("server", mc.Config.Name))
 }
 
+// ForceReconnect triggers an immediate reconnection attempt regardless of backoff state.
+func (mc *Client) ForceReconnect(reason string) {
+	if mc == nil {
+		return
+	}
+
+	serverName := ""
+	if mc.Config != nil {
+		serverName = mc.Config.Name
+	}
+
+	if mc.IsConnected() {
+		mc.logger.Debug("Force reconnect skipped - client already connected",
+			zap.String("server", serverName),
+			zap.String("reason", reason))
+		return
+	}
+
+	if mc.IsConnecting() {
+		mc.logger.Debug("Force reconnect skipped - client currently connecting",
+			zap.String("server", serverName),
+			zap.String("reason", reason))
+		return
+	}
+
+	mc.logger.Info("Force reconnect requested",
+		zap.String("server", serverName),
+		zap.String("reason", reason),
+		zap.String("state", mc.StateManager.GetState().String()))
+
+	go mc.tryReconnect()
+}
+
 // tryReconnect attempts to reconnect the client with proper error handling
 func (mc *Client) tryReconnect() {
 	// CRITICAL FIX: Prevent concurrent reconnection attempts to avoid duplicate containers
@@ -898,6 +931,14 @@ func containsString(str, substr string) bool {
 // IsDockerCommand returns whether this client is running a Docker command
 func (mc *Client) IsDockerCommand() bool {
 	return mc.isDockerServer()
+}
+
+// GetContainerID returns the Docker container ID if this is a Docker-based server
+func (mc *Client) GetContainerID() string {
+	if mc.coreClient == nil {
+		return ""
+	}
+	return mc.coreClient.GetContainerID()
 }
 
 // setToolCountCache records the latest tool count and timestamp for non-blocking consumers.

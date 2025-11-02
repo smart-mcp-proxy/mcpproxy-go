@@ -751,6 +751,31 @@ func (r *Runtime) RestartServer(serverName string) error {
 	return nil
 }
 
+// ForceReconnectAllServers triggers reconnection attempts for all managed servers.
+func (r *Runtime) ForceReconnectAllServers(reason string) error {
+	if r.upstreamManager == nil {
+		return fmt.Errorf("upstream manager not initialized")
+	}
+
+	if r.logger != nil {
+		r.logger.Info("Force reconnect requested for all upstream servers",
+			zap.String("reason", reason))
+	}
+
+	result := r.upstreamManager.ForceReconnectAll(reason)
+
+	if r.logger != nil {
+		r.logger.Info("Force reconnect completed",
+			zap.Int("total_servers", result.TotalServers),
+			zap.Int("attempted", result.AttemptedServers),
+			zap.Int("successful", len(result.SuccessfulServers)),
+			zap.Int("failed", len(result.FailedServers)),
+			zap.Int("skipped", len(result.SkippedServers)))
+	}
+
+	return nil
+}
+
 // HandleUpstreamServerChange should be called when upstream servers change.
 func (r *Runtime) HandleUpstreamServerChange(ctx context.Context) {
 	if ctx == nil {

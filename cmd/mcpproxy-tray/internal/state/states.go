@@ -34,6 +34,12 @@ const (
 	// StateCoreErrorDBLocked represents core failed due to database lock
 	StateCoreErrorDBLocked State = "core_error_db_locked"
 
+	// StateCoreErrorDocker represents core failed due to Docker being unavailable
+	StateCoreErrorDocker State = "core_error_docker"
+
+	// StateCoreRecoveringDocker represents Docker recovery in progress
+	StateCoreRecoveringDocker State = "core_recovering_docker"
+
 	// StateCoreErrorConfig represents core failed due to configuration error
 	StateCoreErrorConfig State = "core_error_config"
 
@@ -84,6 +90,12 @@ const (
 	// EventPermissionError indicates core failed due to permission error
 	EventPermissionError Event = "permission_error"
 
+	// EventDockerUnavailable indicates Docker engine is unavailable or paused
+	EventDockerUnavailable Event = "docker_unavailable"
+
+	// EventDockerRecovered indicates Docker engine became available again
+	EventDockerRecovered Event = "docker_recovered"
+
 	// EventGeneralError indicates core failed with general error
 	EventGeneralError Event = "general_error"
 
@@ -112,7 +124,7 @@ type Info struct {
 
 // GetInfo returns metadata for a given state
 func GetInfo(state State) Info {
-	timeout90s := 90 * time.Second  // Must exceed health monitor's readinessTimeout (60s)
+	timeout90s := 90 * time.Second // Must exceed health monitor's readinessTimeout (60s)
 	timeout5s := 5 * time.Second
 	timeout10s := 10 * time.Second
 
@@ -133,7 +145,7 @@ func GetInfo(state State) Info {
 			Name:        StateWaitingForCore,
 			Description: "Waiting for core to become ready",
 			UserMessage: "Core starting up...",
-			Timeout:     &timeout90s,  // Increased to 90s to allow Docker isolation startup (health timeout is 60s)
+			Timeout:     &timeout90s, // Increased to 90s to allow Docker isolation startup (health timeout is 60s)
 		},
 		StateConnectingAPI: {
 			Name:        StateConnectingAPI,
@@ -175,6 +187,20 @@ func GetInfo(state State) Info {
 			IsError:     true,
 			CanRetry:    false,
 			// No timeout - config errors persist until user fixes the config
+		},
+		StateCoreErrorDocker: {
+			Name:        StateCoreErrorDocker,
+			Description: "Docker engine unavailable or paused",
+			UserMessage: "Docker engine unavailable - resume Docker Desktop",
+			IsError:     true,
+			CanRetry:    true,
+		},
+		StateCoreRecoveringDocker: {
+			Name:        StateCoreRecoveringDocker,
+			Description: "Docker recovery in progress",
+			UserMessage: "Docker engine recovered - reconnecting servers...",
+			CanRetry:    false,
+			Timeout:     &timeout10s,
 		},
 		StateCoreErrorPermission: {
 			Name:        StateCoreErrorPermission,
@@ -229,6 +255,7 @@ func CanTransition(from, to State) bool {
 			StateWaitingForCore,
 			StateCoreErrorPortConflict,
 			StateCoreErrorDBLocked,
+			StateCoreErrorDocker,
 			StateCoreErrorConfig,
 			StateCoreErrorGeneral,
 			StateShuttingDown,
@@ -237,7 +264,8 @@ func CanTransition(from, to State) bool {
 			StateConnectingAPI,
 			StateCoreErrorPortConflict, // ADD: Handle port conflict
 			StateCoreErrorDBLocked,     // ADD: Handle DB lock
-			StateCoreErrorConfig,       // ADD: Handle config error
+			StateCoreErrorDocker,
+			StateCoreErrorConfig, // ADD: Handle config error
 			StateCoreErrorGeneral,
 			StateLaunchingCore, // Retry
 			StateShuttingDown,
@@ -247,7 +275,8 @@ func CanTransition(from, to State) bool {
 			StateReconnecting,
 			StateCoreErrorPortConflict, // ADD: Handle port conflict during connection
 			StateCoreErrorDBLocked,     // ADD: Handle DB lock during connection
-			StateCoreErrorConfig,       // ADD: Handle config error during connection
+			StateCoreErrorDocker,
+			StateCoreErrorConfig, // ADD: Handle config error during connection
 			StateCoreErrorGeneral,
 			StateShuttingDown,
 		},
@@ -271,6 +300,15 @@ func CanTransition(from, to State) bool {
 		},
 		StateCoreErrorConfig: {
 			// Error persists - only shutdown allowed
+			StateShuttingDown,
+		},
+		StateCoreErrorDocker: {
+			StateCoreRecoveringDocker, // Transition to recovering when Docker comes back
+			StateShuttingDown,
+		},
+		StateCoreRecoveringDocker: {
+			StateLaunchingCore, // Launch core after Docker recovery
+			StateCoreErrorDocker, // Back to error if Docker fails again
 			StateShuttingDown,
 		},
 		StateCoreErrorGeneral: {

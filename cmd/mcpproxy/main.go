@@ -453,8 +453,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// Wait for context to be cancelled
 	<-ctx.Done()
 	logger.Info("Shutting down server")
-	if err := srv.StopServer(); err != nil {
-		logger.Error("Error stopping server", zap.Error(err))
+	// Use Shutdown() instead of StopServer() to ensure proper container cleanup
+	// Shutdown() calls runtime.Close() which triggers ShutdownAll() for Docker cleanup
+	if err := srv.Shutdown(); err != nil {
+		logger.Error("Error shutting down server", zap.Error(err))
 	}
 
 	return nil

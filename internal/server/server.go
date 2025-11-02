@@ -709,6 +709,13 @@ func (s *Server) RestartServer(serverName string) error {
 	return s.runtime.RestartServer(serverName)
 }
 
+// ForceReconnectAllServers triggers reconnection attempts for all managed servers.
+func (s *Server) ForceReconnectAllServers(reason string) error {
+	s.logger.Info("HTTP API requested force reconnect for all upstream servers",
+		zap.String("reason", reason))
+	return s.runtime.ForceReconnectAllServers(reason)
+}
+
 // QuarantineServer quarantines/unquarantines a server
 func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	return s.runtime.QuarantineServer(serverName, quarantined)
