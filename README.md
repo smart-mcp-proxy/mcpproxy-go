@@ -457,6 +457,68 @@ docker logs <container-id>
 
 ---
 
+## 🔄 Docker Recovery
+
+MCPProxy includes **intelligent Docker recovery** that automatically detects and handles Docker engine outages:
+
+### ✨ **Key Features**
+- **Automatic Detection**: Monitors Docker health every 2-60 seconds with exponential backoff
+- **Graceful Reconnection**: Automatically reconnects all Docker-based servers when Docker recovers
+- **System Notifications**: Native notifications keep you informed of recovery progress
+- **Container Cleanup**: Removes orphaned containers on shutdown
+- **Zero Configuration**: Works out-of-the-box with sensible defaults
+
+### 🔧 **How It Works**
+1. **Health Monitoring**: Continuously checks Docker engine availability
+2. **Failure Detection**: Detects when Docker becomes unavailable (paused, stopped, crashed)
+3. **Exponential Backoff**: Starts with 2-second checks, backs off to 60 seconds to save resources
+4. **Automatic Reconnection**: When Docker recovers, all affected servers are reconnected
+5. **User Notification**: System notifications inform you of recovery status
+
+### 📢 **Notifications**
+
+MCPProxy shows native system notifications during Docker recovery:
+
+| Event | Notification |
+|-------|-------------|
+| **Recovery Started** | "Docker engine detected offline. Reconnecting servers..." |
+| **Recovery Success** | "Successfully reconnected X server(s)" |
+| **Recovery Failed** | "Unable to reconnect servers. Check Docker status." |
+| **Retry Attempts** | "Retry attempt X. Next check in Y" |
+
+### 🐛 **Troubleshooting Docker Recovery**
+
+**Servers don't reconnect after Docker recovery:**
+```bash
+# 1. Check Docker is running
+docker ps
+
+# 2. Check mcpproxy logs
+cat ~/.mcpproxy/logs/main.log | grep -i "docker recovery"
+
+# 3. Verify container labels
+docker ps -a --filter label=com.mcpproxy.managed
+
+# 4. Force reconnect via system tray
+# System Tray → Force Reconnect All Servers
+```
+
+**Containers not cleaned up on shutdown:**
+```bash
+# Check for orphaned containers
+docker ps -a --filter label=com.mcpproxy.managed=true
+
+# Manual cleanup if needed
+docker ps -a --filter label=com.mcpproxy.managed=true -q | xargs docker rm -f
+```
+
+**Docker recovery taking too long:**
+- Docker recovery uses exponential backoff (2s → 60s intervals)
+- This is intentional to avoid wasting resources while Docker is offline
+- You can force an immediate reconnect via the system tray menu
+
+---
+
 ## OAuth Authentication Support
 
 MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that require user authorization (like Cloudflare AutoRAG, GitHub, etc.):
