@@ -3,8 +3,11 @@
 package tray
 
 import (
+	"fmt"
+
 	"mcpproxy-go/internal/upstream"
 
+	"github.com/gen2brain/beeep"
 	"go.uber.org/zap"
 )
 
@@ -29,12 +32,58 @@ func (h *NotificationHandler) SendNotification(notification *upstream.Notificati
 		zap.String("message", notification.Message),
 		zap.String("server", notification.ServerName))
 
-	// For now, we just log the notification
-	// In a future implementation, we could:
-	// 1. Show system tray notifications/balloons
-	// 2. Update tray icon/tooltip to reflect current status
-	// 3. Add notification history to tray menu
+	// Show system notification using beeep
+	// This works cross-platform on macOS, Windows, and Linux
+	err := beeep.Notify(notification.Title, notification.Message, "")
+	if err != nil {
+		h.logger.Warnw("Failed to show system notification",
+			"error", err,
+			"title", notification.Title,
+			"message", notification.Message)
+	}
+}
 
-	// Note: Actual tray notification display would depend on OS capabilities
-	// and the systray library's notification features
+// ShowDockerRecoveryStarted shows a notification when Docker recovery starts
+func ShowDockerRecoveryStarted() error {
+	return beeep.Notify(
+		"Docker Recovery",
+		"Docker engine detected offline. Reconnecting servers...",
+		"",
+	)
+}
+
+// ShowDockerRecoverySuccess shows a notification when Docker recovery succeeds
+func ShowDockerRecoverySuccess(serverCount int) error {
+	msg := "All servers reconnected successfully"
+	if serverCount > 0 {
+		msg = fmt.Sprintf("Successfully reconnected %d server(s)", serverCount)
+	}
+	return beeep.Notify(
+		"Recovery Complete",
+		msg,
+		"",
+	)
+}
+
+// ShowDockerRecoveryFailed shows a notification when Docker recovery fails
+func ShowDockerRecoveryFailed(reason string) error {
+	msg := "Unable to reconnect servers. Check Docker status."
+	if reason != "" {
+		msg = fmt.Sprintf("Unable to reconnect servers: %s", reason)
+	}
+	return beeep.Notify(
+		"Recovery Failed",
+		msg,
+		"",
+	)
+}
+
+// ShowDockerRecoveryRetry shows a notification for retry attempts
+func ShowDockerRecoveryRetry(attempt int, nextRetryIn string) error {
+	msg := fmt.Sprintf("Retry attempt %d. Next check in %s", attempt, nextRetryIn)
+	return beeep.Notify(
+		"Docker Recovery",
+		msg,
+		"",
+	)
 }

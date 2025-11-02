@@ -1384,6 +1384,11 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 		cpl.logger.Warn("Docker engine unavailable - waiting for recovery")
 	}
 
+	// Show notification that Docker recovery has started
+	if err := tray.ShowDockerRecoveryStarted(); err != nil {
+		cpl.logger.Warn("Failed to show Docker recovery notification", zap.Error(err))
+	}
+
 	cpl.dockerRetryMu.Lock()
 	if cpl.dockerRetryCancel != nil {
 		cpl.dockerRetryCancel()
@@ -1418,6 +1423,9 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 					cpl.logger.Info("Docker engine available - transitioning to recovery state",
 						zap.Int("attempts", attempt+1),
 						zap.Duration("total_wait", elapsed))
+
+					// Show notification that Docker is back online
+					// Note: Full recovery notification will be shown after servers reconnect
 					cpl.setDockerReconnectPending(true)
 					cpl.cancelDockerRetry()
 					// Transition to recovering state instead of directly retrying
@@ -1545,12 +1553,22 @@ func (cpl *CoreProcessLauncher) triggerForceReconnect(reason string) {
 		cpl.logger.Info("Triggered upstream reconnection after Docker recovery",
 			zap.String("reason", reason),
 			zap.Int("attempt", attempt))
+
+		// Show success notification
+		if err := tray.ShowDockerRecoverySuccess(0); err != nil {
+			cpl.logger.Warn("Failed to show recovery success notification", zap.Error(err))
+		}
 		return
 	}
 
 	cpl.logger.Error("Exhausted attempts to trigger upstream reconnection after Docker recovery",
 		zap.String("reason", reason),
 		zap.Int("attempts", maxAttempts))
+
+	// Show failure notification
+	if err := tray.ShowDockerRecoveryFailed("Max reconnection attempts exceeded"); err != nil {
+		cpl.logger.Warn("Failed to show recovery failure notification", zap.Error(err))
+	}
 }
 
 // handleDBLockedError handles database locked errors
