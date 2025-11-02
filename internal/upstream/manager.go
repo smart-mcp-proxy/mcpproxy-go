@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -869,7 +870,53 @@ func (m *Manager) RetryConnection(serverName string) error {
 	return nil
 }
 
-// ForceReconnectAll triggers reconnection attempts for all managed clients that are not currently connected.
+// verifyContainerHealthy checks if a Docker container is actually running and responsive
+// This is critical for detecting "zombie" containers where the socket is open but the process is frozen
+func (m *Manager) verifyContainerHealthy(client *managed.Client) (bool, error) {
+	// Only check Docker-based servers
+	if !client.IsDockerCommand() {
+		return true, nil // Non-Docker servers don't need container health check
+	}
+
+	containerID := client.GetContainerID()
+	if containerID == "" {
+		return false, fmt.Errorf("no container ID available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Check 1: Container exists and is running
+	inspectCmd := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{.State.Running}},{{.State.Status}}",
+		containerID)
+
+	output, err := inspectCmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("container not found or unreachable: %w", err)
+	}
+
+	parts := strings.Split(strings.TrimSpace(string(output)), ",")
+	if len(parts) < 2 {
+		return false, fmt.Errorf("unexpected docker inspect output: %s", string(output))
+	}
+
+	running := parts[0] == "true"
+	status := parts[1]
+
+	if !running {
+		return false, fmt.Errorf("container not running (status: %s)", status)
+	}
+
+	m.logger.Debug("Container health check passed",
+		zap.String("container_id", containerID[:12]),
+		zap.String("status", status))
+
+	return true, nil
+}
+
+// ForceReconnectAll triggers reconnection attempts for all managed clients.
+// For Docker-based servers, this includes container health verification to catch frozen containers.
 func (m *Manager) ForceReconnectAll(reason string) {
 	m.mu.RLock()
 	clientMap := make(map[string]*managed.Client, len(m.clients))
@@ -883,7 +930,7 @@ func (m *Manager) ForceReconnectAll(reason string) {
 		return
 	}
 
-	m.logger.Info("ForceReconnectAll: recreating managed clients",
+	m.logger.Info("ForceReconnectAll: processing managed clients",
 		zap.Int("client_count", len(clientMap)),
 		zap.String("reason", reason))
 
@@ -892,7 +939,34 @@ func (m *Manager) ForceReconnectAll(reason string) {
 			continue
 		}
 
+		// CRITICAL: For Docker servers, verify container health even if connected
+		// This catches frozen containers when Docker is paused/resumed
 		if client.IsConnected() {
+			if client.IsDockerCommand() {
+				healthy, err := m.verifyContainerHealthy(client)
+				if !healthy {
+					m.logger.Warn("Container unhealthy despite active connection - forcing reconnect",
+						zap.String("server", id),
+						zap.Error(err))
+					// Fall through to reconnect logic
+				} else {
+					m.logger.Debug("Skipping reconnect - container healthy",
+						zap.String("server", id))
+					continue
+				}
+			} else {
+				// Non-Docker server, connection state is sufficient
+				m.logger.Debug("Skipping reconnect - already connected",
+					zap.String("server", id))
+				continue
+			}
+		}
+
+		// Filter: Only reconnect Docker-based servers (skip HTTP/SSE/non-Docker stdio)
+		if !client.IsDockerCommand() {
+			m.logger.Debug("Skipping reconnect - not a Docker server",
+				zap.String("server", id),
+				zap.String("reason", reason))
 			continue
 		}
 
@@ -902,10 +976,12 @@ func (m *Manager) ForceReconnectAll(reason string) {
 		}
 
 		if !cfg.Enabled {
+			m.logger.Debug("Skipping reconnect - server disabled",
+				zap.String("server", id))
 			continue
 		}
 
-		m.logger.Info("ForceReconnectAll: rebuilding client",
+		m.logger.Info("ForceReconnectAll: rebuilding Docker client",
 			zap.String("server", cfg.Name),
 			zap.String("id", id),
 			zap.String("reason", reason))

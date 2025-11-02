@@ -269,10 +269,24 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	}
 
 	if willUseDocker {
+		// CRITICAL: Acquire per-server lock to prevent concurrent container creation
+		// This prevents race conditions when multiple goroutines try to reconnect the same server
+		lock := globalContainerLock.Lock(c.config.Name)
+		defer lock.Unlock()
+
 		c.logger.Debug("Docker command detected, setting up container ID tracking",
 			zap.String("server", c.config.Name),
 			zap.String("command", c.config.Command),
 			zap.Strings("original_args", args))
+
+		// CRITICAL: Clean up any existing containers first to prevent duplicates
+		// This makes container creation idempotent and safe to call multiple times
+		if err := c.ensureNoExistingContainers(ctx); err != nil {
+			c.logger.Error("Failed to ensure no existing containers",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			// Continue anyway - we'll try to create the container
+		}
 
 		// Create temp file for container ID
 		tmpFile, err := os.CreateTemp("", "mcpproxy-cid-*.txt")

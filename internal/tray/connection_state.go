@@ -16,6 +16,7 @@ const (
 	ConnectionStateErrorPortConflict ConnectionState = "error_port_conflict" // ADD: Specific error states
 	ConnectionStateErrorDBLocked     ConnectionState = "error_db_locked"
 	ConnectionStateErrorDocker       ConnectionState = "error_docker"
+	ConnectionStateRecoveringDocker  ConnectionState = "recovering_docker" // Docker recovery in progress
 	ConnectionStateErrorConfig       ConnectionState = "error_config"
 	ConnectionStateErrorGeneral      ConnectionState = "error_general"
 	ConnectionStateFailed            ConnectionState = "failed"

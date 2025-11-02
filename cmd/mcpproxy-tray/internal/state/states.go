@@ -37,6 +37,9 @@ const (
 	// StateCoreErrorDocker represents core failed due to Docker being unavailable
 	StateCoreErrorDocker State = "core_error_docker"
 
+	// StateCoreRecoveringDocker represents Docker recovery in progress
+	StateCoreRecoveringDocker State = "core_recovering_docker"
+
 	// StateCoreErrorConfig represents core failed due to configuration error
 	StateCoreErrorConfig State = "core_error_config"
 
@@ -89,6 +92,9 @@ const (
 
 	// EventDockerUnavailable indicates Docker engine is unavailable or paused
 	EventDockerUnavailable Event = "docker_unavailable"
+
+	// EventDockerRecovered indicates Docker engine became available again
+	EventDockerRecovered Event = "docker_recovered"
 
 	// EventGeneralError indicates core failed with general error
 	EventGeneralError Event = "general_error"
@@ -188,6 +194,13 @@ func GetInfo(state State) Info {
 			UserMessage: "Docker engine unavailable - resume Docker Desktop",
 			IsError:     true,
 			CanRetry:    true,
+		},
+		StateCoreRecoveringDocker: {
+			Name:        StateCoreRecoveringDocker,
+			Description: "Docker recovery in progress",
+			UserMessage: "Docker engine recovered - reconnecting servers...",
+			CanRetry:    false,
+			Timeout:     &timeout10s,
 		},
 		StateCoreErrorPermission: {
 			Name:        StateCoreErrorPermission,
@@ -290,7 +303,12 @@ func CanTransition(from, to State) bool {
 			StateShuttingDown,
 		},
 		StateCoreErrorDocker: {
-			StateLaunchingCore,
+			StateCoreRecoveringDocker, // Transition to recovering when Docker comes back
+			StateShuttingDown,
+		},
+		StateCoreRecoveringDocker: {
+			StateLaunchingCore, // Launch core after Docker recovery
+			StateCoreErrorDocker, // Back to error if Docker fails again
 			StateShuttingDown,
 		},
 		StateCoreErrorGeneral: {

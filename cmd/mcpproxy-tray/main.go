@@ -979,6 +979,9 @@ func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, tran
 			case state.StateCoreErrorDocker:
 				cpl.handleDockerUnavailable(ctx)
 
+			case state.StateCoreRecoveringDocker:
+				cpl.handleDockerRecovering(ctx)
+
 			case state.StateCoreErrorConfig:
 				cpl.handleConfigError()
 
@@ -1018,6 +1021,8 @@ func (cpl *CoreProcessLauncher) updateTrayConnectionState(machineState state.Sta
 		trayState = tray.ConnectionStateErrorDBLocked
 	case state.StateCoreErrorDocker:
 		trayState = tray.ConnectionStateErrorDocker
+	case state.StateCoreRecoveringDocker:
+		trayState = tray.ConnectionStateRecoveringDocker
 	case state.StateCoreErrorConfig:
 		trayState = tray.ConnectionStateErrorConfig
 	case state.StateCoreErrorGeneral:
@@ -1357,6 +1362,18 @@ func findNextAvailablePort(start, end int) (int, error) {
 	return 0, fmt.Errorf("no free port in range %d-%d", start, end)
 }
 
+// handleDockerRecovering handles the Docker recovery state
+// This state provides user feedback while we're restarting the core after Docker recovery
+func (cpl *CoreProcessLauncher) handleDockerRecovering(ctx context.Context) {
+	cpl.logger.Info("Docker recovery state - preparing to launch core")
+
+	// Small delay to ensure Docker is fully stable
+	time.Sleep(500 * time.Millisecond)
+
+	// Transition to launching core
+	cpl.stateMachine.SendEvent(state.EventRetry)
+}
+
 // handleDockerUnavailable handles scenarios where Docker Desktop is paused or unavailable.
 func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 	lastErr := cpl.stateMachine.GetLastError()
@@ -1383,10 +1400,11 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 				return
 			case <-ticker.C:
 				if err := cpl.ensureDockerAvailable(retryCtx); err == nil {
-					cpl.logger.Info("Docker engine available - retrying core launch")
+					cpl.logger.Info("Docker engine available - transitioning to recovery state")
 					cpl.setDockerReconnectPending(true)
 					cpl.cancelDockerRetry()
-					cpl.stateMachine.SendEvent(state.EventRetry)
+					// Transition to recovering state instead of directly retrying
+					cpl.stateMachine.SendEvent(state.EventDockerRecovered)
 					return
 				} else if err != nil {
 					cpl.logger.Debug("Docker still unavailable", zap.Error(err))

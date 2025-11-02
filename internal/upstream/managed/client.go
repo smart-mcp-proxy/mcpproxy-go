@@ -933,6 +933,14 @@ func (mc *Client) IsDockerCommand() bool {
 	return mc.isDockerServer()
 }
 
+// GetContainerID returns the Docker container ID if this is a Docker-based server
+func (mc *Client) GetContainerID() string {
+	if mc.coreClient == nil {
+		return ""
+	}
+	return mc.coreClient.GetContainerID()
+}
+
 // setToolCountCache records the latest tool count and timestamp for non-blocking consumers.
 func (mc *Client) setToolCountCache(count int) {
 	mc.toolCountMu.Lock()
