@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/monitor"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/tray"
 )
 
@@ -885,6 +887,87 @@ func maskAPIKey(apiKey string) string {
 	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
 }
 
+// getDockerRecoveryStateFilePath returns the path to the tray's Docker recovery state file
+func getDockerRecoveryStateFilePath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	dataDir := filepath.Join(homeDir, ".mcpproxy")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create data directory: %w", err)
+	}
+	return filepath.Join(dataDir, "tray_docker_recovery.json"), nil
+}
+
+// saveDockerRecoveryState saves the Docker recovery state to a JSON file
+func saveDockerRecoveryState(state *storage.DockerRecoveryState, logger *zap.SugaredLogger) error {
+	filePath, err := getDockerRecoveryStateFilePath()
+	if err != nil {
+		return fmt.Errorf("failed to get state file path: %w", err)
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("failed to marshal recovery state: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write recovery state: %w", err)
+	}
+
+	logger.Debugw("Saved Docker recovery state",
+		"file", filePath,
+		"attempt_count", state.FailureCount,
+		"docker_available", state.DockerAvailable)
+	return nil
+}
+
+// loadDockerRecoveryState loads the Docker recovery state from a JSON file
+func loadDockerRecoveryState(logger *zap.SugaredLogger) (*storage.DockerRecoveryState, error) {
+	filePath, err := getDockerRecoveryStateFilePath()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get state file path: %w", err)
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No state file exists, return nil without error
+			logger.Debug("No Docker recovery state file found")
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read recovery state: %w", err)
+	}
+
+	var state storage.DockerRecoveryState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal recovery state: %w", err)
+	}
+
+	logger.Debugw("Loaded Docker recovery state",
+		"file", filePath,
+		"attempt_count", state.FailureCount,
+		"docker_available", state.DockerAvailable,
+		"last_attempt", state.LastAttempt)
+	return &state, nil
+}
+
+// clearDockerRecoveryState removes the Docker recovery state file
+func clearDockerRecoveryState(logger *zap.SugaredLogger) error {
+	filePath, err := getDockerRecoveryStateFilePath()
+	if err != nil {
+		return fmt.Errorf("failed to get state file path: %w", err)
+	}
+
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove recovery state: %w", err)
+	}
+
+	logger.Debug("Cleared Docker recovery state", zap.String("file", filePath))
+	return nil
+}
+
 // CoreProcessLauncher manages the mcpproxy core process with state machine integration
 type CoreProcessLauncher struct {
 	coreURL      string
@@ -1384,6 +1467,22 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 		cpl.logger.Warn("Docker engine unavailable - waiting for recovery")
 	}
 
+	// Load existing recovery state to resume or initialize new state
+	recoveryState, err := loadDockerRecoveryState(cpl.logger)
+	if err != nil {
+		cpl.logger.Warn("Failed to load Docker recovery state, starting fresh", zap.Error(err))
+		recoveryState = nil
+	}
+
+	// Initialize failure count from persistent state if available
+	failureCount := 0
+	if recoveryState != nil && !recoveryState.DockerAvailable {
+		failureCount = recoveryState.FailureCount
+		cpl.logger.Infow("Resuming Docker recovery from persistent state",
+			"previous_attempts", failureCount,
+			"last_attempt", recoveryState.LastAttempt)
+	}
+
 	// Show notification that Docker recovery has started
 	if err := tray.ShowDockerRecoveryStarted(); err != nil {
 		cpl.logger.Warn("Failed to show Docker recovery notification", zap.Error(err))
@@ -1407,7 +1506,8 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 			60 * time.Second,  // Very slow retry (max backoff)
 		}
 
-		attempt := 0
+		// Resume from persistent state if available
+		attempt := failureCount
 		startTime := time.Now()
 
 		for {
@@ -1418,11 +1518,18 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 			case <-retryCtx.Done():
 				return
 			case <-time.After(currentInterval):
+				attempt++
+
 				if err := cpl.ensureDockerAvailable(retryCtx); err == nil {
 					elapsed := time.Since(startTime)
 					cpl.logger.Info("Docker engine available - transitioning to recovery state",
-						zap.Int("attempts", attempt+1),
+						zap.Int("attempts", attempt),
 						zap.Duration("total_wait", elapsed))
+
+					// Clear persistent state since Docker is available
+					if clearErr := clearDockerRecoveryState(cpl.logger); clearErr != nil {
+						cpl.logger.Warn("Failed to clear Docker recovery state", zap.Error(clearErr))
+					}
 
 					// Show notification that Docker is back online
 					// Note: Full recovery notification will be shown after servers reconnect
@@ -1431,13 +1538,31 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 					// Transition to recovering state instead of directly retrying
 					cpl.stateMachine.SendEvent(state.EventDockerRecovered)
 					return
-				} else if err != nil {
+				}
+
+				// Docker still unavailable, save state
+				lastErrMsg := ""
+				if err != nil {
+					lastErrMsg = err.Error()
 					cpl.logger.Debug("Docker still unavailable",
-						zap.Int("attempt", attempt+1),
-						zap.Duration("next_check_in", intervals[min(attempt+1, len(intervals)-1)]),
+						zap.Int("attempt", attempt),
+						zap.Duration("next_check_in", intervals[min(attempt, len(intervals)-1)]),
 						zap.Error(err))
 				}
-				attempt++
+
+				// Save recovery state for persistence across restarts
+				stateToSave := &storage.DockerRecoveryState{
+					LastAttempt:      time.Now(),
+					FailureCount:     attempt,
+					DockerAvailable:  false,
+					RecoveryMode:     true,
+					LastError:        lastErrMsg,
+					AttemptsSinceUp:  attempt,
+					LastSuccessfulAt: time.Time{},
+				}
+				if saveErr := saveDockerRecoveryState(stateToSave, cpl.logger); saveErr != nil {
+					cpl.logger.Warn("Failed to save Docker recovery state", zap.Error(saveErr))
+				}
 			}
 		}
 	}()
@@ -1554,6 +1679,11 @@ func (cpl *CoreProcessLauncher) triggerForceReconnect(reason string) {
 			zap.String("reason", reason),
 			zap.Int("attempt", attempt))
 
+		// Clear recovery state since recovery is complete
+		if clearErr := clearDockerRecoveryState(cpl.logger); clearErr != nil {
+			cpl.logger.Warn("Failed to clear Docker recovery state", zap.Error(clearErr))
+		}
+
 		// Show success notification
 		if err := tray.ShowDockerRecoverySuccess(0); err != nil {
 			cpl.logger.Warn("Failed to show recovery success notification", zap.Error(err))
@@ -1564,6 +1694,20 @@ func (cpl *CoreProcessLauncher) triggerForceReconnect(reason string) {
 	cpl.logger.Error("Exhausted attempts to trigger upstream reconnection after Docker recovery",
 		zap.String("reason", reason),
 		zap.Int("attempts", maxAttempts))
+
+	// Save failure state
+	failedState := &storage.DockerRecoveryState{
+		LastAttempt:      time.Now(),
+		FailureCount:     maxAttempts,
+		DockerAvailable:  true, // Docker is available, but reconnection failed
+		RecoveryMode:     false,
+		LastError:        "Max reconnection attempts exceeded",
+		AttemptsSinceUp:  maxAttempts,
+		LastSuccessfulAt: time.Time{},
+	}
+	if saveErr := saveDockerRecoveryState(failedState, cpl.logger); saveErr != nil {
+		cpl.logger.Warn("Failed to save recovery failure state", zap.Error(saveErr))
+	}
 
 	// Show failure notification
 	if err := tray.ShowDockerRecoveryFailed("Max reconnection attempts exceeded"); err != nil {
