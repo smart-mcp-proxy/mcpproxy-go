@@ -2,7 +2,9 @@
 
 ## Executive Summary
 
-The current Docker resume recovery implementation (feature/docker-recovery branch) provides a solid foundation for detecting and recovering from Docker Desktop pause/resume events. However, critical analysis reveals **10 significant gaps and improvement opportunities** that could enhance reliability, user experience, and system observability.
+The current Docker resume recovery implementation (feature/docker-recovery branch) provides a solid foundation for detecting and recovering from Docker Desktop pause/resume events. However, critical analysis reveals **11 significant gaps and improvement opportunities** that could enhance reliability, user experience, and system observability.
+
+**🚨 CRITICAL:** Issue #11 (Duplicate Container Spawning) is the **most dangerous** problem - the system can spawn multiple containers for the same server during recovery, leading to resource exhaustion, port conflicts, and orphaned containers.
 
 **Severity Levels:**
 - 🔴 **Critical** - Can cause data loss, incorrect behavior, or poor user experience
@@ -497,6 +499,546 @@ cpl.trayApp.ShowNotification(notification)
 
 ---
 
+## 🔴 Critical Issue #11: Duplicate Container Spawning
+
+**Problem:**
+The system can spawn **duplicate containers** for the same server when the supervisor fails to detect container liveness. This is the **most dangerous issue** as it leads to:
+- Resource exhaustion (multiple containers consuming memory/CPU)
+- Port binding conflicts
+- Data corruption if containers share state
+- Confused system state (which container is "current"?)
+- Orphaned containers that never get cleaned up
+
+**Root Causes:**
+
+1. **Race Condition During ForceReconnectAll()**
+   ```go
+   // internal/upstream/manager.go:890-903
+   for id, client := range clientMap {
+       if client.IsConnected() {
+           continue  // ❌ No container health check!
+       }
+
+       // ❌ Multiple goroutines can enter here simultaneously
+       cfg := cloneServerConfig(client.GetConfig())
+       // ... recreate client (spawns new container)
+   }
+   ```
+
+   **Scenario:**
+   - Docker paused, 3 servers disconnected
+   - `ForceReconnectAll()` called
+   - All 3 clients reconnect in parallel goroutines
+   - If same client gets reconnected twice → **2 containers spawned**
+
+2. **Lost Container ID = Orphaned Containers**
+   ```go
+   // internal/upstream/core/docker.go:20-67
+   for attempt := 0; attempt < 100; attempt++ { // Wait up to 10 seconds
+       cidBytes, err := os.ReadFile(cidFile)
+       if err == nil {
+           c.containerID = containerID  // ✅ Tracked
+           return
+       }
+   }
+   // ❌ If cidfile read fails → c.containerID stays empty → orphan!
+   ```
+
+   **Scenario:**
+   - Container spawned with slow image pull (takes 15s)
+   - cidfile read timeout after 10s
+   - `c.containerID` remains empty
+   - Next reconnect spawns NEW container
+   - Old container never cleaned up → **orphan**
+
+3. **Random Container Names Don't Prevent Duplicates**
+   ```go
+   // internal/upstream/core/isolation.go:403-408
+   func generateContainerName(serverName string) string {
+       sanitized := sanitizeServerNameForContainer(serverName)
+       // Generate 4-character random suffix
+       return fmt.Sprintf("mcpproxy-%s-%s", sanitized, randomSuffix)
+   }
+   ```
+
+   **Result:**
+   - Server "github" → `mcpproxy-github-a1b2`
+   - Reconnect → `mcpproxy-github-c3d4`
+   - **Both containers exist simultaneously!**
+
+4. **No Pre-Creation Check**
+   ```go
+   // internal/upstream/core/connection.go:260-328
+   // ❌ Directly spawns container, no check for existing containers!
+   dockerRunArgs, err := c.isolationManager.BuildDockerArgs(c.config, runtimeType)
+   ```
+
+   **Missing:**
+   - `docker ps --filter name=mcpproxy-github-*` check
+   - Cleanup of stale containers before creating new one
+
+5. **Supervisor Liveness Detection Failures**
+
+   **Scenario A: Slow Container Startup**
+   - Container starts but takes 30s to respond (image pull + init)
+   - Supervisor checks health after 20s → timeout
+   - Supervisor thinks container dead → spawns new one
+   - **Result: 2 containers, one still starting**
+
+   **Scenario B: Network Partition**
+   - Docker API unreachable due to network issue
+   - Supervisor can't verify container health
+   - Assumes container dead → spawns new one
+   - Network recovers → **2 containers running**
+
+   **Scenario C: Transient Docker API Errors**
+   - Docker API returns 500 Internal Server Error
+   - Supervisor retries immediately
+   - Each retry spawns new container
+   - **Result: Multiple containers**
+
+**Evidence from Codebase:**
+
+```go
+// internal/upstream/core/docker.go:274-360
+func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Context) bool {
+    namePattern := "mcpproxy-" + sanitized + "-"
+
+    // This finds ALL containers matching pattern
+    listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
+        "--filter", "name="+namePattern, "--format", "{{.ID}}\t{{.Names}}")
+
+    // ⚠️ The fact that this returns MULTIPLE containers proves duplicates can exist!
+    for _, containerID := range containersToKill {
+        // Kill each one...
+    }
+}
+```
+
+The cleanup logic **already handles multiple containers** because it knows duplicates happen!
+
+---
+
+### **Comprehensive Solution: 5-Layer Defense**
+
+#### **Layer 1: Idempotent Container Creation** 🔴 Critical
+
+**Before creating any container, clean up ALL existing containers for that server:**
+
+```go
+// internal/upstream/core/connection.go (add before BuildDockerArgs)
+
+func (c *Client) ensureNoExistingContainers(ctx context.Context) error {
+    sanitized := sanitizeServerNameForContainer(c.config.Name)
+    namePattern := "mcpproxy-" + sanitized + "-"
+
+    c.logger.Info("Checking for existing containers before creation",
+        zap.String("server", c.config.Name),
+        zap.String("name_pattern", namePattern))
+
+    // Find ALL containers matching our server (running or stopped)
+    listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
+        "--filter", "name="+namePattern,
+        "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}")
+
+    output, err := listCmd.Output()
+    if err != nil {
+        return fmt.Errorf("failed to list existing containers: %w", err)
+    }
+
+    lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+    if len(lines) == 0 || lines[0] == "" {
+        c.logger.Debug("No existing containers found - safe to create new one",
+            zap.String("server", c.config.Name))
+        return nil
+    }
+
+    // Found existing containers - clean them up first
+    c.logger.Warn("Found existing containers - cleaning up before creating new one",
+        zap.String("server", c.config.Name),
+        zap.Int("container_count", len(lines)))
+
+    for _, line := range lines {
+        if line == "" {
+            continue
+        }
+        parts := strings.SplitN(line, "\t", 3)
+        if len(parts) >= 2 {
+            containerID := parts[0]
+            containerName := parts[1]
+            status := ""
+            if len(parts) >= 3 {
+                status = parts[2]
+            }
+
+            c.logger.Info("Removing existing container",
+                zap.String("server", c.config.Name),
+                zap.String("container_id", containerID),
+                zap.String("container_name", containerName),
+                zap.String("status", status))
+
+            // Force remove (works for running and stopped containers)
+            rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
+            if err := rmCmd.Run(); err != nil {
+                c.logger.Error("Failed to remove existing container",
+                    zap.String("container_id", containerID),
+                    zap.Error(err))
+                // Continue anyway - try to remove others
+            } else {
+                c.logger.Info("Successfully removed existing container",
+                    zap.String("container_id", containerID))
+            }
+        }
+    }
+
+    return nil
+}
+```
+
+**Usage:**
+```go
+// internal/upstream/core/connection.go:260 (before BuildDockerArgs)
+if willUseDocker {
+    // ✅ CRITICAL: Clean up any existing containers first
+    if err := c.ensureNoExistingContainers(connectCtx); err != nil {
+        c.logger.Error("Failed to ensure no existing containers",
+            zap.String("server", c.config.Name),
+            zap.Error(err))
+        // Continue anyway - we'll try to create
+    }
+
+    // Now safe to create new container
+    dockerRunArgs, err := c.isolationManager.BuildDockerArgs(c.config, runtimeType)
+    // ...
+}
+```
+
+**Benefits:**
+- ✅ Idempotent: Can call multiple times safely
+- ✅ Prevents duplicates at creation time
+- ✅ Cleans up orphaned containers automatically
+- ✅ Works even if containerID was lost
+
+---
+
+#### **Layer 2: Container Labels for Ownership Tracking** 🟡 Important
+
+**Label all containers with mcpproxy instance ID and server name:**
+
+```go
+// internal/upstream/core/isolation.go:262 (add after --name)
+
+// Add labels for ownership tracking and cleanup
+instanceID := getInstanceID() // Global instance UUID
+labels := []string{
+    "--label", "com.mcpproxy.managed=true",
+    "--label", "com.mcpproxy.instance=" + instanceID,
+    "--label", "com.mcpproxy.server=" + serverConfig.Name,
+    "--label", "com.mcpproxy.created=" + time.Now().UTC().Format(time.RFC3339),
+}
+args = append(args, labels...)
+```
+
+**Add instance ID tracking:**
+```go
+// internal/upstream/core/instance.go (new file)
+
+var (
+    instanceID     string
+    instanceIDOnce sync.Once
+)
+
+func getInstanceID() string {
+    instanceIDOnce.Do(func() {
+        // Try to load from file first
+        if id, err := loadInstanceID(); err == nil {
+            instanceID = id
+            return
+        }
+
+        // Generate new instance ID
+        instanceID = generateUUID()
+        saveInstanceID(instanceID)
+    })
+    return instanceID
+}
+
+func loadInstanceID() (string, error) {
+    data, err := os.ReadFile(filepath.Join(os.TempDir(), "mcpproxy-instance-id"))
+    if err != nil {
+        return "", err
+    }
+    return strings.TrimSpace(string(data)), nil
+}
+
+func saveInstanceID(id string) {
+    os.WriteFile(filepath.Join(os.TempDir(), "mcpproxy-instance-id"), []byte(id), 0644)
+}
+```
+
+**Improved cleanup using labels:**
+```go
+func (c *Client) cleanupOwnedContainers(ctx context.Context) error {
+    instanceID := getInstanceID()
+    serverName := c.config.Name
+
+    // Find containers owned by THIS instance for THIS server
+    listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
+        "--filter", fmt.Sprintf("label=com.mcpproxy.instance=%s", instanceID),
+        "--filter", fmt.Sprintf("label=com.mcpproxy.server=%s", serverName),
+        "--format", "{{.ID}}\t{{.Label \"com.mcpproxy.created\"}}")
+
+    // ... cleanup logic
+}
+```
+
+**Benefits:**
+- ✅ Accurate ownership tracking
+- ✅ Can clean up containers from crashed instances
+- ✅ Prevents conflicts with other mcpproxy instances
+- ✅ Enables better debugging (docker ps --filter label=com.mcpproxy.managed=true)
+
+---
+
+#### **Layer 3: Distributed Lock for Container Creation** 🟡 Important
+
+**Prevent race conditions during concurrent reconnection attempts:**
+
+```go
+// internal/upstream/core/container_lock.go (new file)
+
+type ContainerLock struct {
+    locks sync.Map // serverName -> *sync.Mutex
+}
+
+func (cl *ContainerLock) Lock(serverName string) *sync.Mutex {
+    mutex, _ := cl.locks.LoadOrStore(serverName, &sync.Mutex{})
+    m := mutex.(*sync.Mutex)
+    m.Lock()
+    return m
+}
+
+var globalContainerLock = &ContainerLock{}
+
+// Usage in connection.go:
+func (c *Client) connectStdio(connectCtx context.Context) error {
+    if willUseDocker {
+        // ✅ Acquire lock for this server
+        lock := globalContainerLock.Lock(c.config.Name)
+        defer lock.Unlock()
+
+        // Now only ONE goroutine can create container for this server
+        if err := c.ensureNoExistingContainers(connectCtx); err != nil {
+            // ...
+        }
+
+        dockerRunArgs, err := c.isolationManager.BuildDockerArgs(c.config, runtimeType)
+        // ...
+    }
+}
+```
+
+**Benefits:**
+- ✅ Prevents concurrent container creation for same server
+- ✅ Eliminates race condition in ForceReconnectAll()
+- ✅ Simple implementation using sync.Mutex
+
+---
+
+#### **Layer 4: Enhanced Container Health Verification** 🔴 Critical
+
+**Add comprehensive health check before skipping reconnection:**
+
+```go
+// internal/upstream/manager.go (enhance ForceReconnectAll)
+
+func (m *Manager) verifyContainerHealthy(client *managed.Client) (bool, error) {
+    containerID := client.GetContainerID()
+    if containerID == "" {
+        return false, fmt.Errorf("no container ID")
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    // Check 1: Container exists and is running
+    inspectCmd := exec.CommandContext(ctx, "docker", "inspect",
+        "--format", "{{.State.Running}},{{.State.Status}},{{.State.Health.Status}}",
+        containerID)
+
+    output, err := inspectCmd.Output()
+    if err != nil {
+        return false, fmt.Errorf("container not found: %w", err)
+    }
+
+    parts := strings.Split(strings.TrimSpace(string(output)), ",")
+    if len(parts) < 2 {
+        return false, fmt.Errorf("unexpected inspect output")
+    }
+
+    running := parts[0] == "true"
+    status := parts[1]
+
+    if !running {
+        return false, fmt.Errorf("container not running (status: %s)", status)
+    }
+
+    // Check 2: Container is responsive (simple ping)
+    // This catches cases where Docker is paused but sockets remain open
+    pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
+    defer pingCancel()
+
+    if err := client.Ping(pingCtx); err != nil {
+        return false, fmt.Errorf("container not responsive: %w", err)
+    }
+
+    return true, nil
+}
+
+// Update ForceReconnectAll:
+func (m *Manager) ForceReconnectAll(reason string) {
+    for id, client := range clientMap {
+        if client.IsConnected() {
+            // ✅ For Docker servers, verify container health
+            if client.IsDockerCommand() {
+                healthy, err := m.verifyContainerHealthy(client)
+                if !healthy {
+                    m.logger.Warn("Container unhealthy despite active connection",
+                        zap.String("server", id),
+                        zap.Error(err))
+                    // Force reconnect
+                } else {
+                    continue // Container healthy, skip
+                }
+            } else {
+                continue // Non-Docker, connection check sufficient
+            }
+        }
+
+        // Reconnect logic...
+    }
+}
+```
+
+**Benefits:**
+- ✅ Detects frozen containers (Docker paused)
+- ✅ Verifies actual responsiveness, not just connection state
+- ✅ Prevents skipping reconnection for dead containers
+
+---
+
+#### **Layer 5: Graceful Degradation on cidfile Timeout** 🟡 Important
+
+**If cidfile read fails, use container name to track container ID:**
+
+```go
+// internal/upstream/core/docker.go:67 (after cidfile timeout)
+
+c.logger.Warn("Failed to read container ID from cidfile, attempting recovery via container name",
+    zap.String("server", c.config.Name),
+    zap.String("container_name", c.containerName))
+
+// ✅ Fallback: Find container by name
+if c.containerName != "" {
+    listCmd := exec.CommandContext(ctx, "docker", "ps",
+        "--filter", fmt.Sprintf("name=^%s$", c.containerName),
+        "--format", "{{.ID}}")
+
+    if output, err := listCmd.Output(); err == nil {
+        foundID := strings.TrimSpace(string(output))
+        if foundID != "" {
+            c.mu.Lock()
+            c.containerID = foundID
+            c.mu.Unlock()
+
+            c.logger.Info("Successfully recovered container ID via name lookup",
+                zap.String("server", c.config.Name),
+                zap.String("container_id", foundID),
+                zap.String("container_name", c.containerName))
+            return
+        }
+    }
+}
+
+c.logger.Error("Failed to recover container ID - container will be orphaned on disconnect",
+    zap.String("server", c.config.Name),
+    zap.String("container_name", c.containerName))
+```
+
+**Benefits:**
+- ✅ Prevents orphaned containers
+- ✅ Graceful fallback when cidfile fails
+- ✅ Uses container name as secondary tracking mechanism
+
+---
+
+### **Impact Assessment**
+
+**Without these fixes:**
+- 🔴 **High probability** of duplicate containers during Docker recovery
+- 🔴 **Resource exhaustion** on servers with frequent Docker issues
+- 🔴 **Port conflicts** if containers bind to specific ports
+- 🔴 **Orphaned containers** accumulate over time
+
+**With these fixes:**
+- ✅ **Idempotent creation** prevents duplicates
+- ✅ **Container labels** enable reliable cleanup
+- ✅ **Distributed locks** prevent race conditions
+- ✅ **Health verification** catches stale containers
+- ✅ **Graceful degradation** prevents orphans
+
+---
+
+### **Testing Plan for Duplicate Prevention**
+
+1. **Concurrent Reconnection Test**
+   ```bash
+   # Start 5 Docker servers
+   # Pause Docker Desktop
+   # Trigger ForceReconnectAll() 3 times rapidly
+   # Resume Docker Desktop
+   # Expected: Each server has EXACTLY 1 container
+   # Actual before fix: Each server has 2-3 containers
+   ```
+
+2. **cidfile Timeout Test**
+   ```bash
+   # Use very large Docker image (slow pull: 20s)
+   # Set cidfile timeout to 5s
+   # Trigger reconnection
+   # Expected: Container ID recovered via name lookup
+   # Verify: Container cleaned up on disconnect
+   ```
+
+3. **Orphan Container Test**
+   ```bash
+   # Start server, kill mcpproxy (SIGKILL)
+   # Restart mcpproxy
+   # Expected: Old container cleaned up before new one created
+   # Verify: docker ps shows only 1 container per server
+   ```
+
+4. **Network Partition Test**
+   ```bash
+   # Start server
+   # Block Docker API (iptables or firewall)
+   # Trigger health check
+   # Unblock Docker API
+   # Expected: Health check detects unreachable container
+   # Verify: New container created, old one removed
+   ```
+
+5. **Label-based Cleanup Test**
+   ```bash
+   # Create containers with instance ID labels
+   # Crash mcpproxy (kill -9)
+   # Start new mcpproxy instance (different instance ID)
+   # Expected: Old containers cleaned up despite different instance ID
+   # Verify: No orphaned containers remain
+   ```
+
+---
+
 ## Summary of Recommended Changes
 
 ### High Priority (Critical & Important)
@@ -509,6 +1051,7 @@ cpl.trayApp.ShowNotification(notification)
 | 4 | Add "Recovering" state | Multiple tray files | Medium | High |
 | 6 | Better force reconnect retry logic | `cmd/mcpproxy-tray/main.go` | Small | Medium |
 | 9 | Partial failure handling | `internal/upstream/manager.go` | Medium | Medium |
+| **11** | **Duplicate container spawning** | **`internal/upstream/core/connection.go`, `manager.go`** | **Large** | **Critical** |
 
 ### Medium Priority (Nice-to-have)
 
@@ -554,25 +1097,32 @@ After implementing improvements, test the following scenarios:
 
 ## Implementation Plan
 
-**Phase 1: Critical Fixes (Week 1)**
-1. Issue #1: Docker-only filtering (2 hours)
-2. Issue #2: Container health verification (4 hours)
-3. Issue #4: Add "Recovering" state (3 hours)
+**Phase 1: Critical Fixes (Week 1)** - 17 hours
+1. Issue #11: Duplicate container spawning (8 hours)
+   - Layer 1: Idempotent creation (3 hours)
+   - Layer 3: Distributed locks (2 hours)
+   - Layer 4: Container health verification (3 hours)
+2. Issue #1: Docker-only filtering (2 hours)
+3. Issue #2: Container health verification (4 hours)
+4. Issue #4: Add "Recovering" state (3 hours)
 
-**Phase 2: Reliability Improvements (Week 2)**
-1. Issue #3: Exponential backoff (2 hours)
-2. Issue #6: Better retry logic (2 hours)
-3. Issue #9: Partial failure handling (3 hours)
+**Phase 2: Reliability Improvements (Week 2)** - 11 hours
+1. Issue #11 (continued): Advanced container management (4 hours)
+   - Layer 2: Container labels (2 hours)
+   - Layer 5: cidfile timeout fallback (2 hours)
+2. Issue #3: Exponential backoff (2 hours)
+3. Issue #6: Better retry logic (2 hours)
+4. Issue #9: Partial failure handling (3 hours)
 
-**Phase 3: Observability & Polish (Week 3)**
+**Phase 3: Observability & Polish (Week 3)** - 8 hours
 1. Issue #5: Metrics/observability (4 hours)
 2. Issue #7: Error differentiation (2 hours)
 3. Issue #10: User notifications (2 hours)
 
-**Phase 4: Configuration (Optional)**
+**Phase 4: Configuration (Optional)** - 4 hours
 1. Issue #8: Configurable timeouts (4 hours)
 
-**Total effort estimate: 28-32 hours**
+**Total effort estimate: 40 hours** (up from 28-32 hours due to Issue #11)
 
 ---
 
