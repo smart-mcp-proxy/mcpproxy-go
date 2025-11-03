@@ -1,5 +1,3 @@
-//go:build darwin || windows
-
 package api
 
 import (
