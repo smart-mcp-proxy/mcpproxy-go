@@ -1820,6 +1820,13 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 		case <-recoveryCtx.Done():
 			return
 		case <-time.After(currentInterval):
+			// Check if context was cancelled while waiting
+			select {
+			case <-recoveryCtx.Done():
+				return
+			default:
+			}
+
 			attempt++
 
 			err := m.checkDockerAvailability(recoveryCtx)
@@ -1841,7 +1848,22 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 
 				// Trigger reconnection of Docker-based servers
 				go func() {
+					// Check if context was cancelled before reconnecting
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
 					result := m.ForceReconnectAll("docker_recovered")
+
+					// Check again before logging
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
 					if len(result.FailedServers) > 0 {
 						m.logger.Warn("Some servers failed to reconnect after Docker recovery",
 							zap.Int("error_count", len(result.FailedServers)))
