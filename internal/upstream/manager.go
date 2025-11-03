@@ -1892,6 +1892,13 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 				return
 			}
 
+			// Check if context was cancelled before logging retry
+			select {
+			case <-recoveryCtx.Done():
+				return
+			default:
+			}
+
 			// Still unavailable, save state
 			m.logger.Info("Docker recovery retry",
 				zap.Int("attempt", attempt),
