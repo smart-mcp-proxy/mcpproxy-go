@@ -1900,8 +1900,9 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 			}
 
 			// Check if context was cancelled before logging retry
+			// Use parent context to catch shutdown faster
 			select {
-			case <-recoveryCtx.Done():
+			case <-ctx.Done():
 				return
 			default:
 			}
