@@ -662,3 +662,148 @@ This suggests the tray's synchronization loop or SSE reconnect logic is still ru
 *Bug #1 fixed: 2025-11-03*
 *Bug #2 partially fixed: 2025-11-03*
 *Bug #2.1 discovered: 2025-11-03*
+
+## Bug #2.2: Context Cancellation Sends SIGKILL Before SIGTERM (FIXED ✅)
+
+### Status
+**FIXED ✅** - 2025-11-03
+
+### Severity
+**CRITICAL** - Core process killed immediately on tray quit, preventing graceful shutdown and leaving Docker containers orphaned.
+
+### Symptoms
+- Tray quits successfully in 4 seconds
+- Core process receives SIGKILL instead of SIGTERM
+- Core never runs shutdown sequence (no "Received signal" logs)
+- 1 out of 7 Docker containers remains orphaned (everything-server)
+- Process exit message shows "signal: killed" (SIGKILL) not "signal: terminated" (SIGTERM)
+
+### Root Cause
+`ProcessMonitor.Shutdown()` was calling `pm.cancel()` **BEFORE** calling `pm.Stop()`. This cancelled the context used with `exec.CommandContext()`, which causes Go's exec package to immediately send SIGKILL to the process, preventing graceful shutdown.
+
+**Code Location**: `cmd/mcpproxy-tray/internal/monitor/process.go:286`
+
+**Original Code (BROKEN)**:
+```go
+func (pm *ProcessMonitor) Shutdown() {
+    pm.logger.Info("Process monitor shutting down")
+    pm.cancel()  // ❌ WRONG: Cancels context, sends SIGKILL immediately!
+
+    // Stop the process if it's still running
+    status := pm.GetStatus()
+    if status == ProcessStatusRunning || status == ProcessStatusStarting {
+        if err := pm.Stop(); err != nil {
+            pm.logger.Warn("Process stop returned error during shutdown", "error", err)
+        }
+    }
+
+    close(pm.shutdownCh)
+}
+```
+
+### The Fix
+Move `pm.cancel()` to **AFTER** `pm.Stop()` completes:
+
+```go
+func (pm *ProcessMonitor) Shutdown() {
+    pm.logger.Info("Process monitor shutting down")
+
+    // IMPORTANT: Do NOT cancel context before stopping process!
+    // Cancelling the context sends SIGKILL immediately via exec.CommandContext,
+    // preventing graceful shutdown. We must call Stop() first, which sends SIGTERM
+    // and waits for graceful termination.
+
+    // Stop the process if it's still running
+    status := pm.GetStatus()
+    pm.logger.Infow("Process monitor status before stop", "status", status)
+    if status == ProcessStatusRunning || status == ProcessStatusStarting {
+        if err := pm.Stop(); err != nil {
+            pm.logger.Warn("Process stop returned error during shutdown", "error", err)
+        } else {
+            pm.logger.Info("Process stop completed during shutdown")
+        }
+    }
+
+    // Now it's safe to cancel the context after the process has stopped
+    pm.cancel()
+
+    close(pm.shutdownCh)
+}
+```
+
+### Related Fixes
+While investigating, we also improved signal handling:
+1. Changed `syscall.Kill(-pid, SIGTERM)` to `syscall.Kill(pid, SIGTERM)` in `Stop()` method
+   - Sends SIGTERM to process directly instead of process group
+   - Works correctly with shell wrapper (`zsh -l -c "exec mcpproxy"`)
+2. Maintained `Setpgid: true` for proper process group management
+3. Kept shell wrapper enabled (it was not the issue)
+
+### Test Results
+
+**Before Fix (Bug Present)**:
+```bash
+=== RESULTS ===
+Tray exit time: 4s
+Containers before: 7
+Containers after: 1    # ❌ everything-server orphaned
+Core terminated: YES
+Tray exited: YES
+
+❌ PARTIAL: Some issues remain
+   - 1 containers remain
+```
+
+**Tray Logs (Bug Present)**:
+```json
+{"message":"Stopping process","pid":74027}
+{"message":"Process exited with error...signal: killed...exit_code-1"}  // ❌ SIGKILL!
+{"message":"Process stopped","pid":74027,"exit_code":-1}
+```
+
+**Core Logs (Bug Present)**:
+```
+# NO SHUTDOWN LOGS AT ALL! Core was killed immediately.
+```
+
+**After Fix (All Issues Resolved)**:
+```bash
+=== RESULTS ===
+Tray exit time: 12s    # ✅ Longer because core performs full cleanup
+Containers before: 7
+Containers after: 0    # ✅ All containers cleaned up!
+Core terminated: YES
+Tray exited: YES
+
+✅ SUCCESS: All issues fixed!
+   - Tray quit successfully in 12s
+   - Core process terminated
+   - All 7 containers cleaned up
+   - No cmd.Wait() race condition
+```
+
+**Core Logs (After Fix)**:
+```
+19:27:34.467 | INFO | Received signal, shutting down | {"signal": "terminated"}  // ✅ SIGTERM!
+19:27:34.468 | INFO | Shutting down server
+19:27:34.468 | INFO | Shutting down MCP proxy server...
+19:27:34.736 | INFO | Shutting down all upstream servers
+19:27:39.737 | INFO | Starting Docker container cleanup phase
+```
+
+### Why This Happened
+The Go `exec` package's `CommandContext` behavior:
+- When you create a command with `exec.CommandContext(ctx, ...)`, the command is tied to the context
+- If the context is cancelled while the command is running, Go sends **SIGKILL** immediately
+- This is by design - context cancellation means "stop now, don't wait"
+- For graceful shutdowns, we must call our own SIGTERM/SIGKILL logic first, then cancel context
+
+### Files Modified
+- `cmd/mcpproxy-tray/internal/monitor/process.go:283-307` - Reordered Shutdown() to cancel context after Stop()
+- `cmd/mcpproxy-tray/internal/monitor/process.go:209-215` - Send SIGTERM to PID not process group
+- `cmd/mcpproxy-tray/internal/monitor/process.go:237` - Send SIGKILL to PID not process group
+
+---
+
+*Bug #2.2 discovered and fixed: 2025-11-03*
+*All shutdown bugs now resolved ✅*
