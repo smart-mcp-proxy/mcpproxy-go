@@ -98,7 +98,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Initialize secret resolver
 	secretResolver := secret.NewResolver()
 
-	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver)
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	if cfg.Logging != nil {
 		upstreamManager.SetLogConfig(cfg.Logging)
 	}
@@ -454,13 +454,65 @@ func (r *Runtime) Close() error {
 	if r.upstreamManager != nil {
 		// Use ShutdownAll instead of DisconnectAll to ensure proper container cleanup
 		// ShutdownAll handles both graceful disconnection and Docker container cleanup
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// Use 45-second timeout to allow parallel container cleanup to complete
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer shutdownCancel()
 
 		if err := r.upstreamManager.ShutdownAll(shutdownCtx); err != nil {
 			errs = append(errs, fmt.Errorf("shutdown upstream servers: %w", err))
 			if r.logger != nil {
 				r.logger.Error("Failed to shutdown upstream servers", zap.Error(err))
+			}
+		}
+
+		// Verify all containers stopped with retry loop (15 attempts = 15 seconds)
+		if r.upstreamManager.HasDockerContainers() {
+			if r.logger != nil {
+				r.logger.Warn("Docker containers still running after shutdown, verifying cleanup...")
+			}
+
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+
+			for attempt := 0; attempt < 15; attempt++ {
+				select {
+				case <-shutdownCtx.Done():
+					if r.logger != nil {
+						r.logger.Error("Cleanup verification timeout")
+					}
+					// Force cleanup as last resort
+					r.upstreamManager.ForceCleanupAllContainers()
+					return nil
+				case <-ticker.C:
+					if !r.upstreamManager.HasDockerContainers() {
+						if r.logger != nil {
+							r.logger.Info("All containers cleaned up successfully", zap.Int("attempts", attempt+1))
+						}
+						return nil
+					}
+					if r.logger != nil {
+						r.logger.Debug("Waiting for container cleanup...", zap.Int("attempt", attempt+1))
+					}
+				}
+			}
+
+			// Timeout reached - force cleanup
+			if r.logger != nil {
+				r.logger.Error("Some containers failed to stop gracefully - forcing cleanup")
+			}
+			r.upstreamManager.ForceCleanupAllContainers()
+
+			// Give force cleanup a moment to complete
+			time.Sleep(2 * time.Second)
+
+			if r.upstreamManager.HasDockerContainers() {
+				if r.logger != nil {
+					r.logger.Error("WARNING: Some containers may still be running after force cleanup")
+				}
+			} else {
+				if r.logger != nil {
+					r.logger.Info("Force cleanup succeeded - all containers removed")
+				}
 			}
 		}
 	}
@@ -1226,4 +1278,12 @@ func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int
 		zap.Int("results", len(result)))
 
 	return result, nil
+}
+
+// GetDockerRecoveryStatus returns the current Docker recovery status from the upstream manager
+func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
+	if r.upstreamManager == nil {
+		return nil
+	}
+	return r.upstreamManager.GetDockerRecoveryStatus()
 }

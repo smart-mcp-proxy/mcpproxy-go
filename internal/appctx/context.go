@@ -57,7 +57,7 @@ func NewApplicationContext(cfg *config.Config, logConfig *config.LogConfig, logg
 
 	// Initialize upstream manager
 	secretResolver := secret.NewResolver()
-	baseUpstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver)
+	baseUpstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	upstreamManager := &UpstreamManagerAdapter{Manager: baseUpstreamManager}
 
 	// Initialize cache manager

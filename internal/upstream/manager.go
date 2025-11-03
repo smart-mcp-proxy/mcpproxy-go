@@ -22,6 +22,34 @@ import (
 	"mcpproxy-go/internal/upstream/types"
 )
 
+// Docker recovery constants - internal implementation defaults
+const (
+	dockerCheckInterval      = 30 * time.Second // How often to check Docker availability
+	dockerMaxRetries         = 10               // Maximum consecutive failures before giving up (0 = unlimited)
+	dockerRetryInterval1     = 2 * time.Second  // First retry - Docker might just be paused
+	dockerRetryInterval2     = 5 * time.Second  // Second retry
+	dockerRetryInterval3     = 10 * time.Second // Third retry
+	dockerRetryInterval4     = 30 * time.Second // Fourth retry
+	dockerRetryInterval5     = 60 * time.Second // Fifth+ retry (max backoff)
+	dockerHealthCheckTimeout = 3 * time.Second  // Timeout for docker info command
+)
+
+// getDockerRetryInterval returns the retry interval for a given attempt number (exponential backoff)
+func getDockerRetryInterval(attempt int) time.Duration {
+	switch {
+	case attempt <= 0:
+		return dockerRetryInterval1
+	case attempt == 1:
+		return dockerRetryInterval2
+	case attempt == 2:
+		return dockerRetryInterval3
+	case attempt == 3:
+		return dockerRetryInterval4
+	default:
+		return dockerRetryInterval5 // Max backoff
+	}
+}
+
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
 	clients         map[string]*managed.Client
@@ -41,6 +69,14 @@ type Manager struct {
 	// Context for shutdown coordination
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+	shuttingDown   bool // Flag to prevent reconnections during shutdown
+
+	// Docker recovery state
+	dockerRecoveryMu     sync.RWMutex
+	dockerRecoveryActive bool
+	dockerRecoveryState  *storage.DockerRecoveryState
+	dockerRecoveryCancel context.CancelFunc
+	storageMgr           *storage.Manager // Reference to storage manager for Docker state persistence
 }
 
 func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
@@ -82,18 +118,19 @@ func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
 }
 
 // NewManager creates a new upstream manager
-func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) *Manager {
+func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *storage.BoltDB, secretResolver *secret.Resolver, storageMgr *storage.Manager) *Manager {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		clients:         make(map[string]*managed.Client),
 		logger:          logger,
 		globalConfig:    globalConfig,
-		storage:         storage,
+		storage:         boltStorage,
 		notificationMgr: NewNotificationManager(),
 		secretResolver:  secretResolver,
 		tokenReconnect:  make(map[string]time.Time),
 		shutdownCtx:     shutdownCtx,
 		shutdownCancel:  shutdownCancel,
+		storageMgr:      storageMgr,
 	}
 
 	// Set up OAuth completion callback to trigger connection retries (in-process)
@@ -109,8 +146,13 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, storage *storag
 	})
 
 	// Start database event monitor for cross-process OAuth completion notifications
-	if storage != nil {
+	if boltStorage != nil {
 		go manager.startOAuthEventMonitor(shutdownCtx)
+	}
+
+	// Start Docker recovery monitor (internal feature, always enabled)
+	if storageMgr != nil {
+		go manager.startDockerRecoveryMonitor(shutdownCtx)
 	}
 
 	return manager
@@ -318,12 +360,14 @@ func (m *Manager) RemoveServer(id string) {
 func (m *Manager) ShutdownAll(ctx context.Context) error {
 	m.logger.Info("Shutting down all upstream servers")
 
-	m.mu.RLock()
+	// Set shutdown flag to prevent any reconnection attempts
+	m.mu.Lock()
+	m.shuttingDown = true
 	clientMap := make(map[string]*managed.Client, len(m.clients))
 	for id, client := range m.clients {
 		clientMap[id] = client
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 
 	if len(clientMap) == 0 {
 		m.logger.Debug("No upstream servers to shutdown")
@@ -342,10 +386,19 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 		}
 
 		wg.Add(1)
+		// Launch goroutine immediately without calling GetConfig() first
+		// GetConfig() will be called inside goroutine but we'll use client.Disconnect()
+		// which handles locking internally and won't block the shutdown loop
 		go func(clientID string, c *managed.Client) {
 			defer wg.Done()
 
-			serverName := c.GetConfig().Name
+			// Try to get server name, but use a fallback if it blocks
+			// This prevents the entire shutdown from hanging on one stuck server
+			serverName := clientID // Fallback to clientID
+			if cfg := c.GetConfig(); cfg != nil {
+				serverName = cfg.Name
+			}
+
 			m.logger.Debug("Disconnecting server",
 				zap.String("id", clientID),
 				zap.String("server", serverName))
@@ -363,22 +416,37 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 		}(id, client)
 	}
 
-	// Wait for all disconnections to complete (with timeout from context)
+	// Wait for all disconnections to complete (with timeout)
+	// Use a shorter timeout (5 seconds) for the disconnect phase
+	// If servers are stuck in "Connecting" state, their disconnection will hang
+	// In that case, we'll force-proceed to container cleanup which can handle it
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
 
+	disconnectTimeout := 5 * time.Second
+	disconnectTimer := time.NewTimer(disconnectTimeout)
+	defer disconnectTimer.Stop()
+
 	select {
 	case <-done:
 		m.logger.Info("All upstream servers disconnected successfully")
+	case <-disconnectTimer.C:
+		m.logger.Warn("Disconnect phase timed out after 5 seconds, forcing cleanup")
+		m.logger.Warn("Some servers may not have disconnected cleanly (likely stuck in Connecting state)")
+		// Don't wait for stuck goroutines - proceed with container cleanup anyway
 	case <-ctx.Done():
-		m.logger.Warn("Shutdown context cancelled, some servers may not have disconnected cleanly")
+		m.logger.Warn("Shutdown context cancelled, forcing cleanup",
+			zap.Error(ctx.Err()))
+		// Don't wait for stuck goroutines - proceed with container cleanup anyway
 	}
 
 	// Additional cleanup: Find and stop ALL mcpproxy-managed containers
-	// This catches any orphaned containers from previous crashes
+	// This catches any orphaned containers from previous crashes AND any containers
+	// from servers that were stuck in "Connecting" state and couldn't disconnect
+	m.logger.Info("Starting Docker container cleanup phase")
 	m.cleanupAllManagedContainers(ctx)
 
 	m.logger.Info("All upstream servers shut down successfully")
@@ -482,6 +550,102 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	}
 
 	m.logger.Info("Container cleanup completed")
+}
+
+// ForceCleanupAllContainers is a public wrapper for emergency container cleanup
+// This is called when graceful shutdown fails and containers must be force-removed
+func (m *Manager) ForceCleanupAllContainers() {
+	m.logger.Warn("Force cleanup requested - removing all managed containers immediately")
+
+	// Create a short-lived context for force cleanup (30 seconds max)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Find all containers with our management label
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
+		"--filter", "label=com.mcpproxy.managed=true",
+		"--format", "{{.ID}}\t{{.Names}}")
+
+	output, err := listCmd.Output()
+	if err != nil {
+		m.logger.Warn("Failed to list managed containers for force cleanup", zap.Error(err))
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		m.logger.Info("No managed containers found during force cleanup")
+		return
+	}
+
+	m.logger.Warn("Force removing managed containers",
+		zap.Int("count", len(lines)))
+
+	// Force remove each container (skip graceful stop)
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) < 1 {
+			continue
+		}
+
+		containerID := parts[0]
+		containerName := ""
+		if len(parts) >= 2 {
+			containerName = parts[1]
+		}
+
+		m.logger.Warn("Force removing container",
+			zap.String("id", containerID[:12]),
+			zap.String("name", containerName))
+
+		// Use docker rm -f to force remove (kills and removes in one step)
+		rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
+		if err := rmCmd.Run(); err != nil {
+			m.logger.Error("Failed to force remove container",
+				zap.String("id", containerID[:12]),
+				zap.String("name", containerName),
+				zap.Error(err))
+		} else {
+			m.logger.Info("Container force removed successfully",
+				zap.String("id", containerID[:12]),
+				zap.String("name", containerName))
+		}
+	}
+
+	m.logger.Info("Force cleanup completed")
+}
+
+// forceCleanupClient forces cleanup of a specific client's Docker container
+func (m *Manager) forceCleanupClient(client *managed.Client) {
+	containerID := client.GetContainerID()
+	if containerID == "" {
+		m.logger.Debug("No container ID for force cleanup",
+			zap.String("server", client.GetConfig().Name))
+		return
+	}
+
+	m.logger.Warn("Force cleaning up container for client",
+		zap.String("server", client.GetConfig().Name),
+		zap.String("container_id", containerID[:12]))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Force remove container
+	rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
+	if err := rmCmd.Run(); err != nil {
+		m.logger.Error("Failed to force remove container",
+			zap.String("server", client.GetConfig().Name),
+			zap.String("container_id", containerID[:12]),
+			zap.Error(err))
+	} else {
+		m.logger.Info("Container force removed successfully",
+			zap.String("server", client.GetConfig().Name),
+			zap.String("container_id", containerID[:12]))
+	}
 }
 
 // GetClient returns a client by ID
@@ -714,7 +878,13 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 
 // ConnectAll connects to all configured servers that should retry
 func (m *Manager) ConnectAll(ctx context.Context) error {
+	// Check if we're shutting down - prevent reconnections during shutdown
 	m.mu.RLock()
+	if m.shuttingDown {
+		m.mu.RUnlock()
+		m.logger.Debug("Skipping ConnectAll - manager is shutting down")
+		return nil
+	}
 	clients := make(map[string]*managed.Client)
 	for id, client := range m.clients {
 		clients[id] = client
@@ -822,30 +992,100 @@ func (m *Manager) DisconnectAll() error {
 	}
 	m.mu.RUnlock()
 
-	var lastError error
-	for _, client := range clients {
-		if err := client.Disconnect(); err != nil {
-			lastError = err
-			m.logger.Warn("Client disconnect failed",
-				zap.String("server", client.Config.Name),
-				zap.Error(err))
-		}
+	if len(clients) == 0 {
+		m.logger.Debug("No clients to disconnect")
+		return nil
 	}
 
-	return lastError
+	m.logger.Info("Disconnecting all clients in parallel", zap.Int("count", len(clients)))
+
+	// NEW: Disconnect all clients in PARALLEL for faster shutdown
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(clients))
+
+	for _, client := range clients {
+		if client == nil {
+			continue
+		}
+
+		wg.Add(1)
+		go func(c *managed.Client) {
+			defer wg.Done()
+
+			serverName := c.GetConfig().Name
+			m.logger.Debug("Disconnecting client", zap.String("server", serverName))
+
+			// NEW: Create per-client timeout context (10 seconds max per client)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			// Try to disconnect with timeout
+			done := make(chan error, 1)
+			go func() {
+				done <- c.Disconnect()
+			}()
+
+			select {
+			case err := <-done:
+				if err != nil {
+					m.logger.Warn("Client disconnect failed",
+						zap.String("server", serverName),
+						zap.Error(err))
+					errChan <- fmt.Errorf("disconnect %s: %w", serverName, err)
+				} else {
+					m.logger.Debug("Client disconnected successfully",
+						zap.String("server", serverName))
+				}
+			case <-ctx.Done():
+				m.logger.Error("Client disconnect timeout - forcing cleanup",
+					zap.String("server", serverName))
+				// Force cleanup for this client if it has a container
+				if c.IsDockerCommand() {
+					m.forceCleanupClient(c)
+				}
+				errChan <- fmt.Errorf("disconnect %s: timeout", serverName)
+			}
+		}(client)
+	}
+
+	// Wait for all disconnections to complete
+	wg.Wait()
+	close(errChan)
+
+	// Collect errors
+	var errs []error
+	for err := range errChan {
+		errs = append(errs, err)
+	}
+
+	m.logger.Info("All clients disconnected",
+		zap.Int("total", len(clients)),
+		zap.Int("errors", len(errs)))
+
+	if len(errs) > 0 {
+		return fmt.Errorf("disconnect errors: %v", errs)
+	}
+	return nil
 }
 
-// HasDockerContainers checks if any connected servers are running Docker containers
+// HasDockerContainers checks if any Docker containers are actually running
 func (m *Manager) HasDockerContainers() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	// Check if any containers with our labels are actually running
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
-	for _, client := range m.clients {
-		if client.IsDockerCommand() {
-			return true
-		}
+	listCmd := exec.CommandContext(ctx, "docker", "ps", "-q",
+		"--filter", "label=com.mcpproxy.managed=true")
+
+	output, err := listCmd.Output()
+	if err != nil {
+		// Docker not available or error listing - assume no containers
+		return false
 	}
-	return false
+
+	// If output is not empty, we have running containers
+	containerIDs := strings.TrimSpace(string(output))
+	return containerIDs != ""
 }
 
 // GetStats returns statistics about upstream connections
@@ -966,6 +1206,13 @@ func (m *Manager) ListServers() map[string]*config.ServerConfig {
 // This is typically called after OAuth completion to immediately use new tokens
 func (m *Manager) RetryConnection(serverName string) error {
 	m.mu.RLock()
+	// Check if we're shutting down - prevent reconnections during shutdown
+	if m.shuttingDown {
+		m.mu.RUnlock()
+		m.logger.Debug("Skipping RetryConnection - manager is shutting down",
+			zap.String("server", serverName))
+		return nil
+	}
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
 
@@ -1443,4 +1690,229 @@ func (m *Manager) InvalidateAllToolCountCaches() {
 
 	m.logger.Debug("Invalidated tool count caches for all clients",
 		zap.Int("client_count", len(m.clients)))
+}
+
+// Docker Recovery Methods
+
+// startDockerRecoveryMonitor monitors Docker availability and triggers recovery when needed
+func (m *Manager) startDockerRecoveryMonitor(ctx context.Context) {
+	m.logger.Info("Starting Docker recovery monitor")
+
+	// Load existing recovery state (always persist for reliability)
+	if m.storageMgr != nil {
+		if state, err := m.storageMgr.LoadDockerRecoveryState(); err == nil && state != nil {
+			m.dockerRecoveryMu.Lock()
+			m.dockerRecoveryState = state
+			m.dockerRecoveryMu.Unlock()
+			m.logger.Info("Loaded existing Docker recovery state",
+				zap.Int("failure_count", state.FailureCount),
+				zap.Bool("docker_available", state.DockerAvailable),
+				zap.Time("last_attempt", state.LastAttempt))
+		}
+	}
+
+	// Initial check
+	if err := m.checkDockerAvailability(ctx); err != nil {
+		m.logger.Warn("Docker unavailable on startup, starting recovery", zap.Error(err))
+		go m.handleDockerUnavailable(ctx)
+		return
+	}
+
+	// Periodic monitoring
+	ticker := time.NewTicker(dockerCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Info("Docker recovery monitor shutting down")
+			return
+		case <-ticker.C:
+			if err := m.checkDockerAvailability(ctx); err != nil {
+				m.logger.Warn("Docker became unavailable, starting recovery", zap.Error(err))
+				go m.handleDockerUnavailable(ctx)
+				return // Exit monitor, handleDockerUnavailable will restart it
+			}
+		}
+	}
+}
+
+// checkDockerAvailability checks if Docker daemon is running and responsive
+func (m *Manager) checkDockerAvailability(ctx context.Context) error {
+	checkCtx, cancel := context.WithTimeout(ctx, dockerHealthCheckTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(checkCtx, "docker", "info", "--format", "{{json .ServerVersion}}")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker unavailable: %w", err)
+	}
+	return nil
+}
+
+// handleDockerUnavailable handles Docker unavailability with exponential backoff
+func (m *Manager) handleDockerUnavailable(ctx context.Context) {
+	m.dockerRecoveryMu.Lock()
+	if m.dockerRecoveryActive {
+		m.dockerRecoveryMu.Unlock()
+		return // Already in recovery
+	}
+	m.dockerRecoveryActive = true
+	
+	// Initialize state if needed
+	if m.dockerRecoveryState == nil {
+		m.dockerRecoveryState = &storage.DockerRecoveryState{
+			LastAttempt:     time.Now(),
+			FailureCount:    0,
+			DockerAvailable: false,
+			RecoveryMode:    true,
+		}
+	}
+	m.dockerRecoveryMu.Unlock()
+
+	defer func() {
+		m.dockerRecoveryMu.Lock()
+		m.dockerRecoveryActive = false
+		m.dockerRecoveryMu.Unlock()
+	}()
+
+	// Use internal constants for retry logic
+	maxRetries := dockerMaxRetries
+
+	m.dockerRecoveryMu.RLock()
+	attempt := m.dockerRecoveryState.FailureCount
+	m.dockerRecoveryMu.RUnlock()
+
+	m.logger.Info("Docker recovery started",
+		zap.Int("resumed_from_attempt", attempt),
+		zap.Int("max_retries", maxRetries))
+
+	recoveryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	m.dockerRecoveryMu.Lock()
+	m.dockerRecoveryCancel = cancel
+	m.dockerRecoveryMu.Unlock()
+
+	startTime := time.Now()
+
+	for {
+		// Check if max retries exceeded
+		if maxRetries > 0 && attempt >= maxRetries {
+			m.logger.Error("Docker recovery max retries exceeded",
+				zap.Int("attempts", attempt),
+				zap.Int("max_retries", maxRetries))
+			m.saveDockerRecoveryState(&storage.DockerRecoveryState{
+				LastAttempt:      time.Now(),
+				FailureCount:     attempt,
+				DockerAvailable:  false,
+				RecoveryMode:     false,
+				LastError:        "max retries exceeded",
+				AttemptsSinceUp:  attempt,
+				LastSuccessfulAt: time.Time{},
+			})
+			return
+		}
+
+		// Get retry interval based on attempt number (exponential backoff)
+		currentInterval := getDockerRetryInterval(attempt)
+
+		select {
+		case <-recoveryCtx.Done():
+			return
+		case <-time.After(currentInterval):
+			attempt++
+
+			err := m.checkDockerAvailability(recoveryCtx)
+			if err == nil {
+				// Docker is back!
+				elapsed := time.Since(startTime)
+				m.logger.Info("Docker recovery successful",
+					zap.Int("total_attempts", attempt),
+					zap.Duration("total_duration", elapsed))
+
+				// Clear recovery state
+				m.dockerRecoveryMu.Lock()
+				m.dockerRecoveryState = nil
+				m.dockerRecoveryMu.Unlock()
+
+				if m.storageMgr != nil {
+					_ = m.storageMgr.ClearDockerRecoveryState()
+				}
+
+				// Trigger reconnection of Docker-based servers
+				go func() {
+					result := m.ForceReconnectAll("docker_recovered")
+					if len(result.FailedServers) > 0 {
+						m.logger.Warn("Some servers failed to reconnect after Docker recovery",
+							zap.Int("error_count", len(result.FailedServers)))
+					} else {
+						m.logger.Info("Successfully reconnected servers after Docker recovery",
+							zap.Int("reconnected", len(result.SuccessfulServers)))
+					}
+				}()
+
+				// Restart monitoring
+				go m.startDockerRecoveryMonitor(ctx)
+				return
+			}
+
+			// Still unavailable, save state
+			m.logger.Info("Docker recovery retry",
+				zap.Int("attempt", attempt),
+				zap.Duration("elapsed", time.Since(startTime)),
+				zap.Duration("next_retry_in", getDockerRetryInterval(attempt)),
+				zap.Error(err))
+
+			m.saveDockerRecoveryState(&storage.DockerRecoveryState{
+				LastAttempt:      time.Now(),
+				FailureCount:     attempt,
+				DockerAvailable:  false,
+				RecoveryMode:     true,
+				LastError:        err.Error(),
+				AttemptsSinceUp:  attempt,
+				LastSuccessfulAt: time.Time{},
+			})
+		}
+	}
+}
+// saveDockerRecoveryState saves recovery state to persistent storage
+func (m *Manager) saveDockerRecoveryState(state *storage.DockerRecoveryState) {
+	m.dockerRecoveryMu.Lock()
+	m.dockerRecoveryState = state
+	m.dockerRecoveryMu.Unlock()
+
+	if m.storageMgr != nil {
+		if err := m.storageMgr.SaveDockerRecoveryState(state); err != nil {
+			m.logger.Warn("Failed to save Docker recovery state", zap.Error(err))
+		}
+	}
+}
+
+// GetDockerRecoveryStatus returns the current Docker recovery status
+func (m *Manager) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
+	m.dockerRecoveryMu.RLock()
+	defer m.dockerRecoveryMu.RUnlock()
+
+	if m.dockerRecoveryState == nil {
+		// Check current Docker availability
+		if err := m.checkDockerAvailability(context.Background()); err == nil {
+			return &storage.DockerRecoveryState{
+				LastAttempt:      time.Now(),
+				FailureCount:     0,
+				DockerAvailable:  true,
+				RecoveryMode:     false,
+				LastSuccessfulAt: time.Now(),
+			}
+		}
+		return &storage.DockerRecoveryState{
+			LastAttempt:     time.Now(),
+			FailureCount:    0,
+			DockerAvailable: false,
+			RecoveryMode:    false,
+		}
+	}
+
+	// Return copy of current state
+	stateCopy := *m.dockerRecoveryState
+	return &stateCopy
 }

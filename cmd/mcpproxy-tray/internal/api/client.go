@@ -76,6 +76,17 @@ type StatusUpdate struct {
 	Timestamp     int64                  `json:"timestamp"`
 }
 
+// DockerStatus represents Docker recovery status from the API
+type DockerStatus struct {
+	DockerAvailable  bool   `json:"docker_available"`
+	RecoveryMode     bool   `json:"recovery_mode"`
+	FailureCount     int    `json:"failure_count"`
+	AttemptsSinceUp  int    `json:"attempts_since_up"`
+	LastAttempt      string `json:"last_attempt"`
+	LastError        string `json:"last_error"`
+	LastSuccessfulAt string `json:"last_successful_at"`
+}
+
 // Client provides access to the mcpproxy API
 type Client struct {
 	baseURL           string
@@ -636,6 +647,52 @@ func (c *Client) GetInfo() (map[string]interface{}, error) {
 	}
 
 	return result, nil
+}
+
+// GetStatus fetches the current status snapshot from /api/v1/status
+func (c *Client) GetStatus() (map[string]interface{}, error) {
+	resp, err := c.makeRequest("GET", "/api/v1/status", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("API error: %s", resp.Error)
+	}
+
+	status, ok := resp.Data["status"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected status payload")
+	}
+
+	return status, nil
+}
+
+// GetDockerStatus retrieves the current Docker recovery status
+func (c *Client) GetDockerStatus() (*DockerStatus, error) {
+	resp, err := c.makeRequest("GET", "/api/v1/docker/status", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("API error: %s", resp.Error)
+	}
+
+	// Parse the data field into DockerStatus
+	var status DockerStatus
+	if resp.Data != nil {
+		// Convert map to JSON and back to struct for proper type conversion
+		jsonData, err := json.Marshal(resp.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal Docker status: %w", err)
+		}
+		if err := json.Unmarshal(jsonData, &status); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal Docker status: %w", err)
+		}
+	}
+
+	return &status, nil
 }
 
 func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {

@@ -220,14 +220,15 @@ func (pm *ProcessMonitor) Stop() error {
 	case err := <-done:
 		pm.logger.Infow("Process stopped gracefully", "pid", pid, "error", err)
 		return err
-	case <-time.After(10 * time.Second):
-		// Force kill
-		pm.logger.Warn("Process did not stop gracefully, sending SIGKILL", "pid", pid)
+	case <-time.After(45 * time.Second):
+		// Force kill after 45 seconds to allow core time to clean up Docker containers
+		// Core needs time for parallel container cleanup (typically 10-30s for 7 containers)
+		pm.logger.Warn("Process did not stop gracefully after 45s, sending SIGKILL", "pid", pid)
 		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			pm.logger.Error("Failed to send SIGKILL", "pid", pid, "error", err)
 		}
 		<-done // Wait for process to exit
-		return fmt.Errorf("process force killed")
+		return fmt.Errorf("process force killed after timeout")
 	}
 }
 
@@ -270,8 +271,14 @@ func (pm *ProcessMonitor) Shutdown() {
 	pm.cancel()
 
 	// Stop the process if it's still running
-	if pm.GetStatus() == ProcessStatusRunning {
-		_ = pm.Stop() // Ignore error during shutdown
+	status := pm.GetStatus()
+	pm.logger.Infow("Process monitor status before stop", "status", status)
+	if status == ProcessStatusRunning || status == ProcessStatusStarting {
+		if err := pm.Stop(); err != nil {
+			pm.logger.Warn("Process stop returned error during shutdown", "error", err)
+		} else {
+			pm.logger.Info("Process stop completed during shutdown")
+		}
 	}
 
 	close(pm.shutdownCh)
