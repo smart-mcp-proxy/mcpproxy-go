@@ -29,3 +29,27 @@ func (h *NotificationHandler) SendNotification(notification *upstream.Notificati
 		zap.String("message", notification.Message),
 		zap.String("server", notification.ServerName))
 }
+
+// ShowDockerRecoveryStarted shows a notification when Docker recovery starts (stub)
+func ShowDockerRecoveryStarted() error {
+	// No-op for headless/linux builds
+	return nil
+}
+
+// ShowDockerRecoverySuccess shows a notification when Docker recovery succeeds (stub)
+func ShowDockerRecoverySuccess(serverCount int) error {
+	// No-op for headless/linux builds
+	return nil
+}
+
+// ShowDockerRecoveryFailed shows a notification when Docker recovery fails (stub)
+func ShowDockerRecoveryFailed(reason string) error {
+	// No-op for headless/linux builds
+	return nil
+}
+
+// ShowDockerRecoveryRetry shows a notification for retry attempts (stub)
+func ShowDockerRecoveryRetry(attempt int, nextRetryIn string) error {
+	// No-op for headless/linux builds
+	return nil
+}

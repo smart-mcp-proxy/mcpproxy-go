@@ -17,6 +17,7 @@ import (
 	"mcpproxy-go/internal/contracts"
 	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/storage"
 )
 
 // MockServerController implements ServerController for testing
@@ -86,6 +87,15 @@ func (m *MockServerController) GetQuarantinedServers() ([]map[string]interface{}
 	return []map[string]interface{}{}, nil
 }
 func (m *MockServerController) UnquarantineServer(_ string) error { return nil }
+func (m *MockServerController) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
+	return &storage.DockerRecoveryState{
+		DockerAvailable:  true,
+		RecoveryMode:     false,
+		FailureCount:     0,
+		AttemptsSinceUp:  0,
+		LastError:        "",
+	}
+}
 
 func (m *MockServerController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{

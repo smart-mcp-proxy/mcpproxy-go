@@ -380,6 +380,76 @@ func (m *Manager) DeleteToolHash(toolName string) error {
 	return m.db.DeleteToolHash(toolName)
 }
 
+// Docker recovery state operations
+
+// SaveDockerRecoveryState saves the Docker recovery state to persistent storage
+func (m *Manager) SaveDockerRecoveryState(state *DockerRecoveryState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+		if err != nil {
+			return fmt.Errorf("failed to create meta bucket: %w", err)
+		}
+
+		data, err := state.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("failed to marshal recovery state: %w", err)
+		}
+
+		return bucket.Put([]byte(DockerRecoveryStateKey), data)
+	})
+}
+
+// LoadDockerRecoveryState loads the Docker recovery state from persistent storage
+func (m *Manager) LoadDockerRecoveryState() (*DockerRecoveryState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var state DockerRecoveryState
+
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(MetaBucket))
+		if bucket == nil {
+			return bboltErrors.ErrBucketNotFound
+		}
+
+		data := bucket.Get([]byte(DockerRecoveryStateKey))
+		if data == nil {
+			return bboltErrors.ErrBucketNotFound
+		}
+
+		return state.UnmarshalBinary(data)
+	})
+
+	if err != nil {
+		if err == bboltErrors.ErrBucketNotFound {
+			// No state exists yet, return nil without error
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to load recovery state: %w", err)
+	}
+
+	return &state, nil
+}
+
+// ClearDockerRecoveryState removes the Docker recovery state from persistent storage
+func (m *Manager) ClearDockerRecoveryState() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(MetaBucket))
+		if bucket == nil {
+			// No bucket, nothing to clear
+			return nil
+		}
+
+		return bucket.Delete([]byte(DockerRecoveryStateKey))
+	})
+}
+
 // Maintenance operations
 
 // Backup creates a backup of the database

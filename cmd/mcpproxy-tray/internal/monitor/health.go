@@ -1,5 +1,3 @@
-//go:build darwin || windows
-
 package monitor
 
 import (

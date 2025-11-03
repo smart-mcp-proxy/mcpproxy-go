@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -176,17 +177,22 @@ func main() {
 				// Notify the state machine so it stops launching or reconnecting cores.
 				stateMachine.SendEvent(state.EventShutdown)
 
-				// Cancel the shared context early so tray background workers stop emitting logs.
-				logger.Info("Cancelling tray context")
-				cancel()
-
-				// Shutdown launcher (stops SSE, health monitor, kills core)
+				// Shutdown launcher FIRST (stops SSE, health monitor, kills core)
+				// This must happen BEFORE cancelling context to prevent tray from quitting early
 				if launcher != nil {
+					logger.Info("Shutting down launcher...")
 					launcher.handleShutdown()
+					logger.Info("Launcher shutdown complete")
 				}
 
 				// Shutdown state machine (waits up to its internal timeout)
+				logger.Info("Shutting down state machine...")
 				stateMachine.Shutdown()
+				logger.Info("State machine shutdown complete")
+
+				// NOW cancel the context (this will trigger tray to quit via context monitor)
+				logger.Info("Cancelling tray context")
+				cancel()
 
 				// Give tray.Run() goroutine a moment to notice cancellation before requesting explicit quit.
 				time.Sleep(50 * time.Millisecond)
@@ -222,10 +228,30 @@ func main() {
 		coreTimeout,
 	)
 
-	// Send the appropriate initial event based on:
-	// 1. SKIP_CORE environment variable (explicit override)
-	// 2. Existing running core detection (auto-detect)
-	// 3. Default: launch core as subprocess
+	// Determine initial ownership strategy before dispatching events
+	skipCoreEnv := shouldSkipCoreLaunch()
+	coreAlreadyRunning := false
+	if !skipCoreEnv {
+		coreAlreadyRunning = isCoreAlreadyRunning(coreURL, logger)
+	}
+
+	initialOwnership := coreOwnershipTrayManaged
+	initialEvent := state.EventStart
+
+	if skipCoreEnv {
+		logger.Info("Skipping core launch (MCPPROXY_TRAY_SKIP_CORE=1)")
+		initialOwnership = coreOwnershipExternalUnmanaged
+		initialEvent = state.EventSkipCore
+	} else if coreAlreadyRunning {
+		logger.Info("Detected existing running core, will use it instead of launching subprocess",
+			zap.String("core_url", coreURL))
+		initialOwnership = coreOwnershipExternalManaged
+		initialEvent = state.EventSkipCore
+	} else {
+		logger.Info("No running core detected, will launch new core process")
+	}
+
+	launcher.SetCoreOwnership(initialOwnership)
 
 	// Start launcher FIRST to ensure it subscribes to transitions before events are sent
 	go launcher.Start(ctx)
@@ -234,17 +260,7 @@ func main() {
 	// This prevents race condition where initial event is sent before subscription is ready
 	time.Sleep(10 * time.Millisecond)
 
-	if shouldSkipCoreLaunch() {
-		logger.Info("Skipping core launch (MCPPROXY_TRAY_SKIP_CORE=1)")
-		stateMachine.SendEvent(state.EventSkipCore)
-	} else if isCoreAlreadyRunning(coreURL, logger) {
-		logger.Info("Detected existing running core, will use it instead of launching subprocess",
-			zap.String("core_url", coreURL))
-		stateMachine.SendEvent(state.EventSkipCore)
-	} else {
-		logger.Info("No running core detected, will launch new core process")
-		stateMachine.SendEvent(state.EventStart)
-	}
+	stateMachine.SendEvent(initialEvent)
 
 	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -274,6 +290,97 @@ func main() {
 	stateMachine.Shutdown()
 
 	logger.Info("mcpproxy-tray shutdown complete")
+}
+
+// monitorDockerStatus polls the core API for Docker recovery status and shows notifications
+func monitorDockerStatus(ctx context.Context, apiClient *api.Client, logger *zap.SugaredLogger) {
+	logger.Info("Starting Docker status monitor")
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	var lastStatus *api.DockerStatus
+	var lastRecoveryMode bool
+	var lastFailureCount int
+
+	// Initial poll
+	status, err := apiClient.GetDockerStatus()
+	if err != nil {
+		logger.Debugw("Failed to get initial Docker status", "error", err)
+	} else {
+		lastStatus = status
+		lastRecoveryMode = status.RecoveryMode
+		lastFailureCount = status.FailureCount
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("Docker status monitor stopping")
+			return
+		case <-ticker.C:
+			status, err := apiClient.GetDockerStatus()
+			if err != nil {
+				logger.Debugw("Failed to get Docker status", "error", err)
+				continue
+			}
+
+			// Check for state changes and show appropriate notifications
+			if lastStatus == nil {
+				lastStatus = status
+				lastRecoveryMode = status.RecoveryMode
+				lastFailureCount = status.FailureCount
+				continue
+			}
+
+			// Docker became unavailable (recovery mode started)
+			if !lastRecoveryMode && status.RecoveryMode {
+				logger.Info("Docker recovery started")
+				if err := tray.ShowDockerRecoveryStarted(); err != nil {
+					logger.Warnw("Failed to show Docker recovery notification", "error", err)
+				}
+			}
+
+			// Docker recovery succeeded (was in recovery, now available)
+			if lastRecoveryMode && !status.RecoveryMode && status.DockerAvailable {
+				logger.Info("Docker recovery completed successfully")
+				if err := tray.ShowDockerRecoverySuccess(0); err != nil {
+					logger.Warnw("Failed to show Docker recovery success notification", "error", err)
+				}
+			}
+
+			// Retry attempt detected (failure count increased while in recovery)
+			if status.RecoveryMode && status.FailureCount > lastFailureCount {
+				logger.Infow("Docker recovery retry attempt",
+					"attempt", status.FailureCount,
+					"last_error", status.LastError)
+
+				// Calculate next retry interval based on exponential backoff
+				intervals := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, 60 * time.Second}
+				nextRetryIdx := status.FailureCount
+				if nextRetryIdx >= len(intervals) {
+					nextRetryIdx = len(intervals) - 1
+				}
+				nextRetryIn := intervals[nextRetryIdx].String()
+
+				if err := tray.ShowDockerRecoveryRetry(status.FailureCount, nextRetryIn); err != nil {
+					logger.Warnw("Failed to show Docker retry notification", "error", err)
+				}
+			}
+
+			// Recovery failed (exceeded max retries or persistent error)
+			if lastRecoveryMode && !status.RecoveryMode && !status.DockerAvailable {
+				logger.Warnw("Docker recovery failed", "last_error", status.LastError)
+				if err := tray.ShowDockerRecoveryFailed(status.LastError); err != nil {
+					logger.Warnw("Failed to show Docker recovery failed notification", "error", err)
+				}
+			}
+
+			lastStatus = status
+			lastRecoveryMode = status.RecoveryMode
+			lastFailureCount = status.FailureCount
+		}
+	}
 }
 
 // setupLogging configures the logger with appropriate settings for the tray
@@ -885,6 +992,14 @@ func maskAPIKey(apiKey string) string {
 	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
 }
 
+type coreOwnershipMode int
+
+const (
+	coreOwnershipTrayManaged coreOwnershipMode = iota
+	coreOwnershipExternalManaged
+	coreOwnershipExternalUnmanaged
+)
+
 // CoreProcessLauncher manages the mcpproxy core process with state machine integration
 type CoreProcessLauncher struct {
 	coreURL      string
@@ -896,6 +1011,8 @@ type CoreProcessLauncher struct {
 
 	processMonitor *monitor.ProcessMonitor
 	healthMonitor  *monitor.HealthMonitor
+
+	coreOwnership coreOwnershipMode
 
 	dockerRetryMu          sync.Mutex
 	dockerRetryCancel      context.CancelFunc
@@ -912,12 +1029,26 @@ func NewCoreProcessLauncher(
 	coreTimeout time.Duration,
 ) *CoreProcessLauncher {
 	return &CoreProcessLauncher{
-		coreURL:      coreURL,
-		logger:       logger,
-		stateMachine: stateMachine,
-		apiClient:    apiClient,
-		trayApp:      trayApp,
-		coreTimeout:  coreTimeout,
+		coreURL:       coreURL,
+		logger:        logger,
+		stateMachine:  stateMachine,
+		apiClient:     apiClient,
+		trayApp:       trayApp,
+		coreTimeout:   coreTimeout,
+		coreOwnership: coreOwnershipTrayManaged,
+	}
+}
+
+// SetCoreOwnership configures how the tray should treat the core lifecycle
+func (cpl *CoreProcessLauncher) SetCoreOwnership(mode coreOwnershipMode) {
+	cpl.coreOwnership = mode
+	switch mode {
+	case coreOwnershipTrayManaged:
+		cpl.logger.Debug("Tray managing core lifecycle directly")
+	case coreOwnershipExternalManaged:
+		cpl.logger.Debug("Tray attached to existing core - will manage shutdown")
+	case coreOwnershipExternalUnmanaged:
+		cpl.logger.Debug("Tray configured to skip core management - will not terminate core on exit")
 	}
 }
 
@@ -980,7 +1111,7 @@ func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, tran
 				cpl.handleDockerUnavailable(ctx)
 
 			case state.StateCoreRecoveringDocker:
-				cpl.handleDockerRecovering(ctx)
+				cpl.handleDockerRecovering()
 
 			case state.StateCoreErrorConfig:
 				cpl.handleConfigError()
@@ -1218,6 +1349,9 @@ func (cpl *CoreProcessLauncher) handleConnectAPI(ctx context.Context) {
 		// Just log the error and SSE will retry in the background
 	}
 
+	// Start Docker status monitor in background
+	go monitorDockerStatus(ctx, cpl.apiClient, cpl.logger)
+
 	// Subscribe to API client connection state changes
 	// Pass alreadyConnected=true since we verified API is ready via HTTP
 	// This tells the monitor to ignore SSE connection failures
@@ -1362,20 +1496,7 @@ func findNextAvailablePort(start, end int) (int, error) {
 	return 0, fmt.Errorf("no free port in range %d-%d", start, end)
 }
 
-// handleDockerRecovering handles the Docker recovery state
-// This state provides user feedback while we're restarting the core after Docker recovery
-func (cpl *CoreProcessLauncher) handleDockerRecovering(ctx context.Context) {
-	cpl.logger.Info("Docker recovery state - preparing to launch core")
-
-	// Small delay to ensure Docker is fully stable
-	time.Sleep(500 * time.Millisecond)
-
-	// Transition to launching core
-	cpl.stateMachine.SendEvent(state.EventRetry)
-}
-
 // handleDockerUnavailable handles scenarios where Docker Desktop is paused or unavailable.
-// Uses exponential backoff to avoid wasting resources while waiting for Docker recovery.
 func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 	lastErr := cpl.stateMachine.GetLastError()
 	if lastErr != nil {
@@ -1393,54 +1514,25 @@ func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
 	cpl.dockerRetryMu.Unlock()
 
 	go func() {
-		// Exponential backoff intervals: fast when Docker just paused, slower when off for longer
-		intervals := []time.Duration{
-			2 * time.Second,   // Immediate retry (Docker just paused)
-			5 * time.Second,   // Quick retry
-			10 * time.Second,  // Normal retry
-			30 * time.Second,  // Slow retry
-			60 * time.Second,  // Very slow retry (max backoff)
-		}
-
-		attempt := 0
-		startTime := time.Now()
-
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 		for {
-			// Calculate current interval (stay at max after reaching it)
-			currentInterval := intervals[min(attempt, len(intervals)-1)]
-
 			select {
 			case <-retryCtx.Done():
 				return
-			case <-time.After(currentInterval):
+			case <-ticker.C:
 				if err := cpl.ensureDockerAvailable(retryCtx); err == nil {
-					elapsed := time.Since(startTime)
-					cpl.logger.Info("Docker engine available - transitioning to recovery state",
-						zap.Int("attempts", attempt+1),
-						zap.Duration("total_wait", elapsed))
+					cpl.logger.Info("Docker engine available - retrying core launch")
 					cpl.setDockerReconnectPending(true)
 					cpl.cancelDockerRetry()
-					// Transition to recovering state instead of directly retrying
-					cpl.stateMachine.SendEvent(state.EventDockerRecovered)
+					cpl.stateMachine.SendEvent(state.EventRetry)
 					return
 				} else if err != nil {
-					cpl.logger.Debug("Docker still unavailable",
-						zap.Int("attempt", attempt+1),
-						zap.Duration("next_check_in", intervals[min(attempt+1, len(intervals)-1)]),
-						zap.Error(err))
+					cpl.logger.Debug("Docker still unavailable", zap.Error(err))
 				}
-				attempt++
 			}
 		}
 	}()
-}
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // cancelDockerRetry stops any pending Docker retry loop.
@@ -1451,6 +1543,13 @@ func (cpl *CoreProcessLauncher) cancelDockerRetry() {
 		cpl.dockerRetryCancel = nil
 	}
 	cpl.dockerRetryMu.Unlock()
+}
+
+// handleDockerRecovering handles the Docker recovery state when Docker becomes available again.
+func (cpl *CoreProcessLauncher) handleDockerRecovering() {
+	cpl.logger.Info("Docker engine recovered - preparing to reconnect servers")
+	// The state machine will automatically transition to StateLaunchingCore
+	// after the timeout defined in StateCoreRecoveringDocker (10s)
 }
 
 func (cpl *CoreProcessLauncher) setDockerReconnectPending(pending bool) {
@@ -1590,9 +1689,12 @@ func (cpl *CoreProcessLauncher) handleGeneralError() {
 	}
 }
 
-// handleShutdown handles graceful shutdown
+// handleShutdown handles graceful shutdown and waits for core termination
 func (cpl *CoreProcessLauncher) handleShutdown() {
-	cpl.logger.Info("Core process launcher shutting down")
+	cpl.logger.Infow("Core process launcher shutting down",
+		"monitor_present", cpl.processMonitor != nil,
+		"api_client_present", cpl.apiClient != nil,
+		"core_ownership", cpl.coreOwnership)
 
 	// CRITICAL: Disable menu sync FIRST to prevent API calls after shutdown
 	// This prevents the menu sync from trying to fetch servers after core is killed
@@ -1606,11 +1708,25 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 
 	// Stop SSE connection before killing core
 	// This prevents SSE from detecting disconnection and trying to reconnect
-	cpl.logger.Info("Stopping SSE connection")
-	cpl.apiClient.StopSSE()
+	if cpl.apiClient != nil {
+		cpl.logger.Info("Stopping SSE connection (enter)")
 
-	// Give SSE goroutine a moment to see cancellation and exit cleanly
-	time.Sleep(100 * time.Millisecond)
+		sseDone := make(chan struct{})
+		sseStarted := time.Now()
+		go func() {
+			cpl.apiClient.StopSSE()
+			close(sseDone)
+		}()
+
+		select {
+		case <-sseDone:
+			cpl.logger.Infow("SSE connection stopped", "duration", time.Since(sseStarted))
+		case <-time.After(5 * time.Second):
+			cpl.logger.Warn("SSE stop timed out, continuing with shutdown")
+		}
+	} else {
+		cpl.logger.Debug("API client unavailable, skipping SSE shutdown")
+	}
 
 	// Stop health monitor before killing core
 	if cpl.healthMonitor != nil {
@@ -1618,11 +1734,159 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 		cpl.healthMonitor.Stop()
 	}
 
-	// Finally, kill the core process
+	// Finally, kill the core process and WAIT for it to terminate
 	if cpl.processMonitor != nil {
-		cpl.logger.Info("Shutting down core process")
-		cpl.processMonitor.Shutdown()
+		pid := cpl.processMonitor.GetPID()
+		cpl.logger.Infow("Shutting down core process - waiting for termination...",
+			"pid", pid,
+			"status", cpl.processMonitor.GetStatus())
+
+		// NEW: Create timeout for core shutdown (30 seconds total)
+		shutdownTimeout := time.After(30 * time.Second)
+		shutdownDone := make(chan struct{})
+		shutdownStarted := time.Now()
+
+		go func() {
+			cpl.processMonitor.Shutdown() // This already has 10s SIGTERM + SIGKILL logic
+			close(shutdownDone)
+		}()
+
+		// NEW: Wait for shutdown with timeout
+		select {
+		case <-shutdownDone:
+			cpl.logger.Infow("Core process terminated successfully", "duration", time.Since(shutdownStarted))
+		case <-shutdownTimeout:
+			cpl.logger.Error("Core shutdown timeout exceeded - forcing kill")
+			// Attempt force kill as last resort
+			cpl.forceKillCore()
+		}
+
+		// NEW: Verify core is actually dead
+		if cpl.processMonitor.GetStatus() == monitor.ProcessStatusRunning {
+			cpl.logger.Error("Core process still running after shutdown - emergency kill")
+			cpl.forceKillCore()
+			time.Sleep(1 * time.Second) // Give it a moment to die
+		}
+	} else {
+		switch cpl.coreOwnership {
+		case coreOwnershipExternalUnmanaged:
+			cpl.logger.Info("Core management skipped by configuration - leaving external core running")
+		default:
+			cpl.logger.Warn("Process monitor unavailable during shutdown - attempting emergency core termination")
+			if err := cpl.shutdownExternalCoreFallback(); err != nil {
+				cpl.logger.Error("Emergency core shutdown failed", zap.Error(err))
+			}
+		}
 	}
+
+	if cpl.coreOwnership != coreOwnershipExternalUnmanaged {
+		if err := cpl.ensureCoreTermination(); err != nil {
+			cpl.logger.Error("Final core termination verification failed", zap.Error(err))
+		}
+	}
+
+	cpl.logger.Info("Core shutdown complete")
+}
+
+
+
+// lookupExternalCorePID retrieves the core PID from the status API.
+func (cpl *CoreProcessLauncher) lookupExternalCorePID() (int, error) {
+	if cpl.apiClient == nil {
+		return 0, fmt.Errorf("api client not available")
+	}
+
+	status, err := cpl.apiClient.GetStatus()
+	if err != nil {
+		return 0, fmt.Errorf("failed to query core status: %w", err)
+	}
+
+	rawPID, ok := status["process_pid"]
+	if !ok {
+		return 0, fmt.Errorf("status payload missing process_pid field")
+	}
+
+	switch value := rawPID.(type) {
+	case float64:
+		return int(value), nil
+	case int:
+		return value, nil
+	case int64:
+		return int(value), nil
+	case json.Number:
+		parsed, parseErr := strconv.Atoi(value.String())
+		if parseErr != nil {
+			return 0, fmt.Errorf("failed to parse process_pid: %w", parseErr)
+		}
+		return parsed, nil
+	case string:
+		parsed, parseErr := strconv.Atoi(value)
+		if parseErr != nil {
+			return 0, fmt.Errorf("failed to parse process_pid string: %w", parseErr)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("unsupported process_pid type %T", rawPID)
+	}
+}
+
+
+
+
+// collectCorePIDs gathers candidate PIDs from the monitor and status API.
+func (cpl *CoreProcessLauncher) collectCorePIDs() map[int]struct{} {
+	pids := make(map[int]struct{})
+
+	if cpl.processMonitor != nil {
+		if pid := cpl.processMonitor.GetPID(); pid > 0 {
+			pids[pid] = struct{}{}
+			cpl.logger.Infow("Collected PID from process monitor",
+				"pid", pid,
+				"monitor_status", cpl.processMonitor.GetStatus())
+		}
+	}
+
+	if pid, err := cpl.lookupExternalCorePID(); err == nil && pid > 0 {
+		pids[pid] = struct{}{}
+		cpl.logger.Infow("Collected PID from status API", "pid", pid)
+	} else if err != nil {
+		cpl.logger.Debug("Failed to obtain core PID from status API", zap.Error(err))
+	}
+
+	return pids
+}
+
+// findCorePIDsViaPgrep falls back to scanning the process list for lingering cores.
+func (cpl *CoreProcessLauncher) findCorePIDsViaPgrep() ([]int, error) {
+	cmd := exec.Command("pgrep", "-f", "mcpproxy serve")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	raw := strings.TrimSpace(string(output))
+	if raw == "" {
+		return nil, nil
+	}
+
+	lines := strings.Split(raw, "\n")
+	pids := make([]int, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(line)
+		if err != nil {
+			cpl.logger.Debug("Ignoring invalid PID from pgrep", zap.String("value", line), zap.Error(err))
+			continue
+		}
+		if pid > 0 {
+			pids = append(pids, pid)
+		}
+	}
+
+	return pids, nil
 }
 
 // buildCoreEnvironment builds the environment for the core process

@@ -422,10 +422,16 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Setup signal handling for graceful shutdown with force quit on second signal
+	logger.Info("Signal handler goroutine starting - waiting for SIGINT or SIGTERM")
+	_ = logger.Sync()
 	go func() {
+		logger.Info("Signal handler goroutine is running, waiting for signal on channel")
+		_ = logger.Sync()
 		sig := <-sigChan
 		logger.Info("Received signal, shutting down", zap.String("signal", sig.String()))
+		_ = logger.Sync() // Flush logs immediately so we can see shutdown messages
 		logger.Info("Press Ctrl+C again within 10 seconds to force quit")
+		_ = logger.Sync() // Flush again
 		cancel()
 
 		// Start a timer for force quit

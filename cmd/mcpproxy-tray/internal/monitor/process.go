@@ -81,6 +81,7 @@ type ProcessMonitor struct {
 	// Channels
 	eventCh    chan ProcessEvent
 	shutdownCh chan struct{}
+	doneCh     chan struct{} // Closed when monitor() exits
 
 	// Output capture
 	stdoutBuf strings.Builder
@@ -108,6 +109,7 @@ func NewProcessMonitor(config *ProcessConfig, logger *zap.SugaredLogger, stateMa
 		status:       ProcessStatusStopped,
 		eventCh:      make(chan ProcessEvent, 50),
 		shutdownCh:   make(chan struct{}),
+		doneCh:       make(chan struct{}),
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -195,39 +197,51 @@ func (pm *ProcessMonitor) Start() error {
 // Stop stops the monitored process
 func (pm *ProcessMonitor) Stop() error {
 	pm.mu.Lock()
-	cmd := pm.cmd
 	pid := pm.pid
 	pm.mu.Unlock()
 
-	if cmd == nil || cmd.Process == nil {
+	if pid <= 0 {
 		return fmt.Errorf("no process to stop")
 	}
 
 	pm.logger.Infow("Stopping process", "pid", pid)
 
-	// Send SIGTERM to process group
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+	// Send SIGTERM to the process itself (not process group)
+	// When the core is wrapped in a shell (zsh -l -c "exec mcpproxy"), sending to the
+	// process group can cause signal handling issues. The shell's `exec` replaces the
+	// shell process with mcpproxy, so sending SIGTERM to the PID directly works correctly.
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		pm.logger.Warn("Failed to send SIGTERM", "pid", pid, "error", err)
 	}
 
-	// Wait for graceful shutdown with timeout
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
+	// Wait for monitor goroutine to detect exit (via doneCh)
+	// This avoids the cmd.Wait() race condition
 	select {
-	case err := <-done:
-		pm.logger.Infow("Process stopped gracefully", "pid", pid, "error", err)
-		return err
-	case <-time.After(10 * time.Second):
-		// Force kill
-		pm.logger.Warn("Process did not stop gracefully, sending SIGKILL", "pid", pid)
-		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	case <-pm.doneCh:
+		// Monitor has detected process exit
+		pm.mu.RLock()
+		exitInfo := pm.exitInfo
+		pm.mu.RUnlock()
+
+		if exitInfo != nil {
+			pm.logger.Infow("Process stopped", "pid", pid, "exit_code", exitInfo.Code)
+			return exitInfo.Error
+		}
+		pm.logger.Infow("Process stopped (no exit info)", "pid", pid)
+		return nil
+
+	case <-time.After(45 * time.Second):
+		// Force kill after 45 seconds to allow core time to clean up Docker containers
+		// Core needs time for parallel container cleanup (typically 10-30s for 7 containers)
+		pm.logger.Warn("Process did not stop gracefully after 45s, sending SIGKILL", "pid", pid)
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			pm.logger.Error("Failed to send SIGKILL", "pid", pid, "error", err)
 		}
-		<-done // Wait for process to exit
-		return fmt.Errorf("process force killed")
+
+		// Wait for monitor to detect the kill
+		<-pm.doneCh
+		pm.logger.Info("Process force killed", "pid", pid)
+		return fmt.Errorf("process force killed after timeout")
 	}
 }
 
@@ -267,12 +281,25 @@ func (pm *ProcessMonitor) EventChannel() <-chan ProcessEvent {
 // Shutdown gracefully shuts down the process monitor
 func (pm *ProcessMonitor) Shutdown() {
 	pm.logger.Info("Process monitor shutting down")
-	pm.cancel()
+
+	// IMPORTANT: Do NOT cancel context before stopping process!
+	// Cancelling the context sends SIGKILL immediately via exec.CommandContext,
+	// preventing graceful shutdown. We must call Stop() first, which sends SIGTERM
+	// and waits for graceful termination.
 
 	// Stop the process if it's still running
-	if pm.GetStatus() == ProcessStatusRunning {
-		_ = pm.Stop() // Ignore error during shutdown
+	status := pm.GetStatus()
+	pm.logger.Infow("Process monitor status before stop", "status", status)
+	if status == ProcessStatusRunning || status == ProcessStatusStarting {
+		if err := pm.Stop(); err != nil {
+			pm.logger.Warn("Process stop returned error during shutdown", "error", err)
+		} else {
+			pm.logger.Info("Process stop completed during shutdown")
+		}
 	}
+
+	// Now it's safe to cancel the context after the process has stopped
+	pm.cancel()
 
 	close(pm.shutdownCh)
 }
@@ -280,6 +307,7 @@ func (pm *ProcessMonitor) Shutdown() {
 // monitor watches the process in a background goroutine
 func (pm *ProcessMonitor) monitor() {
 	defer close(pm.eventCh)
+	defer close(pm.doneCh)
 
 	// Wait for process to exit
 	err := pm.cmd.Wait()

@@ -1525,15 +1525,17 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.connected || c.client == nil {
-		return nil
-	}
+	// CRITICAL FIX: Always perform cleanup, even if not fully connected
+	// Servers in "Connecting" state may have Docker containers running
+	wasConnected := c.connected
 
-	c.logger.Info("Disconnecting from upstream MCP server")
+	c.logger.Info("Disconnecting from upstream MCP server",
+		zap.Bool("was_connected", wasConnected))
 
 	// Log disconnection to server-specific log
 	if c.upstreamLogger != nil {
-		c.upstreamLogger.Info("Disconnecting from server")
+		c.upstreamLogger.Info("Disconnecting from server",
+			zap.Bool("was_connected", wasConnected))
 	}
 
 	// Stop stderr monitoring before closing client
@@ -1543,6 +1545,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.StopProcessMonitoring()
 
 	// For Docker containers, kill the container before closing the client
+	// IMPORTANT: Do this even if not fully connected, as containers may be running
 	if c.isDockerCommand {
 		c.logger.Debug("Disconnecting Docker command, attempting container cleanup",
 			zap.String("server", c.config.Name),
@@ -1601,38 +1604,44 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		c.processGroupID = 0
 	}
 
-	c.logger.Debug("Closing MCP client connection",
-		zap.String("server", c.config.Name))
-
-	closeDone := make(chan struct{})
-	go func() {
-		c.client.Close()
-		close(closeDone)
-	}()
-
-	select {
-	case <-closeDone:
-		c.logger.Debug("MCP client connection closed",
-			zap.String("server", c.config.Name))
-	case <-time.After(2 * time.Second):
-		c.logger.Warn("MCP client close timed out, forcing shutdown",
+	// Close MCP client if it exists
+	if c.client != nil {
+		c.logger.Debug("Closing MCP client connection",
 			zap.String("server", c.config.Name))
 
-		// Attempt process group cleanup if available
-		if c.processGroupID > 0 {
-			_ = killProcessGroup(c.processGroupID, c.logger, c.config.Name)
-		}
+		closeDone := make(chan struct{})
+		go func() {
+			c.client.Close()
+			close(closeDone)
+		}()
 
-		if c.processCmd != nil && c.processCmd.Process != nil {
-			if err := c.processCmd.Process.Kill(); err != nil {
-				c.logger.Warn("Failed to kill stdio process after close timeout",
-					zap.String("server", c.config.Name),
-					zap.Error(err))
-			} else {
-				c.logger.Info("Killed stdio process after close timeout",
-					zap.String("server", c.config.Name))
+		select {
+		case <-closeDone:
+			c.logger.Debug("MCP client connection closed",
+				zap.String("server", c.config.Name))
+		case <-time.After(2 * time.Second):
+			c.logger.Warn("MCP client close timed out, forcing shutdown",
+				zap.String("server", c.config.Name))
+
+			// Attempt process group cleanup if available
+			if c.processGroupID > 0 {
+				_ = killProcessGroup(c.processGroupID, c.logger, c.config.Name)
+			}
+
+			if c.processCmd != nil && c.processCmd.Process != nil {
+				if err := c.processCmd.Process.Kill(); err != nil {
+					c.logger.Warn("Failed to kill stdio process after close timeout",
+						zap.String("server", c.config.Name),
+						zap.Error(err))
+				} else {
+					c.logger.Info("Killed stdio process after close timeout",
+						zap.String("server", c.config.Name))
+				}
 			}
 		}
+	} else {
+		c.logger.Debug("No MCP client to close (may be in connecting state)",
+			zap.String("server", c.config.Name))
 	}
 
 	c.client = nil

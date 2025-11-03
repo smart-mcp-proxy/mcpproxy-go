@@ -692,9 +692,16 @@ func (a *App) onReady() {
 					a.logger.Info("Quit item clicked, shutting down")
 					if a.shutdown != nil {
 						a.shutdown()
+						select {
+						case <-a.ctx.Done():
+							a.logger.Info("Tray context cancelled, quit handler exiting")
+						case <-time.After(30 * time.Second):
+							a.logger.Warn("Tray shutdown timed out, forcing systray quit")
+							systray.Quit()
+						}
+					} else {
+						systray.Quit()
 					}
-					// Ensure we exit even if cancellation propagation stalls.
-					systray.Quit()
 					return
 				case <-a.ctx.Done():
 					return

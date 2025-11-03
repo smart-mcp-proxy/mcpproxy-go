@@ -19,6 +19,7 @@ import (
 	"mcpproxy-go/internal/observability"
 	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
 )
 
@@ -44,6 +45,7 @@ type ServerController interface {
 	EnableServer(serverName string, enabled bool) error
 	RestartServer(serverName string) error
 	ForceReconnectAllServers(reason string) error
+	GetDockerRecoveryStatus() *storage.DockerRecoveryState
 	QuarantineServer(serverName string, quarantined bool) error
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
@@ -294,6 +296,9 @@ func (s *Server) setupRoutes() {
 
 		// Search
 		r.Get("/index/search", s.handleSearchTools)
+
+		// Docker recovery status
+		r.Get("/docker/status", s.handleGetDockerStatus)
 
 		// Secrets management
 		r.Route("/secrets", func(r chi.Router) {
@@ -1796,4 +1801,25 @@ func getBool(m map[string]interface{}, key string) bool {
 		return val
 	}
 	return false
+}
+
+// handleGetDockerStatus returns the current Docker recovery status
+func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
+	status := s.controller.GetDockerRecoveryStatus()
+	if status == nil {
+		s.writeError(w, http.StatusInternalServerError, "failed to get Docker status")
+		return
+	}
+
+	response := map[string]interface{}{
+		"docker_available":   status.DockerAvailable,
+		"recovery_mode":      status.RecoveryMode,
+		"failure_count":      status.FailureCount,
+		"attempts_since_up":  status.AttemptsSinceUp,
+		"last_attempt":       status.LastAttempt,
+		"last_error":         status.LastError,
+		"last_successful_at": status.LastSuccessfulAt,
+	}
+
+	s.writeSuccess(w, response)
 }

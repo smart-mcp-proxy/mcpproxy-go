@@ -154,7 +154,7 @@ func TestConfigurationIntegration(t *testing.T) {
 		cfg := config.DefaultConfig()
 		logger := zap.NewNop()
 
-		manager := NewManager(logger, cfg, nil, secret.NewResolver())
+		manager := NewManager(logger, cfg, nil, secret.NewResolver(), nil)
 		require.NotNil(t, manager)
 		assert.Equal(t, cfg, manager.globalConfig)
 	})

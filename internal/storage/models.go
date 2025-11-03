@@ -20,7 +20,8 @@ const (
 
 // Meta keys
 const (
-	SchemaVersionKey = "schema"
+	SchemaVersionKey       = "schema"
+	DockerRecoveryStateKey = "docker_recovery_state"
 )
 
 // Current schema version
@@ -78,6 +79,18 @@ type OAuthCompletionEvent struct {
 	ProcessedAt *time.Time `json:"processed_at,omitempty"` // Nil if not yet processed by server
 }
 
+// DockerRecoveryState represents the persistent state of Docker recovery
+// This allows recovery to resume after application restart
+type DockerRecoveryState struct {
+	LastAttempt      time.Time `json:"last_attempt"`
+	FailureCount     int       `json:"failure_count"`
+	DockerAvailable  bool      `json:"docker_available"`
+	RecoveryMode     bool      `json:"recovery_mode"`
+	LastError        string    `json:"last_error,omitempty"`
+	AttemptsSinceUp  int       `json:"attempts_since_up"` // Attempts since Docker was last available
+	LastSuccessfulAt time.Time `json:"last_successful_at,omitempty"`
+}
+
 // MarshalBinary implements encoding.BinaryMarshaler
 func (u *UpstreamRecord) MarshalBinary() ([]byte, error) {
 	return json.Marshal(u)
@@ -126,4 +139,14 @@ func (e *OAuthCompletionEvent) MarshalBinary() ([]byte, error) {
 // UnmarshalBinary implements encoding.BinaryUnmarshaler
 func (e *OAuthCompletionEvent) UnmarshalBinary(data []byte) error {
 	return json.Unmarshal(data, e)
+}
+
+// MarshalBinary implements encoding.BinaryMarshaler
+func (d *DockerRecoveryState) MarshalBinary() ([]byte, error) {
+	return json.Marshal(d)
+}
+
+// UnmarshalBinary implements encoding.BinaryUnmarshaler
+func (d *DockerRecoveryState) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, d)
 }

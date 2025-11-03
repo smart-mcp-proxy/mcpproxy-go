@@ -312,7 +312,7 @@ func runBuiltInTool(ctx context.Context, toolName string, args map[string]interf
 	secretResolver := secret.NewResolver()
 
 	// Create upstream manager
-	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB(), secretResolver)
+	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB(), secretResolver, storageManager)
 
 	// Create cache manager
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)

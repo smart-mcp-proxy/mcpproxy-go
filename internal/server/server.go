@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/tlslocal"
 	"mcpproxy-go/internal/upstream/types"
 	"mcpproxy-go/web"
@@ -111,6 +113,7 @@ func (s *Server) GetStatus() interface{} {
 	status := s.runtime.StatusSnapshot(s.IsRunning())
 	if status != nil {
 		status["listen_addr"] = s.GetListenAddress()
+		status["process_pid"] = os.Getpid()
 	}
 	return status
 }
@@ -128,6 +131,11 @@ func (s *Server) TriggerOAuthLogin(serverName string) error {
 		return err
 	}
 	return nil
+}
+
+// GetDockerRecoveryStatus returns the current Docker recovery status
+func (s *Server) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
+	return s.runtime.GetDockerRecoveryStatus()
 }
 
 // StatusChannel returns a channel that receives status updates
@@ -805,6 +813,12 @@ func (s *Server) StopServer() error {
 	_ = s.logger.Sync()
 
 	s.mu.Lock()
+	// Check if Shutdown() has already been called - prevent duplicate shutdown
+	if s.shutdown {
+		s.mu.Unlock()
+		s.logger.Debug("Server shutdown already in progress via Shutdown(), skipping StopServer")
+		return nil
+	}
 	if !s.running {
 		s.mu.Unlock()
 		// Return nil instead of error to prevent race condition logs
@@ -845,26 +859,30 @@ func (s *Server) StopServer() error {
 
 	// STEP 2: Disconnect upstream servers AFTER HTTP server is shut down
 	// This ensures no new requests can come in while we're disconnecting
-	s.logger.Info("STOPSERVER - Disconnecting upstream servers")
+	// Use a FRESH context (not the cancelled server context) for cleanup
+	s.logger.Info("STOPSERVER - Disconnecting upstream servers with parallel cleanup")
 	_ = s.logger.Sync()
-	if err := s.runtime.UpstreamManager().DisconnectAll(); err != nil {
-		s.logger.Error("STOPSERVER - Failed to disconnect upstream servers", zap.Error(err))
+
+	// NEW: Create dedicated cleanup context with generous timeout (45 seconds)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cleanupCancel()
+
+	// NEW: Use ShutdownAll for parallel cleanup with proper container verification
+	if err := s.runtime.UpstreamManager().ShutdownAll(cleanupCtx); err != nil {
+		s.logger.Error("STOPSERVER - Failed to shutdown upstream servers", zap.Error(err))
 		_ = s.logger.Sync()
 	} else {
-		s.logger.Info("STOPSERVER - Successfully disconnected all upstream servers")
+		s.logger.Info("STOPSERVER - Successfully shutdown all upstream servers")
 		_ = s.logger.Sync()
 	}
 
-	// Add a brief wait to ensure Docker containers have time to be cleaned up
-	// Only wait if there are actually Docker containers running
+	// NEW: Verify all containers stopped with retry loop (instead of arbitrary 3s sleep)
 	if s.runtime.UpstreamManager().HasDockerContainers() {
-		s.logger.Info("STOPSERVER - Docker containers detected, waiting for cleanup to complete")
+		s.logger.Warn("STOPSERVER - Docker containers still running, verifying cleanup...")
 		_ = s.logger.Sync()
-		time.Sleep(3 * time.Second)
-		s.logger.Info("STOPSERVER - Docker container cleanup wait completed")
-		_ = s.logger.Sync()
+		s.verifyContainersCleanedUp(cleanupCtx)
 	} else {
-		s.logger.Debug("STOPSERVER - No Docker containers detected, skipping cleanup wait")
+		s.logger.Info("STOPSERVER - All Docker containers cleaned up successfully")
 		_ = s.logger.Sync()
 	}
 
@@ -889,6 +907,50 @@ func (s *Server) StopServer() error {
 	_ = s.logger.Sync() // Final log flush
 
 	return nil
+}
+
+// verifyContainersCleanedUp verifies all Docker containers have stopped and forces cleanup if needed
+func (s *Server) verifyContainersCleanedUp(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	maxAttempts := 15 // 15 seconds total
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		select {
+		case <-ctx.Done():
+			s.logger.Error("STOPSERVER - Cleanup verification timeout", zap.Error(ctx.Err()))
+			_ = s.logger.Sync()
+			// Force cleanup as last resort
+			s.runtime.UpstreamManager().ForceCleanupAllContainers()
+			return
+		case <-ticker.C:
+			if !s.runtime.UpstreamManager().HasDockerContainers() {
+				s.logger.Info("STOPSERVER - All containers cleaned up successfully",
+					zap.Int("attempts", attempt+1))
+				_ = s.logger.Sync()
+				return
+			}
+			s.logger.Debug("STOPSERVER - Waiting for container cleanup...",
+				zap.Int("attempt", attempt+1),
+				zap.Int("max_attempts", maxAttempts))
+		}
+	}
+
+	// Timeout reached - force cleanup
+	s.logger.Error("STOPSERVER - Some containers failed to stop gracefully - forcing cleanup")
+	_ = s.logger.Sync()
+	s.runtime.UpstreamManager().ForceCleanupAllContainers()
+
+	// Give force cleanup a moment to complete
+	time.Sleep(2 * time.Second)
+
+	if s.runtime.UpstreamManager().HasDockerContainers() {
+		s.logger.Error("STOPSERVER - WARNING: Some containers may still be running after force cleanup")
+		_ = s.logger.Sync()
+	} else {
+		s.logger.Info("STOPSERVER - Force cleanup succeeded - all containers removed")
+		_ = s.logger.Sync()
+	}
 }
 
 func resolveDisplayAddress(actual, requested string) string {
