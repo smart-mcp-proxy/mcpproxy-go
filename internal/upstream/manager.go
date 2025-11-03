@@ -1471,6 +1471,13 @@ func (m *Manager) startOAuthEventMonitor(ctx context.Context) {
 			m.logger.Info("OAuth event monitor stopped due to context cancellation")
 			return
 		case <-ticker.C:
+			// Check if context was cancelled before processing
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			if err := m.processOAuthEvents(); err != nil {
 				m.logger.Warn("Failed to process OAuth events", zap.Error(err))
 			}
