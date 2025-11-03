@@ -81,6 +81,7 @@ type ProcessMonitor struct {
     // Channels
     eventCh    chan ProcessEvent
     shutdownCh chan struct{}
+    doneCh     chan struct{} // Closed when monitor() exits
 
     // Output capture
     stdoutBuf strings.Builder
@@ -108,6 +109,7 @@ func NewProcessMonitor(config *ProcessConfig, logger *zap.SugaredLogger, stateMa
 		status:       ProcessStatusStopped,
 		eventCh:      make(chan ProcessEvent, 50),
 		shutdownCh:   make(chan struct{}),
+		doneCh:       make(chan struct{}),
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -180,33 +182,46 @@ func (pm *ProcessMonitor) Start() error {
 // Stop stops the monitored process (Windows)
 func (pm *ProcessMonitor) Stop() error {
 	pm.mu.Lock()
-	cmd := pm.cmd
 	pid := pm.pid
 	pm.mu.Unlock()
 
-	if cmd == nil || cmd.Process == nil {
+	if pid <= 0 {
 		return fmt.Errorf("no process to stop")
 	}
 
 	pm.logger.Infow("Stopping process", "pid", pid)
 
-	// Try graceful stop via taskkill /T to kill tree
-	killCmd := exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
+	// Try graceful stop via taskkill without /F first
+	killCmd := exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T")
 	_ = killCmd.Run()
 
-	// Wait for exit with timeout
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
+	// Wait for monitor goroutine to detect exit (via doneCh)
+	// This avoids the cmd.Wait() race condition
 	select {
-	case err := <-done:
-		pm.logger.Infow("Process stopped", "pid", pid, "error", err)
-		return err
-	case <-time.After(10 * time.Second):
-		// Force kill if still alive
-		_ = exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F").Run()
-		<-done
-		return fmt.Errorf("process force killed")
+	case <-pm.doneCh:
+		// Monitor has detected process exit
+		pm.mu.RLock()
+		exitInfo := pm.exitInfo
+		pm.mu.RUnlock()
+
+		if exitInfo != nil {
+			pm.logger.Infow("Process stopped", "pid", pid, "exit_code", exitInfo.Code)
+			return exitInfo.Error
+		}
+		pm.logger.Infow("Process stopped (no exit info)", "pid", pid)
+		return nil
+
+	case <-time.After(45 * time.Second):
+		// Force kill after 45 seconds to allow core time to clean up Docker containers
+		// Core needs time for parallel container cleanup (typically 10-30s for 7 containers)
+		pm.logger.Warn("Process did not stop gracefully after 45s, sending force kill", "pid", pid)
+		killCmd := exec.Command("taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
+		_ = killCmd.Run()
+
+		// Wait for monitor to detect the kill
+		<-pm.doneCh
+		pm.logger.Info("Process force killed", "pid", pid)
+		return fmt.Errorf("process force killed after timeout")
 	}
 }
 
@@ -257,6 +272,7 @@ func (pm *ProcessMonitor) captureOutput(pipe io.ReadCloser, buf *strings.Builder
 // monitor waits for process exit (Windows)
 func (pm *ProcessMonitor) monitor() {
 	defer close(pm.eventCh)
+	defer close(pm.doneCh)
 	err := pm.cmd.Wait()
 	pm.mu.Lock()
 	pm.exitInfo = &ExitInfo{Timestamp: time.Now(), Error: err}
@@ -301,10 +317,26 @@ func (pm *ProcessMonitor) monitor() {
 // Shutdown gracefully shuts down the monitor
 func (pm *ProcessMonitor) Shutdown() {
 	pm.logger.Info("Process monitor shutting down")
-	pm.cancel()
-	if pm.GetStatus() == ProcessStatusRunning {
-		_ = pm.Stop()
+
+	// IMPORTANT: Do NOT cancel context before stopping process!
+	// Cancelling the context sends SIGKILL immediately via exec.CommandContext,
+	// preventing graceful shutdown. We must call Stop() first, which sends SIGTERM
+	// and waits for graceful termination.
+
+	// Stop the process if it's still running
+	status := pm.GetStatus()
+	pm.logger.Infow("Process monitor status before stop", "status", status)
+	if status == ProcessStatusRunning || status == ProcessStatusStarting {
+		if err := pm.Stop(); err != nil {
+			pm.logger.Warn("Process stop returned error during shutdown", "error", err)
+		} else {
+			pm.logger.Info("Process stop completed during shutdown")
+		}
 	}
+
+	// Now it's safe to cancel the context after the process has stopped
+	pm.cancel()
+
 	close(pm.shutdownCh)
 }
 
@@ -366,3 +398,29 @@ func (pm *ProcessMonitor) maskSensitiveEnv(env []string) []string {
 }
 
 
+
+// GetPID returns the process ID (Windows)
+func (pm *ProcessMonitor) GetPID() int {
+    pm.mu.RLock()
+    defer pm.mu.RUnlock()
+    return pm.pid
+}
+
+// GetExitInfo returns information about process exit (Windows)
+func (pm *ProcessMonitor) GetExitInfo() *ExitInfo {
+    pm.mu.RLock()
+    defer pm.mu.RUnlock()
+    return pm.exitInfo
+}
+
+// GetOutput returns captured stdout and stderr (Windows)
+func (pm *ProcessMonitor) GetOutput() (stdout, stderr string) {
+    pm.outputMu.Lock()
+    defer pm.outputMu.Unlock()
+    return pm.stdoutBuf.String(), pm.stderrBuf.String()
+}
+
+// EventChannel returns a channel for receiving process events (Windows)
+func (pm *ProcessMonitor) EventChannel() <-chan ProcessEvent {
+    return pm.eventCh
+}

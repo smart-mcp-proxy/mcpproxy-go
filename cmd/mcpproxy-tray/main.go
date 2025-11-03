@@ -1788,49 +1788,7 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 	cpl.logger.Info("Core shutdown complete")
 }
 
-// forceKillCore sends SIGKILL to the core process as a last resort
-func (cpl *CoreProcessLauncher) forceKillCore() {
-	pid := cpl.processMonitor.GetPID()
-	if pid <= 0 {
-		cpl.logger.Warn("No PID available for force kill")
-		return
-	}
 
-	cpl.logger.Warn("Sending SIGKILL to core process", zap.Int("pid", pid))
-
-	// Kill the entire process group
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-		if !errors.Is(err, syscall.ESRCH) {
-			cpl.logger.Error("Failed to send SIGKILL", zap.Int("pid", pid), zap.Error(err))
-		}
-	}
-}
-
-// shutdownExternalCoreFallback attempts to terminate an externally managed core process.
-func (cpl *CoreProcessLauncher) shutdownExternalCoreFallback() error {
-	pid, err := cpl.lookupExternalCorePID()
-	if err != nil {
-		return fmt.Errorf("failed to discover core PID: %w", err)
-	}
-	if pid <= 0 {
-		return fmt.Errorf("invalid PID discovered (%d)", pid)
-	}
-
-	cpl.logger.Info("Attempting graceful shutdown for external core", zap.Int("pid", pid))
-	if err := cpl.signalProcessTree(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		cpl.logger.Warn("Failed to send SIGTERM to external core", zap.Int("pid", pid), zap.Error(err))
-	}
-
-	if !cpl.waitForProcessExit(pid, 30*time.Second) {
-		cpl.logger.Warn("External core did not exit after SIGTERM, sending SIGKILL", zap.Int("pid", pid))
-		if err := cpl.signalProcessTree(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return fmt.Errorf("failed to force kill external core: %w", err)
-		}
-		_ = cpl.waitForProcessExit(pid, 5*time.Second)
-	}
-
-	return nil
-}
 
 // lookupExternalCorePID retrieves the core PID from the status API.
 func (cpl *CoreProcessLauncher) lookupExternalCorePID() (int, error) {
@@ -1872,115 +1830,8 @@ func (cpl *CoreProcessLauncher) lookupExternalCorePID() (int, error) {
 	}
 }
 
-// signalProcessTree sends a signal to the target process group and falls back to the process itself.
-func (cpl *CoreProcessLauncher) signalProcessTree(pid int, sig syscall.Signal) error {
-	if pid <= 0 {
-		return fmt.Errorf("invalid pid %d", pid)
-	}
 
-	if err := syscall.Kill(-pid, sig); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-		// Fall back to signalling the process directly.
-		if err := syscall.Kill(pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-		return nil
-	}
 
-	// Also send the signal directly to ensure the process receives it even if group signalling fails silently.
-	if err := syscall.Kill(pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-
-	return nil
-}
-
-// waitForProcessExit polls until the process exits or the timeout expires.
-func (cpl *CoreProcessLauncher) waitForProcessExit(pid int, timeout time.Duration) bool {
-	if pid <= 0 {
-		return true
-	}
-
-	deadline := time.After(timeout)
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-deadline:
-			return false
-		case <-ticker.C:
-			if !cpl.isProcessAlive(pid) {
-				return true
-			}
-		}
-	}
-}
-
-// isProcessAlive returns true if the OS reports the PID as running.
-func (cpl *CoreProcessLauncher) isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-
-	err := syscall.Kill(pid, 0)
-	if err == nil {
-		return true
-	}
-
-	// EPERM means the process exists but we lack permissions.
-	return !errors.Is(err, syscall.ESRCH)
-}
-
-// ensureCoreTermination double-checks that no core processes remain and performs a safety cleanup.
-func (cpl *CoreProcessLauncher) ensureCoreTermination() error {
-	candidates := cpl.collectCorePIDs()
-	if len(candidates) == 0 {
-		if extra, err := cpl.findCorePIDsViaPgrep(); err == nil {
-			cpl.logger.Infow("No monitor/status PIDs found, using pgrep results",
-				"pgrep_count", len(extra),
-				"pgrep_pids", extra)
-			for _, pid := range extra {
-				if pid > 0 {
-					candidates[pid] = struct{}{}
-				}
-			}
-		} else {
-			cpl.logger.Debug("pgrep PID discovery failed", zap.Error(err))
-		}
-	}
-	candidateList := make([]int, 0, len(candidates))
-	for pid := range candidates {
-		candidateList = append(candidateList, pid)
-	}
-	cpl.logger.Infow("Ensuring core termination",
-		"candidate_count", len(candidateList),
-		"candidates", candidateList)
-
-	for pid := range candidates {
-		if !cpl.isProcessAlive(pid) {
-			cpl.logger.Debug("Candidate PID already exited", zap.Int("pid", pid))
-			continue
-		}
-
-		cpl.logger.Warn("Additional core termination attempt", zap.Int("pid", pid))
-		if err := cpl.signalProcessTree(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			cpl.logger.Warn("Failed to send SIGTERM during verification", zap.Int("pid", pid), zap.Error(err))
-		}
-
-		if !cpl.waitForProcessExit(pid, 10*time.Second) {
-			cpl.logger.Warn("Core still alive after SIGTERM verification, sending SIGKILL", zap.Int("pid", pid))
-			if err := cpl.signalProcessTree(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				cpl.logger.Error("Failed to force kill during verification", zap.Int("pid", pid), zap.Error(err))
-			}
-			_ = cpl.waitForProcessExit(pid, 3*time.Second)
-		}
-	}
-
-	return nil
-}
 
 // collectCorePIDs gathers candidate PIDs from the monitor and status API.
 func (cpl *CoreProcessLauncher) collectCorePIDs() map[int]struct{} {
