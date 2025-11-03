@@ -1713,6 +1713,13 @@ func (m *Manager) startDockerRecoveryMonitor(ctx context.Context) {
 
 	// Initial check
 	if err := m.checkDockerAvailability(ctx); err != nil {
+		// Check if context was cancelled before logging
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		m.logger.Warn("Docker unavailable on startup, starting recovery", zap.Error(err))
 		go m.handleDockerUnavailable(ctx)
 		return
@@ -1729,6 +1736,13 @@ func (m *Manager) startDockerRecoveryMonitor(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := m.checkDockerAvailability(ctx); err != nil {
+				// Check if context was cancelled before logging
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
 				m.logger.Warn("Docker became unavailable, starting recovery", zap.Error(err))
 				go m.handleDockerUnavailable(ctx)
 				return // Exit monitor, handleDockerUnavailable will restart it
