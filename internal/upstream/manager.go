@@ -1838,12 +1838,12 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 		currentInterval := getDockerRetryInterval(attempt)
 
 		select {
-		case <-recoveryCtx.Done():
+		case <-ctx.Done():
 			return
 		case <-time.After(currentInterval):
 			// Check if context was cancelled while waiting
 			select {
-			case <-recoveryCtx.Done():
+			case <-ctx.Done():
 				return
 			default:
 			}
