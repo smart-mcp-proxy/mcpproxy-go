@@ -1721,10 +1721,8 @@ func (m *Manager) startDockerRecoveryMonitor(ctx context.Context) {
 	// Initial check
 	if err := m.checkDockerAvailability(ctx); err != nil {
 		// Check if context was cancelled before logging
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
 
 		m.logger.Warn("Docker unavailable on startup, starting recovery", zap.Error(err))
@@ -1744,10 +1742,8 @@ func (m *Manager) startDockerRecoveryMonitor(ctx context.Context) {
 		case <-ticker.C:
 			if err := m.checkDockerAvailability(ctx); err != nil {
 				// Check if context was cancelled before logging
-				select {
-				case <-ctx.Done():
+				if ctx.Err() != nil {
 					return
-				default:
 				}
 
 				m.logger.Warn("Docker became unavailable, starting recovery", zap.Error(err))
@@ -1842,16 +1838,19 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 			return
 		case <-time.After(currentInterval):
 			// Check if context was cancelled while waiting
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
-			default:
 			}
 
 			attempt++
 
 			err := m.checkDockerAvailability(recoveryCtx)
 			if err == nil {
+				// Check before logging success
+				if ctx.Err() != nil {
+					return
+				}
+
 				// Docker is back!
 				elapsed := time.Since(startTime)
 				m.logger.Info("Docker recovery successful",
@@ -1870,19 +1869,15 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 				// Trigger reconnection of Docker-based servers
 				go func() {
 					// Check if context was cancelled before reconnecting
-					select {
-					case <-ctx.Done():
+					if ctx.Err() != nil {
 						return
-					default:
 					}
 
 					result := m.ForceReconnectAll("docker_recovered")
 
 					// Check again before logging
-					select {
-					case <-ctx.Done():
+					if ctx.Err() != nil {
 						return
-					default:
 					}
 
 					if len(result.FailedServers) > 0 {
@@ -1900,11 +1895,8 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 			}
 
 			// Check if context was cancelled before logging retry
-			// Use parent context to catch shutdown faster
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
-			default:
 			}
 
 			// Still unavailable, save state
