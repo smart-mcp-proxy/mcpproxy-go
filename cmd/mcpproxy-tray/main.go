@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -47,9 +46,6 @@ var (
 	trayAPIKey       = ""                  // API key generated for core communication
 	shutdownComplete = make(chan struct{}) // Signal when shutdown is complete
 	shutdownOnce     sync.Once
-
-	errDockerPaused      = errors.New("docker engine paused")
-	errDockerUnavailable = errors.New("docker engine unavailable")
 )
 
 // getLogDir returns the standard log directory for the current OS.
@@ -1013,10 +1009,6 @@ type CoreProcessLauncher struct {
 	healthMonitor  *monitor.HealthMonitor
 
 	coreOwnership coreOwnershipMode
-
-	dockerRetryMu          sync.Mutex
-	dockerRetryCancel      context.CancelFunc
-	dockerReconnectPending bool
 }
 
 // NewCoreProcessLauncher creates a new core process launcher
@@ -1108,10 +1100,13 @@ func (cpl *CoreProcessLauncher) handleStateTransitions(ctx context.Context, tran
 				cpl.handleDBLockedError()
 
 			case state.StateCoreErrorDocker:
-				cpl.handleDockerUnavailable(ctx)
+				// Docker errors are handled by the core, not the tray
+				// The tray should monitor Docker status via API, not block on it
+				cpl.logger.Warn("Core reported Docker error - this should be handled by core, not tray")
 
 			case state.StateCoreRecoveringDocker:
-				cpl.handleDockerRecovering()
+				// Docker recovery is handled by the core, not the tray
+				cpl.logger.Info("Core recovering from Docker issues")
 
 			case state.StateCoreErrorConfig:
 				cpl.handleConfigError()
@@ -1223,18 +1218,9 @@ func (cpl *CoreProcessLauncher) safeHandleReconnecting(ctx context.Context) {
 func (cpl *CoreProcessLauncher) handleLaunchCore(ctx context.Context) {
 	cpl.logger.Info("Launching mcpproxy core process")
 
-	// Stop any pending Docker retry loop before attempting a new launch
-	cpl.cancelDockerRetry()
-
-	// Ensure Docker engine is available before launching core (most upstreams depend on it)
-	if runtime.GOOS == platformDarwin || runtime.GOOS == platformWindows {
-		if err := cpl.ensureDockerAvailable(ctx); err != nil {
-			cpl.logger.Error("Docker engine unavailable", zap.Error(err))
-			cpl.stateMachine.SetError(err)
-			cpl.stateMachine.SendEvent(state.EventDockerUnavailable)
-			return
-		}
-	}
+	// NOTE: We do NOT check Docker availability here - that's the core's responsibility!
+	// The core will handle Docker isolation gracefully and fall back to direct execution.
+	// The tray should not block core launch based on Docker status.
 
 	// Stop existing process monitor if running
 	if cpl.processMonitor != nil {
@@ -1424,9 +1410,8 @@ func (cpl *CoreProcessLauncher) monitorAPIConnection(ctx context.Context, alread
 func (cpl *CoreProcessLauncher) handleConnected() {
 	cpl.logger.Info("Core process fully connected and operational")
 
-	if cpl.consumeDockerReconnectPending() {
-		go cpl.triggerForceReconnect("docker_recovered")
-	}
+	// Docker reconnection is handled by the core's own recovery logic
+	// The tray just monitors status via the Docker status API endpoint
 }
 
 // handleReconnecting handles reconnection attempts
@@ -1496,161 +1481,9 @@ func findNextAvailablePort(start, end int) (int, error) {
 	return 0, fmt.Errorf("no free port in range %d-%d", start, end)
 }
 
-// handleDockerUnavailable handles scenarios where Docker Desktop is paused or unavailable.
-func (cpl *CoreProcessLauncher) handleDockerUnavailable(ctx context.Context) {
-	lastErr := cpl.stateMachine.GetLastError()
-	if lastErr != nil {
-		cpl.logger.Warn("Docker engine unavailable - waiting for recovery", zap.Error(lastErr))
-	} else {
-		cpl.logger.Warn("Docker engine unavailable - waiting for recovery")
-	}
-
-	cpl.dockerRetryMu.Lock()
-	if cpl.dockerRetryCancel != nil {
-		cpl.dockerRetryCancel()
-	}
-	retryCtx, cancel := context.WithCancel(ctx)
-	cpl.dockerRetryCancel = cancel
-	cpl.dockerRetryMu.Unlock()
-
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-retryCtx.Done():
-				return
-			case <-ticker.C:
-				if err := cpl.ensureDockerAvailable(retryCtx); err == nil {
-					cpl.logger.Info("Docker engine available - retrying core launch")
-					cpl.setDockerReconnectPending(true)
-					cpl.cancelDockerRetry()
-					cpl.stateMachine.SendEvent(state.EventRetry)
-					return
-				} else if err != nil {
-					cpl.logger.Debug("Docker still unavailable", zap.Error(err))
-				}
-			}
-		}
-	}()
-}
-
-// cancelDockerRetry stops any pending Docker retry loop.
-func (cpl *CoreProcessLauncher) cancelDockerRetry() {
-	cpl.dockerRetryMu.Lock()
-	if cpl.dockerRetryCancel != nil {
-		cpl.dockerRetryCancel()
-		cpl.dockerRetryCancel = nil
-	}
-	cpl.dockerRetryMu.Unlock()
-}
-
-// handleDockerRecovering handles the Docker recovery state when Docker becomes available again.
-func (cpl *CoreProcessLauncher) handleDockerRecovering() {
-	cpl.logger.Info("Docker engine recovered - preparing to reconnect servers")
-	// The state machine will automatically transition to StateLaunchingCore
-	// after the timeout defined in StateCoreRecoveringDocker (10s)
-}
-
-func (cpl *CoreProcessLauncher) setDockerReconnectPending(pending bool) {
-	cpl.dockerRetryMu.Lock()
-	cpl.dockerReconnectPending = pending
-	cpl.dockerRetryMu.Unlock()
-}
-
-func (cpl *CoreProcessLauncher) consumeDockerReconnectPending() bool {
-	cpl.dockerRetryMu.Lock()
-	pending := cpl.dockerReconnectPending
-	if pending {
-		cpl.dockerReconnectPending = false
-	}
-	cpl.dockerRetryMu.Unlock()
-	return pending
-}
-
-// ensureDockerAvailable verifies Docker Desktop is running and responsive.
-func (cpl *CoreProcessLauncher) ensureDockerAvailable(ctx context.Context) error {
-	checkCtx := ctx
-	if checkCtx == nil {
-		checkCtx = context.Background()
-	}
-	timeoutCtx, cancel := context.WithTimeout(checkCtx, 3*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(timeoutCtx, "docker", "info", "--format", "{{json .ServerVersion}}")
-	var stderr bytes.Buffer
-	cmd.Stdout = &bytes.Buffer{}
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		stderrStr := strings.TrimSpace(stderr.String())
-		lower := strings.ToLower(stderrStr)
-
-		switch {
-		case strings.Contains(lower, "docker desktop is manually paused"):
-			if stderrStr == "" {
-				stderrStr = "Docker Desktop is manually paused"
-			}
-			return fmt.Errorf("%w: %s", errDockerPaused, stderrStr)
-		case strings.Contains(lower, "is the docker daemon running"),
-			strings.Contains(lower, "cannot connect to the docker daemon"),
-			strings.Contains(lower, "error during connect"),
-			strings.Contains(lower, "connectex"),
-			errors.Is(err, context.DeadlineExceeded):
-			if stderrStr == "" {
-				stderrStr = "Docker daemon is not responding"
-			}
-			return fmt.Errorf("%w: %s", errDockerUnavailable, stderrStr)
-		}
-
-		var execErr *exec.Error
-		if errors.As(err, &execErr) {
-			return fmt.Errorf("%w: %v", errDockerUnavailable, execErr)
-		}
-
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			if stderrStr == "" {
-				stderrStr = exitErr.Error()
-			}
-			return fmt.Errorf("%w: %s", errDockerUnavailable, stderrStr)
-		}
-
-		if stderrStr != "" {
-			return fmt.Errorf("%w: %s", errDockerUnavailable, stderrStr)
-		}
-
-		return fmt.Errorf("%w: %v", errDockerUnavailable, err)
-	}
-
-	return nil
-}
-
-func (cpl *CoreProcessLauncher) triggerForceReconnect(reason string) {
-	if cpl.apiClient == nil {
-		return
-	}
-
-	const maxAttempts = 3
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if err := cpl.apiClient.ForceReconnectAllServers(reason); err != nil {
-			cpl.logger.Warn("Failed to trigger upstream reconnection after Docker recovery",
-				zap.String("reason", reason),
-				zap.Int("attempt", attempt),
-				zap.Error(err))
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		cpl.logger.Info("Triggered upstream reconnection after Docker recovery",
-			zap.String("reason", reason),
-			zap.Int("attempt", attempt))
-		return
-	}
-
-	cpl.logger.Error("Exhausted attempts to trigger upstream reconnection after Docker recovery",
-		zap.String("reason", reason),
-		zap.Int("attempts", maxAttempts))
-}
+// Docker availability checking and recovery is handled by the core, not the tray.
+// The tray monitors Docker status via the core's API (monitorDockerStatus function)
+// and shows notifications to the user, but never blocks core launch on Docker availability.
 
 // handleDBLockedError handles database locked errors
 func (cpl *CoreProcessLauncher) handleDBLockedError() {
@@ -1702,9 +1535,6 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 		cpl.logger.Info("Disabling menu synchronization")
 		cpl.trayApp.SetConnectionState(tray.ConnectionStateDisconnected)
 	}
-
-	// Stop any Docker retry loop
-	cpl.cancelDockerRetry()
 
 	// Stop SSE connection before killing core
 	// This prevents SSE from detecting disconnection and trying to reconnect
