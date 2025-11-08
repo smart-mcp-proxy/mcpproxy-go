@@ -22,9 +22,6 @@ const (
 	// Default OAuth redirect URI base - port will be dynamically assigned
 	DefaultRedirectURIBase = "http://127.0.0.1"
 	DefaultRedirectPath    = "/oauth/callback"
-
-	// Default OAuth scopes for MCP
-	DefaultScopes = "mcp.read,mcp.write"
 )
 
 // CallbackServerManager manages OAuth callback servers for dynamic port allocation
@@ -193,13 +190,82 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 	logger.Debug("Creating OAuth config for dynamic registration",
 		zap.String("server", serverConfig.Name))
 
-	// Use default scopes - specific scopes can be overridden in server config if needed
-	scopes := []string{"mcp.read", "mcp.write"}
+	// Scope discovery waterfall (FR-003):
+	// 1. Config-specified scopes (highest priority - manual override)
+	// 2. RFC 9728 Protected Resource Metadata
+	// 3. RFC 8414 Authorization Server Metadata
+	// 4. Empty scopes (server specifies via WWW-Authenticate)
+	var scopes []string
+
+	// Priority 1: Check config-specified scopes first (manual override)
 	if serverConfig.OAuth != nil && len(serverConfig.OAuth.Scopes) > 0 {
 		scopes = serverConfig.OAuth.Scopes
-		logger.Debug("Using custom scopes from config",
+		logger.Info("✅ Using config-specified OAuth scopes",
 			zap.String("server", serverConfig.Name),
 			zap.Strings("scopes", scopes))
+	}
+
+	// Priority 2: Try RFC 9728 Protected Resource Metadata discovery
+	if len(scopes) == 0 {
+		baseURL, err := parseBaseURL(serverConfig.URL)
+		if err == nil && baseURL != "" {
+			logger.Debug("Attempting Protected Resource Metadata scope discovery (RFC 9728)",
+				zap.String("server", serverConfig.Name),
+				zap.String("base_url", baseURL))
+
+			// Make a preflight HEAD request to get WWW-Authenticate header
+			resp, err := http.Head(serverConfig.URL)
+			if err == nil && resp.StatusCode == 401 {
+				wwwAuth := resp.Header.Get("WWW-Authenticate")
+				if metadataURL := ExtractResourceMetadataURL(wwwAuth); metadataURL != "" {
+					discoveredScopes, err := DiscoverScopesFromProtectedResource(metadataURL, 5*time.Second)
+					if err == nil && len(discoveredScopes) > 0 {
+						scopes = discoveredScopes
+						logger.Info("✅ Auto-discovered OAuth scopes from Protected Resource Metadata (RFC 9728)",
+							zap.String("server", serverConfig.Name),
+							zap.String("metadata_url", metadataURL),
+							zap.Strings("scopes", scopes))
+					} else if err != nil {
+						logger.Debug("Protected Resource Metadata discovery failed",
+							zap.String("server", serverConfig.Name),
+							zap.Error(err))
+					}
+				}
+			} else if err != nil {
+				logger.Debug("Preflight request for WWW-Authenticate header failed",
+					zap.String("server", serverConfig.Name),
+					zap.Error(err))
+			}
+		}
+	}
+
+	// Priority 3: Fallback to RFC 8414 Authorization Server Metadata
+	if len(scopes) == 0 {
+		baseURL, err := parseBaseURL(serverConfig.URL)
+		if err == nil && baseURL != "" {
+			logger.Debug("Attempting Authorization Server Metadata scope discovery (RFC 8414)",
+				zap.String("server", serverConfig.Name),
+				zap.String("base_url", baseURL))
+
+			discoveredScopes, err := DiscoverScopesFromAuthorizationServer(baseURL, 5*time.Second)
+			if err == nil && len(discoveredScopes) > 0 {
+				scopes = discoveredScopes
+				logger.Info("✅ Auto-discovered OAuth scopes from Authorization Server Metadata (RFC 8414)",
+					zap.String("server", serverConfig.Name),
+					zap.Strings("scopes", scopes))
+			} else if err != nil {
+				logger.Debug("Authorization Server Metadata discovery failed",
+					zap.String("server", serverConfig.Name),
+					zap.Error(err))
+			}
+		}
+	}
+
+	// Priority 4: Final fallback to empty scopes (valid OAuth 2.1)
+	if len(scopes) == 0 {
+		scopes = []string{}
+		logger.Info("Using empty scopes - server will specify required scopes via WWW-Authenticate header",
+			zap.String("server", serverConfig.Name))
 	}
 
 	// Start callback server first to get the exact port (as documented in successful approach)
