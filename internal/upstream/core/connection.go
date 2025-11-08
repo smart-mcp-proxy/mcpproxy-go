@@ -1703,25 +1703,49 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		zap.String("server", c.config.Name),
 		zap.String("state", state))
 
-	// Register client (Dynamic Client Registration) if supported. Some servers
-	// don’t provide a registration endpoint; the upstream library may panic
+	// Check if static OAuth credentials are provided
+	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
+
+	// Register client (Dynamic Client Registration) if supported and no static credentials provided.
+	// Some servers don't provide a registration endpoint; the upstream library may panic
 	// when metadata is missing. Guard with recover and degrade gracefully.
-	c.logger.Info("📋 Performing Dynamic Client Registration",
-		zap.String("server", c.config.Name))
-	var regErr error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				c.logger.Warn("OAuth RegisterClient panicked; likely no dynamic registration or metadata",
-					zap.String("server", c.config.Name),
-					zap.Any("panic", r))
-				regErr = fmt.Errorf("server does not support dynamic client registration")
-			}
+	if hasStaticCredentials {
+		// Skip DCR when static credentials are provided
+		c.logger.Info("⏩ Skipping Dynamic Client Registration (static credentials provided)",
+			zap.String("server", c.config.Name),
+			zap.String("client_id", c.config.OAuth.ClientID))
+	} else {
+		// Attempt DCR for servers without static credentials
+		c.logger.Info("📋 Performing Dynamic Client Registration",
+			zap.String("server", c.config.Name))
+		var regErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					c.logger.Warn("OAuth RegisterClient panicked; likely no dynamic registration or metadata",
+						zap.String("server", c.config.Name),
+						zap.Any("panic", r))
+					regErr = fmt.Errorf("server does not support dynamic client registration")
+				}
+			}()
+			regErr = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
 		}()
-		regErr = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
-	}()
-	if regErr != nil {
-		return fmt.Errorf("failed to register client: %w", regErr)
+		if regErr != nil {
+			// DCR failed and no static credentials - provide helpful error message
+			return fmt.Errorf("failed to register client: %w\n\n"+
+				"💡 Hint: This server does not support Dynamic Client Registration (RFC 7591).\n"+
+				"   You need to register an OAuth application manually and provide:\n"+
+				"   - client_id\n"+
+				"   - client_secret (optional for PKCE)\n\n"+
+				"   Add these to your server configuration:\n"+
+				"   {\n"+
+				"     \"name\": \"%s\",\n"+
+				"     \"oauth\": {\n"+
+				"       \"client_id\": \"your-client-id\",\n"+
+				"       \"client_secret\": \"your-client-secret\"\n"+
+				"     }\n"+
+				"   }", regErr, c.config.Name)
+		}
 	}
 
 	// Get the authorization URL

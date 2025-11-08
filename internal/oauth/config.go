@@ -341,9 +341,31 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 			zap.String("storage", "memory"))
 	}
 
+	// Check if static OAuth credentials are provided in config
+	// If provided, use them instead of Dynamic Client Registration (DCR)
+	var clientID, clientSecret string
+	var registrationMode string
+
+	if serverConfig.OAuth != nil && serverConfig.OAuth.ClientID != "" {
+		// Use static credentials from config
+		clientID = serverConfig.OAuth.ClientID
+		clientSecret = serverConfig.OAuth.ClientSecret
+		registrationMode = "static credentials"
+		logger.Info("✅ Using static OAuth credentials from config (skipping DCR)",
+			zap.String("server", serverConfig.Name),
+			zap.String("client_id", clientID))
+	} else {
+		// Empty credentials - will use Dynamic Client Registration
+		clientID = ""
+		clientSecret = ""
+		registrationMode = "dynamic registration (DCR)"
+		logger.Info("📋 OAuth credentials not provided - will use Dynamic Client Registration",
+			zap.String("server", serverConfig.Name))
+	}
+
 	oauthConfig := &client.OAuthConfig{
-		ClientID:              "",                         // Will be obtained via Dynamic Client Registration
-		ClientSecret:          "",                         // Will be obtained via Dynamic Client Registration
+		ClientID:              clientID,
+		ClientSecret:          clientSecret,
 		RedirectURI:           callbackServer.RedirectURI, // Exact redirect URI with allocated port
 		Scopes:                scopes,
 		TokenStore:            tokenStore,            // Shared token store for this server
@@ -351,12 +373,13 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 		AuthServerMetadataURL: authServerMetadataURL, // Explicit metadata URL for proper discovery
 	}
 
-	logger.Info("OAuth config created for dynamic registration",
+	logger.Info("OAuth config created successfully",
 		zap.String("server", serverConfig.Name),
 		zap.Strings("scopes", scopes),
 		zap.Bool("pkce_enabled", true),
 		zap.String("redirect_uri", callbackServer.RedirectURI),
 		zap.String("auth_server_metadata_url", authServerMetadataURL),
+		zap.String("registration_mode", registrationMode),
 		zap.String("discovery_mode", "explicit metadata URL"), // Using explicit metadata URL to avoid discovery timeouts
 		zap.String("token_store", "shared"))                   // Using shared token store for token persistence
 
