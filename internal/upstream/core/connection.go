@@ -1706,9 +1706,10 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 	// Check if static OAuth credentials are provided
 	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
 
-	// Register client (Dynamic Client Registration) if supported and no static credentials provided.
+	// Attempt Dynamic Client Registration (DCR) if no static credentials provided.
+	// DCR failure is non-fatal - the server may support public client OAuth with PKCE.
 	// Some servers don't provide a registration endpoint; the upstream library may panic
-	// when metadata is missing. Guard with recover and degrade gracefully.
+	// when metadata is missing. Guard with recover and continue gracefully.
 	if hasStaticCredentials {
 		// Skip DCR when static credentials are provided
 		c.logger.Info("⏩ Skipping Dynamic Client Registration (static credentials provided)",
@@ -1716,13 +1717,13 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 			zap.String("client_id", c.config.OAuth.ClientID))
 	} else {
 		// Attempt DCR for servers without static credentials
-		c.logger.Info("📋 Performing Dynamic Client Registration",
+		c.logger.Info("📋 Attempting Dynamic Client Registration (optional)",
 			zap.String("server", c.config.Name))
 		var regErr error
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					c.logger.Warn("OAuth RegisterClient panicked; likely no dynamic registration or metadata",
+					c.logger.Debug("OAuth RegisterClient panicked - server likely doesn't support DCR",
 						zap.String("server", c.config.Name),
 						zap.Any("panic", r))
 					regErr = fmt.Errorf("server does not support dynamic client registration")
@@ -1730,21 +1731,18 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 			}()
 			regErr = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
 		}()
+
 		if regErr != nil {
-			// DCR failed and no static credentials - provide helpful error message
-			return fmt.Errorf("failed to register client: %w\n\n"+
-				"💡 Hint: This server does not support Dynamic Client Registration (RFC 7591).\n"+
-				"   You need to register an OAuth application manually and provide:\n"+
-				"   - client_id\n"+
-				"   - client_secret (optional for PKCE)\n\n"+
-				"   Add these to your server configuration:\n"+
-				"   {\n"+
-				"     \"name\": \"%s\",\n"+
-				"     \"oauth\": {\n"+
-				"       \"client_id\": \"your-client-id\",\n"+
-				"       \"client_secret\": \"your-client-secret\"\n"+
-				"     }\n"+
-				"   }", regErr, c.config.Name)
+			// DCR failed - this is OK! Continue with public client OAuth + PKCE
+			c.logger.Info("⚠️ Dynamic Client Registration not supported - using public client OAuth with PKCE",
+				zap.String("server", c.config.Name),
+				zap.Error(regErr))
+			c.logger.Info("💡 Proceeding with public client authentication (no client_id required)",
+				zap.String("server", c.config.Name))
+			// Continue anyway - many servers support public client OAuth with PKCE
+		} else {
+			c.logger.Info("✅ Dynamic Client Registration successful",
+				zap.String("server", c.config.Name))
 		}
 	}
 

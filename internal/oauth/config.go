@@ -342,7 +342,7 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 	}
 
 	// Check if static OAuth credentials are provided in config
-	// If provided, use them instead of Dynamic Client Registration (DCR)
+	// If not provided, will attempt DCR or fall back to public client OAuth with PKCE
 	var clientID, clientSecret string
 	var registrationMode string
 
@@ -351,16 +351,17 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 		clientID = serverConfig.OAuth.ClientID
 		clientSecret = serverConfig.OAuth.ClientSecret
 		registrationMode = "static credentials"
-		logger.Info("✅ Using static OAuth credentials from config (skipping DCR)",
+		logger.Info("✅ Using static OAuth credentials from config",
 			zap.String("server", serverConfig.Name),
 			zap.String("client_id", clientID))
 	} else {
-		// Empty credentials - will use Dynamic Client Registration
+		// Empty credentials - will attempt DCR or use public client OAuth with PKCE
 		clientID = ""
 		clientSecret = ""
-		registrationMode = "dynamic registration (DCR)"
-		logger.Info("📋 OAuth credentials not provided - will use Dynamic Client Registration",
-			zap.String("server", serverConfig.Name))
+		registrationMode = "public client (PKCE)"
+		logger.Info("🔓 No OAuth credentials provided - will attempt DCR or use public client mode",
+			zap.String("server", serverConfig.Name),
+			zap.String("mode", "Public client OAuth with PKCE"))
 	}
 
 	oauthConfig := &client.OAuthConfig{
