@@ -229,12 +229,29 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 						logger.Debug("Protected Resource Metadata discovery failed",
 							zap.String("server", serverConfig.Name),
 							zap.Error(err))
+					} else if err == nil {
+						logger.Warn("Protected Resource Metadata returned no scopes - some clients wait for this before showing OAuth UI",
+							zap.String("server", serverConfig.Name),
+							zap.String("metadata_url", metadataURL))
+					} else {
+						logger.Warn("Protected Resource Metadata discovery failed",
+							zap.String("server", serverConfig.Name),
+							zap.String("metadata_url", metadataURL),
+							zap.Error(err))
 					}
+				} else {
+					logger.Warn("WWW-Authenticate header missing resource_metadata; OAuth clients may refuse to launch browser until PRM exists",
+						zap.String("server", serverConfig.Name),
+						zap.Any("www_authenticate", resp.Header["Www-Authenticate"]))
 				}
 			} else if err != nil {
-				logger.Debug("Preflight request for WWW-Authenticate header failed",
+				logger.Warn("Preflight request for WWW-Authenticate header failed; OAuth clients may not see login button",
 					zap.String("server", serverConfig.Name),
 					zap.Error(err))
+			} else {
+				logger.Warn("Preflight request did not return 401; server did not advertise WWW-Authenticate metadata",
+					zap.String("server", serverConfig.Name),
+					zap.Int("status_code", resp.StatusCode))
 			}
 		}
 	}
@@ -253,9 +270,14 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 				logger.Info("✅ Auto-discovered OAuth scopes from Authorization Server Metadata (RFC 8414)",
 					zap.String("server", serverConfig.Name),
 					zap.Strings("scopes", scopes))
-			} else if err != nil {
-				logger.Debug("Authorization Server Metadata discovery failed",
+			} else if err == nil {
+				logger.Warn("Authorization Server Metadata returned no scopes; some OAuth clients will wait until scopes_supported is published",
 					zap.String("server", serverConfig.Name),
+					zap.String("metadata_url", baseURL+"/.well-known/oauth-authorization-server"))
+			} else {
+				logger.Warn("Authorization Server Metadata discovery failed",
+					zap.String("server", serverConfig.Name),
+					zap.String("metadata_url", baseURL+"/.well-known/oauth-authorization-server"),
 					zap.Error(err))
 			}
 		}
@@ -264,8 +286,9 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 	// Priority 4: Final fallback to empty scopes (valid OAuth 2.1)
 	if len(scopes) == 0 {
 		scopes = []string{}
-		logger.Info("Using empty scopes - server will specify required scopes via WWW-Authenticate header",
-			zap.String("server", serverConfig.Name))
+		logger.Warn("No OAuth scopes discovered; falling back to empty list. Some providers (e.g., Google) require `openid`/`email` to be set manually.",
+			zap.String("server", serverConfig.Name),
+			zap.String("hint", "Set oauth.scopes in server config or ensure PRM/AS metadata advertises scopes_supported"))
 	}
 
 	// Start callback server first to get the exact port (as documented in successful approach)

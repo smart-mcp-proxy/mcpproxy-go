@@ -204,6 +204,19 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 		zap.Strings("response_types_supported", metadata.ResponseTypesSupported),
 		zap.Strings("grant_types_supported", metadata.GrantTypesSupported))
 
+	logger.Debug("Authorization Server Metadata fetched",
+		zap.String("issuer", metadata.Issuer),
+		zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
+		zap.String("token_endpoint", metadata.TokenEndpoint),
+		zap.String("registration_endpoint", metadata.RegistrationEndpoint),
+		zap.Strings("scopes_supported", metadata.ScopesSupported))
+
+	if metadata.RegistrationEndpoint == "" {
+		logger.Warn("Authorization server metadata missing registration_endpoint; clients that require DCR may keep the Login button disabled",
+			zap.String("issuer", metadata.Issuer),
+			zap.String("hint", "Provide oauth.client_id in config or use a proxy that emulates /register"))
+	}
+
 	if len(metadata.ScopesSupported) == 0 {
 		logger.Debug("Authorization Server Metadata returned empty scopes_supported",
 			zap.String("metadata_url", metadataURL))

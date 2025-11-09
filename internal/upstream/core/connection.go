@@ -1778,6 +1778,12 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		return fmt.Errorf("failed to get authorization URL: %w", authURLErr)
 	}
 
+	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
+	c.logger.Info("OAuth authorization URL ready",
+		zap.String("server", c.config.Name),
+		zap.String("auth_url", authURL))
+	fmt.Printf("OAuth login URL for %s:\n%s\n", c.config.Name, authURL)
+
 	// Check if this is a manual OAuth flow using the proper context key
 	isManualFlow := c.isManualOAuthFlow(ctx)
 
@@ -2177,10 +2183,16 @@ func (c *Client) openBrowser(authURL string) error {
 		cmd = "open"
 		args = []string{authURL}
 	case osLinux:
-		// Try to detect if we're in a GUI environment
+		// Always attempt xdg-open, but warn when no GUI/session indicators are found.
 		if !c.hasGUIEnvironment() {
-			return fmt.Errorf("no GUI environment detected")
+			c.logger.Warn("No GUI session detected - attempting to launch browser anyway. If nothing appears, copy/paste the URL manually.",
+				zap.String("server", c.config.Name))
 		}
+
+		if _, err := exec.LookPath("xdg-open"); err != nil {
+			return fmt.Errorf("xdg-open not found in PATH: %w", err)
+		}
+
 		cmd = "xdg-open"
 		args = []string{authURL}
 	default:
@@ -2200,11 +2212,6 @@ func (c *Client) hasGUIEnvironment() bool {
 		if value := os.Getenv(envVar); value != "" {
 			return true
 		}
-	}
-
-	// Check if xdg-open is available
-	if _, err := exec.LookPath("xdg-open"); err == nil {
-		return true
 	}
 
 	return false
