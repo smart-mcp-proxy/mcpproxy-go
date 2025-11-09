@@ -1706,19 +1706,17 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Check if static OAuth credentials are provided
 	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
 
-	// Attempt Dynamic Client Registration (DCR) if no static credentials provided.
-	// Some servers don't support DCR; the upstream library may panic when metadata is missing.
-	// Guard with recover and handle gracefully.
-	var dcrSucceeded bool
+	// Determine OAuth mode and attempt registration if needed
+	var oauthMode string
 	if hasStaticCredentials {
 		// Skip DCR when static credentials are provided
+		oauthMode = "static credentials"
 		c.logger.Info("⏩ Skipping Dynamic Client Registration (static credentials provided)",
 			zap.String("server", c.config.Name),
 			zap.String("client_id", c.config.OAuth.ClientID))
-		dcrSucceeded = true // Treat as success since we have static credentials
 	} else {
 		// Attempt DCR for servers without static credentials
-		c.logger.Info("📋 Attempting Dynamic Client Registration",
+		c.logger.Info("📋 Attempting Dynamic Client Registration (optional)",
 			zap.String("server", c.config.Name))
 		var regErr error
 		func() {
@@ -1734,33 +1732,34 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		}()
 
 		if regErr != nil {
-			// DCR failed - cannot proceed without static credentials
-			c.logger.Warn("❌ Dynamic Client Registration failed",
+			// DCR failed - proceed with public client OAuth (PKCE without client_id)
+			oauthMode = "public client (PKCE)"
+			c.logger.Warn("⚠️ Dynamic Client Registration not supported - using public client OAuth with PKCE",
 				zap.String("server", c.config.Name),
 				zap.Error(regErr))
-
-			return fmt.Errorf("OAuth authentication requires configuration.\n\n"+
-				"This server does not support Dynamic Client Registration (RFC 7591).\n"+
-				"You need to register an OAuth application with the provider and add:\n\n"+
-				"  \"oauth\": {\n"+
-				"    \"client_id\": \"your_client_id_here\",\n"+
-				"    \"client_secret\": \"your_client_secret_here\"\n"+
-				"  }\n\n"+
-				"to the server configuration for '%s'.\n\n"+
-				"Scopes were auto-discovered successfully: %v\n"+
-				"Original error: %w", c.config.Name, oauthConfig.Scopes, regErr)
+			c.logger.Info("💡 Proceeding with public client authentication (no client_id required)",
+				zap.String("server", c.config.Name),
+				zap.String("mode", "OAuth 2.1 public client with PKCE"),
+				zap.Strings("scopes", oauthConfig.Scopes))
+		} else {
+			oauthMode = "dynamic client registration"
+			c.logger.Info("✅ Dynamic Client Registration successful",
+				zap.String("server", c.config.Name))
 		}
-
-		c.logger.Info("✅ Dynamic Client Registration successful",
-			zap.String("server", c.config.Name))
-		dcrSucceeded = true
 	}
 
-	// Get the authorization URL (only if DCR succeeded or we have static credentials)
-	if !dcrSucceeded {
-		return fmt.Errorf("cannot proceed with OAuth - no credentials available")
-	}
+	// Continue with OAuth flow regardless of DCR result
+	// Public client OAuth (RFC 8252) with PKCE doesn't require client_id
+	// If server doesn't support this, it will reject the authorization request
 
+	c.logger.Info("🌟 Starting OAuth authentication flow",
+		zap.String("server", c.config.Name),
+		zap.Strings("scopes", oauthConfig.Scopes),
+		zap.Bool("pkce_enabled", true),
+		zap.String("mode", oauthMode))
+
+	// Get the authorization URL
+	// Works with: static credentials, DCR, or public client OAuth (empty client_id + PKCE)
 	var authURL string
 	var authURLErr error
 	func() {
