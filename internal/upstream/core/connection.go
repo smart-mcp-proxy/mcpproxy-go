@@ -1657,7 +1657,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 }
 
 // handleOAuthAuthorization handles the manual OAuth flow following the mcp-go example pattern
-func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ *client.OAuthConfig) error {
+func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oauthConfig *client.OAuthConfig) error {
 	// Check if OAuth is already in progress to prevent duplicate flows (CRITICAL FIX for Phase 1)
 	if c.isOAuthInProgress() {
 		c.logger.Warn("⚠️ OAuth authorization already in progress, skipping duplicate attempt",
@@ -1703,31 +1703,79 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, _ 
 		zap.String("server", c.config.Name),
 		zap.String("state", state))
 
-	// Register client (Dynamic Client Registration) if supported. Some servers
-	// don’t provide a registration endpoint; the upstream library may panic
-	// when metadata is missing. Guard with recover and degrade gracefully.
-	c.logger.Info("📋 Performing Dynamic Client Registration",
-		zap.String("server", c.config.Name))
-	var regErr error
+	// Check if static OAuth credentials are provided
+	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
+
+	// Determine OAuth mode and attempt registration if needed
+	var oauthMode string
+	if hasStaticCredentials {
+		// Skip DCR when static credentials are provided
+		oauthMode = "static credentials"
+		c.logger.Info("⏩ Skipping Dynamic Client Registration (static credentials provided)",
+			zap.String("server", c.config.Name),
+			zap.String("client_id", c.config.OAuth.ClientID))
+	} else {
+		// Attempt DCR for servers without static credentials
+		c.logger.Info("📋 Attempting Dynamic Client Registration (optional)",
+			zap.String("server", c.config.Name))
+		var regErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					c.logger.Warn("OAuth RegisterClient panicked - server metadata missing or malformed",
+						zap.String("server", c.config.Name),
+						zap.Any("panic", r))
+					regErr = fmt.Errorf("server does not support dynamic client registration: metadata missing")
+				}
+			}()
+			regErr = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
+		}()
+
+		if regErr != nil {
+			// DCR failed - proceed with public client OAuth (PKCE without client_id)
+			oauthMode = "public client (PKCE)"
+			c.logger.Warn("⚠️ Dynamic Client Registration not supported - using public client OAuth with PKCE",
+				zap.String("server", c.config.Name),
+				zap.Error(regErr))
+			c.logger.Info("💡 Proceeding with public client authentication (no client_id required)",
+				zap.String("server", c.config.Name),
+				zap.String("mode", "OAuth 2.1 public client with PKCE"),
+				zap.Strings("scopes", oauthConfig.Scopes))
+		} else {
+			oauthMode = "dynamic client registration"
+			c.logger.Info("✅ Dynamic Client Registration successful",
+				zap.String("server", c.config.Name))
+		}
+	}
+
+	// Continue with OAuth flow regardless of DCR result
+	// Public client OAuth (RFC 8252) with PKCE doesn't require client_id
+	// If server doesn't support this, it will reject the authorization request
+
+	c.logger.Info("🌟 Starting OAuth authentication flow",
+		zap.String("server", c.config.Name),
+		zap.Strings("scopes", oauthConfig.Scopes),
+		zap.Bool("pkce_enabled", true),
+		zap.String("mode", oauthMode))
+
+	// Get the authorization URL
+	// Works with: static credentials, DCR, or public client OAuth (empty client_id + PKCE)
+	var authURL string
+	var authURLErr error
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				c.logger.Warn("OAuth RegisterClient panicked; likely no dynamic registration or metadata",
+				c.logger.Error("GetAuthorizationURL panicked",
 					zap.String("server", c.config.Name),
 					zap.Any("panic", r))
-				regErr = fmt.Errorf("server does not support dynamic client registration")
+				authURLErr = fmt.Errorf("failed to get authorization URL: internal error (panic recovered)")
 			}
 		}()
-		regErr = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
+		authURL, authURLErr = oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
 	}()
-	if regErr != nil {
-		return fmt.Errorf("failed to register client: %w", regErr)
-	}
 
-	// Get the authorization URL
-	authURL, err := oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
-	if err != nil {
-		return fmt.Errorf("failed to get authorization URL: %w", err)
+	if authURLErr != nil {
+		return fmt.Errorf("failed to get authorization URL: %w", authURLErr)
 	}
 
 	// Check if this is a manual OAuth flow using the proper context key
