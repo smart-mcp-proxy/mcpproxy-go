@@ -905,8 +905,21 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 	// Check if OAuth is already in progress
 	if c.isOAuthInProgress() {
-		c.logger.Warn("⚠️ OAuth is already in progress, clearing stale state and retrying",
-			zap.String("server", c.config.Name))
+		// Check if the OAuth state is stale (> 5 minutes old)
+		c.oauthMu.RLock()
+		timeSinceStart := time.Since(c.lastOAuthTimestamp)
+		c.oauthMu.RUnlock()
+
+		if timeSinceStart < 5*time.Minute {
+			c.logger.Warn("⚠️ OAuth already in progress (started recently), skipping duplicate attempt",
+				zap.String("server", c.config.Name),
+				zap.Duration("time_since_start", timeSinceStart))
+			return fmt.Errorf("OAuth authorization already in progress for %s (started %v ago)", c.config.Name, timeSinceStart.Round(time.Second))
+		}
+
+		c.logger.Warn("⚠️ OAuth state is stale (>5min), clearing and retrying",
+			zap.String("server", c.config.Name),
+			zap.Duration("time_since_start", timeSinceStart))
 		c.clearOAuthState()
 	}
 
@@ -1122,6 +1135,26 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			c.logger.Info("✅ MCP initialization successful after OAuth authorization",
 				zap.String("server", c.config.Name))
 		} else {
+			// Check if this is an OAuth error (invalid token, 404, etc.)
+			// If so, clear the stored token to force fresh authentication
+			if c.isOAuthError(err) {
+				c.logger.Warn("🗑️ OAuth error detected - clearing stored token to force re-authentication",
+					zap.String("server", c.config.Name),
+					zap.Error(err))
+				// Clear token from persistent storage if available
+				if c.storage != nil {
+					// Generate server key matching PersistentTokenStore format
+					serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+					if clearErr := c.storage.DeleteOAuthToken(serverKey); clearErr != nil {
+						c.logger.Warn("Failed to clear invalid OAuth token from storage",
+							zap.String("server", c.config.Name),
+							zap.Error(clearErr))
+					} else {
+						c.logger.Info("✅ Invalid OAuth token cleared from storage",
+							zap.String("server", c.config.Name))
+					}
+				}
+			}
 			return fmt.Errorf("MCP initialize failed during OAuth strategy: %w", err)
 		}
 	}
@@ -1409,10 +1442,15 @@ func (c *Client) isOAuthError(err error) bool {
 		"access_denied",
 		"unauthorized",
 		"401", // HTTP 401 Unauthorized
+		"404", // HTTP 404 - Session not found/terminated (Sentry, others)
 		"Missing or invalid access token",
 		"OAuth authentication failed",
 		"oauth timeout",
 		"oauth error",
+		"session terminated", // Sentry-specific error for invalid tokens
+		"session not found",  // Alternative session error message
+		"token revoked",      // Explicit token revocation
+		"token invalid",      // Generic invalid token message
 	}
 
 	for _, oauthErr := range oauthErrors {
