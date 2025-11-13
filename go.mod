@@ -6,7 +6,9 @@ require (
 	fyne.io/systray v1.11.0
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/blevesearch/bleve/v2 v2.5.2
+	github.com/gen2brain/beeep v0.11.1
 	github.com/go-chi/chi/v5 v5.2.3
+	github.com/google/uuid v1.6.0
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf
 	github.com/mark3labs/mcp-go v0.42.0
 	github.com/pkoukk/tiktoken-go v0.1.8
@@ -57,7 +59,6 @@ require (
 	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/esiqveland/notify v0.13.3 // indirect
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
-	github.com/gen2brain/beeep v0.11.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
@@ -65,7 +66,6 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
