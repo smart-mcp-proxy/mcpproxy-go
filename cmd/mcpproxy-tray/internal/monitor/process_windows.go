@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -139,6 +140,12 @@ func (pm *ProcessMonitor) Start() error {
 		pm.cmd.Env = pm.config.Env
 		pm.logger.Debug("Process environment",
 			"env_vars", pm.maskSensitiveEnv(pm.config.Env))
+	}
+
+	// Hide console window on Windows
+	// CREATE_NO_WINDOW = 0x08000000
+	pm.cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
 	}
 
 	// Set up output capture if enabled

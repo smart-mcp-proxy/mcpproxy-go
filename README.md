@@ -38,6 +38,18 @@ Download the latest DMG installer for your architecture:
 - **Apple Silicon (M1/M2):** [Download DMG](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest) → `mcpproxy-*-darwin-arm64.dmg`
 - **Intel Mac:** [Download DMG](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest) → `mcpproxy-*-darwin-amd64.dmg`
 
+**Windows (Recommended - Installer):**
+
+Download the latest Windows installer for your architecture:
+- **x64 (64-bit):** [Download Installer](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest) → `mcpproxy-setup-*-amd64.exe`
+- **ARM64:** [Download Installer](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest) → `mcpproxy-setup-*-arm64.exe`
+
+The installer automatically:
+- Installs both `mcpproxy.exe` (core server) and `mcpproxy-tray.exe` (system tray app) to Program Files
+- Adds MCPProxy to your system PATH for command-line access
+- Creates Start Menu shortcuts
+- Supports silent installation: `.\mcpproxy-setup.exe /VERYSILENT`
+
 **Alternative install methods:**
 
 macOS (Homebrew):

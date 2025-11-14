@@ -416,14 +416,14 @@ func setupLogging() (*zap.Logger, error) {
 		EncodeName:     zapcore.FullNameEncoder,
 	}
 
-	// Log to both file and stdout
-	config.OutputPaths = []string{
-		"stdout",
-		logFile,
-	}
-	config.ErrorOutputPaths = []string{
-		"stderr",
-		logFile,
+	// Log to file only on Windows GUI apps (stdout/stderr don't exist)
+	// On other platforms, log to both file and stdout
+	if runtime.GOOS == "windows" {
+		config.OutputPaths = []string{logFile}
+		config.ErrorOutputPaths = []string{logFile}
+	} else {
+		config.OutputPaths = []string{"stdout", logFile}
+		config.ErrorOutputPaths = []string{"stderr", logFile}
 	}
 
 	logger, err := config.Build()
