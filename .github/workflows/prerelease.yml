@@ -396,6 +396,56 @@ jobs:
             tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
           fi
 
+      - name: Install Inno Setup (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y
+          # Verify installation
+          if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+            Write-Host "✅ Inno Setup installed successfully"
+          } else {
+            Write-Host "❌ Inno Setup installation failed"
+            exit 1
+          }
+
+      - name: Create Windows installer (Windows - Prerelease)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          # For prerelease, version includes commit hash
+          if ("${{ github.ref }}" -like "refs/tags/*") {
+            $VERSION = "${{ github.ref_name }}"
+          } else {
+            $VERSION = (git describe --tags --always --dirty)
+          }
+          $ARCH = "${{ matrix.goarch }}"
+
+          Write-Host "Building Windows installer for prerelease version ${VERSION} (${ARCH})"
+
+          # Run the build script
+          .\scripts\build-windows-installer.ps1 -Version $VERSION -Arch $ARCH
+
+          # Verify installer was created
+          $INSTALLER_NAME = "mcpproxy-setup-${VERSION}-${ARCH}.exe"
+          $INSTALLER_PATH = "dist\${INSTALLER_NAME}"
+
+          if (Test-Path $INSTALLER_PATH) {
+            Write-Host "✅ Windows installer created: ${INSTALLER_NAME}"
+            $size = (Get-Item $INSTALLER_PATH).Length / 1MB
+            Write-Host "   Size: $([math]::Round($size, 2)) MB"
+          } else {
+            Write-Host "❌ Windows installer not found at ${INSTALLER_PATH}"
+            exit 1
+          }
+
+      - name: Upload Windows installer artifact (Prerelease)
+        if: matrix.goos == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows-${{ matrix.goarch }}
+          path: dist/mcpproxy-setup-*-${{ matrix.goarch }}.exe
+
       - name: Create .icns icon (macOS)
         if: matrix.goos == 'darwin'
         run: |
@@ -696,6 +746,13 @@ jobs:
           find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
             filename=$(basename "$file")
             cp "$file" "release-files/$filename"
+          done
+
+          # Copy Windows installer files (.exe)
+          find dist -path "*/installer-windows-*" -name "*.exe" | while read installer_file; do
+            filename=$(basename "$installer_file")
+            echo "Found Windows installer: $filename"
+            cp "$installer_file" "release-files/$filename"
           done
 
           # Handle installer files (DMG and PKG) and notarization submissions

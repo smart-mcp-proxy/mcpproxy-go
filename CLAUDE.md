@@ -52,6 +52,32 @@ python3 -m pip install --break-system-packages Pillow
 
 **Note**: The Windows tray icon uses `.ico` format for better compatibility with the Windows system tray. The macOS/Linux versions use `.png` format. If you modify the logo, regenerate all icon files using the script above.
 
+### Windows Installer
+```bash
+# Build Windows installer (requires Windows environment)
+# Prerequisites: Inno Setup 6+ or WiX Toolset 4.x
+
+# Using Inno Setup (recommended - single multi-arch installer):
+# Install Inno Setup via Chocolatey
+choco install innosetup -y
+
+# Build installer for specific architecture
+.\scripts\build-windows-installer.ps1 -Version "v1.0.0" -Arch "amd64"
+.\scripts\build-windows-installer.ps1 -Version "v1.0.0" -Arch "arm64"
+
+# Using WiX Toolset 4.x (alternative - MSI format):
+# Install WiX as .NET global tool
+dotnet tool install --global wix
+
+# Build MSI installer
+wix build -arch x64 -d Version=1.0.0.0 -d BinPath=dist\windows-amd64 wix\Package.wxs
+
+# Output: dist\mcpproxy-setup-{version}-{arch}.exe (Inno Setup)
+#     or: dist\mcpproxy-{version}-windows-{arch}.msi (WiX)
+```
+
+**Note**: Windows installers automatically configure system PATH, create Start Menu shortcuts, and support in-place upgrades. Inno Setup produces a single multi-architecture installer, while WiX generates separate MSI files per architecture. Both support silent installation (`/VERYSILENT` for Inno Setup, `/qn` for WiX MSI).
+
 ### Prerelease Builds
 
 **MCPProxy supports automated prerelease builds from the `next` branch with signed and notarized macOS installers.**

@@ -430,6 +430,51 @@ jobs:
             tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 
+      - name: Install Inno Setup (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y
+          # Verify installation
+          if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+            Write-Host "✅ Inno Setup installed successfully"
+          } else {
+            Write-Host "❌ Inno Setup installation failed"
+            exit 1
+          }
+
+      - name: Create Windows installer (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ github.ref_name }}"
+          $ARCH = "${{ matrix.goarch }}"
+
+          Write-Host "Building Windows installer for version ${VERSION} (${ARCH})"
+
+          # Run the build script
+          .\scripts\build-windows-installer.ps1 -Version $VERSION -Arch $ARCH
+
+          # Verify installer was created
+          $INSTALLER_NAME = "mcpproxy-setup-${VERSION}-${ARCH}.exe"
+          $INSTALLER_PATH = "dist\${INSTALLER_NAME}"
+
+          if (Test-Path $INSTALLER_PATH) {
+            Write-Host "✅ Windows installer created: ${INSTALLER_NAME}"
+            $size = (Get-Item $INSTALLER_PATH).Length / 1MB
+            Write-Host "   Size: $([math]::Round($size, 2)) MB"
+          } else {
+            Write-Host "❌ Windows installer not found at ${INSTALLER_PATH}"
+            exit 1
+          }
+
+      - name: Upload Windows installer artifact
+        if: matrix.goos == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows-${{ matrix.goarch }}
+          path: dist/mcpproxy-setup-${{ github.ref_name }}-${{ matrix.goarch }}.exe
+
       - name: Create .icns icon (macOS)
         if: matrix.goos == 'darwin'
         run: |
@@ -700,6 +745,13 @@ jobs:
             cp "$file" "release-files/$filename"
           done
 
+          # Copy Windows installer files (.exe)
+          find dist -path "*/installer-windows-*" -name "*.exe" | while read installer_file; do
+            filename=$(basename "$installer_file")
+            echo "Found Windows installer: $filename"
+            cp "$installer_file" "release-files/$filename"
+          done
+
           # Handle installer files (DMG and PKG) and notarization submissions
           mkdir -p pending-notarizations
 
@@ -769,6 +821,10 @@ jobs:
             - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz)
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
+            **Windows Installer:**
+            - [Setup (AMD64)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-setup-${{ github.ref_name }}-amd64.exe)
+            - [Setup (ARM64)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-setup-${{ github.ref_name }}-arm64.exe)
+
             **macOS Installer:**
             - [Signed DMG (Apple Silicon)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64-installer.dmg)
             - [Signed DMG (Intel)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64-installer.dmg)
@@ -782,6 +838,14 @@ jobs:
             - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.tar.gz)
 
             ### Installation
+
+            **Windows:**
+            1. Download the installer for your architecture (AMD64 or ARM64)
+            2. Run `mcpproxy-setup-*.exe`
+            3. Follow the installation wizard (requires Administrator privileges)
+            4. MCPProxy will be added to Start Menu and system PATH
+            5. Launch "MCPProxy" from Start Menu to start the tray app
+            6. The app will appear in your system tray
 
             **macOS:**
             1. Download the signed installer DMG for your Mac (Apple Silicon or Intel)

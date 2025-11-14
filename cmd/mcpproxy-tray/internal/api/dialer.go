@@ -47,13 +47,22 @@ func CreateDialer(endpoint string) (func(context.Context, string, string) (net.C
 		}
 
 		// Named pipe path is in the form npipe:////./pipe/mcpproxy
+		// URL parsing gives us: Opaque="////./pipe/mcpproxy" or Path="////./pipe/mcpproxy"
 		pipePath := parsed.Opaque
 		if pipePath == "" {
 			pipePath = parsed.Path
 		}
 
-		// Remove leading slashes (npipe:////./pipe/name → //./pipe/name)
-		pipePath = strings.TrimPrefix(pipePath, "//")
+		// Remove all leading slashes, then reconstruct the proper Windows pipe path
+		// npipe:////./pipe/name → ///./pipe/name → ./pipe/name → //./pipe/name
+		pipePath = strings.TrimLeft(pipePath, "/")
+		if strings.HasPrefix(pipePath, "./pipe/") {
+			// Fix partial path: ./pipe/name → //./pipe/name
+			pipePath = "//" + pipePath
+		} else if !strings.HasPrefix(pipePath, "\\\\.\\") && !strings.HasPrefix(pipePath, "//./") {
+			// Add the Windows named pipe prefix if not already present
+			pipePath = "//./pipe/" + pipePath
+		}
 
 		dialer := func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialNamedPipe(ctx, pipePath)
