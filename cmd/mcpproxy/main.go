@@ -103,6 +103,9 @@ func main() {
 	// Add call command
 	callCmd := GetCallCommand()
 
+	// Add code command
+	codeCmd := GetCodeCommand()
+
 	// Add auth command
 	authCmd := GetAuthCommand()
 
@@ -117,6 +120,7 @@ func main() {
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(toolsCmd)
 	rootCmd.AddCommand(callCmd)
+	rootCmd.AddCommand(codeCmd)
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(secretsCmd)
 	rootCmd.AddCommand(trustCertCmd)

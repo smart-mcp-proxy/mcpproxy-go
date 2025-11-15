@@ -14,6 +14,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/jsruntime"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/server/tokens"
@@ -68,6 +69,9 @@ type MCPProxyServer struct {
 	// Docker availability cache
 	dockerAvailableCache *bool
 	dockerCacheTime      time.Time
+
+	// JavaScript runtime pool for code execution
+	jsPool *jsruntime.Pool
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -100,6 +104,18 @@ func NewMCPProxyServer(
 		capabilities...,
 	)
 
+	// Initialize JavaScript runtime pool if code execution is enabled
+	var jsPool *jsruntime.Pool
+	if config.EnableCodeExecution {
+		var err error
+		jsPool, err = jsruntime.NewPool(config.CodeExecutionPoolSize)
+		if err != nil {
+			logger.Error("failed to create JavaScript runtime pool", zap.Error(err))
+		} else {
+			logger.Info("JavaScript runtime pool initialized", zap.Int("size", config.CodeExecutionPoolSize))
+		}
+	}
+
 	proxy := &MCPProxyServer{
 		server:          mcpServer,
 		storage:         storage,
@@ -110,6 +126,7 @@ func NewMCPProxyServer(
 		logger:          logger,
 		mainServer:      mainServer,
 		config:          config,
+		jsPool:          jsPool,
 	}
 
 	// Register proxy tools
@@ -121,6 +138,18 @@ func NewMCPProxyServer(
 	}
 
 	return proxy
+}
+
+// Close gracefully shuts down the MCP proxy server and releases resources
+func (p *MCPProxyServer) Close() error {
+	if p.jsPool != nil {
+		if err := p.jsPool.Close(); err != nil {
+			p.logger.Warn("failed to close JavaScript runtime pool", zap.Error(err))
+			return err
+		}
+		p.logger.Info("JavaScript runtime pool closed successfully")
+	}
+	return nil
 }
 
 // registerTools registers all proxy tools with the MCP server
@@ -175,6 +204,24 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		),
 	)
 	p.server.AddTool(readCacheTool, p.handleReadCache)
+
+	// code_execution - JavaScript code execution for multi-tool orchestration (feature-flagged)
+	if p.config.EnableCodeExecution {
+		codeExecutionTool := mcp.NewTool("code_execution",
+			mcp.WithDescription("Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request. Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations that would require multiple round-trips otherwise.\n\n**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n**Available in JavaScript**:\n- `input` global: Your input data passed via the 'input' parameter\n- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n- Standard ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
+			mcp.WithString("code",
+				mcp.Required(),
+				mcp.Description("JavaScript source code (ES5.1+) to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. Return value must be JSON-serializable. Example: `const res = call_tool('github', 'get_user', {username: input.username}); if (!res.ok) throw new Error(res.error.message); ({user: res.result, timestamp: Date.now()})`"),
+			),
+			mcp.WithObject("input",
+				mcp.Description("Input data accessible as global `input` variable in JavaScript code (default: {})"),
+			),
+			mcp.WithObject("options",
+				mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
+			),
+		)
+		p.server.AddTool(codeExecutionTool, p.handleCodeExecution)
+	}
 
 	// upstream_servers - Basic server management (with security checks)
 	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
