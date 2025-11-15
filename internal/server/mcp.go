@@ -42,6 +42,7 @@ const (
 	operationQuarantineSec   = "quarantine_security"
 	operationRetrieveTools   = "retrieve_tools"
 	operationReadCache       = "read_cache"
+	operationCodeExecution   = "code_execution"
 	operationListRegistries  = "list_registries"
 	operationSearchServers   = "search_servers"
 
@@ -572,6 +573,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		operationRetrieveTools:   true,
 		operationCallTool:        true,
 		"read_cache":             true,
+		"code_execution":         true,
 		"list_registries":        true,
 		"search_servers":         true,
 	}
@@ -592,6 +594,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			return p.handleRetrieveTools(ctx, proxyRequest)
 		case operationReadCache:
 			return p.handleReadCache(ctx, proxyRequest)
+		case operationCodeExecution:
+			return p.handleCodeExecution(ctx, proxyRequest)
 		case operationListRegistries:
 			return p.handleListRegistries(ctx, proxyRequest)
 		case operationSearchServers:
@@ -2306,6 +2310,8 @@ func (p *MCPProxyServer) CallBuiltInTool(ctx context.Context, toolName string, a
 		return p.handleRetrieveTools(ctx, request)
 	case operationReadCache:
 		return p.handleReadCache(ctx, request)
+	case operationCodeExecution:
+		return p.handleCodeExecution(ctx, request)
 	case operationListRegistries:
 		return p.handleListRegistries(ctx, request)
 	case operationSearchServers:
@@ -2406,6 +2412,8 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		result, err = p.handleRetrieveTools(ctx, request)
 	case "quarantine_security":
 		result, err = p.handleQuarantineSecurity(ctx, request)
+	case "code_execution":
+		result, err = p.handleCodeExecution(ctx, request)
 	case "list_registries":
 		result, err = p.handleListRegistries(ctx, request)
 	case "search_servers":
