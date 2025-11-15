@@ -658,11 +658,11 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		})
 	}
 
-	// Validate code execution configuration
-	if c.CodeExecutionTimeoutMs < 1 || c.CodeExecutionTimeoutMs > 600000 {
+	// Validate code execution configuration (0 means use default)
+	if c.CodeExecutionTimeoutMs != 0 && (c.CodeExecutionTimeoutMs < 1 || c.CodeExecutionTimeoutMs > 600000) {
 		errors = append(errors, ValidationError{
 			Field:   "code_execution_timeout_ms",
-			Message: "must be between 1 and 600000 milliseconds",
+			Message: "must be between 1 and 600000 milliseconds (or 0 for default)",
 		})
 	}
 
@@ -673,10 +673,10 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		})
 	}
 
-	if c.CodeExecutionPoolSize < 1 || c.CodeExecutionPoolSize > 100 {
+	if c.CodeExecutionPoolSize != 0 && (c.CodeExecutionPoolSize < 1 || c.CodeExecutionPoolSize > 100) {
 		errors = append(errors, ValidationError{
 			Field:   "code_execution_pool_size",
-			Message: "must be between 1 and 100",
+			Message: "must be between 1 and 100 (or 0 for default)",
 		})
 	}
 
@@ -806,6 +806,14 @@ func (c *Config) Validate() error {
 	if c.CallToolTimeout.Duration() <= 0 {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
 	}
+	// Apply code execution defaults
+	if c.CodeExecutionTimeoutMs <= 0 {
+		c.CodeExecutionTimeoutMs = 120000 // 2 minutes (120,000ms)
+	}
+	if c.CodeExecutionPoolSize <= 0 {
+		c.CodeExecutionPoolSize = 10 // 10 JavaScript runtime instances
+	}
+	// CodeExecutionMaxToolCalls defaults to 0 (unlimited), which is valid
 
 	// Then perform detailed validation
 	errors := c.ValidateDetailed()
