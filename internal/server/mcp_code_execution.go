@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/jsruntime"
+	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/upstream"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 )
 
@@ -79,11 +81,31 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		options.MaxToolCalls = p.config.CodeExecutionMaxToolCalls
 	}
 
+	// Extract session information from context
+	var sessionID, clientName, clientVersion string
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+		if sessInfo := p.sessionStore.GetSession(sessionID); sessInfo != nil {
+			clientName = sessInfo.ClientName
+			clientVersion = sessInfo.ClientVersion
+		}
+	}
+
+	// Generate parent call ID before execution
+	executionStart := time.Now()
+	parentCallID := fmt.Sprintf("%d-code_execution", executionStart.UnixNano())
+
 	// Create tool caller adapter that wraps the upstream manager
 	toolCaller := &upstreamToolCaller{
-		upstreamManager: p.upstreamManager,
-		logger:          p.logger,
-		executionID:     options.ExecutionID,
+		upstreamManager:  p.upstreamManager,
+		logger:           p.logger,
+		executionID:      options.ExecutionID,
+		storage:          p.storage,
+		configPath:       p.mainServer.GetConfigPath(),
+		parentCallID:     parentCallID,
+		sessionID:        sessionID,
+		clientName:       clientName,
+		clientVersion:    clientVersion,
 	}
 
 	// Log pool metrics before acquisition
@@ -143,7 +165,8 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		zap.Int("allowed_servers_count", len(options.AllowedServers)),
 	)
 
-	executionStart := time.Now()
+	// Update execution start time to actual execution start
+	executionStart = time.Now()
 	result := jsruntime.Execute(ctx, toolCaller, code, options)
 	executionDuration := time.Since(executionStart)
 
@@ -173,6 +196,35 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		)
 	}
 
+	// Record the parent code_execution call in history
+	codeExecRecord := &storage.ToolCallRecord{
+		ID:               parentCallID,
+		ServerID:         "code_execution", // Special server ID for built-in tool
+		ServerName:       "mcpproxy",       // Built-in tool
+		ToolName:         "code_execution",
+		Arguments: map[string]interface{}{
+			"code":  code,
+			"input": options.Input,
+		},
+		Response:         result,
+		Duration:         int64(executionDuration),
+		Timestamp:        executionStart,
+		ConfigPath:       p.mainServer.GetConfigPath(),
+		RequestID:        options.ExecutionID,
+		ExecutionType:    "code_execution",
+		MCPSessionID:     sessionID,
+		MCPClientName:    clientName,
+		MCPClientVersion: clientVersion,
+	}
+
+	// Store parent call in history
+	if err := p.storage.RecordToolCall(codeExecRecord); err != nil {
+		p.logger.Warn("failed to record code_execution call in history",
+			zap.String("execution_id", options.ExecutionID),
+			zap.Error(err),
+		)
+	}
+
 	// Convert result to MCP response format
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
@@ -198,11 +250,17 @@ type toolCallRecord struct {
 
 // upstreamToolCaller adapts the upstream.Manager to implement jsruntime.ToolCaller
 type upstreamToolCaller struct {
-	upstreamManager *upstream.Manager
-	logger          *zap.Logger
-	executionID     string
-	toolCalls       []toolCallRecord
-	mu              sync.Mutex
+	upstreamManager  *upstream.Manager
+	logger           *zap.Logger
+	executionID      string
+	storage          *storage.Manager
+	configPath       string
+	toolCalls        []toolCallRecord
+	mu               sync.Mutex
+	parentCallID     string // ID of the parent code_execution call
+	sessionID        string // MCP session ID
+	clientName       string // MCP client name
+	clientVersion    string // MCP client version
 }
 
 // CallTool implements jsruntime.ToolCaller interface
@@ -221,6 +279,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		err := fmt.Errorf("server not found: %s", serverName)
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, err)
+		u.storeToolCallInHistory(serverName, toolName, args, nil, err, startTime, duration)
 		return nil, err
 	}
 
@@ -230,6 +289,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 
 	// Record the tool call with timing and result
 	u.recordToolCall(serverName, toolName, startTime, duration, err == nil, err)
+	u.storeToolCallInHistory(serverName, toolName, args, result, err, startTime, duration)
 
 	u.logger.Debug("upstream tool call completed",
 		zap.String("execution_id", u.executionID),
@@ -275,4 +335,63 @@ func (u *upstreamToolCaller) getToolCalls() []toolCallRecord {
 	calls := make([]toolCallRecord, len(u.toolCalls))
 	copy(calls, u.toolCalls)
 	return calls
+}
+
+// storeToolCallInHistory stores a nested tool call in the database for history tracking
+func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string, args map[string]interface{}, result interface{}, callErr error, startTime time.Time, duration time.Duration) {
+	// Skip if storage is not available
+	if u.storage == nil {
+		return
+	}
+
+	// Get server config to generate server ID
+	serverConfig, err := u.storage.GetUpstreamServer(serverName)
+	if err != nil {
+		u.logger.Warn("failed to get server config for history recording",
+			zap.String("server", serverName),
+			zap.String("execution_id", u.executionID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// Create tool call record for history
+	record := &storage.ToolCallRecord{
+		ID:               fmt.Sprintf("%d-%s", startTime.UnixNano(), toolName),
+		ServerID:         storage.GenerateServerID(serverConfig),
+		ServerName:       serverName,
+		ToolName:         toolName,
+		Arguments:        args,
+		Response:         result,
+		Duration:         int64(duration),
+		Timestamp:        startTime,
+		ConfigPath:       u.configPath,
+		RequestID:        u.executionID, // Use execution ID as request ID to link nested calls
+		ParentCallID:     u.parentCallID,
+		ExecutionType:    "code_execution",
+		MCPSessionID:     u.sessionID,
+		MCPClientName:    u.clientName,
+		MCPClientVersion: u.clientVersion,
+	}
+
+	if callErr != nil {
+		record.Error = callErr.Error()
+	}
+
+	// Store in database
+	if err := u.storage.RecordToolCall(record); err != nil {
+		u.logger.Warn("failed to store nested tool call in history",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("execution_id", u.executionID),
+			zap.Error(err),
+		)
+	} else {
+		u.logger.Debug("stored nested tool call in history",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("execution_id", u.executionID),
+			zap.String("record_id", record.ID),
+		)
+	}
 }

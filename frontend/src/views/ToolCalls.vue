@@ -91,13 +91,14 @@
                 <th>Status</th>
                 <th>Duration</th>
                 <th>Tokens</th>
+                <th>Session</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               <template v-for="call in paginatedToolCalls" :key="call.id">
                 <!-- Main row -->
-                <tr>
+                <tr :data-call-id="call.id">
                   <td>
                     <div class="text-sm">{{ formatTimestamp(call.timestamp) }}</div>
                     <div class="text-xs text-base-content/60">{{ formatRelativeTime(call.timestamp) }}</div>
@@ -144,6 +145,14 @@
                     <span v-else class="text-xs text-base-content/40">—</span>
                   </td>
                   <td>
+                    <div v-if="call.mcp_session_id" class="text-xs">
+                      <code class="bg-base-200 px-1 py-0.5 rounded" :title="call.mcp_session_id">
+                        {{ call.mcp_session_id.substring(0, 8) }}...
+                      </code>
+                    </div>
+                    <span v-else class="text-xs text-base-content/40">—</span>
+                  </td>
+                  <td>
                     <div class="flex gap-2">
                       <button
                         @click="toggleDetails(call.id)"
@@ -184,8 +193,23 @@
 
                 <!-- Expandable detail row (immediately follows main row) -->
                 <tr v-show="expandedCalls.has(call.id)">
-                  <td colspan="7" class="bg-base-200">
+                  <td colspan="8" class="bg-base-200">
                     <div class="p-4 space-y-4">
+                      <!-- JavaScript Code (for code_execution tool) -->
+                      <div v-if="call.tool_name === 'code_execution' && call.arguments.code">
+                        <h4 class="font-semibold mb-2">JavaScript Code:</h4>
+                        <div class="mockup-code bg-base-300 text-sm max-h-96 overflow-auto">
+                          <VueMonacoEditor
+                            :value="call.arguments.code"
+                            language="javascript"
+                            theme="vs-dark"
+                            :options="{ ...editorOptions, readOnly: true, lineNumbers: 'on' }"
+                            height="auto"
+                            class="min-h-[100px] max-h-96"
+                          />
+                        </div>
+                      </div>
+
                       <!-- Arguments -->
                       <div>
                         <h4 class="font-semibold mb-2">Arguments:</h4>
@@ -209,6 +233,19 @@
                         <div class="break-all"><strong>Call ID:</strong> {{ call.id }}</div>
                         <div class="break-all"><strong>Server ID:</strong> {{ call.server_id }}</div>
                         <div v-if="call.request_id" class="break-all"><strong>Request ID:</strong> {{ call.request_id }}</div>
+                        <div v-if="call.parent_call_id" class="break-all">
+                          <strong>Parent Call:</strong>
+                          <button
+                            @click="scrollToCall(call.parent_call_id)"
+                            class="link link-primary ml-1"
+                            :title="`Jump to parent call: ${call.parent_call_id}`"
+                          >
+                            {{ call.parent_call_id }}
+                          </button>
+                        </div>
+                        <div v-if="call.execution_type" class="break-all"><strong>Execution Type:</strong> {{ call.execution_type }}</div>
+                        <div v-if="call.mcp_session_id" class="break-all"><strong>MCP Session ID:</strong> {{ call.mcp_session_id }}</div>
+                        <div v-if="call.mcp_client_name" class="break-all"><strong>MCP Client:</strong> {{ call.mcp_client_name }} {{ call.mcp_client_version ? `v${call.mcp_client_version}` : '' }}</div>
                         <div class="break-all"><strong>Config Path:</strong> {{ call.config_path }}</div>
                         <div v-if="call.metrics" class="pt-2 border-t border-base-300 mt-2">
                           <div class="font-semibold text-sm text-base-content/80 mb-1">Token Usage:</div>
@@ -469,6 +506,35 @@ const toggleDetails = (callId: string) => {
     newSet.add(callId)
   }
   expandedCalls.value = newSet
+}
+
+const scrollToCall = (callId: string) => {
+  // Find the call in filtered list
+  const call = filteredToolCalls.value.find(c => c.id === callId)
+  if (!call) {
+    systemStore.addToast({
+      type: 'warning',
+      title: 'Call Not Found',
+      message: 'Parent call not found in current view. It may be filtered out or on another page.'
+    })
+    return
+  }
+
+  // Calculate which page the call is on
+  const callIndex = filteredToolCalls.value.indexOf(call)
+  const targetPage = Math.floor(callIndex / itemsPerPage) + 1
+
+  // Navigate to the page and expand the call
+  currentPage.value = targetPage
+  expandedCalls.value = new Set([callId])
+
+  // Scroll to the call after a brief delay to ensure rendering
+  setTimeout(() => {
+    const element = document.querySelector(`[data-call-id="${callId}"]`)
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, 100)
 }
 
 const copyCLICommand = (call: ToolCallRecord) => {

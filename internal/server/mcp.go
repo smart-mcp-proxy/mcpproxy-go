@@ -73,6 +73,9 @@ type MCPProxyServer struct {
 
 	// JavaScript runtime pool for code execution
 	jsPool *jsruntime.Pool
+
+	// MCP session tracking
+	sessionStore *SessionStore
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -87,10 +90,37 @@ func NewMCPProxyServer(
 	debugSearch bool,
 	config *config.Config,
 ) *MCPProxyServer {
-	// Create MCP server with capabilities
+	// Initialize session store first (needed for hooks)
+	sessionStore := NewSessionStore(logger)
+
+	// Create hooks to capture session information
+	hooks := &mcpserver.Hooks{}
+	hooks.AddOnRegisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
+		sessionID := sess.SessionID()
+
+		// Try to get client info if available
+		var clientName, clientVersion string
+		if sessWithInfo, ok := sess.(mcpserver.SessionWithClientInfo); ok {
+			clientInfo := sessWithInfo.GetClientInfo()
+			clientName = clientInfo.Name
+			clientVersion = clientInfo.Version
+		}
+
+		// Store session information
+		sessionStore.SetSession(sessionID, clientName, clientVersion)
+
+		logger.Info("MCP session registered",
+			zap.String("session_id", sessionID),
+			zap.String("client_name", clientName),
+			zap.String("client_version", clientVersion),
+		)
+	})
+
+	// Create MCP server with capabilities and hooks
 	capabilities := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
+		mcpserver.WithHooks(hooks),
 	}
 
 	// Add prompts capability if enabled
@@ -128,6 +158,7 @@ func NewMCPProxyServer(
 		mainServer:      mainServer,
 		config:          config,
 		jsPool:          jsPool,
+		sessionStore:    sessionStore,
 	}
 
 	// Register proxy tools
@@ -701,18 +732,32 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 	}
 
+	// Extract session information from context
+	var sessionID, clientName, clientVersion string
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+		if sessInfo := p.sessionStore.GetSession(sessionID); sessInfo != nil {
+			clientName = sessInfo.ClientName
+			clientVersion = sessInfo.ClientVersion
+		}
+	}
+
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
-		ID:         fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
-		ServerID:   storage.GenerateServerID(serverConfig),
-		ServerName: serverName,
-		ToolName:   actualToolName,
-		Arguments:  args,
-		Duration:   int64(duration),
-		Timestamp:  startTime,
-		ConfigPath: p.mainServer.GetConfigPath(),
-		RequestID:  "", // TODO: Extract from context if available
-		Metrics:    tokenMetrics,
+		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
+		ServerID:         storage.GenerateServerID(serverConfig),
+		ServerName:       serverName,
+		ToolName:         actualToolName,
+		Arguments:        args,
+		Duration:         int64(duration),
+		Timestamp:        startTime,
+		ConfigPath:       p.mainServer.GetConfigPath(),
+		RequestID:        "", // TODO: Extract from context if available
+		Metrics:          tokenMetrics,
+		ExecutionType:    "direct",
+		MCPSessionID:     sessionID,
+		MCPClientName:    clientName,
+		MCPClientVersion: clientVersion,
 	}
 
 	if err != nil {
