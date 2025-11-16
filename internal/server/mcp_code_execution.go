@@ -197,6 +197,58 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		)
 	}
 
+	// Calculate token metrics for the parent code_execution call
+	var codeExecMetrics *storage.TokenMetrics
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizer := p.mainServer.runtime.Tokenizer()
+		if tokenizer != nil {
+			// Get model for token counting
+			model := "gpt-4" // default
+			if cfg := p.mainServer.runtime.Config(); cfg != nil && cfg.Tokenizer != nil && cfg.Tokenizer.DefaultModel != "" {
+				model = cfg.Tokenizer.DefaultModel
+			}
+
+			// Count input tokens (code + input arguments)
+			inputArgs := map[string]interface{}{
+				"code":  code,
+				"input": options.Input,
+			}
+			inputTokens, inputErr := tokenizer.CountTokensInJSONForModel(inputArgs, model)
+			if inputErr != nil {
+				p.logger.Debug("Failed to count input tokens for code_execution",
+					zap.String("execution_id", options.ExecutionID),
+					zap.Error(inputErr))
+			}
+
+			// Count output tokens (execution result)
+			outputTokens := 0
+			if result != nil {
+				var outputErr error
+				outputTokens, outputErr = tokenizer.CountTokensInJSONForModel(result, model)
+				if outputErr != nil {
+					p.logger.Debug("Failed to count output tokens for code_execution",
+						zap.String("execution_id", options.ExecutionID),
+						zap.Error(outputErr))
+				}
+			}
+
+			// Get encoding from tokenizer
+			encoding := "cl100k_base" // default
+			if dt, ok := tokenizer.(interface{ GetDefaultEncoding() string }); ok {
+				encoding = dt.GetDefaultEncoding()
+			}
+
+			// Create token metrics
+			codeExecMetrics = &storage.TokenMetrics{
+				InputTokens:  inputTokens,
+				OutputTokens: outputTokens,
+				TotalTokens:  inputTokens + outputTokens,
+				Model:        model,
+				Encoding:     encoding,
+			}
+		}
+	}
+
 	// Record the parent code_execution call in history
 	codeExecRecord := &storage.ToolCallRecord{
 		ID:               parentCallID,
@@ -216,6 +268,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		MCPSessionID:     sessionID,
 		MCPClientName:    clientName,
 		MCPClientVersion: clientVersion,
+		Metrics:          codeExecMetrics,
 	}
 
 	// Store parent call in history

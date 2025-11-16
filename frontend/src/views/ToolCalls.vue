@@ -197,15 +197,53 @@
                     <div class="p-4 space-y-4">
                       <!-- JavaScript Code (for code_execution tool) -->
                       <div v-if="call.tool_name === 'code_execution' && call.arguments.code">
-                        <h4 class="font-semibold mb-2">JavaScript Code:</h4>
-                        <div class="mockup-code bg-base-300 text-sm max-h-96 overflow-auto">
+                        <div class="flex justify-between items-start mb-2">
+                          <h4 class="font-semibold">JavaScript Code:</h4>
+                          <button
+                            @click="copyCode(call.arguments.code, call.id)"
+                            class="btn btn-xs btn-ghost gap-1"
+                            :class="{ 'btn-success': copiedCodeId === call.id }"
+                            :title="copiedCodeId === call.id ? 'Copied!' : 'Copy code to clipboard'"
+                          >
+                            <svg
+                              v-if="copiedCodeId !== call.id"
+                              class="w-4 h-4"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                              />
+                            </svg>
+                            <svg
+                              v-else
+                              class="w-4 h-4"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M5 13l4 4L19 7"
+                              />
+                            </svg>
+                            {{ copiedCodeId === call.id ? 'Copied!' : 'Copy' }}
+                          </button>
+                        </div>
+                        <div class="resizable-editor-container bg-base-300 rounded">
                           <VueMonacoEditor
                             :value="call.arguments.code"
                             language="javascript"
                             theme="vs-dark"
                             :options="{ ...editorOptions, readOnly: true, lineNumbers: 'on' }"
-                            height="auto"
-                            class="min-h-[100px] max-h-96"
+                            height="250px"
+                            class="rounded"
                           />
                         </div>
                       </div>
@@ -426,6 +464,10 @@ const replayValidationError = ref('')
 const replayResult = ref<any>(null)
 const replaying = ref(false)
 
+// Code copy state
+const copiedCodeId = ref<string | null>(null)
+let copiedCodeTimeout: ReturnType<typeof setTimeout> | null = null
+
 // Monaco editor options
 const editorOptions = {
   minimap: { enabled: false },
@@ -554,6 +596,31 @@ const copyCLICommand = (call: ToolCallRecord) => {
       message: 'Failed to copy command to clipboard'
     })
   })
+}
+
+const copyCode = async (code: string, callId: string) => {
+  try {
+    await navigator.clipboard.writeText(code)
+    copiedCodeId.value = callId
+
+    systemStore.addToast({
+      type: 'success',
+      title: 'Copied!',
+      message: 'JavaScript code copied to clipboard'
+    })
+
+    // Reset copied state after 2 seconds
+    if (copiedCodeTimeout) clearTimeout(copiedCodeTimeout)
+    copiedCodeTimeout = setTimeout(() => {
+      copiedCodeId.value = null
+    }, 2000)
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Copy Failed',
+      message: 'Failed to copy code to clipboard'
+    })
+  }
 }
 
 // Replay methods
@@ -701,3 +768,20 @@ onMounted(() => {
   loadToolCalls()
 })
 </script>
+
+<style scoped>
+/* Resizable Monaco Editor Container */
+.resizable-editor-container {
+  resize: vertical;
+  overflow: hidden;
+  min-height: 150px;
+  max-height: 600px;
+  height: 250px;
+  border: 1px solid hsl(var(--bc) / 0.2);
+}
+
+/* Ensure Monaco editor fills the container */
+.resizable-editor-container :deep(.monaco-editor) {
+  height: 100% !important;
+}
+</style>
