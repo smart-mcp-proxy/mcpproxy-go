@@ -96,6 +96,12 @@ type Config struct {
 
 	// Tokenizer configuration for token counting
 	Tokenizer *TokenizerConfig `json:"tokenizer,omitempty" mapstructure:"tokenizer"`
+
+	// Code execution settings
+	EnableCodeExecution          bool `json:"enable_code_execution" mapstructure:"enable-code-execution"`                     // Enable JavaScript code execution tool (default: false)
+	CodeExecutionTimeoutMs       int  `json:"code_execution_timeout_ms,omitempty" mapstructure:"code-execution-timeout-ms"`   // Timeout in milliseconds (default: 120000, max: 600000)
+	CodeExecutionMaxToolCalls    int  `json:"code_execution_max_tool_calls,omitempty" mapstructure:"code-execution-max-tool-calls"` // Max tool calls per execution (0 = unlimited, default: 0)
+	CodeExecutionPoolSize        int  `json:"code_execution_pool_size,omitempty" mapstructure:"code-execution-pool-size"`     // JavaScript runtime pool size (default: 10)
 }
 
 // TLSConfig represents TLS configuration
@@ -531,6 +537,12 @@ func DefaultConfig() *Config {
 			DefaultModel: "gpt-4",       // Default to GPT-4 tokenization
 			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
 		},
+
+		// Code execution defaults - disabled by default for security
+		EnableCodeExecution:       false,  // Must be explicitly enabled
+		CodeExecutionTimeoutMs:    120000, // 2 minutes (120,000ms)
+		CodeExecutionMaxToolCalls: 0,      // Unlimited by default (0 = no limit)
+		CodeExecutionPoolSize:     10,     // 10 JavaScript runtime instances
 	}
 }
 
@@ -643,6 +655,28 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		errors = append(errors, ValidationError{
 			Field:   "call_tool_timeout",
 			Message: "must be a positive duration",
+		})
+	}
+
+	// Validate code execution configuration (0 means use default)
+	if c.CodeExecutionTimeoutMs != 0 && (c.CodeExecutionTimeoutMs < 1 || c.CodeExecutionTimeoutMs > 600000) {
+		errors = append(errors, ValidationError{
+			Field:   "code_execution_timeout_ms",
+			Message: "must be between 1 and 600000 milliseconds (or 0 for default)",
+		})
+	}
+
+	if c.CodeExecutionMaxToolCalls < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "code_execution_max_tool_calls",
+			Message: "cannot be negative (0 means unlimited)",
+		})
+	}
+
+	if c.CodeExecutionPoolSize != 0 && (c.CodeExecutionPoolSize < 1 || c.CodeExecutionPoolSize > 100) {
+		errors = append(errors, ValidationError{
+			Field:   "code_execution_pool_size",
+			Message: "must be between 1 and 100 (or 0 for default)",
 		})
 	}
 
@@ -772,6 +806,14 @@ func (c *Config) Validate() error {
 	if c.CallToolTimeout.Duration() <= 0 {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
 	}
+	// Apply code execution defaults
+	if c.CodeExecutionTimeoutMs <= 0 {
+		c.CodeExecutionTimeoutMs = 120000 // 2 minutes (120,000ms)
+	}
+	if c.CodeExecutionPoolSize <= 0 {
+		c.CodeExecutionPoolSize = 10 // 10 JavaScript runtime instances
+	}
+	// CodeExecutionMaxToolCalls defaults to 0 (unlimited), which is valid
 
 	// Then perform detailed validation
 	errors := c.ValidateDetailed()

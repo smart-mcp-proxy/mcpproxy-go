@@ -38,6 +38,7 @@ var (
 		"read_cache":          true,
 		"list_registries":     true,
 		"search_servers":      true,
+		"code_execution":      true,
 	}
 )
 

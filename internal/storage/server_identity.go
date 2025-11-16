@@ -58,18 +58,23 @@ type TokenMetrics struct {
 
 // ToolCallRecord represents a tool call with server context
 type ToolCallRecord struct {
-	ID         string                 `json:"id"`                // UUID
-	ServerID   string                 `json:"server_id"`         // Server identity
-	ServerName string                 `json:"server_name"`       // For quick reference
-	ToolName   string                 `json:"tool_name"`         // Original tool name (without server prefix)
-	Arguments  map[string]interface{} `json:"arguments"`         // Tool arguments
-	Response   interface{}            `json:"response"`          // Tool response
-	Error      string                 `json:"error"`             // Error if failed
-	Duration   int64                  `json:"duration"`          // Duration in nanoseconds
-	Timestamp  time.Time              `json:"timestamp"`         // When the call was made
-	ConfigPath string                 `json:"config_path"`       // Which config was active
-	RequestID  string                 `json:"request_id"`        // For correlation
-	Metrics    *TokenMetrics          `json:"metrics,omitempty"` // Token usage metrics (nil for older records)
+	ID               string                 `json:"id"`                          // UUID
+	ServerID         string                 `json:"server_id"`                   // Server identity
+	ServerName       string                 `json:"server_name"`                 // For quick reference
+	ToolName         string                 `json:"tool_name"`                   // Original tool name (without server prefix)
+	Arguments        map[string]interface{} `json:"arguments"`                   // Tool arguments
+	Response         interface{}            `json:"response"`                    // Tool response
+	Error            string                 `json:"error"`                       // Error if failed
+	Duration         int64                  `json:"duration"`                    // Duration in nanoseconds
+	Timestamp        time.Time              `json:"timestamp"`                   // When the call was made
+	ConfigPath       string                 `json:"config_path"`                 // Which config was active
+	RequestID        string                 `json:"request_id"`                  // For correlation
+	Metrics          *TokenMetrics          `json:"metrics,omitempty"`           // Token usage metrics (nil for older records)
+	ParentCallID     string                 `json:"parent_call_id,omitempty"`    // Links nested calls to parent code_execution
+	ExecutionType    string                 `json:"execution_type,omitempty"`    // "direct" or "code_execution"
+	MCPSessionID     string                 `json:"mcp_session_id,omitempty"`    // MCP session identifier
+	MCPClientName    string                 `json:"mcp_client_name,omitempty"`   // MCP client name from InitializeRequest
+	MCPClientVersion string                 `json:"mcp_client_version,omitempty"` // MCP client version
 }
 
 // DiagnosticRecord represents a diagnostic event for a server

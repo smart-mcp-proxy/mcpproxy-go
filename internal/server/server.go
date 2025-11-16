@@ -287,6 +287,13 @@ func (s *Server) Shutdown() error {
 		s.logger.Error("Failed to close runtime", zap.Error(err))
 	}
 
+	// Close MCP proxy server (includes JavaScript runtime pool cleanup)
+	if s.mcpProxy != nil {
+		if err := s.mcpProxy.Close(); err != nil {
+			s.logger.Error("Failed to close MCP proxy server", zap.Error(err))
+		}
+	}
+
 	s.logger.Info("MCP proxy server shutdown complete")
 	return nil
 }

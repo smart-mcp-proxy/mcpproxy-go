@@ -430,12 +430,13 @@ ls -la ~/.mcpproxy/mcpproxy.sock
 1. **Tool Discovery** - BM25 search across all upstream MCP server tools
 2. **Security Quarantine** - Automatic quarantine of new servers to prevent Tool Poisoning Attacks
 3. **Docker Security Isolation** - Run stdio MCP servers in isolated Docker containers for enhanced security
-4. **OAuth 2.1 Support** - RFC 8252 compliant OAuth with PKCE for secure authentication
-5. **System Tray UI** - Native cross-platform tray interface for server management
-6. **Per-Server Logging** - Individual log files for each upstream server
-7. **Real-time Event System** - Event bus with SSE integration for live updates (Phase 3 refactoring)
-8. **Hot Configuration Reload** - Real-time config changes with event notifications
-9. **Unix Socket/Named Pipe IPC** - Secure local communication between tray and core without API keys (macOS/Linux: Unix sockets, Windows: Named pipes)
+4. **JavaScript Code Execution** - Execute JavaScript to orchestrate multiple upstream tools in a single request, reducing latency and enabling complex workflows
+5. **OAuth 2.1 Support** - RFC 8252 compliant OAuth with PKCE for secure authentication
+6. **System Tray UI** - Native cross-platform tray interface for server management
+7. **Per-Server Logging** - Individual log files for each upstream server
+8. **Real-time Event System** - Event bus with SSE integration for live updates (Phase 3 refactoring)
+9. **Hot Configuration Reload** - Real-time config changes with event notifications
+10. **Unix Socket/Named Pipe IPC** - Secure local communication between tray and core without API keys (macOS/Linux: Unix sockets, Windows: Named pipes)
 
 ## Configuration
 
@@ -615,6 +616,7 @@ Working directories are compatible with Docker isolation. When both are configur
 ### Built-in Tools
 - **`retrieve_tools`** - BM25 keyword search across all upstream tools
 - **`call_tool`** - Proxy tool calls to upstream servers
+- **`code_execution`** - Execute JavaScript to orchestrate multiple upstream tools (disabled by default)
 - **`upstream_servers`** - CRUD operations for server management
 
 ### Tool Name Format
@@ -659,6 +661,148 @@ open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
 - **MCP endpoints (`/mcp`, `/mcp/`)** remain **unprotected** for client compatibility
 - **REST API** requires authentication when API key is configured
 - **Empty API key** disables authentication (useful for testing)
+
+## JavaScript Code Execution
+
+The `code_execution` tool enables LLM agents to orchestrate multiple upstream MCP tools in a single request using sandboxed JavaScript (ES5.1+). This reduces round-trip latency and enables complex multi-step workflows with conditional logic, loops, and data transformations.
+
+### Overview
+
+**When to Use**:
+- Calling 2+ tools and combining their results
+- Conditional logic based on tool responses
+- Data transformation or aggregation from multiple sources
+- Iterating over data and calling tools for each item
+
+**When NOT to Use**:
+- Single tool calls (use `call_tool` directly)
+- Simple linear workflows (use sequential calls)
+- Operations requiring >2 minutes (default timeout)
+
+### Configuration
+
+Enable the feature in `~/.mcpproxy/mcp_config.json`:
+
+```json
+{
+  "enable_code_execution": true,
+  "code_execution_timeout_ms": 120000,      // Default: 2 minutes, max: 10 minutes
+  "code_execution_max_tool_calls": 0,       // Default: unlimited
+  "code_execution_pool_size": 10            // Default: 10 concurrent VMs
+}
+```
+
+### JavaScript API
+
+**Available in JavaScript**:
+- `input` - Global variable containing request input data
+- `call_tool(serverName, toolName, args)` - Function to invoke upstream MCP tools
+- ES5.1+ standard library (Array, Object, String, Math, Date, JSON, etc.)
+
+**Sandbox Restrictions** (not available):
+- `require()` - No module loading
+- `setTimeout()` / `setInterval()` - No timers
+- Filesystem, network, or environment variable access
+- Node.js built-ins beyond ES5.1
+
+**call_tool() Response Format**:
+```javascript
+// Success
+{
+  "ok": true,
+  "result": <tool result>
+}
+
+// Error
+{
+  "ok": false,
+  "error": {
+    "message": "<error message>",
+    "code": "<error code>"
+  }
+}
+```
+
+### CLI Command
+
+```bash
+# Basic usage
+mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}'
+
+# Code from file
+mcpproxy code exec --file=script.js --input-file=params.json
+
+# Call upstream tools
+mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user})" --input='{"user":"octocat"}'
+
+# With options
+mcpproxy code exec --code="..." --timeout=60000 --max-tool-calls=10 --allowed-servers=github,gitlab
+```
+
+### Common Patterns
+
+**Sequential Tool Calls**:
+```javascript
+var userRes = call_tool('github', 'get_user', {username: input.username});
+if (!userRes.ok) return {error: userRes.error.message};
+
+var reposRes = call_tool('github', 'list_repos', {user: input.username});
+if (!reposRes.ok) return {error: reposRes.error.message};
+
+return {
+  user: userRes.result.name,
+  repos: reposRes.result.length
+};
+```
+
+**Conditional Logic**:
+```javascript
+var primary = call_tool('primary-db', 'query', {sql: input.query});
+if (!primary.ok) {
+  // Fallback to backup
+  var backup = call_tool('backup-db', 'query', {sql: input.query});
+  return backup.ok ? backup.result : {error: 'Both databases unavailable'};
+}
+return primary.result;
+```
+
+**Loop with Aggregation**:
+```javascript
+var results = [];
+for (var i = 0; i < input.ids.length; i++) {
+  var res = call_tool('api', 'get_item', {id: input.ids[i]});
+  if (res.ok) results.push(res.result);
+}
+return {items: results, count: results.length};
+```
+
+### Error Codes
+
+| Code | Description |
+|------|-------------|
+| `SYNTAX_ERROR` | Invalid JavaScript syntax |
+| `RUNTIME_ERROR` | Uncaught exception during execution |
+| `TIMEOUT` | Execution exceeded timeout limit |
+| `MAX_TOOL_CALLS_EXCEEDED` | Too many `call_tool()` invocations |
+| `SERVER_NOT_ALLOWED` | Attempted to call server not in `allowed_servers` |
+| `SERIALIZATION_ERROR` | Return value not JSON-serializable |
+
+### Documentation
+
+For comprehensive guides and examples:
+- **Overview**: `docs/code_execution/overview.md` - Architecture and best practices
+- **Examples**: `docs/code_execution/examples.md` - 13 working code samples
+- **API Reference**: `docs/code_execution/api-reference.md` - Complete schema documentation
+- **Troubleshooting**: `docs/code_execution/troubleshooting.md` - Common issues and solutions
+
+### Security
+
+- **Feature Toggle**: Disabled by default (`enable_code_execution: false`)
+- **Sandbox**: No filesystem, network, or environment access
+- **Timeout**: Maximum execution time enforced (default: 2 minutes, max: 10 minutes)
+- **Tool Call Limits**: Optional `max_tool_calls` to prevent abuse
+- **Server Whitelist**: Optional `allowed_servers` for access control
+- **Quarantine Integration**: Respects existing server quarantine status
 
 ## Security Model
 

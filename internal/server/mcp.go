@@ -14,6 +14,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/jsruntime"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/server/tokens"
@@ -41,6 +42,7 @@ const (
 	operationQuarantineSec   = "quarantine_security"
 	operationRetrieveTools   = "retrieve_tools"
 	operationReadCache       = "read_cache"
+	operationCodeExecution   = "code_execution"
 	operationListRegistries  = "list_registries"
 	operationSearchServers   = "search_servers"
 
@@ -68,6 +70,12 @@ type MCPProxyServer struct {
 	// Docker availability cache
 	dockerAvailableCache *bool
 	dockerCacheTime      time.Time
+
+	// JavaScript runtime pool for code execution
+	jsPool *jsruntime.Pool
+
+	// MCP session tracking
+	sessionStore *SessionStore
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -82,10 +90,37 @@ func NewMCPProxyServer(
 	debugSearch bool,
 	config *config.Config,
 ) *MCPProxyServer {
-	// Create MCP server with capabilities
+	// Initialize session store first (needed for hooks)
+	sessionStore := NewSessionStore(logger)
+
+	// Create hooks to capture session information
+	hooks := &mcpserver.Hooks{}
+	hooks.AddOnRegisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
+		sessionID := sess.SessionID()
+
+		// Try to get client info if available
+		var clientName, clientVersion string
+		if sessWithInfo, ok := sess.(mcpserver.SessionWithClientInfo); ok {
+			clientInfo := sessWithInfo.GetClientInfo()
+			clientName = clientInfo.Name
+			clientVersion = clientInfo.Version
+		}
+
+		// Store session information
+		sessionStore.SetSession(sessionID, clientName, clientVersion)
+
+		logger.Info("MCP session registered",
+			zap.String("session_id", sessionID),
+			zap.String("client_name", clientName),
+			zap.String("client_version", clientVersion),
+		)
+	})
+
+	// Create MCP server with capabilities and hooks
 	capabilities := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
+		mcpserver.WithHooks(hooks),
 	}
 
 	// Add prompts capability if enabled
@@ -100,6 +135,18 @@ func NewMCPProxyServer(
 		capabilities...,
 	)
 
+	// Initialize JavaScript runtime pool if code execution is enabled
+	var jsPool *jsruntime.Pool
+	if config.EnableCodeExecution {
+		var err error
+		jsPool, err = jsruntime.NewPool(config.CodeExecutionPoolSize)
+		if err != nil {
+			logger.Error("failed to create JavaScript runtime pool", zap.Error(err))
+		} else {
+			logger.Info("JavaScript runtime pool initialized", zap.Int("size", config.CodeExecutionPoolSize))
+		}
+	}
+
 	proxy := &MCPProxyServer{
 		server:          mcpServer,
 		storage:         storage,
@@ -110,6 +157,8 @@ func NewMCPProxyServer(
 		logger:          logger,
 		mainServer:      mainServer,
 		config:          config,
+		jsPool:          jsPool,
+		sessionStore:    sessionStore,
 	}
 
 	// Register proxy tools
@@ -121,6 +170,18 @@ func NewMCPProxyServer(
 	}
 
 	return proxy
+}
+
+// Close gracefully shuts down the MCP proxy server and releases resources
+func (p *MCPProxyServer) Close() error {
+	if p.jsPool != nil {
+		if err := p.jsPool.Close(); err != nil {
+			p.logger.Warn("failed to close JavaScript runtime pool", zap.Error(err))
+			return err
+		}
+		p.logger.Info("JavaScript runtime pool closed successfully")
+	}
+	return nil
 }
 
 // registerTools registers all proxy tools with the MCP server
@@ -175,6 +236,24 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		),
 	)
 	p.server.AddTool(readCacheTool, p.handleReadCache)
+
+	// code_execution - JavaScript code execution for multi-tool orchestration (feature-flagged)
+	if p.config.EnableCodeExecution {
+		codeExecutionTool := mcp.NewTool("code_execution",
+			mcp.WithDescription("Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request. Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations that would require multiple round-trips otherwise.\n\n**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n**Available in JavaScript**:\n- `input` global: Your input data passed via the 'input' parameter\n- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n- Standard ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
+			mcp.WithString("code",
+				mcp.Required(),
+				mcp.Description("JavaScript source code (ES5.1+) to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. Return value must be JSON-serializable. Example: `const res = call_tool('github', 'get_user', {username: input.username}); if (!res.ok) throw new Error(res.error.message); ({user: res.result, timestamp: Date.now()})`"),
+			),
+			mcp.WithObject("input",
+				mcp.Description("Input data accessible as global `input` variable in JavaScript code (default: {})"),
+			),
+			mcp.WithObject("options",
+				mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
+			),
+		)
+		p.server.AddTool(codeExecutionTool, p.handleCodeExecution)
+	}
 
 	// upstream_servers - Basic server management (with security checks)
 	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
@@ -525,6 +604,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		operationRetrieveTools:   true,
 		operationCallTool:        true,
 		"read_cache":             true,
+		"code_execution":         true,
 		"list_registries":        true,
 		"search_servers":         true,
 	}
@@ -545,6 +625,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			return p.handleRetrieveTools(ctx, proxyRequest)
 		case operationReadCache:
 			return p.handleReadCache(ctx, proxyRequest)
+		case operationCodeExecution:
+			return p.handleCodeExecution(ctx, proxyRequest)
 		case operationListRegistries:
 			return p.handleListRegistries(ctx, proxyRequest)
 		case operationSearchServers:
@@ -650,18 +732,32 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 	}
 
+	// Extract session information from context
+	var sessionID, clientName, clientVersion string
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+		if sessInfo := p.sessionStore.GetSession(sessionID); sessInfo != nil {
+			clientName = sessInfo.ClientName
+			clientVersion = sessInfo.ClientVersion
+		}
+	}
+
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
-		ID:         fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
-		ServerID:   storage.GenerateServerID(serverConfig),
-		ServerName: serverName,
-		ToolName:   actualToolName,
-		Arguments:  args,
-		Duration:   int64(duration),
-		Timestamp:  startTime,
-		ConfigPath: p.mainServer.GetConfigPath(),
-		RequestID:  "", // TODO: Extract from context if available
-		Metrics:    tokenMetrics,
+		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
+		ServerID:         storage.GenerateServerID(serverConfig),
+		ServerName:       serverName,
+		ToolName:         actualToolName,
+		Arguments:        args,
+		Duration:         int64(duration),
+		Timestamp:        startTime,
+		ConfigPath:       p.mainServer.GetConfigPath(),
+		RequestID:        "", // TODO: Extract from context if available
+		Metrics:          tokenMetrics,
+		ExecutionType:    "direct",
+		MCPSessionID:     sessionID,
+		MCPClientName:    clientName,
+		MCPClientVersion: clientVersion,
 	}
 
 	if err != nil {
@@ -2259,6 +2355,8 @@ func (p *MCPProxyServer) CallBuiltInTool(ctx context.Context, toolName string, a
 		return p.handleRetrieveTools(ctx, request)
 	case operationReadCache:
 		return p.handleReadCache(ctx, request)
+	case operationCodeExecution:
+		return p.handleCodeExecution(ctx, request)
 	case operationListRegistries:
 		return p.handleListRegistries(ctx, request)
 	case operationSearchServers:
@@ -2359,6 +2457,8 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		result, err = p.handleRetrieveTools(ctx, request)
 	case "quarantine_security":
 		result, err = p.handleQuarantineSecurity(ctx, request)
+	case "code_execution":
+		result, err = p.handleCodeExecution(ctx, request)
 	case "list_registries":
 		result, err = p.handleListRegistries(ctx, request)
 	case "search_servers":

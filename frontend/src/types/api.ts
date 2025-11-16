@@ -151,6 +151,11 @@ export interface ToolCallRecord {
   config_path: string
   request_id?: string
   metrics?: TokenMetrics  // Token usage metrics (optional for older records)
+  parent_call_id?: string  // Links nested calls to parent code_execution
+  execution_type?: string  // "direct" or "code_execution"
+  mcp_session_id?: string  // MCP session identifier
+  mcp_client_name?: string  // MCP client name from InitializeRequest
+  mcp_client_version?: string  // MCP client version
 }
 
 export interface GetToolCallsResponse {
