@@ -242,8 +242,7 @@
                             language="javascript"
                             theme="vs-dark"
                             :options="{ ...editorOptions, readOnly: true, lineNumbers: 'on' }"
-                            height="250px"
-                            class="rounded"
+                            class="rounded monaco-wrapper"
                           />
                         </div>
                       </div>
@@ -778,10 +777,23 @@ onMounted(() => {
   max-height: 600px;
   height: 250px;
   border: 1px solid hsl(var(--bc) / 0.2);
+  position: relative;
 }
 
-/* Ensure Monaco editor fills the container */
+/* Ensure Monaco wrapper fills the container absolutely */
+.resizable-editor-container .monaco-wrapper {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Ensure Monaco editor fills the wrapper */
 .resizable-editor-container :deep(.monaco-editor) {
+  width: 100% !important;
   height: 100% !important;
 }
 </style>
