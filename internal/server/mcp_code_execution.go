@@ -106,6 +106,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		sessionID:        sessionID,
 		clientName:       clientName,
 		clientVersion:    clientVersion,
+		mainServer:       p.mainServer,
 	}
 
 	// Log pool metrics before acquisition
@@ -261,6 +262,7 @@ type upstreamToolCaller struct {
 	sessionID        string // MCP session ID
 	clientName       string // MCP client name
 	clientVersion    string // MCP client version
+	mainServer       *Server // Reference to main server for tokenizer access
 }
 
 // CallTool implements jsruntime.ToolCaller interface
@@ -355,6 +357,58 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 		return
 	}
 
+	// Calculate token metrics for the nested call
+	var tokenMetrics *storage.TokenMetrics
+	if u.mainServer != nil && u.mainServer.runtime != nil {
+		tokenizer := u.mainServer.runtime.Tokenizer()
+		if tokenizer != nil {
+			// Get model for token counting
+			model := "gpt-4" // default
+			if cfg := u.mainServer.runtime.Config(); cfg != nil && cfg.Tokenizer != nil && cfg.Tokenizer.DefaultModel != "" {
+				model = cfg.Tokenizer.DefaultModel
+			}
+
+			// Count input tokens (arguments)
+			inputTokens, inputErr := tokenizer.CountTokensInJSONForModel(args, model)
+			if inputErr != nil {
+				u.logger.Debug("failed to count input tokens for nested call",
+					zap.String("server", serverName),
+					zap.String("tool", toolName),
+					zap.Error(inputErr),
+				)
+			}
+
+			// Count output tokens (if result is available and no error)
+			outputTokens := 0
+			if result != nil && callErr == nil {
+				var outputErr error
+				outputTokens, outputErr = tokenizer.CountTokensInJSONForModel(result, model)
+				if outputErr != nil {
+					u.logger.Debug("failed to count output tokens for nested call",
+						zap.String("server", serverName),
+						zap.String("tool", toolName),
+						zap.Error(outputErr),
+					)
+				}
+			}
+
+			// Get encoding from tokenizer
+			encoding := "cl100k_base" // default
+			if dt, ok := tokenizer.(interface{ GetDefaultEncoding() string }); ok {
+				encoding = dt.GetDefaultEncoding()
+			}
+
+			// Create token metrics
+			tokenMetrics = &storage.TokenMetrics{
+				InputTokens:  inputTokens,
+				OutputTokens: outputTokens,
+				TotalTokens:  inputTokens + outputTokens,
+				Model:        model,
+				Encoding:     encoding,
+			}
+		}
+	}
+
 	// Create tool call record for history
 	record := &storage.ToolCallRecord{
 		ID:               fmt.Sprintf("%d-%s", startTime.UnixNano(), toolName),
@@ -372,6 +426,7 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 		MCPSessionID:     u.sessionID,
 		MCPClientName:    u.clientName,
 		MCPClientVersion: u.clientVersion,
+		Metrics:          tokenMetrics,
 	}
 
 	if callErr != nil {
