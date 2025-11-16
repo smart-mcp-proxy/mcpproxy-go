@@ -691,6 +691,14 @@ func (r *Runtime) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, 
 		allCalls = append(allCalls, calls...)
 	}
 
+	// Also fetch code_execution calls (built-in tool, not in server_identities)
+	codeExecCalls, err := r.storageManager.GetServerToolCalls("code_execution", 1000)
+	if err != nil {
+		r.logger.Sugar().Warnw("Failed to get code_execution tool calls", "error", err)
+	} else {
+		allCalls = append(allCalls, codeExecCalls...)
+	}
+
 	// Sort by timestamp (most recent first)
 	sort.Slice(allCalls, func(i, j int) bool {
 		return allCalls[i].Timestamp.After(allCalls[j].Timestamp)
