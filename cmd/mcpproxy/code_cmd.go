@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/cache"
+	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/server"
+	"mcpproxy-go/internal/socket"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
@@ -104,7 +106,7 @@ func init() {
 }
 
 func runCodeExec(_ *cobra.Command, _ []string) error {
-	// Validate that either --code or --file is provided (but not both)
+	// Validate arguments
 	if codeSource == "" && codeFile == "" {
 		fmt.Fprintf(os.Stderr, "Error: either --code or --file must be provided\n")
 		return exitError(2)
@@ -114,52 +116,18 @@ func runCodeExec(_ *cobra.Command, _ []string) error {
 		return exitError(2)
 	}
 
-	// Load JavaScript code
-	var code string
-	var err error
-	if codeFile != "" {
-		codeBytes, readErr := os.ReadFile(codeFile)
-		if readErr != nil {
-			fmt.Fprintf(os.Stderr, "Error reading code file: %v\n", readErr)
-			return exitError(2)
-		}
-		code = string(codeBytes)
-	} else {
-		code = codeSource
-	}
-
-	// Load input data
-	var inputData map[string]interface{}
-	if codeInputFile != "" {
-		inputBytes, readErr := os.ReadFile(codeInputFile)
-		if readErr != nil {
-			fmt.Fprintf(os.Stderr, "Error reading input file: %v\n", readErr)
-			return exitError(2)
-		}
-		if unmarshalErr := json.Unmarshal(inputBytes, &inputData); unmarshalErr != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing input file JSON: %v\n", unmarshalErr)
-			return exitError(2)
-		}
-	} else {
-		if unmarshalErr := json.Unmarshal([]byte(codeInput), &inputData); unmarshalErr != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing input JSON: %v\n", unmarshalErr)
-			return exitError(2)
-		}
-	}
-
-	// Validate timeout range
-	if codeTimeout < 1 || codeTimeout > 600000 {
-		fmt.Fprintf(os.Stderr, "Error: timeout must be between 1 and 600000 milliseconds\n")
+	// Load code and input
+	code, inputData, err := loadCodeAndInput()
+	if err != nil {
 		return exitError(2)
 	}
 
-	// Validate max_tool_calls
-	if codeMaxToolCalls < 0 {
-		fmt.Fprintf(os.Stderr, "Error: max-tool-calls cannot be negative\n")
+	// Validate options
+	if err := validateOptions(); err != nil {
 		return exitError(2)
 	}
 
-	// Load configuration
+	// Load config to get data directory
 	globalConfig, err := loadCodeConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
@@ -172,16 +140,69 @@ func runCodeExec(_ *cobra.Command, _ []string) error {
 		return exitError(2)
 	}
 
-	// Create context with overall timeout (slightly longer than execution timeout)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(codeTimeout+5000)*time.Millisecond)
-	defer cancel()
-
 	// Create logger
 	logger, err := createCodeLogger(codeLogLevel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating logger: %v\n", err)
 		return exitError(2)
 	}
+
+	// Detect daemon and choose mode
+	if shouldUseDaemon(globalConfig.DataDir) {
+		logger.Info("Detected running daemon, using client mode via socket")
+		return runCodeExecClientMode(globalConfig.DataDir, code, inputData, logger)
+	}
+
+	logger.Info("No daemon detected, using standalone mode")
+	return runCodeExecStandalone(globalConfig, code, inputData, logger)
+}
+
+// shouldUseDaemon checks if daemon is running by detecting socket file.
+func shouldUseDaemon(dataDir string) bool {
+	socketPath := socket.DetectSocketPath(dataDir)
+	return socket.IsSocketAvailable(socketPath)
+}
+
+// runCodeExecClientMode executes code via daemon HTTP API over socket.
+func runCodeExecClientMode(dataDir, code string, input map[string]interface{}, logger *zap.Logger) error {
+	// Detect socket endpoint
+	socketPath := socket.DetectSocketPath(dataDir)
+
+	// Create CLI client
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Ping daemon to verify connectivity
+	ctx := context.Background()
+	if err := client.Ping(ctx); err != nil {
+		logger.Warn("Failed to ping daemon, falling back to standalone mode", zap.Error(err))
+		// Fall back to standalone mode
+		cfg, _ := loadCodeConfig()
+		return runCodeExecStandalone(cfg, code, input, logger)
+	}
+
+	// Execute code via daemon
+	result, err := client.CodeExec(
+		ctx,
+		code,
+		input,
+		codeTimeout,
+		codeMaxToolCalls,
+		codeAllowedSrvs,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error calling daemon: %v\n", err)
+		return exitError(1)
+	}
+
+	// Output result
+	return outputResult(result)
+}
+
+// runCodeExecStandalone executes code locally (existing logic).
+func runCodeExecStandalone(globalConfig *config.Config, code string, input map[string]interface{}, logger *zap.Logger) error {
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(codeTimeout+5000)*time.Millisecond)
+	defer cancel()
 
 	// Create storage manager
 	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar())
@@ -224,7 +245,7 @@ func runCodeExec(_ *cobra.Command, _ []string) error {
 		cacheManager,
 		truncator,
 		logger,
-		nil, // mainServer not needed for CLI calls
+		nil,
 		false,
 		globalConfig,
 	)
@@ -233,7 +254,7 @@ func runCodeExec(_ *cobra.Command, _ []string) error {
 	// Build arguments for code_execution tool
 	args := map[string]interface{}{
 		"code":  code,
-		"input": inputData,
+		"input": input,
 		"options": map[string]interface{}{
 			"timeout_ms":      codeTimeout,
 			"max_tool_calls":  codeMaxToolCalls,
@@ -248,37 +269,93 @@ func runCodeExec(_ *cobra.Command, _ []string) error {
 		return exitError(1)
 	}
 
-	// Parse the result to check for execution success/failure
-	// The result should contain content with JSON text
-	if len(result.Content) > 0 {
-		// Get the first content item (should be text)
-		for _, contentItem := range result.Content {
-			if textContent, ok := mcp.AsTextContent(contentItem); ok {
-				// Parse the execution result
-				var execResult map[string]interface{}
-				if unmarshalErr := json.Unmarshal([]byte(textContent.Text), &execResult); unmarshalErr == nil {
-					// Output the result in JSON format
-					output, marshalErr := json.MarshalIndent(execResult, "", "  ")
-					if marshalErr != nil {
-						fmt.Fprintf(os.Stderr, "Error formatting result: %v\n", marshalErr)
-						return exitError(1)
-					}
-					fmt.Println(string(output))
+	// Parse and output result
+	return outputResultFromMCP(result)
+}
 
-					// Check if execution succeeded
-					if okValue, exists := execResult["ok"].(bool); exists && !okValue {
-						// Execution failed, exit with error code
-						return exitError(1)
-					}
+// Helper functions
 
-					// Execution succeeded
-					return nil
+func loadCodeAndInput() (string, map[string]interface{}, error) {
+	var code string
+	if codeFile != "" {
+		codeBytes, err := os.ReadFile(codeFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading code file: %v\n", err)
+			return "", nil, err
+		}
+		code = string(codeBytes)
+	} else {
+		code = codeSource
+	}
+
+	var inputData map[string]interface{}
+	if codeInputFile != "" {
+		inputBytes, err := os.ReadFile(codeInputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading input file: %v\n", err)
+			return "", nil, err
+		}
+		if err := json.Unmarshal(inputBytes, &inputData); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing input file JSON: %v\n", err)
+			return "", nil, err
+		}
+	} else {
+		if err := json.Unmarshal([]byte(codeInput), &inputData); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing input JSON: %v\n", err)
+			return "", nil, err
+		}
+	}
+
+	return code, inputData, nil
+}
+
+func validateOptions() error {
+	if codeTimeout < 1 || codeTimeout > 600000 {
+		fmt.Fprintf(os.Stderr, "Error: timeout must be between 1 and 600000 milliseconds\n")
+		return fmt.Errorf("invalid timeout")
+	}
+	if codeMaxToolCalls < 0 {
+		fmt.Fprintf(os.Stderr, "Error: max-tool-calls cannot be negative\n")
+		return fmt.Errorf("invalid max-tool-calls")
+	}
+	return nil
+}
+
+func outputResult(result *cliclient.CodeExecResult) error {
+	output, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error formatting result: %v\n", err)
+		return exitError(1)
+	}
+	fmt.Println(string(output))
+
+	if !result.OK {
+		return exitError(1)
+	}
+	return nil
+}
+
+func outputResultFromMCP(result *mcp.CallToolResult) error {
+	// Existing logic to parse MCP result
+	for _, content := range result.Content {
+		if textContent, ok := mcp.AsTextContent(content); ok {
+			var execResult map[string]interface{}
+			if err := json.Unmarshal([]byte(textContent.Text), &execResult); err == nil {
+				output, err := json.MarshalIndent(execResult, "", "  ")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error formatting result: %v\n", err)
+					return exitError(1)
 				}
+				fmt.Println(string(output))
+
+				if okValue, exists := execResult["ok"].(bool); exists && !okValue {
+					return exitError(1)
+				}
+				return nil
 			}
 		}
 	}
 
-	// Fallback: output raw result if parsing failed
 	fmt.Fprintf(os.Stderr, "Error: unexpected result format\n")
 	return exitError(1)
 }
