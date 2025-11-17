@@ -323,6 +323,9 @@ func (s *Server) setupRoutes() {
 		// Tool execution
 		r.Post("/tools/call", s.handleCallTool)
 
+		// Code execution endpoint (for CLI client mode)
+		r.Post("/code/exec", NewCodeExecHandler(s.controller, s.logger).ServeHTTP)
+
 		// Configuration management
 		r.Get("/config", s.handleGetConfig)
 		r.Post("/config/validate", s.handleValidateConfig)
