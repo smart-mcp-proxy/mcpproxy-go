@@ -120,6 +120,68 @@ func (c *Client) CodeExec(
 	return &result, nil
 }
 
+// CallToolResult represents tool call result.
+type CallToolResult struct {
+	Content  []interface{}          `json:"content"`
+	IsError  bool                   `json:"isError"`
+	Metadata map[string]interface{} `json:"_meta,omitempty"`
+}
+
+// CallTool calls a tool on an upstream server via daemon API.
+func (c *Client) CallTool(
+	ctx context.Context,
+	toolName string,
+	args map[string]interface{},
+) (*CallToolResult, error) {
+	// Build request body (MCP tools/call format)
+	reqBody := map[string]interface{}{
+		"method": "tools/call",
+		"params": map[string]interface{}{
+			"name":      toolName,
+			"arguments": args,
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Create HTTP request to MCP endpoint
+	url := c.baseURL + "/mcp"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call tool API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Parse response (MCP JSON-RPC format)
+	var mcpResp struct {
+		Result CallToolResult `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&mcpResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if mcpResp.Error != nil {
+		return nil, fmt.Errorf("tool call failed: %s", mcpResp.Error.Message)
+	}
+
+	return &mcpResp.Result, nil
+}
+
 // Ping checks if the daemon is reachable.
 func (c *Client) Ping(ctx context.Context) error {
 	url := c.baseURL + "/api/v1/status"
