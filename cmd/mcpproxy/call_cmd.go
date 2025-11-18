@@ -135,8 +135,21 @@ func runCallTool(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
+	// Create logger early for daemon detection
+	logger, err := createLogger(callLogLevel)
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	// Detect daemon and use client mode for ALL tool calls (built-in and external)
+	if shouldUseCallDaemon(globalConfig.DataDir) {
+		logger.Info("Detected running daemon, using client mode via socket")
+		return runCallToolClientMode(globalConfig.DataDir, callToolName, args, logger)
+	}
+
 	// Check if this is a built-in tool (no server prefix)
 	if builtInTools[callToolName] {
+		logger.Info("No daemon detected, using standalone mode for built-in tool")
 		return runBuiltInTool(ctx, callToolName, args, globalConfig)
 	}
 
@@ -161,20 +174,8 @@ func runCallTool(_ *cobra.Command, _ []string) error {
 	fmt.Printf("🔧 Arguments: %s\n", callJSONArgs)
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-	// Create logger
-	logger, err := createLogger(callLogLevel)
-	if err != nil {
-		return fmt.Errorf("failed to create logger: %w", err)
-	}
-
-	// Detect daemon and choose mode
-	fullToolName := fmt.Sprintf("%s:%s", serverName, toolName)
-	if shouldUseCallDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket")
-		return runCallToolClientMode(globalConfig.DataDir, fullToolName, args, logger)
-	}
-
-	logger.Info("No daemon detected, using standalone mode")
+	// No daemon detected (already checked), use standalone mode
+	logger.Info("No daemon detected, using standalone mode for external tool")
 	return runCallToolStandalone(ctx, serverName, toolName, args, globalConfig)
 }
 

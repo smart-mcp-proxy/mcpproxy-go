@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"time"
 
@@ -133,13 +134,10 @@ func (c *Client) CallTool(
 	toolName string,
 	args map[string]interface{},
 ) (*CallToolResult, error) {
-	// Build request body (MCP tools/call format)
+	// Build request body (REST API format)
 	reqBody := map[string]interface{}{
-		"method": "tools/call",
-		"params": map[string]interface{}{
-			"name":      toolName,
-			"arguments": args,
-		},
+		"tool_name":  toolName,
+		"arguments": args,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -147,8 +145,8 @@ func (c *Client) CallTool(
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Create HTTP request to MCP endpoint
-	url := c.baseURL + "/mcp"
+	// Create HTTP request to REST API endpoint
+	url := c.baseURL + "/api/v1/tools/call"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -162,24 +160,69 @@ func (c *Client) CallTool(
 	}
 	defer resp.Body.Close()
 
-	// Parse response (MCP JSON-RPC format)
-	var mcpResp struct {
-		Result CallToolResult `json:"result"`
-		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+	// Read the full response body for debugging
+	bodyBytes, err2 := ioutil.ReadAll(resp.Body)
+	if err2 != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err2)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&mcpResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+	// Log response for debugging
+	if c.logger != nil {
+		c.logger.Debugw("Received response from CallTool",
+			"status_code", resp.StatusCode,
+			"body", string(bodyBytes))
 	}
 
-	if mcpResp.Error != nil {
-		return nil, fmt.Errorf("tool call failed: %s", mcpResp.Error.Message)
+	// Parse response (REST API format: {"success": true, "data": <result>})
+	var apiResp struct {
+		Success bool        `json:"success"`
+		Data    interface{} `json:"data"`
+		Error   string      `json:"error"`
 	}
 
-	return &mcpResp.Result, nil
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w (body: %s)", err, string(bodyBytes))
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("tool call failed: %s", apiResp.Error)
+	}
+
+	// Convert data to CallToolResult format
+	result := &CallToolResult{}
+
+	// Try to extract as map with content field
+	if dataMap, ok := apiResp.Data.(map[string]interface{}); ok {
+		if content, hasContent := dataMap["content"].([]interface{}); hasContent {
+			result.Content = content
+		} else {
+			// Wrap data in content array if not already in that format
+			result.Content = []interface{}{
+				map[string]interface{}{
+					"type": "text",
+					"text": fmt.Sprintf("%v", apiResp.Data),
+				},
+			}
+		}
+
+		if isError, ok := dataMap["isError"].(bool); ok {
+			result.IsError = isError
+		}
+
+		if meta, ok := dataMap["_meta"].(map[string]interface{}); ok {
+			result.Metadata = meta
+		}
+	} else {
+		// Fallback: wrap data in content array
+		result.Content = []interface{}{
+			map[string]interface{}{
+				"type": "text",
+				"text": fmt.Sprintf("%v", apiResp.Data),
+			},
+		}
+	}
+
+	return result, nil
 }
 
 // Ping checks if the daemon is reachable.

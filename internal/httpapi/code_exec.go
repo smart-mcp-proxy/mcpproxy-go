@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"reflect"
 	"time"
 
 	"go.uber.org/zap"
@@ -102,6 +104,11 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Debug: log the result type and value
+	h.logger.Debugw("Received result from CallTool",
+		"result_type", fmt.Sprintf("%T", result),
+		"result_value", result)
+
 	// Parse result (code_execution tool returns map[string]interface{})
 	response := h.parseResult(result)
 
@@ -112,20 +119,177 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *CodeExecHandler) parseResult(result interface{}) CodeExecResponse {
-	// code_execution tool returns map[string]interface{} directly
-	resultMap, ok := result.(map[string]interface{})
-	if !ok {
+	// Result from CallTool is []mcp.Content (Content array directly)
+	var textJSON string
+
+	// Debug: log the exact type and value
+	h.logger.Debugw("parseResult called",
+		"result_type", fmt.Sprintf("%T", result),
+		"result_value", result)
+
+	// Use reflection to check if it's a slice
+	rv := reflect.ValueOf(result)
+	if rv.Kind() == reflect.Slice {
+		h.logger.Debugw("Detected slice type",
+			"kind", rv.Kind(),
+			"length", rv.Len(),
+			"elem_type", rv.Type().Elem())
+
+		if rv.Len() == 0 {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: "Empty content array",
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+
+		// Get first element
+		firstElem := rv.Index(0).Interface()
+		h.logger.Debugw("First element",
+			"type", fmt.Sprintf("%T", firstElem),
+			"value", firstElem)
+
+		// Try to convert to map
+		firstMap, ok := firstElem.(map[string]interface{})
+		if !ok {
+			// Try to marshal and unmarshal to convert struct to map
+			jsonBytes, err := json.Marshal(firstElem)
+			if err != nil {
+				return CodeExecResponse{
+					OK: false,
+					Error: &CodeExecError{
+						Message: fmt.Sprintf("Failed to marshal first element: %v", err),
+						Code:    "INTERNAL_ERROR",
+					},
+				}
+			}
+			if err := json.Unmarshal(jsonBytes, &firstMap); err != nil {
+				return CodeExecResponse{
+					OK: false,
+					Error: &CodeExecError{
+						Message: fmt.Sprintf("Failed to unmarshal first element: %v", err),
+						Code:    "INTERNAL_ERROR",
+					},
+				}
+			}
+		}
+
+		// Extract text from content
+		text, ok := firstMap["text"].(string)
+		if !ok {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: "Content text field missing or not string",
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+		textJSON = text
+	} else if contentArray, ok := result.([]interface{}); ok {
+		h.logger.Debugw("Successfully type asserted as []interface{}", "length", len(contentArray))
+		if len(contentArray) == 0 {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: "Empty content array",
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+
+		// Get first content item
+		firstContent, ok := contentArray[0].(map[string]interface{})
+		if !ok {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: "Content item is not a map",
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+
+		// Extract text from content
+		text, ok := firstContent["text"].(string)
+		if !ok {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: "Content text field missing or not string",
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+		textJSON = text
+	} else {
+		h.logger.Debugw("Type assertion as []interface{} failed, trying map format")
+		// Fallback: try as map with content field
+		resultMap, ok := result.(map[string]interface{})
+		if !ok {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: fmt.Sprintf("Unexpected result format: %T", result),
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+
+		// Extract content array from MCP response
+		content, hasContent := resultMap["content"].([]interface{})
+		if !hasContent || len(content) == 0 {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: "Result missing 'content' array",
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+
+		// Get first content item (text)
+		firstContent, ok := content[0].(map[string]interface{})
+		if !ok {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: "Content item is not a map",
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+
+		// Extract text from content
+		text, ok := firstContent["text"].(string)
+		if !ok {
+			return CodeExecResponse{
+				OK: false,
+				Error: &CodeExecError{
+					Message: "Content text field missing or not string",
+					Code:    "INTERNAL_ERROR",
+				},
+			}
+		}
+		textJSON = text
+	}
+
+	// Parse the JSON text into execution result
+	var execResult map[string]interface{}
+	if err := json.Unmarshal([]byte(textJSON), &execResult); err != nil {
 		return CodeExecResponse{
 			OK: false,
 			Error: &CodeExecError{
-				Message: "Unexpected result format",
+				Message: "Failed to parse execution result JSON: " + err.Error(),
 				Code:    "INTERNAL_ERROR",
 			},
 		}
 	}
 
 	// Check if execution succeeded
-	okValue, exists := resultMap["ok"]
+	okValue, exists := execResult["ok"]
 	if !exists {
 		return CodeExecResponse{
 			OK: false,
@@ -150,8 +314,8 @@ func (h *CodeExecHandler) parseResult(result interface{}) CodeExecResponse {
 	if okBool {
 		return CodeExecResponse{
 			OK:     true,
-			Result: resultMap["result"],
-			Stats:  extractStats(resultMap),
+			Result: execResult["result"],
+			Stats:  extractStats(execResult),
 		}
 	}
 
@@ -159,8 +323,8 @@ func (h *CodeExecHandler) parseResult(result interface{}) CodeExecResponse {
 	return CodeExecResponse{
 		OK: false,
 		Error: &CodeExecError{
-			Message: extractErrorMessage(resultMap),
-			Code:    extractErrorCode(resultMap),
+			Message: extractErrorMessage(execResult),
+			Code:    extractErrorCode(execResult),
 		},
 	}
 }
