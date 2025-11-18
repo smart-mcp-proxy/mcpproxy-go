@@ -109,8 +109,8 @@ func TestCodeExecHandler_Success(t *testing.T) {
 			assert.Equal(t, "code_execution", toolName)
 			// Return MCP Content array format (matches actual CallTool behavior)
 			execResult := map[string]interface{}{
-				"ok":     true,
-				"result": 42,
+				"ok":    true,
+				"value": 42,
 			}
 			resultJSON, _ := json.Marshal(execResult)
 			return []interface{}{
