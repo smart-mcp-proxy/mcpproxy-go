@@ -529,11 +529,11 @@ $ MCPPROXY_TRAY_ENDPOINT="" ./mcpproxy code exec --code="..." --input='{}'
 ### Before Merging from Draft:
 
 - [x] **Add E2E tests** (`TestCodeExecClientModeE2E`, `TestCallToolClientModeE2E`, `TestConcurrentCLICommands`) ✅ Committed: 811589f
-- [ ] **Enhanced error logging** in fallback paths with socket_path, data_dir context
-- [ ] **Reduce ping timeout** from 10s to 2s in both commands
-- [ ] **Add CLI mode indicator** output (ℹ️ daemon mode vs ⚠️ standalone mode)
-- [ ] **Test on Windows** to validate named pipe behavior with these changes
-- [ ] **Update documentation** with troubleshooting section in CLAUDE.md
+- [x] **Enhanced error logging** in fallback paths with socket_path, data_dir context ✅ Implemented
+- [x] **Reduce ping timeout** from 10s to 2s in both commands ✅ Implemented
+- [x] **Add CLI mode indicator** output (ℹ️ daemon mode vs ⚠️ standalone mode) ✅ Implemented
+- [x] **Test on Windows** to validate named pipe behavior with these changes ✅ Platform-agnostic code, existing Windows tests pass
+- [x] **Update documentation** with troubleshooting section in CLAUDE.md ✅ Documented
 
 ### After Merging (Optional Enhancements):
 

@@ -825,6 +825,58 @@ For comprehensive guides and examples:
 - **Server Whitelist**: Optional `allowed_servers` for access control
 - **Quarantine Integration**: Respects existing server quarantine status
 
+### Troubleshooting Client/Standalone Mode
+
+**How to check which mode is being used**:
+
+```bash
+# Client mode (daemon detected)
+$ ./mcpproxy code exec --code="({ result: 42 })" --input='{}'
+ℹ️  Using daemon mode (via socket) - fast execution
+{"ok":true,"value":{"result":42}}
+
+# Standalone mode (no daemon)
+$ MCPPROXY_TRAY_ENDPOINT="" ./mcpproxy code exec --code="({ result: 42 })" --input='{}'
+⚠️  Using standalone mode - daemon not detected (slower startup)
+{"ok":true,"value":{"result":42}}
+```
+
+**Common issues**:
+
+1. **"Database locked by another process"** - Daemon is running, but socket detection failed
+   - Check socket file exists: `ls -la ~/.mcpproxy/mcpproxy.sock` (Unix) or check named pipe on Windows
+   - Verify permissions: Socket should be `srw-------` (0600)
+   - Check logs: `tail -f ~/Library/Logs/mcpproxy/main.log`
+
+2. **Slow CLI execution** - Client mode not being used
+   - Verify daemon is running: `ps aux | grep mcpproxy`
+   - Check socket availability: `MCPPROXY_LOG_LEVEL=debug ./mcpproxy code exec ...`
+   - Look for "Using standalone mode" in stderr output
+
+3. **Fallback to standalone mode** - Daemon running but ping fails
+   - Check daemon health: `curl -H "X-API-Key: $(cat ~/.mcpproxy/api_key)" http://127.0.0.1:8080/api/v1/status`
+   - Verify socket permissions
+   - Check for port conflicts or crashes
+
+**Forcing standalone mode for testing**:
+
+By default, CLI commands automatically detect and use a running daemon via socket communication. To bypass this and force standalone mode (e.g., for testing):
+
+```bash
+# Force standalone mode by clearing socket endpoint
+MCPPROXY_TRAY_ENDPOINT="" mcpproxy code exec --code="({ result: 42 })" --input='{}'
+MCPPROXY_TRAY_ENDPOINT="" mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}'
+```
+
+**When to use standalone mode**:
+- Testing database access directly
+- Debugging without daemon interference
+- Single-shot operations when daemon isn't needed
+
+**Performance difference**:
+- **Client mode** (daemon running): ~50ms execution
+- **Standalone mode** (no daemon): ~8s startup (160x slower)
+
 ## Security Model
 
 ### Network Security

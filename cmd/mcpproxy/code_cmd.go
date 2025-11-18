@@ -172,13 +172,21 @@ func runCodeExecClientMode(dataDir, code string, input map[string]interface{}, l
 	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	// Ping daemon to verify connectivity
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	if err := client.Ping(ctx); err != nil {
-		logger.Warn("Failed to ping daemon, falling back to standalone mode", zap.Error(err))
+		logger.Warn("Failed to ping daemon, falling back to standalone mode",
+			zap.Error(err),
+			zap.String("socket_path", socketPath),
+			zap.Duration("ping_timeout", 2*time.Second),
+			zap.String("fallback_mode", "standalone"))
 		// Fall back to standalone mode
 		cfg, _ := loadCodeConfig()
 		return runCodeExecStandalone(cfg, code, input, logger)
 	}
+
+	// ADD CLI mode indicator
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n")
 
 	// Execute code via daemon
 	result, err := client.CodeExec(
@@ -200,6 +208,9 @@ func runCodeExecClientMode(dataDir, code string, input map[string]interface{}, l
 
 // runCodeExecStandalone executes code locally (existing logic).
 func runCodeExecStandalone(globalConfig *config.Config, code string, input map[string]interface{}, logger *zap.Logger) error {
+	// ADD standalone mode indicator
+	fmt.Fprintf(os.Stderr, "⚠️  Using standalone mode - daemon not detected (slower startup)\n")
+
 	// Create context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(codeTimeout+5000)*time.Millisecond)
 	defer cancel()

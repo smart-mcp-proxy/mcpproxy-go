@@ -402,9 +402,14 @@ func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}
 	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	// Ping daemon to verify connectivity
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	if err := client.Ping(ctx); err != nil {
-		logger.Warn("Failed to ping daemon, falling back to standalone mode", zap.Error(err))
+		logger.Warn("Failed to ping daemon, falling back to standalone mode",
+			zap.Error(err),
+			zap.String("socket_path", socketPath),
+			zap.String("data_dir", dataDir),
+			zap.String("reason", "daemon_unavailable"))
 		// Fall back to standalone mode
 		cfg, _ := loadCallConfig()
 		parts := strings.SplitN(toolName, ":", 2)
@@ -413,6 +418,9 @@ func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}
 		}
 		return fmt.Errorf("invalid tool name format: %s", toolName)
 	}
+
+	// ADD CLI mode indicator
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n")
 
 	// Call tool via daemon
 	fmt.Printf("🔗 Calling tool via daemon socket...\n")
@@ -436,6 +444,9 @@ func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}
 
 // runCallToolStandalone calls tool directly by connecting to the server (existing logic).
 func runCallToolStandalone(ctx context.Context, serverName, toolName string, args map[string]interface{}, globalConfig *config.Config) error {
+	// ADD standalone mode indicator
+	fmt.Fprintf(os.Stderr, "⚠️  Using standalone mode - daemon not detected (slower startup)\n")
+
 	// Create CLI client
 	cliClient, err := cli.NewClient(serverName, globalConfig, callLogLevel)
 	if err != nil {
