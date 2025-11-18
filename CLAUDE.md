@@ -725,8 +725,22 @@ Enable the feature in `~/.mcpproxy/mcp_config.json`:
 
 ### CLI Command
 
+The `code exec` command automatically detects if a daemon is running and chooses the appropriate mode:
+
+**Client Mode (Daemon Running)**:
+- Detects daemon via socket file (`~/.mcpproxy/mcpproxy.sock` on Unix, named pipe on Windows)
+- Connects via Unix socket/named pipe (no API key required)
+- Calls `/api/v1/code/exec` HTTP endpoint
+- No database locking issues
+- Faster execution (no initialization overhead)
+
+**Standalone Mode (No Daemon)**:
+- Opens database, index, and upstream managers directly
+- Executes code locally
+- Full functionality preserved for offline use
+
 ```bash
-# Basic usage
+# Automatically uses daemon if running, standalone otherwise
 mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}'
 
 # Code from file
@@ -737,7 +751,14 @@ mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user
 
 # With options
 mcpproxy code exec --code="..." --timeout=60000 --max-tool-calls=10 --allowed-servers=github,gitlab
+
+# Force standalone mode (for testing)
+MCPPROXY_TRAY_ENDPOINT="" mcpproxy code exec --code="..." --input='{...}'
 ```
+
+The same client mode pattern applies to other CLI commands:
+- `mcpproxy call tool` - Calls tools via daemon when available
+- `mcpproxy tools list` - Lists tools from daemon cache when available
 
 ### Common Patterns
 
