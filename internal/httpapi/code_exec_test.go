@@ -103,14 +103,21 @@ func TestCodeExecHandler_Success(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/code/exec", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 
-	// Mock controller that returns success result
+	// Mock controller that returns success result in MCP Content format
 	mockCtrl := &mockController{
 		callToolFunc: func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
 			assert.Equal(t, "code_execution", toolName)
-			// Return MCP-style result
-			return map[string]interface{}{
+			// Return MCP Content array format (matches actual CallTool behavior)
+			execResult := map[string]interface{}{
 				"ok":     true,
-				"result": map[string]interface{}{"result": 42},
+				"result": 42,
+			}
+			resultJSON, _ := json.Marshal(execResult)
+			return []interface{}{
+				map[string]interface{}{
+					"type": "text",
+					"text": string(resultJSON),
+				},
 			}, nil
 		},
 	}
@@ -173,14 +180,22 @@ func TestCodeExecHandler_ExecutionError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/code/exec", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 
-	// Mock controller returns error result from code_execution tool
+	// Mock controller returns error result from code_execution tool in MCP Content format
 	mockCtrl := &mockController{
 		callToolFunc: func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
-			return map[string]interface{}{
+			// Return MCP Content array format with error
+			execResult := map[string]interface{}{
 				"ok": false,
 				"error": map[string]interface{}{
 					"code":    "SYNTAX_ERROR",
 					"message": "Invalid syntax",
+				},
+			}
+			resultJSON, _ := json.Marshal(execResult)
+			return []interface{}{
+				map[string]interface{}{
+					"type": "text",
+					"text": string(resultJSON),
 				},
 			}, nil
 		},
