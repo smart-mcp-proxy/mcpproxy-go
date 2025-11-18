@@ -314,7 +314,7 @@ func (h *CodeExecHandler) parseResult(result interface{}) CodeExecResponse {
 	if okBool {
 		return CodeExecResponse{
 			OK:     true,
-			Result: execResult["result"],
+			Result: execResult["value"],
 			Stats:  extractStats(execResult),
 		}
 	}
