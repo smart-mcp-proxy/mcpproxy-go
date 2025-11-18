@@ -12,6 +12,7 @@ import (
 
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"mcpproxy-go/internal/socket"
 )
 
 // HealthStatus represents the health status of the core service
@@ -77,7 +78,7 @@ func NewHealthMonitor(endpoint string, logger *zap.SugaredLogger, stateMachine *
 	// Transform the endpoint to get the proper base URL for HTTP requests
 	// For Unix sockets: unix:///path/socket.sock -> http://localhost
 	// For TCP: http://localhost:8080 -> http://localhost:8080
-	_, transformedBaseURL, err := api.CreateDialer(endpoint)
+	_, transformedBaseURL, err := socket.CreateDialer(endpoint)
 	if err != nil {
 		// If CreateDialer fails, use the original endpoint (it's likely already HTTP)
 		transformedBaseURL = endpoint

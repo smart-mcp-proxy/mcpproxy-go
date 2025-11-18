@@ -31,6 +31,7 @@ import (
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/monitor"
 	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"mcpproxy-go/internal/socket"
 	"mcpproxy-go/internal/tray"
 )
 
@@ -445,7 +446,7 @@ func resolveCoreURL() string {
 	// Note: We return the socket path even if it doesn't exist yet, because:
 	//   - When launching core: Core will create the socket
 	//   - When connecting: isCoreAlreadyRunning() will check existence and fall back if needed
-	socketPath := api.DetectSocketPath("") // Empty dataDir uses default ~/.mcpproxy
+	socketPath := socket.DetectSocketPath("") // Empty dataDir uses default ~/.mcpproxy
 	if socketPath != "" {
 		return socketPath
 	}
@@ -518,7 +519,7 @@ func isCoreAlreadyRunning(coreURL string, logger *zap.Logger) bool {
 
 	// Create custom dialer if using socket
 	if isSocketEndpoint(coreURL) {
-		dialer, baseURL, err := api.CreateDialer(coreURL)
+		dialer, baseURL, err := socket.CreateDialer(coreURL)
 		if err != nil {
 			logger.Debug("Failed to create dialer for core health check", zap.Error(err))
 			return false
