@@ -1,6 +1,7 @@
 package socket_test
 
 import (
+	"runtime"
 	"testing"
 
 	"mcpproxy-go/internal/socket"
@@ -9,6 +10,10 @@ import (
 )
 
 func TestCreateDialer_UnixSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix socket test not applicable on Windows")
+	}
+
 	// Given: Unix socket endpoint
 	endpoint := "unix:///tmp/test.sock"
 
