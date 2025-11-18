@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
 
@@ -161,7 +161,7 @@ func (c *Client) CallTool(
 	defer resp.Body.Close()
 
 	// Read the full response body for debugging
-	bodyBytes, err2 := ioutil.ReadAll(resp.Body)
+	bodyBytes, err2 := io.ReadAll(resp.Body)
 	if err2 != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err2)
 	}
