@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// binaryName returns the appropriate binary name for the current OS
+func binaryName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
 
 func TestCodeExecClientModeE2E(t *testing.T) {
 	if testing.Short() {
@@ -21,7 +30,7 @@ func TestCodeExecClientModeE2E(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Build mcpproxy binary
-	mcpproxyBin := filepath.Join(tmpDir, "mcpproxy")
+	mcpproxyBin := filepath.Join(tmpDir, binaryName("mcpproxy"))
 	buildCmd := exec.Command("go", "build", "-o", mcpproxyBin, "./cmd/mcpproxy")
 	// Run from project root (two directories up from internal/server)
 	buildCmd.Dir = filepath.Join("..", "..")
@@ -95,7 +104,7 @@ func TestCallToolClientModeE2E(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Build mcpproxy binary
-	mcpproxyBin := filepath.Join(tmpDir, "mcpproxy")
+	mcpproxyBin := filepath.Join(tmpDir, binaryName("mcpproxy"))
 	buildCmd := exec.Command("go", "build", "-o", mcpproxyBin, "./cmd/mcpproxy")
 	// Run from project root (two directories up from internal/server)
 	buildCmd.Dir = filepath.Join("..", "..")
@@ -165,7 +174,7 @@ func TestConcurrentCLICommands(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Build mcpproxy binary
-	mcpproxyBin := filepath.Join(tmpDir, "mcpproxy")
+	mcpproxyBin := filepath.Join(tmpDir, binaryName("mcpproxy"))
 	buildCmd := exec.Command("go", "build", "-o", mcpproxyBin, "./cmd/mcpproxy")
 	// Run from project root (two directories up from internal/server)
 	buildCmd.Dir = filepath.Join("..", "..")
