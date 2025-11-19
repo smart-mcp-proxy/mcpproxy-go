@@ -166,7 +166,7 @@ func TestCallToolClientModeE2E(t *testing.T) {
 	})
 }
 
-func TestConcurrentCLICommands(t *testing.T) {
+func TestConcurrentCLICommandsE2E(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
 	}
