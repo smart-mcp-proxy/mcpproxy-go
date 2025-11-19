@@ -121,3 +121,6 @@ internal_docs/
 # Keep cmd/mcpproxy-tray/ directory and its contents (this line is optional)
 !cmd/mcpproxy-tray/
 !cmd/mcpproxy-tray/**
+
+# Git worktrees
+.worktrees/
