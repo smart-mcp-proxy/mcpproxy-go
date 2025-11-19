@@ -95,13 +95,19 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	executionStart := time.Now()
 	parentCallID := fmt.Sprintf("%d-code_execution", executionStart.UnixNano())
 
+	// Get config path (handle nil mainServer for CLI mode)
+	var configPath string
+	if p.mainServer != nil {
+		configPath = p.mainServer.GetConfigPath()
+	}
+
 	// Create tool caller adapter that wraps the upstream manager
 	toolCaller := &upstreamToolCaller{
 		upstreamManager:  p.upstreamManager,
 		logger:           p.logger,
 		executionID:      options.ExecutionID,
 		storage:          p.storage,
-		configPath:       p.mainServer.GetConfigPath(),
+		configPath:       configPath,
 		parentCallID:     parentCallID,
 		sessionID:        sessionID,
 		clientName:       clientName,
@@ -262,7 +268,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		Response:         result,
 		Duration:         int64(executionDuration),
 		Timestamp:        executionStart,
-		ConfigPath:       p.mainServer.GetConfigPath(),
+		ConfigPath:       configPath,
 		RequestID:        options.ExecutionID,
 		ExecutionType:    "code_execution",
 		MCPSessionID:     sessionID,

@@ -20,6 +20,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/socket"
 	"mcpproxy-go/internal/tray"
 )
 
@@ -110,7 +111,7 @@ func NewClient(endpoint string, logger *zap.SugaredLogger) *Client {
 	}
 
 	// Check if we should use a custom dialer (Unix socket or Windows pipe)
-	dialer, baseURL, err := CreateDialer(endpoint)
+	dialer, baseURL, err := socket.CreateDialer(endpoint)
 	if err != nil {
 		if logger != nil {
 			logger.Warn("Failed to create custom dialer, falling back to TCP",
@@ -159,7 +160,7 @@ func CreateHTTPClient(endpoint string, timeout time.Duration, logger *zap.Sugare
 	}
 
 	// Check if we should use a custom dialer (Unix socket or Windows pipe)
-	dialer, _, err := CreateDialer(endpoint)
+	dialer, _, err := socket.CreateDialer(endpoint)
 	if err != nil {
 		if logger != nil {
 			logger.Debug("Using standard TCP dialer",

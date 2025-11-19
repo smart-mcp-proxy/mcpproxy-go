@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/cache"
+	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/server"
+	"mcpproxy-go/internal/socket"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
@@ -133,8 +135,21 @@ func runCallTool(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
+	// Create logger early for daemon detection
+	logger, err := createLogger(callLogLevel)
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	// Detect daemon and use client mode for ALL tool calls (built-in and external)
+	if shouldUseCallDaemon(globalConfig.DataDir) {
+		logger.Info("Detected running daemon, using client mode via socket")
+		return runCallToolClientMode(globalConfig.DataDir, callToolName, args, logger)
+	}
+
 	// Check if this is a built-in tool (no server prefix)
 	if builtInTools[callToolName] {
+		logger.Info("No daemon detected, using standalone mode for built-in tool")
 		return runBuiltInTool(ctx, callToolName, args, globalConfig)
 	}
 
@@ -159,43 +174,9 @@ func runCallTool(_ *cobra.Command, _ []string) error {
 	fmt.Printf("🔧 Arguments: %s\n", callJSONArgs)
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-	// Create CLI client
-	cliClient, err := cli.NewClient(serverName, globalConfig, callLogLevel)
-	if err != nil {
-		return fmt.Errorf("failed to create CLI client: %w", err)
-	}
-
-	// Connect to server
-	fmt.Printf("🔗 Connecting to server '%s'...\n", serverName)
-	if err := cliClient.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
-	}
-
-	// Ensure cleanup on exit
-	defer func() {
-		if disconnectErr := cliClient.Disconnect(); disconnectErr != nil {
-			fmt.Printf("⚠️  Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
-		}
-	}()
-
-	// Call the tool
-	fmt.Printf("🛠️  Calling tool '%s' with arguments...\n", toolName)
-	result, err := cliClient.CallTool(ctx, toolName, args)
-	if err != nil {
-		return fmt.Errorf("failed to call tool '%s': %w", toolName, err)
-	}
-
-	// Output results based on format
-	switch callOutputFormat {
-	case outputFormatJSON:
-		return outputCallResultAsJSON(result)
-	case outputFormatPretty:
-	default:
-		fmt.Printf("✅ Tool call completed successfully!\n\n")
-		outputCallResultPretty(result)
-	}
-
-	return nil
+	// No daemon detected (already checked), use standalone mode
+	logger.Info("No daemon detected, using standalone mode for external tool")
+	return runCallToolStandalone(ctx, serverName, toolName, args, globalConfig)
 }
 
 // loadCallConfig loads the MCP configuration file for call command
@@ -404,4 +385,103 @@ func serverExistsInConfigForCall(serverName string, globalConfig *config.Config)
 		}
 	}
 	return false
+}
+
+// shouldUseCallDaemon checks if daemon is running by detecting socket file.
+func shouldUseCallDaemon(dataDir string) bool {
+	socketPath := socket.DetectSocketPath(dataDir)
+	return socket.IsSocketAvailable(socketPath)
+}
+
+// runCallToolClientMode calls tool via daemon HTTP API over socket.
+func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}, logger *zap.Logger) error {
+	// Detect socket endpoint
+	socketPath := socket.DetectSocketPath(dataDir)
+
+	// Create CLI client
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Ping daemon to verify connectivity
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx); err != nil {
+		logger.Warn("Failed to ping daemon, falling back to standalone mode",
+			zap.Error(err),
+			zap.String("socket_path", socketPath),
+			zap.String("data_dir", dataDir),
+			zap.String("reason", "daemon_unavailable"))
+		// Fall back to standalone mode
+		cfg, _ := loadCallConfig()
+		parts := strings.SplitN(toolName, ":", 2)
+		if len(parts) == 2 {
+			return runCallToolStandalone(ctx, parts[0], parts[1], args, cfg)
+		}
+		return fmt.Errorf("invalid tool name format: %s", toolName)
+	}
+
+	// ADD CLI mode indicator
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n")
+
+	// Call tool via daemon
+	fmt.Printf("🔗 Calling tool via daemon socket...\n")
+	result, err := client.CallTool(ctx, toolName, args)
+	if err != nil {
+		return fmt.Errorf("failed to call tool via daemon: %w", err)
+	}
+
+	// Output results based on format
+	switch callOutputFormat {
+	case outputFormatJSON:
+		return outputCallResultAsJSON(result)
+	case outputFormatPretty:
+	default:
+		fmt.Printf("✅ Tool call completed successfully!\n\n")
+		outputCallResultPretty(result)
+	}
+
+	return nil
+}
+
+// runCallToolStandalone calls tool directly by connecting to the server (existing logic).
+func runCallToolStandalone(ctx context.Context, serverName, toolName string, args map[string]interface{}, globalConfig *config.Config) error {
+	// ADD standalone mode indicator
+	fmt.Fprintf(os.Stderr, "⚠️  Using standalone mode - daemon not detected (slower startup)\n")
+
+	// Create CLI client
+	cliClient, err := cli.NewClient(serverName, globalConfig, callLogLevel)
+	if err != nil {
+		return fmt.Errorf("failed to create CLI client: %w", err)
+	}
+
+	// Connect to server
+	fmt.Printf("🔗 Connecting to server '%s'...\n", serverName)
+	if err := cliClient.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
+	}
+
+	// Ensure cleanup on exit
+	defer func() {
+		if disconnectErr := cliClient.Disconnect(); disconnectErr != nil {
+			fmt.Printf("⚠️  Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
+		}
+	}()
+
+	// Call the tool
+	fmt.Printf("🛠️  Calling tool '%s' with arguments...\n", toolName)
+	result, err := cliClient.CallTool(ctx, toolName, args)
+	if err != nil {
+		return fmt.Errorf("failed to call tool '%s': %w", toolName, err)
+	}
+
+	// Output results based on format
+	switch callOutputFormat {
+	case outputFormatJSON:
+		return outputCallResultAsJSON(result)
+	case outputFormatPretty:
+	default:
+		fmt.Printf("✅ Tool call completed successfully!\n\n")
+		outputCallResultPretty(result)
+	}
+
+	return nil
 }

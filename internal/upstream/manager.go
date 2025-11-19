@@ -1134,6 +1134,11 @@ func (m *Manager) GetStats() map[string]interface{} {
 	serverStatus := make(map[string]interface{})
 
 	for id, client := range clientsCopy {
+		// Skip nil clients (can happen during shutdown)
+		if client == nil {
+			continue
+		}
+
 		// Get detailed connection info from state manager
 		connectionInfo := client.GetConnectionInfo()
 
@@ -1172,9 +1177,8 @@ func (m *Manager) GetStats() map[string]interface{} {
 			status["server_version"] = connectionInfo.ServerVersion
 		}
 
-		if client.GetServerInfo() != nil {
-			info := client.GetServerInfo()
-			status["protocol_version"] = info.ProtocolVersion
+		if serverInfo := client.GetServerInfo(); serverInfo != nil && serverInfo.ProtocolVersion != "" {
+			status["protocol_version"] = serverInfo.ProtocolVersion
 		}
 
 		serverStatus[id] = status
