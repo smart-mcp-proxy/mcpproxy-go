@@ -80,49 +80,11 @@ wix build -arch x64 -d Version=1.0.0.0 -d BinPath=dist\windows-amd64 wix\Package
 
 ### Prerelease Builds
 
-**MCPProxy supports automated prerelease builds from the `next` branch with signed and notarized macOS installers.**
-
-#### Branch Strategy
-- **`main` branch**: Stable releases (hotfixes and production builds)
+- **`main` branch**: Stable releases
 - **`next` branch**: Prerelease builds with latest features
+- macOS DMG installers are signed and notarized
 
-#### Downloading Prerelease Builds
-
-**Option 1: GitHub Web Interface**
-1. Go to [GitHub Actions](https://github.com/smart-mcp-proxy/mcpproxy-go/actions)
-2. Click on the latest successful "Prerelease" workflow run
-3. Scroll to **Artifacts** section
-4. Download:
-   - `dmg-darwin-arm64` (Apple Silicon Macs)
-   - `dmg-darwin-amd64` (Intel Macs)
-   - `versioned-linux-amd64`, `versioned-windows-amd64`, etc. (other platforms)
-
-**Option 2: Command Line**
-```bash
-# List recent prerelease runs
-gh run list --workflow="Prerelease" --limit 5
-
-# Download specific artifacts from a run
-gh run download <RUN_ID> --name dmg-darwin-arm64    # Apple Silicon
-gh run download <RUN_ID> --name dmg-darwin-amd64    # Intel Mac
-gh run download <RUN_ID> --name versioned-linux-amd64  # Linux
-```
-
-#### Prerelease Versioning
-- Format: `{last_git_tag}-next.{commit_hash}`
-- Example: `v0.8.4-next.5b63e2d`
-- Version embedded in both `mcpproxy` and `mcpproxy-tray` binaries
-
-#### Security Features
-- **macOS DMG installers**: Signed with Apple Developer ID and notarized
-- **Code signing**: All macOS binaries are signed for Gatekeeper compatibility
-- **Automatic quarantine protection**: New servers are quarantined by default
-
-#### GitHub Workflows
-- **Prerelease workflow**: Triggered on `next` branch pushes
-- **Release workflow**: Triggered on `main` branch tags
-- **Unit Tests**: Run on all branches with comprehensive test coverage
-- **Frontend CI**: Validates web UI components and build process
+See `docs/prerelease-builds.md` for download instructions and workflow details.
 
 ### Testing
 
@@ -314,116 +276,23 @@ Error states automatically retry core launch with exponential backoff:
 
 ### Tray-Core Communication (Unix Sockets / Named Pipes)
 
-MCPProxy uses platform-specific local IPC for secure, low-latency communication between the tray application and core server:
+MCPProxy uses platform-specific local IPC for secure communication between tray and core:
 
-**Architecture**:
-- **Dual Listener Design**: Core server accepts connections on both TCP (for browsers/remote) and socket/pipe (for tray)
-- **Unified Socket Transport**: Tray uses socket/pipe for ALL communication - both API calls AND Server-Sent Events (SSE)
-- **No Hybrid Mode**: All HTTP traffic (including persistent SSE connection) is routed through the socket - no TCP fallback
-- **Automatic Detection**: Tray auto-detects socket path from data directory configuration
-- **Zero Configuration**: Works out-of-the-box with no manual setup required
 - **Platform-Specific**: Unix sockets (macOS/Linux), Named pipes (Windows)
-
-**Security Model** (8 layers):
-1. **Data Directory Permissions**: Must be `0700` (user-only access) or server refuses to start (exit code 5)
-2. **Socket File Permissions**: Created with `0600` (user read/write only)
-3. **UID Verification**: Server verifies connecting process belongs to same user
-4. **GID Verification**: Group ownership validated on macOS/Linux
-5. **SID/ACL Verification**: Windows ACLs ensure current user-only access
-6. **Stale Socket Cleanup**: Automatic removal of leftover socket files from crashed processes
-7. **Ownership Validation**: Socket file ownership verified before use
-8. **Connection Source Tagging**: Middleware distinguishes socket vs TCP connections
-
-**API Key Authentication**:
-- **Socket/Pipe connections**: Trusted by default (skip API key validation)
+- **Zero Configuration**: Auto-detects socket path from data directory
+- **Socket connections**: Trusted by default (skip API key validation)
 - **TCP connections**: Require API key authentication
-- **Middleware**: `internal/httpapi/server.go` checks connection source via context
 
 **File Locations**:
-- **macOS/Linux**: `<data-dir>/mcpproxy.sock` (default: `~/.mcpproxy/mcpproxy.sock`)
-- **Windows**: `\\.\pipe\mcpproxy-<username>` (or hashed for custom data-dir)
-- **Override**: `--tray-endpoint` flag or `MCPPROXY_TRAY_ENDPOINT` environment variable
+- **macOS/Linux**: `~/.mcpproxy/mcpproxy.sock`
+- **Windows**: `\\.\pipe\mcpproxy-<username>`
 
-**Implementation Files**:
-- `internal/server/listener.go` - Listener manager and abstraction layer
-- `internal/server/listener_unix.go` - Unix socket implementation (macOS/Linux)
-- `internal/server/listener_darwin.go` - macOS-specific peer credential verification
-- `internal/server/listener_linux.go` - Linux-specific peer credential verification
-- `internal/server/listener_windows.go` - Windows named pipe implementation
-- `internal/server/listener_mux.go` - Multiplexing listener combining TCP + socket/pipe
-- `cmd/mcpproxy-tray/internal/api/dialer.go` - Tray client socket dialer with auto-detection
-- `cmd/mcpproxy-tray/internal/api/dialer_unix.go` - Unix socket dialer (macOS/Linux)
-- `cmd/mcpproxy-tray/internal/api/dialer_windows.go` - Named pipe dialer (Windows)
-- `cmd/mcpproxy-tray/internal/api/client.go` - HTTP client with socket transport (lines 100-118, 318-377)
-
-**How SSE Works Over Socket**:
-
-The tray application uses a unified HTTP client that routes all traffic through the socket:
-
-1. **Custom HTTP Transport**: Creates `http.Transport` with socket-based `DialContext` function
-2. **API Calls**: Standard HTTP requests (`GET /api/v1/info`, `POST /api/v1/servers/{name}/enable`) use socket transport
-3. **SSE Connection**: Persistent HTTP connection to `/events` endpoint also uses socket transport
-4. **Real-time Updates**: Core sends `event: status` messages with `listen_addr` field for tray UI updates
-5. **Single Source of Truth**: Tray UI reads `listen_addr` exclusively from SSE status events (no local fallbacks)
-
-**Configuration**:
-
-Socket/pipe communication is **enabled by default**. You can disable it using:
-
-**1. Command-line Flag**:
+**Disable socket** (use TCP + API key instead):
 ```bash
-# Disable socket communication (clients will use TCP + API key)
 ./mcpproxy serve --enable-socket=false
-
-# Explicitly enable (default behavior)
-./mcpproxy serve --enable-socket=true
 ```
 
-**2. JSON Configuration File**:
-```json
-{
-  "listen": "127.0.0.1:8080",
-  "enable_socket": false,
-  "mcpServers": [...]
-}
-```
-
-**3. When Running via Tray (Launchpad/Autostart)**:
-
-If you're running the core server via the tray application (e.g., automatically at startup), and want to disable socket communication:
-
-- Edit your config file at `~/.mcpproxy/mcp_config.json`
-- Add or update: `"enable_socket": false`
-- Restart the core server (via tray menu: "Stop Core" → "Start Core")
-
-When socket communication is disabled, the tray application will fall back to TCP connections using the auto-generated API key.
-
-**Usage Examples**:
-```bash
-# Default: Socket auto-created in data directory
-./mcpproxy serve
-
-# Disable socket, use TCP only
-./mcpproxy serve --enable-socket=false
-
-# Custom socket path
-./mcpproxy serve --tray-endpoint=unix:///tmp/custom.sock
-
-# Windows named pipe
-mcpproxy.exe serve --tray-endpoint=npipe:////./pipe/mycustompipe
-
-# Verify socket creation
-ls -la ~/.mcpproxy/mcpproxy.sock
-# Should show: srw------- (socket, user-only permissions)
-
-# Tray automatically connects via socket (no API key needed)
-./mcpproxy-tray
-```
-
-**Testing**:
-- Unit tests: `internal/server/listener_test.go` (13 tests covering TCP, Unix socket, permissions, multiplexing)
-- Dialer tests: `cmd/mcpproxy-tray/internal/api/dialer_test.go` (14 tests covering dialers, auto-detection, URL parsing)
-- E2E tests: `internal/server/socket_e2e_test.go` (3 scenarios: socket without API key, TCP with/without API key, concurrent requests)
+See `docs/socket-communication.md` for complete security model, implementation details, and testing info.
 
 ### Key Features
 
@@ -457,54 +326,21 @@ ls -la ~/.mcpproxy/mcpproxy.sock
   "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
-  "docker_isolation": {
-    "enabled": true,
-    "memory_limit": "512m",
-    "cpu_limit": "1.0",
-    "timeout": "60s",
-    "default_images": {
-      "python": "python:3.11",
-      "uvx": "python:3.11",
-      "node": "node:20",
-      "npx": "node:20"
-    }
-  },
   "mcpServers": [
     {
       "name": "github-server",
       "url": "https://api.github.com/mcp",
       "protocol": "http",
-      "enabled": true,
-      "quarantined": false
+      "enabled": true
     },
     {
-      "name": "python-mcp-server",
-      "command": "uvx",
-      "args": ["some-python-package"],
-      "protocol": "stdio",
-      "env": {
-        "API_KEY": "your-api-key"
-      },
-      "enabled": true,
-      "quarantined": false
-    },
-    {
-      "name": "ast-grep-project-a",
+      "name": "ast-grep-project",
       "command": "npx",
       "args": ["ast-grep-mcp"],
-      "working_dir": "/home/user/projects/project-a",
+      "working_dir": "/home/user/projects/myproject",
       "protocol": "stdio",
-      "enabled": true,
-      "quarantined": false
-    },
-    {
-      "name": "filesystem-work",
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server-filesystem"],
-      "working_dir": "/home/user/work/company-repo",
-      "protocol": "stdio",
-      "enabled": true,
-      "quarantined": false
+      "env": { "API_KEY": "your-api-key" },
+      "enabled": true
     }
   ]
 }
@@ -550,66 +386,11 @@ export HEADLESS=true
 
 ### Working Directory Configuration
 
-The `working_dir` field allows you to specify the working directory for stdio MCP servers, solving the common problem where file-based servers operate on mcpproxy's directory instead of your project directories.
+The `working_dir` field specifies the working directory for stdio MCP servers. Useful for file-based servers (`ast-grep-mcp`, `filesystem-mcp`, `git-mcp`) to operate on your project directories instead of mcpproxy's directory.
 
-#### Use Cases
-- **File-based MCP servers**: `ast-grep-mcp`, `filesystem-mcp`, `git-mcp`
-- **Project isolation**: Separate work and personal project contexts
-- **Multiple instances**: Same MCP server type for different projects
-
-#### Configuration Examples
-
-**Project-specific servers**:
-```json
-{
-  "mcpServers": [
-    {
-      "name": "ast-grep-project-a",
-      "command": "npx",
-      "args": ["ast-grep-mcp"],
-      "working_dir": "/home/user/projects/project-a",
-      "enabled": true
-    },
-    {
-      "name": "ast-grep-work-repo",
-      "command": "npx", 
-      "args": ["ast-grep-mcp"],
-      "working_dir": "/home/user/work/company-repo",
-      "enabled": true
-    }
-  ]
-}
-```
-
-**Management via Tool Calls**:
-```bash
-# Add server with working directory
-mcpproxy call tool --tool-name=upstream_servers \
-  --json_args='{"operation":"add","name":"git-myproject","command":"npx","args_json":"[\"@modelcontextprotocol/server-git\"]","working_dir":"/home/user/projects/myproject","enabled":true}'
-
-# Update working directory for existing server
-mcpproxy call tool --tool-name=upstream_servers \
-  --json_args='{"operation":"update","name":"git-myproject","working_dir":"/home/user/projects/myproject-v2"}'
-
-# Add server via patch operation
-mcpproxy call tool --tool-name=upstream_servers \
-  --json_args='{"operation":"patch","name":"existing-server","patch_json":"{\"working_dir\":\"/new/project/path\"}"}'
-```
-
-#### Error Handling
-If a specified `working_dir` doesn't exist:
-- Server startup will fail with detailed error message
-- Error logged to both main log and server-specific log  
-- Server remains disabled until directory issue is resolved
-
-#### Backwards Compatibility
-- Empty or unspecified `working_dir` uses current directory (existing behavior)
-- All existing configurations continue to work unchanged
-
-#### Docker Integration
-Working directories are compatible with Docker isolation. When both are configured:
-- `working_dir` affects the host-side directory context
-- `isolation.working_dir` affects the container's internal working directory
+- Empty/unspecified `working_dir` uses current directory (default behavior)
+- If directory doesn't exist, server startup fails with detailed error
+- Compatible with Docker isolation (`isolation.working_dir` for container path)
 
 ## MCP Protocol Implementation
 
@@ -664,218 +445,33 @@ open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
 
 ## JavaScript Code Execution
 
-The `code_execution` tool enables LLM agents to orchestrate multiple upstream MCP tools in a single request using sandboxed JavaScript (ES5.1+). This reduces round-trip latency and enables complex multi-step workflows with conditional logic, loops, and data transformations.
-
-### Overview
-
-**When to Use**:
-- Calling 2+ tools and combining their results
-- Conditional logic based on tool responses
-- Data transformation or aggregation from multiple sources
-- Iterating over data and calling tools for each item
-
-**When NOT to Use**:
-- Single tool calls (use `call_tool` directly)
-- Simple linear workflows (use sequential calls)
-- Operations requiring >2 minutes (default timeout)
+The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES5.1+).
 
 ### Configuration
-
-Enable the feature in `~/.mcpproxy/mcp_config.json`:
 
 ```json
 {
   "enable_code_execution": true,
-  "code_execution_timeout_ms": 120000,      // Default: 2 minutes, max: 10 minutes
-  "code_execution_max_tool_calls": 0,       // Default: unlimited
-  "code_execution_pool_size": 10            // Default: 10 concurrent VMs
+  "code_execution_timeout_ms": 120000,
+  "code_execution_max_tool_calls": 0,
+  "code_execution_pool_size": 10
 }
 ```
 
-### JavaScript API
-
-**Available in JavaScript**:
-- `input` - Global variable containing request input data
-- `call_tool(serverName, toolName, args)` - Function to invoke upstream MCP tools
-- ES5.1+ standard library (Array, Object, String, Math, Date, JSON, etc.)
-
-**Sandbox Restrictions** (not available):
-- `require()` - No module loading
-- `setTimeout()` / `setInterval()` - No timers
-- Filesystem, network, or environment variable access
-- Node.js built-ins beyond ES5.1
-
-**call_tool() Response Format**:
-```javascript
-// Success
-{
-  "ok": true,
-  "result": <tool result>
-}
-
-// Error
-{
-  "ok": false,
-  "error": {
-    "message": "<error message>",
-    "code": "<error code>"
-  }
-}
-```
-
-### CLI Command
-
-The `code exec` command automatically detects if a daemon is running and chooses the appropriate mode:
-
-**Client Mode (Daemon Running)**:
-- Detects daemon via socket file (`~/.mcpproxy/mcpproxy.sock` on Unix, named pipe on Windows)
-- Connects via Unix socket/named pipe (no API key required)
-- Calls `/api/v1/code/exec` HTTP endpoint
-- No database locking issues
-- Faster execution (no initialization overhead)
-
-**Standalone Mode (No Daemon)**:
-- Opens database, index, and upstream managers directly
-- Executes code locally
-- Full functionality preserved for offline use
+### CLI Usage
 
 ```bash
-# Automatically uses daemon if running, standalone otherwise
 mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}'
-
-# Code from file
-mcpproxy code exec --file=script.js --input-file=params.json
-
-# Call upstream tools
 mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user})" --input='{"user":"octocat"}'
-
-# With options
-mcpproxy code exec --code="..." --timeout=60000 --max-tool-calls=10 --allowed-servers=github,gitlab
-
-# Force standalone mode (for testing)
-MCPPROXY_TRAY_ENDPOINT="" mcpproxy code exec --code="..." --input='{...}'
 ```
-
-The same client mode pattern applies to other CLI commands:
-- `mcpproxy call tool` - Calls tools via daemon when available
-- `mcpproxy tools list` - Lists tools from daemon cache when available
-
-### Common Patterns
-
-**Sequential Tool Calls**:
-```javascript
-var userRes = call_tool('github', 'get_user', {username: input.username});
-if (!userRes.ok) return {error: userRes.error.message};
-
-var reposRes = call_tool('github', 'list_repos', {user: input.username});
-if (!reposRes.ok) return {error: reposRes.error.message};
-
-return {
-  user: userRes.result.name,
-  repos: reposRes.result.length
-};
-```
-
-**Conditional Logic**:
-```javascript
-var primary = call_tool('primary-db', 'query', {sql: input.query});
-if (!primary.ok) {
-  // Fallback to backup
-  var backup = call_tool('backup-db', 'query', {sql: input.query});
-  return backup.ok ? backup.result : {error: 'Both databases unavailable'};
-}
-return primary.result;
-```
-
-**Loop with Aggregation**:
-```javascript
-var results = [];
-for (var i = 0; i < input.ids.length; i++) {
-  var res = call_tool('api', 'get_item', {id: input.ids[i]});
-  if (res.ok) results.push(res.result);
-}
-return {items: results, count: results.length};
-```
-
-### Error Codes
-
-| Code | Description |
-|------|-------------|
-| `SYNTAX_ERROR` | Invalid JavaScript syntax |
-| `RUNTIME_ERROR` | Uncaught exception during execution |
-| `TIMEOUT` | Execution exceeded timeout limit |
-| `MAX_TOOL_CALLS_EXCEEDED` | Too many `call_tool()` invocations |
-| `SERVER_NOT_ALLOWED` | Attempted to call server not in `allowed_servers` |
-| `SERIALIZATION_ERROR` | Return value not JSON-serializable |
 
 ### Documentation
 
-For comprehensive guides and examples:
-- **Overview**: `docs/code_execution/overview.md` - Architecture and best practices
-- **Examples**: `docs/code_execution/examples.md` - 13 working code samples
-- **API Reference**: `docs/code_execution/api-reference.md` - Complete schema documentation
-- **Troubleshooting**: `docs/code_execution/troubleshooting.md` - Common issues and solutions
-
-### Security
-
-- **Feature Toggle**: Disabled by default (`enable_code_execution: false`)
-- **Sandbox**: No filesystem, network, or environment access
-- **Timeout**: Maximum execution time enforced (default: 2 minutes, max: 10 minutes)
-- **Tool Call Limits**: Optional `max_tool_calls` to prevent abuse
-- **Server Whitelist**: Optional `allowed_servers` for access control
-- **Quarantine Integration**: Respects existing server quarantine status
-
-### Troubleshooting Client/Standalone Mode
-
-**How to check which mode is being used**:
-
-```bash
-# Client mode (daemon detected)
-$ ./mcpproxy code exec --code="({ result: 42 })" --input='{}'
-ℹ️  Using daemon mode (via socket) - fast execution
-{"ok":true,"value":{"result":42}}
-
-# Standalone mode (no daemon)
-$ MCPPROXY_TRAY_ENDPOINT="" ./mcpproxy code exec --code="({ result: 42 })" --input='{}'
-⚠️  Using standalone mode - daemon not detected (slower startup)
-{"ok":true,"value":{"result":42}}
-```
-
-**Common issues**:
-
-1. **"Database locked by another process"** - Daemon is running, but socket detection failed
-   - Check socket file exists: `ls -la ~/.mcpproxy/mcpproxy.sock` (Unix) or check named pipe on Windows
-   - Verify permissions: Socket should be `srw-------` (0600)
-   - Check logs: `tail -f ~/Library/Logs/mcpproxy/main.log`
-
-2. **Slow CLI execution** - Client mode not being used
-   - Verify daemon is running: `ps aux | grep mcpproxy`
-   - Check socket availability: `MCPPROXY_LOG_LEVEL=debug ./mcpproxy code exec ...`
-   - Look for "Using standalone mode" in stderr output
-
-3. **Fallback to standalone mode** - Daemon running but ping fails
-   - Check daemon health: `curl -H "X-API-Key: $(cat ~/.mcpproxy/api_key)" http://127.0.0.1:8080/api/v1/status`
-   - Verify socket permissions
-   - Check for port conflicts or crashes
-
-**Forcing standalone mode for testing**:
-
-By default, CLI commands automatically detect and use a running daemon via socket communication. To bypass this and force standalone mode (e.g., for testing):
-
-```bash
-# Force standalone mode by clearing socket endpoint
-MCPPROXY_TRAY_ENDPOINT="" mcpproxy code exec --code="({ result: 42 })" --input='{}'
-MCPPROXY_TRAY_ENDPOINT="" mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}'
-```
-
-**When to use standalone mode**:
-- Testing database access directly
-- Debugging without daemon interference
-- Single-shot operations when daemon isn't needed
-
-**Performance difference**:
-- **Client mode** (daemon running): ~50ms execution
-- **Standalone mode** (no daemon): ~8s startup (160x slower)
+See `docs/code_execution/` for complete guides:
+- `overview.md` - Architecture and best practices
+- `examples.md` - 13 working code samples
+- `api-reference.md` - Complete schema documentation
+- `troubleshooting.md` - Common issues and solutions
 
 ## Security Model
 
@@ -931,105 +527,23 @@ The tray application's process monitor (`cmd/mcpproxy-tray/internal/monitor/proc
 
 ## Debugging Guide
 
-### Log Locations and Analysis
-
-#### Log File Structure
+### Log Locations
 - **Main log**: `~/Library/Logs/mcpproxy/main.log` (macOS) or `~/.mcpproxy/logs/main.log` (Linux/Windows)
 - **Per-server logs**: `~/Library/Logs/mcpproxy/server-{name}.log`
-- **Archived logs**: Compressed with timestamps (e.g., `main-2025-09-02T10-17-31.851.log.gz`)
 
-#### Essential Grep Commands
+### Common Commands
 ```bash
-# Monitor real-time logs
+# Monitor logs
 tail -f ~/Library/Logs/mcpproxy/main.log
 
-# Filter for specific issues
-tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(ERROR|WARN|oauth|OAuth|tool|Tool)"
+# Filter for errors
+tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(ERROR|WARN)"
 
-# Debug specific server
-tail -f ~/Library/Logs/mcpproxy/server-Sentry.log
+# Debug mode
+pkill mcpproxy && ./mcpproxy serve --log-level=debug
 
-# Search for authentication issues
-grep -E "(auth|Auth|token|Token|401|invalid_token)" ~/Library/Logs/mcpproxy/main.log
-
-# Find tool indexing problems
-grep -E "(index|Index|tool.*list|list.*tool)" ~/Library/Logs/mcpproxy/main.log
-
-# Check OAuth flow details
-grep -E "(OAuth|oauth|browser|callback|authorization)" ~/Library/Logs/mcpproxy/main.log
-```
-
-### OAuth Debugging
-
-#### Manual Authentication Testing
-```bash
-# Test OAuth flow for specific server
+# OAuth debugging
 mcpproxy auth login --server=Sentry --log-level=debug
-
-# Check current authentication status
-mcpproxy auth status
-
-# Force re-authentication
-mcpproxy auth login --server=Sentry --force
-```
-
-
-
-### Server Management Commands
-
-#### Upstream Server Operations
-```bash
-# List all upstream servers with status
-mcpproxy upstream list
-
-# Add new server
-mcpproxy upstream add --name="new-server" --url="https://api.example.com/mcp"
-
-# Remove server
-mcpproxy upstream remove --name="old-server"
-
-# Enable/disable server
-mcpproxy upstream update --name="test-server" --enabled=false
-```
-
-### Performance and Resource Debugging
-
-#### Docker Isolation Monitoring
-```bash
-# Check Docker container status
-docker ps | grep mcpproxy
-
-# Monitor container resource usage
-docker stats $(docker ps -q --filter "name=mcpproxy")
-
-# Debug isolation setup
-grep -E "(Docker|docker|isolation|container)" ~/Library/Logs/mcpproxy/main.log
-```
-
-#### Connection and Retry Analysis
-```bash
-# Monitor connection attempts and retries
-grep -E "(retry|Retry|connection.*attempt|backoff)" ~/Library/Logs/mcpproxy/main.log
-
-# Check connection state transitions
-grep -E "(state.*transition|Connecting|Ready|Error)" ~/Library/Logs/mcpproxy/main.log
-```
-
-### Running with Debug Mode
-
-#### Start mcpproxy with Enhanced Debugging
-```bash
-# Kill existing daemon
-pkill mcpproxy
-
-# Start with debug logging
-go build && ./mcpproxy serve --log-level=debug
-
-# Start with trace-level logging (very verbose)
-./mcpproxy serve --log-level=trace
-
-# Debug specific operations
-./mcpproxy tools list --server=github-server --log-level=trace
 ```
 
 
