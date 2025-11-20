@@ -16,6 +16,7 @@ const (
 	MetaBucket            = "meta"
 	CacheBucket           = "cache"
 	CacheStatsBucket      = "cache_stats"
+	SessionsBucket        = "sessions"
 )
 
 // Meta keys

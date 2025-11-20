@@ -335,13 +335,23 @@ func ConvertFromCursorFormat(cursorConfig *CursorMCPConfig) []*ServerConfig {
 
 // ToolMetadata represents tool information stored in the index
 type ToolMetadata struct {
-	Name        string    `json:"name"`
-	ServerName  string    `json:"server_name"`
-	Description string    `json:"description"`
-	ParamsJSON  string    `json:"params_json"`
-	Hash        string    `json:"hash"`
-	Created     time.Time `json:"created"`
-	Updated     time.Time `json:"updated"`
+	Name        string           `json:"name"`
+	ServerName  string           `json:"server_name"`
+	Description string           `json:"description"`
+	ParamsJSON  string           `json:"params_json"`
+	Hash        string           `json:"hash"`
+	Created     time.Time        `json:"created"`
+	Updated     time.Time        `json:"updated"`
+	Annotations *ToolAnnotations `json:"annotations,omitempty"`
+}
+
+// ToolAnnotations represents MCP tool behavior hints
+type ToolAnnotations struct {
+	Title           string `json:"title,omitempty"`
+	ReadOnlyHint    *bool  `json:"readOnlyHint,omitempty"`
+	DestructiveHint *bool  `json:"destructiveHint,omitempty"`
+	IdempotentHint  *bool  `json:"idempotentHint,omitempty"`
+	OpenWorldHint   *bool  `json:"openWorldHint,omitempty"`
 }
 
 // ToolRegistration represents a tool registration

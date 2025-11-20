@@ -1439,12 +1439,37 @@ func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, er
 	// Convert cached tools to API response format
 	result := make([]map[string]interface{}, len(serverStatus.Tools))
 	for i, tool := range serverStatus.Tools {
-		result[i] = map[string]interface{}{
+		toolMap := map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,
 			"inputSchema": tool.InputSchema,
 			"server_name": serverName,
 		}
+
+		// Include annotations if present
+		if tool.Annotations != nil {
+			annotations := map[string]interface{}{}
+			if tool.Annotations.Title != "" {
+				annotations["title"] = tool.Annotations.Title
+			}
+			if tool.Annotations.ReadOnlyHint != nil {
+				annotations["readOnlyHint"] = *tool.Annotations.ReadOnlyHint
+			}
+			if tool.Annotations.DestructiveHint != nil {
+				annotations["destructiveHint"] = *tool.Annotations.DestructiveHint
+			}
+			if tool.Annotations.IdempotentHint != nil {
+				annotations["idempotentHint"] = *tool.Annotations.IdempotentHint
+			}
+			if tool.Annotations.OpenWorldHint != nil {
+				annotations["openWorldHint"] = *tool.Annotations.OpenWorldHint
+			}
+			if len(annotations) > 0 {
+				toolMap["annotations"] = annotations
+			}
+		}
+
+		result[i] = toolMap
 	}
 
 	s.logger.Debug("Retrieved server tools from cache",
@@ -1557,6 +1582,21 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 // ReplayToolCall replays a tool call with modified arguments
 func (s *Server) ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	return s.runtime.ReplayToolCall(id, arguments)
+}
+
+// GetToolCallsBySession retrieves tool calls filtered by session ID
+func (s *Server) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+	return s.runtime.GetToolCallsBySession(sessionID, limit, offset)
+}
+
+// GetRecentSessions retrieves recent MCP sessions
+func (s *Server) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error) {
+	return s.runtime.GetRecentSessions(limit)
+}
+
+// GetSessionByID retrieves a session by its ID
+func (s *Server) GetSessionByID(sessionID string) (*contracts.MCPSession, error) {
+	return s.runtime.GetSessionByID(sessionID)
 }
 
 // CallTool calls an MCP tool and returns the result

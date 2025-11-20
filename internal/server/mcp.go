@@ -92,6 +92,8 @@ func NewMCPProxyServer(
 ) *MCPProxyServer {
 	// Initialize session store first (needed for hooks)
 	sessionStore := NewSessionStore(logger)
+	// Wire up storage manager for session persistence
+	sessionStore.SetStorageManager(storage)
 
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
@@ -106,13 +108,32 @@ func NewMCPProxyServer(
 			clientVersion = clientInfo.Version
 		}
 
-		// Store session information
+		// Store session information (persists to storage)
 		sessionStore.SetSession(sessionID, clientName, clientVersion)
 
 		logger.Info("MCP session registered",
 			zap.String("session_id", sessionID),
 			zap.String("client_name", clientName),
 			zap.String("client_version", clientVersion),
+		)
+	})
+
+	// Add hook to clean up session on disconnect
+	// NOTE: This hook may NOT be called for Streamable HTTP transport because HTTP is stateless
+	// and has no persistent connection. For HTTP transport, we rely on inactivity timeout
+	// cleanup (see runtime.backgroundSessionCleanup).
+	hooks.AddOnUnregisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
+		sessionID := sess.SessionID()
+
+		logger.Debug("OnUnregisterSession hook called - transport supports disconnect detection",
+			zap.String("session_id", sessionID),
+		)
+
+		// Remove session information (closes in storage)
+		sessionStore.RemoveSession(sessionID)
+
+		logger.Info("MCP session unregistered",
+			zap.String("session_id", sessionID),
 		)
 	})
 
@@ -760,6 +781,21 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		MCPClientVersion: clientVersion,
 	}
 
+	// Look up tool annotations from StateView cache
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if supervisor := p.mainServer.runtime.Supervisor(); supervisor != nil {
+			snapshot := supervisor.StateView().Snapshot()
+			if serverStatus, exists := snapshot.Servers[serverName]; exists {
+				for _, tool := range serverStatus.Tools {
+					if tool.Name == actualToolName {
+						toolCallRecord.Annotations = tool.Annotations
+						break
+					}
+				}
+			}
+		}
+	}
+
 	if err != nil {
 		// Record error in tool call history
 		toolCallRecord.Error = err.Error()
@@ -783,6 +819,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		// Store error tool call
 		if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
 			p.logger.Warn("Failed to record failed tool call", zap.Error(storeErr))
+		}
+
+		// Update session stats even for errors (to track call count)
+		if sessionID != "" && tokenMetrics != nil {
+			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
@@ -870,6 +911,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Store successful tool call in history
 	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
 		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
+	}
+
+	// Update session stats for successful call
+	if sessionID != "" && tokenMetrics != nil {
+		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
 	return mcp.NewToolResultText(response), nil

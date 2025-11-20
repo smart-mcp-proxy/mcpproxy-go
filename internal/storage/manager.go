@@ -879,3 +879,405 @@ func (m *Manager) saveServerIdentity(identity *ServerIdentity) error {
 		return bucket.Put([]byte(identity.ID), data)
 	})
 }
+
+// Session storage operations
+
+// SessionRecord represents a stored MCP session
+type SessionRecord struct {
+	ID            string     `json:"id"`
+	ClientName    string     `json:"client_name,omitempty"`
+	ClientVersion string     `json:"client_version,omitempty"`
+	Status        string     `json:"status"`
+	StartTime     time.Time  `json:"start_time"`
+	EndTime       *time.Time `json:"end_time,omitempty"`
+	LastActivity  time.Time  `json:"last_activity"`
+	ToolCallCount int        `json:"tool_call_count"`
+	TotalTokens   int        `json:"total_tokens"`
+}
+
+// CreateSession creates a new session record
+func (m *Manager) CreateSession(session *SessionRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(SessionsBucket))
+		if err != nil {
+			return fmt.Errorf("failed to create sessions bucket: %w", err)
+		}
+
+		// Check if session already exists (avoid duplicates)
+		c := bucket.Cursor()
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			keyStr := string(k)
+			// Check if key ends with the session ID (after the underscore)
+			if len(keyStr) > len(session.ID) && keyStr[len(keyStr)-len(session.ID):] == session.ID {
+				// Session already exists, skip creation
+				m.logger.Debugw("Session already exists, skipping creation", "session_id", session.ID)
+				return nil
+			}
+		}
+
+		data, err := json.Marshal(session)
+		if err != nil {
+			return fmt.Errorf("failed to marshal session: %w", err)
+		}
+
+		// Key format: {timestamp_ns}_{session_id} for reverse chronological ordering
+		key := fmt.Sprintf("%d_%s", session.StartTime.UnixNano(), session.ID)
+		if err := bucket.Put([]byte(key), data); err != nil {
+			return fmt.Errorf("failed to store session: %w", err)
+		}
+
+		m.logger.Debugw("Session created", "session_id", session.ID, "client_name", session.ClientName)
+
+		// Enforce retention limit (keep 100 most recent)
+		return m.enforceSessionRetention(bucket, 100)
+	})
+}
+
+// CloseSession marks a session as closed with end time
+func (m *Manager) CloseSession(sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return fmt.Errorf("sessions bucket not found")
+		}
+
+		// Find the session by iterating (session_id is in the key suffix)
+		var sessionKey []byte
+		var session SessionRecord
+
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			// Key format: {timestamp_ns}_{session_id}
+			keyStr := string(k)
+			// Check if key ends with the session ID (after the underscore)
+			if len(keyStr) > len(sessionID) && keyStr[len(keyStr)-len(sessionID):] == sessionID {
+				sessionKey = k
+				if err := json.Unmarshal(v, &session); err != nil {
+					return fmt.Errorf("failed to unmarshal session: %w", err)
+				}
+				break
+			}
+		}
+
+		if sessionKey == nil {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+
+		// Update session status and end time
+		now := time.Now()
+		session.Status = "closed"
+		session.EndTime = &now
+
+		data, err := json.Marshal(session)
+		if err != nil {
+			return fmt.Errorf("failed to marshal session: %w", err)
+		}
+
+		m.logger.Debugw("Session closed", "session_id", sessionID)
+		return bucket.Put(sessionKey, data)
+	})
+}
+
+// GetRecentSessions returns the most recent sessions
+func (m *Manager) GetRecentSessions(limit int) ([]*SessionRecord, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var sessions []*SessionRecord
+	var total int
+
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return nil // No sessions yet
+		}
+
+		// Count total
+		total = bucket.Stats().KeyN
+
+		// Iterate in reverse (newest first due to timestamp key prefix)
+		c := bucket.Cursor()
+		count := 0
+		for k, v := c.Last(); k != nil && count < limit; k, v = c.Prev() {
+			var session SessionRecord
+			if err := json.Unmarshal(v, &session); err != nil {
+				m.logger.Warnw("Failed to unmarshal session", "error", err)
+				continue
+			}
+			sessions = append(sessions, &session)
+			count++
+		}
+
+		return nil
+	})
+
+	return sessions, total, err
+}
+
+// GetSessionByID retrieves a session by its ID
+func (m *Manager) GetSessionByID(sessionID string) (*SessionRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var session *SessionRecord
+
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+
+		// Find the session by iterating
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			keyStr := string(k)
+			// Check if key ends with the session ID (after the underscore)
+			if len(keyStr) > len(sessionID) && keyStr[len(keyStr)-len(sessionID):] == sessionID {
+				var s SessionRecord
+				if err := json.Unmarshal(v, &s); err != nil {
+					return fmt.Errorf("failed to unmarshal session: %w", err)
+				}
+				session = &s
+				return nil
+			}
+		}
+
+		return fmt.Errorf("session not found: %s", sessionID)
+	})
+
+	return session, err
+}
+
+// CloseAllActiveSessions marks all active sessions as closed
+// This should be called on startup to clean up stale sessions from previous runs
+func (m *Manager) CloseAllActiveSessions() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return nil // No sessions bucket yet
+		}
+
+		now := time.Now()
+		var keysToUpdate [][]byte
+		var sessionsToUpdate []SessionRecord
+
+		// First pass: find all active sessions
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var session SessionRecord
+			if err := json.Unmarshal(v, &session); err != nil {
+				continue
+			}
+			if session.Status == "active" {
+				keysToUpdate = append(keysToUpdate, k)
+				session.Status = "closed"
+				session.EndTime = &now
+				sessionsToUpdate = append(sessionsToUpdate, session)
+			}
+		}
+
+		// Second pass: update all active sessions
+		for i, key := range keysToUpdate {
+			data, err := json.Marshal(sessionsToUpdate[i])
+			if err != nil {
+				continue
+			}
+			if err := bucket.Put(key, data); err != nil {
+				continue
+			}
+		}
+
+		if len(keysToUpdate) > 0 {
+			m.logger.Infow("Closed stale sessions on startup", "count", len(keysToUpdate))
+		}
+
+		return nil
+	})
+}
+
+// UpdateSessionStats increments tool call count and adds tokens
+func (m *Manager) UpdateSessionStats(sessionID string, tokens int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return fmt.Errorf("sessions bucket not found")
+		}
+
+		// Find the session
+		var sessionKey []byte
+		var session SessionRecord
+
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			keyStr := string(k)
+			// Check if key ends with the session ID (after the underscore)
+			if len(keyStr) > len(sessionID) && keyStr[len(keyStr)-len(sessionID):] == sessionID {
+				sessionKey = k
+				if err := json.Unmarshal(v, &session); err != nil {
+					return fmt.Errorf("failed to unmarshal session: %w", err)
+				}
+				break
+			}
+		}
+
+		if sessionKey == nil {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+
+		// Update stats and last activity
+		session.ToolCallCount++
+		session.TotalTokens += tokens
+		session.LastActivity = time.Now()
+
+		data, err := json.Marshal(session)
+		if err != nil {
+			return fmt.Errorf("failed to marshal session: %w", err)
+		}
+
+		return bucket.Put(sessionKey, data)
+	})
+}
+
+// CloseInactiveSessions closes sessions that haven't had activity for the specified duration
+func (m *Manager) CloseInactiveSessions(inactivityTimeout time.Duration) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var closedCount int
+
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return nil // No sessions bucket yet
+		}
+
+		now := time.Now()
+		cutoff := now.Add(-inactivityTimeout)
+		var keysToUpdate [][]byte
+		var sessionsToUpdate []SessionRecord
+
+		// Find all active sessions with no recent activity
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var session SessionRecord
+			if err := json.Unmarshal(v, &session); err != nil {
+				continue
+			}
+
+			// Check if session is active and hasn't had activity within timeout
+			if session.Status == "active" {
+				lastActivity := session.LastActivity
+				// If LastActivity is zero, use StartTime (for backwards compatibility)
+				if lastActivity.IsZero() {
+					lastActivity = session.StartTime
+				}
+
+				if lastActivity.Before(cutoff) {
+					keysToUpdate = append(keysToUpdate, k)
+					session.Status = "closed"
+					session.EndTime = &now
+					sessionsToUpdate = append(sessionsToUpdate, session)
+				}
+			}
+		}
+
+		// Update all inactive sessions
+		for i, key := range keysToUpdate {
+			data, err := json.Marshal(sessionsToUpdate[i])
+			if err != nil {
+				continue
+			}
+			if err := bucket.Put(key, data); err != nil {
+				continue
+			}
+			closedCount++
+		}
+
+		return nil
+	})
+
+	if closedCount > 0 {
+		m.logger.Infow("Closed inactive sessions", "count", closedCount, "timeout", inactivityTimeout.String())
+	}
+
+	return closedCount, err
+}
+
+// GetToolCallsBySession retrieves tool calls filtered by session ID
+func (m *Manager) GetToolCallsBySession(sessionID string, limit, offset int) ([]*ToolCallRecord, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var toolCalls []*ToolCallRecord
+	var total int
+
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		// We need to iterate all server tool call buckets
+		return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {
+			bucketName := string(name)
+			// Check if this is a tool calls bucket
+			if len(bucketName) < 18 || bucketName[:7] != "server_" || bucketName[len(bucketName)-11:] != "_tool_calls" {
+				return nil
+			}
+
+			c := b.Cursor()
+			for k, v := c.Last(); k != nil; k, v = c.Prev() {
+				var record ToolCallRecord
+				if err := json.Unmarshal(v, &record); err != nil {
+					continue
+				}
+
+				// Filter by session ID
+				if record.MCPSessionID == sessionID {
+					total++
+					if total > offset && len(toolCalls) < limit {
+						toolCalls = append(toolCalls, &record)
+					}
+				}
+			}
+			return nil
+		})
+	})
+
+	// Sort by timestamp descending
+	sort.Slice(toolCalls, func(i, j int) bool {
+		return toolCalls[i].Timestamp.After(toolCalls[j].Timestamp)
+	})
+
+	return toolCalls, total, err
+}
+
+// enforceSessionRetention deletes oldest sessions if count exceeds limit
+func (m *Manager) enforceSessionRetention(bucket *bbolt.Bucket, maxSessions int) error {
+	stats := bucket.Stats()
+	if stats.KeyN <= maxSessions {
+		return nil
+	}
+
+	// Delete oldest sessions (first keys since they have oldest timestamps)
+	toDelete := stats.KeyN - maxSessions
+	deleted := 0
+
+	c := bucket.Cursor()
+	for k, _ := c.First(); k != nil && deleted < toDelete; k, _ = c.Next() {
+		if err := bucket.Delete(k); err != nil {
+			return fmt.Errorf("failed to delete old session: %w", err)
+		}
+		deleted++
+	}
+
+	m.logger.Debugw("Enforced session retention", "deleted", deleted, "remaining", maxSessions)
+	return nil
+}

@@ -26,12 +26,35 @@ export interface Server {
   }
 }
 
+// Tool Annotation types
+export interface ToolAnnotation {
+  title?: string
+  readOnlyHint?: boolean
+  destructiveHint?: boolean
+  idempotentHint?: boolean
+  openWorldHint?: boolean
+}
+
+// MCP Session types
+export interface MCPSession {
+  id: string
+  client_name?: string
+  client_version?: string
+  status: 'active' | 'closed'
+  start_time: string  // ISO 8601
+  end_time?: string   // ISO 8601
+  last_activity: string  // ISO 8601
+  tool_call_count: number
+  total_tokens: number
+}
+
 // Tool types
 export interface Tool {
   name: string
   description: string
   server: string
   input_schema?: Record<string, any>
+  annotations?: ToolAnnotation
 }
 
 // Search result types
@@ -156,6 +179,7 @@ export interface ToolCallRecord {
   mcp_session_id?: string  // MCP session identifier
   mcp_client_name?: string  // MCP client name from InitializeRequest
   mcp_client_version?: string  // MCP client version
+  annotations?: ToolAnnotation  // Tool behavior hints snapshot
 }
 
 export interface GetToolCallsResponse {
@@ -173,6 +197,18 @@ export interface GetServerToolCallsResponse {
   server_name: string
   tool_calls: ToolCallRecord[]
   total: number
+}
+
+// Session response types
+export interface GetSessionsResponse {
+  sessions: MCPSession[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface GetSessionDetailResponse {
+  session: MCPSession
 }
 
 // Configuration management types

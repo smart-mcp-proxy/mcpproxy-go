@@ -70,6 +70,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/sessions',
+      name: 'sessions',
+      component: () => import('@/views/Sessions.vue'),
+      meta: {
+        title: 'MCP Sessions',
+      },
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'not-found',
       component: () => import('@/views/NotFound.vue'),

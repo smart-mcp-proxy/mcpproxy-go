@@ -263,6 +263,11 @@
                   <p class="text-sm text-base-content/70">
                     {{ tool.description || 'No description available' }}
                   </p>
+                  <AnnotationBadges
+                    v-if="tool.annotations"
+                    :annotations="tool.annotations"
+                    class="mt-2"
+                  />
                   <div v-if="tool.input_schema" class="card-actions justify-end mt-4">
                     <button
                       class="btn btn-sm btn-outline"
@@ -419,6 +424,7 @@ import { useRoute } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool } from '@/types'
 import api from '@/services/api'

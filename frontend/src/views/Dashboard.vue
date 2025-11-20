@@ -94,6 +94,67 @@
     </div>
 
 
+    <!-- Recent Sessions -->
+    <div class="card bg-base-100 shadow-md">
+      <div class="card-body">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="card-title text-lg">Recent Sessions</h2>
+            <p class="text-sm opacity-60">MCP client connections</p>
+          </div>
+          <router-link to="/sessions" class="btn btn-sm btn-ghost">
+            View All →
+          </router-link>
+        </div>
+
+        <div v-if="sessionsLoading" class="flex justify-center py-4">
+          <span class="loading loading-spinner loading-sm"></span>
+        </div>
+
+        <div v-else-if="sessionsError" class="alert alert-error alert-sm">
+          <span>{{ sessionsError }}</span>
+        </div>
+
+        <div v-else-if="recentSessions.length === 0" class="text-center py-4 text-base-content/60">
+          <p class="text-sm">No sessions yet</p>
+        </div>
+
+        <div v-else class="overflow-x-auto">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th>Session</th>
+                <th>Status</th>
+                <th>Tool Calls</th>
+                <th>Tokens</th>
+                <th>Started</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="session in recentSessions" :key="session.id" class="hover">
+                <td>
+                  <code class="text-xs">{{ session.id.substring(0, 16) }}...</code>
+                </td>
+                <td>
+                  <div
+                    class="badge badge-sm"
+                    :class="session.status === 'active' ? 'badge-success' : 'badge-ghost'"
+                  >
+                    {{ session.status === 'active' ? 'Active' : 'Closed' }}
+                  </div>
+                </td>
+                <td class="text-center">{{ session.tool_call_count || 0 }}</td>
+                <td class="text-right font-mono text-xs">{{ formatNumber(session.total_tokens || 0) }}</td>
+                <td>
+                  <span class="text-xs">{{ formatRelativeTime(session.start_time) }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- Recent Tool Calls -->
     <div class="card bg-base-100 shadow-md">
       <div class="card-body">
@@ -407,6 +468,11 @@ const recentToolCalls = ref<any[]>([])
 const toolCallsLoading = ref(false)
 const toolCallsError = ref<string | null>(null)
 
+// Recent Sessions
+const recentSessions = ref<any[]>([])
+const sessionsLoading = ref(false)
+const sessionsError = ref<string | null>(null)
+
 // Load token savings data
 const loadTokenSavings = async () => {
   tokenSavingsLoading.value = true
@@ -442,6 +508,25 @@ const loadToolCalls = async () => {
     toolCallsError.value = error instanceof Error ? error.message : 'Unknown error'
   } finally {
     toolCallsLoading.value = false
+  }
+}
+
+// Load recent sessions
+const loadSessions = async () => {
+  sessionsLoading.value = true
+  sessionsError.value = null
+
+  try {
+    const response = await api.getSessions(5)
+    if (response.success && response.data) {
+      recentSessions.value = response.data.sessions || []
+    } else {
+      sessionsError.value = response.error || 'Failed to load sessions'
+    }
+  } catch (error) {
+    sessionsError.value = error instanceof Error ? error.message : 'Unknown error'
+  } finally {
+    sessionsLoading.value = false
   }
 }
 
@@ -715,12 +800,15 @@ onMounted(() => {
   loadTokenSavings()
   // Load tool calls immediately
   loadToolCalls()
+  // Load sessions immediately
+  loadSessions()
 
   // Set up auto-refresh every 30 seconds
   refreshInterval = setInterval(() => {
     loadDiagnostics()
     loadTokenSavings()
     loadToolCalls()
+    loadSessions()
   }, 30000)
 
   // Listen for SSE events to refresh diagnostics

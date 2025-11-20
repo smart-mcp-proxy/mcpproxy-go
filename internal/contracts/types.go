@@ -63,6 +63,27 @@ type IsolationConfig struct {
 	Timeout     string `json:"timeout,omitempty"`
 }
 
+// ToolAnnotation represents MCP tool behavior hints
+type ToolAnnotation struct {
+	Title           string `json:"title,omitempty"`
+	ReadOnlyHint    *bool  `json:"readOnlyHint,omitempty"`
+	DestructiveHint *bool  `json:"destructiveHint,omitempty"`
+	IdempotentHint  *bool  `json:"idempotentHint,omitempty"`
+	OpenWorldHint   *bool  `json:"openWorldHint,omitempty"`
+}
+
+// MCPSession represents a client session with MCPProxy
+type MCPSession struct {
+	ID            string     `json:"id"`
+	ClientName    string     `json:"client_name,omitempty"`
+	ClientVersion string     `json:"client_version,omitempty"`
+	Status        string     `json:"status"`
+	StartTime     time.Time  `json:"start_time"`
+	EndTime       *time.Time `json:"end_time,omitempty"`
+	ToolCallCount int        `json:"tool_call_count"`
+	TotalTokens   int        `json:"total_tokens"`
+}
+
 // Tool represents an MCP tool with its metadata
 type Tool struct {
 	Name        string                 `json:"name"`
@@ -71,6 +92,7 @@ type Tool struct {
 	Schema      map[string]interface{} `json:"schema,omitempty"`
 	Usage       int                    `json:"usage"`
 	LastUsed    *time.Time             `json:"last_used,omitempty"`
+	Annotations *ToolAnnotation        `json:"annotations,omitempty"`
 }
 
 // SearchResult represents a search result for tools
@@ -298,6 +320,7 @@ type ToolCallRecord struct {
 	MCPSessionID     string                 `json:"mcp_session_id,omitempty"`     // MCP session identifier
 	MCPClientName    string                 `json:"mcp_client_name,omitempty"`    // MCP client name from InitializeRequest
 	MCPClientVersion string                 `json:"mcp_client_version,omitempty"` // MCP client version
+	Annotations      *ToolAnnotation        `json:"annotations,omitempty"`        // Tool behavior hints snapshot
 }
 
 // GetToolCallsResponse is the response for GET /api/v1/tool-calls
@@ -318,6 +341,19 @@ type GetServerToolCallsResponse struct {
 	ServerName string           `json:"server_name"`
 	ToolCalls  []ToolCallRecord `json:"tool_calls"`
 	Total      int              `json:"total"`
+}
+
+// GetSessionsResponse is the response for GET /api/v1/sessions
+type GetSessionsResponse struct {
+	Sessions []MCPSession `json:"sessions"`
+	Total    int          `json:"total"`
+	Limit    int          `json:"limit"`
+	Offset   int          `json:"offset"`
+}
+
+// GetSessionDetailResponse is the response for GET /api/v1/sessions/{id}
+type GetSessionDetailResponse struct {
+	Session MCPSession `json:"session"`
 }
 
 // Configuration management types

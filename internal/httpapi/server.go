@@ -73,6 +73,11 @@ type ServerController interface {
 	GetToolCallByID(id string) (*contracts.ToolCallRecord, error)
 	GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error)
 	ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error)
+	GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error)
+
+	// Session management
+	GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error)
+	GetSessionByID(sessionID string) (*contracts.MCPSession, error)
 
 	// Configuration management
 	ValidateConfig(cfg *config.Config) ([]config.ValidationError, error)
@@ -319,6 +324,10 @@ func (s *Server) setupRoutes() {
 		r.Get("/tool-calls", s.handleGetToolCalls)
 		r.Get("/tool-calls/{id}", s.handleGetToolCallDetail)
 		r.Post("/tool-calls/{id}/replay", s.handleReplayToolCall)
+
+		// Session management
+		r.Get("/sessions", s.handleGetSessions)
+		r.Get("/sessions/{id}", s.handleGetSessionDetail)
 
 		// Tool execution
 		r.Post("/tools/call", s.handleCallTool)
@@ -1397,6 +1406,7 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters
 	limitStr := r.URL.Query().Get("limit")
 	offsetStr := r.URL.Query().Get("offset")
+	sessionID := r.URL.Query().Get("session_id")
 
 	limit := 50 // default
 	if limitStr != "" {
@@ -1412,10 +1422,19 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get tool calls from controller
-	toolCalls, total, err := s.controller.GetToolCalls(limit, offset)
+	var toolCalls []*contracts.ToolCallRecord
+	var total int
+	var err error
+
+	// Get tool calls - either filtered by session or all
+	if sessionID != "" {
+		toolCalls, total, err = s.controller.GetToolCallsBySession(sessionID, limit, offset)
+	} else {
+		toolCalls, total, err = s.controller.GetToolCalls(limit, offset)
+	}
+
 	if err != nil {
-		s.logger.Error("Failed to get tool calls", "error", err)
+		s.logger.Error("Failed to get tool calls", "error", err, "session_id", sessionID)
 		s.writeError(w, http.StatusInternalServerError, "Failed to get tool calls")
 		return
 	}
@@ -1804,6 +1823,85 @@ func getBool(m map[string]interface{}, key string) bool {
 		return val
 	}
 	return false
+}
+
+// Session management handlers
+
+func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Parse query parameters
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+
+	limit := 10 // default for sessions
+	if limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
+		}
+	}
+
+	offset := 0
+	if offsetStr != "" {
+		if parsed, err := strconv.Atoi(offsetStr); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	// Get recent sessions from controller
+	sessions, total, err := s.controller.GetRecentSessions(limit)
+	if err != nil {
+		s.logger.Error("Failed to get sessions", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to get sessions")
+		return
+	}
+
+	// Convert to non-pointer slice
+	sessionList := make([]contracts.MCPSession, 0, len(sessions))
+	for _, session := range sessions {
+		if session != nil {
+			sessionList = append(sessionList, *session)
+		}
+	}
+
+	response := contracts.GetSessionsResponse{
+		Sessions: sessionList,
+		Total:    total,
+		Limit:    limit,
+		Offset:   offset,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		s.writeError(w, http.StatusBadRequest, "Session ID required")
+		return
+	}
+
+	// Get session by ID
+	session, err := s.controller.GetSessionByID(id)
+	if err != nil {
+		s.logger.Error("Failed to get session detail", "id", id, "error", err)
+		s.writeError(w, http.StatusNotFound, "Session not found")
+		return
+	}
+
+	response := contracts.GetSessionDetailResponse{
+		Session: *session,
+	}
+
+	s.writeSuccess(w, response)
 }
 
 // handleGetDockerStatus returns the current Docker recovery status

@@ -72,9 +72,10 @@ type ToolCallRecord struct {
 	Metrics          *TokenMetrics          `json:"metrics,omitempty"`           // Token usage metrics (nil for older records)
 	ParentCallID     string                 `json:"parent_call_id,omitempty"`    // Links nested calls to parent code_execution
 	ExecutionType    string                 `json:"execution_type,omitempty"`    // "direct" or "code_execution"
-	MCPSessionID     string                 `json:"mcp_session_id,omitempty"`    // MCP session identifier
-	MCPClientName    string                 `json:"mcp_client_name,omitempty"`   // MCP client name from InitializeRequest
-	MCPClientVersion string                 `json:"mcp_client_version,omitempty"` // MCP client version
+	MCPSessionID     string                    `json:"mcp_session_id,omitempty"`    // MCP session identifier
+	MCPClientName    string                    `json:"mcp_client_name,omitempty"`   // MCP client name from InitializeRequest
+	MCPClientVersion string                    `json:"mcp_client_version,omitempty"` // MCP client version
+	Annotations      *config.ToolAnnotations   `json:"annotations,omitempty"`       // Tool behavior hints snapshot
 }
 
 // DiagnosticRecord represents a diagnostic event for a server
