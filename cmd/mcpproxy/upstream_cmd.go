@@ -52,12 +52,35 @@ Examples:
 		RunE: runUpstreamLogs,
 	}
 
+	upstreamEnableCmd = &cobra.Command{
+		Use:   "enable <server-name>",
+		Short: "Enable a server",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runUpstreamEnable,
+	}
+
+	upstreamDisableCmd = &cobra.Command{
+		Use:   "disable <server-name>",
+		Short: "Disable a server",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runUpstreamDisable,
+	}
+
+	upstreamRestartCmd = &cobra.Command{
+		Use:   "restart <server-name>",
+		Short: "Restart a server",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runUpstreamRestart,
+	}
+
 	// Command flags
 	upstreamOutputFormat string
 	upstreamLogLevel     string
 	upstreamConfigPath   string
 	upstreamLogsTail     int
 	upstreamLogsFollow   bool
+	upstreamAll          bool
+	upstreamForce        bool
 )
 
 // GetUpstreamCommand returns the upstream command for adding to the root command
@@ -69,6 +92,9 @@ func init() {
 	// Add subcommands
 	upstreamCmd.AddCommand(upstreamListCmd)
 	upstreamCmd.AddCommand(upstreamLogsCmd)
+	upstreamCmd.AddCommand(upstreamEnableCmd)
+	upstreamCmd.AddCommand(upstreamDisableCmd)
+	upstreamCmd.AddCommand(upstreamRestartCmd)
 
 	// Define flags
 	upstreamListCmd.Flags().StringVarP(&upstreamOutputFormat, "output", "o", "table", "Output format (table, json)")
@@ -79,6 +105,15 @@ func init() {
 	upstreamLogsCmd.Flags().BoolVarP(&upstreamLogsFollow, "follow", "f", false, "Follow log output (requires daemon)")
 	upstreamLogsCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level")
 	upstreamLogsCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to config file")
+
+	// Add --all and --force flags to enable/disable/restart
+	upstreamEnableCmd.Flags().BoolVar(&upstreamAll, "all", false, "Enable all servers")
+	upstreamEnableCmd.Flags().BoolVar(&upstreamForce, "force", false, "Skip confirmation prompt")
+
+	upstreamDisableCmd.Flags().BoolVar(&upstreamAll, "all", false, "Disable all servers")
+	upstreamDisableCmd.Flags().BoolVar(&upstreamForce, "force", false, "Skip confirmation prompt")
+
+	upstreamRestartCmd.Flags().BoolVar(&upstreamAll, "all", false, "Restart all servers")
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
@@ -388,4 +423,150 @@ func runUpstreamLogsFollowMode(ctx context.Context, dataDir, serverName string, 
 			}
 		}
 	}
+}
+
+func runUpstreamEnable(cmd *cobra.Command, args []string) error {
+	if upstreamAll {
+		return runUpstreamBulkAction("enable", upstreamForce)
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("server name required (or use --all)")
+	}
+	return runUpstreamAction(args[0], "enable")
+}
+
+func runUpstreamDisable(cmd *cobra.Command, args []string) error {
+	if upstreamAll {
+		return runUpstreamBulkAction("disable", upstreamForce)
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("server name required (or use --all)")
+	}
+	return runUpstreamAction(args[0], "disable")
+}
+
+func runUpstreamRestart(cmd *cobra.Command, args []string) error {
+	if upstreamAll {
+		return runUpstreamBulkAction("restart", false) // restart doesn't need confirmation
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("server name required (or use --all)")
+	}
+	return runUpstreamAction(args[0], "restart")
+}
+
+func runUpstreamAction(serverName, action string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Load configuration
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		return err
+	}
+
+	// Create logger
+	logger, err := createUpstreamLogger(upstreamLogLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating logger: %v\n", err)
+		return err
+	}
+
+	// Require daemon for actions
+	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return fmt.Errorf("server actions require running daemon. Start with: mcpproxy serve")
+	}
+
+	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	fmt.Printf("Performing action '%s' on server '%s'...\n", action, serverName)
+
+	err = client.ServerAction(ctx, serverName, action)
+	if err != nil {
+		return fmt.Errorf("failed to %s server: %w", action, err)
+	}
+
+	fmt.Printf("✅ Successfully %sd server '%s'\n", action, serverName)
+	return nil
+}
+
+func runUpstreamBulkAction(action string, force bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Load configuration
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		return err
+	}
+
+	// Create logger
+	logger, err := createUpstreamLogger(upstreamLogLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating logger: %v\n", err)
+		return err
+	}
+
+	// Require daemon
+	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return fmt.Errorf("server actions require running daemon. Start with: mcpproxy serve")
+	}
+
+	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Get server list to count
+	servers, err := client.GetServers(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get server list: %w", err)
+	}
+
+	// Filter based on action (enable=disabled servers, disable=enabled servers)
+	var targetServers []string
+	for _, srv := range servers {
+		name := getStringField(srv, "name")
+		enabled := getBoolField(srv, "enabled")
+
+		if action == "enable" && !enabled {
+			targetServers = append(targetServers, name)
+		} else if action == "disable" && enabled {
+			targetServers = append(targetServers, name)
+		} else if action == "restart" && enabled {
+			targetServers = append(targetServers, name)
+		}
+	}
+
+	if len(targetServers) == 0 {
+		fmt.Printf("⚠️  No servers to %s\n", action)
+		return nil
+	}
+
+	// Require confirmation for enable/disable --all
+	if action == "enable" || action == "disable" {
+		confirmed, err := confirmBulkAction(action, len(targetServers), force)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Println("Operation cancelled")
+			return nil
+		}
+	}
+
+	// Perform action on all servers
+	fmt.Printf("Performing action '%s' on %d server(s)...\n", action, len(targetServers))
+
+	for _, serverName := range targetServers {
+		err = client.ServerAction(ctx, serverName, action)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Failed to %s server '%s': %v\n", action, serverName, err)
+		} else {
+			fmt.Printf("✅ Successfully %sd server '%s'\n", action, serverName)
+		}
+	}
+
+	return nil
 }
