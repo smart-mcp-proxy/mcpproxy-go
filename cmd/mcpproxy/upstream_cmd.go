@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -270,7 +272,20 @@ func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--follow requires running daemon")
 		}
 		logger.Info("Following logs from daemon")
-		return runUpstreamLogsFollowMode(ctx, globalConfig.DataDir, serverName, logger)
+		// Use background context with signal handling for follow mode
+		bgCtx, bgCancel := context.WithCancel(context.Background())
+		defer bgCancel()
+
+		// Handle Ctrl+C gracefully
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			logger.Info("Received interrupt signal, stopping...")
+			bgCancel()
+		}()
+
+		return runUpstreamLogsFollowMode(bgCtx, globalConfig.DataDir, serverName, logger)
 	}
 
 	// Check if daemon is running
@@ -340,7 +355,10 @@ func runUpstreamLogsFollowMode(ctx context.Context, dataDir, serverName string, 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	// Ring buffer to track recently seen lines and prevent unbounded memory growth
+	const maxTrackedLines = 1000
 	lastLines := make(map[string]bool)
+	lineOrder := make([]string, 0, maxTrackedLines)
 
 	for {
 		select {
@@ -358,6 +376,14 @@ func runUpstreamLogsFollowMode(ctx context.Context, dataDir, serverName string, 
 				if !lastLines[line] {
 					fmt.Println(line)
 					lastLines[line] = true
+					lineOrder = append(lineOrder, line)
+
+					// Implement ring buffer: remove oldest line if we exceed max
+					if len(lineOrder) > maxTrackedLines {
+						oldestLine := lineOrder[0]
+						delete(lastLines, oldestLine)
+						lineOrder = lineOrder[1:]
+					}
 				}
 			}
 		}
