@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,6 +14,7 @@ import (
 
 	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/socket"
 )
 
@@ -34,10 +37,25 @@ Examples:
 		RunE: runUpstreamList,
 	}
 
+	upstreamLogsCmd = &cobra.Command{
+		Use:   "logs <server-name>",
+		Short: "Show logs for a specific server",
+		Long: `Display recent log entries from a specific upstream server.
+
+Examples:
+  mcpproxy upstream logs github-server
+  mcpproxy upstream logs github-server --tail=100
+  mcpproxy upstream logs weather-api --follow`,
+		Args: cobra.ExactArgs(1),
+		RunE: runUpstreamLogs,
+	}
+
 	// Command flags
 	upstreamOutputFormat string
 	upstreamLogLevel     string
 	upstreamConfigPath   string
+	upstreamLogsTail     int
+	upstreamLogsFollow   bool
 )
 
 // GetUpstreamCommand returns the upstream command for adding to the root command
@@ -48,11 +66,17 @@ func GetUpstreamCommand() *cobra.Command {
 func init() {
 	// Add subcommands
 	upstreamCmd.AddCommand(upstreamListCmd)
+	upstreamCmd.AddCommand(upstreamLogsCmd)
 
 	// Define flags
 	upstreamListCmd.Flags().StringVarP(&upstreamOutputFormat, "output", "o", "table", "Output format (table, json)")
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
 	upstreamListCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to MCP configuration file")
+
+	upstreamLogsCmd.Flags().IntVarP(&upstreamLogsTail, "tail", "n", 50, "Number of log lines to show")
+	upstreamLogsCmd.Flags().BoolVarP(&upstreamLogsFollow, "follow", "f", false, "Follow log output (requires daemon)")
+	upstreamLogsCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level")
+	upstreamLogsCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to config file")
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
@@ -218,4 +242,124 @@ func getIntField(m map[string]interface{}, key string) int {
 		return v
 	}
 	return 0
+}
+
+func runUpstreamLogs(cmd *cobra.Command, args []string) error {
+	serverName := args[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Load configuration
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		return err
+	}
+
+	// Create logger
+	logger, err := createUpstreamLogger(upstreamLogLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating logger: %v\n", err)
+		return err
+	}
+
+	// Follow mode requires daemon
+	if upstreamLogsFollow {
+		if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+			return fmt.Errorf("--follow requires running daemon")
+		}
+		logger.Info("Following logs from daemon")
+		return runUpstreamLogsFollowMode(ctx, globalConfig.DataDir, serverName, logger)
+	}
+
+	// Check if daemon is running
+	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		logger.Info("Detected running daemon, using client mode via socket")
+		return runUpstreamLogsClientMode(ctx, globalConfig.DataDir, serverName, logger)
+	}
+
+	// No daemon - read from log file
+	logger.Info("No daemon detected, reading from log file")
+	return runUpstreamLogsFromFile(globalConfig, serverName)
+}
+
+func runUpstreamLogsClientMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
+	socketPath := socket.DetectSocketPath(dataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Call GET /api/v1/servers/{name}/logs?tail=N
+	logs, err := client.GetServerLogs(ctx, serverName, upstreamLogsTail)
+	if err != nil {
+		return fmt.Errorf("failed to get logs from daemon: %w", err)
+	}
+
+	for _, logLine := range logs {
+		fmt.Println(logLine)
+	}
+
+	return nil
+}
+
+func runUpstreamLogsFromFile(globalConfig *config.Config, serverName string) error {
+	// Read from log file directly
+	logDir := globalConfig.Logging.LogDir
+	if logDir == "" {
+		// Use OS-specific standard log directory
+		var err error
+		logDir, err = logs.GetLogDir()
+		if err != nil {
+			return fmt.Errorf("failed to determine log directory: %w", err)
+		}
+	}
+
+	logFile := filepath.Join(logDir, fmt.Sprintf("server-%s.log", serverName))
+
+	// Check if file exists
+	if _, err := os.Stat(logFile); os.IsNotExist(err) {
+		return fmt.Errorf("log file not found: %s (daemon may not have run yet)", logFile)
+	}
+
+	// Read last N lines using tail command
+	cmd := exec.Command("tail", "-n", fmt.Sprintf("%d", upstreamLogsTail), logFile)
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to read log file: %w", err)
+	}
+
+	fmt.Print(string(output))
+	return nil
+}
+
+func runUpstreamLogsFollowMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
+	socketPath := socket.DetectSocketPath(dataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	fmt.Printf("Following logs for server '%s' (Ctrl+C to stop)...\n", serverName)
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	lastLines := make(map[string]bool)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			logs, err := client.GetServerLogs(ctx, serverName, 10)
+			if err != nil {
+				logger.Warn("Failed to fetch logs", zap.Error(err))
+				continue
+			}
+
+			// Print only new lines
+			for _, line := range logs {
+				if !lastLines[line] {
+					fmt.Println(line)
+					lastLines[line] = true
+				}
+			}
+		}
+	}
 }
