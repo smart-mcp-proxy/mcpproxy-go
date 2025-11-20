@@ -118,6 +118,9 @@ func main() {
 	// Add upstream command
 	upstreamCmd := GetUpstreamCommand()
 
+	// Add doctor command
+	doctorCmd := GetDoctorCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
@@ -128,6 +131,7 @@ func main() {
 	rootCmd.AddCommand(secretsCmd)
 	rootCmd.AddCommand(trustCertCmd)
 	rootCmd.AddCommand(upstreamCmd)
+	rootCmd.AddCommand(doctorCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
