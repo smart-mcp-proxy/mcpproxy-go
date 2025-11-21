@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
@@ -181,6 +182,13 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 }
 
 func outputServers(servers []map[string]interface{}) error {
+	// Sort servers alphabetically by name for consistent output
+	sort.Slice(servers, func(i, j int) bool {
+		nameI := getStringField(servers[i], "name")
+		nameJ := getStringField(servers[j], "name")
+		return nameI < nameJ
+	})
+
 	switch upstreamOutputFormat {
 	case "json":
 		output, err := json.MarshalIndent(servers, "", "  ")
