@@ -1,6 +1,11 @@
 package main
 
-// Helper functions for extracting fields from JSON maps (used by doctor and upstream commands)
+// cmd_helpers.go provides type-safe helper functions for extracting fields
+// from JSON-decoded map[string]interface{} responses from the MCPProxy API.
+//
+// These functions are used throughout the CLI commands to safely extract
+// typed values from API responses, handling missing keys and type mismatches
+// gracefully by returning zero values.
 
 func getStringField(m map[string]interface{}, key string) string {
 	if v, ok := m[key].(string); ok {

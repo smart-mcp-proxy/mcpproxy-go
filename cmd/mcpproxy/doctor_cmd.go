@@ -40,7 +40,11 @@ Examples:
 	doctorConfigPath string
 )
 
-// GetDoctorCommand returns the doctor command
+// GetDoctorCommand returns the doctor command for adding to the root command.
+// The doctor command runs comprehensive health checks on MCPProxy to identify
+// upstream server connection errors, OAuth authentication requirements, missing
+// secrets, and runtime warnings. This is the first command to run when debugging
+// server issues.
 func GetDoctorCommand() *cobra.Command {
 	return doctorCmd
 }
