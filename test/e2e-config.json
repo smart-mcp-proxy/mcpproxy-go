@@ -16,7 +16,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-10-28T14:20:34.857673+02:00"
+      "updated": "2025-11-21T16:35:41.231539-05:00"
     }
   ],
   "top_k": 10,
@@ -175,5 +175,8 @@
     "enabled": true,
     "default_model": "gpt-4",
     "encoding": "cl100k_base"
-  }
+  },
+  "enable_code_execution": false,
+  "code_execution_timeout_ms": 120000,
+  "code_execution_pool_size": 10
 }

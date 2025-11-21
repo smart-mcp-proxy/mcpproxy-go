@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/socket"
 
 	"go.uber.org/zap"
@@ -289,7 +290,7 @@ func (c *Client) GetServers(ctx context.Context) ([]map[string]interface{}, erro
 }
 
 // GetServerLogs retrieves logs for a specific server.
-func (c *Client) GetServerLogs(ctx context.Context, serverName string, tail int) ([]string, error) {
+func (c *Client) GetServerLogs(ctx context.Context, serverName string, tail int) ([]contracts.LogEntry, error) {
 	url := fmt.Sprintf("%s/api/v1/servers/%s/logs?tail=%d", c.baseURL, serverName, tail)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -314,7 +315,7 @@ func (c *Client) GetServerLogs(ctx context.Context, serverName string, tail int)
 	var apiResp struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Logs []string `json:"logs"`
+			Logs []contracts.LogEntry `json:"logs"`
 		} `json:"data"`
 		Error string `json:"error"`
 	}
