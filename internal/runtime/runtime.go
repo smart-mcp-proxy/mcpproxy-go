@@ -1009,8 +1009,12 @@ func (r *Runtime) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, er
 			Status:        rec.Status,
 			StartTime:     rec.StartTime,
 			EndTime:       rec.EndTime,
+			LastActivity:  rec.LastActivity,
 			ToolCallCount: rec.ToolCallCount,
 			TotalTokens:   rec.TotalTokens,
+			HasRoots:      rec.HasRoots,
+			HasSampling:   rec.HasSampling,
+			Experimental:  rec.Experimental,
 		})
 	}
 
@@ -1034,8 +1038,12 @@ func (r *Runtime) GetSessionByID(sessionID string) (*contracts.MCPSession, error
 		Status:        rec.Status,
 		StartTime:     rec.StartTime,
 		EndTime:       rec.EndTime,
+		LastActivity:  rec.LastActivity,
 		ToolCallCount: rec.ToolCallCount,
 		TotalTokens:   rec.TotalTokens,
+		HasRoots:      rec.HasRoots,
+		HasSampling:   rec.HasSampling,
+		Experimental:  rec.Experimental,
 	}, nil
 }
 

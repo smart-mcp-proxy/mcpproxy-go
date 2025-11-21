@@ -123,17 +123,22 @@
           <table class="table table-sm">
             <thead>
               <tr>
-                <th>Session</th>
+                <th>Client</th>
                 <th>Status</th>
+                <th>Capabilities</th>
                 <th>Tool Calls</th>
                 <th>Tokens</th>
                 <th>Started</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="session in recentSessions" :key="session.id" class="hover">
                 <td>
-                  <code class="text-xs">{{ session.id.substring(0, 16) }}...</code>
+                  <div class="font-medium text-sm">{{ session.client_name || 'Unknown' }}</div>
+                  <div v-if="session.client_version" class="text-xs text-base-content/60">
+                    v{{ session.client_version }}
+                  </div>
                 </td>
                 <td>
                   <div
@@ -143,10 +148,26 @@
                     {{ session.status === 'active' ? 'Active' : 'Closed' }}
                   </div>
                 </td>
+                <td>
+                  <div class="flex flex-wrap gap-1">
+                    <span v-if="session.has_roots" class="badge badge-xs badge-info" title="Roots">R</span>
+                    <span v-if="session.has_sampling" class="badge badge-xs badge-info" title="Sampling">S</span>
+                    <span v-if="session.experimental && session.experimental.length > 0" class="badge badge-xs badge-warning" :title="`Experimental: ${session.experimental.join(', ')}`">E</span>
+                  </div>
+                </td>
                 <td class="text-center">{{ session.tool_call_count || 0 }}</td>
                 <td class="text-right font-mono text-xs">{{ formatNumber(session.total_tokens || 0) }}</td>
                 <td>
                   <span class="text-xs">{{ formatRelativeTime(session.start_time) }}</span>
+                </td>
+                <td>
+                  <router-link
+                    :to="{ name: 'tool-calls', query: { session: session.id } }"
+                    class="btn btn-xs btn-primary"
+                    title="View tool calls for this session"
+                  >
+                    View Calls
+                  </router-link>
                 </td>
               </tr>
             </tbody>

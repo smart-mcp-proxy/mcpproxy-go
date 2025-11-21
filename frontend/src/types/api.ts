@@ -46,6 +46,10 @@ export interface MCPSession {
   last_activity: string  // ISO 8601
   tool_call_count: number
   total_tokens: number
+  // MCP Client Capabilities
+  has_roots?: boolean
+  has_sampling?: boolean
+  experimental?: string[]
 }
 
 // Tool types

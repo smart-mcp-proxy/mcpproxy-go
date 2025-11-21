@@ -100,21 +100,52 @@ func NewMCPProxyServer(
 	hooks.AddOnRegisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
 		sessionID := sess.SessionID()
 
-		// Try to get client info if available
-		var clientName, clientVersion string
-		if sessWithInfo, ok := sess.(mcpserver.SessionWithClientInfo); ok {
-			clientInfo := sessWithInfo.GetClientInfo()
-			clientName = clientInfo.Name
-			clientVersion = clientInfo.Version
+		// Just log the registration - client info and capabilities will be set by OnAfterInitialize
+		// This hook is primarily for persistent connections (SSE) to track when the session is registered
+		logger.Info("MCP session registered",
+			zap.String("session_id", sessionID),
+		)
+	})
+
+	// Add hook to capture client capabilities after initialize completes
+	// This hook is called for ALL transports (including HTTP POST), and receives the
+	// InitializeRequest with client info and capabilities.
+	hooks.AddAfterInitialize(func(ctx context.Context, id any, request *mcp.InitializeRequest, result *mcp.InitializeResult) {
+		// Get session from context
+		session := mcpserver.ClientSessionFromContext(ctx)
+		if session == nil {
+			return
 		}
 
-		// Store session information (persists to storage)
-		sessionStore.SetSession(sessionID, clientName, clientVersion)
+		sessionID := session.SessionID()
 
-		logger.Info("MCP session registered",
+		// Extract client info and capabilities directly from the initialize request
+		// This works for all transports, including ephemeral streamable HTTP sessions
+		clientName := request.Params.ClientInfo.Name
+		clientVersion := request.Params.ClientInfo.Version
+
+		capabilities := request.Params.Capabilities
+		hasRoots := capabilities.Roots != nil
+		hasSampling := capabilities.Sampling != nil
+
+		var experimental []string
+		if capabilities.Experimental != nil && len(capabilities.Experimental) > 0 {
+			experimental = make([]string, 0, len(capabilities.Experimental))
+			for key := range capabilities.Experimental {
+				experimental = append(experimental, key)
+			}
+		}
+
+		// Store/update session information with capabilities
+		sessionStore.SetSession(sessionID, clientName, clientVersion, hasRoots, hasSampling, experimental)
+
+		logger.Info("MCP client initialized with capabilities",
 			zap.String("session_id", sessionID),
 			zap.String("client_name", clientName),
 			zap.String("client_version", clientVersion),
+			zap.Bool("has_roots", hasRoots),
+			zap.Bool("has_sampling", hasSampling),
+			zap.Strings("experimental", experimental),
 		)
 	})
 

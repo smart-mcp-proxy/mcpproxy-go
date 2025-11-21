@@ -80,8 +80,13 @@ type MCPSession struct {
 	Status        string     `json:"status"`
 	StartTime     time.Time  `json:"start_time"`
 	EndTime       *time.Time `json:"end_time,omitempty"`
+	LastActivity  time.Time  `json:"last_activity"`
 	ToolCallCount int        `json:"tool_call_count"`
 	TotalTokens   int        `json:"total_tokens"`
+	// MCP Client Capabilities
+	HasRoots     bool     `json:"has_roots,omitempty"`
+	HasSampling  bool     `json:"has_sampling,omitempty"`
+	Experimental []string `json:"experimental,omitempty"`
 }
 
 // Tool represents an MCP tool with its metadata

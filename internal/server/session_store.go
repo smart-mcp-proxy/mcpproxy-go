@@ -39,7 +39,7 @@ func (s *SessionStore) SetStorageManager(manager *storage.Manager) {
 }
 
 // SetSession stores or updates session information
-func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string) {
+func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string, hasRoots, hasSampling bool, experimental []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -59,6 +59,9 @@ func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string) {
 			Status:        "active",
 			StartTime:     now,
 			LastActivity:  now,
+			HasRoots:      hasRoots,
+			HasSampling:   hasSampling,
+			Experimental:  experimental,
 		}
 		if err := s.storageManager.CreateSession(session); err != nil {
 			s.logger.Warn("failed to persist session to storage",
@@ -72,6 +75,8 @@ func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string) {
 		zap.String("session_id", sessionID),
 		zap.String("client_name", clientName),
 		zap.String("client_version", clientVersion),
+		zap.Bool("has_roots", hasRoots),
+		zap.Bool("has_sampling", hasSampling),
 	)
 }
 

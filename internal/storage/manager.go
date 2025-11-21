@@ -893,6 +893,10 @@ type SessionRecord struct {
 	LastActivity  time.Time  `json:"last_activity"`
 	ToolCallCount int        `json:"tool_call_count"`
 	TotalTokens   int        `json:"total_tokens"`
+	// MCP Client Capabilities
+	HasRoots     bool     `json:"has_roots,omitempty"`      // Whether client supports roots
+	HasSampling  bool     `json:"has_sampling,omitempty"`   // Whether client supports sampling
+	Experimental []string `json:"experimental,omitempty"`   // Experimental capability names
 }
 
 // CreateSession creates a new session record
@@ -906,15 +910,33 @@ func (m *Manager) CreateSession(session *SessionRecord) error {
 			return fmt.Errorf("failed to create sessions bucket: %w", err)
 		}
 
-		// Check if session already exists (avoid duplicates)
+		// Check if session already exists - if so, update it
+		var existingKey []byte
+		var existingSession SessionRecord
 		c := bucket.Cursor()
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+		for k, v := c.First(); k != nil; k, v = c.Next() {
 			keyStr := string(k)
 			// Check if key ends with the session ID (after the underscore)
 			if len(keyStr) > len(session.ID) && keyStr[len(keyStr)-len(session.ID):] == session.ID {
-				// Session already exists, skip creation
-				m.logger.Debugw("Session already exists, skipping creation", "session_id", session.ID)
-				return nil
+				existingKey = k
+				if err := json.Unmarshal(v, &existingSession); err != nil {
+					m.logger.Warnw("Failed to unmarshal existing session", "error", err)
+					continue
+				}
+				// Merge new data with existing session (preserve certain fields)
+				if session.ClientName != "" {
+					existingSession.ClientName = session.ClientName
+				}
+				if session.ClientVersion != "" {
+					existingSession.ClientVersion = session.ClientVersion
+				}
+				// Update capabilities
+				existingSession.HasRoots = session.HasRoots
+				existingSession.HasSampling = session.HasSampling
+				existingSession.Experimental = session.Experimental
+				session = &existingSession
+				m.logger.Debugw("Updating existing session with new data", "session_id", session.ID, "client_name", session.ClientName)
+				break
 			}
 		}
 
@@ -923,16 +945,26 @@ func (m *Manager) CreateSession(session *SessionRecord) error {
 			return fmt.Errorf("failed to marshal session: %w", err)
 		}
 
-		// Key format: {timestamp_ns}_{session_id} for reverse chronological ordering
-		key := fmt.Sprintf("%d_%s", session.StartTime.UnixNano(), session.ID)
-		if err := bucket.Put([]byte(key), data); err != nil {
+		// Use existing key if found, otherwise create new key
+		var key []byte
+		if existingKey != nil {
+			key = existingKey
+		} else {
+			// Key format: {timestamp_ns}_{session_id} for reverse chronological ordering
+			keyStr := fmt.Sprintf("%d_%s", session.StartTime.UnixNano(), session.ID)
+			key = []byte(keyStr)
+			m.logger.Debugw("Creating new session", "session_id", session.ID, "client_name", session.ClientName)
+		}
+
+		if err := bucket.Put(key, data); err != nil {
 			return fmt.Errorf("failed to store session: %w", err)
 		}
 
-		m.logger.Debugw("Session created", "session_id", session.ID, "client_name", session.ClientName)
-
-		// Enforce retention limit (keep 100 most recent)
-		return m.enforceSessionRetention(bucket, 100)
+		// Enforce retention limit (keep 100 most recent) only when creating new sessions
+		if existingKey == nil {
+			return m.enforceSessionRetention(bucket, 100)
+		}
+		return nil
 	})
 }
 

@@ -43,6 +43,7 @@
                 <th>Session ID</th>
                 <th>Client</th>
                 <th>Status</th>
+                <th>Capabilities</th>
                 <th>Tool Calls</th>
                 <th>Tokens</th>
                 <th>Started</th>
@@ -69,6 +70,26 @@
                     :class="session.status === 'active' ? 'badge-success' : 'badge-neutral'"
                   >
                     {{ session.status === 'active' ? 'Active' : 'Closed' }}
+                  </div>
+                </td>
+                <td>
+                  <div class="flex flex-wrap gap-1">
+                    <span v-if="session.has_roots" class="badge badge-sm badge-info" title="Client supports roots capability">
+                      Roots
+                    </span>
+                    <span v-if="session.has_sampling" class="badge badge-sm badge-info" title="Client supports sampling capability">
+                      Sampling
+                    </span>
+                    <span
+                      v-if="session.experimental && session.experimental.length > 0"
+                      class="badge badge-sm badge-warning"
+                      :title="`Experimental features: ${session.experimental.join(', ')}`"
+                    >
+                      Experimental ({{ session.experimental.length }})
+                    </span>
+                    <span v-if="!session.has_roots && !session.has_sampling && (!session.experimental || session.experimental.length === 0)" class="text-xs text-base-content/40">
+                      None
+                    </span>
                   </div>
                 </td>
                 <td>
