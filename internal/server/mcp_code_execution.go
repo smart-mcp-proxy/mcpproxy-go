@@ -285,6 +285,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		)
 	}
 
+	// Update session stats for code_execution call
+	if sessionID != "" && codeExecMetrics != nil {
+		p.sessionStore.UpdateSessionStats(sessionID, codeExecMetrics.TotalTokens)
+	}
+
 	// Convert result to MCP response format
 	resultJSON, err := json.Marshal(result)
 	if err != nil {

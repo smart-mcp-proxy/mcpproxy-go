@@ -69,7 +69,7 @@ type Manager struct {
 	// Context for shutdown coordination
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
-	shuttingDown   bool // Flag to prevent reconnections during shutdown
+	shuttingDown   bool           // Flag to prevent reconnections during shutdown
 	shutdownWg     sync.WaitGroup // Tracks all background goroutines for clean shutdown
 
 	// Docker recovery state
@@ -152,13 +152,51 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 		go manager.startOAuthEventMonitor(shutdownCtx)
 	}
 
-	// Start Docker recovery monitor (internal feature, always enabled)
-	if storageMgr != nil {
+	// Start Docker recovery monitor only when Docker is actually in use
+	if storageMgr != nil && manager.shouldEnableDockerRecovery() {
 		manager.shutdownWg.Add(1)
 		go manager.startDockerRecoveryMonitor(shutdownCtx)
+	} else if storageMgr != nil {
+		manager.logger.Info("Docker recovery monitor disabled (docker isolation off or recovery disabled in config)")
 	}
 
 	return manager
+}
+
+// shouldEnableDockerRecovery returns true when Docker recovery should run based on config.
+// It respects docker_recovery.enabled=false and only enables monitoring when Docker
+// isolation is turned on or any server is explicitly using Docker commands.
+func (m *Manager) shouldEnableDockerRecovery() bool {
+	if m == nil || m.globalConfig == nil {
+		return false
+	}
+
+	// Allow explicit opt-out via docker_recovery.enabled=false (defaults to enabled)
+	if m.globalConfig.DockerRecovery != nil && !m.globalConfig.DockerRecovery.IsEnabled() {
+		return false
+	}
+
+	// Global Docker isolation enabled
+	if m.globalConfig.DockerIsolation != nil && m.globalConfig.DockerIsolation.Enabled {
+		return true
+	}
+
+	// Detect servers that explicitly use Docker (e.g., docker run/exec commands)
+	for _, srv := range m.globalConfig.Servers {
+		if srv == nil {
+			continue
+		}
+
+		if srv.Isolation != nil && srv.Isolation.Enabled {
+			return true
+		}
+
+		if strings.Contains(srv.Command, "docker") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // SetLogConfig sets the logging configuration for upstream server loggers
@@ -1807,7 +1845,7 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 		return // Already in recovery
 	}
 	m.dockerRecoveryActive = true
-	
+
 	// Initialize state if needed
 	if m.dockerRecoveryState == nil {
 		m.dockerRecoveryState = &storage.DockerRecoveryState{
@@ -1952,6 +1990,7 @@ func (m *Manager) handleDockerUnavailable(ctx context.Context) {
 		}
 	}
 }
+
 // saveDockerRecoveryState saves recovery state to persistent storage
 func (m *Manager) saveDockerRecoveryState(state *storage.DockerRecoveryState) {
 	m.dockerRecoveryMu.Lock()
@@ -1967,6 +2006,17 @@ func (m *Manager) saveDockerRecoveryState(state *storage.DockerRecoveryState) {
 
 // GetDockerRecoveryStatus returns the current Docker recovery status
 func (m *Manager) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
+	// Short-circuit when Docker recovery is disabled (e.g., docker isolation off)
+	if !m.shouldEnableDockerRecovery() {
+		return &storage.DockerRecoveryState{
+			LastAttempt:      time.Now(),
+			FailureCount:     0,
+			DockerAvailable:  true,  // Considered available because Docker isn't required
+			RecoveryMode:     false, // Never enter recovery when disabled
+			LastSuccessfulAt: time.Now(),
+		}
+	}
+
 	m.dockerRecoveryMu.RLock()
 	defer m.dockerRecoveryMu.RUnlock()
 

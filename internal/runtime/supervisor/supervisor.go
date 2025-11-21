@@ -542,6 +542,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 					Name:        tool.Name,
 					Description: tool.Description,
 					InputSchema: inputSchema,
+					Annotations: tool.Annotations,
 				}
 			}
 		} else {
@@ -678,6 +679,7 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 					Name:        tool.Name,
 					Description: tool.Description,
 					InputSchema: inputSchema,
+					Annotations: tool.Annotations,
 				}
 			}
 		})

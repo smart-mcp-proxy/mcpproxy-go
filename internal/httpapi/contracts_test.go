@@ -97,6 +97,15 @@ func (m *MockServerController) GetDockerRecoveryStatus() *storage.DockerRecovery
 		LastError:        "",
 	}
 }
+func (m *MockServerController) GetRecentSessions(_ int) ([]*contracts.MCPSession, int, error) {
+	return []*contracts.MCPSession{}, 0, nil
+}
+func (m *MockServerController) GetSessionByID(_ string) (*contracts.MCPSession, error) {
+	return nil, nil
+}
+func (m *MockServerController) GetToolCallsBySession(_ string, _ int, _ int) ([]*contracts.ToolCallRecord, int, error) {
+	return []*contracts.ToolCallRecord{}, 0, nil
+}
 
 func (m *MockServerController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{

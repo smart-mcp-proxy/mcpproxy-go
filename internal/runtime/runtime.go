@@ -89,6 +89,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
 	}
 
+	// Close any stale sessions from previous runs
+	if err := storageManager.CloseAllActiveSessions(); err != nil {
+		logger.Warn("Failed to close stale sessions on startup", zap.Error(err))
+	}
+
 	indexManager, err := index.NewManager(cfg.DataDir, logger)
 	if err != nil {
 		_ = storageManager.Close()
@@ -667,6 +672,20 @@ func convertTokenMetrics(m *storage.TokenMetrics) *contracts.TokenMetrics {
 	}
 }
 
+// convertToolAnnotations converts config.ToolAnnotations to contracts.ToolAnnotation
+func convertToolAnnotations(a *config.ToolAnnotations) *contracts.ToolAnnotation {
+	if a == nil {
+		return nil
+	}
+	return &contracts.ToolAnnotation{
+		Title:           a.Title,
+		ReadOnlyHint:    a.ReadOnlyHint,
+		DestructiveHint: a.DestructiveHint,
+		IdempotentHint:  a.IdempotentHint,
+		OpenWorldHint:   a.OpenWorldHint,
+	}
+}
+
 // GetToolCalls retrieves tool call history with pagination
 func (r *Runtime) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
 	r.mu.RLock()
@@ -739,6 +758,7 @@ func (r *Runtime) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, 
 			MCPSessionID:     call.MCPSessionID,
 			MCPClientName:    call.MCPClientName,
 			MCPClientVersion: call.MCPClientVersion,
+			Annotations:      convertToolAnnotations(call.Annotations),
 		}
 	}
 
@@ -765,18 +785,24 @@ func (r *Runtime) GetToolCallByID(id string) (*contracts.ToolCallRecord, error) 
 		for _, call := range calls {
 			if call.ID == id {
 				return &contracts.ToolCallRecord{
-					ID:         call.ID,
-					ServerID:   call.ServerID,
-					ServerName: call.ServerName,
-					ToolName:   call.ToolName,
-					Arguments:  call.Arguments,
-					Response:   call.Response,
-					Error:      call.Error,
-					Duration:   call.Duration,
-					Timestamp:  call.Timestamp,
-					ConfigPath: call.ConfigPath,
-					RequestID:  call.RequestID,
-					Metrics:    convertTokenMetrics(call.Metrics),
+					ID:               call.ID,
+					ServerID:         call.ServerID,
+					ServerName:       call.ServerName,
+					ToolName:         call.ToolName,
+					Arguments:        call.Arguments,
+					Response:         call.Response,
+					Error:            call.Error,
+					Duration:         call.Duration,
+					Timestamp:        call.Timestamp,
+					ConfigPath:       call.ConfigPath,
+					RequestID:        call.RequestID,
+					Metrics:          convertTokenMetrics(call.Metrics),
+					ParentCallID:     call.ParentCallID,
+					ExecutionType:    call.ExecutionType,
+					MCPSessionID:     call.MCPSessionID,
+					MCPClientName:    call.MCPClientName,
+					MCPClientVersion: call.MCPClientVersion,
+					Annotations:      convertToolAnnotations(call.Annotations),
 				}, nil
 			}
 		}
@@ -825,6 +851,7 @@ func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts
 			MCPSessionID:     call.MCPSessionID,
 			MCPClientName:    call.MCPClientName,
 			MCPClientVersion: call.MCPClientVersion,
+			Annotations:      convertToolAnnotations(call.Annotations),
 		}
 	}
 
@@ -909,17 +936,114 @@ func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*
 
 	// Convert to contract type
 	return &contracts.ToolCallRecord{
-		ID:         newCall.ID,
-		ServerID:   newCall.ServerID,
-		ServerName: newCall.ServerName,
-		ToolName:   newCall.ToolName,
-		Arguments:  newCall.Arguments,
-		Response:   newCall.Response,
-		Error:      newCall.Error,
-		Duration:   newCall.Duration,
-		Timestamp:  newCall.Timestamp,
-		ConfigPath: newCall.ConfigPath,
-		RequestID:  newCall.RequestID,
+		ID:               newCall.ID,
+		ServerID:         newCall.ServerID,
+		ServerName:       newCall.ServerName,
+		ToolName:         newCall.ToolName,
+		Arguments:        newCall.Arguments,
+		Response:         newCall.Response,
+		Error:            newCall.Error,
+		Duration:         newCall.Duration,
+		Timestamp:        newCall.Timestamp,
+		ConfigPath:       newCall.ConfigPath,
+		RequestID:        newCall.RequestID,
+		Annotations:      convertToolAnnotations(newCall.Annotations),
+	}, nil
+}
+
+// GetToolCallsBySession returns tool calls filtered by session ID
+func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	storageRecords, total, err := r.storageManager.GetToolCallsBySession(sessionID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get tool calls by session: %w", err)
+	}
+
+	// Convert storage records to contract types
+	records := make([]*contracts.ToolCallRecord, 0, len(storageRecords))
+	for _, rec := range storageRecords {
+		records = append(records, &contracts.ToolCallRecord{
+			ID:               rec.ID,
+			ServerID:         rec.ServerID,
+			ServerName:       rec.ServerName,
+			ToolName:         rec.ToolName,
+			Arguments:        rec.Arguments,
+			Response:         rec.Response,
+			Error:            rec.Error,
+			Duration:         rec.Duration,
+			Timestamp:        rec.Timestamp,
+			ConfigPath:       rec.ConfigPath,
+			RequestID:        rec.RequestID,
+			Metrics:          convertTokenMetrics(rec.Metrics),
+			ParentCallID:     rec.ParentCallID,
+			ExecutionType:    rec.ExecutionType,
+			MCPSessionID:     rec.MCPSessionID,
+			MCPClientName:    rec.MCPClientName,
+			MCPClientVersion: rec.MCPClientVersion,
+			Annotations:      convertToolAnnotations(rec.Annotations),
+		})
+	}
+
+	return records, total, nil
+}
+
+// GetRecentSessions returns recent MCP sessions
+func (r *Runtime) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	storageRecords, total, err := r.storageManager.GetRecentSessions(limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get recent sessions: %w", err)
+	}
+
+	// Convert storage records to contract types
+	sessions := make([]*contracts.MCPSession, 0, len(storageRecords))
+	for _, rec := range storageRecords {
+		sessions = append(sessions, &contracts.MCPSession{
+			ID:            rec.ID,
+			ClientName:    rec.ClientName,
+			ClientVersion: rec.ClientVersion,
+			Status:        rec.Status,
+			StartTime:     rec.StartTime,
+			EndTime:       rec.EndTime,
+			LastActivity:  rec.LastActivity,
+			ToolCallCount: rec.ToolCallCount,
+			TotalTokens:   rec.TotalTokens,
+			HasRoots:      rec.HasRoots,
+			HasSampling:   rec.HasSampling,
+			Experimental:  rec.Experimental,
+		})
+	}
+
+	return sessions, total, nil
+}
+
+// GetSessionByID returns a session by its ID
+func (r *Runtime) GetSessionByID(sessionID string) (*contracts.MCPSession, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rec, err := r.storageManager.GetSessionByID(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session: %w", err)
+	}
+
+	return &contracts.MCPSession{
+		ID:            rec.ID,
+		ClientName:    rec.ClientName,
+		ClientVersion: rec.ClientVersion,
+		Status:        rec.Status,
+		StartTime:     rec.StartTime,
+		EndTime:       rec.EndTime,
+		LastActivity:  rec.LastActivity,
+		ToolCallCount: rec.ToolCallCount,
+		TotalTokens:   rec.TotalTokens,
+		HasRoots:      rec.HasRoots,
+		HasSampling:   rec.HasSampling,
+		Experimental:  rec.Experimental,
 	}, nil
 }
 

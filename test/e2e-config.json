@@ -1,9 +1,12 @@
 {
   "listen": ":8081",
-  "enable_socket": true,
   "data_dir": "./test-data",
   "enable_tray": false,
+  "api_key": "",
   "debug_search": false,
+  "tls": {
+    "enabled": false
+  },
   "mcpServers": [
     {
       "name": "everything",

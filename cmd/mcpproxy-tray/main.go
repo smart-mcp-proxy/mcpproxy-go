@@ -351,18 +351,7 @@ func monitorDockerStatus(ctx context.Context, apiClient *api.Client, logger *zap
 				logger.Infow("Docker recovery retry attempt",
 					"attempt", status.FailureCount,
 					"last_error", status.LastError)
-
-				// Calculate next retry interval based on exponential backoff
-				intervals := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, 60 * time.Second}
-				nextRetryIdx := status.FailureCount
-				if nextRetryIdx >= len(intervals) {
-					nextRetryIdx = len(intervals) - 1
-				}
-				nextRetryIn := intervals[nextRetryIdx].String()
-
-				if err := tray.ShowDockerRecoveryRetry(status.FailureCount, nextRetryIn); err != nil {
-					logger.Warnw("Failed to show Docker retry notification", "error", err)
-				}
+				// Intentionally no tray notification to avoid spam; log only.
 			}
 
 			// Recovery failed (exceeded max retries or persistent error)
@@ -1619,8 +1608,6 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 	cpl.logger.Info("Core shutdown complete")
 }
 
-
-
 // lookupExternalCorePID retrieves the core PID from the status API.
 func (cpl *CoreProcessLauncher) lookupExternalCorePID() (int, error) {
 	if cpl.apiClient == nil {
@@ -1660,9 +1647,6 @@ func (cpl *CoreProcessLauncher) lookupExternalCorePID() (int, error) {
 		return 0, fmt.Errorf("unsupported process_pid type %T", rawPID)
 	}
 }
-
-
-
 
 // collectCorePIDs gathers candidate PIDs from the monitor and status API.
 func (cpl *CoreProcessLauncher) collectCorePIDs() map[int]struct{} {

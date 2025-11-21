@@ -82,6 +82,9 @@ func (r *Runtime) backgroundInitialization() {
 
 	// Start tool indexing with reduced delay
 	go r.backgroundToolIndexing(appCtx)
+
+	// Start session inactivity cleanup
+	go r.backgroundSessionCleanup(appCtx)
 }
 
 func (r *Runtime) backgroundConnections(ctx context.Context) {
@@ -151,6 +154,38 @@ func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 			_ = r.DiscoverAndIndexTools(ctx)
 		case <-ctx.Done():
 			r.logger.Info("Background tool indexing stopped due to context cancellation")
+			return
+		}
+	}
+}
+
+// backgroundSessionCleanup periodically closes sessions that haven't had activity.
+// This handles the HTTP transport limitation where OnUnregisterSession is never called.
+func (r *Runtime) backgroundSessionCleanup(ctx context.Context) {
+	// Session inactivity timeout: 5 minutes
+	// This is a reasonable timeout for MCP sessions where clients typically
+	// send tool calls every few seconds during active use.
+	const sessionInactivityTimeout = 5 * time.Minute
+
+	// Check every minute for inactive sessions
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if r.storageManager != nil {
+				closedCount, err := r.storageManager.CloseInactiveSessions(sessionInactivityTimeout)
+				if err != nil {
+					r.logger.Warn("Failed to close inactive sessions", zap.Error(err))
+				} else if closedCount > 0 {
+					r.logger.Debug("Closed inactive sessions",
+						zap.Int("count", closedCount),
+						zap.Duration("timeout", sessionInactivityTimeout))
+				}
+			}
+		case <-ctx.Done():
+			r.logger.Info("Background session cleanup stopped due to context cancellation")
 			return
 		}
 	}
