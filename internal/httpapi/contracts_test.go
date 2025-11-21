@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -122,10 +123,20 @@ func (m *MockServerController) SearchTools(_ string, _ int) ([]map[string]interf
 	}, nil
 }
 
-func (m *MockServerController) GetServerLogs(_ string, _ int) ([]string, error) {
-	return []string{
-		"2025-09-19T12:00:00Z INFO Server started",
-		"2025-09-19T12:00:01Z INFO Tool registered: echo_tool",
+func (m *MockServerController) GetServerLogs(_ string, _ int) ([]contracts.LogEntry, error) {
+	return []contracts.LogEntry{
+		{
+			Timestamp: time.Date(2025, 9, 19, 12, 0, 0, 0, time.UTC),
+			Level:     "INFO",
+			Message:   "Server started",
+			Server:    "test-server",
+		},
+		{
+			Timestamp: time.Date(2025, 9, 19, 12, 0, 1, 0, time.UTC),
+			Level:     "INFO",
+			Message:   "Tool registered: echo_tool",
+			Server:    "test-server",
+		},
 	}, nil
 }
 

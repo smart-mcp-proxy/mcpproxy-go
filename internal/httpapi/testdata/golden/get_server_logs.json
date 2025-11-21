@@ -4,15 +4,15 @@
     "logs": [
       {
         "level": "INFO",
-        "message": "2025-09-19T12:00:00Z INFO Server started",
+        "message": "Server started",
         "server": "test-server",
         "timestamp": "2025-09-19T12:00:00Z"
       },
       {
         "level": "INFO",
-        "message": "2025-09-19T12:00:01Z INFO Tool registered: echo_tool",
+        "message": "Tool registered: echo_tool",
         "server": "test-server",
-        "timestamp": "2025-09-19T12:00:00Z"
+        "timestamp": "2025-09-19T12:00:01Z"
       }
     ],
     "server_name": "test-server"

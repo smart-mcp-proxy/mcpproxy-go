@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/httpapi"
 
 	"github.com/stretchr/testify/assert"
@@ -57,7 +58,9 @@ func (m *mockController) GetServerTools(serverName string) ([]map[string]interfa
 func (m *mockController) SearchTools(query string, limit int) ([]map[string]interface{}, error) {
 	return nil, nil
 }
-func (m *mockController) GetServerLogs(serverName string, tail int) ([]string, error) { return nil, nil }
+func (m *mockController) GetServerLogs(serverName string, tail int) ([]contracts.LogEntry, error) {
+	return nil, nil
+}
 func (m *mockController) ReloadConfiguration() error                                   { return nil }
 func (m *mockController) GetConfigPath() string                                        { return "" }
 func (m *mockController) GetLogDir() string                                            { return "" }
