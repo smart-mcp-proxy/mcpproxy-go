@@ -901,11 +901,24 @@ git commit -m "feat: add upstream enable/disable/restart commands with --all sup
 
 ---
 
-## Task 5: Add `mcpproxy doctor` command (placeholder)
+## Task 5: Add `mcpproxy doctor` command
+
+**Status:** ✅ JSON output complete, ⚠️ Pretty output needs implementation
 
 **Files:**
 - Create: `cmd/mcpproxy/doctor_cmd.go`
 - Modify: `cmd/mcpproxy/main.go`
+
+**Implementation Notes:**
+- ✅ JSON output (`--output=json`) is fully functional and displays real diagnostics data
+- ⚠️ Pretty output (default) is currently a placeholder showing generic "all systems operational" message
+- TODO: Implement pretty output formatting to parse and display:
+  - `upstream_errors` - Array of server connection errors with server names and error messages
+  - `oauth_required` - Servers requiring OAuth authentication
+  - `missing_secrets` - Unresolved secret references
+  - `runtime_warnings` - General runtime warnings
+  - `total_issues` - Total count of all issues
+- Reference: See `docs/plans/2025-11-19-cli-management-commands-design.md` lines 700-764 for intended pretty output format with categorized issues and remediation steps
 
 **Step 1: Create doctor command structure**
 
@@ -1020,14 +1033,20 @@ func outputDiagnostics(diag map[string]interface{}) error {
 		fmt.Println(string(output))
 	case "pretty":
 	default:
-		// Pretty format (placeholder - will be implemented with actual diagnostics API)
+		// TODO: Parse and format the diagnostics data from the API
+		// The API endpoint exists and returns real data (see JSON output)
+		// Need to implement pretty formatting for: upstream_errors, oauth_required,
+		// missing_secrets, runtime_warnings, total_issues
+		// Reference design doc lines 700-764 for intended output format
+
+		// Placeholder output until pretty formatting is implemented:
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("🔍 MCPProxy Health Check")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println()
 		fmt.Println("✅ All systems operational! No issues detected.")
 		fmt.Println()
-		fmt.Println("(Full diagnostics will be implemented when API endpoint is ready)")
+		fmt.Println("(Pretty output formatting not yet implemented - use --output=json to see full diagnostics)")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	}
 
@@ -1069,9 +1088,9 @@ func createDoctorLogger(level string) (*zap.Logger, error) {
 }
 ```
 
-**Step 2: Add GetDiagnostics placeholder to cliclient**
+**Step 2: Add GetDiagnostics method to cliclient**
 
-Add to `internal/cliclient/client.go`:
+Add to `internal/cliclient/client.go` (API endpoint `/api/v1/diagnostics` already exists and returns real data):
 
 ```go
 // GetDiagnostics retrieves diagnostics information from daemon.
@@ -1142,7 +1161,12 @@ go build -o mcpproxy ./cmd/mcpproxy
 
 ```bash
 git add cmd/mcpproxy/doctor_cmd.go cmd/mcpproxy/main.go internal/cliclient/client.go
-git commit -m "feat: add 'mcpproxy doctor' command (placeholder)"
+git commit -m "feat: add 'mcpproxy doctor' command
+
+- JSON output (--output=json) fully functional with real diagnostics data
+- Pretty output is placeholder - needs implementation for parsing/formatting
+- Connects to existing /api/v1/diagnostics endpoint
+- Requires daemon to be running"
 ```
 
 ---
