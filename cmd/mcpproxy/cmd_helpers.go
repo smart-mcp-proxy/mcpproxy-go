@@ -1,0 +1,51 @@
+package main
+
+// Helper functions for extracting fields from JSON maps (used by doctor and upstream commands)
+
+func getStringField(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func getBoolField(m map[string]interface{}, key string) bool {
+	if v, ok := m[key].(bool); ok {
+		return v
+	}
+	return false
+}
+
+func getIntField(m map[string]interface{}, key string) int {
+	if v, ok := m[key].(float64); ok {
+		return int(v)
+	}
+	if v, ok := m[key].(int); ok {
+		return v
+	}
+	return 0
+}
+
+func getArrayField(m map[string]interface{}, key string) []interface{} {
+	if v, ok := m[key]; ok && v != nil {
+		if arr, ok := v.([]interface{}); ok {
+			return arr
+		}
+	}
+	return nil
+}
+
+func getStringArrayField(m map[string]interface{}, key string) []string {
+	if v, ok := m[key]; ok && v != nil {
+		if arr, ok := v.([]interface{}); ok {
+			result := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if str, ok := item.(string); ok {
+					result = append(result, str)
+				}
+			}
+			return result
+		}
+	}
+	return nil
+}

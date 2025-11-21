@@ -164,11 +164,23 @@ func outputDiagnostics(diag map[string]interface{}) error {
 		}
 
 		// 3. Missing Secrets
-		if missingSecrets := getStringArrayField(diag, "missing_secrets"); len(missingSecrets) > 0 {
+		if missingSecrets := getArrayField(diag, "missing_secrets"); len(missingSecrets) > 0 {
 			fmt.Println("🔐 Missing Secrets")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			for _, secret := range missingSecrets {
-				fmt.Printf("  • %s\n", secret)
+			for _, secretItem := range missingSecrets {
+				if secretMap, ok := secretItem.(map[string]interface{}); ok {
+					name := getStringField(secretMap, "name")
+					server := getStringField(secretMap, "server")
+					reference := getStringField(secretMap, "reference")
+
+					fmt.Printf("\n  • %s\n", name)
+					if server != "" {
+						fmt.Printf("    Server: %s\n", server)
+					}
+					if reference != "" {
+						fmt.Printf("    Reference: %s\n", reference)
+					}
+				}
 			}
 			fmt.Println()
 			fmt.Println("💡 Remediation:")
@@ -179,11 +191,29 @@ func outputDiagnostics(diag map[string]interface{}) error {
 		}
 
 		// 4. Runtime Warnings
-		if runtimeWarnings := getStringArrayField(diag, "runtime_warnings"); len(runtimeWarnings) > 0 {
+		if runtimeWarnings := getArrayField(diag, "runtime_warnings"); len(runtimeWarnings) > 0 {
 			fmt.Println("⚠️  Runtime Warnings")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			for _, warning := range runtimeWarnings {
-				fmt.Printf("  • %s\n", warning)
+			for _, warningItem := range runtimeWarnings {
+				if warningMap, ok := warningItem.(map[string]interface{}); ok {
+					message := getStringField(warningMap, "message")
+					severity := getStringField(warningMap, "severity")
+					title := getStringField(warningMap, "title")
+
+					// Display title if present, otherwise just the message
+					if title != "" {
+						fmt.Printf("\n  • %s\n", title)
+						if message != "" {
+							fmt.Printf("    %s\n", message)
+						}
+					} else if message != "" {
+						fmt.Printf("  • %s\n", message)
+					}
+
+					if severity != "" && severity != "warning" {
+						fmt.Printf("    Severity: %s\n", severity)
+					}
+				}
 			}
 			fmt.Println()
 			fmt.Println("💡 Remediation:")
@@ -198,32 +228,6 @@ func outputDiagnostics(diag map[string]interface{}) error {
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	}
 
-	return nil
-}
-
-// Helper functions for extracting fields from diagnostics map
-
-func getArrayField(m map[string]interface{}, key string) []interface{} {
-	if v, ok := m[key]; ok && v != nil {
-		if arr, ok := v.([]interface{}); ok {
-			return arr
-		}
-	}
-	return nil
-}
-
-func getStringArrayField(m map[string]interface{}, key string) []string {
-	if v, ok := m[key]; ok && v != nil {
-		if arr, ok := v.([]interface{}); ok {
-			result := make([]string, 0, len(arr))
-			for _, item := range arr {
-				if str, ok := item.(string); ok {
-					result = append(result, str)
-				}
-			}
-			return result
-		}
-	}
 	return nil
 }
 

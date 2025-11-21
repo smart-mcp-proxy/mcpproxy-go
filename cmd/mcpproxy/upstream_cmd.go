@@ -257,30 +257,6 @@ func createUpstreamLogger(level string) (*zap.Logger, error) {
 	return cfg.Build()
 }
 
-func getStringField(m map[string]interface{}, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func getBoolField(m map[string]interface{}, key string) bool {
-	if v, ok := m[key].(bool); ok {
-		return v
-	}
-	return false
-}
-
-func getIntField(m map[string]interface{}, key string) int {
-	if v, ok := m[key].(float64); ok {
-		return int(v)
-	}
-	if v, ok := m[key].(int); ok {
-		return v
-	}
-	return 0
-}
-
 func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 	serverName := args[0]
 
