@@ -104,19 +104,126 @@ func outputDiagnostics(diag map[string]interface{}) error {
 			return fmt.Errorf("failed to format output: %w", err)
 		}
 		fmt.Println(string(output))
-	case "pretty":
-	default:
-		// Pretty format (placeholder - will be implemented with actual diagnostics API)
+	case "pretty", "": // Handle both "pretty" and empty string (default value)
+		// Pretty format - parse and display diagnostics
+		totalIssues := getIntField(diag, "total_issues")
+
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("🔍 MCPProxy Health Check")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println()
-		fmt.Println("✅ All systems operational! No issues detected.")
+
+		if totalIssues == 0 {
+			fmt.Println("✅ All systems operational! No issues detected.")
+			fmt.Println()
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			return nil
+		}
+
+		// Show issue summary
+		issueWord := "issue"
+		if totalIssues > 1 {
+			issueWord = "issues"
+		}
+		fmt.Printf("⚠️  Found %d %s that need attention\n", totalIssues, issueWord)
 		fmt.Println()
-		fmt.Println("(Full diagnostics will be implemented when API endpoint is ready)")
+
+		// 1. Upstream Connection Errors
+		if upstreamErrors := getArrayField(diag, "upstream_errors"); len(upstreamErrors) > 0 {
+			fmt.Println("❌ Upstream Server Connection Errors")
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			for _, errItem := range upstreamErrors {
+				if errMap, ok := errItem.(map[string]interface{}); ok {
+					server := getStringField(errMap, "server")
+					message := getStringField(errMap, "message")
+					fmt.Printf("\nServer: %s\n", server)
+					fmt.Printf("  Error: %s\n", message)
+				}
+			}
+			fmt.Println()
+			fmt.Println("💡 Remediation:")
+			fmt.Println("  • Check server configuration in mcp_config.json")
+			fmt.Println("  • View detailed logs: mcpproxy upstream logs <server-name>")
+			fmt.Println("  • Restart server: mcpproxy upstream restart <server-name>")
+			fmt.Println("  • Disable if not needed: mcpproxy upstream disable <server-name>")
+			fmt.Println()
+		}
+
+		// 2. OAuth Required
+		if oauthRequired := getStringArrayField(diag, "oauth_required"); len(oauthRequired) > 0 {
+			fmt.Println("🔑 OAuth Authentication Required")
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			for _, server := range oauthRequired {
+				fmt.Printf("  • %s\n", server)
+			}
+			fmt.Println()
+			fmt.Println("💡 Remediation:")
+			fmt.Println("  • Authenticate: mcpproxy auth login --server=<server-name>")
+			fmt.Println("  • Check OAuth config in mcp_config.json")
+			fmt.Println()
+		}
+
+		// 3. Missing Secrets
+		if missingSecrets := getStringArrayField(diag, "missing_secrets"); len(missingSecrets) > 0 {
+			fmt.Println("🔐 Missing Secrets")
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			for _, secret := range missingSecrets {
+				fmt.Printf("  • %s\n", secret)
+			}
+			fmt.Println()
+			fmt.Println("💡 Remediation:")
+			fmt.Println("  • Set environment variables with required secrets")
+			fmt.Println("  • Update secret references in mcp_config.json")
+			fmt.Println("  • Use mcpproxy secrets command to manage secrets")
+			fmt.Println()
+		}
+
+		// 4. Runtime Warnings
+		if runtimeWarnings := getStringArrayField(diag, "runtime_warnings"); len(runtimeWarnings) > 0 {
+			fmt.Println("⚠️  Runtime Warnings")
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			for _, warning := range runtimeWarnings {
+				fmt.Printf("  • %s\n", warning)
+			}
+			fmt.Println()
+			fmt.Println("💡 Remediation:")
+			fmt.Println("  • Review main log: tail -f ~/.mcpproxy/logs/main.log")
+			fmt.Println("  • Check server status: mcpproxy upstream list")
+			fmt.Println()
+		}
+
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println()
+		fmt.Println("For more details, run: mcpproxy doctor --output=json")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	}
 
+	return nil
+}
+
+// Helper functions for extracting fields from diagnostics map
+
+func getArrayField(m map[string]interface{}, key string) []interface{} {
+	if v, ok := m[key]; ok && v != nil {
+		if arr, ok := v.([]interface{}); ok {
+			return arr
+		}
+	}
+	return nil
+}
+
+func getStringArrayField(m map[string]interface{}, key string) []string {
+	if v, ok := m[key]; ok && v != nil {
+		if arr, ok := v.([]interface{}); ok {
+			result := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if str, ok := item.(string); ok {
+					result = append(result, str)
+				}
+			}
+			return result
+		}
+	}
 	return nil
 }
 
