@@ -335,8 +335,8 @@ func runUpstreamLogsClientMode(ctx context.Context, dataDir, serverName string, 
 		return fmt.Errorf("failed to get logs from daemon: %w", err)
 	}
 
-	for _, logLine := range logs {
-		fmt.Println(logLine)
+	for _, entry := range logs {
+		fmt.Printf("%s [%s] %s\n", entry.Timestamp.Format("2006-01-02 15:04:05"), entry.Level, entry.Message)
 	}
 
 	return nil
@@ -391,18 +391,21 @@ func runUpstreamLogsFollowMode(ctx context.Context, dataDir, serverName string, 
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			logs, err := client.GetServerLogs(ctx, serverName, 10)
+			logs, err := client.GetServerLogs(ctx, serverName, upstreamLogsTail)
 			if err != nil {
 				logger.Warn("Failed to fetch logs", zap.Error(err))
 				continue
 			}
 
 			// Print only new lines
-			for _, line := range logs {
-				if !lastLines[line] {
-					fmt.Println(line)
-					lastLines[line] = true
-					lineOrder = append(lineOrder, line)
+			for _, entry := range logs {
+				// Format the log entry as a unique string for deduplication
+				logLine := fmt.Sprintf("%s [%s] %s", entry.Timestamp.Format("2006-01-02 15:04:05"), entry.Level, entry.Message)
+
+				if !lastLines[logLine] {
+					fmt.Println(logLine)
+					lastLines[logLine] = true
+					lineOrder = append(lineOrder, logLine)
 
 					// Implement ring buffer: remove oldest line if we exceed max
 					if len(lineOrder) > maxTrackedLines {
@@ -494,12 +497,13 @@ func runUpstreamAction(serverName, action string) error {
 		return fmt.Errorf("failed to %s server: %w", action, err)
 	}
 
-	fmt.Printf("✅ Successfully %sd server '%s'\n", action, serverName)
+	fmt.Printf("✅ Successfully %sed server '%s'\n", action, serverName)
 	return nil
 }
 
 func runUpstreamBulkAction(action string, force bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Use a longer parent context (2 minutes) to allow multiple operations
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	// Load configuration
@@ -566,11 +570,16 @@ func runUpstreamBulkAction(action string, force bool) error {
 	fmt.Printf("Performing action '%s' on %d server(s)...\n", action, len(targetServers))
 
 	for _, serverName := range targetServers {
-		err = client.ServerAction(ctx, serverName, action)
+		// Give each server its own 30-second timeout
+		serverCtx, serverCancel := context.WithTimeout(ctx, 30*time.Second)
+
+		err = client.ServerAction(serverCtx, serverName, action)
+		serverCancel() // Clean up immediately after each operation
+
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Failed to %s server '%s': %v\n", action, serverName, err)
 		} else {
-			fmt.Printf("✅ Successfully %sd server '%s'\n", action, serverName)
+			fmt.Printf("✅ Successfully %sed server '%s'\n", action, serverName)
 		}
 	}
 
