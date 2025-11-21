@@ -84,7 +84,9 @@ Examples:
 	upstreamForce        bool
 )
 
-// GetUpstreamCommand returns the upstream command for adding to the root command
+// GetUpstreamCommand returns the upstream command for adding to the root command.
+// The upstream command provides subcommands for managing and monitoring upstream
+// MCP servers, including list, logs, enable/disable, and restart operations.
 func GetUpstreamCommand() *cobra.Command {
 	return upstreamCmd
 }
@@ -200,8 +202,7 @@ func outputServers(servers []map[string]interface{}) error {
 		// Table format (default)
 		fmt.Printf("%-25s %-10s %-10s %-12s %-10s %s\n",
 			"NAME", "ENABLED", "PROTOCOL", "CONNECTED", "TOOLS", "STATUS")
-		fmt.Printf("%-25s %-10s %-10s %-12s %-10s %s\n",
-			"====", "=======", "========", "=========", "=====", "======")
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 		for _, srv := range servers {
 			name := getStringField(srv, "name")
@@ -298,10 +299,16 @@ func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 		// Handle Ctrl+C gracefully
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(sigChan)
+
 		go func() {
-			<-sigChan
-			logger.Info("Received interrupt signal, stopping...")
-			bgCancel()
+			select {
+			case <-sigChan:
+				logger.Info("Received interrupt signal, stopping...")
+				bgCancel()
+			case <-bgCtx.Done():
+				// Context canceled, exit goroutine
+			}
 		}()
 
 		return runUpstreamLogsFollowMode(bgCtx, globalConfig.DataDir, serverName, logger)
@@ -439,6 +446,16 @@ func runUpstreamRestart(cmd *cobra.Command, args []string) error {
 	return runUpstreamAction(args[0], "restart")
 }
 
+// validateServerExists checks if a server exists in the configuration
+func validateServerExists(cfg *config.Config, serverName string) error {
+	for _, srv := range cfg.Servers {
+		if srv.Name == serverName {
+			return nil
+		}
+	}
+	return fmt.Errorf("server '%s' not found in configuration", serverName)
+}
+
 func runUpstreamAction(serverName, action string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -447,6 +464,11 @@ func runUpstreamAction(serverName, action string) error {
 	globalConfig, err := loadUpstreamConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		return err
+	}
+
+	// Validate server exists
+	if err := validateServerExists(globalConfig, serverName); err != nil {
 		return err
 	}
 
