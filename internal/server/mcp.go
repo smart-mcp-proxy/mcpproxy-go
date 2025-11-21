@@ -129,7 +129,7 @@ func NewMCPProxyServer(
 		hasSampling := capabilities.Sampling != nil
 
 		var experimental []string
-		if capabilities.Experimental != nil && len(capabilities.Experimental) > 0 {
+		if len(capabilities.Experimental) > 0 {
 			experimental = make([]string, 0, len(capabilities.Experimental))
 			for key := range capabilities.Experimental {
 				experimental = append(experimental, key)
