@@ -72,16 +72,6 @@ func ShowDockerRecoveryFailed(reason string) error {
 		msg = fmt.Sprintf("Unable to reconnect servers: %s", reason)
 	}
 	return beeep.Notify(
-		"Recovery Failed",
-		msg,
-		"",
-	)
-}
-
-// ShowDockerRecoveryRetry shows a notification for retry attempts
-func ShowDockerRecoveryRetry(attempt int, nextRetryIn string) error {
-	msg := fmt.Sprintf("Retry attempt %d. Next check in %s", attempt, nextRetryIn)
-	return beeep.Notify(
 		"Docker Recovery",
 		msg,
 		"",
