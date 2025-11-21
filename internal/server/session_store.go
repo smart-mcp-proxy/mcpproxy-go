@@ -2,8 +2,10 @@ package server
 
 import (
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
+	"mcpproxy-go/internal/storage"
 )
 
 // SessionInfo holds MCP session metadata
@@ -15,9 +17,10 @@ type SessionInfo struct {
 
 // SessionStore manages MCP session information
 type SessionStore struct {
-	sessions map[string]*SessionInfo
-	mu       sync.RWMutex
-	logger   *zap.Logger
+	sessions       map[string]*SessionInfo
+	mu             sync.RWMutex
+	logger         *zap.Logger
+	storageManager *storage.Manager
 }
 
 // NewSessionStore creates a new session store
@@ -28,8 +31,15 @@ func NewSessionStore(logger *zap.Logger) *SessionStore {
 	}
 }
 
+// SetStorageManager sets the storage manager for persistence
+func (s *SessionStore) SetStorageManager(manager *storage.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.storageManager = manager
+}
+
 // SetSession stores or updates session information
-func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string) {
+func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string, hasRoots, hasSampling bool, experimental []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -39,10 +49,34 @@ func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string) {
 		ClientVersion: clientVersion,
 	}
 
+	// Persist to storage if available
+	if s.storageManager != nil {
+		now := time.Now()
+		session := &storage.SessionRecord{
+			ID:            sessionID,
+			ClientName:    clientName,
+			ClientVersion: clientVersion,
+			Status:        "active",
+			StartTime:     now,
+			LastActivity:  now,
+			HasRoots:      hasRoots,
+			HasSampling:   hasSampling,
+			Experimental:  experimental,
+		}
+		if err := s.storageManager.CreateSession(session); err != nil {
+			s.logger.Warn("failed to persist session to storage",
+				zap.String("session_id", sessionID),
+				zap.Error(err),
+			)
+		}
+	}
+
 	s.logger.Debug("session info stored",
 		zap.String("session_id", sessionID),
 		zap.String("client_name", clientName),
 		zap.String("client_version", clientVersion),
+		zap.Bool("has_roots", hasRoots),
+		zap.Bool("has_sampling", hasSampling),
 	)
 }
 
@@ -61,9 +95,36 @@ func (s *SessionStore) RemoveSession(sessionID string) {
 
 	delete(s.sessions, sessionID)
 
+	// Close session in storage if available
+	if s.storageManager != nil {
+		if err := s.storageManager.CloseSession(sessionID); err != nil {
+			s.logger.Warn("failed to close session in storage",
+				zap.String("session_id", sessionID),
+				zap.Error(err),
+			)
+		}
+	}
+
 	s.logger.Debug("session info removed",
 		zap.String("session_id", sessionID),
 	)
+}
+
+// UpdateSessionStats updates token usage for a session
+func (s *SessionStore) UpdateSessionStats(sessionID string, tokens int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Update in storage if available
+	if s.storageManager != nil {
+		if err := s.storageManager.UpdateSessionStats(sessionID, tokens); err != nil {
+			s.logger.Warn("failed to update session stats in storage",
+				zap.String("session_id", sessionID),
+				zap.Int("tokens", tokens),
+				zap.Error(err),
+			)
+		}
+	}
 }
 
 // Count returns the number of active sessions

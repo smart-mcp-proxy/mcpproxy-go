@@ -1,0 +1,317 @@
+openapi: 3.0.3
+info:
+  title: MCPProxy Sessions API
+  description: API endpoints for MCP session management
+  version: 1.0.0
+
+paths:
+  /api/v1/sessions:
+    get:
+      summary: List recent MCP sessions
+      description: Returns paginated list of MCP sessions, ordered by start time descending
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of sessions to return
+          schema:
+            type: integer
+            default: 10
+            maximum: 100
+        - name: offset
+          in: query
+          description: Number of sessions to skip
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetSessionsResponse'
+
+  /api/v1/sessions/{id}:
+    get:
+      summary: Get session details
+      description: Returns a single session with aggregated metrics
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Session UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetSessionDetailResponse'
+        '404':
+          description: Session not found
+
+  /api/v1/sessions/{id}/tool-calls:
+    get:
+      summary: Get tool calls for session
+      description: Returns all tool calls belonging to a specific session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Session UUID
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Tool calls for session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetToolCallsResponse'
+        '404':
+          description: Session not found
+
+  /api/v1/tool-calls:
+    get:
+      summary: List tool calls with optional session filter
+      description: Returns paginated tool calls, optionally filtered by session
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: session_id
+          in: query
+          description: Filter by session UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of tool calls
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetToolCallsResponse'
+
+components:
+  schemas:
+    ToolAnnotation:
+      type: object
+      properties:
+        title:
+          type: string
+          description: Human-readable title for UI display
+        readOnlyHint:
+          type: boolean
+          description: If true, tool does not modify environment
+        destructiveHint:
+          type: boolean
+          description: If true, tool may perform destructive updates
+        idempotentHint:
+          type: boolean
+          description: If true, repeated calls have same effect
+        openWorldHint:
+          type: boolean
+          description: If true, tool interacts with external systems
+
+    MCPSession:
+      type: object
+      required:
+        - id
+        - status
+        - start_time
+        - tool_call_count
+        - total_tokens
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique session identifier
+        client_name:
+          type: string
+          description: MCP client application name
+        client_version:
+          type: string
+          description: MCP client version
+        status:
+          type: string
+          enum: [active, closed]
+          description: Session lifecycle status
+        start_time:
+          type: string
+          format: date-time
+          description: Session start timestamp
+        end_time:
+          type: string
+          format: date-time
+          description: Session end timestamp (null if active)
+        tool_call_count:
+          type: integer
+          minimum: 0
+          description: Number of tool calls in session
+        total_tokens:
+          type: integer
+          minimum: 0
+          description: Aggregate tokens across all calls
+
+    Tool:
+      type: object
+      required:
+        - name
+        - server_name
+        - description
+        - usage
+      properties:
+        name:
+          type: string
+        server_name:
+          type: string
+        description:
+          type: string
+        schema:
+          type: object
+          additionalProperties: true
+        usage:
+          type: integer
+        last_used:
+          type: string
+          format: date-time
+        annotations:
+          $ref: '#/components/schemas/ToolAnnotation'
+
+    ToolCallRecord:
+      type: object
+      required:
+        - id
+        - server_id
+        - server_name
+        - tool_name
+        - timestamp
+        - duration
+      properties:
+        id:
+          type: string
+        server_id:
+          type: string
+        server_name:
+          type: string
+        tool_name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+        response:
+          description: Tool response (any type)
+        error:
+          type: string
+        duration:
+          type: integer
+          description: Duration in nanoseconds
+        timestamp:
+          type: string
+          format: date-time
+        config_path:
+          type: string
+        request_id:
+          type: string
+        metrics:
+          $ref: '#/components/schemas/TokenMetrics'
+        parent_call_id:
+          type: string
+        execution_type:
+          type: string
+        mcp_session_id:
+          type: string
+        mcp_client_name:
+          type: string
+        mcp_client_version:
+          type: string
+        annotations:
+          $ref: '#/components/schemas/ToolAnnotation'
+
+    TokenMetrics:
+      type: object
+      properties:
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        model:
+          type: string
+        encoding:
+          type: string
+        estimated_cost:
+          type: number
+        truncated_tokens:
+          type: integer
+        was_truncated:
+          type: boolean
+
+    GetSessionsResponse:
+      type: object
+      required:
+        - sessions
+        - total
+        - limit
+        - offset
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/MCPSession'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    GetSessionDetailResponse:
+      type: object
+      required:
+        - session
+      properties:
+        session:
+          $ref: '#/components/schemas/MCPSession'
+
+    GetToolCallsResponse:
+      type: object
+      required:
+        - tool_calls
+        - total
+        - limit
+        - offset
+      properties:
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolCallRecord'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer

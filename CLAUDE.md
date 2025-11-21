@@ -663,3 +663,10 @@ The event bus enables real-time communication between runtime and UI components:
 
 When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
 - remember before running mcpproxy core u need to kill all mcpproxy instances, because it locks DB
+
+## Active Technologies
+- Go 1.21+, TypeScript/Vue 3 (003-tool-annotations-webui)
+- BBolt (existing `server_{serverID}_tool_calls` buckets, new `sessions` bucket) (003-tool-annotations-webui)
+
+## Recent Changes
+- 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3

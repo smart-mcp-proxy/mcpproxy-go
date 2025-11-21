@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -371,6 +371,16 @@ class APIService {
       method: 'POST',
       body: JSON.stringify({ arguments: args })
     })
+  }
+
+  // Session management endpoints
+  async getSessions(limit?: number): Promise<APIResponse<GetSessionsResponse>> {
+    const url = `/api/v1/sessions${limit ? `?limit=${limit}` : ''}`
+    return this.request<GetSessionsResponse>(url)
+  }
+
+  async getSessionDetail(sessionId: string): Promise<APIResponse<GetSessionDetailResponse>> {
+    return this.request<GetSessionDetailResponse>(`/api/v1/sessions/${encodeURIComponent(sessionId)}`)
   }
 
   // Configuration management endpoints

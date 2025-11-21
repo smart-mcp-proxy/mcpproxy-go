@@ -304,6 +304,33 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			Description: tool.Description,
 			ParamsJSON:  paramsJSON,
 		}
+
+		// Copy tool annotations if any are set
+		// ToolAnnotation is a value type with pointer fields, check if any hints are present
+		hasAnnotations := tool.Annotations.Title != "" ||
+			tool.Annotations.ReadOnlyHint != nil ||
+			tool.Annotations.DestructiveHint != nil ||
+			tool.Annotations.IdempotentHint != nil ||
+			tool.Annotations.OpenWorldHint != nil
+
+		// Log tool annotations at debug level for troubleshooting
+		if hasAnnotations {
+			c.logger.Debug("Tool with annotations from server",
+				zap.String("server", c.config.Name),
+				zap.String("tool", tool.Name),
+				zap.String("title", tool.Annotations.Title))
+		}
+
+		if hasAnnotations {
+			toolMeta.Annotations = &config.ToolAnnotations{
+				Title:           tool.Annotations.Title,
+				ReadOnlyHint:    tool.Annotations.ReadOnlyHint,
+				DestructiveHint: tool.Annotations.DestructiveHint,
+				IdempotentHint:  tool.Annotations.IdempotentHint,
+				OpenWorldHint:   tool.Annotations.OpenWorldHint,
+			}
+		}
+
 		tools = append(tools, toolMeta)
 	}
 

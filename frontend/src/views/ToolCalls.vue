@@ -47,6 +47,18 @@
             </select>
           </div>
 
+          <div class="form-control flex-1 min-w-[200px]">
+            <label class="label">
+              <span class="label-text">Session</span>
+            </label>
+            <select v-model="filterSession" class="select select-bordered select-sm">
+              <option value="">All Sessions</option>
+              <option v-for="session in availableSessions" :key="session" :value="session">
+                {{ session.substring(0, 12) }}...
+              </option>
+            </select>
+          </div>
+
           <div class="form-control">
             <label class="label">
               <span class="label-text">&nbsp;</span>
@@ -112,7 +124,10 @@
                     </router-link>
                   </td>
                   <td>
-                    <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ call.tool_name }}</code>
+                    <div class="flex items-center gap-2">
+                      <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ call.tool_name }}</code>
+                      <AnnotationBadges :annotations="call.annotations" :compact="true" />
+                    </div>
                   </td>
                   <td>
                     <div
@@ -429,7 +444,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ToolCallRecord } from '@/types'
@@ -437,7 +453,10 @@ import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import JsonViewer from '@/components/JsonViewer.vue'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
+import AnnotationBadges from '@/components/AnnotationBadges.vue'
 
+const route = useRoute()
+const router = useRouter()
 const systemStore = useSystemStore()
 
 // State
@@ -450,6 +469,7 @@ const expandedCalls = ref(new Set<string>())
 const filterServer = ref('')
 const filterTool = ref('')
 const filterStatus = ref('')
+const filterSession = ref('')
 
 // Pagination
 const currentPage = ref(1)
@@ -502,6 +522,16 @@ const availableServers = computed(() => {
   return Array.from(servers).sort()
 })
 
+const availableSessions = computed(() => {
+  const sessions = new Set<string>()
+  toolCalls.value.forEach(call => {
+    if (call.mcp_session_id) {
+      sessions.add(call.mcp_session_id)
+    }
+  })
+  return Array.from(sessions).sort()
+})
+
 const filteredToolCalls = computed(() => {
   let filtered = toolCalls.value
 
@@ -520,6 +550,10 @@ const filteredToolCalls = computed(() => {
     filtered = filtered.filter(call => !!call.error)
   }
 
+  if (filterSession.value) {
+    filtered = filtered.filter(call => call.mcp_session_id === filterSession.value)
+  }
+
   return filtered
 })
 
@@ -536,7 +570,12 @@ const clearFilters = () => {
   filterServer.value = ''
   filterTool.value = ''
   filterStatus.value = ''
+  filterSession.value = ''
   currentPage.value = 1
+  // Clear session from URL if present
+  if (route.query.session) {
+    router.replace({ query: {} })
+  }
 }
 
 const toggleDetails = (callId: string) => {
@@ -764,7 +803,22 @@ const toolCallsHints = computed<Hint[]>(() => {
 
 // Lifecycle
 onMounted(() => {
+  // Initialize session filter from URL query param
+  const sessionParam = route.query.session
+  if (sessionParam && typeof sessionParam === 'string') {
+    filterSession.value = sessionParam
+  }
+
   loadToolCalls()
+})
+
+// Watch for route query changes to update session filter
+watch(() => route.query.session, (newSession) => {
+  if (newSession && typeof newSession === 'string') {
+    filterSession.value = newSession
+  } else {
+    filterSession.value = ''
+  }
 })
 </script>
 

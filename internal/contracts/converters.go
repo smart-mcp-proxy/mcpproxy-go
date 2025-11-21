@@ -288,6 +288,11 @@ func ConvertGenericToolsToTyped(genericTools []map[string]interface{}) []Tool {
 			tool.LastUsed = &lastUsed
 		}
 
+		// Extract annotations
+		if annotations, ok := generic["annotations"].(map[string]interface{}); ok {
+			tool.Annotations = convertMapToToolAnnotation(annotations)
+		}
+
 		tools = append(tools, tool)
 	}
 
@@ -424,4 +429,31 @@ func ConvertConfigToContract(cfg *config.Config) interface{} {
 	// Return the config as-is for JSON marshaling
 	// The JSON tags on config.Config will handle serialization
 	return cfg
+}
+
+// convertMapToToolAnnotation converts a map to ToolAnnotation
+func convertMapToToolAnnotation(m map[string]interface{}) *ToolAnnotation {
+	if m == nil {
+		return nil
+	}
+
+	annotation := &ToolAnnotation{}
+
+	if title, ok := m["title"].(string); ok {
+		annotation.Title = title
+	}
+	if readOnly, ok := m["readOnlyHint"].(bool); ok {
+		annotation.ReadOnlyHint = &readOnly
+	}
+	if destructive, ok := m["destructiveHint"].(bool); ok {
+		annotation.DestructiveHint = &destructive
+	}
+	if idempotent, ok := m["idempotentHint"].(bool); ok {
+		annotation.IdempotentHint = &idempotent
+	}
+	if openWorld, ok := m["openWorldHint"].(bool); ok {
+		annotation.OpenWorldHint = &openWorld
+	}
+
+	return annotation
 }

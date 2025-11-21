@@ -13,6 +13,7 @@ type ToolInfo struct {
 	Name        string
 	Description string
 	InputSchema map[string]interface{}
+	Annotations *config.ToolAnnotations
 }
 
 // ServerStatus represents the runtime status of an upstream server.

@@ -1,9 +1,12 @@
 {
   "listen": ":8081",
-  "enable_socket": true,
   "data_dir": "./test-data",
   "enable_tray": false,
+  "api_key": "",
   "debug_search": false,
+  "tls": {
+    "enabled": false
+  },
   "mcpServers": [
     {
       "name": "everything",
@@ -16,7 +19,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-10-28T14:20:34.857673+02:00"
+      "updated": "2025-09-23T10:13:46.357736+03:00"
     }
   ],
   "top_k": 10,
@@ -165,15 +168,5 @@
     "enable_tray": true,
     "enable_debug_logging": false,
     "enable_contract_tests": false
-  },
-  "tls": {
-    "enabled": false,
-    "require_client_cert": false,
-    "hsts": true
-  },
-  "tokenizer": {
-    "enabled": true,
-    "default_model": "gpt-4",
-    "encoding": "cl100k_base"
   }
 }
