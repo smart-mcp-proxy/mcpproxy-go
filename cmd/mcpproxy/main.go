@@ -261,7 +261,7 @@ func listAllRegistries(logger *zap.Logger) {
 
 	// Format as a simple table for CLI display
 	fmt.Printf("%-20s %-30s %s\n", "ID", "NAME", "DESCRIPTION")
-	fmt.Printf("%-20s %-30s %s\n", "==", "====", "===========")
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 	for i := range registryList {
 		reg := &registryList[i]
