@@ -47,9 +47,3 @@ func ShowDockerRecoveryFailed(reason string) error {
 	// No-op for headless/linux builds
 	return nil
 }
-
-// ShowDockerRecoveryRetry shows a notification for retry attempts (stub)
-func ShowDockerRecoveryRetry(attempt int, nextRetryIn string) error {
-	// No-op for headless/linux builds
-	return nil
-}
