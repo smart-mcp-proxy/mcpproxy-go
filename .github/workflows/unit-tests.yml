@@ -66,7 +66,7 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
             ~/AppData/Local/go-build
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
 
@@ -198,7 +198,7 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
             ~/AppData/Local/go-build
-          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.25-${{ hashFiles('go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.25-
 
