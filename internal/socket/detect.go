@@ -81,10 +81,8 @@ func IsSocketAvailable(endpoint string) bool {
 	}
 
 	if strings.HasPrefix(endpoint, "npipe://") {
-		// Windows named pipe: try to connect
-		// For now, assume available if endpoint is well-formed
-		// TODO: Implement actual pipe connection check
-		return true
+		// Windows named pipe: check if pipe is available
+		return isPipeAvailable(endpoint)
 	}
 
 	return false
