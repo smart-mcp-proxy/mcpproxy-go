@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1524,7 +1525,7 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 }
 
 // GetServerLogs returns recent log lines for a specific server
-func (s *Server) GetServerLogs(serverName string, tail int) ([]string, error) {
+func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntry, error) {
 	s.logger.Debug("GetServerLogs called", zap.String("server", serverName), zap.Int("tail", tail))
 
 	if s.runtime.UpstreamManager() == nil {
@@ -1537,16 +1538,99 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]string, error) {
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
-	// For now, return a placeholder indicating logs are not yet implemented
-	// TODO: Implement actual log reading from server-specific log files
-	logs := []string{
-		fmt.Sprintf("Log viewing for server '%s' is not yet implemented", serverName),
-		"This feature will be added in a future release",
-		"Check the main application logs for server activity",
+	// Read from server-specific log file
+	cfg, err := s.runtime.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config: %w", err)
 	}
 
-	s.logger.Debug("Retrieved server logs", zap.String("server", serverName), zap.Int("lines", len(logs)))
-	return logs, nil
+	logDir := cfg.Logging.LogDir
+	if logDir == "" {
+		logDir, err = logs.GetLogDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine log directory: %w", err)
+		}
+	}
+
+	logFile := filepath.Join(logDir, fmt.Sprintf("server-%s.log", serverName))
+
+	// Check if file exists
+	if _, err := os.Stat(logFile); os.IsNotExist(err) {
+		return nil, fmt.Errorf("log file not found: %s (server may not have run yet)", logFile)
+	}
+
+	// Read last N lines from file
+	file, err := os.Open(logFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file: %w", err)
+	}
+	defer file.Close()
+
+	// Use a simple tail implementation - read lines into buffer
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read log file: %w", err)
+	}
+
+	// Get last N lines
+	start := 0
+	if len(lines) > tail {
+		start = len(lines) - tail
+	}
+	lines = lines[start:]
+
+	// Parse lines into LogEntry structs
+	var logEntries []contracts.LogEntry
+	for _, line := range lines {
+		// Parse structured log format: timestamp [level] message
+		// Example: "2025-01-20 15:04:05 [INFO] Server started"
+		entry := parseLogLine(line, serverName)
+		logEntries = append(logEntries, entry)
+	}
+
+	s.logger.Debug("Retrieved server logs", zap.String("server", serverName), zap.Int("lines", len(logEntries)))
+	return logEntries, nil
+}
+
+// parseLogLine parses a log line into a LogEntry
+func parseLogLine(line string, serverName string) contracts.LogEntry {
+	// Try to parse structured format: "2025-01-20 15:04:05 [LEVEL] message"
+	parts := strings.SplitN(line, " ", 3)
+
+	entry := contracts.LogEntry{
+		Timestamp: time.Now(), // Default to now
+		Level:     "INFO",
+		Message:   line, // Full line as fallback
+		Server:    serverName,
+	}
+
+	// Try to parse timestamp and level
+	if len(parts) >= 3 {
+		// Try to parse timestamp (first two parts)
+		timestampStr := parts[0] + " " + parts[1]
+		if ts, err := time.Parse("2006-01-02 15:04:05", timestampStr); err == nil {
+			entry.Timestamp = ts
+
+			// Parse level and message
+			rest := parts[2]
+			if strings.HasPrefix(rest, "[") {
+				endIdx := strings.Index(rest, "]")
+				if endIdx > 0 {
+					entry.Level = rest[1:endIdx]
+					if endIdx+2 < len(rest) {
+						entry.Message = rest[endIdx+2:]
+					}
+				}
+			}
+		}
+	}
+
+	return entry
 }
 
 // GetSecretResolver returns the secret resolver instance

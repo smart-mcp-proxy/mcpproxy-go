@@ -148,6 +148,27 @@ The E2E tests use `@modelcontextprotocol/server-everything` which provides:
 golangci-lint run ./...
 ```
 
+### CLI Management Commands
+
+MCPProxy provides CLI commands for managing upstream servers and monitoring health:
+
+```bash
+mcpproxy upstream list              # List all servers
+mcpproxy upstream logs <name>       # View logs (--tail, --follow)
+mcpproxy upstream restart <name>    # Restart server (supports --all)
+mcpproxy doctor                     # Run health checks
+```
+
+**Common workflow:**
+```bash
+mcpproxy doctor                     # Check overall health
+mcpproxy upstream list              # Identify issues
+mcpproxy upstream logs failing-srv  # View logs
+mcpproxy upstream restart failing-srv
+```
+
+See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
+
 ### Running the Application
 
 #### Core + Tray Architecture (Current)
@@ -527,14 +548,40 @@ The tray application's process monitor (`cmd/mcpproxy-tray/internal/monitor/proc
 
 ## Debugging Guide
 
-### Log Locations
-- **Main log**: `~/Library/Logs/mcpproxy/main.log` (macOS) or `~/.mcpproxy/logs/main.log` (Linux/Windows)
-- **Per-server logs**: `~/Library/Logs/mcpproxy/server-{name}.log`
+### Quick Diagnostics
+
+Run this first when debugging any issue:
+
+```bash
+mcpproxy doctor
+```
+
+This checks for:
+- Upstream server connection errors
+- OAuth authentication requirements
+- Missing secrets
+- Runtime warnings
+- Docker isolation status
+
+See [docs/cli-management-commands.md](docs/cli-management-commands.md) for detailed workflows.
 
 ### Common Commands
+
 ```bash
 # Monitor logs
 tail -f ~/Library/Logs/mcpproxy/main.log
+
+# Check server status
+mcpproxy upstream list
+
+# View specific server logs
+mcpproxy upstream logs github-server --tail=100
+
+# Follow logs in real-time (requires daemon)
+mcpproxy upstream logs github-server --follow
+
+# Restart problematic server
+mcpproxy upstream restart github-server
 
 # Filter for errors
 tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(ERROR|WARN)"
@@ -545,6 +592,10 @@ pkill mcpproxy && ./mcpproxy serve --log-level=debug
 # OAuth debugging
 mcpproxy auth login --server=Sentry --log-level=debug
 ```
+
+### Log Locations
+- **Main log**: `~/Library/Logs/mcpproxy/main.log` (macOS) or `~/.mcpproxy/logs/main.log` (Linux/Windows)
+- **Per-server logs**: `~/Library/Logs/mcpproxy/server-{name}.log`
 
 
 ## Development Guidelines

@@ -55,7 +55,7 @@ type ServerController interface {
 	SearchTools(query string, limit int) ([]map[string]interface{}, error)
 
 	// Logs
-	GetServerLogs(serverName string, tail int) ([]string, error)
+	GetServerLogs(serverName string, tail int) ([]contracts.LogEntry, error)
 
 	// Config and OAuth
 	ReloadConfiguration() error
@@ -803,17 +803,11 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	logs, err := s.controller.GetServerLogs(serverID, tail)
+	logEntries, err := s.controller.GetServerLogs(serverID, tail)
 	if err != nil {
 		s.logger.Error("Failed to get server logs", "server", serverID, "error", err)
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get logs: %v", err))
 		return
-	}
-
-	// Convert log strings to typed log entries
-	logEntries := make([]contracts.LogEntry, len(logs))
-	for i, logLine := range logs {
-		logEntries[i] = *contracts.ConvertLogEntry(logLine, serverID)
 	}
 
 	response := contracts.GetServerLogsResponse{
