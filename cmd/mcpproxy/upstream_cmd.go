@@ -41,34 +41,34 @@ Examples:
 	}
 
 	upstreamLogsCmd = &cobra.Command{
-		Use:   "logs <server-name>",
+		Use:   "logs [server-name]",
 		Short: "Show logs for a specific server",
 		Long: `Display recent log entries from a specific upstream server.
 
 Examples:
-  mcpproxy upstream logs github-server
-  mcpproxy upstream logs github-server --tail=100
+  mcpproxy upstream logs --server github-server
+  mcpproxy upstream logs --server github-server --tail=100
   mcpproxy upstream logs weather-api --follow`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: runUpstreamLogs,
 	}
 
 	upstreamEnableCmd = &cobra.Command{
-		Use:   "enable <server-name>",
+		Use:   "enable [server-name]",
 		Short: "Enable a server",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runUpstreamEnable,
 	}
 
 	upstreamDisableCmd = &cobra.Command{
-		Use:   "disable <server-name>",
+		Use:   "disable [server-name]",
 		Short: "Disable a server",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runUpstreamDisable,
 	}
 
 	upstreamRestartCmd = &cobra.Command{
-		Use:   "restart <server-name>",
+		Use:   "restart [server-name]",
 		Short: "Restart a server",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runUpstreamRestart,
@@ -82,6 +82,7 @@ Examples:
 	upstreamLogsFollow   bool
 	upstreamAll          bool
 	upstreamForce        bool
+	upstreamServerName   string
 )
 
 // GetUpstreamCommand returns the upstream command for adding to the root command.
@@ -108,15 +109,19 @@ func init() {
 	upstreamLogsCmd.Flags().BoolVarP(&upstreamLogsFollow, "follow", "f", false, "Follow log output (requires daemon)")
 	upstreamLogsCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level")
 	upstreamLogsCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to config file")
+	upstreamLogsCmd.Flags().StringVarP(&upstreamServerName, "server", "s", "", "Name of the upstream server")
 
 	// Add --all and --force flags to enable/disable/restart
 	upstreamEnableCmd.Flags().BoolVar(&upstreamAll, "all", false, "Enable all servers")
 	upstreamEnableCmd.Flags().BoolVar(&upstreamForce, "force", false, "Skip confirmation prompt")
+	upstreamEnableCmd.Flags().StringVarP(&upstreamServerName, "server", "s", "", "Name of the upstream server (required unless --all)")
 
 	upstreamDisableCmd.Flags().BoolVar(&upstreamAll, "all", false, "Disable all servers")
 	upstreamDisableCmd.Flags().BoolVar(&upstreamForce, "force", false, "Skip confirmation prompt")
+	upstreamDisableCmd.Flags().StringVarP(&upstreamServerName, "server", "s", "", "Name of the upstream server (required unless --all)")
 
 	upstreamRestartCmd.Flags().BoolVar(&upstreamAll, "all", false, "Restart all servers")
+	upstreamRestartCmd.Flags().StringVarP(&upstreamServerName, "server", "s", "", "Name of the upstream server (required unless --all)")
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
@@ -267,7 +272,10 @@ func createUpstreamLogger(level string) (*zap.Logger, error) {
 }
 
 func runUpstreamLogs(cmd *cobra.Command, args []string) error {
-	serverName := args[0]
+	serverName, err := resolveServerName(args, false)
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -421,32 +429,67 @@ func runUpstreamLogsFollowMode(ctx context.Context, dataDir, serverName string, 
 
 func runUpstreamEnable(cmd *cobra.Command, args []string) error {
 	if upstreamAll {
+		if upstreamServerName != "" || len(args) > 0 {
+			return fmt.Errorf("do not combine --all with a specific server")
+		}
 		return runUpstreamBulkAction("enable", upstreamForce)
 	}
-	if len(args) == 0 {
-		return fmt.Errorf("server name required (or use --all)")
+	serverName, err := resolveServerName(args, true)
+	if err != nil {
+		return err
 	}
-	return runUpstreamAction(args[0], "enable")
+	return runUpstreamAction(serverName, "enable")
 }
 
 func runUpstreamDisable(cmd *cobra.Command, args []string) error {
 	if upstreamAll {
+		if upstreamServerName != "" || len(args) > 0 {
+			return fmt.Errorf("do not combine --all with a specific server")
+		}
 		return runUpstreamBulkAction("disable", upstreamForce)
 	}
-	if len(args) == 0 {
-		return fmt.Errorf("server name required (or use --all)")
+	serverName, err := resolveServerName(args, true)
+	if err != nil {
+		return err
 	}
-	return runUpstreamAction(args[0], "disable")
+	return runUpstreamAction(serverName, "disable")
 }
 
 func runUpstreamRestart(cmd *cobra.Command, args []string) error {
 	if upstreamAll {
+		if upstreamServerName != "" || len(args) > 0 {
+			return fmt.Errorf("do not combine --all with a specific server")
+		}
 		return runUpstreamBulkAction("restart", false) // restart doesn't need confirmation
 	}
-	if len(args) == 0 {
-		return fmt.Errorf("server name required (or use --all)")
+	serverName, err := resolveServerName(args, true)
+	if err != nil {
+		return err
 	}
-	return runUpstreamAction(args[0], "restart")
+	return runUpstreamAction(serverName, "restart")
+}
+
+func resolveServerName(args []string, allowAll bool) (string, error) {
+	// Prefer --server, but allow positional for parity with other commands
+	if upstreamServerName != "" && len(args) > 0 {
+		if args[0] != upstreamServerName {
+			return "", fmt.Errorf("specify server once, either as positional or with --server")
+		}
+	}
+
+	if upstreamServerName != "" {
+		return upstreamServerName, nil
+	}
+
+	if len(args) > 0 {
+		return args[0], nil
+	}
+
+	if allowAll {
+		return "", fmt.Errorf("server name required (or use --all)")
+	}
+
+	return "", fmt.Errorf("server name required")
 }
 
 // validateServerExists checks if a server exists in the configuration
