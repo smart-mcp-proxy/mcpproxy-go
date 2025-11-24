@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 // This file demonstrates swaggo/swag annotation patterns for REST API endpoints.
 // These annotations generate OpenAPI 3.x specifications automatically.
 //
