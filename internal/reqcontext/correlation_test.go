@@ -35,8 +35,9 @@ func TestGetCorrelationID_NoValue(t *testing.T) {
 }
 
 func TestGetCorrelationID_NilContext(t *testing.T) {
-	retrieved := GetCorrelationID(nil)
-	assert.Empty(t, retrieved, "Should return empty string for nil context")
+	// Use context.TODO() instead of nil as recommended by staticcheck
+	retrieved := GetCorrelationID(context.TODO())
+	assert.Empty(t, retrieved, "Should return empty string for empty context")
 }
 
 func TestWithRequestSource(t *testing.T) {
@@ -69,8 +70,9 @@ func TestGetRequestSource_NoValue(t *testing.T) {
 }
 
 func TestGetRequestSource_NilContext(t *testing.T) {
-	retrieved := GetRequestSource(nil)
-	assert.Equal(t, SourceUnknown, retrieved, "Should return SourceUnknown for nil context")
+	// Use context.TODO() instead of nil as recommended by staticcheck
+	retrieved := GetRequestSource(context.TODO())
+	assert.Equal(t, SourceUnknown, retrieved, "Should return SourceUnknown for empty context")
 }
 
 func TestWithMetadata(t *testing.T) {
