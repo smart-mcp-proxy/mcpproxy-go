@@ -11,5 +11,5 @@ linters:
     - gosec
 
 run:
-  skip-dirs:
+  exclude-dirs:
     - specs
