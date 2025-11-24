@@ -10,6 +10,6 @@ linters:
     - errcheck
     - gosec
 
-run:
+issues:
   exclude-dirs:
     - specs
