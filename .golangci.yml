@@ -9,3 +9,7 @@ linters:
   disable:
     - errcheck
     - gosec
+
+run:
+  skip-dirs:
+    - specs

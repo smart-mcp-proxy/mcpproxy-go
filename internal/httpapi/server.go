@@ -16,7 +16,9 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/management"
 	"mcpproxy-go/internal/observability"
+	"mcpproxy-go/internal/reqcontext"
 	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
@@ -49,6 +51,7 @@ type ServerController interface {
 	QuarantineServer(serverName string, quarantined bool) error
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
+	GetManagementService() interface{} // Returns the management service for unified operations
 
 	// Tools and search
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
@@ -196,6 +199,29 @@ func (s *Server) validateAPIKey(r *http.Request, expectedKey string) bool {
 	return false
 }
 
+// correlationIDMiddleware injects correlation ID and request source into context
+func (s *Server) correlationIDMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Generate or retrieve correlation ID
+			correlationID := r.Header.Get("X-Correlation-ID")
+			if correlationID == "" {
+				correlationID = reqcontext.GenerateCorrelationID()
+			}
+
+			// Inject correlation ID and request source into context
+			ctx := reqcontext.WithCorrelationID(r.Context(), correlationID)
+			ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceRESTAPI)
+
+			// Add correlation ID to response headers for client tracking
+			w.Header().Set("X-Correlation-ID", correlationID)
+
+			// Continue with enriched context
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
 // ServeHTTP implements http.Handler
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
@@ -215,7 +241,8 @@ func (s *Server) setupRoutes() {
 	s.router.Use(s.httpLoggingMiddleware()) // Custom HTTP API logging
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.RequestID)
-	s.logger.Debug("Core middleware configured (logging, recovery, request ID)")
+	s.router.Use(s.correlationIDMiddleware()) // Correlation ID and request source tracking
+	s.logger.Debug("Core middleware configured (logging, recovery, request ID, correlation ID)")
 
 	// CORS headers for browser access
 	s.router.Use(func(next http.Handler) http.Handler {
@@ -287,6 +314,10 @@ func (s *Server) setupRoutes() {
 		// Server management
 		r.Get("/servers", s.handleGetServers)
 		r.Post("/servers/reconnect", s.handleForceReconnectServers)
+		// T076-T077: Bulk operation routes
+		r.Post("/servers/restart_all", s.handleRestartAll)
+		r.Post("/servers/enable_all", s.handleEnableAll)
+		r.Post("/servers/disable_all", s.handleDisableAll)
 		r.Route("/servers/{id}", func(r chi.Router) {
 			r.Post("/enable", s.handleEnableServer)
 			r.Post("/disable", s.handleDisableServer)
@@ -316,6 +347,7 @@ func (s *Server) setupRoutes() {
 
 		// Diagnostics
 		r.Get("/diagnostics", s.handleGetDiagnostics)
+		r.Get("/doctor", s.handleGetDiagnostics) // Alias for consistency with CLI command
 
 		// Token statistics
 		r.Get("/stats/tokens", s.handleGetTokenStats)
@@ -349,9 +381,13 @@ func (s *Server) setupRoutes() {
 	s.router.With(s.apiKeyAuthMiddleware()).Method("GET", "/events", http.HandlerFunc(s.handleSSEEvents))
 	s.router.With(s.apiKeyAuthMiddleware()).Method("HEAD", "/events", http.HandlerFunc(s.handleSSEEvents))
 
+	// Swagger UI (OpenAPI documentation)
+	s.router.Get("/swagger/*", s.setupSwaggerRoutes().ServeHTTP)
+
 	s.logger.Debug("HTTP API routes setup completed",
 		"api_routes", "/api/v1/*",
 		"sse_route", "/events",
+		"swagger_route", "/swagger/",
 		"health_routes", "/healthz,/readyz,/livez,/ready")
 }
 
@@ -423,6 +459,16 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 
 // API v1 handlers
 
+// handleGetStatus godoc
+// @Summary Get server status
+// @Description Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+// @Tags status
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse "Server status information"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /status [get]
 func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	response := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
@@ -435,9 +481,17 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	s.writeSuccess(w, response)
 }
 
-// handleGetInfo returns server information including version and web UI URL
-// This endpoint is designed for tray-core communication and returns essential
-// server metadata without requiring detailed status information
+// handleGetInfo godoc
+// @Summary Get server information
+// @Description Get essential server metadata including version, web UI URL, and endpoint addresses
+// @Description This endpoint is designed for tray-core communication
+// @Tags status
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse "Server information"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /info [get]
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	listenAddr := s.controller.GetListenAddress()
 
@@ -512,7 +566,53 @@ func getSocketPath() string {
 	return ""
 }
 
-func (s *Server) handleGetServers(w http.ResponseWriter, _ *http.Request) {
+// handleGetServers godoc
+// @Summary List all upstream MCP servers
+// @Description Get a list of all configured upstream MCP servers with their connection status and statistics
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.GetServersResponse "Server list with statistics"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers [get]
+func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
+	// Try to use management service if available
+	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
+		// Use new management service path
+		servers, stats, err := mgmtSvc.(interface {
+			ListServers(context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
+		}).ListServers(r.Context())
+
+		if err != nil {
+			s.logger.Error("Failed to list servers via management service", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to get servers")
+			return
+		}
+
+		// Convert []*Server to []Server
+		serverValues := make([]contracts.Server, len(servers))
+		for i, srv := range servers {
+			if srv != nil {
+				serverValues[i] = *srv
+			}
+		}
+
+		// Dereference stats pointer
+		var statsValue contracts.ServerStats
+		if stats != nil {
+			statsValue = *stats
+		}
+
+		response := contracts.GetServersResponse{
+			Servers: serverValues,
+			Stats:   statsValue,
+		}
+		s.writeSuccess(w, response)
+		return
+	}
+
+	// Fallback to legacy path if management service not available
 	genericServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.logger.Error("Failed to get servers", "error", err)
@@ -532,6 +632,19 @@ func (s *Server) handleGetServers(w http.ResponseWriter, _ *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleEnableServer godoc
+// @Summary Enable an upstream server
+// @Description Enable a specific upstream MCP server
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Server enabled successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/enable [post]
 func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -539,6 +652,29 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try to use management service if available
+	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
+		err := mgmtSvc.(interface {
+			EnableServer(context.Context, string, bool) error
+		}).EnableServer(r.Context(), serverID, true)
+
+		if err != nil {
+			s.logger.Error("Failed to enable server via management service", "server", serverID, "error", err)
+			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
+			return
+		}
+
+		response := contracts.ServerActionResponse{
+			Server:  serverID,
+			Action:  "enable",
+			Success: true,
+			Async:   false, // Management service is synchronous
+		}
+		s.writeSuccess(w, response)
+		return
+	}
+
+	// Fallback to legacy async path
 	async, err := s.toggleServerAsync(serverID, true)
 	if err != nil {
 		s.logger.Error("Failed to enable server", "server", serverID, "error", err)
@@ -562,6 +698,19 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleDisableServer godoc
+// @Summary Disable an upstream server
+// @Description Disable a specific upstream MCP server
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Server disabled successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/disable [post]
 func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -569,6 +718,29 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try to use management service if available
+	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
+		err := mgmtSvc.(interface {
+			EnableServer(context.Context, string, bool) error
+		}).EnableServer(r.Context(), serverID, false)
+
+		if err != nil {
+			s.logger.Error("Failed to disable server via management service", "server", serverID, "error", err)
+			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
+			return
+		}
+
+		response := contracts.ServerActionResponse{
+			Server:  serverID,
+			Action:  "disable",
+			Success: true,
+			Async:   false, // Management service is synchronous
+		}
+		s.writeSuccess(w, response)
+		return
+	}
+
+	// Fallback to legacy async path
 	async, err := s.toggleServerAsync(serverID, false)
 	if err != nil {
 		s.logger.Error("Failed to disable server", "server", serverID, "error", err)
@@ -592,6 +764,17 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleForceReconnectServers godoc
+// @Summary Reconnect all servers
+// @Description Force reconnection to all upstream MCP servers
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param reason query string false "Reason for reconnection"
+// @Success 200 {object} contracts.ServerActionResponse "All servers reconnected successfully"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/reconnect [post]
 func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Request) {
 	reason := r.URL.Query().Get("reason")
 
@@ -612,6 +795,115 @@ func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Requ
 	s.writeSuccess(w, response)
 }
 
+// T073: handleRestartAll godoc
+// @Summary Restart all servers
+// @Description Restart all configured upstream MCP servers sequentially with partial failure handling
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} management.BulkOperationResult "Bulk restart results with success/failure counts"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (management disabled)"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/restart_all [post]
+func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
+	// Get management service from controller
+	mgmtSvc, ok := s.controller.GetManagementService().(interface {
+		RestartAll(ctx context.Context) (*management.BulkOperationResult, error)
+	})
+	if !ok {
+		s.logger.Error("Failed to get management service")
+		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	result, err := mgmtSvc.RestartAll(r.Context())
+	if err != nil {
+		s.logger.Error("RestartAll operation failed", "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart all servers: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, result)
+}
+
+// T074: handleEnableAll godoc
+// @Summary Enable all servers
+// @Description Enable all configured upstream MCP servers with partial failure handling
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} management.BulkOperationResult "Bulk enable results with success/failure counts"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (management disabled)"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/enable_all [post]
+func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
+	// Get management service from controller
+	mgmtSvc, ok := s.controller.GetManagementService().(interface {
+		EnableAll(ctx context.Context) (*management.BulkOperationResult, error)
+	})
+	if !ok {
+		s.logger.Error("Failed to get management service")
+		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	result, err := mgmtSvc.EnableAll(r.Context())
+	if err != nil {
+		s.logger.Error("EnableAll operation failed", "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to enable all servers: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, result)
+}
+
+// T075: handleDisableAll godoc
+// @Summary Disable all servers
+// @Description Disable all configured upstream MCP servers with partial failure handling
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} management.BulkOperationResult "Bulk disable results with success/failure counts"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (management disabled)"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/disable_all [post]
+func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
+	// Get management service from controller
+	mgmtSvc, ok := s.controller.GetManagementService().(interface {
+		DisableAll(ctx context.Context) (*management.BulkOperationResult, error)
+	})
+	if !ok {
+		s.logger.Error("Failed to get management service")
+		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	result, err := mgmtSvc.DisableAll(r.Context())
+	if err != nil {
+		s.logger.Error("DisableAll operation failed", "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable all servers: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, result)
+}
+
+// handleRestartServer godoc
+// @Summary Restart an upstream server
+// @Description Restart the connection to a specific upstream MCP server
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Server restarted successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/restart [post]
 func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -619,6 +911,53 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try to use management service if available
+	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
+		err := mgmtSvc.(interface {
+			RestartServer(context.Context, string) error
+		}).RestartServer(r.Context(), serverID)
+
+		if err != nil {
+			// Check if error is OAuth-related (expected state, not a failure)
+			errStr := err.Error()
+			isOAuthError := strings.Contains(errStr, "OAuth authorization") ||
+				strings.Contains(errStr, "oauth") ||
+				strings.Contains(errStr, "authorization required") ||
+				strings.Contains(errStr, "no valid token")
+
+			if isOAuthError {
+				// OAuth required is not a failure - restart succeeded but OAuth is needed
+				s.logger.Info("Server restart completed, OAuth login required",
+					"server", serverID,
+					"error", errStr)
+
+				response := contracts.ServerActionResponse{
+					Server:  serverID,
+					Action:  "restart",
+					Success: true,
+					Async:   false,
+				}
+				s.writeSuccess(w, response)
+				return
+			}
+
+			// Non-OAuth error - treat as failure
+			s.logger.Error("Failed to restart server via management service", "server", serverID, "error", err)
+			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
+			return
+		}
+
+		response := contracts.ServerActionResponse{
+			Server:  serverID,
+			Action:  "restart",
+			Success: true,
+			Async:   false,
+		}
+		s.writeSuccess(w, response)
+		return
+	}
+
+	// Fallback to legacy path
 	// Use the new synchronous RestartServer method
 	done := make(chan error, 1)
 	go func() {
@@ -696,6 +1035,19 @@ func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) 
 	}
 }
 
+// handleServerLogin godoc
+// @Summary Trigger OAuth login for server
+// @Description Initiate OAuth authentication flow for a specific upstream MCP server
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "OAuth login initiated successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/login [post]
 func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -718,6 +1070,19 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleQuarantineServer godoc
+// @Summary Quarantine a server
+// @Description Place a specific upstream MCP server in quarantine to prevent tool execution
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Server quarantined successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/quarantine [post]
 func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -740,6 +1105,19 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 	s.writeSuccess(w, response)
 }
 
+// handleUnquarantineServer godoc
+// @Summary Unquarantine a server
+// @Description Remove a specific upstream MCP server from quarantine to allow tool execution
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Server unquarantined successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/unquarantine [post]
 func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -762,6 +1140,19 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 	s.writeSuccess(w, response)
 }
 
+// handleGetServerTools godoc
+// @Summary Get tools for a server
+// @Description Retrieve all available tools for a specific upstream MCP server
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.GetServerToolsResponse "Server tools retrieved successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/tools [get]
 func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -788,6 +1179,20 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleGetServerLogs godoc
+// @Summary Get server logs
+// @Description Retrieve log entries for a specific upstream MCP server
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Param tail query int false "Number of log lines to retrieve" default(100)
+// @Success 200 {object} contracts.GetServerLogsResponse "Server logs retrieved successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/logs [get]
 func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -819,6 +1224,19 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleSearchTools godoc
+// @Summary Search for tools
+// @Description Search across all upstream MCP server tools using BM25 keyword search
+// @Tags tools
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param q query string true "Search query"
+// @Param limit query int false "Maximum number of results" default(10) maximum(100)
+// @Success 200 {object} contracts.SearchToolsResponse "Search results"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing query parameter)"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /index/search [get]
 func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -1227,13 +1645,40 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 
 // Diagnostics handler
 
+// handleGetDiagnostics godoc
+// @Summary Get health diagnostics
+// @Description Get comprehensive health diagnostics including upstream errors, OAuth requirements, missing secrets, and Docker status
+// @Tags diagnostics
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.Diagnostics "Health diagnostics"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /diagnostics [get]
+// @Router /doctor [get]
 func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
-	// Get all servers
+	// Try to use management service if available
+	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
+		diag, err := mgmtSvc.(interface {
+			Doctor(context.Context) (*contracts.Diagnostics, error)
+		}).Doctor(r.Context())
+
+		if err != nil {
+			s.logger.Error("Failed to get diagnostics via management service", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to get diagnostics")
+			return
+		}
+
+		s.writeSuccess(w, diag)
+		return
+	}
+
+	// Fallback to legacy path if management service not available
 	genericServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.logger.Error("Failed to get servers for diagnostics", "error", err)
@@ -1244,7 +1689,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed servers
 	servers := contracts.ConvertGenericServersToTyped(genericServers)
 
-	// Collect diagnostics
+	// Collect diagnostics (legacy format)
 	var upstreamErrors []contracts.DiagnosticIssue
 	var oauthRequired []string
 	var missingSecrets []contracts.MissingSecret
@@ -1261,7 +1706,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 				Server:    server.Name,
 				Title:     "Server Connection Error",
 				Message:   server.LastError,
-				Timestamp: now, // TODO: Use actual error timestamp
+				Timestamp: now,
 				Severity:  "high",
 				Metadata: map[string]interface{}{
 					"protocol": server.Protocol,
@@ -1279,9 +1724,6 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 		missingSecrets = append(missingSecrets, s.checkMissingSecrets(server)...)
 	}
 
-	// TODO: Collect runtime warnings from system
-	// This could include configuration warnings, performance alerts, etc.
-
 	totalIssues := len(upstreamErrors) + len(oauthRequired) + len(missingSecrets) + len(runtimeWarnings)
 
 	response := contracts.DiagnosticsResponse{
@@ -1296,7 +1738,16 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
-// handleGetTokenStats returns token savings statistics
+// handleGetTokenStats godoc
+// @Summary Get token savings statistics
+// @Description Retrieve token savings statistics across all servers and sessions
+// @Tags stats
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse "Token statistics"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /stats/tokens [get]
 func (s *Server) handleGetTokenStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1649,7 +2100,19 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
-// handleCallTool handles REST API tool calls (wrapper around MCP tool calls)
+// handleCallTool godoc
+// @Summary Call a tool
+// @Description Execute a tool on an upstream MCP server (wrapper around MCP tool calls)
+// @Tags tools
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param request body object{tool_name=string,arguments=object} true "Tool call request with tool name and arguments"
+// @Success 200 {object} contracts.SuccessResponse "Tool call result"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (invalid payload or missing tool name)"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error or tool execution failure"
+// @Router /tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1898,7 +2361,16 @@ func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) 
 	s.writeSuccess(w, response)
 }
 
-// handleGetDockerStatus returns the current Docker recovery status
+// handleGetDockerStatus godoc
+// @Summary Get Docker status
+// @Description Retrieve current Docker availability and recovery status
+// @Tags docker
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse "Docker status information"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /docker/status [get]
 func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 	status := s.controller.GetDockerRecoveryStatus()
 	if status == nil {

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/reqcontext"
 	"mcpproxy-go/internal/socket"
 )
 
@@ -503,7 +505,9 @@ func validateServerExists(cfg *config.Config, serverName string) error {
 }
 
 func runUpstreamAction(serverName, action string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Create context with correlation ID and request source tracking
+	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// Load configuration
@@ -544,9 +548,12 @@ func runUpstreamAction(serverName, action string) error {
 	return nil
 }
 
+// T081-T082: Updated to use new bulk operation endpoints
 func runUpstreamBulkAction(action string, force bool) error {
+	// Create context with correlation ID and request source tracking
+	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
 	// Use a longer parent context (2 minutes) to allow multiple operations
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	// Load configuration
@@ -571,35 +578,20 @@ func runUpstreamBulkAction(action string, force bool) error {
 	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
 	client := cliclient.NewClient(socketPath, logger.Sugar())
 
-	// Get server list to count
+	// Get server count for confirmation
 	servers, err := client.GetServers(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get server list: %w", err)
 	}
 
-	// Filter based on action (enable=disabled servers, disable=enabled servers)
-	var targetServers []string
-	for _, srv := range servers {
-		name := getStringField(srv, "name")
-		enabled := getBoolField(srv, "enabled")
-
-		if action == "enable" && !enabled {
-			targetServers = append(targetServers, name)
-		} else if action == "disable" && enabled {
-			targetServers = append(targetServers, name)
-		} else if action == "restart" && enabled {
-			targetServers = append(targetServers, name)
-		}
-	}
-
-	if len(targetServers) == 0 {
-		fmt.Printf("⚠️  No servers to %s\n", action)
+	if len(servers) == 0 {
+		fmt.Printf("⚠️  No servers configured\n")
 		return nil
 	}
 
 	// Require confirmation for enable/disable --all
 	if action == "enable" || action == "disable" {
-		confirmed, err := confirmBulkAction(action, len(targetServers), force)
+		confirmed, err := confirmBulkAction(action, len(servers), force)
 		if err != nil {
 			return err
 		}
@@ -609,21 +601,45 @@ func runUpstreamBulkAction(action string, force bool) error {
 		}
 	}
 
-	// Perform action on all servers
-	fmt.Printf("Performing action '%s' on %d server(s)...\n", action, len(targetServers))
+	// Call appropriate bulk operation endpoint
+	var result *cliclient.BulkOperationResult
+	switch action {
+	case "restart":
+		result, err = client.RestartAll(ctx)
+	case "enable":
+		result, err = client.EnableAll(ctx)
+	case "disable":
+		result, err = client.DisableAll(ctx)
+	default:
+		return fmt.Errorf("unknown bulk action: %s", action)
+	}
 
-	for _, serverName := range targetServers {
-		// Give each server its own 30-second timeout
-		serverCtx, serverCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Bulk %s failed: %v\n", action, err)
+		return err
+	}
 
-		err = client.ServerAction(serverCtx, serverName, action)
-		serverCancel() // Clean up immediately after each operation
+	// Display results
+	actionTitle := action
+	if len(action) > 0 {
+		actionTitle = strings.ToUpper(action[:1]) + action[1:]
+	}
+	fmt.Printf("\n%s Operation Results:\n", actionTitle)
+	fmt.Printf("  Total servers:      %d\n", result.Total)
+	fmt.Printf("  ✅ Successful:      %d\n", result.Successful)
+	fmt.Printf("  ❌ Failed:          %d\n", result.Failed)
 
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to %s server '%s': %v\n", action, serverName, err)
-		} else {
-			fmt.Printf("✅ Successfully %sed server '%s'\n", action, serverName)
+	// Show errors if any
+	if len(result.Errors) > 0 {
+		fmt.Printf("\nErrors:\n")
+		for serverName, errMsg := range result.Errors {
+			fmt.Printf("  • %s: %s\n", serverName, errMsg)
 		}
+	}
+
+	// Return error if any servers failed
+	if result.Failed > 0 {
+		return fmt.Errorf("%d server(s) failed to %s", result.Failed, action)
 	}
 
 	return nil

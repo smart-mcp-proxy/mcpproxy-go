@@ -2,6 +2,8 @@ package server_test
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"mcpproxy-go/internal/socket"
 )
 
 // binaryName returns the appropriate binary name for the current OS
@@ -22,12 +26,44 @@ func binaryName(name string) string {
 	return name
 }
 
+// waitForServerReady polls the server health endpoint and socket file until both are ready or timeout occurs
+func waitForServerReady(address, dataDir string, timeout time.Duration) error {
+	client := &http.Client{Timeout: 1 * time.Second}
+	deadline := time.Now().Add(timeout)
+
+	// Get the socket endpoint path using the same logic as the daemon
+	socketEndpoint := socket.GetDefaultSocketPath(dataDir)
+
+	for time.Now().Before(deadline) {
+		// Check HTTP endpoint
+		resp, err := client.Get(fmt.Sprintf("http://%s/healthz", address))
+		httpReady := (err == nil && resp.StatusCode == http.StatusOK)
+		if resp != nil {
+			resp.Body.Close()
+		}
+
+		// Check socket/pipe availability using socket package
+		socketReady := socket.IsSocketAvailable(socketEndpoint)
+
+		if httpReady && socketReady {
+			return nil
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("server not ready after %v (http ready, socket at %s)", timeout, socketEndpoint)
+}
+
 func TestCodeExecClientModeE2E(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
 	}
 
-	tmpDir := t.TempDir()
+	// Use /tmp with short name to avoid Unix socket path length limit (104-108 chars)
+	tmpDir := filepath.Join("/tmp", "mcpproxy-test-"+t.Name())
+	require.NoError(t, os.MkdirAll(tmpDir, 0700))
+	defer os.RemoveAll(tmpDir)
 
 	// Build mcpproxy binary
 	mcpproxyBin := filepath.Join(tmpDir, binaryName("mcpproxy"))
@@ -42,6 +78,7 @@ func TestCodeExecClientModeE2E(t *testing.T) {
 	config := `{
 		"listen": "127.0.0.1:18080",
 		"data_dir": "` + tmpDir + `",
+		"enable_socket": true,
 		"enable_code_execution": true,
 		"mcpServers": []
 	}`
@@ -57,8 +94,9 @@ func TestCodeExecClientModeE2E(t *testing.T) {
 		require.NoError(t, daemonCmd.Start())
 		defer daemonCmd.Process.Kill()
 
-		// Wait for daemon to be ready
-		time.Sleep(2 * time.Second)
+		// Wait for daemon to be ready with health check polling
+		err = waitForServerReady("127.0.0.1:18080", tmpDir, 15*time.Second)
+		require.NoError(t, err, "Daemon failed to become ready")
 
 		// Run code exec CLI command
 		execCmd := exec.Command(mcpproxyBin, "code", "exec",
@@ -101,7 +139,10 @@ func TestCallToolClientModeE2E(t *testing.T) {
 		t.Skip("Skipping E2E test in short mode")
 	}
 
-	tmpDir := t.TempDir()
+	// Use /tmp with short name to avoid Unix socket path length limit (104-108 chars)
+	tmpDir := filepath.Join("/tmp", "mcpproxy-test-"+t.Name())
+	require.NoError(t, os.MkdirAll(tmpDir, 0700))
+	defer os.RemoveAll(tmpDir)
 
 	// Build mcpproxy binary
 	mcpproxyBin := filepath.Join(tmpDir, binaryName("mcpproxy"))
@@ -116,6 +157,7 @@ func TestCallToolClientModeE2E(t *testing.T) {
 	config := `{
 		"listen": "127.0.0.1:18081",
 		"data_dir": "` + tmpDir + `",
+		"enable_socket": true,
 		"mcpServers": []
 	}`
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0600))
@@ -130,8 +172,9 @@ func TestCallToolClientModeE2E(t *testing.T) {
 		require.NoError(t, daemonCmd.Start())
 		defer daemonCmd.Process.Kill()
 
-		// Wait for daemon to be ready
-		time.Sleep(2 * time.Second)
+		// Wait for daemon to be ready with health check polling
+		err = waitForServerReady("127.0.0.1:18081", tmpDir, 15*time.Second)
+		require.NoError(t, err, "Daemon failed to become ready")
 
 		// Run call tool CLI command (test built-in upstream_servers tool)
 		callCmd := exec.Command(mcpproxyBin, "call", "tool",
@@ -171,7 +214,10 @@ func TestConcurrentCLICommandsE2E(t *testing.T) {
 		t.Skip("Skipping E2E test in short mode")
 	}
 
-	tmpDir := t.TempDir()
+	// Use /tmp with short name to avoid Unix socket path length limit (104-108 chars)
+	tmpDir := filepath.Join("/tmp", "mcpproxy-test-"+t.Name())
+	require.NoError(t, os.MkdirAll(tmpDir, 0700))
+	defer os.RemoveAll(tmpDir)
 
 	// Build mcpproxy binary
 	mcpproxyBin := filepath.Join(tmpDir, binaryName("mcpproxy"))
@@ -186,6 +232,7 @@ func TestConcurrentCLICommandsE2E(t *testing.T) {
 	config := `{
 		"listen": "127.0.0.1:18082",
 		"data_dir": "` + tmpDir + `",
+		"enable_socket": true,
 		"enable_code_execution": true,
 		"mcpServers": []
 	}`
@@ -200,8 +247,21 @@ func TestConcurrentCLICommandsE2E(t *testing.T) {
 	require.NoError(t, daemonCmd.Start())
 	defer daemonCmd.Process.Kill()
 
-	// Wait for daemon to be ready
-	time.Sleep(2 * time.Second)
+	// Wait for daemon to be ready with health check polling
+	socketPath := socket.GetDefaultSocketPath(tmpDir)
+	t.Logf("Waiting for daemon... Socket path: %s", socketPath)
+
+	err = waitForServerReady("127.0.0.1:18082", tmpDir, 15*time.Second)
+	if err != nil {
+		t.Logf("Socket available after timeout: %v", socket.IsSocketAvailable(socketPath))
+		// List files in tmpDir to debug
+		files, _ := os.ReadDir(tmpDir)
+		t.Logf("Files in tmpDir:")
+		for _, f := range files {
+			t.Logf("  - %s", f.Name())
+		}
+	}
+	require.NoError(t, err, "Daemon failed to become ready")
 
 	// Run 5 concurrent code exec commands
 	errChan := make(chan error, 5)
@@ -215,12 +275,15 @@ func TestConcurrentCLICommandsE2E(t *testing.T) {
 
 			output, err := execCmd.CombinedOutput()
 			if err != nil {
+				// Log the output to help diagnose the issue
+				t.Logf("Command %d failed with error: %v\nOutput: %s", idx, err, string(output))
 				errChan <- err
 				return
 			}
 
 			// Verify no DB lock error
 			if contains(string(output), "database locked") {
+				t.Logf("Command %d got database locked error", idx)
 				errChan <- assert.AnError
 				return
 			}

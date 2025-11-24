@@ -149,6 +149,15 @@ func (s *Server) EventsChannel() <-chan runtime.Event {
 	return s.eventsCh
 }
 
+// GetManagementService returns the management service instance from runtime.
+// Returns nil if service hasn't been set yet.
+func (s *Server) GetManagementService() interface{} {
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.GetManagementService()
+}
+
 // updateStatus updates the current status and notifies subscribers
 func (s *Server) updateStatus(phase runtime.Phase, message string) {
 	s.runtime.UpdatePhase(phase, message)

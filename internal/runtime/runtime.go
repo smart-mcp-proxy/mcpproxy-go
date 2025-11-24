@@ -59,13 +59,14 @@ type Runtime struct {
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
 
-	storageManager  *storage.Manager
-	indexManager    *index.Manager
-	upstreamManager *upstream.Manager
-	cacheManager    *cache.Manager
-	truncator       *truncate.Truncator
-	secretResolver  *secret.Resolver
-	tokenizer       tokens.Tokenizer
+	storageManager   *storage.Manager
+	indexManager     *index.Manager
+	upstreamManager  *upstream.Manager
+	cacheManager     *cache.Manager
+	truncator        *truncate.Truncator
+	secretResolver   *secret.Resolver
+	tokenizer        tokens.Tokenizer
+	managementService interface{} // Initialized later to avoid import cycle
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
@@ -1428,4 +1429,22 @@ func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 		return nil
 	}
 	return r.upstreamManager.GetDockerRecoveryStatus()
+}
+
+// SetManagementService stores the management service instance.
+// This is called after runtime initialization to avoid import cycles.
+func (r *Runtime) SetManagementService(svc interface{}) {
+	r.managementService = svc
+}
+
+// GetManagementService returns the management service instance.
+// Returns nil if service hasn't been set yet.
+func (r *Runtime) GetManagementService() interface{} {
+	return r.managementService
+}
+
+// EmitServersChanged implements the EventEmitter interface for the management service.
+// This delegates to the runtime's internal event emission mechanism.
+func (r *Runtime) EmitServersChanged(reason string, extra map[string]any) {
+	r.emitServersChanged(reason, extra)
 }

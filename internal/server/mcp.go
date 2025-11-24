@@ -12,6 +12,7 @@ import (
 
 	"mcpproxy-go/internal/cache"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/jsruntime"
@@ -1048,6 +1049,12 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		return p.handlePatchUpstream(ctx, request)
 	case "tail_log":
 		return p.handleTailLog(ctx, request)
+	case "enable":
+		return p.handleEnableUpstream(ctx, request, true)
+	case "disable":
+		return p.handleEnableUpstream(ctx, request, false)
+	case "restart":
+		return p.handleRestartUpstream(ctx, request)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
 	}
@@ -1208,6 +1215,112 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 	}
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// handleEnableUpstream enables or disables a specific upstream server
+func (p *MCPProxyServer) handleEnableUpstream(ctx context.Context, request mcp.CallToolRequest, enabled bool) (*mcp.CallToolResult, error) {
+	serverName, err := request.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
+	}
+
+	// Try to use management service if available
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
+			err := mgmtSvc.(interface {
+				EnableServer(context.Context, string, bool) error
+			}).EnableServer(ctx, serverName, enabled)
+
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to %s server '%s': %v",
+					map[bool]string{true: "enable", false: "disable"}[enabled], serverName, err)), nil
+			}
+
+			action := "enabled"
+			if !enabled {
+				action = "disabled"
+			}
+
+			result := map[string]interface{}{
+				"success": true,
+				"server":  serverName,
+				"action":  action,
+			}
+
+			jsonResult, err := json.Marshal(result)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+			}
+
+			return mcp.NewToolResultText(string(jsonResult)), nil
+		}
+	}
+
+	// Fallback: management service not available
+	return mcp.NewToolResultError("Management service not available"), nil
+}
+
+// handleRestartUpstream restarts a specific upstream server connection
+func (p *MCPProxyServer) handleRestartUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName, err := request.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
+	}
+
+	// Try to use management service if available
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
+			err := mgmtSvc.(interface {
+				RestartServer(context.Context, string) error
+			}).RestartServer(ctx, serverName)
+
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to restart server '%s': %v", serverName, err)), nil
+			}
+
+			result := map[string]interface{}{
+				"success": true,
+				"server":  serverName,
+				"action":  "restarted",
+			}
+
+			jsonResult, err := json.Marshal(result)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+			}
+
+			return mcp.NewToolResultText(string(jsonResult)), nil
+		}
+	}
+
+	// Fallback: management service not available
+	return mcp.NewToolResultError("Management service not available"), nil
+}
+
+// handleDoctor returns comprehensive health diagnostics from the management service
+func (p *MCPProxyServer) handleDoctor(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Try to use management service if available
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
+			diag, err := mgmtSvc.(interface {
+				Doctor(context.Context) (*contracts.Diagnostics, error)
+			}).Doctor(ctx)
+
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to run diagnostics: %v", err)), nil
+			}
+
+			jsonResult, err := json.Marshal(diag)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize diagnostics: %v", err)), nil
+			}
+
+			return mcp.NewToolResultText(string(jsonResult)), nil
+		}
+	}
+
+	// Fallback: management service not available
+	return mcp.NewToolResultError("Management service not available"), nil
 }
 
 // checkDockerAvailable checks if Docker daemon is available with caching
@@ -2540,6 +2653,8 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		result, err = p.handleListRegistries(ctx, request)
 	case "search_servers":
 		result, err = p.handleSearchServers(ctx, request)
+	case "doctor":
+		result, err = p.handleDoctor(ctx, request)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", toolName)
 	}

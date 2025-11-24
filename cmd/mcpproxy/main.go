@@ -1,5 +1,31 @@
 package main
 
+// @title MCPProxy API
+// @version 1.0
+// @description MCPProxy REST API for managing MCP servers, tools, and diagnostics
+// @description
+// @description MCPProxy is a smart proxy for AI agents using the Model Context Protocol (MCP).
+// @description It provides intelligent tool discovery, massive token savings, and built-in security quarantine.
+//
+// @contact.name MCPProxy Support
+// @contact.url https://github.com/smart-mcp-proxy/mcpproxy-go
+//
+// @license.name MIT
+// @license.url https://opensource.org/licenses/MIT
+//
+// @host localhost:8080
+// @BasePath /api/v1
+//
+// @securityDefinitions.apikey ApiKeyAuth
+// @in header
+// @name X-API-Key
+// @description API key authentication. Provide your API key in the X-API-Key header.
+//
+// @securityDefinitions.apikey ApiKeyQuery
+// @in query
+// @name apikey
+// @description API key authentication via query parameter. Use ?apikey=your-key
+
 import (
 	"context"
 	"encoding/json"
@@ -15,6 +41,7 @@ import (
 	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
+	_ "mcpproxy-go/docs" // Import generated swagger docs
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/logs"

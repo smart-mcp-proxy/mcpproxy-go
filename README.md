@@ -168,6 +168,32 @@ mcpproxy tools list --server=NAME  # Debug tool discovery for specific server
 mcpproxy trust-cert                 # Install CA certificate as trusted (for HTTPS)
 ```
 
+**Management Commands:**
+```bash
+# Single-server operations
+mcpproxy upstream list              # List all servers with status
+mcpproxy upstream restart <name>    # Restart specific server
+mcpproxy upstream enable <name>     # Enable specific server
+mcpproxy upstream disable <name>    # Disable specific server
+mcpproxy upstream logs <name>       # View server logs (--tail, --follow)
+
+# Bulk operations (multiple servers)
+mcpproxy upstream restart --all     # Restart all configured servers
+mcpproxy upstream enable --all      # Enable all servers
+mcpproxy upstream disable --all     # Disable all servers
+
+# Health diagnostics
+mcpproxy doctor                     # Run comprehensive health checks
+```
+
+**Management Service Architecture:**
+
+All management operations (CLI, REST API, and MCP protocol) share a unified service layer that provides:
+- **Configuration gates**: Respects `disable_management` and `read_only_mode` settings
+- **Event integration**: Real-time updates to system tray and web UI
+- **Bulk operations**: Efficient multi-server management with partial failure handling
+- **Consistent behavior**: Same validation and error handling across all interfaces
+
 **Serve Command Flags:**
 ```text
 mcpproxy serve --help

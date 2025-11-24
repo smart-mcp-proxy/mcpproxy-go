@@ -26,6 +26,7 @@ type MockServerController struct{}
 
 func (m *MockServerController) IsRunning() bool          { return true }
 func (m *MockServerController) GetListenAddress() string { return ":8080" }
+func (m *MockServerController) GetManagementService() interface{} { return nil }
 func (m *MockServerController) GetUpstreamStats() map[string]interface{} {
 	return map[string]interface{}{
 		"servers": map[string]interface{}{
