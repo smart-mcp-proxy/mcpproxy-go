@@ -22,6 +22,7 @@ import (
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/httpapi"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/management"
 	"mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
@@ -71,6 +72,17 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	if err != nil {
 		return nil, err
 	}
+
+	// Initialize management service and set it on runtime
+	secretResolver := secret.NewResolver()
+	mgmtService := management.NewService(
+		rt,            // RuntimeOperations
+		cfg,           // Config
+		rt,            // EventEmitter
+		secretResolver, // SecretResolver
+		logger.Sugar(),
+	)
+	rt.SetManagementService(mgmtService)
 
 	server := &Server{
 		logger:   logger,

@@ -150,13 +150,18 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 	stats := &contracts.ServerStats{}
 
 	for _, srvRaw := range serversRaw {
-		// Convert map to Server struct (simplified - real impl would use proper conversion)
+		// Convert map to Server struct
 		srv := &contracts.Server{}
+
+		// Extract basic fields
 		if name, ok := srvRaw["name"].(string); ok {
 			srv.Name = name
 		}
 		if id, ok := srvRaw["id"].(string); ok {
 			srv.ID = id
+		}
+		if protocol, ok := srvRaw["protocol"].(string); ok {
+			srv.Protocol = protocol
 		}
 		if enabled, ok := srvRaw["enabled"].(bool); ok {
 			srv.Enabled = enabled
@@ -166,6 +171,26 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		}
 		if quarantined, ok := srvRaw["quarantined"].(bool); ok {
 			srv.Quarantined = quarantined
+		}
+		if status, ok := srvRaw["status"].(string); ok {
+			srv.Status = status
+		}
+
+		// Extract numeric fields
+		if toolCount, ok := srvRaw["tool_count"].(int); ok {
+			srv.ToolCount = toolCount
+			stats.TotalTools += toolCount
+		}
+		if retryCount, ok := srvRaw["retry_count"].(int); ok {
+			srv.ReconnectCount = retryCount
+		}
+
+		// Extract timestamp fields
+		if created, ok := srvRaw["created"].(time.Time); ok {
+			srv.Created = created
+		}
+		if updated, ok := srvRaw["updated"].(time.Time); ok {
+			srv.Updated = updated
 		}
 
 		servers = append(servers, srv)
