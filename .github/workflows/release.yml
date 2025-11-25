@@ -14,8 +14,8 @@ env:
 jobs:
   build:
     environment: production
-    # Only run on tags from main branch
-    if: startsWith(github.ref, 'refs/tags/v') && (github.event.base_ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[main]'))
+    # Only run on version tags
+    if: startsWith(github.ref, 'refs/tags/v')
     strategy:
       matrix:
         include:
