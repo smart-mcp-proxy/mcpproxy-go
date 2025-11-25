@@ -381,13 +381,12 @@ func (s *Server) setupRoutes() {
 	s.router.With(s.apiKeyAuthMiddleware()).Method("GET", "/events", http.HandlerFunc(s.handleSSEEvents))
 	s.router.With(s.apiKeyAuthMiddleware()).Method("HEAD", "/events", http.HandlerFunc(s.handleSSEEvents))
 
-	// Swagger UI (OpenAPI documentation)
-	s.router.Get("/swagger/*", s.setupSwaggerRoutes().ServeHTTP)
+	// Note: Swagger UI is mounted directly on the main mux (not via HTTP API server)
+	// See internal/server/server.go for swagger handler registration
 
 	s.logger.Debug("HTTP API routes setup completed",
 		"api_routes", "/api/v1/*",
 		"sse_route", "/events",
-		"swagger_route", "/swagger/",
 		"health_routes", "/healthz,/readyz,/livez,/ready")
 }
 

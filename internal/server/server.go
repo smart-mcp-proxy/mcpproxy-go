@@ -1135,6 +1135,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
 	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
 
+	// Swagger UI (OpenAPI documentation) - mounted directly on main mux for /swagger/* access
+	swaggerHandler := httpapi.SetupSwaggerHandler(s.logger.Sugar())
+	mux.Handle("/swagger/", swaggerHandler)
+	s.logger.Info("Registered Swagger UI endpoint", zap.String("swagger_endpoint", "/swagger/*"))
+
 	// Web UI endpoints (serves embedded Vue.js frontend) with selective API key protection
 	webUIHandler := web.NewHandler(s.logger.Sugar())
 	selectiveProtectedWebUIHandler := s.createSelectiveWebUIProtectedHandler(http.StripPrefix("/ui", webUIHandler))
