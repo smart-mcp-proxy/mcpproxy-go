@@ -90,12 +90,12 @@ func TestOutputDiagnostics_PrettyFormat_WithUpstreamErrors(t *testing.T) {
 		"total_issues": 2,
 		"upstream_errors": []interface{}{
 			map[string]interface{}{
-				"server":  "github-server",
-				"message": "connection timeout",
+				"server_name":   "github-server",
+				"error_message": "connection timeout",
 			},
 			map[string]interface{}{
-				"server":  "weather-api",
-				"message": "authentication failed",
+				"server_name":   "weather-api",
+				"error_message": "authentication failed",
 			},
 		},
 	}
