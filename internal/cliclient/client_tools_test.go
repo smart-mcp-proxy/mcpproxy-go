@@ -22,12 +22,15 @@ func TestClient_GetServerTools(t *testing.T) {
 		response := map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
+				"server_name": "test-server",
 				"tools": []map[string]interface{}{
 					{
 						"name":        "test_tool",
 						"description": "A test tool",
+						"server_name": "test-server",
 					},
 				},
+				"count": 1,
 			},
 		}
 
