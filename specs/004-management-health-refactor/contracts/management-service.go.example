@@ -1,0 +1,278 @@
+// Package management provides a unified service layer for upstream server lifecycle
+// management and health diagnostics. This example shows the service interface and
+// implementation structure.
+//
+// Location: internal/management/service.go
+package management
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/contracts"
+	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/runtime"
+	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/server"
+)
+
+// Service defines the unified interface for all server management operations.
+// All CLI commands, REST endpoints, and MCP tools delegate to this service.
+type Service interface {
+	// Server Lifecycle Operations
+	ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
+	GetServerLogs(ctx context.Context, name string, tail int) ([]contracts.LogEntry, error)
+	EnableServer(ctx context.Context, name string, enabled bool) error
+	RestartServer(ctx context.Context, name string) error
+
+	// Bulk Operations
+	RestartAll(ctx context.Context) (int, error)
+	EnableAll(ctx context.Context) (int, error)
+	DisableAll(ctx context.Context) (int, error)
+
+	// Diagnostics
+	Doctor(ctx context.Context) (*contracts.Diagnostics, error)
+	AuthStatus(ctx context.Context, name string) (*contracts.AuthStatus, error)
+}
+
+// service is the concrete implementation of the Service interface.
+type service struct {
+	manager        *server.Manager
+	config         *config.Config
+	eventBus       *runtime.EventBus
+	logReader      *logs.Reader
+	secretResolver *secret.Resolver
+	logger         *zap.SugaredLogger
+}
+
+// NewService creates a new management service instance.
+func NewService(
+	manager *server.Manager,
+	config *config.Config,
+	eventBus *runtime.EventBus,
+	logReader *logs.Reader,
+	secretResolver *secret.Resolver,
+	logger *zap.SugaredLogger,
+) Service {
+	return &service{
+		manager:        manager,
+		config:         config,
+		eventBus:       eventBus,
+		logReader:      logReader,
+		secretResolver: secretResolver,
+		logger:         logger,
+	}
+}
+
+// ListServers returns all configured servers with current status and aggregate statistics.
+func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
+	servers := s.manager.GetAllServers()
+
+	stats := &contracts.ServerStats{
+		Total: len(servers),
+	}
+
+	for _, srv := range servers {
+		if srv.Enabled {
+			stats.Enabled++
+		} else {
+			stats.Disabled++
+		}
+		if srv.Connected {
+			stats.Connected++
+		}
+		if srv.Error != "" {
+			stats.Errors++
+		}
+		if srv.Quarantined {
+			stats.Quarantined++
+		}
+	}
+
+	return servers, stats, nil
+}
+
+// EnableServer enables or disables a server.
+func (s *service) EnableServer(ctx context.Context, name string, enabled bool) error {
+	if err := s.checkWriteGates(); err != nil {
+		return err
+	}
+
+	if err := s.manager.EnableServer(name, enabled); err != nil {
+		return fmt.Errorf("failed to enable server: %w", err)
+	}
+
+	// Emit event for real-time UI updates
+	s.eventBus.Emit(runtime.Event{
+		Type: "servers.changed",
+		Data: map[string]interface{}{
+			"server":    name,
+			"operation": "enable",
+			"enabled":   enabled,
+			"timestamp": time.Now(),
+		},
+	})
+
+	return nil
+}
+
+// RestartServer restarts a single server.
+func (s *service) RestartServer(ctx context.Context, name string) error {
+	if err := s.checkWriteGates(); err != nil {
+		return err
+	}
+
+	if err := s.manager.RestartServer(name); err != nil {
+		return fmt.Errorf("failed to restart server: %w", err)
+	}
+
+	s.eventBus.Emit(runtime.Event{
+		Type: "servers.changed",
+		Data: map[string]interface{}{
+			"server":    name,
+			"operation": "restart",
+			"timestamp": time.Now(),
+		},
+	})
+
+	return nil
+}
+
+// RestartAll restarts all configured servers sequentially.
+// Returns the count of successfully restarted servers.
+func (s *service) RestartAll(ctx context.Context) (int, error) {
+	if err := s.checkWriteGates(); err != nil {
+		return 0, err
+	}
+
+	servers := s.manager.GetAllServers()
+	successCount := 0
+	var errs []string
+
+	for _, srv := range servers {
+		if err := s.RestartServer(ctx, srv.Name); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", srv.Name, err))
+			s.logger.Warnf("Failed to restart %s: %v", srv.Name, err)
+		} else {
+			successCount++
+		}
+	}
+
+	if len(errs) > 0 {
+		return successCount, fmt.Errorf("some servers failed: %v", errs)
+	}
+
+	return successCount, nil
+}
+
+// GetServerLogs retrieves recent log entries for a specific server.
+func (s *service) GetServerLogs(ctx context.Context, name string, tail int) ([]contracts.LogEntry, error) {
+	if tail <= 0 {
+		tail = 50 // Default
+	}
+	if tail > 1000 {
+		tail = 1000 // Max
+	}
+
+	logs, err := s.logReader.GetLogs(name, tail)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read logs: %w", err)
+	}
+
+	return logs, nil
+}
+
+// Doctor aggregates health diagnostics from all system components.
+func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
+	diag := &contracts.Diagnostics{
+		Timestamp:       time.Now(),
+		UpstreamErrors:  []contracts.UpstreamError{},
+		OAuthRequired:   []contracts.OAuthRequirement{},
+		MissingSecrets:  []contracts.MissingSecret{},
+		RuntimeWarnings: []string{},
+	}
+
+	// Collect upstream errors and OAuth requirements
+	servers := s.manager.GetAllServers()
+	for _, srv := range servers {
+		if srv.Error != "" {
+			diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
+				ServerName:   srv.Name,
+				ErrorMessage: srv.Error,
+				Timestamp:    srv.LastError,
+			})
+		}
+		if srv.RequiresAuth {
+			diag.OAuthRequired = append(diag.OAuthRequired, contracts.OAuthRequirement{
+				ServerName: srv.Name,
+				State:      srv.AuthState,
+				ExpiresAt:  srv.TokenExpiry,
+				Message:    fmt.Sprintf("Run: mcpproxy auth login --server=%s", srv.Name),
+			})
+		}
+	}
+
+	// Check for missing secrets
+	secrets := s.secretResolver.ListReferences()
+	for _, ref := range secrets {
+		if !s.secretResolver.Exists(ref) {
+			diag.MissingSecrets = append(diag.MissingSecrets, contracts.MissingSecret{
+				SecretName: ref,
+				UsedBy:     s.findServersUsingSecret(ref),
+			})
+		}
+	}
+
+	// Check Docker status if isolation is enabled
+	if s.config.EnableDockerIsolation {
+		diag.DockerStatus = s.checkDockerDaemon(ctx)
+	}
+
+	diag.TotalIssues = len(diag.UpstreamErrors) + len(diag.OAuthRequired) + len(diag.MissingSecrets)
+
+	return diag, nil
+}
+
+// checkWriteGates verifies that write operations are allowed.
+func (s *service) checkWriteGates() error {
+	if s.config.DisableManagement {
+		return errors.New("management operations are disabled in configuration")
+	}
+	if s.config.ReadOnly {
+		return errors.New("server is in read-only mode")
+	}
+	return nil
+}
+
+// findServersUsingSecret returns server names that reference the given secret.
+func (s *service) findServersUsingSecret(secretName string) []string {
+	var serverNames []string
+	servers := s.manager.GetAllServers()
+	for _, srv := range servers {
+		// Check if server env vars reference this secret
+		for _, envVar := range srv.EnvVars {
+			if envVar == secretName {
+				serverNames = append(serverNames, srv.Name)
+				break
+			}
+		}
+	}
+	return serverNames
+}
+
+// checkDockerDaemon checks Docker daemon availability.
+func (s *service) checkDockerDaemon(ctx context.Context) *contracts.DockerStatus {
+	// Implementation would check Docker socket/API
+	// This is a simplified example
+	return &contracts.DockerStatus{
+		Available: true,
+		Version:   "24.0.7",
+	}
+}
+
+// Additional implementations for EnableAll, DisableAll, AuthStatus follow same patterns...

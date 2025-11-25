@@ -22,6 +22,7 @@ import (
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/httpapi"
 	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/management"
 	"mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
@@ -71,6 +72,17 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	if err != nil {
 		return nil, err
 	}
+
+	// Initialize management service and set it on runtime
+	secretResolver := secret.NewResolver()
+	mgmtService := management.NewService(
+		rt,            // RuntimeOperations
+		cfg,           // Config
+		rt,            // EventEmitter
+		secretResolver, // SecretResolver
+		logger.Sugar(),
+	)
+	rt.SetManagementService(mgmtService)
 
 	server := &Server{
 		logger:   logger,
@@ -147,6 +159,15 @@ func (s *Server) StatusChannel() <-chan interface{} {
 // EventsChannel exposes runtime events for tray/UI consumers.
 func (s *Server) EventsChannel() <-chan runtime.Event {
 	return s.eventsCh
+}
+
+// GetManagementService returns the management service instance from runtime.
+// Returns nil if service hasn't been set yet.
+func (s *Server) GetManagementService() interface{} {
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.GetManagementService()
 }
 
 // updateStatus updates the current status and notifies subscribers
@@ -1113,6 +1134,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
 	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
+
+	// Swagger UI (OpenAPI documentation) - mounted directly on main mux for /swagger/* access
+	swaggerHandler := httpapi.SetupSwaggerHandler(s.logger.Sugar())
+	mux.Handle("/swagger/", swaggerHandler)
+	s.logger.Info("Registered Swagger UI endpoint", zap.String("swagger_endpoint", "/swagger/*"))
 
 	// Web UI endpoints (serves embedded Vue.js frontend) with selective API key protection
 	webUIHandler := web.NewHandler(s.logger.Sugar())

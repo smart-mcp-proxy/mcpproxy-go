@@ -138,8 +138,8 @@ func outputDiagnostics(diag map[string]interface{}) error {
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			for _, errItem := range upstreamErrors {
 				if errMap, ok := errItem.(map[string]interface{}); ok {
-					server := getStringField(errMap, "server")
-					message := getStringField(errMap, "message")
+					server := getStringField(errMap, "server_name")
+					message := getStringField(errMap, "error_message")
 					fmt.Printf("\nServer: %s\n", server)
 					fmt.Printf("  Error: %s\n", message)
 				}

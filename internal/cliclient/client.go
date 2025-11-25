@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/contracts"
+	"mcpproxy-go/internal/reqcontext"
 	"mcpproxy-go/internal/socket"
 
 	"go.uber.org/zap"
@@ -70,6 +71,13 @@ func NewClient(endpoint string, logger *zap.SugaredLogger) *Client {
 			Transport: transport,
 		},
 		logger: logger,
+	}
+}
+
+// addCorrelationIDToRequest extracts correlation ID from context and adds it to HTTP request headers
+func (c *Client) addCorrelationIDToRequest(ctx context.Context, req *http.Request) {
+	if correlationID := reqcontext.GetCorrelationID(ctx); correlationID != "" {
+		req.Header.Set("X-Correlation-ID", correlationID)
 	}
 }
 
@@ -418,6 +426,143 @@ func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, er
 
 	if !apiResp.Success {
 		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data, nil
+}
+
+// BulkOperationResult holds the results of a bulk operation across multiple servers.
+type BulkOperationResult struct {
+	Total      int               `json:"total"`
+	Successful int               `json:"successful"`
+	Failed     int               `json:"failed"`
+	Errors     map[string]string `json:"errors"`
+}
+
+// T079: RestartAll restarts all configured servers.
+func (c *Client) RestartAll(ctx context.Context) (*BulkOperationResult, error) {
+	url := c.baseURL + "/api/v1/servers/restart_all"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add correlation ID from context to request headers
+	c.addCorrelationIDToRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call restart_all API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool                 `json:"success"`
+		Data    *BulkOperationResult `json:"data"`
+		Error   string               `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("restart_all failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data, nil
+}
+
+// T080: EnableAll enables all configured servers.
+func (c *Client) EnableAll(ctx context.Context) (*BulkOperationResult, error) {
+	url := c.baseURL + "/api/v1/servers/enable_all"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add correlation ID from context to request headers
+	c.addCorrelationIDToRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call enable_all API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool                 `json:"success"`
+		Data    *BulkOperationResult `json:"data"`
+		Error   string               `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("enable_all failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data, nil
+}
+
+// T080: DisableAll disables all configured servers.
+func (c *Client) DisableAll(ctx context.Context) (*BulkOperationResult, error) {
+	url := c.baseURL + "/api/v1/servers/disable_all"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add correlation ID from context to request headers
+	c.addCorrelationIDToRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call disable_all API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool                 `json:"success"`
+		Data    *BulkOperationResult `json:"data"`
+		Error   string               `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("disable_all failed: %s", apiResp.Error)
 	}
 
 	return apiResp.Data, nil

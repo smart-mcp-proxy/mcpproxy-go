@@ -644,16 +644,27 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 		return fmt.Errorf("failed to update server '%s' in storage: %w", serverName, err)
 	}
 
-	// Save configuration and reload asynchronously to reduce blocking
-	go func() {
-		if err := r.SaveConfiguration(); err != nil {
-			r.logger.Error("Failed to save configuration after state change", zap.Error(err))
-		}
+	// Save configuration synchronously to ensure changes are persisted before returning
+	if err := r.SaveConfiguration(); err != nil {
+		r.logger.Error("Failed to save configuration after state change", zap.Error(err))
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
 
-		if err := r.LoadConfiguredServers(nil); err != nil {
-			r.logger.Error("Failed to synchronize runtime after enable toggle", zap.Error(err))
-		}
-	}()
+	// Reload configuration synchronously to ensure server state is updated before returning
+	if err := r.LoadConfiguredServers(nil); err != nil {
+		r.logger.Error("Failed to synchronize runtime after enable toggle", zap.Error(err))
+		return fmt.Errorf("failed to reload configuration: %w", err)
+	}
+
+	// Wait for the server to start connecting (LoadConfiguredServers spawns goroutines)
+	// This ensures callers don't race with connection establishment
+	// The goroutine needs time to spawn and then AddServer needs to initiate connection
+	if enabled {
+		time.Sleep(5 * time.Second)
+		r.logger.Info("Waited for server to begin connection attempt",
+			zap.String("server", serverName),
+			zap.Bool("enabled", enabled))
+	}
 
 	r.emitServersChanged("enable_toggle", map[string]any{
 		"server":  serverName,
@@ -676,16 +687,17 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)
 	}
 
-	// Save configuration and reload asynchronously to reduce blocking
-	go func() {
-		if err := r.SaveConfiguration(); err != nil {
-			r.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))
-		}
+	// Save configuration synchronously to ensure changes are persisted before returning
+	if err := r.SaveConfiguration(); err != nil {
+		r.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
 
-		if err := r.LoadConfiguredServers(nil); err != nil {
-			r.logger.Error("Failed to synchronize runtime after quarantine toggle", zap.Error(err))
-		}
-	}()
+	// Reload configuration synchronously to ensure server state is updated before returning
+	if err := r.LoadConfiguredServers(nil); err != nil {
+		r.logger.Error("Failed to synchronize runtime after quarantine toggle", zap.Error(err))
+		return fmt.Errorf("failed to reload configuration: %w", err)
+	}
 
 	r.emitServersChanged("quarantine_toggle", map[string]any{
 		"server":      serverName,
@@ -699,6 +711,68 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		zap.Bool("quarantined", quarantined))
 
 	return nil
+}
+
+// BulkEnableServers toggles the enabled state for multiple servers in a single
+// storage/config save to avoid repeated file writes. Returns a map of per-server
+// errors for operations that could not be applied.
+func (r *Runtime) BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error) {
+	resultErrs := make(map[string]error)
+	if len(serverNames) == 0 {
+		return resultErrs, nil
+	}
+
+	servers, err := r.storageManager.ListUpstreamServers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list servers: %w", err)
+	}
+	serversByName := make(map[string]*config.ServerConfig, len(servers))
+	for _, srv := range servers {
+		serversByName[srv.Name] = srv
+	}
+
+	var changed []string
+	for _, name := range serverNames {
+		cfg, ok := serversByName[name]
+		if !ok {
+			resultErrs[name] = fmt.Errorf("server '%s' not found", name)
+			continue
+		}
+		if cfg.Enabled == enabled {
+			r.logger.Debug("Skipping server already in desired enabled state",
+				zap.String("server", name),
+				zap.Bool("enabled", enabled))
+			continue
+		}
+		if err := r.storageManager.EnableUpstreamServer(name, enabled); err != nil {
+			resultErrs[name] = fmt.Errorf("failed to update server '%s' in storage: %w", name, err)
+			continue
+		}
+		changed = append(changed, name)
+	}
+
+	// Nothing changed; return collected errors (if any)
+	if len(changed) == 0 {
+		return resultErrs, nil
+	}
+
+	// Persist once and reload once for all changes
+	if err := r.SaveConfiguration(); err != nil {
+		return resultErrs, fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	if err := r.LoadConfiguredServers(nil); err != nil {
+		return resultErrs, fmt.Errorf("failed to reload configuration: %w", err)
+	}
+
+	r.emitServersChanged("bulk_enable_toggle", map[string]any{
+		"enabled": enabled,
+		"count":   len(changed),
+	})
+
+	r.HandleUpstreamServerChange(r.AppContext())
+
+	return resultErrs, nil
 }
 
 // RestartServer restarts an upstream server by disconnecting and reconnecting it.
@@ -737,7 +811,13 @@ func (r *Runtime) RestartServer(serverName string) error {
 		// Server is enabled but client doesn't exist, try to add it
 		r.logger.Info("Server client not found, attempting to create and connect",
 			zap.String("server", serverName))
-		return r.upstreamManager.AddServer(serverName, serverConfig)
+		if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
+			return fmt.Errorf("failed to add server '%s': %w", serverName, err)
+		}
+		// Wait to allow the connection attempt to begin
+		time.Sleep(2 * time.Second)
+		r.logger.Info("Successfully added server", zap.String("server", serverName))
+		return nil
 	}
 
 	// CRITICAL FIX: Remove and recreate the client to pick up new secrets
@@ -768,6 +848,10 @@ func (r *Runtime) RestartServer(serverName string) error {
 			zap.Error(err))
 		return fmt.Errorf("failed to recreate server '%s': %w", serverName, err)
 	}
+
+	// Wait to allow the connection attempt to begin
+	// AddServer starts connection asynchronously, so we give it time to initiate
+	time.Sleep(2 * time.Second)
 
 	r.logger.Info("Successfully recreated server with fresh secrets",
 		zap.String("server", serverName))

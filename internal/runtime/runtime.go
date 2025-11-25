@@ -59,13 +59,14 @@ type Runtime struct {
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
 
-	storageManager  *storage.Manager
-	indexManager    *index.Manager
-	upstreamManager *upstream.Manager
-	cacheManager    *cache.Manager
-	truncator       *truncate.Truncator
-	secretResolver  *secret.Resolver
-	tokenizer       tokens.Tokenizer
+	storageManager   *storage.Manager
+	indexManager     *index.Manager
+	upstreamManager  *upstream.Manager
+	cacheManager     *cache.Manager
+	truncator        *truncate.Truncator
+	secretResolver   *secret.Resolver
+	tokenizer        tokens.Tokenizer
+	managementService interface{} // Initialized later to avoid import cycle
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
@@ -1428,4 +1429,146 @@ func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 		return nil
 	}
 	return r.upstreamManager.GetDockerRecoveryStatus()
+}
+
+// SetManagementService stores the management service instance.
+// This is called after runtime initialization to avoid import cycles.
+func (r *Runtime) SetManagementService(svc interface{}) {
+	r.managementService = svc
+}
+
+// GetManagementService returns the management service instance.
+// Returns nil if service hasn't been set yet.
+func (r *Runtime) GetManagementService() interface{} {
+	return r.managementService
+}
+
+// EmitServersChanged implements the EventEmitter interface for the management service.
+// This delegates to the runtime's internal event emission mechanism.
+func (r *Runtime) EmitServersChanged(reason string, extra map[string]any) {
+	r.emitServersChanged(reason, extra)
+}
+
+// GetAllServers implements RuntimeOperations interface for management service.
+// Returns all servers with their current status using the Supervisor's StateView.
+func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
+	r.logger.Debug("Runtime.GetAllServers called")
+
+	// Use Supervisor's StateView for lock-free, instant reads
+	supervisor := r.Supervisor()
+	if supervisor == nil {
+		r.logger.Warn("GetAllServers: supervisor not available, falling back to storage")
+		return r.getAllServersLegacy()
+	}
+
+	stateView := supervisor.StateView()
+	if stateView == nil {
+		r.logger.Warn("GetAllServers: StateView not available, falling back to storage")
+		return r.getAllServersLegacy()
+	}
+
+	// Get snapshot - this is lock-free and instant
+	snapshot := stateView.Snapshot()
+	r.logger.Debug("StateView snapshot retrieved", zap.Int("count", len(snapshot.Servers)))
+
+	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
+	for _, serverStatus := range snapshot.Servers {
+		// Convert StateView ServerStatus to API response format
+		connected := serverStatus.Connected
+		connecting := serverStatus.State == "connecting"
+
+		status := serverStatus.State
+		if status == "" {
+			if serverStatus.Enabled {
+				if connecting {
+					status = "connecting"
+				} else if connected {
+					status = "ready"
+				} else {
+					status = "disconnected"
+				}
+			} else {
+				status = "disabled"
+			}
+		}
+
+		// Extract created time and config fields
+		var created time.Time
+		var url, command, protocol string
+		if serverStatus.Config != nil {
+			created = serverStatus.Config.Created
+			url = serverStatus.Config.URL
+			command = serverStatus.Config.Command
+			protocol = serverStatus.Config.Protocol
+		}
+
+		result = append(result, map[string]interface{}{
+			"name":            serverStatus.Name,
+			"url":             url,
+			"command":         command,
+			"protocol":        protocol,
+			"enabled":         serverStatus.Enabled,
+			"quarantined":     serverStatus.Quarantined,
+			"created":         created,
+			"connected":       connected,
+			"connecting":      connecting,
+			"tool_count":      serverStatus.ToolCount,
+			"last_error":      serverStatus.LastError,
+			"status":          status,
+			"should_retry":    false,
+			"retry_count":     serverStatus.RetryCount,
+			"last_retry_time": nil,
+		})
+	}
+
+	r.logger.Debug("GetAllServers completed", zap.Int("server_count", len(result)))
+	return result, nil
+}
+
+// getAllServersLegacy is the storage-based fallback implementation.
+func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
+	r.logger.Warn("Using legacy storage-based GetAllServers (slow path)")
+
+	// Check if storage manager is available
+	if r.storageManager == nil {
+		r.logger.Warn("getAllServersLegacy: storage manager is nil")
+		return []map[string]interface{}{}, nil
+	}
+
+	// Get all configured servers from storage
+	servers, err := r.storageManager.ListUpstreamServers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get servers from storage: %w", err)
+	}
+
+	// Get connection status from upstream manager
+	result := make([]map[string]interface{}, 0, len(servers))
+	for _, srv := range servers {
+		serverInfo := map[string]interface{}{
+			"name":        srv.Name,
+			"url":         srv.URL,
+			"command":     srv.Command,
+			"protocol":    srv.Protocol,
+			"enabled":     srv.Enabled,
+			"quarantined": srv.Quarantined,
+			"created":     srv.Created,
+			"connected":   false,
+			"connecting":  false,
+			"tool_count":  0,
+			"status":      "unknown",
+		}
+
+		// Try to get connection status
+		if r.upstreamManager != nil {
+			if client, exists := r.upstreamManager.GetClient(srv.Name); exists && client != nil {
+				serverInfo["connected"] = client.IsConnected()
+				// Skip slow tool count in legacy path
+				serverInfo["tool_count"] = 0
+			}
+		}
+
+		result = append(result, serverInfo)
+	}
+
+	return result, nil
 }

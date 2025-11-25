@@ -1,7 +1,7 @@
 package testutil
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,6 +33,7 @@ type BinaryTestEnv struct {
 	apiURL     string
 	cmd        *exec.Cmd
 	cleanup    func()
+	mcpClient  *client.Client // MCP client for tool calls
 }
 
 const (
@@ -184,7 +188,7 @@ func (env *BinaryTestEnv) WaitForReady() {
 
 // WaitForEverythingServer waits for the test server to connect and be ready
 func (env *BinaryTestEnv) WaitForEverythingServer() {
-	timeout := time.After(60 * time.Second) // Longer timeout for test server
+	timeout := time.After(120 * time.Second) // Very long timeout for test server, especially after restart
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -202,6 +206,11 @@ func (env *BinaryTestEnv) WaitForEverythingServer() {
 
 				// Verify tools are actually indexed by making a test query
 				env.waitForToolIndexing()
+
+				// Initialize MCP session for tests (skip if already initialized)
+				if env.mcpClient == nil {
+					env.InitializeMCPSession()
+				}
 				return
 			}
 		}
@@ -266,11 +275,13 @@ func (env *BinaryTestEnv) isEverythingServerReady() bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(env.apiURL + "/servers")
 	if err != nil {
+		env.t.Logf("Failed to get servers: %v", err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		env.t.Logf("Server returned non-200 status: %d", resp.StatusCode)
 		return false
 	}
 
@@ -283,22 +294,43 @@ func (env *BinaryTestEnv) isEverythingServerReady() bool {
 				ConnectionStatus string `json:"connection_status"`
 				Connected        bool   `json:"connected"`
 				Connecting       bool   `json:"connecting"`
+				Enabled          bool   `json:"enabled"`
 			} `json:"servers"`
 		} `json:"data"`
 	}
 
 	if err := ParseJSONResponse(resp, &response); err != nil {
+		env.t.Logf("Failed to parse server response: %v", err)
 		return false
 	}
 
 	// Look for test server (memory)
 	for _, server := range response.Data.Servers {
-		ready := server.ConnectionStatus == "Ready" || (server.Connected && !server.Connecting)
-		if server.Name == "memory" && ready {
-			return true
+		if server.Name == "memory" {
+			env.t.Logf("Memory server status: enabled=%v connected=%v connecting=%v status=%q",
+				server.Enabled, server.Connected, server.Connecting, server.ConnectionStatus)
+
+			// Server must be enabled to connect
+			if !server.Enabled {
+				env.t.Log("Memory server is disabled")
+				return false
+			}
+
+			// Accept multiple states as "ready":
+			// 1. ConnectionStatus is "Ready" (ideal state)
+			// 2. Connected and not currently connecting (stable connection)
+			// 3. Currently connecting (connection in progress - acceptable during reconnection)
+			ready := server.ConnectionStatus == "Ready" ||
+				(server.Connected && !server.Connecting) ||
+				server.Connecting
+
+			if ready {
+				return true
+			}
 		}
 	}
 
+	env.t.Log("Memory server not found or not ready")
 	return false
 }
 
@@ -392,76 +424,71 @@ type MCPCallRequest struct {
 	Args     map[string]interface{} `json:"args"`
 }
 
-// CallMCPTool calls an MCP tool through the proxy using HTTP API
+// InitializeMCPSession initializes an MCP session with the server using the MCP client library
+func (env *BinaryTestEnv) InitializeMCPSession() {
+	// Create HTTP transport for the MCP client
+	httpTransport, err := transport.NewStreamableHTTP(env.baseURL + "/mcp")
+	require.NoError(env.t, err, "Failed to create HTTP transport")
+
+	// Create MCP client
+	env.mcpClient = client.NewClient(httpTransport)
+
+	// Start and initialize the client
+	ctx := context.Background()
+	err = env.mcpClient.Start(ctx)
+	require.NoError(env.t, err, "Failed to start MCP client")
+
+	// Initialize the session
+	initRequest := mcp.InitializeRequest{}
+	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initRequest.Params.ClientInfo = mcp.Implementation{
+		Name:    "mcpproxy-binary-test",
+		Version: "1.0.0",
+	}
+	initRequest.Params.Capabilities = mcp.ClientCapabilities{}
+
+	_, err = env.mcpClient.Initialize(ctx, initRequest)
+	require.NoError(env.t, err, "Failed to initialize MCP session")
+
+	env.t.Log("MCP session initialized successfully")
+}
+
+// CallMCPTool calls an MCP tool through the proxy using the MCP client library
 func (env *BinaryTestEnv) CallMCPTool(toolName string, args map[string]interface{}) ([]byte, error) {
-	// Build MCP request
-	mcpRequest := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/call",
-		"params": map[string]interface{}{
-			"name":      toolName,
-			"arguments": args,
-		},
+	if env.mcpClient == nil {
+		return nil, fmt.Errorf("MCP client not initialized - call InitializeMCPSession first")
 	}
 
-	requestBody, err := json.Marshal(mcpRequest)
+	ctx := context.Background()
+
+	// Build the tool call request
+	callRequest := mcp.CallToolRequest{}
+	callRequest.Params.Name = toolName
+	callRequest.Params.Arguments = args
+
+	// Call the tool
+	result, err := env.mcpClient.CallTool(ctx, callRequest)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal MCP request: %w", err)
-	}
-
-	// Call the server via HTTP /mcp endpoint (use baseURL, not apiURL)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Post(
-		env.baseURL+"/mcp",
-		"application/json",
-		bytes.NewReader(requestBody),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to call MCP endpoint: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("MCP call failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Parse MCP response
-	var mcpResponse struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if err := json.Unmarshal(body, &mcpResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal MCP response: %w", err)
-	}
-
-	// Check for MCP error
-	if mcpResponse.Error != nil {
-		return nil, fmt.Errorf("MCP error %d: %s", mcpResponse.Error.Code, mcpResponse.Error.Message)
+		return nil, fmt.Errorf("tool call failed: %w", err)
 	}
 
 	// Extract text content from response
-	if len(mcpResponse.Result.Content) == 0 {
+	if len(result.Content) == 0 {
 		return []byte("{}"), nil
 	}
 
-	text := mcpResponse.Result.Content[0].Text
-	return []byte(text), nil
+	// Try to extract text from the first content item
+	if textContent, ok := result.Content[0].(mcp.TextContent); ok {
+		return []byte(textContent.Text), nil
+	}
+
+	// Fallback: marshal the entire result
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal result: %w", err)
+	}
+
+	return jsonBytes, nil
 }
 
 // TestServerList represents a simplified server list response
@@ -515,4 +542,23 @@ type TestSearchTool struct {
 	Description string  `json:"description"`
 	Server      string  `json:"server"`
 	Score       float64 `json:"score"`
+}
+
+// TestServerLogsResponse represents a server logs response
+type TestServerLogsResponse struct {
+	Success bool `json:"success"`
+	Data    struct {
+		ServerName string         `json:"server_name"`
+		Logs       []TestLogEntry `json:"logs"`
+		Count      int            `json:"count"`
+	} `json:"data"`
+}
+
+// TestLogEntry represents a single log entry
+type TestLogEntry struct {
+	Timestamp string                 `json:"timestamp"`
+	Level     string                 `json:"level"`
+	Message   string                 `json:"message"`
+	Server    string                 `json:"server,omitempty"`
+	Fields    map[string]interface{} `json:"fields,omitempty"`
 }

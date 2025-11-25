@@ -167,27 +167,39 @@ func (r *SSEReader) ReadEvent(timeout time.Duration) (map[string]string, error) 
 	errCh := make(chan error, 1)
 
 	go func() {
-		event := make(map[string]string)
-		buffer := make([]byte, 4096)
+		// Keep reading until we get an event with actual data
+		for {
+			event := make(map[string]string)
+			buffer := make([]byte, 4096)
 
-		n, err := r.reader.Read(buffer)
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		data := string(buffer[:n])
-		lines := strings.Split(data, "\n")
-
-		for _, line := range lines {
-			if strings.HasPrefix(line, "data: ") {
-				event["data"] = strings.TrimPrefix(line, "data: ")
-			} else if strings.HasPrefix(line, "event: ") {
-				event["event"] = strings.TrimPrefix(line, "event: ")
+			n, err := r.reader.Read(buffer)
+			if err != nil {
+				errCh <- err
+				return
 			}
-		}
 
-		done <- event
+			data := string(buffer[:n])
+			lines := strings.Split(data, "\n")
+
+			for _, line := range lines {
+				// Skip comment lines (starting with :)
+				if strings.HasPrefix(line, ":") {
+					continue
+				}
+				if strings.HasPrefix(line, "data: ") {
+					event["data"] = strings.TrimPrefix(line, "data: ")
+				} else if strings.HasPrefix(line, "event: ") {
+					event["event"] = strings.TrimPrefix(line, "event: ")
+				}
+			}
+
+			// If we found data, return this event
+			if len(event) > 0 && event["data"] != "" {
+				done <- event
+				return
+			}
+			// Otherwise, keep reading for the next chunk
+		}
 	}()
 
 	select {

@@ -13,7 +13,7 @@ NC='\033[0m' # No Color
 MCPPROXY_BINARY="./mcpproxy"
 CONFIG_TEMPLATE="./test/e2e-config.template.json"
 CONFIG_FILE="./test/e2e-config.json"
-LISTEN_PORT="8081"
+LISTEN_PORT="${LISTEN_PORT:-8081}"
 # Support both HTTP and HTTPS modes
 # Default to HTTP for E2E tests since the template config has TLS disabled
 USE_HTTPS="${USE_HTTPS:-false}"
@@ -408,6 +408,12 @@ mkdir -p "$TEST_DATA_DIR"
 # Copy fresh config from template to ensure clean state
 echo "Copying fresh config from template..."
 cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
+
+# Substitute LISTEN_PORT in config file if not using default 8081
+if [ "$LISTEN_PORT" != "8081" ]; then
+    sed -i '' "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE"
+    echo "Updated listen port to :${LISTEN_PORT}"
+fi
 
 # Start server in background
 $MCPPROXY_BINARY serve --config="$CONFIG_FILE" --log-level=info > "/tmp/mcpproxy_e2e.log" 2>&1 &

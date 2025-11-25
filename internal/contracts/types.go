@@ -292,6 +292,65 @@ type DiagnosticsResponse struct {
 	LastUpdated     time.Time         `json:"last_updated"`
 }
 
+// Diagnostics represents aggregated health information from all MCPProxy components.
+// This is the new unified diagnostics format for the management service.
+type Diagnostics struct {
+	TotalIssues     int                 `json:"total_issues"`
+	UpstreamErrors  []UpstreamError     `json:"upstream_errors"`
+	OAuthRequired   []OAuthRequirement  `json:"oauth_required"`
+	MissingSecrets  []MissingSecretInfo `json:"missing_secrets"` // Renamed to avoid conflict
+	RuntimeWarnings []string            `json:"runtime_warnings"`
+	DockerStatus    *DockerStatus       `json:"docker_status,omitempty"`
+	Timestamp       time.Time           `json:"timestamp"`
+}
+
+// UpstreamError represents a connection or runtime error from an upstream MCP server.
+type UpstreamError struct {
+	ServerName   string    `json:"server_name"`
+	ErrorMessage string    `json:"error_message"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+// OAuthRequirement represents an OAuth authentication requirement for a server.
+type OAuthRequirement struct {
+	ServerName string     `json:"server_name"`
+	State      string     `json:"state"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	Message    string     `json:"message"`
+}
+
+// MissingSecretInfo represents a secret referenced in configuration but not found.
+// This is used by the new Diagnostics type to avoid field name conflicts.
+type MissingSecretInfo struct {
+	SecretName string   `json:"secret_name"`
+	UsedBy     []string `json:"used_by"`
+}
+
+// DockerStatus represents the availability of Docker daemon for stdio server isolation.
+type DockerStatus struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// AuthStatus represents detailed OAuth authentication status for a single server.
+type AuthStatus struct {
+	ServerName string     `json:"server_name"`
+	State      string     `json:"state"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	TokenType  string     `json:"token_type,omitempty"`
+	Scopes     []string   `json:"scopes,omitempty"`
+	Message    string     `json:"message"`
+}
+
+// OAuth Authentication State Constants
+const (
+	AuthStateAuthenticated   = "authenticated"
+	AuthStateUnauthenticated = "unauthenticated"
+	AuthStateExpired         = "expired"
+	AuthStateRefreshing      = "refreshing"
+)
+
 // Tool Call History types
 
 // TokenMetrics represents token usage statistics for a tool call
@@ -471,4 +530,16 @@ type SearchRegistryServersResponse struct {
 	Total      int                `json:"total"`
 	Query      string             `json:"query,omitempty"`
 	Tag        string             `json:"tag,omitempty"`
+}
+
+// SuccessResponse is the standard success response wrapper for API endpoints.
+type SuccessResponse struct {
+	Success bool        `json:"success"`
+	Data    interface{} `json:"data"`
+}
+
+// ErrorResponse is the standard error response for API endpoints.
+type ErrorResponse struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error"`
 }

@@ -1,11 +1,12 @@
 # MCPProxy Makefile
 
-.PHONY: help build frontend-build frontend-dev backend-dev clean test lint
+.PHONY: help build swagger frontend-build frontend-dev backend-dev clean test lint
 
 # Default target
 help:
 	@echo "MCPProxy Build Commands:"
-	@echo "  make build           - Build complete project (frontend + backend)"
+	@echo "  make build           - Build complete project (swagger + frontend + backend)"
+	@echo "  make swagger         - Generate OpenAPI specification"
 	@echo "  make frontend-build  - Build frontend for production"
 	@echo "  make frontend-dev    - Start frontend development server"
 	@echo "  make backend-dev     - Build backend with dev flag (loads frontend from disk)"
@@ -13,13 +14,20 @@ help:
 	@echo "  make test           - Run tests"
 	@echo "  make lint           - Run linter"
 
+# Generate OpenAPI specification
+swagger:
+	@echo "📚 Generating OpenAPI 3.1 specification..."
+	$$HOME/go/bin/swag init -g cmd/mcpproxy/main.go --output docs --outputTypes go,yaml --v3.1
+	@echo "✅ OpenAPI 3.1 spec generated: docs/swagger.yaml and docs/docs.go"
+
 # Build complete project
-build: frontend-build
+build: swagger frontend-build
 	@echo "🔨 Building Go binary with embedded frontend..."
 	go build -o mcpproxy ./cmd/mcpproxy
 	go build -o mcpproxy-tray ./cmd/mcpproxy-tray
 	@echo "✅ Build completed! Run: ./mcpproxy serve"
 	@echo "🌐 Web UI: http://localhost:8080/ui/"
+	@echo "📚 API Docs: http://localhost:8080/swagger/"
 
 # Build frontend for production
 frontend-build:

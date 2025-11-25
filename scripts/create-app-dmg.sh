@@ -75,6 +75,12 @@ EOF
 # Create a simple Applications symlink for drag-and-drop installation
 ln -s /Applications "$TEMP_DIR/Applications"
 
+# Sync filesystem to ensure all writes complete
+sync
+
+# Wait a moment for macOS to finish any background operations (Spotlight indexing, etc.)
+sleep 2
+
 # Create DMG using hdiutil
 echo "Creating DMG..."
 hdiutil create -size 100m -fs HFS+ -volname "Smart MCP Proxy ${VERSION#v}" -srcfolder "$TEMP_DIR" "${DMG_NAME}.dmg"

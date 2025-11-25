@@ -1,0 +1,190 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Diagnostics Response Schema",
+  "description": "Health diagnostics aggregated from all MCPProxy components",
+  "type": "object",
+  "required": ["total_issues", "upstream_errors", "oauth_required", "missing_secrets", "runtime_warnings", "timestamp"],
+  "properties": {
+    "total_issues": {
+      "type": "integer",
+      "description": "Count of all detected issues (upstream_errors + oauth_required + missing_secrets)",
+      "minimum": 0,
+      "example": 3
+    },
+    "upstream_errors": {
+      "type": "array",
+      "description": "Connection or runtime errors from upstream servers",
+      "items": {
+        "$ref": "#/definitions/UpstreamError"
+      }
+    },
+    "oauth_required": {
+      "type": "array",
+      "description": "Servers requiring OAuth authentication",
+      "items": {
+        "$ref": "#/definitions/OAuthRequirement"
+      }
+    },
+    "missing_secrets": {
+      "type": "array",
+      "description": "Secrets referenced in config but not found in environment/keyring",
+      "items": {
+        "$ref": "#/definitions/MissingSecret"
+      }
+    },
+    "runtime_warnings": {
+      "type": "array",
+      "description": "General warnings (deprecated config, etc.)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "docker_status": {
+      "description": "Docker daemon status (only if Docker isolation is enabled)",
+      "oneOf": [
+        {"$ref": "#/definitions/DockerStatus"},
+        {"type": "null"}
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When diagnostics were collected",
+      "example": "2025-11-23T10:35:12Z"
+    }
+  },
+  "definitions": {
+    "UpstreamError": {
+      "type": "object",
+      "required": ["server_name", "error_message", "timestamp"],
+      "properties": {
+        "server_name": {
+          "type": "string",
+          "description": "Unique server identifier",
+          "example": "github-server"
+        },
+        "error_message": {
+          "type": "string",
+          "description": "Human-readable error description",
+          "example": "connection refused"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When error occurred",
+          "example": "2025-11-23T09:15:30Z"
+        }
+      }
+    },
+    "OAuthRequirement": {
+      "type": "object",
+      "required": ["server_name", "state", "message"],
+      "properties": {
+        "server_name": {
+          "type": "string",
+          "description": "Server requiring authentication",
+          "example": "sentry-mcp"
+        },
+        "state": {
+          "type": "string",
+          "enum": ["unauthenticated", "expired", "refreshing"],
+          "description": "Authentication state",
+          "example": "unauthenticated"
+        },
+        "expires_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Token expiration timestamp (if authenticated)",
+          "example": "2025-11-30T10:00:00Z"
+        },
+        "message": {
+          "type": "string",
+          "description": "Actionable instruction for user",
+          "example": "Run: mcpproxy auth login --server=sentry-mcp"
+        }
+      }
+    },
+    "MissingSecret": {
+      "type": "object",
+      "required": ["secret_name", "used_by"],
+      "properties": {
+        "secret_name": {
+          "type": "string",
+          "description": "Environment variable or keyring key",
+          "example": "GITHUB_TOKEN"
+        },
+        "used_by": {
+          "type": "array",
+          "description": "Server names referencing this secret",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "example": ["github-server", "gh-issues"]
+        }
+      }
+    },
+    "DockerStatus": {
+      "type": "object",
+      "required": ["available"],
+      "properties": {
+        "available": {
+          "type": "boolean",
+          "description": "Whether Docker daemon is reachable",
+          "example": true
+        },
+        "version": {
+          "type": "string",
+          "description": "Docker version (if available)",
+          "example": "24.0.7"
+        },
+        "error": {
+          "type": "string",
+          "description": "Error message if unavailable",
+          "example": "Cannot connect to the Docker daemon"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "total_issues": 3,
+      "upstream_errors": [
+        {
+          "server_name": "github-server",
+          "error_message": "connection refused",
+          "timestamp": "2025-11-23T10:30:00Z"
+        }
+      ],
+      "oauth_required": [
+        {
+          "server_name": "sentry-mcp",
+          "state": "unauthenticated",
+          "expires_at": null,
+          "message": "Run: mcpproxy auth login --server=sentry-mcp"
+        }
+      ],
+      "missing_secrets": [
+        {
+          "secret_name": "GITHUB_TOKEN",
+          "used_by": ["github-server", "gh-issues"]
+        }
+      ],
+      "runtime_warnings": [],
+      "docker_status": {
+        "available": true,
+        "version": "24.0.7"
+      },
+      "timestamp": "2025-11-23T10:35:12Z"
+    },
+    {
+      "total_issues": 0,
+      "upstream_errors": [],
+      "oauth_required": [],
+      "missing_secrets": [],
+      "runtime_warnings": [],
+      "docker_status": null,
+      "timestamp": "2025-11-23T10:40:00Z"
+    }
+  ]
+}

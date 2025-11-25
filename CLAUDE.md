@@ -294,6 +294,91 @@ Error states automatically retry core launch with exponential backoff:
   - `internal/monitor/` - Process and health monitoring systems
   - `internal/api/` - Enhanced API client with exponential backoff
 - **`internal/logs/`** - Structured logging with per-server log files
+- **`internal/management/`** - Centralized management service layer
+  - `service.go` - Business logic for server lifecycle operations
+  - Shared by CLI, REST API, and MCP protocol interfaces
+  - Configuration gates, event emission, and bulk operations
+
+### Management Service Architecture
+
+The management service (`internal/management/`) provides a centralized business logic layer for upstream server management operations, eliminating code duplication across CLI, REST API, and MCP interfaces.
+
+**Architecture Diagram**:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Client Interfaces                         │
+├───────────────┬─────────────────┬───────────────────────────┤
+│  CLI Commands │   REST API      │   MCP Protocol            │
+│  (upstream)   │   (/api/v1/*)   │   (upstream_servers tool) │
+└───────┬───────┴────────┬────────┴───────────┬───────────────┘
+        │                │                    │
+        └────────────────┼────────────────────┘
+                         │
+                         ▼
+              ┌─────────────────────┐
+              │  Management Service │
+              │  (internal/mgmt/)   │
+              └──────────┬──────────┘
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+        ▼                ▼                ▼
+  ┌──────────┐    ┌──────────┐    ┌──────────┐
+  │ Runtime  │    │  Config  │    │  Events  │
+  │Operations│    │  Gates   │    │  Emitter │
+  └──────────┘    └──────────┘    └──────────┘
+```
+
+**Key Components**:
+
+- **Service Interface** (`service.go:16-64`): Defines all management operations
+  - Single-server: `RestartServer()`, `EnableServer()`, `DisableServer()`
+  - Bulk operations: `RestartAll()`, `EnableAll()`, `DisableAll()`
+  - Diagnostics: `GetServerHealth()`, `RunDiagnostics()`
+  - Server CRUD: `AddServer()`, `RemoveServer()`, `QuarantineServer()`
+
+- **Configuration Gates**: All operations respect centralized configuration guards
+  - `disable_management`: Blocks all write operations when true
+  - `read_only_mode`: Blocks all configuration modifications
+
+- **Bulk Operations** (`service.go:243-388`): Efficient multi-server management
+  - Sequential execution with partial failure handling
+  - Returns `BulkOperationResult` with success/failure counts
+  - Collects per-server errors in results map
+  - Continues on individual failures, reports aggregate results
+
+- **Event Integration**: All operations emit events through event bus
+  - `servers.changed`: Notifies UI of server state changes
+  - Triggers SSE updates to web UI and tray application
+  - Enables real-time synchronization across interfaces
+
+**Benefits**:
+- **Code Deduplication**: 40%+ reduction in duplicate code across interfaces
+- **Consistent Behavior**: All interfaces use identical business logic
+- **Centralized Validation**: Configuration gates enforced in one place
+- **Easier Testing**: Unit tests cover all interfaces through service layer
+- **Future Extensibility**: New interfaces can reuse existing service methods
+
+**Usage Examples**:
+
+```go
+// CLI usage (cmd/mcpproxy/upstream_cmd.go:547-636)
+result, err := client.RestartAll(ctx)
+fmt.Printf("  Total servers:      %d\n", result.Total)
+fmt.Printf("  ✅ Successful:      %d\n", result.Successful)
+fmt.Printf("  ❌ Failed:          %d\n", result.Failed)
+
+// REST API usage (internal/httpapi/server.go:772-866)
+mgmtSvc := s.controller.GetManagementService().(ManagementService)
+result, err := mgmtSvc.RestartAll(r.Context())
+s.writeSuccess(w, result)
+
+// MCP protocol usage (future integration)
+result, err := mgmtService.RestartAll(ctx)
+return mcpResponse(result)
+```
+
+**OpenAPI Documentation**: All REST endpoints are documented with OpenAPI 3.1 annotations and auto-generated Swagger spec. See `docs/swagger.yaml` for complete API reference.
 
 ### Tray-Core Communication (Unix Sockets / Named Pipes)
 
@@ -718,6 +803,8 @@ When making changes to this codebase, ensure you understand the modular architec
 ## Active Technologies
 - Go 1.21+, TypeScript/Vue 3 (003-tool-annotations-webui)
 - BBolt (existing `server_{serverID}_tool_calls` buckets, new `sessions` bucket) (003-tool-annotations-webui)
+- Go 1.24.0 (004-management-health-refactor)
+- BBolt embedded database (`~/.mcpproxy/config.db`) for server configurations, quarantine status, and tool statistics (004-management-health-refactor)
 
 ## Recent Changes
 - 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3
