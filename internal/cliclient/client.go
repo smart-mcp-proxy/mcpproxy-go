@@ -567,3 +567,45 @@ func (c *Client) DisableAll(ctx context.Context) (*BulkOperationResult, error) {
 
 	return apiResp.Data, nil
 }
+
+// GetServerTools retrieves tools for a specific server from daemon.
+func (c *Client) GetServerTools(ctx context.Context, serverName string) ([]map[string]interface{}, error) {
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools", c.baseURL, serverName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call tools API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Tools []map[string]interface{} `json:"tools"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data.Tools, nil
+}
