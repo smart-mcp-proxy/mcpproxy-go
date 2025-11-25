@@ -78,3 +78,53 @@ func TestClient_GetServerTools_NotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Server not found")
 }
+
+func TestClient_TriggerOAuthLogin(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/servers/oauth-server/login", r.URL.Path)
+		assert.Equal(t, "POST", r.Method)
+
+		response := map[string]interface{}{
+			"success": true,
+			"message": "OAuth login initiated",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer ts.Close()
+
+	logger := zap.NewNop().Sugar()
+	client := NewClient(ts.URL, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.TriggerOAuthLogin(ctx, "oauth-server")
+	require.NoError(t, err)
+}
+
+func TestClient_TriggerOAuthLogin_NotConfigured(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := map[string]interface{}{
+			"success": false,
+			"error":   "Server does not have OAuth configured",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer ts.Close()
+
+	logger := zap.NewNop().Sugar()
+	client := NewClient(ts.URL, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.TriggerOAuthLogin(ctx, "non-oauth-server")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not have OAuth configured")
+}
