@@ -86,7 +86,11 @@ func TestClient_TriggerOAuthLogin(t *testing.T) {
 
 		response := map[string]interface{}{
 			"success": true,
-			"message": "OAuth login initiated",
+			"data": map[string]interface{}{
+				"server":  "oauth-server",
+				"action":  "login",
+				"success": true,
+			},
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -634,9 +634,13 @@ func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error
 	}
 
 	var apiResp struct {
-		Success bool   `json:"success"`
-		Message string `json:"message"`
-		Error   string `json:"error"`
+		Success bool `json:"success"`
+		Data    struct {
+			Server  string `json:"server"`
+			Action  string `json:"action"`
+			Success bool   `json:"success"`
+		} `json:"data"`
+		Error string `json:"error"`
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
