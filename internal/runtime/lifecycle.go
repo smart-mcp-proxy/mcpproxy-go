@@ -713,6 +713,68 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	return nil
 }
 
+// BulkEnableServers toggles the enabled state for multiple servers in a single
+// storage/config save to avoid repeated file writes. Returns a map of per-server
+// errors for operations that could not be applied.
+func (r *Runtime) BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error) {
+	resultErrs := make(map[string]error)
+	if len(serverNames) == 0 {
+		return resultErrs, nil
+	}
+
+	servers, err := r.storageManager.ListUpstreamServers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list servers: %w", err)
+	}
+	serversByName := make(map[string]*config.ServerConfig, len(servers))
+	for _, srv := range servers {
+		serversByName[srv.Name] = srv
+	}
+
+	var changed []string
+	for _, name := range serverNames {
+		cfg, ok := serversByName[name]
+		if !ok {
+			resultErrs[name] = fmt.Errorf("server '%s' not found", name)
+			continue
+		}
+		if cfg.Enabled == enabled {
+			r.logger.Debug("Skipping server already in desired enabled state",
+				zap.String("server", name),
+				zap.Bool("enabled", enabled))
+			continue
+		}
+		if err := r.storageManager.EnableUpstreamServer(name, enabled); err != nil {
+			resultErrs[name] = fmt.Errorf("failed to update server '%s' in storage: %w", name, err)
+			continue
+		}
+		changed = append(changed, name)
+	}
+
+	// Nothing changed; return collected errors (if any)
+	if len(changed) == 0 {
+		return resultErrs, nil
+	}
+
+	// Persist once and reload once for all changes
+	if err := r.SaveConfiguration(); err != nil {
+		return resultErrs, fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	if err := r.LoadConfiguredServers(nil); err != nil {
+		return resultErrs, fmt.Errorf("failed to reload configuration: %w", err)
+	}
+
+	r.emitServersChanged("bulk_enable_toggle", map[string]any{
+		"enabled": enabled,
+		"count":   len(changed),
+	})
+
+	r.HandleUpstreamServerChange(r.AppContext())
+
+	return resultErrs, nil
+}
+
 // RestartServer restarts an upstream server by disconnecting and reconnecting it.
 // This is a synchronous operation that waits for the restart to complete.
 func (r *Runtime) RestartServer(serverName string) error {

@@ -5,6 +5,7 @@ package management
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -94,6 +95,7 @@ type RuntimeOperations interface {
 	EnableServer(serverName string, enabled bool) error
 	RestartServer(serverName string) error
 	GetAllServers() ([]map[string]interface{}, error)
+	BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error)
 }
 
 // service implements the Service interface with dependency injection.
@@ -273,6 +275,7 @@ func (s *service) RestartAll(ctx context.Context) (*BulkOperationResult, error) 
 	startTime := time.Now()
 	correlationID := reqcontext.GetCorrelationID(ctx)
 	source := reqcontext.GetRequestSource(ctx)
+	maxWorkers := 4
 
 	s.logger.Infow("Bulk operation initiated",
 		"operation", "restart_all",
@@ -299,11 +302,11 @@ func (s *service) RestartAll(ctx context.Context) (*BulkOperationResult, error) 
 	}
 
 	result := &BulkOperationResult{
-		Total:  len(servers),
 		Errors: make(map[string]string),
 	}
 
-	// Iterate through servers and restart each
+	// Collect valid server names
+	targetServers := make([]string, 0, len(servers))
 	for _, server := range servers {
 		name, ok := server["name"].(string)
 		if !ok {
@@ -312,21 +315,59 @@ func (s *service) RestartAll(ctx context.Context) (*BulkOperationResult, error) 
 				"server", server)
 			continue
 		}
+		targetServers = append(targetServers, name)
+	}
 
-		if err := s.runtime.RestartServer(name); err != nil {
-			s.logger.Errorw("Failed to restart server in bulk operation",
-				"correlation_id", correlationID,
-				"server", name,
-				"error", err)
+	result.Total = len(targetServers)
+	if len(targetServers) == 0 {
+		return result, nil
+	}
+
+	// Parallelize restarts with a small worker pool
+	sem := make(chan struct{}, maxWorkers)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, name := range targetServers {
+		// Respect context cancellation before spawning
+		select {
+		case <-ctx.Done():
+			mu.Lock()
+			result.Errors[name] = ctx.Err().Error()
 			result.Failed++
-			result.Errors[name] = err.Error()
-		} else {
+			mu.Unlock()
+			continue
+		default:
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(serverName string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if err := s.runtime.RestartServer(serverName); err != nil {
+				s.logger.Errorw("Failed to restart server in bulk operation",
+					"correlation_id", correlationID,
+					"server", serverName,
+					"error", err)
+				mu.Lock()
+				result.Failed++
+				result.Errors[serverName] = err.Error()
+				mu.Unlock()
+				return
+			}
+
 			s.logger.Infow("Successfully restarted server in bulk operation",
 				"correlation_id", correlationID,
-				"server", name)
+				"server", serverName)
+			mu.Lock()
 			result.Successful++
-		}
+			mu.Unlock()
+		}(name)
 	}
+
+	wg.Wait()
 
 	duration := time.Since(startTime)
 	s.logger.Infow("RestartAll completed",
@@ -371,32 +412,53 @@ func (s *service) EnableAll(ctx context.Context) (*BulkOperationResult, error) {
 		return nil, fmt.Errorf("failed to get servers: %w", err)
 	}
 
-	result := &BulkOperationResult{
-		Total:  len(servers),
-		Errors: make(map[string]string),
-	}
-
-	// Iterate through servers and enable each
+	// Filter to only servers that actually need an update
+	targetServers := make([]string, 0, len(servers))
 	for _, server := range servers {
 		name, ok := server["name"].(string)
+		enabled, hasEnabled := server["enabled"].(bool)
 		if !ok {
 			s.logger.Warnw("Server missing name field, skipping",
 				"correlation_id", correlationID,
 				"server", server)
 			continue
 		}
+		if hasEnabled && enabled {
+			continue // Already enabled; skip
+		}
+		targetServers = append(targetServers, name)
+	}
 
-		if err := s.runtime.EnableServer(name, true); err != nil {
-			s.logger.Errorw("Failed to enable server in bulk operation",
-				"correlation_id", correlationID,
-				"server", name,
-				"error", err)
+	// Short-circuit if there's nothing to do
+	if len(targetServers) == 0 {
+		return &BulkOperationResult{
+			Total:      0,
+			Successful: 0,
+			Failed:     0,
+			Errors:     map[string]string{},
+		}, nil
+	}
+
+	// Apply changes in one batch to reduce config writes
+	perServerErrs, opErr := s.runtime.BulkEnableServers(targetServers, true)
+	if opErr != nil {
+		s.logger.Errorw("Failed to enable servers in bulk operation",
+			"correlation_id", correlationID,
+			"source", source,
+			"error", opErr)
+		return nil, opErr
+	}
+
+	result := &BulkOperationResult{
+		Total:  len(targetServers),
+		Errors: make(map[string]string),
+	}
+
+	for _, name := range targetServers {
+		if errMsg, exists := perServerErrs[name]; exists && errMsg != nil {
 			result.Failed++
-			result.Errors[name] = err.Error()
+			result.Errors[name] = errMsg.Error()
 		} else {
-			s.logger.Infow("Successfully enabled server in bulk operation",
-				"correlation_id", correlationID,
-				"server", name)
 			result.Successful++
 		}
 	}
@@ -444,32 +506,51 @@ func (s *service) DisableAll(ctx context.Context) (*BulkOperationResult, error) 
 		return nil, fmt.Errorf("failed to get servers: %w", err)
 	}
 
-	result := &BulkOperationResult{
-		Total:  len(servers),
-		Errors: make(map[string]string),
-	}
-
-	// Iterate through servers and disable each
+	// Filter to only servers that actually need to be disabled
+	targetServers := make([]string, 0, len(servers))
 	for _, server := range servers {
 		name, ok := server["name"].(string)
+		enabled, hasEnabled := server["enabled"].(bool)
 		if !ok {
 			s.logger.Warnw("Server missing name field, skipping",
 				"correlation_id", correlationID,
 				"server", server)
 			continue
 		}
+		if hasEnabled && !enabled {
+			continue // Already disabled
+		}
+		targetServers = append(targetServers, name)
+	}
 
-		if err := s.runtime.EnableServer(name, false); err != nil {
-			s.logger.Errorw("Failed to disable server in bulk operation",
-				"correlation_id", correlationID,
-				"server", name,
-				"error", err)
+	if len(targetServers) == 0 {
+		return &BulkOperationResult{
+			Total:      0,
+			Successful: 0,
+			Failed:     0,
+			Errors:     map[string]string{},
+		}, nil
+	}
+
+	perServerErrs, opErr := s.runtime.BulkEnableServers(targetServers, false)
+	if opErr != nil {
+		s.logger.Errorw("Failed to disable servers in bulk operation",
+			"correlation_id", correlationID,
+			"source", source,
+			"error", opErr)
+		return nil, opErr
+	}
+
+	result := &BulkOperationResult{
+		Total:  len(targetServers),
+		Errors: make(map[string]string),
+	}
+
+	for _, name := range targetServers {
+		if errMsg, exists := perServerErrs[name]; exists && errMsg != nil {
 			result.Failed++
-			result.Errors[name] = err.Error()
+			result.Errors[name] = errMsg.Error()
 		} else {
-			s.logger.Infow("Successfully disabled server in bulk operation",
-				"correlation_id", correlationID,
-				"server", name)
 			result.Successful++
 		}
 	}

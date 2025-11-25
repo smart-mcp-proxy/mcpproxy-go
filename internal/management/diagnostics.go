@@ -3,11 +3,13 @@ package management
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"mcpproxy-go/internal/contracts"
+	"mcpproxy-go/internal/secret"
 )
 
 // Doctor aggregates health diagnostics from all system components.
@@ -63,7 +65,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	}
 
 	// Check for missing secrets
-	diag.MissingSecrets = s.findMissingSecrets(serversRaw)
+	diag.MissingSecrets = s.findMissingSecrets(ctx, serversRaw)
 
 	// Check Docker status if isolation is enabled
 	if s.config.DockerIsolation != nil && s.config.DockerIsolation.Enabled {
@@ -85,7 +87,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 
 // findMissingSecrets identifies secrets referenced in configuration but not resolvable.
 // This implements T041: helper for identifying which servers reference a secret.
-func (s *service) findMissingSecrets(serversRaw []map[string]interface{}) []contracts.MissingSecretInfo {
+func (s *service) findMissingSecrets(ctx context.Context, serversRaw []map[string]interface{}) []contracts.MissingSecretInfo {
 	secretUsage := make(map[string][]string) // secret name -> list of servers using it
 
 	for _, srvRaw := range serversRaw {
@@ -96,10 +98,9 @@ func (s *service) findMissingSecrets(serversRaw []map[string]interface{}) []cont
 			if envMap, ok := envRaw.(map[string]interface{}); ok {
 				for _, valueRaw := range envMap {
 					if valueStr, ok := valueRaw.(string); ok {
-						if secretName := extractSecretName(valueStr); secretName != "" {
-							// Check if secret is missing (not resolvable)
-							if !s.isSecretResolvable(secretName) {
-								secretUsage[secretName] = append(secretUsage[secretName], serverName)
+						if ref := parseSecretRef(valueStr); ref != nil {
+							if !s.isSecretResolvable(ctx, *ref) {
+								secretUsage[ref.Name] = append(secretUsage[ref.Name], serverName)
 							}
 						}
 					}
@@ -120,27 +121,23 @@ func (s *service) findMissingSecrets(serversRaw []map[string]interface{}) []cont
 	return missingSecrets
 }
 
-// extractSecretName extracts the secret name from a reference like "${env:SECRET_NAME}".
-// Returns empty string if not a secret reference.
-func extractSecretName(value string) string {
-	// Check for ${env:NAME} pattern
-	if strings.HasPrefix(value, "${env:") && strings.HasSuffix(value, "}") {
-		// Extract the secret name between ${env: and }
-		secretName := value[6 : len(value)-1]
-		return secretName
-	}
-	return ""
-}
-
 // isSecretResolvable checks if a secret can be resolved (e.g., environment variable exists).
-func (s *service) isSecretResolvable(secretName string) bool {
-	// If we have a secret resolver, use it
-	if s.secretResolver != nil {
-		// Check if the secret can be resolved
-		// For now, we'll assume any environment variable that starts with ${env: is resolvable
-		// This is a simplified check - the real implementation would use the resolver
-		return false // For testing, we'll say secrets are NOT resolvable
+func (s *service) isSecretResolvable(ctx context.Context, ref secret.Ref) bool {
+	if s.secretResolver == nil {
+		return false
 	}
+
+	// Environment variables: quick check without resolving to avoid errors
+	if ref.Type == secret.SecretTypeEnv {
+		val, ok := os.LookupEnv(ref.Name)
+		return ok && val != ""
+	}
+
+	// Attempt to resolve; success indicates the secret exists/works
+	if _, err := s.secretResolver.Resolve(ctx, ref); err == nil {
+		return true
+	}
+
 	return false
 }
 
@@ -172,6 +169,17 @@ func (s *service) checkDockerDaemon() *contracts.DockerStatus {
 }
 
 // Helper functions to extract fields from map[string]interface{}
+
+func parseSecretRef(value string) *secret.Ref {
+	if !secret.IsSecretRef(value) {
+		return nil
+	}
+	ref, err := secret.ParseSecretRef(value)
+	if err != nil {
+		return nil
+	}
+	return ref
+}
 
 func getStringFromMap(m map[string]interface{}, key string) string {
 	if val, ok := m[key]; ok {

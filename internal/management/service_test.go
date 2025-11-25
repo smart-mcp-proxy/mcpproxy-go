@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"sync"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -228,6 +229,7 @@ type mockRuntimeOperations struct {
 	restartError  error
 	getAllError   error
 	failOnServer  string // If set, only fail operations on this specific server
+	mu            sync.Mutex
 }
 
 type enableCall struct {
@@ -251,15 +253,33 @@ func (m *mockRuntimeOperations) GetAllServers() ([]map[string]interface{}, error
 }
 
 func (m *mockRuntimeOperations) EnableServer(serverName string, enabled bool) error {
+	m.mu.Lock()
 	m.enableCalls = append(m.enableCalls, enableCall{serverName: serverName, enabled: enabled})
+	m.mu.Unlock()
 	if m.failOnServer != "" && serverName == m.failOnServer {
 		return m.enableError
 	}
 	return nil
 }
 
+func (m *mockRuntimeOperations) BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error) {
+	errs := make(map[string]error)
+	for _, name := range serverNames {
+		if m.failOnServer != "" && name == m.failOnServer {
+			errs[name] = m.enableError
+			continue
+		}
+		m.mu.Lock()
+		m.enableCalls = append(m.enableCalls, enableCall{serverName: name, enabled: enabled})
+		m.mu.Unlock()
+	}
+	return errs, nil
+}
+
 func (m *mockRuntimeOperations) RestartServer(serverName string) error {
+	m.mu.Lock()
 	m.restartCalls = append(m.restartCalls, serverName)
+	m.mu.Unlock()
 	if m.failOnServer != "" && serverName == m.failOnServer {
 		return m.restartError
 	}
