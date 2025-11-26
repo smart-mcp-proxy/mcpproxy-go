@@ -131,59 +131,95 @@ func runAuthLogin(_ *cobra.Command, _ []string) error {
 }
 
 func runAuthStatus(_ *cobra.Command, _ []string) error {
-	fmt.Printf("🔍 OAuth Authentication Status\n")
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
+	defer cancel()
 
-	// Load configuration
-	globalConfig, err := loadAuthConfig()
+	// Load configuration to get data directory
+	cfg, err := loadAuthConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Get servers to check
-	var serversToCheck []string
-	if authAll || authServerName == "" {
-		serversToCheck = getAuthAvailableServerNames(globalConfig)
-	} else {
-		if !authServerExistsInConfig(authServerName, globalConfig) {
-			return fmt.Errorf("server '%s' not found in configuration", authServerName)
-		}
-		serversToCheck = []string{authServerName}
+	// Auth status REQUIRES daemon (to show real daemon state)
+	if !shouldUseAuthDaemon(cfg.DataDir) {
+		return fmt.Errorf("auth status requires running daemon. Start with: mcpproxy serve")
 	}
 
-	// Check each server
-	for _, serverName := range serversToCheck {
-		fmt.Printf("🔗 Server: %s\n", serverName)
+	return runAuthStatusClientMode(ctx, cfg.DataDir, authServerName, authAll)
+}
 
-		// Create CLI client to check status
-		cliClient, err := cli.NewClient(serverName, globalConfig, authLogLevel)
-		if err != nil {
-			fmt.Printf("  ❌ Failed to create client: %v\n", err)
-			continue
-		}
-		// Ensure storage is closed per-iteration (avoid defers in loop)
+// runAuthStatusClientMode fetches auth status from daemon via socket.
+func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, allServers bool) error {
+	socketPath := socket.DetectSocketPath(dataDir)
+	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
 
-		status, err := cliClient.GetOAuthStatus()
-		if err != nil {
-			fmt.Printf("  ❌ Failed to get OAuth status: %v\n", err)
-			_ = cliClient.Close()
-			continue
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Fetch all servers to check OAuth status
+	servers, err := client.GetServers(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get servers from daemon: %w", err)
+	}
+
+	// Filter by server name if specified
+	if serverName != "" && !allServers {
+		var found bool
+		for _, srv := range servers {
+			if name, ok := srv["name"].(string); ok && name == serverName {
+				servers = []map[string]interface{}{srv}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("server '%s' not found", serverName)
+		}
+	}
+
+	// Display OAuth status
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("🔐 OAuth Authentication Status")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+
+	hasOAuthServers := false
+	for _, srv := range servers {
+		name, _ := srv["name"].(string)
+		oauth, hasOAuth := srv["oauth"].(map[string]interface{})
+
+		if !hasOAuth {
+			continue // Skip non-OAuth servers
 		}
 
-		switch status {
-		case "authenticated":
-			fmt.Printf("  ✅ Authenticated\n")
-		case "expired":
-			fmt.Printf("  ⚠️  Token expired - run 'mcpproxy auth login --server=%s'\n", serverName)
-		case "not_required":
-			fmt.Printf("  ℹ️  OAuth not required\n")
-		case "required":
-			fmt.Printf("  🔐 Authentication required - run 'mcpproxy auth login --server=%s'\n", serverName)
-		default:
-			fmt.Printf("  ❓ Unknown status: %s\n", status)
+		hasOAuthServers = true
+		authenticated, _ := srv["authenticated"].(bool)
+
+		status := "❌ Not Authenticated"
+		if authenticated {
+			status = "✅ Authenticated"
 		}
-		fmt.Printf("\n")
-		_ = cliClient.Close()
+
+		fmt.Printf("Server: %s\n", name)
+		fmt.Printf("  Status: %s\n", status)
+
+		if authURL, ok := oauth["auth_url"].(string); ok {
+			fmt.Printf("  Auth URL: %s\n", authURL)
+		}
+
+		if tokenURL, ok := oauth["token_url"].(string); ok {
+			fmt.Printf("  Token URL: %s\n", tokenURL)
+		}
+
+		fmt.Println()
+	}
+
+	if !hasOAuthServers {
+		fmt.Println("ℹ️  No servers with OAuth configuration found.")
+		fmt.Println("   Configure OAuth in mcp_config.json to enable authentication.")
 	}
 
 	return nil
