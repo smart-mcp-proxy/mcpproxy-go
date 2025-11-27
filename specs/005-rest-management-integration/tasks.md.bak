@@ -1,0 +1,301 @@
+# Tasks: REST Endpoint Management Service Integration
+
+**Input**: Design documents from `/specs/005-rest-management-integration/`
+**Prerequisites**: plan.md, spec.md, data-model.md, contracts/management-service.yaml
+
+**Tests**: Test tasks included per FR-015, FR-016, FR-017 (unit, integration, E2E validation)
+
+**Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependencies)
+- **[Story]**: Which user story this task belongs to (e.g., US1, US2, US3)
+- Include exact file paths in descriptions
+
+## Path Conventions
+
+This project uses single project structure:
+- `internal/` - All Go packages
+- `cmd/` - Command-line applications
+- `scripts/` - Test and build scripts
+
+---
+
+## Phase 1: Setup (Shared Infrastructure)
+
+**Purpose**: Verify existing infrastructure and review current implementations
+
+Since this is a refactoring within an existing codebase, setup is minimal.
+
+- [ ] T001 Review existing management service interface in internal/management/service.go
+- [ ] T002 Review existing runtime implementations in internal/server/server.go:1447 and internal/server/server.go:136
+- [ ] T003 [P] Review existing REST handlers in internal/httpapi/server.go:1155 and internal/httpapi/server.go:1050
+
+**Checkpoint**: Understand current code structure before refactoring
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: Core interface extension that MUST be complete before ANY user story can be implemented
+
+**⚠️ CRITICAL**: No REST handler work can begin until management service interface is extended
+
+- [ ] T004 Extend ManagementService interface in internal/management/service.go with GetServerTools method signature
+- [ ] T005 Extend ManagementService interface in internal/management/service.go with TriggerOAuthLogin method signature
+
+**Checkpoint**: Foundation ready - user story implementation can now begin
+
+---
+
+## Phase 3: User Story 1 - Unified Server Management via REST API (Priority: P1) 🎯 MVP
+
+**Goal**: Refactor two REST endpoints to delegate to management service layer, ensuring architectural compliance with spec 004 and consistent behavior across all interfaces.
+
+**Independent Test**: Call REST endpoints directly (`GET /api/v1/servers/{id}/tools` and `POST /api/v1/servers/{id}/login`) and verify they delegate to management service methods, emit events, and respect configuration gates.
+
+### Unit Tests for User Story 1 (Per FR-015)
+
+> **NOTE: Write these tests FIRST using TDD approach, ensure they FAIL before implementation**
+
+- [ ] T006 [P] [US1] Add unit test for GetServerTools with valid server name in internal/management/service_test.go
+- [ ] T007 [P] [US1] Add unit test for GetServerTools with empty server name in internal/management/service_test.go
+- [ ] T008 [P] [US1] Add unit test for GetServerTools with nonexistent server in internal/management/service_test.go
+- [ ] T009 [P] [US1] Add unit test for TriggerOAuthLogin with valid server in internal/management/service_test.go
+- [ ] T010 [P] [US1] Add unit test for TriggerOAuthLogin with disable_management enabled in internal/management/service_test.go
+- [ ] T011 [P] [US1] Add unit test for TriggerOAuthLogin with read_only enabled in internal/management/service_test.go
+- [ ] T012 [P] [US1] Add unit test for TriggerOAuthLogin with empty server name in internal/management/service_test.go
+
+### Implementation for User Story 1
+
+**Service Layer Implementation:**
+
+- [ ] T013 [US1] Implement GetServerTools method in internal/management/service_impl.go - delegate to runtime.GetServerTools
+- [ ] T014 [US1] Implement TriggerOAuthLogin method in internal/management/service_impl.go - check config gates, delegate to runtime.TriggerOAuthLogin
+- [ ] T015 [US1] Add configuration gate checks in TriggerOAuthLogin (disable_management, read_only) in internal/management/service_impl.go
+
+**REST Handler Refactoring:**
+
+- [ ] T016 [US1] Update handleGetServerTools in internal/httpapi/server.go:1155 to call management service instead of controller
+- [ ] T017 [US1] Update handleServerLogin in internal/httpapi/server.go:1050 to call management service instead of controller
+- [ ] T018 [US1] Add error mapping for management service errors to HTTP status codes in handleGetServerTools
+- [ ] T019 [US1] Add error mapping for management service errors to HTTP status codes in handleServerLogin
+
+**Mock Updates:**
+
+- [ ] T020 [US1] Update MockServerController in internal/httpapi/contracts_test.go to include GetServerTools method
+- [ ] T021 [US1] Update MockServerController in internal/httpapi/contracts_test.go to include TriggerOAuthLogin method
+
+**Integration Testing (Per FR-016):**
+
+- [ ] T022 [US1] Add integration test to verify servers.changed event emitted after OAuth completion in internal/management/service_test.go
+- [ ] T023 [US1] Verify event propagates to SSE endpoint /events (monitor event bus integration)
+
+**E2E Validation (Per FR-017, SC-005):**
+
+- [ ] T024 [US1] Run existing E2E API tests with ./scripts/test-api-e2e.sh and verify all pass without modification
+- [ ] T025 [US1] Verify no behavioral changes in REST API responses (backward compatibility check)
+
+**Checkpoint**: At this point, User Story 1 should be fully functional - REST endpoints delegate to management service, config gates enforced, events emitted, E2E tests pass
+
+---
+
+## Phase 4: User Story 2 - CLI Socket Commands Use Management Layer (Priority: P2)
+
+**Goal**: Ensure CLI commands from PR #152 (`tools list`, `auth login`, `auth status`) benefit from management service's configuration gates, event emissions, and error handling.
+
+**Independent Test**: Run `mcpproxy tools list --server=test-server` and `mcpproxy auth login --server=test-server` with daemon running, verify they work correctly and trigger management service events.
+
+**Note**: No new implementation required for this story - it automatically benefits once REST endpoints are refactored in US1. This phase is purely validation.
+
+### Validation for User Story 2
+
+- [ ] T026 [US2] Start mcpproxy daemon and verify it's running
+- [ ] T027 [US2] Test mcpproxy tools list --server=<name> command and verify tools retrieved via management service
+- [ ] T028 [US2] Test mcpproxy auth login --server=<name> command and verify OAuth triggered via management service
+- [ ] T029 [US2] Test mcpproxy auth status --server=<name> command and verify authentication state shown
+- [ ] T030 [US2] Enable disable_management in config and verify mcpproxy auth login is blocked with clear error
+- [ ] T031 [US2] Verify servers.changed event emitted after OAuth completion (monitor logs or SSE stream)
+
+**Checkpoint**: CLI commands work correctly through refactored REST endpoints, config gates enforced, events emitted
+
+---
+
+## Phase 5: User Story 3 - Tray Application Server Management (Priority: P3)
+
+**Goal**: Ensure tray application users get consistent behavior when managing servers through GUI menus (passive benefit from US1 refactoring).
+
+**Independent Test**: Use tray menu actions to trigger OAuth login and verify operations go through management service with proper event emissions.
+
+**Note**: No new implementation required - tray already uses REST API endpoints refactored in US1. This phase is purely validation.
+
+### Validation for User Story 3
+
+- [ ] T032 [US3] Launch mcpproxy-tray application and verify connection to daemon
+- [ ] T033 [US3] Use tray menu "Authenticate Server" action and verify OAuth triggered via management service
+- [ ] T034 [US3] Verify tray UI updates automatically after OAuth completion (SSE event received)
+- [ ] T035 [US3] Enable read_only mode and verify server restart blocked via tray menu with error message
+- [ ] T036 [US3] Verify all tray server management actions use refactored REST endpoints
+
+**Checkpoint**: Tray application works correctly through refactored REST endpoints, automatic UI updates via events
+
+---
+
+## Phase 6: Polish & Cross-Cutting Concerns
+
+**Purpose**: Final cleanup, documentation updates, and comprehensive validation
+
+### Documentation
+
+- [ ] T037 Add code comments explaining delegation pattern in internal/management/service_impl.go
+- [ ] T038 Update CLAUDE.md if management service patterns changed (minimal changes expected)
+- [ ] T039 Update OpenAPI annotations in internal/httpapi/server.go if endpoint behavior changed
+
+### Code Quality
+
+- [ ] T040 Run golangci-lint on modified files: ./scripts/run-linter.sh
+- [ ] T041 Verify test coverage ≥80% for new management service methods: go test -coverprofile=coverage.out ./internal/management/...
+- [ ] T042 [P] Check for code duplication removed (SC-006): compare LOC before/after refactoring
+
+### Final Validation
+
+- [ ] T043 Run full test suite: ./scripts/run-all-tests.sh
+- [ ] T044 Manual smoke test: Start daemon, call all refactored endpoints, verify responses
+- [ ] T045 Performance verification: Ensure no regression in API response times (<10ms for GetServerTools, <50ms for TriggerOAuthLogin)
+
+**Final Checkpoint**: All success criteria met, ready for PR submission
+
+---
+
+## Dependencies Between User Stories
+
+```
+Phase 1 (Setup) → Phase 2 (Foundational)
+                      ↓
+                  Phase 3 (US1) 🎯 MVP - Core refactoring
+                      ↓
+        ┌─────────────┼─────────────┐
+        ↓             ↓             ↓
+   Phase 4 (US2)  Phase 5 (US3)  Phase 6 (Polish)
+   CLI validation  Tray validation  Cleanup
+```
+
+**Critical Path**: Phase 1 → Phase 2 → Phase 3 (US1) → Phase 4 (US2) + Phase 5 (US3) in parallel → Phase 6
+
+**Parallelization Opportunities**:
+- After US1 complete: US2 and US3 validation can run in parallel
+- Within US1: All unit tests (T006-T012) can be written in parallel
+- Within US1: Mock updates (T020-T021) can be done in parallel with service implementation
+- Within Phase 6: Documentation (T037-T039) and code quality (T040-T042) can run in parallel
+
+---
+
+## Implementation Strategy
+
+### MVP Scope (Minimum Viable Product)
+
+**Phase 3 (US1) ONLY** constitutes the MVP:
+- Extend management service interface with 2 methods ✅
+- Implement methods to delegate to runtime ✅
+- Refactor 2 REST handlers to call management service ✅
+- Add unit tests (target 80% coverage) ✅
+- Verify E2E tests pass ✅
+
+**Deliverable**: REST endpoints architecturally compliant, all interfaces use unified management service
+
+### Incremental Delivery
+
+**Iteration 1** (MVP): User Story 1
+- ✅ Delivers core architectural compliance
+- ✅ Unblocks CLI and tray benefits
+- ✅ Verifiable by E2E tests
+
+**Iteration 2**: User Story 2 + User Story 3
+- ✅ Validates CLI commands work correctly
+- ✅ Validates tray application works correctly
+- ✅ Confirms passive benefits realized
+
+**Iteration 3**: Polish & Documentation
+- ✅ Final cleanup and documentation
+- ✅ Performance verification
+- ✅ Ready for production deployment
+
+### Parallel Execution Examples
+
+**Within User Story 1**:
+```bash
+# Terminal 1: Write unit tests
+vim internal/management/service_test.go  # T006-T012
+
+# Terminal 2: Implement service methods
+vim internal/management/service_impl.go  # T013-T015
+
+# Terminal 3: Update mocks
+vim internal/httpapi/contracts_test.go   # T020-T021
+
+# All three can proceed in parallel
+```
+
+**Across User Stories** (after US1 complete):
+```bash
+# Terminal 1: Validate CLI commands
+./scripts/validate-cli.sh  # US2 tasks
+
+# Terminal 2: Validate tray application
+./mcpproxy-tray  # US3 tasks
+
+# Both can run in parallel
+```
+
+---
+
+## Task Summary
+
+**Total Tasks**: 45
+
+**Breakdown by Phase**:
+- Phase 1 (Setup): 3 tasks
+- Phase 2 (Foundational): 2 tasks
+- Phase 3 (US1 - MVP): 20 tasks (7 unit tests + 13 implementation/integration)
+- Phase 4 (US2): 6 validation tasks
+- Phase 5 (US3): 5 validation tasks
+- Phase 6 (Polish): 9 tasks
+
+**Breakdown by User Story**:
+- User Story 1 (P1): 20 tasks - Core refactoring (MVP)
+- User Story 2 (P2): 6 tasks - CLI validation
+- User Story 3 (P3): 5 tasks - Tray validation
+
+**Parallelization**:
+- 16 tasks marked with [P] can run in parallel
+- After US1: US2 and US3 can run fully in parallel (11 tasks total)
+
+**Test Coverage**:
+- 7 unit tests (T006-T012) - Target 80% coverage
+- 2 integration tests (T022-T023) - Event emissions
+- 1 E2E validation (T024-T025) - Backward compatibility
+- 6 CLI validation tests (T026-T031)
+- 5 tray validation tests (T032-T036)
+- **Total: 21 test/validation tasks (47% of all tasks)**
+
+**Independent Test Criteria**:
+- ✅ US1: Call REST endpoints, verify delegation and events
+- ✅ US2: Run CLI commands, verify correct behavior
+- ✅ US3: Use tray menus, verify automatic updates
+
+**Suggested MVP**: Phase 3 (US1) only - 20 tasks delivering core architectural compliance
+
+---
+
+## Format Validation
+
+✅ **ALL tasks follow checklist format**: `- [ ] [TaskID] [P?] [Story?] Description with file path`
+
+- ✅ Checkbox prefix: All tasks start with `- [ ]`
+- ✅ Task IDs: Sequential T001-T045
+- ✅ [P] markers: 16 tasks correctly marked as parallelizable
+- ✅ [Story] labels: All US1/US2/US3 tasks properly labeled
+- ✅ File paths: All implementation tasks include exact file paths
+- ✅ Organization: Grouped by user story for independent implementation
+- ✅ Dependencies: Clear critical path and parallelization opportunities documented

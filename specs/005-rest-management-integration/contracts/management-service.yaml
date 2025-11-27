@@ -1,0 +1,374 @@
+# Management Service Interface Contract
+# Feature: 005-rest-management-integration
+# Created: 2025-11-27
+#
+# This contract defines the extended ManagementService interface with new methods
+# for server tool retrieval and OAuth authentication.
+
+interface: ManagementService
+package: mcpproxy-go/internal/management
+version: "1.1.0"  # Extended from 1.0.0 (spec 004)
+
+# New methods added in this feature
+new_methods:
+  - name: GetServerTools
+    description: |
+      Retrieves all available tools for a specific upstream MCP server.
+      Delegates to runtime's GetServerTools() which reads from StateView cache.
+
+    signature: |
+      GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
+
+    parameters:
+      - name: ctx
+        type: context.Context
+        description: Request context for cancellation and timeouts
+        required: true
+
+      - name: name
+        type: string
+        description: Server identifier (must match server name in configuration)
+        required: true
+        validation:
+          - not_empty: true
+          - pattern: "^[a-zA-Z0-9_-]+$"
+
+    returns:
+      success:
+        type: "[]map[string]interface{}"
+        description: Array of tool metadata objects
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                description: "Tool name (e.g., 'github:create_issue')"
+              description:
+                type: string
+                description: Human-readable tool description
+              server_name:
+                type: string
+                description: Originating server name
+              usage:
+                type: integer
+                description: Call count (optional)
+              inputSchema:
+                type: object
+                description: JSON Schema for parameters (optional)
+
+      error:
+        type: error
+        conditions:
+          - condition: "name is empty"
+            error: "server name required"
+          - condition: "server not found"
+            error: "server not found: {name}"
+          - condition: "server not connected"
+            error: "server not connected: {name}"
+          - condition: "runtime error"
+            error: "failed to get tools: {err}"
+
+    behavior:
+      - Validates server name is not empty
+      - Checks server exists in configuration
+      - Delegates to runtime.GetServerTools(name)
+      - Returns empty array if server has no tools
+      - Does not modify any state (read-only operation)
+
+    performance:
+      latency: "<10ms"
+      blocking: false
+      description: "In-memory cache read from StateView"
+
+    example:
+      go: |
+        ctx := context.Background()
+        tools, err := mgmtSvc.GetServerTools(ctx, "github-server")
+        if err != nil {
+            return fmt.Errorf("failed to get tools: %w", err)
+        }
+        fmt.Printf("Found %d tools\n", len(tools))
+
+  - name: TriggerOAuthLogin
+    description: |
+      Initiates an OAuth 2.x authentication flow for a specific server.
+      Delegates to upstream manager's StartManualOAuth() which launches browser.
+
+    signature: |
+      TriggerOAuthLogin(ctx context.Context, name string) error
+
+    parameters:
+      - name: ctx
+        type: context.Context
+        description: Request context for cancellation and timeouts
+        required: true
+
+      - name: name
+        type: string
+        description: Server identifier (must match server name in configuration)
+        required: true
+        validation:
+          - not_empty: true
+          - pattern: "^[a-zA-Z0-9_-]+$"
+
+    returns:
+      success:
+        type: nil
+        description: OAuth flow started successfully
+
+      error:
+        type: error
+        conditions:
+          - condition: "name is empty"
+            error: "server name required"
+          - condition: "disable_management=true"
+            error: "operation blocked: management disabled"
+            http_status: 403
+          - condition: "read_only=true"
+            error: "operation blocked: read-only mode"
+            http_status: 403
+          - condition: "server not found"
+            error: "server not found: {name}"
+            http_status: 404
+          - condition: "no OAuth config"
+            error: "server does not support OAuth: {name}"
+            http_status: 400
+          - condition: "OAuth start failed"
+            error: "failed to start OAuth: {err}"
+            http_status: 500
+
+    configuration_gates:
+      - name: disable_management
+        blocks: true
+        error: "operation blocked: management disabled"
+
+      - name: read_only
+        blocks: true
+        error: "operation blocked: read-only mode"
+
+    behavior:
+      - Validates server name is not empty
+      - Checks configuration gates (disable_management, read_only)
+      - Checks server exists in configuration
+      - Checks server has OAuth configuration
+      - Delegates to upstreamManager.StartManualOAuth(name, true)
+      - Launches browser with OAuth authorization URL
+      - Starts local callback server to receive OAuth code
+      - Returns immediately (OAuth completion is asynchronous)
+      - Emits "servers.changed" event on successful OAuth completion
+
+    side_effects:
+      - Opens default browser with OAuth URL
+      - Starts HTTP server on random port for OAuth callback
+      - Updates server authentication state on success
+      - Emits event to notify UI (tray, web UI)
+
+    events:
+      - type: "servers.changed"
+        reason: "oauth_completed"
+        payload:
+          server_name: string
+          timestamp: string (ISO 8601)
+
+    performance:
+      latency: "<50ms"
+      blocking: false
+      description: "Launches OAuth flow in background goroutine"
+
+    example:
+      go: |
+        ctx := context.Background()
+        err := mgmtSvc.TriggerOAuthLogin(ctx, "sentry-server")
+        if err != nil {
+            return fmt.Errorf("failed to start OAuth: %w", err)
+        }
+        fmt.Println("OAuth flow started. Check your browser.")
+
+# REST API Mappings
+rest_endpoints:
+  - path: /api/v1/servers/{id}/tools
+    method: GET
+    handler: handleGetServerTools
+    calls: ManagementService.GetServerTools(ctx, serverID)
+    request:
+      parameters:
+        - name: id
+          in: path
+          type: string
+          description: Server ID or name
+          required: true
+    response:
+      success:
+        status: 200
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                success:
+                  type: boolean
+                  example: true
+                data:
+                  type: object
+                  properties:
+                    server_name:
+                      type: string
+                    tools:
+                      type: array
+                      items:
+                        type: object
+                    count:
+                      type: integer
+      error:
+        status: [400, 404, 500]
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                success:
+                  type: boolean
+                  example: false
+                error:
+                  type: string
+
+  - path: /api/v1/servers/{id}/login
+    method: POST
+    handler: handleServerLogin
+    calls: ManagementService.TriggerOAuthLogin(ctx, serverID)
+    request:
+      parameters:
+        - name: id
+          in: path
+          type: string
+          description: Server ID or name
+          required: true
+    response:
+      success:
+        status: 200
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                success:
+                  type: boolean
+                  example: true
+                data:
+                  type: object
+                  properties:
+                    server:
+                      type: string
+                    action:
+                      type: string
+                      example: "login"
+                    success:
+                      type: boolean
+                      example: true
+      error:
+        status: [400, 403, 404, 500]
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                success:
+                  type: boolean
+                  example: false
+                error:
+                  type: string
+
+# CLI Command Mappings
+cli_commands:
+  - command: "mcpproxy tools list --server=<name>"
+    description: List tools for a server (uses REST API via socket)
+    flow: |
+      CLI → Socket → REST /api/v1/servers/{name}/tools →
+      handleGetServerTools → ManagementService.GetServerTools →
+      runtime.GetServerTools → StateView.Snapshot()
+    fallback: "Standalone mode if daemon not running"
+
+  - command: "mcpproxy auth login --server=<name>"
+    description: Trigger OAuth login for a server (uses REST API via socket)
+    flow: |
+      CLI → Socket → REST /api/v1/servers/{name}/login →
+      handleServerLogin → ManagementService.TriggerOAuthLogin →
+      upstreamManager.StartManualOAuth → Browser OAuth flow
+    fallback: "Standalone mode if daemon not running"
+
+# Implementation Notes
+implementation:
+  files:
+    - path: internal/management/service.go
+      changes:
+        - Add GetServerTools method signature to Service interface
+        - Add TriggerOAuthLogin method signature to Service interface
+
+    - path: internal/management/service_impl.go
+      changes:
+        - Implement GetServerTools method
+        - Implement TriggerOAuthLogin method
+        - Add config gate checks
+        - Add event emissions
+
+    - path: internal/httpapi/server.go
+      changes:
+        - Update handleGetServerTools to call management service
+        - Update handleServerLogin to call management service
+        - Update error handling to map service errors to HTTP status
+
+    - path: internal/httpapi/contracts_test.go
+      changes:
+        - Update MockServerController to include new methods in interface
+
+  dependencies:
+    - internal/server/server.go (GetServerTools implementation to wrap)
+    - internal/server/server.go (TriggerOAuthLogin implementation to wrap)
+    - internal/runtime/event_bus.go (EventEmitter interface)
+
+  testing:
+    unit_tests:
+      - Test GetServerTools with valid/invalid server names
+      - Test TriggerOAuthLogin with gates enabled/disabled
+      - Test event emissions
+      - Test error conditions
+
+    integration_tests:
+      - Verify REST endpoints delegate to management service
+      - Verify events propagate to SSE endpoint
+
+    e2e_tests:
+      - Run ./scripts/test-api-e2e.sh
+      - Verify CLI commands (tools list, auth login) work
+      - Verify tray menu actions work
+
+# Backward Compatibility
+compatibility:
+  breaking_changes: none
+
+  guarantees:
+    - Tool metadata format unchanged
+    - REST API response contracts unchanged
+    - HTTP status codes unchanged
+    - Event payload structure consistent
+
+  migration: |
+    No migration required. This is an interface extension.
+    Existing code continues to work without changes.
+
+# Version History
+versions:
+  - version: "1.1.0"
+    date: "2025-11-27"
+    changes:
+      - Add GetServerTools method
+      - Add TriggerOAuthLogin method
+    spec: "005-rest-management-integration"
+
+  - version: "1.0.0"
+    date: "2025-11-23"
+    changes:
+      - Initial management service interface
+    spec: "004-management-health-refactor"

@@ -1054,8 +1054,28 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.controller.TriggerOAuthLogin(serverID); err != nil {
+	// NEW: Call management service instead of controller (T017)
+	mgmtSvc, ok := s.controller.GetManagementService().(interface {
+		TriggerOAuthLogin(ctx context.Context, name string) error
+	})
+	if !ok {
+		s.logger.Error("Management service not available or missing TriggerOAuthLogin method")
+		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	if err := mgmtSvc.TriggerOAuthLogin(r.Context(), serverID); err != nil {
 		s.logger.Error("Failed to trigger OAuth login", "server", serverID, "error", err)
+
+		// Map errors to HTTP status codes (T019)
+		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {
+			s.writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to trigger login: %v", err))
 		return
 	}
@@ -1159,9 +1179,25 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tools, err := s.controller.GetServerTools(serverID)
+	// NEW: Call management service instead of controller (T016)
+	mgmtSvc, ok := s.controller.GetManagementService().(interface {
+		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
+	})
+	if !ok {
+		s.logger.Error("Management service not available or missing GetServerTools method")
+		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	tools, err := mgmtSvc.GetServerTools(r.Context(), serverID)
 	if err != nil {
 		s.logger.Error("Failed to get server tools", "server", serverID, "error", err)
+
+		// Map errors to HTTP status codes (T018)
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get tools: %v", err))
 		return
 	}
