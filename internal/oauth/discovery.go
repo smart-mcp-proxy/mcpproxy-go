@@ -56,79 +56,13 @@ func ExtractResourceMetadataURL(wwwAuthHeader string) string {
 	return parts[1][:endIdx]
 }
 
-// DiscoverScopesFromProtectedResource attempts to discover scopes from Protected Resource Metadata (RFC 9728)
+// DiscoverScopesFromProtectedResource fetches and returns scopes from Protected Resource Metadata
+// Kept for backward compatibility - delegates to DiscoverProtectedResourceMetadata
 func DiscoverScopesFromProtectedResource(metadataURL string, timeout time.Duration) ([]string, error) {
-	logger := zap.L().Named("oauth.discovery")
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", metadataURL, nil)
+	metadata, err := DiscoverProtectedResourceMetadata(metadataURL, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, err
 	}
-
-	req.Header.Set("Accept", "application/json")
-
-	// TRACE: Log HTTP request details
-	logger.Debug("🌐 HTTP Request - Protected Resource Metadata (RFC 9728)",
-		zap.String("method", req.Method),
-		zap.String("url", metadataURL),
-		zap.Any("headers", req.Header),
-		zap.Duration("timeout", timeout))
-
-	startTime := time.Now()
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
-	elapsed := time.Since(startTime)
-
-	if err != nil {
-		logger.Debug("❌ HTTP Request failed",
-			zap.String("url", metadataURL),
-			zap.Error(err),
-			zap.Duration("elapsed", elapsed))
-		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// TRACE: Log HTTP response details
-	logger.Debug("📥 HTTP Response - Protected Resource Metadata",
-		zap.String("url", metadataURL),
-		zap.Int("status_code", resp.StatusCode),
-		zap.String("status", resp.Status),
-		zap.Any("headers", resp.Header),
-		zap.Duration("elapsed", elapsed))
-
-	if resp.StatusCode != http.StatusOK {
-		logger.Debug("⚠️ Non-200 status code from metadata endpoint",
-			zap.String("url", metadataURL),
-			zap.Int("status_code", resp.StatusCode))
-		return nil, fmt.Errorf("metadata endpoint returned %d", resp.StatusCode)
-	}
-
-	var metadata ProtectedResourceMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
-		logger.Debug("❌ Failed to parse JSON response",
-			zap.String("url", metadataURL),
-			zap.Error(err))
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
-	}
-
-	// TRACE: Log parsed metadata
-	logger.Debug("✅ Successfully parsed Protected Resource Metadata",
-		zap.String("url", metadataURL),
-		zap.String("resource", metadata.Resource),
-		zap.String("resource_name", metadata.ResourceName),
-		zap.Strings("scopes_supported", metadata.ScopesSupported),
-		zap.Strings("authorization_servers", metadata.AuthorizationServers),
-		zap.Strings("bearer_methods_supported", metadata.BearerMethodsSupported))
-
-	if len(metadata.ScopesSupported) == 0 {
-		logger.Debug("Protected Resource Metadata returned empty scopes_supported",
-			zap.String("metadata_url", metadataURL))
-		return []string{}, nil
-	}
-
 	return metadata.ScopesSupported, nil
 }
 
@@ -224,4 +158,42 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 	}
 
 	return metadata.ScopesSupported, nil
+}
+
+// DiscoverProtectedResourceMetadata fetches RFC 9728 Protected Resource Metadata
+// and returns the full metadata structure including resource parameter
+func DiscoverProtectedResourceMetadata(metadataURL string, timeout time.Duration) (*ProtectedResourceMetadata, error) {
+	logger := zap.L().Named("oauth.discovery")
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", metadataURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metadata endpoint returned %d", resp.StatusCode)
+	}
+
+	var metadata ProtectedResourceMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
+
+	logger.Info("Protected Resource Metadata discovered",
+		zap.String("resource", metadata.Resource),
+		zap.Strings("scopes", metadata.ScopesSupported),
+		zap.Strings("auth_servers", metadata.AuthorizationServers))
+
+	return &metadata, nil
 }

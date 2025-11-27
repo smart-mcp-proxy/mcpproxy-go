@@ -275,3 +275,33 @@ func TestDiscoverScopesFromAuthorizationServer_Timeout(t *testing.T) {
 		t.Errorf("Expected nil scopes on timeout, got %v", scopes)
 	}
 }
+
+func TestDiscoverProtectedResourceMetadata_ReturnsFullMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"resource": "https://example.com/mcp",
+			"scopes_supported": ["mcp.read", "mcp.write"],
+			"authorization_servers": ["https://auth.example.com"]
+		}`))
+	}))
+	defer server.Close()
+
+	metadata, err := DiscoverProtectedResourceMetadata(server.URL, 5*time.Second)
+
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if metadata == nil {
+		t.Fatalf("Expected metadata but got nil")
+	}
+	if metadata.Resource != "https://example.com/mcp" {
+		t.Errorf("Resource = %q, want %q", metadata.Resource, "https://example.com/mcp")
+	}
+	if len(metadata.ScopesSupported) != 2 {
+		t.Errorf("len(ScopesSupported) = %d, want 2", len(metadata.ScopesSupported))
+	}
+	if len(metadata.ScopesSupported) > 0 && metadata.ScopesSupported[0] != "mcp.read" {
+		t.Errorf("ScopesSupported[0] = %q, want %q", metadata.ScopesSupported[0], "mcp.read")
+	}
+}
