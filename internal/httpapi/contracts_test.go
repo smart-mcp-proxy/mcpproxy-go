@@ -24,9 +24,61 @@ import (
 // MockServerController implements ServerController for testing
 type MockServerController struct{}
 
+// mockManagementService provides a test implementation of management service methods
+type mockManagementService struct{}
+
+func (m *mockManagementService) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
+	return []*contracts.Server{
+		{
+			ID:              "test-server",
+			Name:            "test-server",
+			Protocol:        "stdio",
+			Command:         "echo",
+			Args:            []string{"hello"},
+			Enabled:         true,
+			Quarantined:     false,
+			Connected:       true,
+			Status:          "Ready",
+			ToolCount:       5,
+			ReconnectCount:  0,
+			Authenticated:   false,
+		},
+	}, &contracts.ServerStats{
+		TotalServers:       1,
+		ConnectedServers:   1,
+		QuarantinedServers: 0,
+		TotalTools:         5,
+	}, nil
+}
+
+func (m *mockManagementService) EnableServer(ctx context.Context, name string, enabled bool) error {
+	return nil
+}
+
+func (m *mockManagementService) RestartServer(ctx context.Context, name string) error {
+	return nil
+}
+
+func (m *mockManagementService) GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error) {
+	return []map[string]interface{}{
+		{
+			"name":        "echo_tool",
+			"server_name": name,
+			"description": "A simple echo tool for testing",
+			"usage":       10,
+		},
+	}, nil
+}
+
+func (m *mockManagementService) TriggerOAuthLogin(ctx context.Context, name string) error {
+	return nil
+}
+
 func (m *MockServerController) IsRunning() bool          { return true }
 func (m *MockServerController) GetListenAddress() string { return ":8080" }
-func (m *MockServerController) GetManagementService() interface{} { return nil }
+func (m *MockServerController) GetManagementService() interface{} {
+	return &mockManagementService{}
+}
 func (m *MockServerController) GetUpstreamStats() map[string]interface{} {
 	return map[string]interface{}{
 		"servers": map[string]interface{}{

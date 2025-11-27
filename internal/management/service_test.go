@@ -286,6 +286,32 @@ func (m *mockRuntimeOperations) RestartServer(serverName string) error {
 	return nil
 }
 
+// GetServerTools implements RuntimeOperations for testing
+func (m *mockRuntimeOperations) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	// Return mock tools data or error for testing
+	if m.failOnServer != "" && serverName == m.failOnServer {
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
+	if serverName == "" {
+		return nil, fmt.Errorf("server name required")
+	}
+	// Return sample tools for valid servers
+	return []map[string]interface{}{
+		{"name": "test_tool", "description": "A test tool"},
+	}, nil
+}
+
+// TriggerOAuthLogin implements RuntimeOperations for testing
+func (m *mockRuntimeOperations) TriggerOAuthLogin(serverName string) error {
+	if m.failOnServer != "" && serverName == m.failOnServer {
+		return fmt.Errorf("OAuth start failed")
+	}
+	if serverName == "" {
+		return fmt.Errorf("server name required")
+	}
+	return nil
+}
+
 // T065: Unit test for RestartAll() - verify sequential execution and partial failure handling
 func TestRestartAll(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()
@@ -544,4 +570,108 @@ func TestDisableAll(t *testing.T) {
 		assert.Len(t, result.Errors, 1)
 		assert.Contains(t, result.Errors["server3"], "disable failed")
 	})
+}
+
+// T006: Unit test for GetServerTools with valid server name
+func TestGetServerTools_ValidServer(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	cfg := &config.Config{}
+	emitter := &mockEventEmitter{}
+	runtime := newMockRuntime()
+
+	svc := NewService(runtime, cfg, emitter, nil, logger)
+	tools, err := svc.GetServerTools(context.Background(), "test-server")
+
+	require.NoError(t, err)
+	require.NotNil(t, tools)
+	assert.Len(t, tools, 1)
+	assert.Equal(t, "test_tool", tools[0]["name"])
+}
+
+// T007: Unit test for GetServerTools with empty server name
+func TestGetServerTools_EmptyServerName(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	cfg := &config.Config{}
+	emitter := &mockEventEmitter{}
+	runtime := newMockRuntime()
+
+	svc := NewService(runtime, cfg, emitter, nil, logger)
+	tools, err := svc.GetServerTools(context.Background(), "")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server name required")
+	assert.Nil(t, tools)
+}
+
+// T008: Unit test for GetServerTools with nonexistent server
+func TestGetServerTools_NonexistentServer(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	cfg := &config.Config{}
+	emitter := &mockEventEmitter{}
+	runtime := newMockRuntime()
+	runtime.failOnServer = "nonexistent"
+
+	svc := NewService(runtime, cfg, emitter, nil, logger)
+	tools, err := svc.GetServerTools(context.Background(), "nonexistent")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server not found")
+	assert.Nil(t, tools)
+}
+
+// T009: Unit test for TriggerOAuthLogin with valid server
+func TestTriggerOAuthLogin_ValidServer(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	cfg := &config.Config{}
+	emitter := &mockEventEmitter{}
+	runtime := newMockRuntime()
+
+	svc := NewService(runtime, cfg, emitter, nil, logger)
+	err := svc.TriggerOAuthLogin(context.Background(), "test-server")
+
+	require.NoError(t, err)
+}
+
+// T010: Unit test for TriggerOAuthLogin with disable_management enabled
+func TestTriggerOAuthLogin_DisableManagement(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	cfg := &config.Config{DisableManagement: true}
+	emitter := &mockEventEmitter{}
+	runtime := newMockRuntime()
+
+	svc := NewService(runtime, cfg, emitter, nil, logger)
+	err := svc.TriggerOAuthLogin(context.Background(), "test-server")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disable_management=true")
+	assert.Empty(t, emitter.emittedEvents, "No events should be emitted when blocked")
+}
+
+// T011: Unit test for TriggerOAuthLogin with read_only enabled
+func TestTriggerOAuthLogin_ReadOnly(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	cfg := &config.Config{ReadOnlyMode: true}
+	emitter := &mockEventEmitter{}
+	runtime := newMockRuntime()
+
+	svc := NewService(runtime, cfg, emitter, nil, logger)
+	err := svc.TriggerOAuthLogin(context.Background(), "test-server")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read_only_mode=true")
+	assert.Empty(t, emitter.emittedEvents)
+}
+
+// T012: Unit test for TriggerOAuthLogin with empty server name
+func TestTriggerOAuthLogin_EmptyServerName(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	cfg := &config.Config{}
+	emitter := &mockEventEmitter{}
+	runtime := newMockRuntime()
+
+	svc := NewService(runtime, cfg, emitter, nil, logger)
+	err := svc.TriggerOAuthLogin(context.Background(), "")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server name required")
 }

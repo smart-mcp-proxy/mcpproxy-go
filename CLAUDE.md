@@ -357,11 +357,12 @@ The management service (`internal/management/`) provides a centralized business 
 
 **Key Components**:
 
-- **Service Interface** (`service.go:16-64`): Defines all management operations
+- **Service Interface** (`service.go:16-102`): Defines all management operations
   - Single-server: `RestartServer()`, `EnableServer()`, `DisableServer()`
   - Bulk operations: `RestartAll()`, `EnableAll()`, `DisableAll()`
   - Diagnostics: `GetServerHealth()`, `RunDiagnostics()`
   - Server CRUD: `AddServer()`, `RemoveServer()`, `QuarantineServer()`
+  - Tool operations: `GetServerTools()`, `TriggerOAuthLogin()` (added in spec 005)
 
 - **Configuration Gates**: All operations respect centralized configuration guards
   - `disable_management`: Blocks all write operations when true
@@ -831,6 +832,7 @@ When making changes to this codebase, ensure you understand the modular architec
 - BBolt (existing `server_{serverID}_tool_calls` buckets, new `sessions` bucket) (003-tool-annotations-webui)
 - Go 1.24.0 (004-management-health-refactor)
 - BBolt embedded database (`~/.mcpproxy/config.db`) for server configurations, quarantine status, and tool statistics (004-management-health-refactor)
+- BBolt embedded database (`~/.mcpproxy/config.db`) - used by existing runtime, no changes required (005-rest-management-integration)
 
 ## Recent Changes
 - 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3

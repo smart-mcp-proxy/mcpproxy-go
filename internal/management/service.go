@@ -81,6 +81,24 @@ type Service interface {
 	// AuthStatus returns detailed OAuth authentication status for a specific server.
 	// Returns nil if server doesn't use OAuth or doesn't exist.
 	AuthStatus(ctx context.Context, name string) (*contracts.AuthStatus, error)
+
+	// Server Tool Operations
+
+	// GetServerTools retrieves all available tools for a specific upstream MCP server.
+	// Delegates to runtime's GetServerTools() which reads from StateView cache.
+	// This is a read-only operation that completes in <10ms (in-memory cache read).
+	// Returns empty array if server has no tools.
+	// Returns error if server name is empty, server not found, or server not connected.
+	GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
+
+	// TriggerOAuthLogin initiates an OAuth 2.x authentication flow for a specific server.
+	// Delegates to upstream manager's StartManualOAuth() which launches browser-based flow.
+	// This operation respects disable_management and read_only configuration gates.
+	// Emits "servers.changed" event on successful OAuth completion.
+	// Method returns immediately after starting OAuth flow (actual completion is asynchronous).
+	// Returns error if server name is empty, server not found, config gates block operation,
+	// or server doesn't support OAuth.
+	TriggerOAuthLogin(ctx context.Context, name string) error
 }
 
 // EventEmitter defines the interface for emitting runtime events.
@@ -96,6 +114,8 @@ type RuntimeOperations interface {
 	RestartServer(serverName string) error
 	GetAllServers() ([]map[string]interface{}, error)
 	BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error)
+	GetServerTools(serverName string) ([]map[string]interface{}, error)
+	TriggerOAuthLogin(serverName string) error
 }
 
 // service implements the Service interface with dependency injection.
@@ -568,6 +588,47 @@ func (s *service) DisableAll(ctx context.Context) (*BulkOperationResult, error) 
 }
 
 // Doctor is now implemented in diagnostics.go (T040-T044)
+
+// GetServerTools retrieves all tools for a specific upstream server (T013).
+// This method delegates to runtime's GetServerTools() which reads from StateView cache.
+func (s *service) GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error) {
+	// Validate input
+	if name == "" {
+		return nil, fmt.Errorf("server name required")
+	}
+
+	// Delegate to runtime (existing implementation)
+	tools, err := s.runtime.GetServerTools(name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tools: %w", err)
+	}
+
+	return tools, nil
+}
+
+// TriggerOAuthLogin initiates OAuth authentication flow for a server (T014).
+// This method checks config gates, delegates to runtime, and emits events on completion.
+func (s *service) TriggerOAuthLogin(ctx context.Context, name string) error {
+	// Validate input
+	if name == "" {
+		return fmt.Errorf("server name required")
+	}
+
+	// Check configuration gates (T015)
+	if err := s.checkWriteGates(); err != nil {
+		return err
+	}
+
+	// Delegate to runtime (existing implementation)
+	if err := s.runtime.TriggerOAuthLogin(name); err != nil {
+		return fmt.Errorf("failed to start OAuth: %w", err)
+	}
+
+	// Event will be emitted by upstream manager on OAuth completion
+	// (existing behavior - no changes needed)
+
+	return nil
+}
 
 // AuthStatus returns detailed OAuth authentication status for a specific server.
 func (s *service) AuthStatus(ctx context.Context, name string) (*contracts.AuthStatus, error) {

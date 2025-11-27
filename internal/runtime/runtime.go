@@ -1572,3 +1572,63 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 
 	return result, nil
 }
+
+// GetServerTools implements RuntimeOperations interface for management service.
+// Returns all tools for a specific upstream server from StateView cache (lock-free read).
+func (r *Runtime) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	r.logger.Debug("Runtime.GetServerTools called", zap.String("server", serverName))
+
+	// Use Supervisor's StateView for lock-free, instant reads
+	if r.supervisor == nil {
+		return nil, fmt.Errorf("supervisor not available")
+	}
+
+	stateView := r.supervisor.StateView()
+	if stateView == nil {
+		return nil, fmt.Errorf("StateView not available")
+	}
+
+	// Get snapshot - this is lock-free and instant
+	snapshot := stateView.Snapshot()
+	serverStatus, exists := snapshot.Servers[serverName]
+	if !exists {
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
+
+	// Convert []stateview.ToolInfo to []map[string]interface{}
+	tools := make([]map[string]interface{}, 0, len(serverStatus.Tools))
+	for _, tool := range serverStatus.Tools {
+		toolMap := map[string]interface{}{
+			"name":         tool.Name,
+			"description":  tool.Description,
+			"server_name":  serverName,
+		}
+		if tool.InputSchema != nil {
+			toolMap["inputSchema"] = tool.InputSchema
+		}
+		if tool.Annotations != nil {
+			toolMap["annotations"] = tool.Annotations
+		}
+		tools = append(tools, toolMap)
+	}
+
+	return tools, nil
+}
+
+// TriggerOAuthLogin implements RuntimeOperations interface for management service.
+// Initiates OAuth 2.x authentication flow for a specific server.
+func (r *Runtime) TriggerOAuthLogin(serverName string) error {
+	r.logger.Debug("Runtime.TriggerOAuthLogin called", zap.String("server", serverName))
+
+	// Delegate to upstream manager to start manual OAuth flow
+	if r.upstreamManager == nil {
+		return fmt.Errorf("upstream manager not available")
+	}
+
+	// StartManualOAuth launches browser and starts callback server
+	if err := r.upstreamManager.StartManualOAuth(serverName, true); err != nil {
+		return fmt.Errorf("failed to start OAuth flow: %w", err)
+	}
+
+	return nil
+}
