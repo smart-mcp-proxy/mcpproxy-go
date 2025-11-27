@@ -133,6 +133,46 @@ func TestListServers(t *testing.T) {
 		assert.Nil(t, servers)
 		assert.Nil(t, stats)
 	})
+
+	t.Run("server with OAuth config", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":            "oauth-server",
+				"name":          "slack",
+				"enabled":       true,
+				"connected":     false,
+				"quarantined":   false,
+				"authenticated": false,
+				"last_error":    "OAuth provider requires 'resource' parameter",
+				"oauth": map[string]interface{}{
+					"client_id": "test-client-123",
+					"scopes":    []interface{}{"read", "write"},
+					"auth_url":  "https://oauth.example.com/authorize",
+					"token_url": "https://oauth.example.com/token",
+				},
+			},
+		}
+
+		svc := NewService(runtime, cfg, emitter, nil, logger)
+		servers, stats, err := svc.ListServers(context.Background())
+
+		require.NoError(t, err)
+		assert.Len(t, servers, 1)
+		assert.Equal(t, 1, stats.TotalServers)
+
+		// Verify OAuth config was extracted correctly
+		server := servers[0]
+		assert.Equal(t, "slack", server.Name)
+		assert.Equal(t, "OAuth provider requires 'resource' parameter", server.LastError)
+		assert.False(t, server.Authenticated)
+
+		require.NotNil(t, server.OAuth, "OAuth config should be present")
+		assert.Equal(t, "test-client-123", server.OAuth.ClientID)
+		assert.Equal(t, []string{"read", "write"}, server.OAuth.Scopes)
+		assert.Equal(t, "https://oauth.example.com/authorize", server.OAuth.AuthURL)
+		assert.Equal(t, "https://oauth.example.com/token", server.OAuth.TokenURL)
+	})
 }
 
 // T019: Unit test for EnableServer
