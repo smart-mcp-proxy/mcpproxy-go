@@ -169,6 +169,32 @@ mcpproxy upstream restart failing-srv
 
 See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
 
+### CLI Socket Communication
+
+CLI commands automatically detect and use Unix socket/named pipe communication when the daemon is running:
+
+**Commands with socket support:**
+- `upstream list/logs/enable/disable/restart` - Daemon connection with standalone fallback
+- `doctor` - **Requires daemon** (shows live diagnostics)
+- `call tool` - Daemon connection with standalone fallback
+- `code exec` - Daemon connection with standalone fallback
+- `tools list` - Daemon connection with standalone fallback (NEW)
+- `auth login` - Daemon connection with standalone fallback (NEW)
+- `auth status` - **Requires daemon** (shows live OAuth state) (NEW)
+
+**Benefits of socket mode:**
+- Reuses daemon's existing server connections (faster)
+- Shows real daemon state (not config file state)
+- Coordinates OAuth tokens with running daemon
+- No redundant server connection overhead
+
+**Standalone commands** (no socket support needed):
+- `secrets` - Direct OS keyring operations
+- `trust-cert` - File system operations
+- `search-servers` - Registry API operations
+
+See `docs/socket-communication.md` for socket implementation details.
+
 ### Running the Application
 
 #### Core + Tray Architecture (Current)

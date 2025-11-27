@@ -2,19 +2,23 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/socket"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/upstream/managed"
 
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 var (
@@ -102,101 +106,24 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Find server config
-	var serverConfig *config.ServerConfig
-	for _, server := range globalConfig.Servers {
-		if server.Name == serverName {
-			serverConfig = server
-			break
-		}
-	}
-	if serverConfig == nil {
-		return fmt.Errorf("server '%s' not found in configuration. Available servers: %v",
-			serverName, getAvailableServerNames(globalConfig))
-	}
-
-	fmt.Printf("🚀 MCP Tools List - Server: %s\n", serverName)
-	fmt.Printf("📝 Log Level: %s\n", toolsLogLevel)
-	fmt.Printf("⏱️  Timeout: %v\n", timeout)
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-
 	// Create logger
-	logConfig := &config.LogConfig{
-		Level:         toolsLogLevel,
-		EnableConsole: true,
-		EnableFile:    false,
-		JSONFormat:    false,
-	}
-	logger, err := logs.SetupLogger(logConfig)
+	logger, err := logs.SetupCommandLogger(false, toolsLogLevel, false, "")
 	if err != nil {
-		return fmt.Errorf("failed to create logger: %w", err)
+		return fmt.Errorf("failed to setup logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	// Check if daemon is running and use client mode
+	if shouldUseToolsDaemon(globalConfig.DataDir) {
+		logger.Info("Detected running daemon, using client mode via socket",
+			zap.String("server", serverName))
+		return runToolsListClientMode(ctx, globalConfig.DataDir, serverName, logger)
 	}
 
-	// Create storage (optional, for OAuth persistence)
-	var db *storage.BoltDB
-	if globalConfig.DataDir != "" {
-		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
-		if err != nil {
-			logger.Warn("Failed to create storage, OAuth will use in-memory")
-		} else {
-			db = boltDB
-			defer db.Close()
-		}
-	}
-
-	// Create secret resolver
-	secretResolver := secret.NewResolver()
-
-	// Create managed client (same as serve mode!)
-	managedClient, err := managed.NewClient(serverName, serverConfig, logger, logConfig, globalConfig, db, secretResolver)
-	if err != nil {
-		return fmt.Errorf("failed to create managed client: %w", err)
-	}
-
-	// Connect to server
-	fmt.Printf("🔗 Connecting to server '%s'...\n", serverName)
-	if err := managedClient.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
-	}
-
-	// Ensure cleanup on exit
-	defer func() {
-		fmt.Printf("🔌 Disconnecting from server...\n")
-		if disconnectErr := managedClient.Disconnect(); disconnectErr != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
-		}
-	}()
-
-	// List tools
-	tools, err := managedClient.ListTools(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list tools: %w", err)
-	}
-
-	// Output results based on format
-	switch outputFormat {
-	case "json":
-		return outputToolsAsJSON(tools)
-	case "yaml":
-		return outputToolsAsYAML(tools)
-	default:
-		// Table format (default)
-		fmt.Printf("✅ Tool discovery completed successfully!\n\n")
-
-		if len(tools) == 0 {
-			fmt.Printf("⚠️  No tools found on server '%s'\n", serverName)
-			fmt.Printf("💡 This could indicate:\n")
-			fmt.Printf("   • Server doesn't support tools\n")
-			fmt.Printf("   • Server is not properly configured\n")
-			fmt.Printf("   • Connection issues during tool discovery\n")
-		} else {
-			fmt.Printf("🎉 Found %d tool(s) on server '%s'\n\n", len(tools), serverName)
-			displayToolsTable(tools, serverName)
-			fmt.Printf("\n💡 Use these tools with: mcpproxy call_tool --tool=%s:<tool_name>\n", serverName)
-		}
-	}
-
-	return nil
+	// No daemon detected, use standalone mode
+	logger.Info("No daemon detected, using standalone mode",
+		zap.String("server", serverName))
+	return runToolsListStandalone(ctx, serverName, globalConfig, logger)
 }
 
 // loadToolsConfig loads the MCP configuration file for tools command
@@ -276,5 +203,172 @@ func outputToolsAsJSON(_ []*config.ToolMetadata) error {
 func outputToolsAsYAML(_ []*config.ToolMetadata) error {
 	// This would use gopkg.in/yaml.v3 to output tools
 	fmt.Printf("📄 YAML output not yet implemented\n")
+	return nil
+}
+
+// shouldUseToolsDaemon checks if daemon is running by detecting socket file.
+func shouldUseToolsDaemon(dataDir string) bool {
+	socketPath := socket.DetectSocketPath(dataDir)
+	return socket.IsSocketAvailable(socketPath)
+}
+
+// runToolsListClientMode executes tools list via daemon HTTP API over socket.
+func runToolsListClientMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
+	socketPath := socket.DetectSocketPath(dataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Ping daemon to verify connectivity
+	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer pingCancel()
+	if err := client.Ping(pingCtx); err != nil {
+		logger.Warn("Failed to ping daemon, falling back to standalone mode",
+			zap.Error(err),
+			zap.String("socket_path", socketPath))
+		// Fall back to standalone mode
+		cfg, err := loadToolsConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load config for standalone mode: %w", err)
+		}
+		return runToolsListStandalone(ctx, serverName, cfg, logger)
+	}
+
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n\n")
+
+	// Fetch tools from daemon
+	tools, err := client.GetServerTools(ctx, serverName)
+	if err != nil {
+		return fmt.Errorf("failed to get server tools from daemon: %w", err)
+	}
+
+	// Output results
+	return outputTools(tools, outputFormat, logger)
+}
+
+// outputTools formats and displays tools based on output format.
+func outputTools(tools []map[string]interface{}, format string, logger *zap.Logger) error {
+	switch format {
+	case "json":
+		output, err := json.MarshalIndent(tools, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to format tools as JSON: %w", err)
+		}
+		fmt.Println(string(output))
+	case "yaml":
+		// YAML output implementation (if needed)
+		return fmt.Errorf("YAML output not yet implemented, use json or table")
+	case "table":
+		fallthrough
+	default:
+		// Table output
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("🔧 Tools Available (%d total)\n", len(tools))
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+		for _, tool := range tools {
+			name, _ := tool["name"].(string)
+			desc, _ := tool["description"].(string)
+
+			fmt.Printf("📌 %s\n", name)
+			if desc != "" {
+				fmt.Printf("   %s\n", desc)
+			}
+			fmt.Println()
+		}
+	}
+	return nil
+}
+
+// runToolsListStandalone executes tools list in standalone mode (original behavior).
+func runToolsListStandalone(ctx context.Context, serverName string, globalConfig *config.Config, logger *zap.Logger) error {
+	// Find server config
+	var serverConfig *config.ServerConfig
+	for _, server := range globalConfig.Servers {
+		if server.Name == serverName {
+			serverConfig = server
+			break
+		}
+	}
+	if serverConfig == nil {
+		return fmt.Errorf("server '%s' not found in configuration. Available servers: %v",
+			serverName, getAvailableServerNames(globalConfig))
+	}
+
+	fmt.Printf("🚀 MCP Tools List - Server: %s\n", serverName)
+	fmt.Printf("📝 Log Level: %s\n", toolsLogLevel)
+	fmt.Printf("⏱️  Timeout: %v\n", timeout)
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+	// Create storage (optional, for OAuth persistence)
+	var db *storage.BoltDB
+	if globalConfig.DataDir != "" {
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
+		if err != nil {
+			logger.Warn("Failed to create storage, OAuth will use in-memory")
+		} else {
+			db = boltDB
+			defer db.Close()
+		}
+	}
+
+	// Create secret resolver
+	secretResolver := secret.NewResolver()
+
+	// Create log config for managed client
+	logConfig := &config.LogConfig{
+		Level:         toolsLogLevel,
+		EnableConsole: true,
+		EnableFile:    false,
+		JSONFormat:    false,
+	}
+
+	// Create managed client (same as serve mode!)
+	managedClient, err := managed.NewClient(serverName, serverConfig, logger, logConfig, globalConfig, db, secretResolver)
+	if err != nil {
+		return fmt.Errorf("failed to create managed client: %w", err)
+	}
+
+	// Connect to server
+	fmt.Printf("🔗 Connecting to server '%s'...\n", serverName)
+	if err := managedClient.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
+	}
+
+	// Ensure cleanup on exit
+	defer func() {
+		fmt.Printf("🔌 Disconnecting from server...\n")
+		if disconnectErr := managedClient.Disconnect(); disconnectErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
+		}
+	}()
+
+	// List tools
+	tools, err := managedClient.ListTools(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list tools: %w", err)
+	}
+
+	// Output results based on format
+	switch outputFormat {
+	case "json":
+		return outputToolsAsJSON(tools)
+	case "yaml":
+		return outputToolsAsYAML(tools)
+	default:
+		// Table format (default)
+		fmt.Printf("✅ Tool discovery completed successfully!\n\n")
+
+		if len(tools) == 0 {
+			fmt.Printf("⚠️  No tools found on server '%s'\n", serverName)
+			fmt.Printf("💡 This could indicate:\n")
+			fmt.Printf("   • Server doesn't support tools\n")
+			fmt.Printf("   • Server is not properly configured\n")
+			fmt.Printf("   • Connection issues during tool discovery\n")
+		} else {
+			fmt.Printf("🎉 Found %d tool(s) on server '%s'\n\n", len(tools), serverName)
+			displayToolsTable(tools, serverName)
+			fmt.Printf("\n💡 Use these tools with: mcpproxy call_tool --tool=%s:<tool_name>\n", serverName)
+		}
+	}
+
 	return nil
 }
