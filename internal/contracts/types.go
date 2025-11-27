@@ -298,7 +298,8 @@ type Diagnostics struct {
 	TotalIssues     int                 `json:"total_issues"`
 	UpstreamErrors  []UpstreamError     `json:"upstream_errors"`
 	OAuthRequired   []OAuthRequirement  `json:"oauth_required"`
-	MissingSecrets  []MissingSecretInfo `json:"missing_secrets"` // Renamed to avoid conflict
+	OAuthIssues     []OAuthIssue        `json:"oauth_issues"`          // OAuth parameter mismatches
+	MissingSecrets  []MissingSecretInfo `json:"missing_secrets"`       // Renamed to avoid conflict
 	RuntimeWarnings []string            `json:"runtime_warnings"`
 	DockerStatus    *DockerStatus       `json:"docker_status,omitempty"`
 	Timestamp       time.Time           `json:"timestamp"`
@@ -317,6 +318,16 @@ type OAuthRequirement struct {
 	State      string     `json:"state"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	Message    string     `json:"message"`
+}
+
+// OAuthIssue represents an OAuth configuration issue (e.g., missing parameters).
+type OAuthIssue struct {
+	ServerName       string   `json:"server_name"`
+	Issue            string   `json:"issue"`
+	Error            string   `json:"error"`
+	MissingParams    []string `json:"missing_params,omitempty"`
+	Resolution       string   `json:"resolution"`
+	DocumentationURL string   `json:"documentation_url,omitempty"`
 }
 
 // MissingSecretInfo represents a secret referenced in configuration but not found.
