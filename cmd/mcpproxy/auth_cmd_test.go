@@ -1,6 +1,8 @@
 package main
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 
 	"mcpproxy-go/internal/socket"
@@ -32,5 +34,16 @@ func TestDetectSocketPath_Auth(t *testing.T) {
 	socketPath := socket.DetectSocketPath(tmpDir)
 
 	assert.NotEmpty(t, socketPath, "DetectSocketPath should return non-empty path")
-	assert.Contains(t, socketPath, tmpDir, "Socket path should be within data directory")
+
+	// Platform-specific assertions
+	if runtime.GOOS == "windows" {
+		// Windows: Named pipes use global namespace with hash
+		assert.True(t, strings.HasPrefix(socketPath, "npipe:////./pipe/mcpproxy-"),
+			"Windows socket should be a named pipe")
+	} else {
+		// Unix: Socket file is within data directory
+		assert.Contains(t, socketPath, tmpDir, "Socket path should be within data directory")
+		assert.True(t, strings.HasPrefix(socketPath, "unix://"),
+			"Unix socket should have unix:// prefix")
+	}
 }
