@@ -153,11 +153,12 @@ type ServerConfig struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	ClientID     string   `json:"client_id,omitempty" mapstructure:"client_id"`
-	ClientSecret string   `json:"client_secret,omitempty" mapstructure:"client_secret"`
-	RedirectURI  string   `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
-	Scopes       []string `json:"scopes,omitempty" mapstructure:"scopes"`
-	PKCEEnabled  bool     `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+	ClientID     string            `json:"client_id,omitempty" mapstructure:"client_id"`
+	ClientSecret string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
+	RedirectURI  string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
+	Scopes       []string          `json:"scopes,omitempty" mapstructure:"scopes"`
+	PKCEEnabled  bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+	ExtraParams  map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"`
 }
 
 // DockerIsolationConfig represents global Docker isolation settings
