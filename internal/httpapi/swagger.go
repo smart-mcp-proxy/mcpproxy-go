@@ -65,6 +65,35 @@ func (h *swaggerHandler) overrideServers(doc string, r *http.Request) (string, e
 		{"url": serverURL},
 	}
 
+	// Force header-based API key as default while keeping query-based option available.
+	components, _ := spec["components"].(map[string]any)
+	if components == nil {
+		components = make(map[string]any)
+	}
+	securitySchemes, _ := components["securitySchemes"].(map[string]any)
+	if securitySchemes == nil {
+		securitySchemes = make(map[string]any)
+	}
+	securitySchemes["ApiKeyAuth"] = map[string]any{
+		"type":        "apiKey",
+		"in":          "header",
+		"name":        "X-API-Key",
+		"description": "API key authentication via X-API-Key header",
+	}
+	securitySchemes["ApiKeyQuery"] = map[string]any{
+		"type":        "apiKey",
+		"in":          "query",
+		"name":        "apikey",
+		"description": "API key authentication via query parameter. Use ?apikey=your-key",
+	}
+	components["securitySchemes"] = securitySchemes
+	spec["components"] = components
+
+	// Default to header auth.
+	spec["security"] = []map[string]any{
+		{"ApiKeyAuth": []any{}},
+	}
+
 	out, err := json.Marshal(spec)
 	if err != nil {
 		return "", err
