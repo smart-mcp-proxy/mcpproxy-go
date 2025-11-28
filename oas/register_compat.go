@@ -10,14 +10,12 @@ import (
 func init() {
 	// Use a relative server URL so Swagger UI executes against the same origin as the served UI.
 	const defaultServer = "localhost:8080/api/v1"
-	if strings.Contains(SwaggerInfo.SwaggerTemplate, defaultServer) {
-		SwaggerInfo.SwaggerTemplate = strings.Replace(
-			SwaggerInfo.SwaggerTemplate,
-			defaultServer,
-			"/api/v1",
-			1,
-		)
-	}
+	SwaggerInfo.SwaggerTemplate = strings.Replace(
+		SwaggerInfo.SwaggerTemplate,
+		defaultServer,
+		"/api/v1",
+		1,
+	)
 
 	// swagger UI handler reads from swag v1 registry; we reuse the v2-generated spec since it implements ReadDoc.
 	swagv1.Register(SwaggerInfo.InstanceName(), SwaggerInfo)
