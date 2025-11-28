@@ -40,6 +40,65 @@ const (
 	manualOAuthKey contextKey = "manual_oauth"
 )
 
+// OAuthParameterError represents a missing or invalid OAuth parameter
+type OAuthParameterError struct {
+	Parameter   string
+	Location    string // "authorization_url" or "token_request"
+	Message     string
+	OriginalErr error
+}
+
+func (e *OAuthParameterError) Error() string {
+	return fmt.Sprintf("OAuth provider requires '%s' parameter: %s", e.Parameter, e.Message)
+}
+
+func (e *OAuthParameterError) Unwrap() error {
+	return e.OriginalErr
+}
+
+// parseOAuthError extracts structured error information from OAuth provider responses
+func parseOAuthError(err error, responseBody []byte) error {
+	// Try to parse as FastAPI validation error (Runlayer format)
+	var fapiErr struct {
+		Detail []struct {
+			Type  string   `json:"type"`
+			Loc   []string `json:"loc"`
+			Msg   string   `json:"msg"`
+			Input any      `json:"input"`
+		} `json:"detail"`
+	}
+
+	if json.Unmarshal(responseBody, &fapiErr) == nil && len(fapiErr.Detail) > 0 {
+		for _, detail := range fapiErr.Detail {
+			if detail.Type == "missing" && len(detail.Loc) >= 2 {
+				if detail.Loc[0] == "query" {
+					paramName := detail.Loc[1]
+					return &OAuthParameterError{
+						Parameter:   paramName,
+						Location:    "authorization_url",
+						Message:     detail.Msg,
+						OriginalErr: err,
+					}
+				}
+			}
+		}
+	}
+
+	// Try to parse as RFC 6749 OAuth error response
+	var oauthErr struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+		ErrorURI         string `json:"error_uri"`
+	}
+
+	if json.Unmarshal(responseBody, &oauthErr) == nil && oauthErr.Error != "" {
+		return fmt.Errorf("OAuth error: %s - %s", oauthErr.Error, oauthErr.ErrorDescription)
+	}
+
+	// Fallback to original error
+	return err
+}
+
 // Connect establishes connection to the upstream server
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()

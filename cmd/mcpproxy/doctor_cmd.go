@@ -167,7 +167,34 @@ func outputDiagnostics(diag map[string]interface{}) error {
 			fmt.Println()
 		}
 
-		// 3. Missing Secrets
+		// 3. OAuth Configuration Issues
+		if oauthIssues := getArrayField(diag, "oauth_issues"); len(oauthIssues) > 0 {
+			fmt.Println("🔍 OAuth Configuration Issues")
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			for _, issueItem := range oauthIssues {
+				if issueMap, ok := issueItem.(map[string]interface{}); ok {
+					serverName := getStringField(issueMap, "server_name")
+					issue := getStringField(issueMap, "issue")
+					errorMsg := getStringField(issueMap, "error")
+					resolution := getStringField(issueMap, "resolution")
+					docURL := getStringField(issueMap, "documentation_url")
+
+					fmt.Printf("\n  Server: %s\n", serverName)
+					fmt.Printf("    Issue: %s\n", issue)
+					fmt.Printf("    Error: %s\n", errorMsg)
+					fmt.Printf("    Impact: Server cannot authenticate until parameter is provided\n")
+					fmt.Println()
+					fmt.Printf("    Resolution:\n")
+					fmt.Printf("      %s\n", resolution)
+					if docURL != "" {
+						fmt.Printf("      Documentation: %s\n", docURL)
+					}
+				}
+			}
+			fmt.Println()
+		}
+
+		// 4. Missing Secrets
 		if missingSecrets := getArrayField(diag, "missing_secrets"); len(missingSecrets) > 0 {
 			fmt.Println("🔐 Missing Secrets")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

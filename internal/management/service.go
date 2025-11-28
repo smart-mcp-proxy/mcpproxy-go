@@ -197,6 +197,35 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		if status, ok := srvRaw["status"].(string); ok {
 			srv.Status = status
 		}
+		if lastError, ok := srvRaw["last_error"].(string); ok {
+			srv.LastError = lastError
+		}
+		if authenticated, ok := srvRaw["authenticated"].(bool); ok {
+			srv.Authenticated = authenticated
+		}
+
+		// Extract OAuth config if present
+		if oauthRaw, ok := srvRaw["oauth"].(map[string]interface{}); ok && oauthRaw != nil {
+			oauthCfg := &contracts.OAuthConfig{}
+			if clientID, ok := oauthRaw["client_id"].(string); ok {
+				oauthCfg.ClientID = clientID
+			}
+			if scopes, ok := oauthRaw["scopes"].([]interface{}); ok {
+				oauthCfg.Scopes = make([]string, 0, len(scopes))
+				for _, scope := range scopes {
+					if scopeStr, ok := scope.(string); ok {
+						oauthCfg.Scopes = append(oauthCfg.Scopes, scopeStr)
+					}
+				}
+			}
+			if authURL, ok := oauthRaw["auth_url"].(string); ok {
+				oauthCfg.AuthURL = authURL
+			}
+			if tokenURL, ok := oauthRaw["token_url"].(string); ok {
+				oauthCfg.TokenURL = tokenURL
+			}
+			srv.OAuth = oauthCfg
+		}
 
 		// Extract numeric fields
 		if toolCount, ok := srvRaw["tool_count"].(int); ok {

@@ -26,6 +26,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		Timestamp:       time.Now(),
 		UpstreamErrors:  []contracts.UpstreamError{},
 		OAuthRequired:   []contracts.OAuthRequirement{},
+		OAuthIssues:     []contracts.OAuthIssue{},
 		MissingSecrets:  []contracts.MissingSecretInfo{},
 		RuntimeWarnings: []string{},
 	}
@@ -64,6 +65,9 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		}
 	}
 
+	// Check for OAuth issues (parameter mismatches)
+	diag.OAuthIssues = s.detectOAuthIssues(serversRaw)
+
 	// Check for missing secrets
 	diag.MissingSecrets = s.findMissingSecrets(ctx, serversRaw)
 
@@ -74,7 +78,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 
 	// Calculate total issues
 	diag.TotalIssues = len(diag.UpstreamErrors) + len(diag.OAuthRequired) +
-		len(diag.MissingSecrets) + len(diag.RuntimeWarnings)
+		len(diag.OAuthIssues) + len(diag.MissingSecrets) + len(diag.RuntimeWarnings)
 
 	s.logger.Infow("Doctor diagnostics completed",
 		"total_issues", diag.TotalIssues,
@@ -179,6 +183,57 @@ func parseSecretRef(value string) *secret.Ref {
 		return nil
 	}
 	return ref
+}
+
+// detectOAuthIssues identifies OAuth configuration issues like missing parameters.
+func (s *service) detectOAuthIssues(serversRaw []map[string]interface{}) []contracts.OAuthIssue {
+	var issues []contracts.OAuthIssue
+
+	for _, srvRaw := range serversRaw {
+		serverName := getStringFromMap(srvRaw, "name")
+		hasOAuth := srvRaw["oauth"] != nil
+		lastError := getStringFromMap(srvRaw, "last_error")
+		authenticated := getBoolFromMap(srvRaw, "authenticated")
+
+		// Skip servers without OAuth or already authenticated
+		if !hasOAuth || authenticated {
+			continue
+		}
+
+		// Check for parameter-related errors
+		if strings.Contains(strings.ToLower(lastError), "requires") &&
+			strings.Contains(strings.ToLower(lastError), "parameter") {
+			// Extract parameter name from error
+			paramName := extractParameterName(lastError)
+
+			issues = append(issues, contracts.OAuthIssue{
+				ServerName:    serverName,
+				Issue:         "OAuth provider parameter mismatch",
+				Error:         lastError,
+				MissingParams: []string{paramName},
+				Resolution: "This requires MCPProxy support for OAuth extra_params. " +
+					"Track progress: https://github.com/smart-mcp-proxy/mcpproxy-go/issues",
+				DocumentationURL: "https://www.rfc-editor.org/rfc/rfc8707.html",
+			})
+		}
+	}
+
+	return issues
+}
+
+// extractParameterName extracts the parameter name from an error message.
+// Example: "requires 'resource' parameter" -> "resource"
+func extractParameterName(errorMsg string) string {
+	// Look for pattern: 'parameter_name' parameter
+	start := strings.Index(errorMsg, "'")
+	if start == -1 {
+		return "unknown"
+	}
+	end := strings.Index(errorMsg[start+1:], "'")
+	if end == -1 {
+		return "unknown"
+	}
+	return errorMsg[start+1 : start+1+end]
 }
 
 func getStringFromMap(m map[string]interface{}, key string) string {

@@ -1495,11 +1495,23 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// Extract created time and config fields
 		var created time.Time
 		var url, command, protocol string
+		var oauthConfig map[string]interface{}
 		if serverStatus.Config != nil {
 			created = serverStatus.Config.Created
 			url = serverStatus.Config.URL
 			command = serverStatus.Config.Command
 			protocol = serverStatus.Config.Protocol
+
+			// Serialize OAuth config if present
+			if serverStatus.Config.OAuth != nil {
+				oauthConfig = map[string]interface{}{
+					"client_id": serverStatus.Config.OAuth.ClientID,
+					"scopes":    serverStatus.Config.OAuth.Scopes,
+					// auth_url and token_url will be populated from discovered metadata in Phase 0 Task 2
+					"auth_url":  "",
+					"token_url": "",
+				}
+			}
 		}
 
 		result = append(result, map[string]interface{}{
@@ -1518,6 +1530,8 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			"should_retry":    false,
 			"retry_count":     serverStatus.RetryCount,
 			"last_retry_time": nil,
+			"oauth":           oauthConfig,
+			"authenticated":   false, // Will be populated from OAuth status in Phase 0 Task 2
 		})
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"mcpproxy-go/internal/cliclient"
@@ -191,27 +192,50 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		name, _ := srv["name"].(string)
 		oauth, hasOAuth := srv["oauth"].(map[string]interface{})
 
-		if !hasOAuth {
+		if !hasOAuth || oauth == nil {
 			continue // Skip non-OAuth servers
 		}
 
 		hasOAuthServers = true
 		authenticated, _ := srv["authenticated"].(bool)
+		lastError, _ := srv["last_error"].(string)
 
-		status := "❌ Not Authenticated"
+		// Determine status emoji and text
+		var status string
 		if authenticated {
 			status = "✅ Authenticated"
+		} else if lastError != "" {
+			status = "❌ Authentication Failed"
+		} else {
+			status = "⏳ Pending Authentication"
 		}
 
 		fmt.Printf("Server: %s\n", name)
 		fmt.Printf("  Status: %s\n", status)
 
-		if authURL, ok := oauth["auth_url"].(string); ok {
+		if authURL, ok := oauth["auth_url"].(string); ok && authURL != "" {
 			fmt.Printf("  Auth URL: %s\n", authURL)
 		}
 
-		if tokenURL, ok := oauth["token_url"].(string); ok {
+		if tokenURL, ok := oauth["token_url"].(string); ok && tokenURL != "" {
 			fmt.Printf("  Token URL: %s\n", tokenURL)
+		}
+
+		if lastError != "" {
+			fmt.Printf("  Error: %s\n", lastError)
+
+			// Provide suggestions based on error type
+			if containsIgnoreCase(lastError, "requires") && containsIgnoreCase(lastError, "parameter") {
+				fmt.Println()
+				fmt.Println("  💡 Suggestion:")
+				fmt.Println("     This OAuth provider requires additional parameters that")
+				fmt.Println("     MCPProxy doesn't currently support. Support for custom")
+				fmt.Println("     OAuth parameters (extra_params) is coming soon.")
+				fmt.Println()
+				fmt.Println("     For more information:")
+				fmt.Println("     - RFC 8707: https://www.rfc-editor.org/rfc/rfc8707.html")
+				fmt.Println("     - Track progress: https://github.com/smart-mcp-proxy/mcpproxy-go/issues")
+			}
 		}
 
 		fmt.Println()
@@ -349,4 +373,9 @@ func runAuthLoginStandalone(ctx context.Context, serverName string) error {
 	fmt.Printf("🎉 You can now use tools from this server.\n")
 
 	return nil
+}
+
+// containsIgnoreCase checks if a string contains a substring (case-insensitive)
+func containsIgnoreCase(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
