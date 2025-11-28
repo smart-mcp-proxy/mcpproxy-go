@@ -23,10 +23,13 @@ type swaggerHandler struct {
 }
 
 func (h *swaggerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/swagger/")
+	path := strings.TrimPrefix(r.URL.Path, "/swagger")
+	path = strings.TrimPrefix(path, "/")
 
 	switch path {
 	case "", "/":
+		fallthrough
+	case "index.html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = fmt.Fprint(w, swaggerHTML)
 	case "doc.json":
