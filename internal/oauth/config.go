@@ -724,3 +724,26 @@ func parseBaseURL(fullURL string) (string, error) {
 
 	return fmt.Sprintf("%s://%s", u.Scheme, u.Host), nil
 }
+
+// IsOAuthCapable determines if a server can use OAuth authentication
+// Returns true if:
+//  1. OAuth is explicitly configured in config, OR
+//  2. Server uses HTTP-based protocol (OAuth auto-detection available)
+func IsOAuthCapable(serverConfig *config.ServerConfig) bool {
+	// Explicitly configured
+	if serverConfig.OAuth != nil {
+		return true
+	}
+
+	// Auto-detection available for HTTP-based protocols
+	protocol := strings.ToLower(serverConfig.Protocol)
+	switch protocol {
+	case "http", "sse", "streamable-http", "auto":
+		return true // OAuth can be auto-detected
+	case "stdio":
+		return false // OAuth not applicable for stdio
+	default:
+		// Unknown protocol - assume HTTP-based and try OAuth
+		return true
+	}
+}
