@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -39,12 +40,58 @@ func (h *swaggerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
+
+		doc, err = h.overrideServers(doc, r)
+		if err != nil {
+			h.logger.Warnf("failed to inject server URL into swagger doc: %v", err)
+		}
+
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_, _ = w.Write([]byte(doc))
 	default:
 		http.NotFound(w, r)
 	}
 }
+
+func (h *swaggerHandler) overrideServers(doc string, r *http.Request) (string, error) {
+	// Decode to map to avoid depending on the generated struct format.
+	var spec map[string]any
+	if err := json.Unmarshal([]byte(doc), &spec); err != nil {
+		return "", err
+	}
+
+	serverURL := h.buildServerURL(r)
+	spec["servers"] = []map[string]string{
+		{"url": serverURL},
+	}
+
+	out, err := json.Marshal(spec)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func (h *swaggerHandler) buildServerURL(r *http.Request) string {
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+
+	trimmedHost := strings.TrimSuffix(host, "/")
+	return fmt.Sprintf("%s://%s%s", scheme, trimmedHost, apiBasePath)
+}
+
+const apiBasePath = "/api/v1"
 
 const swaggerHTML = `<!doctype html>
 <html lang="en">
