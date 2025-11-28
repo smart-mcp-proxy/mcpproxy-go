@@ -42,6 +42,24 @@ jobs:
           echo "latest_tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
           echo "Generated version: ${VERSION}"
 
+  verify-oas:
+    name: Verify OpenAPI Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install swag
+        run: go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4
+
+      - name: Regenerate and verify OpenAPI spec
+        run: scripts/verify-oas.sh
+
   # Build frontend once and share across all jobs
   build-frontend:
     name: Build Frontend
@@ -72,7 +90,7 @@ jobs:
 
   build:
     name: Build Binaries
-    needs: [prepare, build-frontend]
+    needs: [prepare, build-frontend, verify-oas]
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}

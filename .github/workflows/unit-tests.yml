@@ -35,9 +35,27 @@ jobs:
           path: frontend/dist/
           retention-days: 1
 
+  verify-oas:
+    name: Verify OpenAPI Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install swag
+        run: go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4
+
+      - name: Regenerate and verify OpenAPI spec
+        run: scripts/verify-oas.sh
+
   test:
     name: Unit Tests
-    needs: build-frontend
+    needs: [build-frontend, verify-oas]
     runs-on: ${{ matrix.os }}
 
     env:
@@ -125,7 +143,7 @@ jobs:
 
   lint:
     name: Lint
-    needs: build-frontend
+    needs: [build-frontend, verify-oas]
     runs-on: ubuntu-latest
 
     env:
@@ -160,7 +178,7 @@ jobs:
 
   build:
     name: Build
-    needs: build-frontend
+    needs: [build-frontend, verify-oas]
     runs-on: ${{ matrix.os }}
 
     env:

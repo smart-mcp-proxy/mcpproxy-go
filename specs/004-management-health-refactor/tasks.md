@@ -131,7 +131,7 @@ This is a Go backend refactoring project with CLI interface:
 
 **Goal**: Generate OpenAPI 3.x specification from swag annotations automatically during build. Ensure API documentation stays synchronized with codebase for every release.
 
-**Independent Test**: Run `make build`, verify docs/openapi.yaml exists and validates successfully with `swagger-cli validate`. Third-party OpenAPI tools can consume the spec without errors.
+**Independent Test**: Run `make build`, verify oas/swagger.yaml exists and validates successfully with `swagger-cli validate`. Third-party OpenAPI tools can consume the spec without errors.
 
 ### Tests for User Story 3
 
@@ -218,7 +218,7 @@ This is a Go backend refactoring project with CLI interface:
 - [ ] T091 [P] Update docs/cli-management-commands.md with complete endpoint mapping table
 - [ ] T092 [P] Add architecture diagram to specs/004-management-health-refactor/plan.md showing service layer flow
 - [ ] T093 Run `make build` and verify OpenAPI spec generates without errors
-- [ ] T094 Validate OpenAPI spec with `swagger-cli validate docs/openapi.yaml`
+- [ ] T094 Validate OpenAPI spec with `swagger-cli validate oas/swagger.yaml`
 - [ ] T095 Run `./scripts/run-linter.sh` and fix any linting issues
 - [ ] T096 Run `./scripts/test-api-e2e.sh` and verify all E2E tests pass
 - [ ] T097 Run `./scripts/run-all-tests.sh` and verify full test suite passes

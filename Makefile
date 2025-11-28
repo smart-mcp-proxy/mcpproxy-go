@@ -1,12 +1,17 @@
 # MCPProxy Makefile
 
-.PHONY: help build swagger frontend-build frontend-dev backend-dev clean test lint
+.PHONY: help build swagger swagger-verify frontend-build frontend-dev backend-dev clean test lint
+
+SWAGGER_BIN ?= $(HOME)/go/bin/swag
+SWAGGER_OUT ?= oas
+SWAGGER_ENTRY ?= cmd/mcpproxy/main.go
 
 # Default target
 help:
 	@echo "MCPProxy Build Commands:"
 	@echo "  make build           - Build complete project (swagger + frontend + backend)"
 	@echo "  make swagger         - Generate OpenAPI specification"
+	@echo "  make swagger-verify  - Regenerate OpenAPI and fail if artifacts are dirty"
 	@echo "  make frontend-build  - Build frontend for production"
 	@echo "  make frontend-dev    - Start frontend development server"
 	@echo "  make backend-dev     - Build backend with dev flag (loads frontend from disk)"
@@ -17,8 +22,19 @@ help:
 # Generate OpenAPI specification
 swagger:
 	@echo "📚 Generating OpenAPI 3.1 specification..."
-	$$HOME/go/bin/swag init -g cmd/mcpproxy/main.go --output docs --outputTypes go,yaml --v3.1
-	@echo "✅ OpenAPI 3.1 spec generated: docs/swagger.yaml and docs/docs.go"
+	@[ -x "$(SWAGGER_BIN)" ] || { echo "⚠️  swag binary not found at $(SWAGGER_BIN). Run 'go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4'"; exit 1; }
+	@mkdir -p $(SWAGGER_OUT)
+	$(SWAGGER_BIN) init -g $(SWAGGER_ENTRY) --output $(SWAGGER_OUT) --outputTypes go,yaml --v3.1
+	@echo "✅ OpenAPI 3.1 spec generated: $(SWAGGER_OUT)/swagger.yaml and $(SWAGGER_OUT)/docs.go"
+
+swagger-verify: swagger
+	@echo "🔎 Verifying OpenAPI artifacts are committed..."
+	@if git status --porcelain -- $(SWAGGER_OUT)/swagger.yaml $(SWAGGER_OUT)/docs.go | grep -q .; then \
+		echo "❌ OpenAPI artifacts are out of date. Run 'make swagger' and commit the regenerated files."; \
+		git diff --stat -- $(SWAGGER_OUT)/swagger.yaml $(SWAGGER_OUT)/docs.go || true; \
+		exit 1; \
+	fi
+	@echo "✅ OpenAPI artifacts are up to date."
 
 # Build complete project
 build: swagger frontend-build
@@ -86,6 +102,8 @@ lint:
 # Install development dependencies
 dev-setup:
 	@echo "🛠️  Setting up development environment..."
+	@echo "📦 Installing swag (OpenAPI generator)..."
+	go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4
 	@echo "📦 Installing frontend dependencies..."
 	cd frontend && npm install
 	@echo "✅ Development setup completed"
