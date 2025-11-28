@@ -996,7 +996,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	c.logger.Error("🚨 ABOUT TO CALL oauth.CreateOAuthConfig")
 
 	// Create OAuth config using the oauth package
-	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, _ := oauth.CreateOAuthConfig(c.config, c.storage)
 
 	c.logger.Error("🚨 oauth.CreateOAuthConfig RETURNED",
 		zap.Bool("config_nil", oauthConfig == nil))
@@ -1307,7 +1307,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 		zap.String("strategy", "SSE OAuth"))
 
 	// Create OAuth config using the oauth package
-	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, _ := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config")
 	}
@@ -2069,7 +2069,7 @@ func (c *Client) ForceOAuthFlow(ctx context.Context) error {
 // forceHTTPOAuthFlow forces OAuth flow for HTTP transport
 func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 	// Create OAuth config
-	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, _ := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
 	}
@@ -2128,7 +2128,7 @@ func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 // forceSSEOAuthFlow forces OAuth flow for SSE transport
 func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 	// Create OAuth config
-	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, _ := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
 	}

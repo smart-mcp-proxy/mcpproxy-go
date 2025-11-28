@@ -178,9 +178,9 @@ func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
 	return isRecent
 }
 
-// CreateOAuthConfig creates an OAuth configuration for dynamic client registration
-// This implements proper callback server coordination required for Cloudflare OAuth
-func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltDB) *client.OAuthConfig {
+// CreateOAuthConfig creates OAuth configuration with auto-detected resource parameter
+// Returns both OAuth config and extra parameters map for RFC 8707 compliance
+func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltDB) (*client.OAuthConfig, map[string]string) {
 	logger := zap.L().Named("oauth")
 
 	logger.Error("🚨 OAUTH CONFIG CREATION CALLED - THIS SHOULD APPEAR IN LOGS",
@@ -291,6 +291,35 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 			zap.String("hint", "Set oauth.scopes in server config or ensure PRM/AS metadata advertises scopes_supported"))
 	}
 
+	// Track auto-detected resource parameter
+	var resourceURL string
+
+	// Try RFC 9728 Protected Resource Metadata discovery for resource parameter
+	baseURL, err := parseBaseURL(serverConfig.URL)
+	if err == nil && baseURL != "" {
+		resp, err := http.Head(serverConfig.URL)
+		if err == nil && resp.StatusCode == 401 {
+			wwwAuth := resp.Header.Get("WWW-Authenticate")
+			if metadataURL := ExtractResourceMetadataURL(wwwAuth); metadataURL != "" {
+				metadata, err := DiscoverProtectedResourceMetadata(metadataURL, 5*time.Second)
+				if err == nil && metadata.Resource != "" {
+					resourceURL = metadata.Resource
+					logger.Info("Auto-detected resource parameter from Protected Resource Metadata",
+						zap.String("server", serverConfig.Name),
+						zap.String("resource", resourceURL))
+				}
+			}
+		}
+	}
+
+	// Fallback: Use server URL as resource if not in metadata
+	if resourceURL == "" {
+		resourceURL = serverConfig.URL
+		logger.Info("Using server URL as resource parameter (fallback)",
+			zap.String("server", serverConfig.Name),
+			zap.String("resource", resourceURL))
+	}
+
 	// Start callback server first to get the exact port (as documented in successful approach)
 	logger.Info("🔧 Starting OAuth callback server with dynamic port allocation",
 		zap.String("server", serverConfig.Name),
@@ -302,7 +331,7 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 		logger.Error("Failed to start OAuth callback server",
 			zap.String("server", serverConfig.Name),
 			zap.Error(err))
-		return nil
+		return nil, nil
 	}
 
 	logger.Info("Using exact redirect URI from allocated callback server",
@@ -317,7 +346,7 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 
 	// Try to construct explicit metadata URLs to avoid timeout issues during auto-discovery
 	// Extract base URL from server URL for .well-known endpoints
-	baseURL, err := parseBaseURL(serverConfig.URL)
+	baseURL, err = parseBaseURL(serverConfig.URL)
 	if err != nil {
 		logger.Warn("Failed to parse base URL for OAuth metadata",
 			zap.String("server", serverConfig.Name),
@@ -407,7 +436,22 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 		zap.String("discovery_mode", "explicit metadata URL"), // Using explicit metadata URL to avoid discovery timeouts
 		zap.String("token_store", "shared"))                   // Using shared token store for token persistence
 
-	return oauthConfig
+	// Build extra parameters map
+	extraParams := map[string]string{
+		"resource": resourceURL,
+	}
+
+	// Merge with manual extra_params if provided
+	if serverConfig.OAuth != nil && serverConfig.OAuth.ExtraParams != nil {
+		for k, v := range serverConfig.OAuth.ExtraParams {
+			extraParams[k] = v
+			logger.Info("Manual extra parameter override",
+				zap.String("server", serverConfig.Name),
+				zap.String("param", k))
+		}
+	}
+
+	return oauthConfig, extraParams
 }
 
 // StartCallbackServer starts a new OAuth callback server for the given server name
