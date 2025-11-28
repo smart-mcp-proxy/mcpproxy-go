@@ -996,10 +996,15 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	c.logger.Error("🚨 ABOUT TO CALL oauth.CreateOAuthConfig")
 
 	// Create OAuth config using the oauth package
-	oauthConfig, _ := oauth.CreateOAuthConfig(c.config, c.storage)
+	// TODO(zero-config-oauth): extraParams (including RFC 8707 resource parameter) are currently
+	// not injected into mcp-go's OAuth flow because mcp-go v0.42.0 doesn't expose OAuth URL
+	// construction. Full support requires upstream mcp-go changes to accept extra parameters
+	// in OAuthConfig or provide URL construction hooks.
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 
 	c.logger.Error("🚨 oauth.CreateOAuthConfig RETURNED",
-		zap.Bool("config_nil", oauthConfig == nil))
+		zap.Bool("config_nil", oauthConfig == nil),
+		zap.Any("extra_params", extraParams))
 
 	if oauthConfig == nil {
 		c.logger.Error("🚨 OAUTH CONFIG IS NIL - RETURNING ERROR")
