@@ -6,7 +6,7 @@ import (
 	"go.uber.org/zap"
 
 	httpSwagger "github.com/swaggo/http-swagger"
-	_ "mcpproxy-go/docs" // Import generated docs
+	_ "mcpproxy-go/oas" // Import generated docs
 )
 
 // SetupSwaggerHandler returns a handler for Swagger UI

@@ -254,8 +254,8 @@ Add swag generation to `Makefile`:
 # Generate OpenAPI spec
 swagger:
 	@echo "📄 Generating OpenAPI specification..."
-	swag init -g cmd/mcpproxy/main.go --output docs --outputTypes yaml
-	@echo "✅ OpenAPI spec generated at docs/openapi.yaml"
+	swag init -g cmd/mcpproxy/main.go --output oas --outputTypes yaml
+	@echo "✅ OpenAPI spec generated at oas/swagger.yaml"
 
 # Update build target to include swagger
 build: swagger frontend-build
@@ -270,16 +270,16 @@ build: swagger frontend-build
 make swagger
 
 # Or manually:
-swag init -g cmd/mcpproxy/main.go --output docs --outputTypes yaml
+swag init -g cmd/mcpproxy/main.go --output oas --outputTypes yaml
 ```
 
 Expected output:
 ```
 2025/11/23 10:00:00 Generate swagger docs....
 2025/11/23 10:00:00 Generate general API Info, search dir:./cmd/mcpproxy
-2025/11/23 10:00:01 create docs/docs.go at  docs/docs.go
-2025/11/23 10:00:01 create docs/swagger.json at  docs/swagger.json
-2025/11/23 10:00:01 create docs/swagger.yaml at  docs/swagger.yaml
+2025/11/23 10:00:01 create oas/docs.go at  oas/docs.go
+2025/11/23 10:00:01 create oas/swagger.json at  oas/swagger.json
+2025/11/23 10:00:01 create oas/swagger.yaml at  oas/swagger.yaml
 ```
 
 ### 5.3 Validate Spec
@@ -289,10 +289,10 @@ Expected output:
 npm install -g @apidevtools/swagger-cli
 
 # Validate OpenAPI spec
-swagger-cli validate docs/openapi.yaml
+swagger-cli validate oas/swagger.yaml
 
 # Expected output:
-# docs/openapi.yaml is valid
+# oas/swagger.yaml is valid
 ```
 
 ## Step 6: Serve Swagger UI
@@ -308,7 +308,7 @@ import (
     "github.com/go-chi/chi/v5"
     httpSwagger "github.com/swaggo/http-swagger"
 
-    _ "mcpproxy-go/docs" // Import generated docs
+    _ "mcpproxy-go/oas" // Import generated docs
 )
 
 func (s *Server) mountSwaggerUI(r chi.Router) {
@@ -520,7 +520,7 @@ swag init -g cmd/mcpproxy/main.go --output docs --outputTypes yaml
 **Solution**: Check docs import:
 ```go
 import (
-    _ "mcpproxy-go/docs" // Must import generated docs
+    _ "mcpproxy-go/oas" // Must import generated docs
 )
 ```
 

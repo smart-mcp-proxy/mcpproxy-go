@@ -204,7 +204,7 @@ mcpproxy-go/                              # Existing structure
 │   └── [other packages unchanged]
 │
 ├── docs/                                 # [NEW] Generated documentation
-│   └── openapi.yaml                      # [GENERATED] OpenAPI 3.x spec
+│   └── swagger.yaml                      # [GENERATED] OpenAPI 3.x spec (in oas/)
 │
 ├── Makefile                              # [MODIFY] Add swag generation
 ├── go.mod                                # [MODIFY] Add swag dependencies

@@ -10,6 +10,12 @@ components:
             $ref: '#/components/schemas/contracts.MissingSecretInfo'
           type: array
           uniqueItems: false
+        oauth_issues:
+          description: OAuth parameter mismatches
+          items:
+            $ref: '#/components/schemas/contracts.OAuthIssue'
+          type: array
+          uniqueItems: false
         oauth_required:
           items:
             $ref: '#/components/schemas/contracts.OAuthRequirement'
@@ -137,6 +143,24 @@ components:
           type: array
           uniqueItems: false
         token_url:
+          type: string
+      type: object
+    contracts.OAuthIssue:
+      properties:
+        documentation_url:
+          type: string
+        error:
+          type: string
+        issue:
+          type: string
+        missing_params:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        resolution:
+          type: string
+        server_name:
           type: string
       type: object
     contracts.OAuthRequirement:

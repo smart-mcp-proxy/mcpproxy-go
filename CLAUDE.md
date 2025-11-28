@@ -405,7 +405,7 @@ result, err := mgmtService.RestartAll(ctx)
 return mcpResponse(result)
 ```
 
-**OpenAPI Documentation**: All REST endpoints are documented with OpenAPI 3.1 annotations and auto-generated Swagger spec. See `docs/swagger.yaml` for complete API reference.
+**OpenAPI Documentation**: All REST endpoints are documented with OpenAPI 3.1 annotations and auto-generated Swagger spec. See `oas/swagger.yaml` for complete API reference.
 
 ### Tray-Core Communication (Unix Sockets / Named Pipes)
 

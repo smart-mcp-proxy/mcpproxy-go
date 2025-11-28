@@ -138,7 +138,7 @@ Operators managing multiple servers need efficient bulk operations (enable-all, 
 - **FR-027**: Generated OpenAPI spec MUST validate against OpenAPI 3.x schema without errors
 - **FR-028**: `make build` command MUST regenerate OpenAPI spec automatically as part of the build process
 - **FR-029**: OpenAPI spec MUST document authentication schemes (X-API-Key header and apikey query parameter)
-- **FR-030**: Generated spec file MUST be located at `docs/openapi.yaml` in the repository root
+- **FR-030**: Generated spec file MUST be located at `oas/swagger.yaml` in the repository root
 
 ### Key Entities
 

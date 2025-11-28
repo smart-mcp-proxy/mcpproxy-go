@@ -41,13 +41,13 @@ import (
 	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
-	_ "mcpproxy-go/docs" // Import generated swagger docs
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/server"
 	"mcpproxy-go/internal/storage"
+	_ "mcpproxy-go/oas" // Import generated swagger docs
 )
 
 var (
