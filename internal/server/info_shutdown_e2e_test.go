@@ -52,8 +52,9 @@ func TestInfoEndpoint(t *testing.T) {
 		"--data-dir", tempDir,
 		"--listen", listenAddr)
 
-	// Disable API key authentication for E2E tests
-	cmd.Env = append(os.Environ(), "MCPPROXY_API_KEY=")
+	// Set a test API key for E2E tests
+	testAPIKey := "test-api-key-for-e2e-tests"
+	cmd.Env = append(os.Environ(), "MCPPROXY_API_KEY="+testAPIKey)
 
 	// Capture output for debugging
 	cmd.Stdout = os.Stdout
@@ -71,9 +72,13 @@ func TestInfoEndpoint(t *testing.T) {
 	serverURL := fmt.Sprintf("http://%s", listenAddr)
 	require.True(t, waitForServer(serverURL, 10*time.Second), "Server did not become ready")
 
-	// Test 1: GET /api/v1/info without API key (should work)
+	// Test 1: GET /api/v1/info with API key
 	t.Run("GET /api/v1/info returns server information", func(t *testing.T) {
-		resp, err := http.Get(serverURL + "/api/v1/info")
+		req, err := http.NewRequest("GET", serverURL+"/api/v1/info", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", testAPIKey)
+
+		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -107,7 +112,11 @@ func TestInfoEndpoint(t *testing.T) {
 
 	// Test 2: Verify web_ui_url is correctly formatted
 	t.Run("web_ui_url is correctly formatted", func(t *testing.T) {
-		resp, err := http.Get(serverURL + "/api/v1/info")
+		req, err := http.NewRequest("GET", serverURL+"/api/v1/info", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", testAPIKey)
+
+		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
