@@ -90,10 +90,14 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 		return srv.IsReady()
 	}, 5*time.Second, 100*time.Millisecond, "Server should become ready")
 
-	// Get actual addresses
-	tcpAddr := srv.GetListenAddress()
-	socketPath := filepath.Join(tmpDir, "mcpproxy.sock")
+	// Wait for TCP address to be resolved (may take a moment with race detector)
+	var tcpAddr string
+	require.Eventually(t, func() bool {
+		tcpAddr = srv.GetListenAddress()
+		return tcpAddr != "" && tcpAddr != "127.0.0.1:0" && tcpAddr != ":0"
+	}, 3*time.Second, 50*time.Millisecond, "TCP address should be resolved with actual port")
 
+	socketPath := filepath.Join(tmpDir, "mcpproxy.sock")
 	t.Logf("Server started - TCP: %s, Socket: %s", tcpAddr, socketPath)
 
 	// SECURITY: TCP address must be resolved for security tests to run

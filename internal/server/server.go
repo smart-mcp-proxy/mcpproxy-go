@@ -357,8 +357,14 @@ func (s *Server) GetListenAddress() string {
 	if addr != "" {
 		return addr
 	}
+	// Don't return config value if it contains :0 (unbound port)
+	// This indicates the server hasn't fully started yet
 	if cfg := s.runtime.Config(); cfg != nil {
-		return cfg.Listen
+		listen := cfg.Listen
+		// Check if the port is 0 (unbound) - don't return it as a fallback
+		if listen != "" && !strings.HasSuffix(listen, ":0") {
+			return listen
+		}
 	}
 	return ""
 }
