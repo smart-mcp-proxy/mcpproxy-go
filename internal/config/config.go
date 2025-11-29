@@ -591,20 +591,21 @@ func (s APIKeySource) String() string {
 
 // EnsureAPIKey ensures the API key is set, generating one if needed
 // Returns the API key, whether it was auto-generated, and the source
+// SECURITY: Empty API keys are never allowed - always auto-generates if empty or missing
 func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource) {
 	// Check environment variable for API key first - this overrides config file
 	// Use LookupEnv to distinguish between "not set" and "set to empty string"
-	if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists {
-		c.APIKey = envAPIKey // Allow empty string to explicitly disable authentication
+	if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists && envAPIKey != "" {
+		c.APIKey = envAPIKey
 		return c.APIKey, false, APIKeySourceEnvironment
 	}
 
-	// If API key was explicitly set in config (including empty string), respect it
-	if c.apiKeyExplicitlySet {
-		return c.APIKey, false, APIKeySourceConfig // User-provided or explicitly disabled
+	// If API key was explicitly set in config and is non-empty, use it
+	if c.apiKeyExplicitlySet && c.APIKey != "" {
+		return c.APIKey, false, APIKeySourceConfig
 	}
 
-	// Generate a new API key only if not explicitly set
+	// Generate a new API key if missing or empty (never allow empty for security)
 	c.APIKey = generateAPIKey()
 	c.apiKeyExplicitlySet = true
 	return c.APIKey, true, APIKeySourceGenerated

@@ -79,6 +79,7 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 	cfg := &config.Config{
 		DataDir:           dataDir,
 		Listen:            fmt.Sprintf(":%d", testPort),
+		APIKey:            "test-api-key-e2e", // Set explicit API key for E2E tests
 		ToolResponseLimit: 10000,
 		DisableManagement: false,
 		ReadOnlyMode:      false,
@@ -736,15 +737,15 @@ func TestE2E_SSEEvents(t *testing.T) {
 	env := NewTestEnvironment(t)
 	defer env.Cleanup()
 
-	// Test SSE connection without authentication (no API key configured)
-	testSSEConnection(t, env, "")
+	// Test SSE connection with the initial API key from NewTestEnvironment
+	testSSEConnection(t, env, "test-api-key-e2e")
 
-	// Now test with API key authentication
-	// Update config to include API key
+	// Now test with different API key
+	// Update config to include different API key
 	cfg := env.proxyServer.runtime.Config()
 	cfg.APIKey = "test-api-key-12345"
 
-	// Test SSE with correct API key
+	// Test SSE with new correct API key
 	testSSEConnection(t, env, "test-api-key-12345")
 
 	// Test SSE with incorrect API key

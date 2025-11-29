@@ -161,9 +161,13 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// If API key is empty, authentication is disabled
+			// SECURITY: API key is REQUIRED for all TCP connections to REST API
+			// Empty API key is not allowed - this prevents accidental exposure
 			if cfg.APIKey == "" {
-				next.ServeHTTP(w, r)
+				s.logger.Warn("TCP connection rejected - API key not configured",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr))
+				s.writeError(w, http.StatusUnauthorized, "API key authentication required but not configured. Please set MCPPROXY_API_KEY or configure api_key in config file.")
 				return
 			}
 
@@ -1541,6 +1545,20 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 	s.writeSuccess(w, configSecrets)
 }
 
+// handleSetSecret godoc
+// @Summary      Store a secret in OS keyring
+// @Description  Stores a secret value in the operating system's secure keyring. The secret can then be referenced in configuration using ${keyring:secret-name} syntax. Automatically notifies runtime to restart affected servers.
+// @Tags         secrets
+// @Accept       json
+// @Produce      json
+// @Success      200     {object}  map[string]interface{}      "Secret stored successfully with reference syntax"
+// @Failure      400     {object}  contracts.ErrorResponse     "Invalid JSON payload, missing name/value, or unsupported type"
+// @Failure      401     {object}  contracts.ErrorResponse     "Unauthorized - missing or invalid API key"
+// @Failure      405     {object}  contracts.ErrorResponse     "Method not allowed"
+// @Failure      500     {object}  contracts.ErrorResponse     "Secret resolver not available or failed to store secret"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/secrets [post]
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1617,6 +1635,21 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleDeleteSecret godoc
+// @Summary      Delete a secret from OS keyring
+// @Description  Deletes a secret from the operating system's secure keyring. Automatically notifies runtime to restart affected servers. Only keyring type is supported for security.
+// @Tags         secrets
+// @Produce      json
+// @Param        name   path      string                  true   "Name of the secret to delete"
+// @Param        type   query     string                  false  "Secret type (only 'keyring' supported, defaults to 'keyring')"
+// @Success      200    {object}  map[string]interface{}  "Secret deleted successfully"
+// @Failure      400    {object}  contracts.ErrorResponse "Missing secret name or unsupported type"
+// @Failure      401    {object}  contracts.ErrorResponse "Unauthorized - missing or invalid API key"
+// @Failure      405    {object}  contracts.ErrorResponse "Method not allowed"
+// @Failure      500    {object}  contracts.ErrorResponse "Secret resolver not available or failed to delete secret"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/secrets/{name} [delete]
 func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1877,6 +1910,21 @@ func (s *Server) canResolveSecret(ref *contracts.Ref) bool {
 
 // Tool call history handlers
 
+// handleGetToolCalls godoc
+// @Summary      Get tool call history
+// @Description  Retrieves paginated tool call history across all upstream servers or filtered by session ID. Includes execution timestamps, arguments, results, and error information for debugging and auditing.
+// @Tags         tool-calls
+// @Produce      json
+// @Param        limit       query     int                                 false  "Maximum number of records to return (1-100, default 50)"
+// @Param        offset      query     int                                 false  "Number of records to skip for pagination (default 0)"
+// @Param        session_id  query     string                              false  "Filter tool calls by MCP session ID"
+// @Success      200         {object}  contracts.GetToolCallsResponse      "Tool calls retrieved successfully"
+// @Failure      401         {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
+// @Failure      405         {object}  contracts.ErrorResponse             "Method not allowed"
+// @Failure      500         {object}  contracts.ErrorResponse             "Failed to get tool calls"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/tool-calls [get]
 func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1929,6 +1977,20 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleGetToolCallDetail godoc
+// @Summary      Get tool call details by ID
+// @Description  Retrieves detailed information about a specific tool call execution including full request arguments, response data, execution time, and any errors encountered.
+// @Tags         tool-calls
+// @Produce      json
+// @Param        id   path      string                                  true  "Tool call ID"
+// @Success      200  {object}  contracts.GetToolCallDetailResponse     "Tool call details retrieved successfully"
+// @Failure      400  {object}  contracts.ErrorResponse                 "Tool call ID required"
+// @Failure      401  {object}  contracts.ErrorResponse                 "Unauthorized - missing or invalid API key"
+// @Failure      404  {object}  contracts.ErrorResponse                 "Tool call not found"
+// @Failure      405  {object}  contracts.ErrorResponse                 "Method not allowed"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/tool-calls/{id} [get]
 func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1956,6 +2018,21 @@ func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request)
 	s.writeSuccess(w, response)
 }
 
+// handleGetServerToolCalls godoc
+// @Summary      Get tool call history for specific server
+// @Description  Retrieves tool call history filtered by upstream server ID. Returns recent tool executions for the specified server including timestamps, arguments, results, and errors. Useful for server-specific debugging and monitoring.
+// @Tags         tool-calls
+// @Produce      json
+// @Param        id     path      string                                      true   "Upstream server ID or name"
+// @Param        limit  query     int                                         false  "Maximum number of records to return (1-100, default 50)"
+// @Success      200    {object}  contracts.GetServerToolCallsResponse        "Server tool calls retrieved successfully"
+// @Failure      400    {object}  contracts.ErrorResponse                     "Server ID required"
+// @Failure      401    {object}  contracts.ErrorResponse                     "Unauthorized - missing or invalid API key"
+// @Failure      405    {object}  contracts.ErrorResponse                     "Method not allowed"
+// @Failure      500    {object}  contracts.ErrorResponse                     "Failed to get server tool calls"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/servers/{id}/tool-calls [get]
 func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2005,6 +2082,22 @@ func convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.T
 	return records
 }
 
+// handleReplayToolCall godoc
+// @Summary      Replay a tool call
+// @Description  Re-executes a previous tool call with optional modified arguments. Useful for debugging and testing tool behavior with different inputs. Creates a new tool call record linked to the original.
+// @Tags         tool-calls
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                              true  "Original tool call ID to replay"
+// @Param        request  body      contracts.ReplayToolCallRequest     false "Optional modified arguments for replay"
+// @Success      200      {object}  contracts.ReplayToolCallResponse    "Tool call replayed successfully"
+// @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
+// @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
+// @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
+// @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/tool-calls/{id}/replay [post]
 func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2044,6 +2137,17 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 
 // Configuration management handlers
 
+// handleGetConfig godoc
+// @Summary      Get current configuration
+// @Description  Retrieves the current MCPProxy configuration including all server definitions, global settings, and runtime parameters
+// @Tags         config
+// @Produce      json
+// @Success      200  {object}  contracts.GetConfigResponse  "Configuration retrieved successfully"
+// @Failure      401  {object}  contracts.ErrorResponse      "Unauthorized - missing or invalid API key"
+// @Failure      500  {object}  contracts.ErrorResponse      "Failed to get configuration"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/config [get]
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2071,6 +2175,20 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleValidateConfig godoc
+// @Summary      Validate configuration
+// @Description  Validates a provided MCPProxy configuration without applying it. Checks for syntax errors, invalid server definitions, conflicting settings, and other configuration issues.
+// @Tags         config
+// @Accept       json
+// @Produce      json
+// @Param        config  body      config.Config                       true  "Configuration to validate"
+// @Success      200     {object}  contracts.ValidateConfigResponse    "Configuration validation result"
+// @Failure      400     {object}  contracts.ErrorResponse             "Invalid JSON payload"
+// @Failure      401     {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
+// @Failure      500     {object}  contracts.ErrorResponse             "Validation failed"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/config/validate [post]
 func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2099,6 +2217,20 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleApplyConfig godoc
+// @Summary      Apply configuration
+// @Description  Applies a new MCPProxy configuration. Validates and persists the configuration to disk. Some changes apply immediately, while others may require a restart. Returns detailed information about applied changes and restart requirements.
+// @Tags         config
+// @Accept       json
+// @Produce      json
+// @Param        config  body      config.Config                   true  "Configuration to apply"
+// @Success      200     {object}  contracts.ConfigApplyResult     "Configuration applied successfully with change details"
+// @Failure      400     {object}  contracts.ErrorResponse         "Invalid JSON payload"
+// @Failure      401     {object}  contracts.ErrorResponse         "Unauthorized - missing or invalid API key"
+// @Failure      500     {object}  contracts.ErrorResponse         "Failed to apply configuration"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/config/apply [post]
 func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2181,6 +2313,17 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListRegistries handles GET /api/v1/registries
+// handleListRegistries godoc
+// @Summary      List available MCP server registries
+// @Description  Retrieves list of all MCP server registries that can be browsed for discovering and installing new upstream servers. Includes registry metadata, server counts, and API endpoints.
+// @Tags         registries
+// @Produce      json
+// @Success      200  {object}  contracts.GetRegistriesResponse  "Registries retrieved successfully"
+// @Failure      401  {object}  contracts.ErrorResponse          "Unauthorized - missing or invalid API key"
+// @Failure      500  {object}  contracts.ErrorResponse          "Failed to list registries"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/registries [get]
 func (s *Server) handleListRegistries(w http.ResponseWriter, _ *http.Request) {
 	registries, err := s.controller.ListRegistries()
 	if err != nil {
@@ -2228,7 +2371,22 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, _ *http.Request) {
 	s.writeSuccess(w, response)
 }
 
-// handleSearchRegistryServers handles GET /api/v1/registries/{id}/servers
+// handleSearchRegistryServers godoc
+// @Summary      Search MCP servers in a registry
+// @Description  Searches for MCP servers within a specific registry by keyword or tag. Returns server metadata including installation commands, source code URLs, and npm package information for easy discovery and installation.
+// @Tags         registries
+// @Produce      json
+// @Param        id     path      string                                       true   "Registry ID"
+// @Param        q      query     string                                       false  "Search query keyword"
+// @Param        tag    query     string                                       false  "Filter by tag"
+// @Param        limit  query     int                                          false  "Maximum number of results (default 10)"
+// @Success      200    {object}  contracts.SearchRegistryServersResponse      "Servers retrieved successfully"
+// @Failure      400    {object}  contracts.ErrorResponse                      "Registry ID required"
+// @Failure      401    {object}  contracts.ErrorResponse                      "Unauthorized - missing or invalid API key"
+// @Failure      500    {object}  contracts.ErrorResponse                      "Failed to search servers"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/registries/{id}/servers [get]
 func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Request) {
 	registryID := chi.URLParam(r, "id")
 	if registryID == "" {
@@ -2319,6 +2477,20 @@ func getBool(m map[string]interface{}, key string) bool {
 
 // Session management handlers
 
+// handleGetSessions godoc
+// @Summary      Get active MCP sessions
+// @Description  Retrieves paginated list of active and recent MCP client sessions. Each session represents a connection from an MCP client to MCPProxy, tracking initialization time, tool calls, and connection status.
+// @Tags         sessions
+// @Produce      json
+// @Param        limit   query     int                               false  "Maximum number of sessions to return (1-100, default 10)"
+// @Param        offset  query     int                               false  "Number of sessions to skip for pagination (default 0)"
+// @Success      200     {object}  contracts.GetSessionsResponse     "Sessions retrieved successfully"
+// @Failure      401     {object}  contracts.ErrorResponse           "Unauthorized - missing or invalid API key"
+// @Failure      405     {object}  contracts.ErrorResponse           "Method not allowed"
+// @Failure      500     {object}  contracts.ErrorResponse           "Failed to get sessions"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/sessions [get]
 func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2369,6 +2541,20 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// handleGetSessionDetail godoc
+// @Summary      Get MCP session details by ID
+// @Description  Retrieves detailed information about a specific MCP client session including initialization parameters, connection status, tool call count, and activity timestamps.
+// @Tags         sessions
+// @Produce      json
+// @Param        id   path      string                                  true  "Session ID"
+// @Success      200  {object}  contracts.GetSessionDetailResponse      "Session details retrieved successfully"
+// @Failure      400  {object}  contracts.ErrorResponse                 "Session ID required"
+// @Failure      401  {object}  contracts.ErrorResponse                 "Unauthorized - missing or invalid API key"
+// @Failure      404  {object}  contracts.ErrorResponse                 "Session not found"
+// @Failure      405  {object}  contracts.ErrorResponse                 "Method not allowed"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/sessions/{id} [get]
 func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
