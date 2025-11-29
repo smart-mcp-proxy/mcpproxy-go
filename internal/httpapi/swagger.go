@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	swagv1 "github.com/swaggo/swag"
+	swag "github.com/swaggo/swag/v2"
 	_ "mcpproxy-go/oas" // Import generated docs
 )
 
@@ -34,7 +34,7 @@ func (h *swaggerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = fmt.Fprint(w, swaggerHTML)
 	case "doc.json":
-		doc, err := swagv1.ReadDoc()
+		doc, err := swag.ReadDoc("swagger")
 		if err != nil {
 			h.logger.Errorf("failed to read swagger doc: %v", err)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -117,10 +117,9 @@ func (h *swaggerHandler) buildServerURL(r *http.Request) string {
 	}
 
 	trimmedHost := strings.TrimSuffix(host, "/")
-	return fmt.Sprintf("%s://%s%s", scheme, trimmedHost, apiBasePath)
+	// Do NOT append /api/v1 here - it's already in the path definitions
+	return fmt.Sprintf("%s://%s", scheme, trimmedHost)
 }
-
-const apiBasePath = "/api/v1"
 
 const swaggerHTML = `<!doctype html>
 <html lang="en">

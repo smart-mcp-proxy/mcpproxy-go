@@ -94,6 +94,9 @@ See `docs/prerelease-builds.md` for download instructions and workflow details.
 # Quick API E2E test (required before commits)
 ./scripts/test-api-e2e.sh
 
+# Verify OpenAPI endpoint coverage (required before commits if you modified REST endpoints)
+./scripts/verify-oas-coverage.sh
+
 # Full test suite (recommended before major commits)
 ./scripts/run-all-tests.sh
 
@@ -508,10 +511,6 @@ export MCPPROXY_LISTEN=":8080"
 export MCPPROXY_API_KEY="my-secret-key"
 ./mcpproxy serve
 
-# Disable authentication for testing
-export MCPPROXY_API_KEY=""
-./mcpproxy serve
-
 # Run in headless mode
 export HEADLESS=true
 ./mcpproxy serve
@@ -573,8 +572,8 @@ open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
 
 **Security Notes**:
 - **MCP endpoints (`/mcp`, `/mcp/`)** remain **unprotected** for client compatibility
-- **REST API** requires authentication when API key is configured
-- **Empty API key** disables authentication (useful for testing)
+- **REST API** requires authentication - API key is always enforced (auto-generated if not provided)
+- **Secure by default**: Empty or missing API keys trigger automatic generation and persistence to config
 
 ## JavaScript Code Execution
 
@@ -615,12 +614,13 @@ See `docs/code_execution/` for complete guides:
 - **MCP endpoints open**: MCP protocol endpoints (`/mcp`, `/mcp/`) remain unprotected for client compatibility
 
 ### API Key Authentication
-- **Automatic generation**: API key generated if not provided and logged for easy access
+- **Secure by default**: API key is ALWAYS required - empty or missing keys trigger automatic generation
+- **Automatic generation**: Auto-generated keys are saved to config file for persistence across restarts
 - **Multiple authentication methods**: Supports `X-API-Key` header and `?apikey=` query parameter
 - **Tray integration**: Tray app automatically generates and manages API keys for core communication
-- **Configuration options**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
-- **Optional protection**: Empty API key disables authentication (useful for testing)
-- **Protected endpoints**: `/api/v1/*` and `/events` (SSE) require authentication when enabled
+- **Configuration priority**: `MCPPROXY_API_KEY` env var > config file `api_key` > auto-generated
+- **Protected endpoints**: `/api/v1/*` and `/events` (SSE) always require authentication
+- **Unix socket bypass**: Connections via Unix socket/named pipe (tray) bypass API key check (OS-level auth)
 
 #### Tray-Core API Key Coordination
 The tray application ensures secure communication with the core process through coordinated API key management:
@@ -833,6 +833,7 @@ When making changes to this codebase, ensure you understand the modular architec
 - Go 1.24.0 (004-management-health-refactor)
 - BBolt embedded database (`~/.mcpproxy/config.db`) for server configurations, quarantine status, and tool statistics (004-management-health-refactor)
 - BBolt embedded database (`~/.mcpproxy/config.db`) - used by existing runtime, no changes required (005-rest-management-integration)
+- N/A (documentation-only feature) (001-oas-endpoint-documentation)
 
 ## Recent Changes
 - 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3
