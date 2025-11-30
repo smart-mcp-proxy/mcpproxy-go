@@ -212,7 +212,13 @@ func (env *TestEnvironment) GetServers() ([]contracts.Server, error) {
 	}
 
 	url := fmt.Sprintf("http://localhost:%s/api/v1/servers", port)
-	resp, err := http.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-API-Key", "test-api-key-e2e")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +277,13 @@ func (env *TestEnvironment) SearchTools(query string, limit int) ([]contracts.Se
 	}
 
 	url := fmt.Sprintf("http://localhost:%s/api/v1/index/search?q=%s&limit=%d", port, query, limit)
-	resp, err := http.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-API-Key", "test-api-key-e2e")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +365,13 @@ func (env *TestEnvironment) GetConfig() (*config.Config, error) {
 	}
 
 	url := fmt.Sprintf("http://localhost:%s/api/v1/config", port)
-	resp, err := http.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-API-Key", "test-api-key-e2e")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +427,14 @@ func (env *TestEnvironment) ApplyConfig(cfg *config.Config) (*contracts.ConfigAp
 		return nil, err
 	}
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-api-key-e2e")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
