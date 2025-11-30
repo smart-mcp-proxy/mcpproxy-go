@@ -1,0 +1,106 @@
+name: PR Artifacts Comment
+
+# This workflow runs after the PR Build workflow completes
+# It posts a comment with artifact links to the PR
+# This approach avoids permission issues with PRs from forks
+on:
+  workflow_run:
+    workflows: ["PR Build"]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    # Only run for successful PR builds
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
+            --jq '.pull_requests[0].number')
+
+          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+            echo "No PR found for this workflow run"
+            exit 0
+          fi
+
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Found PR #$PR_NUMBER"
+
+      - name: Get artifacts and post comment
+        if: steps.pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # Get artifact list
+          ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
+            --jq '.artifacts[] | "- **\(.name)** (\(.size_in_bytes / 1024 / 1024 | floor) MB)"' | sort)
+
+          if [ -z "$ARTIFACTS" ]; then
+            echo "No artifacts found for run $RUN_ID"
+            exit 0
+          fi
+
+          # Get version info from workflow run name or conclusion
+          VERSION=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID \
+            --jq '.head_branch // "unknown"')
+
+          # Build comment body
+          MARKER="<!-- mcpproxy-pr-artifacts -->"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/$RUN_ID"
+
+          COMMENT_BODY="$MARKER
+## 📦 Build Artifacts for PR #$PR_NUMBER
+
+**Workflow Run:** [#$RUN_ID]($RUN_URL)
+**Branch:** \`$VERSION\`
+
+### Available Artifacts
+
+$ARTIFACTS
+
+### How to Download
+
+**Option 1: GitHub Web UI** (easiest)
+1. Go to the [workflow run page]($RUN_URL)
+2. Scroll to the bottom \"Artifacts\" section
+3. Click on the artifact you want to download
+
+**Option 2: GitHub CLI**
+\`\`\`bash
+gh run download $RUN_ID --repo ${{ github.repository }}
+
+# Or download a specific artifact:
+gh run download $RUN_ID --name archive-linux-amd64
+\`\`\`
+
+> **Note:** Artifacts expire in 14 days."
+
+          # Check for existing comment
+          EXISTING_COMMENT=$(gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$MARKER\"))) | .id" | head -1)
+
+          if [ -n "$EXISTING_COMMENT" ]; then
+            # Update existing comment
+            gh api repos/${{ github.repository }}/issues/comments/$EXISTING_COMMENT \
+              -X PATCH \
+              -f body="$COMMENT_BODY"
+            echo "✅ Updated existing artifact comment (ID: $EXISTING_COMMENT)"
+          else
+            # Create new comment
+            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+              -X POST \
+              -f body="$COMMENT_BODY"
+            echo "✅ Created new artifact comment"
+          fi
