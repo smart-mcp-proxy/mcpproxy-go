@@ -120,6 +120,7 @@ jobs:
           GO_TEST_TIMEOUT: 300s
 
       - name: Check for skipped security tests
+        shell: bash
         run: |
           echo "Verifying that security-critical authentication tests were not skipped..."
 
