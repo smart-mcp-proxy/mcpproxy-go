@@ -225,3 +225,63 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 
 	return metadata.ScopesSupported, nil
 }
+
+// DetectOAuthAvailability checks if a server supports OAuth by probing the well-known endpoint
+// Returns true if OAuth metadata is discoverable, false otherwise
+func DetectOAuthAvailability(baseURL string, timeout time.Duration) bool {
+	logger := zap.L().Named("oauth.detection")
+
+	metadataURL := baseURL + "/.well-known/oauth-authorization-server"
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", metadataURL, nil)
+	if err != nil {
+		return false
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Debug("OAuth detection failed - endpoint unreachable",
+			zap.String("url", metadataURL),
+			zap.Error(err))
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Debug("OAuth detection failed - non-200 status",
+			zap.String("url", metadataURL),
+			zap.Int("status_code", resp.StatusCode))
+		return false
+	}
+
+	var metadata OAuthServerMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		logger.Debug("OAuth detection failed - invalid JSON",
+			zap.String("url", metadataURL),
+			zap.Error(err))
+		return false
+	}
+
+	// Verify it's valid OAuth metadata
+	if metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
+		logger.Debug("OAuth detection failed - incomplete metadata",
+			zap.String("url", metadataURL),
+			zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
+			zap.String("token_endpoint", metadata.TokenEndpoint))
+		return false
+	}
+
+	logger.Info("✅ OAuth detected automatically",
+		zap.String("server_url", baseURL),
+		zap.String("issuer", metadata.Issuer),
+		zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
+		zap.String("token_endpoint", metadata.TokenEndpoint))
+
+	return true
+}

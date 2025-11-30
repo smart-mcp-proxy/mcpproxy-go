@@ -34,7 +34,7 @@ components:
           type: string
       type: object
     config.OAuthConfig:
-      description: OAuth configuration
+      description: OAuth configuration (keep even when empty to signal OAuth requirement)
       properties:
         client_id:
           type: string
