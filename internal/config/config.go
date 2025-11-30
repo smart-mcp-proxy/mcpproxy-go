@@ -143,7 +143,7 @@ type ServerConfig struct {
 	WorkingDir  string            `json:"working_dir,omitempty" mapstructure:"working_dir"` // Working directory for stdio servers
 	Env         map[string]string `json:"env,omitempty" mapstructure:"env"`
 	Headers     map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
-	OAuth       *OAuthConfig      `json:"oauth,omitempty" mapstructure:"oauth"`     // OAuth configuration
+	OAuth       *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
 	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
 	Created     time.Time         `json:"created" mapstructure:"created"`
