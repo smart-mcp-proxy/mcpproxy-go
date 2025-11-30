@@ -235,6 +235,39 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			}
 		}
 
+		// Extract OAuth config
+		if oauth, ok := generic["oauth"].(map[string]interface{}); ok {
+			server.OAuth = &OAuthConfig{}
+			if authURL, ok := oauth["auth_url"].(string); ok {
+				server.OAuth.AuthURL = authURL
+			}
+			if tokenURL, ok := oauth["token_url"].(string); ok {
+				server.OAuth.TokenURL = tokenURL
+			}
+			if clientID, ok := oauth["client_id"].(string); ok {
+				server.OAuth.ClientID = clientID
+			}
+			if scopes, ok := oauth["scopes"].([]interface{}); ok {
+				server.OAuth.Scopes = make([]string, len(scopes))
+				for i, scope := range scopes {
+					if scopeStr, ok := scope.(string); ok {
+						server.OAuth.Scopes[i] = scopeStr
+					}
+				}
+			}
+			if extraParams, ok := oauth["extra_params"].(map[string]interface{}); ok {
+				server.OAuth.ExtraParams = make(map[string]string)
+				for k, v := range extraParams {
+					if vStr, ok := v.(string); ok {
+						server.OAuth.ExtraParams[k] = vStr
+					}
+				}
+			}
+			if redirectPort, ok := oauth["redirect_port"].(int); ok {
+				server.OAuth.RedirectPort = redirectPort
+			}
+		}
+
 		// Extract timestamps
 		if created, ok := generic["created"].(time.Time); ok {
 			server.Created = created
