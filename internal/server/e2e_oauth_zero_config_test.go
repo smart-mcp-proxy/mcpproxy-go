@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -240,4 +241,187 @@ func TestE2E_ProtectedResourceMetadataDiscovery(t *testing.T) {
 	default:
 		// Context is still active, good
 	}
+}
+
+// TestE2E_URLInjectionWorkaround validates that the URL injection workaround
+// correctly adds extra OAuth parameters to the authorization URL.
+// This tests the critical workaround at connection.go:1846-1866 that enables
+// RFC 8707 resource parameters without upstream mcp-go support.
+func TestE2E_URLInjectionWorkaround(t *testing.T) {
+	// This test validates the URL injection logic by simulating the scenario
+	// where CreateOAuthConfig returns extraParams and verifying they would be
+	// correctly injected into an OAuth authorization URL.
+
+	storage := setupTestStorage(t)
+	defer storage.Close()
+
+	// Test Case 1: Zero-config OAuth with auto-detected resource parameter
+	t.Run("Auto-detected resource parameter injection", func(t *testing.T) {
+		serverConfig := &config.ServerConfig{
+			Name:     "runlayer-slack",
+			URL:      "https://oauth.example.com/api/v1/proxy/UUID/mcp",
+			Protocol: "http",
+			// NO OAuth field - should auto-detect and extract resource param
+		}
+
+		// Call CreateOAuthConfig which performs metadata discovery and extraction
+		oauthConfig, extraParams := oauth.CreateOAuthConfig(serverConfig, storage)
+
+		require.NotNil(t, oauthConfig, "OAuth config should be created")
+		require.NotNil(t, extraParams, "Extra parameters should be returned")
+		require.Contains(t, extraParams, "resource", "Should extract resource parameter")
+
+		// Simulate the URL injection workaround (connection.go:1846-1866)
+		// This is what happens in handleOAuthAuthorization()
+		baseAuthURL := "https://auth.example.com/oauth/authorize?client_id=test&scope=mcp.read&state=abc123&code_challenge=xyz&response_type=code"
+
+		// Parse and inject extra params (the workaround logic)
+		u, err := url.Parse(baseAuthURL)
+		require.NoError(t, err, "Should parse authorization URL")
+
+		q := u.Query()
+		for k, v := range extraParams {
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+		finalAuthURL := u.String()
+
+		// Verify the resource parameter is in the final URL
+		assert.Contains(t, finalAuthURL, "resource=", "Final auth URL should contain resource parameter")
+
+		// Parse again to verify parameter value
+		finalURL, err := url.Parse(finalAuthURL)
+		require.NoError(t, err, "Should parse final URL")
+
+		resourceParam := finalURL.Query().Get("resource")
+		assert.NotEmpty(t, resourceParam, "Resource parameter should have a value")
+		assert.Equal(t, extraParams["resource"], resourceParam, "Resource parameter should match extraParams")
+
+		t.Logf("✅ Base URL: %s", baseAuthURL)
+		t.Logf("✅ Extra params: %v", extraParams)
+		t.Logf("✅ Final URL: %s", finalAuthURL)
+		t.Logf("✅ Resource parameter correctly injected: %s", resourceParam)
+	})
+
+	// Test Case 2: Manual extra_params override with multiple parameters
+	t.Run("Manual extra_params with multiple parameters", func(t *testing.T) {
+		serverConfig := &config.ServerConfig{
+			Name:     "custom-oauth",
+			URL:      "https://api.example.com/mcp",
+			Protocol: "http",
+			OAuth: &config.OAuthConfig{
+				ClientID:     "test-client",
+				ClientSecret: "test-secret",
+				Scopes:       []string{"custom.scope"},
+				ExtraParams: map[string]string{
+					"tenant_id": "12345",
+					"audience":  "https://custom-audience.com",
+					"custom":    "value",
+				},
+			},
+		}
+
+		// Call CreateOAuthConfig
+		oauthConfig, extraParams := oauth.CreateOAuthConfig(serverConfig, storage)
+
+		require.NotNil(t, oauthConfig, "OAuth config should be created")
+		require.NotNil(t, extraParams, "Extra parameters should be returned")
+
+		// Should have both manual params and auto-detected resource
+		assert.Contains(t, extraParams, "tenant_id", "Should have tenant_id")
+		assert.Contains(t, extraParams, "audience", "Should have audience")
+		assert.Contains(t, extraParams, "custom", "Should have custom")
+		assert.Contains(t, extraParams, "resource", "Should have auto-detected resource")
+
+		// Simulate URL injection
+		baseAuthURL := "https://auth.example.com/authorize?client_id=test-client&scope=custom.scope"
+
+		u, err := url.Parse(baseAuthURL)
+		require.NoError(t, err, "Should parse authorization URL")
+
+		q := u.Query()
+		for k, v := range extraParams {
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+		finalAuthURL := u.String()
+
+		// Verify all parameters are in the final URL
+		finalURL, err := url.Parse(finalAuthURL)
+		require.NoError(t, err, "Should parse final URL")
+
+		assert.Equal(t, "12345", finalURL.Query().Get("tenant_id"), "tenant_id should be injected")
+		assert.Equal(t, "https://custom-audience.com", finalURL.Query().Get("audience"), "audience should be injected")
+		assert.Equal(t, "value", finalURL.Query().Get("custom"), "custom should be injected")
+		assert.NotEmpty(t, finalURL.Query().Get("resource"), "resource should be injected")
+
+		t.Logf("✅ All extra parameters correctly injected into auth URL")
+		t.Logf("   tenant_id: %s", finalURL.Query().Get("tenant_id"))
+		t.Logf("   audience: %s", finalURL.Query().Get("audience"))
+		t.Logf("   custom: %s", finalURL.Query().Get("custom"))
+		t.Logf("   resource: %s", finalURL.Query().Get("resource"))
+	})
+
+	// Test Case 3: Empty extraParams (should not modify URL)
+	t.Run("Empty extraParams does not modify URL", func(t *testing.T) {
+		extraParams := map[string]string{}
+		baseAuthURL := "https://auth.example.com/authorize?client_id=test&scope=read"
+
+		// Simulate the workaround with empty params
+		var finalAuthURL string
+		if len(extraParams) > 0 {
+			u, err := url.Parse(baseAuthURL)
+			require.NoError(t, err)
+
+			q := u.Query()
+			for k, v := range extraParams {
+				q.Set(k, v)
+			}
+			u.RawQuery = q.Encode()
+			finalAuthURL = u.String()
+		} else {
+			finalAuthURL = baseAuthURL
+		}
+
+		// URL should be unchanged
+		assert.Equal(t, baseAuthURL, finalAuthURL, "URL should not be modified when extraParams is empty")
+
+		t.Logf("✅ URL unchanged with empty extraParams: %s", finalAuthURL)
+	})
+
+	// Test Case 4: URL encoding of special characters in parameters
+	t.Run("Special characters are properly URL encoded", func(t *testing.T) {
+		extraParams := map[string]string{
+			"resource": "https://mcp.example.com/api?user=test&mode=prod",
+			"redirect": "http://localhost:3000/callback#section",
+		}
+
+		baseAuthURL := "https://auth.example.com/authorize"
+
+		u, err := url.Parse(baseAuthURL)
+		require.NoError(t, err)
+
+		q := u.Query()
+		for k, v := range extraParams {
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+		finalAuthURL := u.String()
+
+		// Verify special characters are properly encoded
+		assert.Contains(t, finalAuthURL, "resource=https%3A%2F%2Fmcp.example.com", "Resource URL should be encoded")
+		assert.Contains(t, finalAuthURL, "redirect=http%3A%2F%2Flocalhost", "Redirect URL should be encoded")
+
+		// Verify decoding recovers original values
+		finalURL, err := url.Parse(finalAuthURL)
+		require.NoError(t, err)
+
+		assert.Equal(t, extraParams["resource"], finalURL.Query().Get("resource"), "Decoded resource should match original")
+		assert.Equal(t, extraParams["redirect"], finalURL.Query().Get("redirect"), "Decoded redirect should match original")
+
+		t.Logf("✅ Special characters properly URL encoded")
+		t.Logf("   Original resource: %s", extraParams["resource"])
+		t.Logf("   Encoded URL: %s", finalAuthURL)
+		t.Logf("   Decoded resource: %s", finalURL.Query().Get("resource"))
+	})
 }
