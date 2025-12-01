@@ -1009,6 +1009,89 @@ To properly address the UX gap:
 - ✅ Optional: System notification alerts user to authentication requirement
 - ✅ User can complete authentication within 30 seconds of seeing notification
 
+### ❌ Bug: `authenticated` Field Always False in API Responses
+
+**Problem**: The `auth status` CLI command shows OAuth servers as "⏳ Pending Authentication" even after successful authentication, while `upstream list` correctly shows them as connected.
+
+**Root Cause**: `internal/runtime/runtime.go:1534`
+```go
+"authenticated":   false, // Will be populated from OAuth status in Phase 0 Task 2
+```
+
+The `authenticated` field in API responses is hardcoded to `false` and never populated with actual OAuth token state.
+
+**Current Behavior**:
+```bash
+$ ./mcpproxy upstream list
+slack     yes    streamable-http    yes    14    connected
+
+$ ./mcpproxy auth status
+Server: slack
+  Status: ⏳ Pending Authentication    # WRONG - should be ✅ Authenticated
+```
+
+**Impact**:
+- 🐛 **Misleading CLI Output**: `auth status` incorrectly reports authenticated servers as pending
+- 🐛 **API Inconsistency**: `/api/v1/servers` endpoint returns `authenticated: false` for connected OAuth servers
+- 🐛 **Monitoring Issues**: External tools querying the API cannot detect OAuth authentication state
+- 🐛 **User Confusion**: Web UI may show incorrect OAuth status based on API data
+
+**Code Location**:
+- **Bug**: `internal/runtime/runtime.go:1534` - hardcoded `false`
+- **Consumer**: `cmd/mcpproxy/auth_cmd.go:200` - reads `authenticated` field from API
+- **API Response**: `internal/httpapi/server.go:582-615` - serves data from runtime
+
+**Expected Behavior**:
+The `authenticated` field should reflect the actual OAuth token state:
+- `true` when server has valid OAuth tokens (access token not expired)
+- `false` when server requires OAuth but has no valid tokens
+
+**Fix Required**:
+```go
+// internal/runtime/runtime.go:1534
+// Replace hardcoded false with actual token state check
+authenticated := r.isServerAuthenticated(serverStatus.Name, serverStatus.Config)
+
+// Add helper method:
+func (r *Runtime) isServerAuthenticated(serverName string, cfg *config.ServerConfig) bool {
+    if cfg == nil || cfg.OAuth == nil {
+        return false // No OAuth configured
+    }
+
+    tokenManager := oauth.GetTokenStoreManager()
+    if !tokenManager.HasTokenStore(serverName) {
+        return false // No tokens stored
+    }
+
+    // Check if token is valid (not expired)
+    // This requires access to token expiry from token manager
+    return tokenManager.HasValidToken(serverName)
+}
+```
+
+**Testing**:
+```bash
+# After OAuth login
+./mcpproxy auth login --server=slack
+# ✅ OAuth succeeds
+
+./mcpproxy auth status --server=slack
+# Should show: ✅ Authenticated (currently shows ⏳ Pending)
+
+# Check API directly
+curl "http://127.0.0.1:8080/api/v1/servers?apikey=..." | jq '.servers[] | select(.name=="slack") | .authenticated'
+# Should return: true (currently returns: false)
+```
+
+**Timeline**: 2-3 hours
+- Add `HasValidToken()` method to token manager
+- Implement `isServerAuthenticated()` helper
+- Update `GetAllServers()` to populate field correctly
+- Add unit tests for token state detection
+- Add E2E test: verify `auth status` shows correct state after OAuth login
+
+**Priority**: Medium (affects UX but doesn't break functionality - servers still work)
+
 ## References
 
 - RFC 8707: Resource Indicators - https://www.rfc-editor.org/rfc/rfc8707.html
