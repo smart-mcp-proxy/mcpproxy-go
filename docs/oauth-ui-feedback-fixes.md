@@ -313,6 +313,60 @@ This error occurs when a connection attempt is made while the client is already 
 
 **Impact**: OAuth login flow will no longer silently fail - users will see clear error messages explaining why OAuth isn't working
 
+### Part 3: OAuth Deferral Bypass for Manual Triggers (FIXED 2025-12-01)
+
+**Problem**: Even after fixing the panic in Part 2, OAuth flows triggered by the Login button were still being deferred. The browser wouldn't open because the code was treating manual triggers the same as automatic connection attempts.
+
+**Log Evidence**:
+```
+2025-12-01T15:37:15.904-05:00 | INFO | 🌟 Starting OAuth authentication flow
+2025-12-01T15:37:15.904-05:00 | INFO | 🚀 Starting OAuth client
+2025-12-01T15:37:15.905-05:00 | INFO | ✅ OAuth client started successfully
+2025-12-01T15:37:15.905-05:00 | ERROR | ❌ MCP initialization failed after OAuth setup
+2025-12-01T15:37:15.905-05:00 | INFO | 🎯 OAuth authorization required during MCP init - deferring OAuth for background processing
+2025-12-01T15:37:15.905-05:00 | INFO | ⏳ Deferring OAuth to prevent tray UI blocking
+```
+
+**Root Cause**: The `isDeferOAuthForTray()` function at line 2351 always returned `true` (defer OAuth) except when OAuth was recently completed. It didn't check if the OAuth flow was manually triggered via the Login button. The code comment said "Manual OAuth flows (triggered via tray menu) should proceed immediately" but this logic wasn't implemented.
+
+**Solution**: Modified `isDeferOAuthForTray()` to check the context for `manualOAuthKey`:
+
+1. **Added context parameter** (line 2351):
+   ```go
+   func (c *Client) isDeferOAuthForTray(ctx context.Context) bool {
+   ```
+
+2. **Check for manual OAuth flag** (lines 2352-2360):
+   ```go
+   // Check if this is a manual OAuth flow (triggered via Login button)
+   // Manual flows should NEVER be deferred
+   if value := ctx.Value(manualOAuthKey); value != nil {
+       if isManual, ok := value.(bool); ok && isManual {
+           c.logger.Debug("Manual OAuth flow detected - NOT deferring",
+               zap.String("server", c.config.Name))
+           return false
+       }
+   }
+   ```
+
+3. **Updated caller** (line 1178):
+   ```go
+   if c.isDeferOAuthForTray(ctx) {  // Now passes context
+   ```
+
+**How It Works**:
+- `ForceOAuthFlow()` sets `manualOAuthKey` in context (line 2127)
+- This context flows through to `tryHTTPOAuthStrategy()`
+- When OAuth authorization is required, `isDeferOAuthForTray(ctx)` checks the context
+- If `manualOAuthKey` is true, deferral is bypassed and browser opens immediately
+- Automatic connection attempts (no `manualOAuthKey`) still defer correctly
+
+**Files Modified**:
+- `internal/upstream/core/connection.go:1178` - Pass context to isDeferOAuthForTray
+- `internal/upstream/core/connection.go:2351-2385` - Enhanced isDeferOAuthForTray to check manual OAuth context
+
+**Testing**: Build successful. Manual OAuth flows (Login button) will now open browser immediately while automatic connection attempts continue to defer correctly.
+
 ---
 
 ## Files Modified
@@ -399,10 +453,16 @@ Currently no automated tests for these UI components. Future work:
 
 ## Change History
 
+- **2025-12-01 (Part 3)**: Fixed OAuth Login button not opening browser
+  - Root cause: `isDeferOAuthForTray()` didn't check for manual OAuth context
+  - Solution: Check `manualOAuthKey` in context to bypass deferral for manual triggers
+  - Manual OAuth flows (Login button) now open browser immediately
+  - Automatic connection attempts continue to defer correctly
+
 - **2025-12-01 (Part 2)**: Resolved remaining issues
   - Fixed transport/connection error display with categorization
   - Fixed OAuth login flow backend panic with defensive error handling
-  - All pending issues now resolved
+  - All pending issues now resolved (except Login button browser opening - fixed in Part 3)
 
 - **2025-12-01 (Part 1)**: Initial document - OAuth UI feedback fixes
   - Fixed System Diagnostics display issues
