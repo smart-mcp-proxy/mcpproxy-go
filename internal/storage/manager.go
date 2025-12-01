@@ -1313,3 +1313,37 @@ func (m *Manager) enforceSessionRetention(bucket *bbolt.Bucket, maxSessions int)
 	m.logger.Debugw("Enforced session retention", "deleted", deleted, "remaining", maxSessions)
 	return nil
 }
+
+// GetOAuthToken retrieves an OAuth token for a server from storage
+func (m *Manager) GetOAuthToken(serverName string) (*OAuthTokenRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.db == nil {
+		return nil, fmt.Errorf("storage not initialized")
+	}
+
+	return m.db.GetOAuthToken(serverName)
+}
+
+// ClearOAuthState clears all OAuth state for a server (tokens, client registration, etc.)
+// This should be called when OAuth configuration changes to force re-authentication
+func (m *Manager) ClearOAuthState(serverName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.db == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+
+	// Delete OAuth token
+	if err := m.db.DeleteOAuthToken(serverName); err != nil {
+		// Log but don't fail - token may not exist
+		m.logger.Debugw("OAuth token not found during clear (expected if none exists)",
+			"server", serverName,
+			"error", err)
+	}
+
+	m.logger.Infow("Cleared OAuth state for server", "server", serverName)
+	return nil
+}

@@ -190,20 +190,33 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 	hasOAuthServers := false
 	for _, srv := range servers {
 		name, _ := srv["name"].(string)
-		oauth, hasOAuth := srv["oauth"].(map[string]interface{})
+		oauth, _ := srv["oauth"].(map[string]interface{})
+		authenticated, _ := srv["authenticated"].(bool)
+		connected, _ := srv["connected"].(bool)
+		lastError, _ := srv["last_error"].(string)
 
-		if !hasOAuth || oauth == nil {
+		// Check if this is an OAuth server by:
+		// 1. Has oauth config OR
+		// 2. Has OAuth-related error OR
+		// 3. Is authenticated (has OAuth token)
+		isOAuthServer := (oauth != nil) ||
+			containsIgnoreCase(lastError, "oauth") ||
+			authenticated
+
+		if !isOAuthServer {
 			continue // Skip non-OAuth servers
 		}
 
 		hasOAuthServers = true
-		authenticated, _ := srv["authenticated"].(bool)
-		lastError, _ := srv["last_error"].(string)
 
-		// Determine status emoji and text
+		// Determine status emoji and text (improved logic)
 		var status string
-		if authenticated {
-			status = "✅ Authenticated"
+		if authenticated && connected {
+			status = "✅ Authenticated & Connected"
+		} else if authenticated && !connected {
+			status = "✅ Authenticated (Disconnected)"
+		} else if connected {
+			status = "⚠️  Connected (No OAuth Token)"
 		} else if lastError != "" {
 			status = "❌ Authentication Failed"
 		} else {
@@ -213,29 +226,76 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		fmt.Printf("Server: %s\n", name)
 		fmt.Printf("  Status: %s\n", status)
 
-		if authURL, ok := oauth["auth_url"].(string); ok && authURL != "" {
-			fmt.Printf("  Auth URL: %s\n", authURL)
+		// Display OAuth configuration details (if available)
+		if oauth != nil {
+			if clientID, ok := oauth["client_id"].(string); ok && clientID != "" {
+				fmt.Printf("  Client ID: %s\n", clientID)
+			}
+
+			// Handle both []string (from runtime) and []interface{} (from conversions)
+			if scopes, ok := oauth["scopes"].([]string); ok && len(scopes) > 0 {
+				fmt.Printf("  Scopes: %s\n", strings.Join(scopes, ", "))
+			} else if scopes, ok := oauth["scopes"].([]interface{}); ok && len(scopes) > 0 {
+				scopeStrs := make([]string, len(scopes))
+				for i, s := range scopes {
+					scopeStrs[i] = fmt.Sprintf("%v", s)
+				}
+				fmt.Printf("  Scopes: %s\n", strings.Join(scopeStrs, ", "))
+			}
+
+			if pkceEnabled, ok := oauth["pkce_enabled"].(bool); ok && pkceEnabled {
+				fmt.Printf("  PKCE: Enabled\n")
+			}
+
+			// Handle both map[string]string (from runtime) and map[string]interface{} (from conversions)
+			if extraParams, ok := oauth["extra_params"].(map[string]string); ok && len(extraParams) > 0 {
+				paramParts := make([]string, 0, len(extraParams))
+				for key, val := range extraParams {
+					paramParts = append(paramParts, fmt.Sprintf("%s=%v", key, val))
+				}
+				fmt.Printf("  Extra Params: %s\n", strings.Join(paramParts, ", "))
+			} else if extraParams, ok := oauth["extra_params"].(map[string]interface{}); ok && len(extraParams) > 0 {
+				paramParts := make([]string, 0, len(extraParams))
+				for key, val := range extraParams {
+					paramParts = append(paramParts, fmt.Sprintf("%s=%v", key, val))
+				}
+				fmt.Printf("  Extra Params: %s\n", strings.Join(paramParts, ", "))
+			}
+		} else {
+			// Server requires OAuth but has no config (discovery/DCR)
+			fmt.Printf("  OAuth: Discovered via Dynamic Client Registration\n")
 		}
 
-		if tokenURL, ok := oauth["token_url"].(string); ok && tokenURL != "" {
-			fmt.Printf("  Token URL: %s\n", tokenURL)
+		// Display token expiration if available
+		if oauth != nil {
+			if tokenExpiresAt, ok := oauth["token_expires_at"].(string); ok && tokenExpiresAt != "" {
+				if expiryTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
+					timeUntilExpiry := time.Until(expiryTime)
+					if timeUntilExpiry > 0 {
+						fmt.Printf("  Token Expires: %s (in %s)\n", expiryTime.Format("2006-01-02 15:04:05"), formatDuration(timeUntilExpiry))
+					} else {
+						fmt.Printf("  Token Expires: %s (⚠️  EXPIRED)\n", expiryTime.Format("2006-01-02 15:04:05"))
+					}
+				}
+			} else if tokenValid, ok := oauth["token_valid"].(bool); ok {
+				if tokenValid {
+					fmt.Printf("  Token: Valid\n")
+				} else {
+					fmt.Printf("  Token: ⚠️  Invalid or Expired\n")
+				}
+			}
+
+			if authURL, ok := oauth["auth_url"].(string); ok && authURL != "" {
+				fmt.Printf("  Auth URL: %s\n", authURL)
+			}
+
+			if tokenURL, ok := oauth["token_url"].(string); ok && tokenURL != "" {
+				fmt.Printf("  Token URL: %s\n", tokenURL)
+			}
 		}
 
 		if lastError != "" {
 			fmt.Printf("  Error: %s\n", lastError)
-
-			// Provide suggestions based on error type
-			if containsIgnoreCase(lastError, "requires") && containsIgnoreCase(lastError, "parameter") {
-				fmt.Println()
-				fmt.Println("  💡 Suggestion:")
-				fmt.Println("     This OAuth provider requires additional parameters that")
-				fmt.Println("     MCPProxy doesn't currently support. Support for custom")
-				fmt.Println("     OAuth parameters (extra_params) is coming soon.")
-				fmt.Println()
-				fmt.Println("     For more information:")
-				fmt.Println("     - RFC 8707: https://www.rfc-editor.org/rfc/rfc8707.html")
-				fmt.Println("     - Track progress: https://github.com/smart-mcp-proxy/mcpproxy-go/issues")
-			}
 		}
 
 		fmt.Println()
@@ -378,4 +438,23 @@ func runAuthLoginStandalone(ctx context.Context, serverName string) error {
 // containsIgnoreCase checks if a string contains a substring (case-insensitive)
 func containsIgnoreCase(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+// formatDuration formats a duration into a human-readable string
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		return "expired"
+	}
+
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	} else if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	} else {
+		return fmt.Sprintf("%dm", minutes)
+	}
 }

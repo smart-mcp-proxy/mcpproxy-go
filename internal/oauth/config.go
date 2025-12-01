@@ -430,6 +430,31 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 			zap.String("storage", "memory"))
 	}
 
+	// Extract extra OAuth parameters (e.g., RFC 8707 resource parameter)
+	var extraParams map[string]string
+	var httpClient *http.Client
+
+	if serverConfig.OAuth != nil && len(serverConfig.OAuth.ExtraParams) > 0 {
+		extraParams = serverConfig.OAuth.ExtraParams
+
+		// Log extra params with selective masking for security
+		masked := maskExtraParams(extraParams)
+		logger.Debug("OAuth extra parameters configured",
+			zap.String("server", serverConfig.Name),
+			zap.Any("extra_params", masked))
+
+		// Create HTTP client with wrapper to inject extra params
+		wrapper := NewOAuthTransportWrapper(http.DefaultTransport, extraParams, logger)
+		httpClient = &http.Client{
+			Transport: wrapper,
+			Timeout:   30 * time.Second,
+		}
+
+		logger.Info("✅ Created OAuth HTTP client with extra params wrapper",
+			zap.String("server", serverConfig.Name),
+			zap.Int("extra_params_count", len(extraParams)))
+	}
+
 	// Check if static OAuth credentials are provided in config
 	// If not provided, will attempt DCR or fall back to public client OAuth with PKCE
 	var clientID, clientSecret string
@@ -461,6 +486,7 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 		TokenStore:            tokenStore,            // Shared token store for this server
 		PKCEEnabled:           true,                  // Always enable PKCE for security
 		AuthServerMetadataURL: authServerMetadataURL, // Explicit metadata URL for proper discovery
+		HTTPClient:            httpClient,            // Custom HTTP client with extra params wrapper (if configured)
 	}
 
 	logger.Info("OAuth config created successfully",

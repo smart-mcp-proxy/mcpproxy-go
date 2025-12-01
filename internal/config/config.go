@@ -153,11 +153,12 @@ type ServerConfig struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	ClientID     string   `json:"client_id,omitempty" mapstructure:"client_id"`
-	ClientSecret string   `json:"client_secret,omitempty" mapstructure:"client_secret"`
-	RedirectURI  string   `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
-	Scopes       []string `json:"scopes,omitempty" mapstructure:"scopes"`
-	PKCEEnabled  bool     `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+	ClientID     string            `json:"client_id,omitempty" mapstructure:"client_id"`
+	ClientSecret string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
+	RedirectURI  string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
+	Scopes       []string          `json:"scopes,omitempty" mapstructure:"scopes"`
+	PKCEEnabled  bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+	ExtraParams  map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
 }
 
 // DockerIsolationConfig represents global Docker isolation settings
@@ -900,4 +901,49 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 		Alias: (*Alias)(c),
 	}
 	return json.Unmarshal(data, aux)
+}
+
+// OAuthConfigChanged checks if OAuth configuration has changed between two configs.
+// Returns true if any OAuth field differs (ClientID, Scopes, ExtraParams, etc.)
+func OAuthConfigChanged(old, new *OAuthConfig) bool {
+	// Both nil - no change
+	if old == nil && new == nil {
+		return false
+	}
+
+	// One nil, one not - changed
+	if (old == nil) != (new == nil) {
+		return true
+	}
+
+	// Compare all fields
+	if old.ClientID != new.ClientID ||
+		old.ClientSecret != new.ClientSecret ||
+		old.RedirectURI != new.RedirectURI ||
+		old.PKCEEnabled != new.PKCEEnabled {
+		return true
+	}
+
+	// Compare scopes (order matters for OAuth)
+	if len(old.Scopes) != len(new.Scopes) {
+		return true
+	}
+	for i := range old.Scopes {
+		if old.Scopes[i] != new.Scopes[i] {
+			return true
+		}
+	}
+
+	// Compare extra params
+	if len(old.ExtraParams) != len(new.ExtraParams) {
+		return true
+	}
+	for key, oldVal := range old.ExtraParams {
+		newVal, exists := new.ExtraParams[key]
+		if !exists || oldVal != newVal {
+			return true
+		}
+	}
+
+	return false
 }

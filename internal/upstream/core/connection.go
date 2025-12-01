@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -2023,6 +2024,30 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 	if authURLErr != nil {
 		return fmt.Errorf("failed to get authorization URL: %w", authURLErr)
+	}
+
+	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
+	if c.config.OAuth != nil && len(c.config.OAuth.ExtraParams) > 0 {
+		parsedURL, err := url.Parse(authURL)
+		if err == nil {
+			query := parsedURL.Query()
+			for key, value := range c.config.OAuth.ExtraParams {
+				query.Set(key, value)
+				c.logger.Debug("Added extra OAuth parameter to authorization URL",
+					zap.String("server", c.config.Name),
+					zap.String("key", key),
+					zap.String("value", value))
+			}
+			parsedURL.RawQuery = query.Encode()
+			authURL = parsedURL.String()
+			c.logger.Info("✅ Appended extra OAuth parameters to authorization URL",
+				zap.String("server", c.config.Name),
+				zap.Int("extra_params_count", len(c.config.OAuth.ExtraParams)))
+		} else {
+			c.logger.Warn("Failed to parse authorization URL for extra params",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+		}
 	}
 
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.

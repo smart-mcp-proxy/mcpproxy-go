@@ -206,10 +206,10 @@ func outputServers(servers []map[string]interface{}) error {
 		}
 		fmt.Println(string(output))
 	case "table", "":
-		// Table format (default)
-		fmt.Printf("%-25s %-10s %-10s %-12s %-10s %s\n",
-			"NAME", "ENABLED", "PROTOCOL", "CONNECTED", "TOOLS", "STATUS")
-		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		// Table format (default) with OAuth token validity column
+		fmt.Printf("%-25s %-10s %-10s %-12s %-10s %-20s %s\n",
+			"NAME", "ENABLED", "PROTOCOL", "CONNECTED", "TOOLS", "OAUTH TOKEN", "STATUS")
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 		for _, srv := range servers {
 			name := getStringField(srv, "name")
@@ -229,8 +229,50 @@ func outputServers(servers []map[string]interface{}) error {
 				connectedStr = "yes"
 			}
 
-			fmt.Printf("%-25s %-10s %-10s %-12s %-10d %s\n",
-				name, enabledStr, protocol, connectedStr, toolCount, status)
+			// Extract OAuth token validity info
+			oauthStatus := "-"
+			oauth, _ := srv["oauth"].(map[string]interface{})
+			authenticated, _ := srv["authenticated"].(bool)
+			lastError, _ := srv["last_error"].(string)
+
+			// Check if this is an OAuth-related server
+			isOAuthServer := (oauth != nil) ||
+				containsIgnoreCase(lastError, "oauth") ||
+				authenticated
+
+			if isOAuthServer {
+				if oauth != nil {
+					if tokenExpiresAt, ok := oauth["token_expires_at"].(string); ok && tokenExpiresAt != "" {
+						if expiryTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
+							timeUntilExpiry := time.Until(expiryTime)
+							if timeUntilExpiry > 0 {
+								oauthStatus = formatDurationShort(timeUntilExpiry)
+							} else {
+								oauthStatus = "⚠️  EXPIRED"
+							}
+						}
+					} else if tokenValid, ok := oauth["token_valid"].(bool); ok {
+						if tokenValid {
+							oauthStatus = "✅ Valid"
+						} else {
+							oauthStatus = "⚠️  Invalid"
+						}
+					} else if authenticated {
+						oauthStatus = "✅ Active"
+					} else {
+						oauthStatus = "⏳ Pending"
+					}
+				} else if authenticated {
+					// OAuth server without config (DCR) but authenticated
+					oauthStatus = "✅ Active"
+				} else {
+					// OAuth required but not authenticated yet
+					oauthStatus = "⏳ Pending"
+				}
+			}
+
+			fmt.Printf("%-25s %-10s %-10s %-12s %-10d %-20s %s\n",
+				name, enabledStr, protocol, connectedStr, toolCount, oauthStatus, status)
 		}
 	default:
 		return fmt.Errorf("unknown output format: %s", upstreamOutputFormat)
@@ -643,4 +685,25 @@ func runUpstreamBulkAction(action string, force bool) error {
 	}
 
 	return nil
+}
+
+// formatDurationShort formats a duration into a short human-readable string for table display
+func formatDurationShort(d time.Duration) string {
+	if d < 0 {
+		return "expired"
+	}
+
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+
+	if days > 30 {
+		return fmt.Sprintf("%dd", days)
+	} else if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	} else if hours > 0 {
+		return fmt.Sprintf("%dh", hours)
+	} else {
+		minutes := int(d.Minutes())
+		return fmt.Sprintf("%dm", minutes)
+	}
 }
