@@ -982,7 +982,7 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 
 // tryOAuthAuth attempts OAuth authentication
 func (c *Client) tryOAuthAuth(ctx context.Context) error {
-	c.logger.Error("🚨 OAUTH AUTH FUNCTION CALLED - START",
+	c.logger.Debug("🚨 OAUTH AUTH FUNCTION CALLED - START",
 		zap.String("server", c.config.Name))
 
 	// Check if OAuth is already in progress
@@ -1016,7 +1016,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		zap.Bool("has_existing_token_store", hasExistingTokens),
 		zap.String("strategy", "HTTP OAuth"))
 
-	c.logger.Error("🚨 ABOUT TO CALL oauth.CreateOAuthConfig")
+	c.logger.Debug("🚨 ABOUT TO CALL oauth.CreateOAuthConfig")
 
 	// Create OAuth config using the oauth package
 	// TODO(zero-config-oauth): extraParams (including RFC 8707 resource parameter) are currently
@@ -1025,7 +1025,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	// in OAuthConfig or provide URL construction hooks.
 	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 
-	c.logger.Error("🚨 oauth.CreateOAuthConfig RETURNED",
+	c.logger.Debug("🚨 oauth.CreateOAuthConfig RETURNED",
 		zap.Bool("config_nil", oauthConfig == nil),
 		zap.Any("extra_params", extraParams))
 
