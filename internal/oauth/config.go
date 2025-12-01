@@ -178,6 +178,56 @@ func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
 	return isRecent
 }
 
+// HasValidToken checks if a server has a valid, non-expired OAuth token
+// Returns true if token exists and hasn't expired (with grace period)
+func (m *TokenStoreManager) HasValidToken(ctx context.Context, serverName string, storage *storage.BoltDB) bool {
+	m.mu.RLock()
+	store, exists := m.stores[serverName]
+	m.mu.RUnlock()
+
+	if !exists {
+		m.logger.Debug("No token store found for server",
+			zap.String("server", serverName))
+		return false
+	}
+
+	// Try to get token from persistent store if available
+	if persistentStore, ok := store.(*PersistentTokenStore); ok && storage != nil {
+		token, err := persistentStore.GetToken(ctx)
+		if err != nil {
+			// No token or error retrieving it
+			m.logger.Debug("Failed to retrieve token from persistent store",
+				zap.String("server", serverName),
+				zap.Error(err))
+			return false
+		}
+
+		// Check if token is expired (considering grace period)
+		now := time.Now()
+		if token.ExpiresAt.IsZero() {
+			// No expiration time means token is always valid (unusual but possible)
+			m.logger.Debug("Token has no expiration, treating as valid",
+				zap.String("server", serverName))
+			return true
+		}
+
+		isExpired := now.After(token.ExpiresAt)
+		m.logger.Debug("Token expiration check",
+			zap.String("server", serverName),
+			zap.Bool("is_expired", isExpired),
+			zap.Time("expires_at", token.ExpiresAt),
+			zap.Duration("time_until_expiry", token.ExpiresAt.Sub(now)))
+
+		return !isExpired
+	}
+
+	// For in-memory stores, just check if store exists
+	// (no expiration checking for non-persistent stores)
+	m.logger.Debug("Using in-memory token store, assuming valid",
+		zap.String("server", serverName))
+	return true
+}
+
 // CreateOAuthConfig creates OAuth configuration with auto-detected resource parameter
 // Returns both OAuth config and extra parameters map for RFC 8707 compliance
 func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltDB) (*client.OAuthConfig, map[string]string) {
