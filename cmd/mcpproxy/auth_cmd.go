@@ -227,7 +227,15 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		fmt.Printf("  Status: %s\n", status)
 
 		// Display OAuth configuration details (if available)
+		// Check if this is an autodiscovery server (no explicit OAuth config, but has token)
+		isAutodiscovery := false
 		if oauth != nil {
+			if autodiscovery, ok := oauth["autodiscovery"].(bool); ok && autodiscovery {
+				isAutodiscovery = true
+			}
+		}
+
+		if oauth != nil && !isAutodiscovery {
 			if clientID, ok := oauth["client_id"].(string); ok && clientID != "" {
 				fmt.Printf("  Client ID: %s\n", clientID)
 			}
@@ -262,7 +270,7 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 				fmt.Printf("  Extra Params: %s\n", strings.Join(paramParts, ", "))
 			}
 		} else {
-			// Server requires OAuth but has no config (discovery/DCR)
+			// Server requires OAuth but has no explicit config (discovery/DCR)
 			fmt.Printf("  OAuth: Discovered via Dynamic Client Registration\n")
 		}
 

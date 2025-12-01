@@ -1505,7 +1505,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			command = serverStatus.Config.Command
 			protocol = serverStatus.Config.Protocol
 
-			// Serialize OAuth config if present
+			// Serialize OAuth config if present (explicit config)
 			if serverStatus.Config.OAuth != nil {
 				oauthConfig = map[string]interface{}{
 					"client_id":    serverStatus.Config.OAuth.ClientID,
@@ -1516,49 +1516,57 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					"auth_url":  "",
 					"token_url": "",
 				}
+			}
 
-				// Check if server has valid OAuth token in storage
-				// IMPORTANT: PersistentTokenStore uses serverKey (name + URL hash), not just server name
-				// We need to generate the same key format: "servername_hash16"
+			// Check if server has valid OAuth token in storage
+			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
+			// PersistentTokenStore uses serverKey (name + URL hash), not just server name
+			// We need to generate the same key format: "servername_hash16"
+			if url != "" && r.storageManager != nil {
 				r.logger.Debug("Checking OAuth token in storage",
 					zap.String("server", serverStatus.Name),
 					zap.String("url", url),
-					zap.Bool("storage_manager_nil", r.storageManager == nil))
+					zap.Bool("has_explicit_oauth_config", serverStatus.Config.OAuth != nil))
 
-				if r.storageManager != nil {
-					// Generate server key matching PersistentTokenStore format
-					combined := fmt.Sprintf("%s|%s", serverStatus.Name, url)
-					hash := sha256.Sum256([]byte(combined))
-					hashStr := hex.EncodeToString(hash[:])
-					serverKey := fmt.Sprintf("%s_%s", serverStatus.Name, hashStr[:16])
+				// Generate server key matching PersistentTokenStore format
+				combined := fmt.Sprintf("%s|%s", serverStatus.Name, url)
+				hash := sha256.Sum256([]byte(combined))
+				hashStr := hex.EncodeToString(hash[:])
+				serverKey := fmt.Sprintf("%s_%s", serverStatus.Name, hashStr[:16])
 
-					r.logger.Debug("Generated OAuth token lookup key",
-						zap.String("server", serverStatus.Name),
-						zap.String("server_key", serverKey))
+				r.logger.Debug("Generated OAuth token lookup key",
+					zap.String("server", serverStatus.Name),
+					zap.String("server_key", serverKey))
 
-					token, err := r.storageManager.GetOAuthToken(serverKey)
-					r.logger.Debug("OAuth token lookup result",
+				token, err := r.storageManager.GetOAuthToken(serverKey)
+				r.logger.Debug("OAuth token lookup result",
+					zap.String("server", serverStatus.Name),
+					zap.String("server_key", serverKey),
+					zap.Bool("token_nil", token == nil),
+					zap.Error(err))
+
+				if err == nil && token != nil {
+					authenticated = true
+					r.logger.Info("OAuth token found for server",
 						zap.String("server", serverStatus.Name),
 						zap.String("server_key", serverKey),
-						zap.Bool("token_nil", token == nil),
-						zap.Error(err))
+						zap.Time("expires_at", token.ExpiresAt))
 
-					if err == nil && token != nil {
-						authenticated = true
-						r.logger.Info("OAuth token found for server",
-							zap.String("server", serverStatus.Name),
-							zap.String("server_key", serverKey),
-							zap.Time("expires_at", token.ExpiresAt))
-
-						// Add token expiration info to oauth config
-						if !token.ExpiresAt.IsZero() {
-							oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
-							// Check if token is expired
-							oauthConfig["token_valid"] = time.Now().Before(token.ExpiresAt)
-						} else {
-							// No expiration means token is valid indefinitely
-							oauthConfig["token_valid"] = true
+					// For autodiscovery servers (no explicit OAuth config), create minimal oauthConfig
+					if oauthConfig == nil {
+						oauthConfig = map[string]interface{}{
+							"autodiscovery": true,
 						}
+					}
+
+					// Add token expiration info to oauth config
+					if !token.ExpiresAt.IsZero() {
+						oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
+						// Check if token is expired
+						oauthConfig["token_valid"] = time.Now().Before(token.ExpiresAt)
+					} else {
+						// No expiration means token is valid indefinitely
+						oauthConfig["token_valid"] = true
 					}
 				}
 			}
