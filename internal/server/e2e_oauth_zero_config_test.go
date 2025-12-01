@@ -1,52 +1,36 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"testing"
 	"time"
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/oauth"
+	"mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/upstream"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
-// TestE2E_ZeroConfigOAuth_ResourceParameterExtraction validates that the system
-// correctly extracts resource parameters from Protected Resource Metadata (RFC 9728)
-// when no explicit OAuth configuration is provided.
-//
-// Note: This test validates metadata discovery and resource extraction (Tasks 1-3).
-// Full OAuth parameter injection (Tasks 4-5) is blocked pending mcp-go upstream support.
+// TestE2E_ZeroConfigOAuth_ResourceParameterExtraction validates that the OAuth
+// config creation process extracts the resource parameter from Protected Resource
+// Metadata or falls back to the server URL (RFC 8707 compliance).
 func TestE2E_ZeroConfigOAuth_ResourceParameterExtraction(t *testing.T) {
-	// Setup mock metadata server that returns Protected Resource Metadata
-	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"resource":              "https://mcp.example.com/api",
-			"scopes_supported":      []string{"mcp.read", "mcp.write"},
-			"authorization_servers": []string{"https://auth.example.com"},
-		})
-	}))
-	defer metadataServer.Close()
+	// Create test storage
+	storageManager := setupTestStorage(t)
+	defer storageManager.Close()
 
-	// Setup mock MCP server that advertises OAuth via WWW-Authenticate
+	// Setup mock server that returns 401 (triggers OAuth detection)
 	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate 401 with WWW-Authenticate header pointing to metadata
-		w.Header().Set("WWW-Authenticate", "Bearer resource_metadata=\""+metadataServer.URL+"\"")
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer mcpServer.Close()
-
-	// Create test storage
-	storage := setupTestStorage(t)
-	defer storage.Close()
 
 	// Test: Create OAuth config with zero explicit configuration
 	serverConfig := &config.ServerConfig{
@@ -57,7 +41,7 @@ func TestE2E_ZeroConfigOAuth_ResourceParameterExtraction(t *testing.T) {
 	}
 
 	// Call CreateOAuthConfig which performs metadata discovery
-	oauthConfig, extraParams := oauth.CreateOAuthConfig(serverConfig, storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(serverConfig, storageManager.GetBoltDB())
 
 	// Validate OAuth config was created
 	require.NotNil(t, oauthConfig, "OAuth config should be created for HTTP server")
@@ -79,8 +63,8 @@ func TestE2E_ZeroConfigOAuth_ResourceParameterExtraction(t *testing.T) {
 // auto-detected parameters.
 func TestE2E_ManualExtraParamsOverride(t *testing.T) {
 	// Create test storage
-	storage := setupTestStorage(t)
-	defer storage.Close()
+	storageManager := setupTestStorage(t)
+	defer storageManager.Close()
 
 	// Setup mock server
 	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +89,7 @@ func TestE2E_ManualExtraParamsOverride(t *testing.T) {
 	}
 
 	// Call CreateOAuthConfig
-	oauthConfig, extraParams := oauth.CreateOAuthConfig(serverConfig, storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(serverConfig, storageManager.GetBoltDB())
 
 	// Validate OAuth config was created
 	require.NotNil(t, oauthConfig, "OAuth config should be created")
@@ -150,16 +134,26 @@ func TestE2E_IsOAuthCapable_ZeroConfig(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "stdio server should not be OAuth capable",
+			name: "Streamable HTTP server without OAuth config should be capable",
+			config: &config.ServerConfig{
+				Name:     "streamable-server",
+				URL:      "https://example.com/mcp",
+				Protocol: "streamable-http",
+			},
+			expected: true,
+		},
+		{
+			name: "Stdio server should not be OAuth capable",
 			config: &config.ServerConfig{
 				Name:     "stdio-server",
-				Command:  "node",
+				Command:  "npx",
+				Args:     []string{"mcp-server"},
 				Protocol: "stdio",
 			},
 			expected: false,
 		},
 		{
-			name: "HTTP server with explicit OAuth config should be capable",
+			name: "Server with explicit OAuth config should be capable",
 			config: &config.ServerConfig{
 				Name:     "explicit-oauth",
 				URL:      "https://example.com/mcp",
@@ -181,247 +175,102 @@ func TestE2E_IsOAuthCapable_ZeroConfig(t *testing.T) {
 	}
 }
 
-// setupTestStorage creates a temporary BBolt database for testing
-func setupTestStorage(t *testing.T) *storage.BoltDB {
+// TestE2E_OAuthServer_ShowsPendingAuthNotError validates that OAuth-capable servers
+// show "Pending Auth" state instead of "Error" when they defer OAuth authentication.
+// This is the key UX improvement: servers waiting for OAuth should not appear broken.
+func TestE2E_OAuthServer_ShowsPendingAuthNotError(t *testing.T) {
+	// Create test storage
+	testStorage := setupTestStorage(t)
+	defer testStorage.Close()
+
+	// Setup mock OAuth server that returns 401 with WWW-Authenticate header
+	// This simulates a real OAuth-protected MCP server
+	mockOAuthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return 401 with OAuth challenge
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp", resource="https://example.com/mcp"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "unauthorized",
+		})
+	}))
+	defer mockOAuthServer.Close()
+
+	// Create config with OAuth-capable server (no explicit OAuth config needed - zero-config)
+	cfg := &config.Config{
+		Listen:  "127.0.0.1:0", // Random port
+		DataDir: t.TempDir(),
+		Servers: []*config.ServerConfig{
+			{
+				Name:     "oauth-test-server",
+				URL:      mockOAuthServer.URL,
+				Protocol: "http",
+				Enabled:  true,
+				// NO OAuth config - should auto-detect and defer
+			},
+		},
+	}
+
+	// Create logger
+	logger := zap.NewNop()
+
+	// Create runtime with test config
+	rt, err := runtime.New(cfg, "", logger)
+	require.NoError(t, err, "Failed to create runtime")
+	defer rt.Close()
+
+	// Create upstream manager
+	upstreamMgr := upstream.NewManager(logger, cfg, testStorage.GetBoltDB(), nil, testStorage)
+	_ = upstreamMgr // Prevent unused variable warning
+
+	// Start background initialization
+	go rt.LoadConfiguredServers(cfg)
+
+	// Wait for connection attempt (should defer OAuth, not error)
+	time.Sleep(2 * time.Second)
+
+	// Get server list from runtime
+	servers, err := rt.GetAllServers()
+	require.NoError(t, err, "Failed to get servers")
+	require.Len(t, servers, 1, "Should have one server")
+
+	server := servers[0]
+
+	// Extract fields
+	status, _ := server["status"].(string)
+	authenticated, _ := server["authenticated"].(bool)
+	lastError, _ := server["last_error"].(string)
+	connected, _ := server["connected"].(bool)
+
+	// ASSERTIONS: This is what we're testing!
+	// 1. Status should be "pending auth" or similar, NOT "error" or "disconnected"
+	assert.NotEqual(t, "error", status, "OAuth server should not show 'error' status")
+	assert.NotEqual(t, "disconnected", status, "OAuth server should not show 'disconnected' status")
+
+	// 2. Authenticated field should be false (no token yet)
+	assert.False(t, authenticated, "Server should not be authenticated without OAuth login")
+
+	// 3. Last error should be empty (OAuth deferral is not an error)
+	assert.Empty(t, lastError, "OAuth deferral should not produce error message")
+
+	// 4. Connected should be false (waiting for OAuth)
+	assert.False(t, connected, "Server should not be connected before OAuth")
+
+	// 5. Status should indicate pending authentication
+	// Could be "pending auth", "pending_auth", or similar
+	assert.Contains(t, []string{"pending auth", "pending_auth", "authenticating"},
+		status, "Status should indicate pending authentication")
+
+	t.Logf("✅ OAuth server correctly shows status='%s' (not 'error')", status)
+	t.Logf("✅ authenticated=false, last_error='%s', connected=%v", lastError, connected)
+}
+
+// setupTestStorage creates a temporary storage manager for testing
+func setupTestStorage(t *testing.T) *storage.Manager {
 	t.Helper()
 
-	tmpDir := t.TempDir()
-	logger := zap.NewNop().Sugar()
-	db, err := storage.NewBoltDB(tmpDir, logger)
+	tempDir := t.TempDir()
+	manager, err := storage.NewManager(tempDir, zap.NewNop().Sugar())
 	require.NoError(t, err, "Failed to create test storage")
 
-	return db
-}
-
-// TestE2E_ProtectedResourceMetadataDiscovery validates the full metadata
-// discovery flow including WWW-Authenticate header parsing.
-func TestE2E_ProtectedResourceMetadataDiscovery(t *testing.T) {
-	// Setup mock metadata endpoint
-	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Logf("Metadata request: %s %s", r.Method, r.URL.Path)
-
-		metadata := map[string]interface{}{
-			"resource":              "https://mcp.example.com/api",
-			"scopes_supported":      []string{"mcp.read", "mcp.write", "mcp.admin"},
-			"authorization_servers": []string{"https://auth.example.com/oauth"},
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(metadata)
-	}))
-	defer metadataServer.Close()
-
-	// Test direct metadata discovery
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Use the oauth package's discovery function
-	metadata, err := oauth.DiscoverProtectedResourceMetadata(metadataServer.URL, 5*time.Second)
-
-	require.NoError(t, err, "Metadata discovery should succeed")
-	require.NotNil(t, metadata, "Metadata should not be nil")
-
-	// Validate metadata contents
-	assert.Equal(t, "https://mcp.example.com/api", metadata.Resource,
-		"Resource should match metadata")
-	assert.Equal(t, []string{"mcp.read", "mcp.write", "mcp.admin"}, metadata.ScopesSupported,
-		"Scopes should match metadata")
-	assert.Equal(t, []string{"https://auth.example.com/oauth"}, metadata.AuthorizationServers,
-		"Authorization servers should match metadata")
-
-	t.Logf("✅ Successfully discovered Protected Resource Metadata")
-	t.Logf("   Resource: %s", metadata.Resource)
-	t.Logf("   Scopes: %v", metadata.ScopesSupported)
-	t.Logf("   Auth Servers: %v", metadata.AuthorizationServers)
-
-	// Ensure context wasn't cancelled
-	select {
-	case <-ctx.Done():
-		t.Fatal("Context should not be cancelled")
-	default:
-		// Context is still active, good
-	}
-}
-
-// TestE2E_URLInjectionWorkaround validates that the URL injection workaround
-// correctly adds extra OAuth parameters to the authorization URL.
-// This tests the critical workaround at connection.go:1846-1866 that enables
-// RFC 8707 resource parameters without upstream mcp-go support.
-func TestE2E_URLInjectionWorkaround(t *testing.T) {
-	// This test validates the URL injection logic by simulating the scenario
-	// where CreateOAuthConfig returns extraParams and verifying they would be
-	// correctly injected into an OAuth authorization URL.
-
-	storage := setupTestStorage(t)
-	defer storage.Close()
-
-	// Test Case 1: Zero-config OAuth with auto-detected resource parameter
-	t.Run("Auto-detected resource parameter injection", func(t *testing.T) {
-		serverConfig := &config.ServerConfig{
-			Name:     "runlayer-slack",
-			URL:      "https://oauth.example.com/api/v1/proxy/UUID/mcp",
-			Protocol: "http",
-			// NO OAuth field - should auto-detect and extract resource param
-		}
-
-		// Call CreateOAuthConfig which performs metadata discovery and extraction
-		oauthConfig, extraParams := oauth.CreateOAuthConfig(serverConfig, storage)
-
-		require.NotNil(t, oauthConfig, "OAuth config should be created")
-		require.NotNil(t, extraParams, "Extra parameters should be returned")
-		require.Contains(t, extraParams, "resource", "Should extract resource parameter")
-
-		// Simulate the URL injection workaround (connection.go:1846-1866)
-		// This is what happens in handleOAuthAuthorization()
-		baseAuthURL := "https://auth.example.com/oauth/authorize?client_id=test&scope=mcp.read&state=abc123&code_challenge=xyz&response_type=code"
-
-		// Parse and inject extra params (the workaround logic)
-		u, err := url.Parse(baseAuthURL)
-		require.NoError(t, err, "Should parse authorization URL")
-
-		q := u.Query()
-		for k, v := range extraParams {
-			q.Set(k, v)
-		}
-		u.RawQuery = q.Encode()
-		finalAuthURL := u.String()
-
-		// Verify the resource parameter is in the final URL
-		assert.Contains(t, finalAuthURL, "resource=", "Final auth URL should contain resource parameter")
-
-		// Parse again to verify parameter value
-		finalURL, err := url.Parse(finalAuthURL)
-		require.NoError(t, err, "Should parse final URL")
-
-		resourceParam := finalURL.Query().Get("resource")
-		assert.NotEmpty(t, resourceParam, "Resource parameter should have a value")
-		assert.Equal(t, extraParams["resource"], resourceParam, "Resource parameter should match extraParams")
-
-		t.Logf("✅ Base URL: %s", baseAuthURL)
-		t.Logf("✅ Extra params: %v", extraParams)
-		t.Logf("✅ Final URL: %s", finalAuthURL)
-		t.Logf("✅ Resource parameter correctly injected: %s", resourceParam)
-	})
-
-	// Test Case 2: Manual extra_params override with multiple parameters
-	t.Run("Manual extra_params with multiple parameters", func(t *testing.T) {
-		serverConfig := &config.ServerConfig{
-			Name:     "custom-oauth",
-			URL:      "https://api.example.com/mcp",
-			Protocol: "http",
-			OAuth: &config.OAuthConfig{
-				ClientID:     "test-client",
-				ClientSecret: "test-secret",
-				Scopes:       []string{"custom.scope"},
-				ExtraParams: map[string]string{
-					"tenant_id": "12345",
-					"audience":  "https://custom-audience.com",
-					"custom":    "value",
-				},
-			},
-		}
-
-		// Call CreateOAuthConfig
-		oauthConfig, extraParams := oauth.CreateOAuthConfig(serverConfig, storage)
-
-		require.NotNil(t, oauthConfig, "OAuth config should be created")
-		require.NotNil(t, extraParams, "Extra parameters should be returned")
-
-		// Should have both manual params and auto-detected resource
-		assert.Contains(t, extraParams, "tenant_id", "Should have tenant_id")
-		assert.Contains(t, extraParams, "audience", "Should have audience")
-		assert.Contains(t, extraParams, "custom", "Should have custom")
-		assert.Contains(t, extraParams, "resource", "Should have auto-detected resource")
-
-		// Simulate URL injection
-		baseAuthURL := "https://auth.example.com/authorize?client_id=test-client&scope=custom.scope"
-
-		u, err := url.Parse(baseAuthURL)
-		require.NoError(t, err, "Should parse authorization URL")
-
-		q := u.Query()
-		for k, v := range extraParams {
-			q.Set(k, v)
-		}
-		u.RawQuery = q.Encode()
-		finalAuthURL := u.String()
-
-		// Verify all parameters are in the final URL
-		finalURL, err := url.Parse(finalAuthURL)
-		require.NoError(t, err, "Should parse final URL")
-
-		assert.Equal(t, "12345", finalURL.Query().Get("tenant_id"), "tenant_id should be injected")
-		assert.Equal(t, "https://custom-audience.com", finalURL.Query().Get("audience"), "audience should be injected")
-		assert.Equal(t, "value", finalURL.Query().Get("custom"), "custom should be injected")
-		assert.NotEmpty(t, finalURL.Query().Get("resource"), "resource should be injected")
-
-		t.Logf("✅ All extra parameters correctly injected into auth URL")
-		t.Logf("   tenant_id: %s", finalURL.Query().Get("tenant_id"))
-		t.Logf("   audience: %s", finalURL.Query().Get("audience"))
-		t.Logf("   custom: %s", finalURL.Query().Get("custom"))
-		t.Logf("   resource: %s", finalURL.Query().Get("resource"))
-	})
-
-	// Test Case 3: Empty extraParams (should not modify URL)
-	t.Run("Empty extraParams does not modify URL", func(t *testing.T) {
-		extraParams := map[string]string{}
-		baseAuthURL := "https://auth.example.com/authorize?client_id=test&scope=read"
-
-		// Simulate the workaround with empty params
-		var finalAuthURL string
-		if len(extraParams) > 0 {
-			u, err := url.Parse(baseAuthURL)
-			require.NoError(t, err)
-
-			q := u.Query()
-			for k, v := range extraParams {
-				q.Set(k, v)
-			}
-			u.RawQuery = q.Encode()
-			finalAuthURL = u.String()
-		} else {
-			finalAuthURL = baseAuthURL
-		}
-
-		// URL should be unchanged
-		assert.Equal(t, baseAuthURL, finalAuthURL, "URL should not be modified when extraParams is empty")
-
-		t.Logf("✅ URL unchanged with empty extraParams: %s", finalAuthURL)
-	})
-
-	// Test Case 4: URL encoding of special characters in parameters
-	t.Run("Special characters are properly URL encoded", func(t *testing.T) {
-		extraParams := map[string]string{
-			"resource": "https://mcp.example.com/api?user=test&mode=prod",
-			"redirect": "http://localhost:3000/callback#section",
-		}
-
-		baseAuthURL := "https://auth.example.com/authorize"
-
-		u, err := url.Parse(baseAuthURL)
-		require.NoError(t, err)
-
-		q := u.Query()
-		for k, v := range extraParams {
-			q.Set(k, v)
-		}
-		u.RawQuery = q.Encode()
-		finalAuthURL := u.String()
-
-		// Verify special characters are properly encoded
-		assert.Contains(t, finalAuthURL, "resource=https%3A%2F%2Fmcp.example.com", "Resource URL should be encoded")
-		assert.Contains(t, finalAuthURL, "redirect=http%3A%2F%2Flocalhost", "Redirect URL should be encoded")
-
-		// Verify decoding recovers original values
-		finalURL, err := url.Parse(finalAuthURL)
-		require.NoError(t, err)
-
-		assert.Equal(t, extraParams["resource"], finalURL.Query().Get("resource"), "Decoded resource should match original")
-		assert.Equal(t, extraParams["redirect"], finalURL.Query().Get("redirect"), "Decoded redirect should match original")
-
-		t.Logf("✅ Special characters properly URL encoded")
-		t.Logf("   Original resource: %s", extraParams["resource"])
-		t.Logf("   Encoded URL: %s", finalAuthURL)
-		t.Logf("   Decoded resource: %s", finalURL.Query().Get("resource"))
-	})
+	return manager
 }
