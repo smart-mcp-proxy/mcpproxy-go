@@ -796,6 +796,27 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 
 	enabled, _ := server["enabled"].(bool)
 	quarantined, _ := server["quarantined"].(bool)
+	authenticated, _ := server["authenticated"].(bool)
+	connected, _ := server["connected"].(bool)
+
+	// Check if server needs OAuth authentication
+	needsOAuth := m.serverSupportsOAuth(server) && !quarantined && !authenticated && enabled && !connected
+
+	// OAuth Login action - show FIRST if server needs authentication
+	if needsOAuth {
+		oauthItem := serverMenuItem.AddSubMenuItem("🔐 Login (OAuth)", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+		m.serverOAuthItems[serverName] = oauthItem
+
+		// Set up OAuth login click handler
+		go func(name string, item *systray.MenuItem) {
+			for range item.ClickedCh {
+				if m.onServerAction != nil {
+					// Run in new goroutines to avoid blocking the event channel
+					go m.onServerAction(name, "oauth_login")
+				}
+			}
+		}(serverName, oauthItem)
+	}
 
 	// Enable/Disable action
 	var enableText string
@@ -807,8 +828,9 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
 	m.serverActionItems[serverName] = enableItem
 
-	// OAuth Login action (only for servers that support OAuth)
-	if m.serverSupportsOAuth(server) && !quarantined {
+	// OAuth Login action (for authenticated servers or when not the primary action)
+	// Show as secondary option if OAuth is supported but server doesn't currently need auth
+	if m.serverSupportsOAuth(server) && !quarantined && !needsOAuth {
 		oauthItem := serverMenuItem.AddSubMenuItem("🔐 OAuth Login", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
 		m.serverOAuthItems[serverName] = oauthItem
 

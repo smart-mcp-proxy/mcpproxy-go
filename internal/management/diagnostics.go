@@ -38,9 +38,20 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		lastError := getStringFromMap(srvRaw, "last_error")
 		authenticated := getBoolFromMap(srvRaw, "authenticated")
 		hasOAuth := srvRaw["oauth"] != nil
+		connected := getBoolFromMap(srvRaw, "connected")
+		enabled := getBoolFromMap(srvRaw, "enabled")
 
-		// Check for connection errors
-		if lastError != "" {
+		// Check if error indicates OAuth requirement (zero-config OAuth detection)
+		isOAuthError := lastError != "" && (
+			strings.Contains(lastError, "OAuth") ||
+			strings.Contains(lastError, "authorization") ||
+			strings.Contains(lastError, "401") ||
+			strings.Contains(lastError, "invalid_token") ||
+			strings.Contains(lastError, "Missing or invalid access token") ||
+			strings.Contains(lastError, "deferred for tray UI"))
+
+		// Check for connection errors (but exclude OAuth-related errors from this section)
+		if lastError != "" && !isOAuthError {
 			errorTime := time.Now()
 			if errorTimeStr := getStringFromMap(srvRaw, "error_time"); errorTimeStr != "" {
 				if parsed, err := time.Parse(time.RFC3339, errorTimeStr); err == nil {
@@ -55,12 +66,22 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			})
 		}
 
-		// Check for OAuth requirements
-		if hasOAuth && !authenticated {
+		// Check for OAuth requirements (explicit config OR OAuth error)
+		// This supports both configured OAuth and zero-config OAuth detection
+		if enabled && !connected && !authenticated && (hasOAuth || isOAuthError) {
+			state := "unauthenticated"
+			message := fmt.Sprintf("Run: mcpproxy auth login --server=%s", serverName)
+
+			// Extract more specific state from error if available
+			if strings.Contains(lastError, "deferred for tray UI") {
+				state = "pending_auth"
+				message = "Click Login in the tray menu or web UI to authenticate"
+			}
+
 			diag.OAuthRequired = append(diag.OAuthRequired, contracts.OAuthRequirement{
 				ServerName: serverName,
-				State:      "unauthenticated",
-				Message:    fmt.Sprintf("Run: mcpproxy auth login --server=%s", serverName),
+				State:      state,
+				Message:    message,
 			})
 		}
 	}
