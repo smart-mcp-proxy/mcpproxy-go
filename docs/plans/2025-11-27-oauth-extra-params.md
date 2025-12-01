@@ -1092,6 +1092,127 @@ curl "http://127.0.0.1:8080/api/v1/servers?apikey=..." | jq '.servers[] | select
 
 **Priority**: Medium (affects UX but doesn't break functionality - servers still work)
 
+## Optional Followup Tasks
+
+The following enhancements were identified during implementation but are **not required** for core functionality. They can be implemented in future iterations if desired.
+
+### Task 1: System Notifications for OAuth Pending State
+
+**Status**: Optional Enhancement
+**Priority**: Low
+**Effort**: 2-3 hours
+
+**Description**:
+Currently, when a server enters `StatePendingAuth`, the user is notified through:
+- ⏳ Icon in tray UI
+- "Authenticate" menu item in tray
+- `pending_auth` status in `upstream list` CLI output
+- Documentation explaining this is a normal waiting state
+
+This task would add **desktop notifications** to provide an additional notification channel.
+
+**Current Infrastructure**:
+MCPProxy already has a notification system:
+- `internal/upstream/notifications.go` - NotificationManager with `NotifyOAuthRequired()` method
+- `internal/tray/notifications.go` - Desktop notification handler using `beeep` library
+- `StateChangeNotifier()` - Triggers notifications on state transitions
+
+**What Would Be Added**:
+1. Update `StateChangeNotifier()` in `internal/upstream/notifications.go` to handle `StatePendingAuth`:
+   ```go
+   case types.StatePendingAuth:
+       if oldState == types.StateConnecting {
+           nm.NotifyOAuthRequired(serverName)
+       }
+   ```
+
+2. Optionally make notification clickable to trigger `auth login` directly
+
+**Why Optional**:
+- User experience is already good through UI feedback
+- Desktop notifications can be intrusive
+- Infrastructure exists for easy future addition
+- Current implementation meets all core requirements
+
+**Example Notification**:
+```
+┌─────────────────────────────────────┐
+│ 🔐 Authentication Required          │
+│ OAuth authentication required for   │
+│ slack-server                        │
+│ Click to authenticate →             │
+└─────────────────────────────────────┘
+```
+
+**Testing**:
+- Test on macOS, Windows, Linux
+- Verify notification timing (only on first pending_auth transition)
+- Test with multiple servers requiring auth simultaneously
+- Verify notification preferences (user can disable)
+
+### Task 2: Upstream Contribution to mcp-go Library
+
+**Status**: Optional Enhancement
+**Priority**: Low
+**Effort**: 8-12 hours (includes upstream coordination)
+
+**Description**:
+The current implementation uses URL injection as a workaround to add extra parameters to OAuth authorization URLs. The mcp-go library (v0.42.0) doesn't natively support extra parameters in its OAuth configuration.
+
+**Current Workaround** (works well):
+```go
+// internal/upstream/core/connection.go:1873-1900
+// Extract extra params and inject into authorization URL
+u, err := url.Parse(authURL)
+query := u.Query()
+for key, value := range extraParams {
+    query.Set(key, value)
+}
+u.RawQuery = query.Encode()
+```
+
+**Proposed Upstream Enhancement**:
+Add native support for extra parameters in mcp-go's `OAuthConfig`:
+```go
+// Proposed addition to github.com/mark3labs/mcp-go/client
+type OAuthConfig struct {
+    ClientID              string
+    ClientSecret          string
+    RedirectURI           string
+    Scopes                []string
+    ExtraParams           map[string]string // NEW FIELD
+    TokenStore            TokenStore
+    PKCEEnabled           bool
+    AuthServerMetadataURL string
+}
+```
+
+**Benefits of Upstream Contribution**:
+- Cleaner implementation (no URL parsing workaround)
+- Official support in mcp-go library
+- Helps other projects using mcp-go with RFC 8707 providers
+- Better maintainability (no custom URL injection)
+
+**Why Optional**:
+- Current workaround is robust and well-tested
+- Requires coordination with upstream maintainers
+- May take time for upstream review/merge
+- Current implementation meets all requirements
+
+**Steps for Contribution**:
+1. Fork mcp-go repository
+2. Add `ExtraParams` field to `OAuthConfig`
+3. Update OAuth URL construction to include extra params
+4. Add tests for RFC 8707 resource parameter
+5. Submit pull request with documentation
+6. Wait for upstream review/merge
+7. Update MCPProxy to use new mcp-go version after merge
+
+**Timeline**:
+- Implementation: 4-6 hours
+- Testing/documentation: 2-3 hours
+- Upstream coordination: Variable (days to weeks)
+
 ## References
 
 - RFC 8707: Resource Indicators - https://www.rfc-editor.org/rfc/rfc8707.html
