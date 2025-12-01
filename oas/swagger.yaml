@@ -40,6 +40,10 @@ components:
           type: string
         client_secret:
           type: string
+        extra_params:
+          additionalProperties:
+            type: string
+          type: object
         pkce_enabled:
           type: boolean
         redirect_uri:
