@@ -14,6 +14,8 @@ const (
 	StateDisconnected ConnectionState = iota
 	// StateConnecting indicates the upstream is attempting to connect
 	StateConnecting
+	// StatePendingAuth indicates the upstream requires OAuth authentication but is deferred (e.g., waiting for user action)
+	StatePendingAuth
 	// StateAuthenticating indicates the upstream is performing OAuth authentication
 	StateAuthenticating
 	// StateDiscovering indicates the upstream is discovering available tools
@@ -31,6 +33,8 @@ func (s ConnectionState) String() string {
 		return "Disconnected"
 	case StateConnecting:
 		return "Connecting"
+	case StatePendingAuth:
+		return "Pending Auth"
 	case StateAuthenticating:
 		return "Authenticating"
 	case StateDiscovering:

@@ -57,6 +57,28 @@ func (e *OAuthParameterError) Unwrap() error {
 	return e.OriginalErr
 }
 
+// ErrOAuthPending represents a deferred OAuth authentication requirement.
+// This error indicates that OAuth is required but has been intentionally deferred
+// (e.g., for user action via tray UI or CLI) rather than being a connection failure.
+type ErrOAuthPending struct {
+	ServerName string
+	ServerURL  string
+	Message    string
+}
+
+func (e *ErrOAuthPending) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("OAuth authentication required for %s: %s", e.ServerName, e.Message)
+	}
+	return fmt.Sprintf("OAuth authentication required for %s - use 'mcpproxy auth login --server=%s' or tray menu", e.ServerName, e.ServerName)
+}
+
+// IsOAuthPending checks if an error is an ErrOAuthPending
+func IsOAuthPending(err error) bool {
+	_, ok := err.(*ErrOAuthPending)
+	return ok
+}
+
 // parseOAuthError extracts structured error information from OAuth provider responses
 func parseOAuthError(err error, responseBody []byte) error {
 	// Try to parse as FastAPI validation error (Runlayer format)
@@ -1161,7 +1183,11 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				c.logger.Info("💡 OAuth login available via system tray menu",
 					zap.String("server", c.config.Name))
 
-				return fmt.Errorf("OAuth authorization required - deferred for background processing")
+				return &ErrOAuthPending{
+					ServerName: c.config.Name,
+					ServerURL:  c.config.URL,
+					Message:    "deferred for tray UI - login available via system tray menu",
+				}
 			}
 
 			// Clear OAuth state before starting manual flow to prevent "already in progress" errors
