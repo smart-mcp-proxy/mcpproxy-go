@@ -102,6 +102,15 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Debug("Invoking core client Connect for managed client",
 		zap.String("server", mc.Config.Name))
 	if err := mc.coreClient.Connect(ctx); err != nil {
+		// Check if this is a deferred OAuth requirement (pending user action)
+		if core.IsOAuthPending(err) {
+			mc.logger.Info("⏳ OAuth authentication pending user action",
+				zap.String("server", mc.Config.Name))
+			// Transition to PendingAuth state instead of Error
+			mc.StateManager.TransitionTo(types.StatePendingAuth)
+			mc.StateManager.SetError(err)
+			return fmt.Errorf("OAuth authentication pending: %w", err)
+		}
 		// Check if this is an OAuth authorization requirement (not an error)
 		if mc.isOAuthAuthorizationRequired(err) {
 			// Check if this is a token refresh scenario vs full re-auth
