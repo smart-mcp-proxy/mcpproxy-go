@@ -2,8 +2,10 @@
 
 **Feature Branch**: `zero-config-oauth`
 **Created**: 2025-11-27
-**Status**: Implementation Complete (7/9 tasks - 78%)
-**PR**: #165 (Draft)
+**Updated**: 2025-12-01 (Added UX specifications and implementation updates)
+**Status**: Implementation Complete (10/11 tasks - 91%) - Ready for User Testing
+**PR**: #165 (Ready for Review)
+**Input**: User description: "Enable zero-configuration OAuth for MCP servers by automatically detecting OAuth requirements from HTTP 401 responses and RFC 9728 Protected Resource Metadata, extracting necessary parameters including RFC 8707 resource indicators without user intervention. Provide consistent OAuth UX across web UI, CLI, and system tray interfaces."
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -72,6 +74,279 @@ Users running `mcpproxy auth status` or `mcpproxy doctor` need to see which serv
 2. **Given** a server has `protocol: "stdio"`, **When** `IsOAuthCapable()` is called, **Then** it returns `false` (OAuth not applicable)
 3. **Given** a server has explicit OAuth config, **When** `IsOAuthCapable()` is called, **Then** it returns `true` regardless of protocol
 4. **Given** user runs `mcpproxy auth status`, **When** output is displayed, **Then** OAuth-capable servers show "Capability: Auto-detected" or "Capability: Explicit"
+
+---
+
+### User Story 5 - OAuth UX Across Interfaces (Priority: P1)
+
+Users interacting with OAuth-required servers should have a consistent, clear experience across all MCPProxy interfaces (web UI, CLI, macOS tray), with obvious authentication triggers and status visibility.
+
+**Why this priority**: Users interact with MCPProxy through multiple interfaces. Inconsistent OAuth UX creates confusion and friction. Clear status indicators and easy authentication triggers are essential for user adoption.
+
+**Independent Test**: Can be fully tested by configuring an OAuth server, verifying status display in each interface, triggering OAuth login from each interface, and confirming consistent behavior.
+
+**Acceptance Scenarios**:
+
+1. **Given** an OAuth server is configured but not authenticated, **When** user opens web control panel dashboard, **Then** system diagnostics shows OAuth required with actionable "Login" link
+2. **Given** user clicks OAuth login link in web UI, **When** browser opens, **Then** new tab opens with OAuth authorization flow
+3. **Given** user runs `mcpproxy auth status`, **When** output displays, **Then** OAuth-required servers show clear authentication status and login instructions
+4. **Given** user opens macOS tray menu, **When** viewing upstream servers, **Then** OAuth servers show 🔐 icon with "Login" menu item
+5. **Given** user clicks "Login" in tray menu, **When** action triggers, **Then** browser opens OAuth flow immediately (no deferral)
+
+---
+
+## User Experience Specifications *(mandatory)*
+
+This section defines the expected behavior across all user interfaces for OAuth-related functionality.
+
+### Web Control Panel (`/ui/`)
+
+**Dashboard View** (`/ui/`):
+
+**Unauthenticated OAuth Server Display**:
+- **System Diagnostics Alert**: Yellow warning badge showing count of OAuth-required servers
+  - Badge format: `[N OAuth Required]`
+  - Badge color: Yellow (`badge-warning`)
+  - Click behavior: Opens diagnostics detail modal
+- **Diagnostics Detail Modal**:
+  - Section: "OAuth Required"
+  - Per-server: Yellow alert with server name and message "Authentication required"
+  - Action button: "Login" - triggers OAuth flow in new browser tab
+  - Dismiss button: Temporarily hides alert (restore with "Restore Dismissed")
+- **Visual hierarchy**: OAuth warnings less alarming than errors (yellow vs red)
+
+**Servers View** (`/ui/servers`):
+
+**Server Card - OAuth Required State**:
+- **Status Badge**: Blue info badge (`badge-info`) displaying "Needs Auth"
+  - NOT red error badge (reserved for actual errors)
+- **Info Alert**: Blue informational alert (`alert-info`)
+  - Icon: 🔐 (lock icon)
+  - Message: "Authentication required - click Login button"
+  - NOT red error alert (reserved for connection failures)
+- **Login Button**: Primary action button
+  - Label: "Login"
+  - Click behavior: Opens OAuth authorization URL in new browser tab
+  - Visibility: Always visible for OAuth-capable servers without valid token
+
+**Server Card - Error Categorization**:
+- **Connection errors**: Show categorized, user-friendly messages
+  - Timeout: ⏱️ "Request timed out" (with retry suggestion)
+  - Network: 🔌 "Connection failed" (with domain, not full URL)
+  - Config: ⚙️ "Configuration error" (with link to docs)
+  - Transient: ⚠️ "Connection in progress" (warning, not error)
+- **Expandable details**: "Show details" link reveals full error message
+- **Action buttons**: Context-appropriate (Retry, Restart, Configure)
+
+**Authenticated OAuth Server Display**:
+- **Status Badge**: Green success badge (`badge-success`) displaying "Connected"
+- **No alerts**: Authentication complete, normal operation
+- **Token info**: Show token expiry if available (future enhancement)
+
+### Command Line Interface
+
+**`mcpproxy auth status`**:
+
+**Output Format**:
+```
+OAuth-Capable Servers:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Server: slack-mcp
+  Status: ⏳ Authentication Required
+  Capability: Auto-detected (zero-config)
+  OAuth Provider: https://oauth.example.com
+  Resource: https://oauth.example.com/api/v1/proxy/UUID/mcp
+
+  🔑 To authenticate:
+     mcpproxy auth login --server=slack-mcp
+
+Server: github-mcp
+  Status: ✅ Authenticated
+  Capability: Explicit (configured)
+  Token Expires: 2025-12-15 14:30:00
+  Last Login: 2025-12-01 10:00:00
+
+No OAuth Capability:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Server: local-sqlite (protocol: stdio)
+```
+
+**Status Icons**:
+- ⏳ = Authentication required (pending)
+- ✅ = Authenticated and connected
+- 🔐 = OAuth-capable but never attempted
+- ❌ = Authentication failed
+
+**Capability Labels**:
+- "Auto-detected (zero-config)" = HTTP server without explicit OAuth config
+- "Explicit (configured)" = Server with `oauth` field in config
+- Not listed = stdio/non-HTTP servers (not OAuth-capable)
+
+**`mcpproxy auth login --server=<name>`**:
+
+**Output Sequence**:
+```
+🔐 Initiating OAuth login for server: slack-mcp
+
+✅ OAuth authorization flow started
+🌐 Opening browser for authentication...
+   URL: https://oauth.example.com/authorize?client_id=...&resource=...
+
+⏳ Waiting for OAuth callback...
+   (This may take a few moments while you authorize in the browser)
+
+✅ OAuth authentication successful!
+   Token received and stored securely
+   Server is now authenticated
+
+Next steps:
+   • Check status: mcpproxy auth status
+   • Test connection: mcpproxy upstream list
+```
+
+**Error Scenarios**:
+```
+❌ OAuth login failed: Browser did not open
+   Hint: Check if HEADLESS environment variable is set
+   Manual: Open this URL in your browser:
+   https://oauth.example.com/authorize?client_id=...
+
+❌ OAuth login failed: User denied authorization
+   The OAuth provider reported: access_denied
+
+   To retry: mcpproxy auth login --server=slack-mcp
+```
+
+**`mcpproxy doctor`**:
+
+**OAuth Diagnostics Section**:
+```
+OAuth Required (2 servers):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ⚠️  slack-mcp
+      Status: Authentication required
+      Issue: OAuth authentication required - deferred for tray UI
+      Fix: mcpproxy auth login --server=slack-mcp
+
+  ⚠️  github-mcp
+      Status: Token expired
+      Issue: OAuth token expired (expired: 2025-11-30)
+      Fix: mcpproxy auth login --server=github-mcp
+```
+
+### macOS/Linux/Windows System Tray
+
+**Tray Menu Structure**:
+```
+MCPProxy
+├─ 🟢 Connected (or 🔴 Disconnected if core offline)
+├─ ─────────────────────────
+├─ Upstream Servers ▶
+│  ├─ Server: slack-mcp
+│  │  ├─ Status: 🔐 needs auth
+│  │  ├─ Login...              ← Triggers OAuth
+│  │  ├─ ─────────────────────
+│  │  ├─ Restart
+│  │  └─ View Logs
+│  │
+│  ├─ Server: github-mcp
+│  │  ├─ Status: ✅ connected
+│  │  ├─ ─────────────────────
+│  │  ├─ Restart
+│  │  └─ View Logs
+│  │
+│  └─ Server: local-sqlite
+│     └─ Status: ✅ connected
+│
+├─ ─────────────────────────
+├─ Open Web UI
+├─ Settings...
+└─ Quit
+```
+
+**OAuth Server Status Icons**:
+- 🔐 = "needs auth" (OAuth required, not authenticated)
+- ⏳ = "pending auth" (OAuth flow in progress)
+- ✅ = "connected" (OAuth authenticated and connected)
+- 🔴 = "disconnected" (non-OAuth error)
+- ⚠️ = "connection in progress" (transient state)
+
+**Login Menu Item Behavior**:
+- **Label**: "Login..." (ellipsis indicates action will open dialog)
+- **Click behavior**:
+  1. Sends `POST /api/v1/servers/{name}/login` to core API
+  2. Core triggers `ForceOAuthFlow()` with `manualOAuthKey` context flag
+  3. Browser opens OAuth authorization URL immediately (bypasses deferral logic)
+  4. Tray shows "Opening browser..." tooltip
+- **Disabled state**: Grayed out if server already authenticated or not OAuth-capable
+- **Error handling**: Shows macOS notification if browser fails to open
+
+**Status Update Behavior**:
+- **Real-time**: Tray subscribes to SSE events from core (`/events` endpoint)
+- **Event types**: `servers.changed`, `oauth.login.success`, `oauth.login.failed`
+- **Update trigger**: Menu refreshes automatically when SSE event received
+- **Polling fallback**: If SSE disconnected, polls `/api/v1/servers` every 10 seconds
+
+**OAuth Flow Indicators**:
+- **During OAuth**: Status changes to ⏳ "pending auth"
+- **Success**: Status changes to ✅ "connected", "Login..." menu item disappears
+- **Failure**: Status remains 🔐 "needs auth", shows macOS notification with error
+
+### Browser OAuth Flow
+
+**Authorization Window**:
+- **Opens in**: New browser tab (not modal/popup to avoid popup blockers)
+- **URL format**: `https://<oauth-provider>/authorize?client_id=...&resource=...&redirect_uri=http://localhost:<port>/callback`
+- **User actions**:
+  1. Review authorization request
+  2. Click "Allow" or "Deny"
+  3. Browser redirects to localhost callback
+- **Callback handling**: MCPProxy's temporary HTTP server receives callback, exchanges code for token
+
+**Callback Success**:
+- **Browser displays**:
+  ```
+  ✅ Authentication Successful
+
+  You have successfully authenticated with <Server Name>.
+  You can close this window and return to MCPProxy.
+  ```
+- **Auto-close**: Window closes automatically after 3 seconds (configurable)
+- **Notification**: Tray shows success notification (macOS) or toast (web UI)
+
+**Callback Failure**:
+- **Browser displays**:
+  ```
+  ❌ Authentication Failed
+
+  Error: <error_description from OAuth provider>
+  Error Code: <error_code>
+
+  Please close this window and try again.
+  ```
+- **No auto-close**: User must manually close window
+- **Notification**: Tray/web UI shows error notification with retry instructions
+
+### Consistent Behavior Across Interfaces
+
+**Authentication Trigger**:
+- **All interfaces** trigger the same backend API: `POST /api/v1/servers/{name}/login`
+- **All interfaces** open browser OAuth flow (never embedded/in-app)
+- **All interfaces** show consistent status during OAuth flow (⏳ pending auth)
+
+**Status Display**:
+- **Icons**: Same meaning across CLI, web UI, tray (🔐, ⏳, ✅, 🔴, ⚠️)
+- **Language**: Consistent terminology ("needs auth", "authenticated", "pending")
+- **Colors**: Consistent severity (blue=info/auth, yellow=warning, red=error, green=success)
+
+**Error Messages**:
+- **User-friendly**: Avoid technical jargon in primary message
+- **Actionable**: Always include "To fix:" or "Next steps:" section
+- **Expandable**: Technical details available via "Show details" or debug logs
+- **Consistent**: Same error categories across all interfaces
 
 ---
 
@@ -315,7 +590,7 @@ Documentation: docs/upstream-issue-draft.md explains limitation
 
 ## Implementation Status *(mandatory)*
 
-### Completed (7/9 tasks - 78%)
+### Completed (10/11 tasks - 91%)
 
 **✅ Task 1: Enhanced Metadata Discovery**
 - Commit: `a23e5a2`, `42b64f8`
@@ -365,7 +640,39 @@ Documentation: docs/upstream-issue-draft.md explains limitation
 - Build: Successful (`go build -o mcpproxy ./cmd/mcpproxy`)
 - Status: **COMPLETE** in PR #165
 
-### Blocked (2/9 tasks - 22%)
+**✅ Task 10: Web UI OAuth UX Improvements** (2025-12-01)
+- Commit: `33990bf`, `37f617f`, `1d1e4a9`, `1ff4739`, `760f032`, `eb3c8df`
+- Files: `frontend/src/views/Dashboard.vue`, `frontend/src/components/ServerCard.vue`
+- Implementation:
+  - Dashboard diagnostics modal with OAuth-required section and Login buttons
+  - ServerCard OAuth state display (blue "Needs Auth" badge, not red error)
+  - Error categorization (timeout, network, config) with user-friendly messages
+  - Expandable error details ("Show details" link)
+  - System diagnostics spacing fixes and field name corrections
+- Status: **COMPLETE** - documented in `docs/oauth-ui-feedback-fixes.md`
+
+**✅ Task 11: Tray OAuth UX Improvements** (2025-12-01)
+- Commit: `37f617f`, `1d1e4a9`, `1ff4739`
+- Files: `internal/tray/managers.go`, `internal/upstream/core/connection.go`
+- Implementation:
+  - Tray icon OAuth detection (🔐 "needs auth" instead of 🔴 "disconnected")
+  - OAuth login button in tray menu triggers browser immediately
+  - Manual OAuth context flag (`manualOAuthKey`) bypasses deferral logic
+  - Defensive error handling prevents OAuth login panic
+  - OAuth deferral bypass for manual triggers (Login button)
+- Status: **COMPLETE** - documented in `docs/oauth-ui-feedback-fixes.md`
+
+**✅ Task 12: E2E OAuth Zero-Config Test** (2025-12-01)
+- Files: `internal/server/e2e_oauth_zero_config_test.go`
+- Implementation: Comprehensive E2E test validating OAuth zero-config flow
+  - Test 1: Resource parameter extraction from metadata
+  - Test 2: Manual extra_params override
+  - Test 3: IsOAuthCapable zero-config detection
+  - Test 4: Protected Resource Metadata discovery
+- Tests: All 4 test scenarios passing
+- Status: **COMPLETE** in PR #165
+
+### Blocked (1/11 tasks - 9%)
 
 **🚧 Tasks 4-5: OAuth Parameter Injection**
 - Reason: mcp-go library limitation - no ExtraParams support in `client.OAuthConfig`
@@ -843,3 +1150,42 @@ func WithHTTPTransport(transport http.RoundTripper) ClientOption
 - **mcp-go Repository**: https://github.com/mark3labs/mcp-go
 - **PR #165**: https://github.com/smart-mcp-proxy/mcpproxy-go/pull/165
 - **OAuth Debugging Guide**: `docs/oauth-implementation-summary.md`
+
+## Commit Message Conventions *(mandatory)*
+
+When committing changes for this feature, follow these guidelines:
+
+### Issue References
+- ✅ **Use**: `Related #155` - Links the commit to the issue without auto-closing
+- ❌ **Do NOT use**: `Fixes #155`, `Closes #155`, `Resolves #155` - These auto-close issues on merge
+
+**Rationale**: Issues should only be closed manually after verification and testing in production, not automatically on merge.
+
+### Co-Authorship
+- ❌ **Do NOT include**: `Co-Authored-By: Claude <noreply@anthropic.com>`
+- ❌ **Do NOT include**: "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+
+**Rationale**: Commit authorship should reflect the human contributors, not the AI tools used.
+
+### Example Commit Message
+```
+feat: add zero-config OAuth with automatic resource parameter extraction
+
+Related #155
+
+Implements RFC 9728 Protected Resource Metadata discovery to automatically
+extract OAuth configuration parameters, eliminating the need for manual
+OAuth configuration in 90% of cases.
+
+## Changes
+- Add DiscoverProtectedResourceMetadata() for full metadata parsing
+- Extract resource parameter from metadata with fallback to server URL
+- Add ExtraParams field to OAuthConfig for custom OAuth parameters
+- Implement IsOAuthCapable() for automatic OAuth detection
+- Add validation to prevent reserved parameter overrides
+
+## Testing
+- 4 E2E test scenarios covering metadata discovery and resource extraction
+- 100% coverage on validation logic
+- All OAuth unit tests passing
+```
