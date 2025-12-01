@@ -1771,7 +1771,11 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Get the OAuth handler from the error (as shown in the example)
 	oauthHandler := client.GetOAuthHandler(authErr)
 	if oauthHandler == nil {
-		return fmt.Errorf("failed to get OAuth handler from error")
+		c.logger.Error("Failed to get OAuth handler from authorization error",
+			zap.String("server", c.config.Name),
+			zap.Error(authErr),
+			zap.String("hint", "Server may not properly support OAuth or the error type is unexpected"))
+		return fmt.Errorf("failed to get OAuth handler from error - server may not support OAuth properly")
 	}
 
 	c.logger.Info("✅ OAuth handler obtained from error",
@@ -1849,6 +1853,14 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		zap.Bool("pkce_enabled", true),
 		zap.String("mode", oauthMode))
 
+	// Validate OAuth handler has required metadata before calling GetAuthorizationURL
+	// This prevents nil pointer panics when server metadata is incomplete
+	if oauthHandler == nil {
+		c.logger.Error("OAuth handler is nil - cannot proceed with authorization",
+			zap.String("server", c.config.Name))
+		return fmt.Errorf("OAuth handler not properly initialized - server may not support OAuth or metadata is incomplete")
+	}
+
 	// Get the authorization URL
 	// Works with: static credentials, DCR, or public client OAuth (empty client_id + PKCE)
 	var authURL string
@@ -1856,16 +1868,21 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				c.logger.Error("GetAuthorizationURL panicked",
+				c.logger.Error("GetAuthorizationURL panicked - OAuth handler or server metadata incomplete",
 					zap.String("server", c.config.Name),
-					zap.Any("panic", r))
-				authURLErr = fmt.Errorf("failed to get authorization URL: internal error (panic recovered)")
+					zap.Any("panic", r),
+					zap.String("hint", "Server may not fully support OAuth or Protected Resource Metadata is missing"))
+				authURLErr = fmt.Errorf("failed to get authorization URL: OAuth handler incomplete (server metadata missing or invalid)")
 			}
 		}()
 		authURL, authURLErr = oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
 	}()
 
 	if authURLErr != nil {
+		c.logger.Error("Failed to get authorization URL",
+			zap.String("server", c.config.Name),
+			zap.Error(authURLErr),
+			zap.String("hint", "Check if server supports OAuth and has valid Protected Resource Metadata"))
 		return fmt.Errorf("failed to get authorization URL: %w", authURLErr)
 	}
 

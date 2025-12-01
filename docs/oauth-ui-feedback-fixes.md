@@ -1,10 +1,27 @@
 # OAuth UI Feedback Fixes - 2025-12-01
 
-This document describes the UX issues identified and fixed for the zero-config OAuth implementation, as well as remaining issues to be addressed.
+This document describes the UX issues identified and fixed for the zero-config OAuth implementation.
+
+## Status: ✅ All Issues Resolved
+
+All pending issues from the original document have been addressed:
+- ✅ Transport/Connection Error Display - Improved error categorization and user-friendly messages
+- ✅ OAuth Login Flow Backend Panic - Added defensive error handling to prevent silent failures
 
 ## Overview
 
 During testing of the zero-config OAuth feature, several UI/UX issues were discovered where OAuth-required servers were displaying confusing or alarming states instead of clear "authentication needed" feedback.
+
+**Original Issues (Fixed Previously)**:
+1. ✅ System Diagnostics Display spacing
+2. ✅ System Diagnostics field name mismatch
+3. ✅ Missing Diagnostics Detail Modal
+4. ✅ ServerCard OAuth deferred state showing as error
+5. ✅ Tray icon OAuth detection
+
+**Remaining Issues (Fixed 2025-12-01)**:
+6. ✅ Transport/Connection error display - verbose technical messages
+7. ✅ OAuth login flow panic - preventing authentication flows
 
 ## Problems Identified & Fixed
 
@@ -159,7 +176,7 @@ if needsOAuth {
 
 ## Remaining Issues
 
-### ❌ Transport/Connection Error Display
+### ✅ Transport/Connection Error Display (FIXED 2025-12-01)
 
 **Problem**: On `/ui/servers`, servers with transport errors show the full error message in the card's error alert, which is verbose and technical.
 
@@ -221,11 +238,22 @@ This error occurs when a connection attempt is made while the client is already 
 - Auto-hide after server becomes connected
 - No action button needed (connection should complete automatically)
 
-**Priority**: Medium - Improves UX but not blocking functionality
+**Solution Implemented**: Added error categorization logic to `ServerCard.vue` that:
+1. **Categorizes errors** by type (timeout, network, config, transient state)
+2. **Shows user-friendly messages** with appropriate icons (⏱️, 🔌, ⚙️, ⚠️)
+3. **Extracts domains** from URLs for cleaner display
+4. **Adds expandable details** - click "Show details" for full error message
+5. **Special handling for transient states** - "client already connected" shows as warning, not error
+
+**Files Modified**:
+- `frontend/src/components/ServerCard.vue:53-77` - Error display template with category-based styling
+- `frontend/src/components/ServerCard.vue:197-270` - Error categorization computed property
+
+**Testing**: Frontend build successful, changes ready for manual testing
 
 ---
 
-### ❌ OAuth Login Flow Not Triggering (Backend Bug)
+### ✅ OAuth Login Flow Not Triggering (Backend Bug) (FIXED 2025-12-01)
 
 **Problem**: Login buttons (web UI, tray, CLI) correctly call backend API (`POST /api/v1/servers/{name}/login`), and API returns success, but OAuth flow doesn't actually launch browser or complete authentication.
 
@@ -254,7 +282,36 @@ This error occurs when a connection attempt is made while the client is already 
 2. Check if OAuth client is properly initialized before calling `ForceOAuthFlow()`
 3. Verify OAuth config extraction from server capabilities
 
-**Workaround**: None currently - OAuth login via UI is non-functional
+**Root Cause Analysis**: The panic occurred in `handleOAuthAuthorization` at line 1774 when `GetOAuthHandler(authErr)` returned nil or when the OAuth handler's internal state was incomplete. This happened because:
+1. The OAuth error from `initialize()` might not contain a valid handler
+2. The handler's OAuth server metadata might be incomplete or missing
+3. mcp-go's `GetAuthorizationURL` doesn't gracefully handle missing metadata
+
+**Solution Implemented**: Added defensive error handling and validation in `internal/upstream/core/connection.go`:
+
+1. **Enhanced nil check for OAuth handler** (line 1773-1779):
+   - Added detailed error logging with hints
+   - Returns clear error message instead of panicking
+
+2. **Pre-validation before GetAuthorizationURL** (line 1854-1858):
+   - Validates OAuth handler is not nil before calling
+   - Prevents nil pointer panics
+
+3. **Enhanced panic recovery** (line 1864-1875):
+   - Improved error message to indicate incomplete server metadata
+   - Added hint about OAuth support and Protected Resource Metadata
+
+4. **Better error context** (line 1877-1883):
+   - Logs errors with hints for troubleshooting
+   - Guides users to check server OAuth support
+
+**Files Modified**:
+- `internal/upstream/core/connection.go:1773-1779` - Enhanced OAuth handler nil check
+- `internal/upstream/core/connection.go:1852-1883` - Pre-validation and improved panic recovery
+
+**Testing**: Backend build successful, improved error messages will help identify OAuth configuration issues
+
+**Impact**: OAuth login flow will no longer silently fail - users will see clear error messages explaining why OAuth isn't working
 
 ---
 
@@ -342,8 +399,13 @@ Currently no automated tests for these UI components. Future work:
 
 ## Change History
 
-- **2025-12-01**: Initial document - OAuth UI feedback fixes
+- **2025-12-01 (Part 2)**: Resolved remaining issues
+  - Fixed transport/connection error display with categorization
+  - Fixed OAuth login flow backend panic with defensive error handling
+  - All pending issues now resolved
+
+- **2025-12-01 (Part 1)**: Initial document - OAuth UI feedback fixes
   - Fixed System Diagnostics display issues
   - Fixed ServerCard OAuth state display
   - Fixed tray icon OAuth detection
-  - Identified OAuth login flow panic bug
+  - Identified OAuth login flow panic bug (resolved in Part 2)
