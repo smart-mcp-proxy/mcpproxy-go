@@ -120,3 +120,96 @@ func TestOAuthParameterError_Unwrap(t *testing.T) {
 	unwrapped := errors.Unwrap(paramErr)
 	assert.Equal(t, originalErr, unwrapped, "Should unwrap to original error")
 }
+
+// TestErrOAuthPending_Error tests ErrOAuthPending error message formatting
+func TestErrOAuthPending_Error(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      *ErrOAuthPending
+		expected string
+	}{
+		{
+			name: "with custom message",
+			err: &ErrOAuthPending{
+				ServerName: "slack",
+				ServerURL:  "https://oauth.example.com/mcp",
+				Message:    "deferred for tray UI",
+			},
+			expected: "OAuth authentication required for slack: deferred for tray UI",
+		},
+		{
+			name: "without custom message",
+			err: &ErrOAuthPending{
+				ServerName: "github",
+				ServerURL:  "https://api.github.com/mcp",
+			},
+			expected: "OAuth authentication required for github - use 'mcpproxy auth login --server=github' or tray menu",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.err.Error()
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+// TestIsOAuthPending tests the IsOAuthPending helper function
+func TestIsOAuthPending(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name: "ErrOAuthPending returns true",
+			err: &ErrOAuthPending{
+				ServerName: "slack",
+				ServerURL:  "https://oauth.example.com/mcp",
+			},
+			expected: true,
+		},
+		{
+			name:     "regular error returns false",
+			err:      errors.New("regular error"),
+			expected: false,
+		},
+		{
+			name:     "nil error returns false",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name: "wrapped ErrOAuthPending returns false",
+			err: errors.New("wrapped: " + (&ErrOAuthPending{
+				ServerName: "slack",
+			}).Error()),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsOAuthPending(tt.err)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+// TestErrOAuthPending_AsError tests that ErrOAuthPending satisfies error interface
+func TestErrOAuthPending_AsError(t *testing.T) {
+	err := &ErrOAuthPending{
+		ServerName: "slack",
+		ServerURL:  "https://oauth.example.com/mcp",
+		Message:    "test message",
+	}
+
+	// Should satisfy error interface
+	var _ error = err
+
+	// Should work with errors.As
+	var target *ErrOAuthPending
+	assert.True(t, errors.As(err, &target))
+	assert.Equal(t, "slack", target.ServerName)
+}
