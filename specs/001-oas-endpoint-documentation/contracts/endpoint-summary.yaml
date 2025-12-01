@@ -1,0 +1,300 @@
+# Complete Endpoint Contracts Summary
+
+This file provides a comprehensive reference for all 19 undocumented endpoints with swag annotation examples.
+
+---
+
+## 1. Configuration Management (3 endpoints)
+
+### GET /api/v1/config
+- **Handler**: `internal/httpapi/server.go:2047-2070`
+- **Summary**: Get current configuration
+- **Response**: `contracts.GetConfigResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### POST /api/v1/config/validate
+- **Handler**: `internal/httpapi/server.go:2072-2095`
+- **Summary**: Validate configuration without applying
+- **Request**: `config.Config`
+- **Response**: `contracts.ValidateConfigResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### POST /api/v1/config/apply
+- **Handler**: `internal/httpapi/server.go:2097-2138`
+- **Summary**: Apply configuration changes
+- **Request**: `config.Config`
+- **Response**: `contracts.ConfigApplyResult`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+---
+
+## 2. Secrets Management (5 endpoints)
+
+### GET /api/v1/secrets/refs
+- **Handler**: `internal/httpapi/server.go:1474-1497`
+- **Summary**: List all secret references in config
+- **Response**: `contracts.GetSecretReferencesResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### GET /api/v1/secrets/config
+- **Handler**: `internal/httpapi/server.go:1499-1543`
+- **Summary**: Get config-referenced secrets with resolution status
+- **Response**: `contracts.GetConfigSecretsResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### POST /api/v1/secrets/migrate
+- **Handler**: `internal/httpapi/server.go:1545-1610`
+- **Summary**: Migrate secrets between storage backends
+- **Request**: `contracts.MigrateSecretsRequest`
+- **Response**: `contracts.MigrateSecretsResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### POST /api/v1/secrets
+- **Handler**: `internal/httpapi/server.go:1612-1635`
+- **Summary**: Set a secret value
+- **Request**: `contracts.SetSecretRequest`
+- **Response**: `contracts.SuccessResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### DELETE /api/v1/secrets/{name}
+- **Handler**: `internal/httpapi/server.go:1637-1658`
+- **Summary**: Delete a secret by name
+- **Path Param**: `name` (string) - Secret name to delete
+- **Response**: `contracts.SuccessResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+---
+
+## 3. Tool Call History (3 endpoints)
+
+### GET /api/v1/tool-calls
+- **Handler**: `internal/httpapi/server.go:1867-1902`
+- **Summary**: List tool call history with pagination
+- **Query Params**:
+  - `limit` (int) - Maximum results (default 50, max 1000)
+  - `offset` (int) - Pagination offset (default 0)
+  - `session_id` (string) - Filter by session ID (optional)
+- **Response**: `contracts.GetToolCallsResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### GET /api/v1/tool-calls/{id}
+- **Handler**: `internal/httpapi/server.go:1904-1925`
+- **Summary**: Get tool call details by ID
+- **Path Param**: `id` (string) - Tool call ID
+- **Response**: `contracts.ToolCallRecord`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### POST /api/v1/tool-calls/{id}/replay
+- **Handler**: `internal/httpapi/server.go:1927-1947`
+- **Summary**: Replay a previous tool call
+- **Path Param**: `id` (string) - Tool call ID to replay
+- **Request**: `contracts.ReplayToolCallRequest` (optional arguments override)
+- **Response**: `contracts.ToolCallRecord` (new execution record)
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+---
+
+## 4. Session Management (2 endpoints)
+
+### GET /api/v1/sessions
+- **Handler**: `internal/httpapi/server.go:1956-1990`
+- **Summary**: List all MCP sessions
+- **Query Params**:
+  - `limit` (int) - Maximum results (default 50, max 500)
+- **Response**: `contracts.GetSessionsResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### GET /api/v1/sessions/{id}
+- **Handler**: `internal/httpapi/server.go:1992-2036`
+- **Summary**: Get session details by ID
+- **Path Param**: `id` (string) - Session ID
+- **Response**: `contracts.MCPSession`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+---
+
+## 5. Registry Browsing (2 endpoints)
+
+### GET /api/v1/registries
+- **Handler**: `internal/httpapi/server.go:2228-2265`
+- **Summary**: List available MCP server registries
+- **Response**: `contracts.GetRegistriesResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+### GET /api/v1/registries/{id}/servers
+- **Handler**: `internal/httpapi/server.go:2267-2350`
+- **Summary**: Search servers in a registry
+- **Path Param**: `id` (string) - Registry ID
+- **Query Params**:
+  - `tag` (string) - Filter by tag (optional)
+  - `query` (string) - Search query (optional)
+  - `limit` (int) - Maximum results (default 50, max 200)
+- **Response**: `contracts.SearchRegistryServersResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+---
+
+## 6. Code Execution (1 endpoint)
+
+### POST /api/v1/code/exec
+- **Handler**: `internal/httpapi/code_exec.go`
+- **Summary**: Execute JavaScript code (CLI client mode)
+- **Description**: Executes sandboxed JavaScript code with access to `call_tool()` function for orchestrating multiple tool calls
+- **Request**: `contracts.CodeExecRequest`
+- **Response**: `contracts.CodeExecResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+---
+
+## 7. SSE Events (2 endpoints)
+
+### GET /events
+- **Handler**: `internal/httpapi/server.go` (SSE handler)
+- **Summary**: Server-Sent Events stream
+- **Description**: Real-time event stream for server status changes and configuration reloads. Supports API key via query parameter for browser compatibility.
+- **Query Params**:
+  - `apikey` (string) - API key for authentication (alternative to header)
+- **Produces**: `text/event-stream`
+- **Response**: Stream of SSE events with JSON data
+- **Security**: ApiKeyAuth, ApiKeyQuery
+- **Event Types**:
+  - `servers.changed` - Server status change (connected, enabled, quarantined, etc.)
+  - `config.reloaded` - Configuration reloaded from disk
+
+### HEAD /events
+- **Handler**: `internal/httpapi/server.go` (SSE health check)
+- **Summary**: SSE endpoint health check
+- **Description**: Returns 200 OK to verify SSE endpoint is available without establishing a connection
+- **Response**: 200 OK (empty body)
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+---
+
+## 8. Per-Server Tool Calls (1 endpoint)
+
+### GET /api/v1/servers/{id}/tool-calls
+- **Handler**: `internal/httpapi/server.go` (may need to be added)
+- **Summary**: Tool call history for specific server
+- **Path Param**: `id` (string) - Server ID or name
+- **Query Params**:
+  - `limit` (int) - Maximum results (default 50, max 1000)
+- **Response**: `contracts.GetToolCallsResponse`
+- **Security**: ApiKeyAuth, ApiKeyQuery
+
+---
+
+## swaggo Annotation Template
+
+For consistency, use this template when annotating handlers:
+
+```go
+// HandlerName godoc
+// @Summary      [One-line summary]
+// @Description  [Detailed description with purpose and behavior]
+// @Tags         [category]
+// @Accept       json                                      // If endpoint accepts request body
+// @Produce      json                                      // Or text/event-stream for SSE
+// @Param        param_name  query/path/body  type  required  "description"
+// @Success      200  {object}   contracts.ResponseType    "Success message"
+// @Failure      400  {object}   contracts.ErrorResponse   "Bad request"
+// @Failure      401  {object}   contracts.ErrorResponse   "Unauthorized"
+// @Failure      403  {object}   contracts.ErrorResponse   "Forbidden"
+// @Failure      404  {object}   contracts.ErrorResponse   "Not found"
+// @Failure      500  {object}   contracts.ErrorResponse   "Internal server error"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/endpoint [method]
+func (s *Server) handlerName(w http.ResponseWriter, r *http.Request) {
+    // Implementation
+}
+```
+
+---
+
+## Authentication Documentation Pattern
+
+**All `/api/v1/*` endpoints require authentication** except when:
+- Connection source is Unix socket/named pipe (tray application)
+- API key is empty in configuration (authentication disabled)
+
+**Correct security annotations**:
+```go
+// @Security     ApiKeyAuth      // X-API-Key header
+// @Security     ApiKeyQuery     // ?apikey= query parameter
+```
+
+**Do NOT add security annotations** to:
+- `/healthz`, `/readyz`, `/livez`, `/ready` (health checks)
+- `/swagger/*` (Swagger UI static files)
+
+---
+
+## Response Schema Patterns
+
+### Success Response with Data
+```go
+type GetResourceResponse struct {
+    Success bool        `json:"success"`
+    Data    *Resource   `json:"data"`
+}
+```
+
+### List Response with Pagination
+```go
+type ListResourceResponse struct {
+    Success     bool        `json:"success"`
+    Resources   []Resource  `json:"resources"`
+    TotalCount  int         `json:"total_count"`
+    Limit       int         `json:"limit"`
+    Offset      int         `json:"offset"`
+}
+```
+
+### Error Response (Reused)
+```go
+type ErrorResponse struct {
+    Success bool   `json:"success"`
+    Error   string `json:"error"`
+}
+```
+
+---
+
+## Implementation Checklist
+
+For each endpoint:
+- [ ] Add swag comment block above handler function
+- [ ] Define request/response contract types in `internal/contracts/`
+- [ ] Add `@Security` annotations (ApiKeyAuth + ApiKeyQuery)
+- [ ] Document all path/query parameters with types
+- [ ] Include all error responses (400, 401, 403, 404, 500 as applicable)
+- [ ] Run `make swagger` to regenerate OAS
+- [ ] Verify endpoint appears in Swagger UI with lock icon
+- [ ] Test "Try it out" functionality with valid API key
+
+---
+
+## Verification Script Usage
+
+After adding documentation:
+
+```bash
+# Generate OAS from swag annotations
+make swagger
+
+# Verify all endpoints documented
+./scripts/verify-oas-coverage.sh
+
+# Expected output:
+# ✅ All REST endpoints documented in OAS
+```
+
+If missing endpoints detected:
+```bash
+# Script will output:
+# ❌ Missing OAS documentation for:
+# POST /api/v1/secrets/migrate
+# GET /api/v1/sessions
+
+# Fix by adding swag annotations to handlers, then re-run make swagger
+```

@@ -90,14 +90,21 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 		return srv.IsReady()
 	}, 5*time.Second, 100*time.Millisecond, "Server should become ready")
 
-	// Get actual addresses
-	tcpAddr := srv.GetListenAddress()
-	socketPath := filepath.Join(tmpDir, "mcpproxy.sock")
+	// Wait for TCP address to be resolved (may take a moment with race detector)
+	var tcpAddr string
+	require.Eventually(t, func() bool {
+		tcpAddr = srv.GetListenAddress()
+		return tcpAddr != "" && tcpAddr != "127.0.0.1:0" && tcpAddr != ":0"
+	}, 3*time.Second, 50*time.Millisecond, "TCP address should be resolved with actual port")
 
+	socketPath := filepath.Join(tmpDir, "mcpproxy.sock")
 	t.Logf("Server started - TCP: %s, Socket: %s", tcpAddr, socketPath)
 
-	// Skip TCP tests if we couldn't resolve the actual port
-	skipTCPTests := (tcpAddr == "" || tcpAddr == "127.0.0.1:0" || tcpAddr == ":0")
+	// SECURITY: TCP address must be resolved for security tests to run
+	// These tests verify API key authentication - skipping them creates security blind spots
+	require.NotEmpty(t, tcpAddr, "TCP address must be resolved - GetListenAddress() returned empty")
+	require.NotEqual(t, "127.0.0.1:0", tcpAddr, "TCP must bind to actual port, not :0 - server may not have started correctly")
+	require.NotEqual(t, ":0", tcpAddr, "TCP must bind to actual port, not :0 - server may not have started correctly")
 
 	// Wait for socket file to be created (HTTP server starts asynchronously)
 	require.Eventually(t, func() bool {
@@ -137,10 +144,6 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 
 	// Test 2: TCP connection WITHOUT API key (should fail)
 	t.Run("TCP_NoAPIKey_Fail", func(t *testing.T) {
-		if skipTCPTests {
-			t.Skip("TCP port resolution failed - skipping TCP test")
-		}
-
 		client := &http.Client{
 			Timeout: 2 * time.Second,
 			Transport: &http.Transport{
@@ -157,10 +160,6 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 
 	// Test 3: TCP connection WITH API key (should succeed)
 	t.Run("TCP_WithAPIKey_Success", func(t *testing.T) {
-		if skipTCPTests {
-			t.Skip("TCP port resolution failed - skipping TCP test")
-		}
-
 		client := &http.Client{
 			Timeout: 2 * time.Second,
 			Transport: &http.Transport{

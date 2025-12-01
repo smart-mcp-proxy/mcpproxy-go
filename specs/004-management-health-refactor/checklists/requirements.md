@@ -44,7 +44,7 @@ All checklist items have been validated successfully. The specification is ready
 6. **No clarifications needed**: All requirements have reasonable defaults documented in Assumptions
 
 ### Assumptions Made:
-- OpenAPI spec location: `docs/openapi.yaml` (industry standard practice)
+- OpenAPI spec location: `oas/swagger.yaml` (industry standard practice)
 - Build integration: Makefile-based generation (consistent with existing `make build` command)
 - Log tail limits: default 50, max 1000 (standard pagination practices)
 - Diagnostics timeout: 3 seconds for 20 servers (reasonable for local operations)

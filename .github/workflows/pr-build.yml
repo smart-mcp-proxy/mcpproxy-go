@@ -42,6 +42,24 @@ jobs:
           echo "latest_tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
           echo "Generated version: ${VERSION}"
 
+  verify-oas:
+    name: Verify OpenAPI Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install swag
+        run: go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4
+
+      - name: Regenerate and verify OpenAPI spec
+        run: scripts/verify-oas.sh
+
   # Build frontend once and share across all jobs
   build-frontend:
     name: Build Frontend
@@ -72,7 +90,7 @@ jobs:
 
   build:
     name: Build Binaries
-    needs: [prepare, build-frontend]
+    needs: [prepare, build-frontend, verify-oas]
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -326,142 +344,3 @@ jobs:
           path: mcpproxy-*-darwin-${{ matrix.goarch }}-installer.dmg
           retention-days: 14
           if-no-files-found: warn
-
-  announce:
-    name: Share Artifacts
-    needs:
-      - prepare
-      - build
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-      issues: write
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
-      CLEAN_VERSION: ${{ needs.prepare.outputs.clean_version }}
-      LATEST_TAG: ${{ needs.prepare.outputs.latest_tag }}
-      RETENTION_DAYS: "14"
-    steps:
-      - name: Publish artifact summary
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const prNumber = context.payload.pull_request?.number;
-            if (!prNumber) {
-              core.info('No pull request context; skipping comment.');
-              return;
-            }
-
-            const runId = context.runId;
-            const artifacts = await github.paginate(
-              github.rest.actions.listWorkflowRunArtifacts,
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                run_id: runId,
-                per_page: 100
-              }
-            );
-
-            if (artifacts.length === 0) {
-              core.info('No artifacts found for this run.');
-              return;
-            }
-
-            const formatSize = (bytes) => {
-              if (!bytes) {
-                return '0 B';
-              }
-              const units = ['B', 'KB', 'MB', 'GB'];
-              const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-              const value = bytes / Math.pow(1024, exponent);
-              return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
-            };
-
-            const artifactLines = artifacts.map((artifact) => {
-              const size = formatSize(artifact.size_in_bytes);
-              return `- [${artifact.name}](${artifact.archive_download_url}) -> ${size}`;
-            });
-
-            const tableRows = artifacts
-              .map((artifact) => `| ${artifact.name} | ${formatSize(artifact.size_in_bytes)} | [Download](${artifact.archive_download_url}) |`)
-              .join('\n');
-
-            await core.summary
-              .addHeading('Pull Request Artifacts')
-              .addRaw(`| Name | Size | Link |\n| --- | --- | --- |\n${tableRows}`, true)
-              .addRaw(`\n\nVersion: ${process.env.VERSION}`)
-              .addRaw(`\nLatest tag: ${process.env.LATEST_TAG}`)
-              .addRaw(`\nLinks expire in ${process.env.RETENTION_DAYS} days.`)
-              .write();
-
-            const marker = '<!-- mcpproxy-pr-artifacts -->';
-            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
-
-            const bodyLines = [
-              marker,
-              `## 📦 Build Artifacts for PR #${prNumber}`,
-              '',
-              `**Version:** \`${process.env.VERSION}\``,
-              `**Latest tag:** \`${process.env.LATEST_TAG}\``,
-              '',
-              '### Available Artifacts',
-              '',
-              ...artifacts.map((artifact) => {
-                const size = formatSize(artifact.size_in_bytes);
-                return `- **${artifact.name}** (${size})`;
-              }),
-              '',
-              '### How to Download',
-              '',
-              '**Option 1: GitHub Web UI** (easiest)',
-              `1. Go to the [workflow run page](${runUrl})`,
-              '2. Scroll to the bottom "Artifacts" section',
-              '3. Click on the artifact you want to download',
-              '',
-              '**Option 2: GitHub CLI**',
-              '```bash',
-              `gh run download ${runId} --repo ${context.repo.owner}/${context.repo.repo}`,
-              '',
-              '# Or download a specific artifact:',
-              `gh run download ${runId} --name dmg-darwin-arm64`,
-              '```',
-              '',
-              `> **Note:** Artifacts expire in ${process.env.RETENTION_DAYS} days.`
-            ];
-            const body = bodyLines.join('\n');
-
-            const existingComments = await github.paginate(
-              github.rest.issues.listComments,
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber
-              }
-            );
-
-            const previous = existingComments.find(
-              (comment) =>
-                comment.user?.login === 'github-actions[bot]' &&
-                comment.body?.includes(marker)
-            );
-
-            if (previous) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: previous.id,
-                body
-              });
-              core.info(`Updated existing artifact comment (${previous.id}).`);
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body
-              });
-              core.info('Created new artifact comment.');
-            }

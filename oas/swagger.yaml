@@ -1,5 +1,118 @@
 components:
   schemas:
+    config.Config:
+      type: object
+    config.IsolationConfig:
+      description: Per-server isolation settings
+      properties:
+        enabled:
+          description: Enable Docker isolation for this server
+          type: boolean
+        extra_args:
+          description: Additional docker run arguments for this server
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        image:
+          description: Custom Docker image (overrides default)
+          type: string
+        log_driver:
+          description: Docker log driver override for this server
+          type: string
+        log_max_files:
+          description: Maximum number of log files override
+          type: string
+        log_max_size:
+          description: Maximum size of log files override
+          type: string
+        network_mode:
+          description: Custom network mode for this server
+          type: string
+        working_dir:
+          description: Custom working directory in container
+          type: string
+      type: object
+    config.OAuthConfig:
+      description: OAuth configuration (keep even when empty to signal OAuth requirement)
+      properties:
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        pkce_enabled:
+          type: boolean
+        redirect_uri:
+          type: string
+        scopes:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    config.ServerConfig:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        command:
+          type: string
+        created:
+          type: string
+        enabled:
+          type: boolean
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        headers:
+          additionalProperties:
+            type: string
+          description: For HTTP servers
+          type: object
+        isolation:
+          $ref: '#/components/schemas/config.IsolationConfig'
+        name:
+          type: string
+        oauth:
+          $ref: '#/components/schemas/config.OAuthConfig'
+        protocol:
+          description: stdio, http, sse, streamable-http, auto
+          type: string
+        quarantined:
+          description: Security quarantine status
+          type: boolean
+        updated:
+          type: string
+        url:
+          type: string
+        working_dir:
+          description: Working directory for stdio servers
+          type: string
+      type: object
+    contracts.ConfigApplyResult:
+      properties:
+        applied_immediately:
+          type: boolean
+        changed_fields:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        requires_restart:
+          type: boolean
+        restart_reason:
+          type: string
+        success:
+          type: boolean
+        validation_errors:
+          items:
+            $ref: '#/components/schemas/contracts.ValidationError'
+          type: array
+          uniqueItems: false
+      type: object
     contracts.Diagnostics:
       properties:
         docker_status:
@@ -8,6 +121,12 @@ components:
           description: Renamed to avoid conflict
           items:
             $ref: '#/components/schemas/contracts.MissingSecretInfo'
+          type: array
+          uniqueItems: false
+        oauth_issues:
+          description: OAuth parameter mismatches
+          items:
+            $ref: '#/components/schemas/contracts.OAuthIssue'
           type: array
           uniqueItems: false
         oauth_required:
@@ -46,6 +165,24 @@ components:
         success:
           type: boolean
       type: object
+    contracts.GetConfigResponse:
+      properties:
+        config:
+          description: The configuration object
+        config_path:
+          description: Path to config file
+          type: string
+      type: object
+    contracts.GetRegistriesResponse:
+      properties:
+        registries:
+          items:
+            $ref: '#/components/schemas/contracts.Registry'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
+      type: object
     contracts.GetServerLogsResponse:
       properties:
         count:
@@ -57,6 +194,18 @@ components:
           uniqueItems: false
         server_name:
           type: string
+      type: object
+    contracts.GetServerToolCallsResponse:
+      properties:
+        server_name:
+          type: string
+        tool_calls:
+          items:
+            $ref: '#/components/schemas/contracts.ToolCallRecord'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
       type: object
     contracts.GetServerToolsResponse:
       properties:
@@ -79,6 +228,44 @@ components:
           uniqueItems: false
         stats:
           $ref: '#/components/schemas/contracts.ServerStats'
+      type: object
+    contracts.GetSessionDetailResponse:
+      properties:
+        session:
+          $ref: '#/components/schemas/contracts.MCPSession'
+      type: object
+    contracts.GetSessionsResponse:
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        sessions:
+          items:
+            $ref: '#/components/schemas/contracts.MCPSession'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
+      type: object
+    contracts.GetToolCallDetailResponse:
+      properties:
+        tool_call:
+          $ref: '#/components/schemas/contracts.ToolCallRecord'
+      type: object
+    contracts.GetToolCallsResponse:
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        tool_calls:
+          items:
+            $ref: '#/components/schemas/contracts.ToolCallRecord'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
       type: object
     contracts.IsolationConfig:
       properties:
@@ -109,6 +296,37 @@ components:
         timestamp:
           type: string
       type: object
+    contracts.MCPSession:
+      properties:
+        client_name:
+          type: string
+        client_version:
+          type: string
+        end_time:
+          type: string
+        experimental:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        has_roots:
+          description: MCP Client Capabilities
+          type: boolean
+        has_sampling:
+          type: boolean
+        id:
+          type: string
+        last_activity:
+          type: string
+        start_time:
+          type: string
+        status:
+          type: string
+        tool_call_count:
+          type: integer
+        total_tokens:
+          type: integer
+      type: object
     contracts.MissingSecretInfo:
       properties:
         secret_name:
@@ -118,6 +336,13 @@ components:
             type: string
           type: array
           uniqueItems: false
+      type: object
+    contracts.NPMPackageInfo:
+      properties:
+        exists:
+          type: boolean
+        install_cmd:
+          type: string
       type: object
     contracts.OAuthConfig:
       properties:
@@ -139,6 +364,24 @@ components:
         token_url:
           type: string
       type: object
+    contracts.OAuthIssue:
+      properties:
+        documentation_url:
+          type: string
+        error:
+          type: string
+        issue:
+          type: string
+        missing_params:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        resolution:
+          type: string
+        server_name:
+          type: string
+      type: object
     contracts.OAuthRequirement:
       properties:
         expires_at:
@@ -149,6 +392,103 @@ components:
           type: string
         state:
           type: string
+      type: object
+    contracts.Registry:
+      properties:
+        count:
+          description: number or string
+        description:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        protocol:
+          type: string
+        servers_url:
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        url:
+          type: string
+      type: object
+    contracts.ReplayToolCallRequest:
+      properties:
+        arguments:
+          additionalProperties: {}
+          description: Modified arguments for replay
+          type: object
+      type: object
+    contracts.ReplayToolCallResponse:
+      properties:
+        error:
+          description: Error if replay failed
+          type: string
+        new_call_id:
+          description: ID of the newly created call
+          type: string
+        new_tool_call:
+          $ref: '#/components/schemas/contracts.ToolCallRecord'
+        replayed_from:
+          description: Original call ID
+          type: string
+        success:
+          type: boolean
+      type: object
+    contracts.RepositoryInfo:
+      description: Detected package info
+      properties:
+        npm:
+          $ref: '#/components/schemas/contracts.NPMPackageInfo'
+      type: object
+    contracts.RepositoryServer:
+      properties:
+        connect_url:
+          description: Alternative connection URL
+          type: string
+        created_at:
+          type: string
+        description:
+          type: string
+        id:
+          type: string
+        install_cmd:
+          description: Installation command
+          type: string
+        name:
+          type: string
+        registry:
+          description: Which registry this came from
+          type: string
+        repository_info:
+          $ref: '#/components/schemas/contracts.RepositoryInfo'
+        source_code_url:
+          description: Source repository URL
+          type: string
+        updated_at:
+          type: string
+        url:
+          description: MCP endpoint for remote servers only
+          type: string
+      type: object
+    contracts.SearchRegistryServersResponse:
+      properties:
+        query:
+          type: string
+        registry_id:
+          type: string
+        servers:
+          items:
+            $ref: '#/components/schemas/contracts.RepositoryServer'
+          type: array
+          uniqueItems: false
+        tag:
+          type: string
+        total:
+          type: integer
       type: object
     contracts.SearchResult:
       properties:
@@ -293,6 +633,34 @@ components:
         success:
           type: boolean
       type: object
+    contracts.TokenMetrics:
+      description: Token usage metrics (nil for older records)
+      properties:
+        encoding:
+          description: Encoding used (e.g., cl100k_base)
+          type: string
+        estimated_cost:
+          description: Optional cost estimate
+          type: number
+        input_tokens:
+          description: Tokens in the request
+          type: integer
+        model:
+          description: Model used for tokenization
+          type: string
+        output_tokens:
+          description: Tokens in the response
+          type: integer
+        total_tokens:
+          description: Total tokens (input + output)
+          type: integer
+        truncated_tokens:
+          description: Tokens removed by truncation
+          type: integer
+        was_truncated:
+          description: Whether response was truncated
+          type: boolean
+      type: object
     contracts.Tool:
       properties:
         annotations:
@@ -312,6 +680,7 @@ components:
           type: integer
       type: object
     contracts.ToolAnnotation:
+      description: Tool behavior hints snapshot
       properties:
         destructiveHint:
           type: boolean
@@ -324,6 +693,62 @@ components:
         title:
           type: string
       type: object
+    contracts.ToolCallRecord:
+      description: The new tool call record
+      properties:
+        annotations:
+          $ref: '#/components/schemas/contracts.ToolAnnotation'
+        arguments:
+          additionalProperties: {}
+          description: Tool arguments
+          type: object
+        config_path:
+          description: Active config file path
+          type: string
+        duration:
+          description: Duration in nanoseconds
+          type: integer
+        error:
+          description: Error message (failure only)
+          type: string
+        execution_type:
+          description: '"direct" or "code_execution"'
+          type: string
+        id:
+          description: Unique identifier
+          type: string
+        mcp_client_name:
+          description: MCP client name from InitializeRequest
+          type: string
+        mcp_client_version:
+          description: MCP client version
+          type: string
+        mcp_session_id:
+          description: MCP session identifier
+          type: string
+        metrics:
+          $ref: '#/components/schemas/contracts.TokenMetrics'
+        parent_call_id:
+          description: Links nested calls to parent code_execution
+          type: string
+        request_id:
+          description: Request correlation ID
+          type: string
+        response:
+          description: Tool response (success only)
+        server_id:
+          description: Server identity hash
+          type: string
+        server_name:
+          description: Human-readable server name
+          type: string
+        timestamp:
+          description: When the call was made
+          type: string
+        tool_name:
+          description: Tool name (without server prefix)
+          type: string
+      type: object
     contracts.UpstreamError:
       properties:
         error_message:
@@ -331,6 +756,23 @@ components:
         server_name:
           type: string
         timestamp:
+          type: string
+      type: object
+    contracts.ValidateConfigResponse:
+      properties:
+        errors:
+          items:
+            $ref: '#/components/schemas/contracts.ValidationError'
+          type: array
+          uniqueItems: false
+        valid:
+          type: boolean
+      type: object
+    contracts.ValidationError:
+      properties:
+        field:
+          type: string
+        message:
           type: string
       type: object
     main.Diagnostics:
@@ -554,6 +996,619 @@ info:
   version: "1.0"
 openapi: 3.1.0
 paths:
+  /api/v1/config:
+    get:
+      description: Retrieves the current MCPProxy configuration including all server
+        definitions, global settings, and runtime parameters
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetConfigResponse'
+          description: Configuration retrieved successfully
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to get configuration
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get current configuration
+      tags:
+      - config
+  /api/v1/config/apply:
+    post:
+      description: Applies a new MCPProxy configuration. Validates and persists the
+        configuration to disk. Some changes apply immediately, while others may require
+        a restart. Returns detailed information about applied changes and restart
+        requirements.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/config.Config'
+        description: Configuration to apply
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ConfigApplyResult'
+          description: Configuration applied successfully with change details
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid JSON payload
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to apply configuration
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Apply configuration
+      tags:
+      - config
+  /api/v1/config/validate:
+    post:
+      description: Validates a provided MCPProxy configuration without applying it.
+        Checks for syntax errors, invalid server definitions, conflicting settings,
+        and other configuration issues.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/config.Config'
+        description: Configuration to validate
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ValidateConfigResponse'
+          description: Configuration validation result
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid JSON payload
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Validation failed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Validate configuration
+      tags:
+      - config
+  /api/v1/registries:
+    get:
+      description: Retrieves list of all MCP server registries that can be browsed
+        for discovering and installing new upstream servers. Includes registry metadata,
+        server counts, and API endpoints.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetRegistriesResponse'
+          description: Registries retrieved successfully
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to list registries
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List available MCP server registries
+      tags:
+      - registries
+  /api/v1/registries/{id}/servers:
+    get:
+      description: Searches for MCP servers within a specific registry by keyword
+        or tag. Returns server metadata including installation commands, source code
+        URLs, and npm package information for easy discovery and installation.
+      parameters:
+      - description: Registry ID
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: Search query keyword
+        in: query
+        name: q
+        schema:
+          type: string
+      - description: Filter by tag
+        in: query
+        name: tag
+        schema:
+          type: string
+      - description: Maximum number of results (default 10)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SearchRegistryServersResponse'
+          description: Servers retrieved successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Registry ID required
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to search servers
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Search MCP servers in a registry
+      tags:
+      - registries
+  /api/v1/secrets:
+    post:
+      description: Stores a secret value in the operating system's secure keyring.
+        The secret can then be referenced in configuration using ${keyring:secret-name}
+        syntax. Automatically notifies runtime to restart affected servers.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: {}
+                type: object
+          description: Secret stored successfully with reference syntax
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid JSON payload, missing name/value, or unsupported type
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Method not allowed
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Secret resolver not available or failed to store secret
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Store a secret in OS keyring
+      tags:
+      - secrets
+  /api/v1/secrets/{name}:
+    delete:
+      description: Deletes a secret from the operating system's secure keyring. Automatically
+        notifies runtime to restart affected servers. Only keyring type is supported
+        for security.
+      parameters:
+      - description: Name of the secret to delete
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: Secret type (only 'keyring' supported, defaults to 'keyring')
+        in: query
+        name: type
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: {}
+                type: object
+          description: Secret deleted successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Missing secret name or unsupported type
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Method not allowed
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Secret resolver not available or failed to delete secret
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Delete a secret from OS keyring
+      tags:
+      - secrets
+  /api/v1/servers/{id}/tool-calls:
+    get:
+      description: Retrieves tool call history filtered by upstream server ID. Returns
+        recent tool executions for the specified server including timestamps, arguments,
+        results, and errors. Useful for server-specific debugging and monitoring.
+      parameters:
+      - description: Upstream server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: Maximum number of records to return (1-100, default 50)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetServerToolCallsResponse'
+          description: Server tool calls retrieved successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server ID required
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Method not allowed
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to get server tool calls
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get tool call history for specific server
+      tags:
+      - tool-calls
+  /api/v1/sessions:
+    get:
+      description: Retrieves paginated list of active and recent MCP client sessions.
+        Each session represents a connection from an MCP client to MCPProxy, tracking
+        initialization time, tool calls, and connection status.
+      parameters:
+      - description: Maximum number of sessions to return (1-100, default 10)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      - description: Number of sessions to skip for pagination (default 0)
+        in: query
+        name: offset
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetSessionsResponse'
+          description: Sessions retrieved successfully
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Method not allowed
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to get sessions
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get active MCP sessions
+      tags:
+      - sessions
+  /api/v1/sessions/{id}:
+    get:
+      description: Retrieves detailed information about a specific MCP client session
+        including initialization parameters, connection status, tool call count, and
+        activity timestamps.
+      parameters:
+      - description: Session ID
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetSessionDetailResponse'
+          description: Session details retrieved successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Session ID required
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Session not found
+        "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Method not allowed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get MCP session details by ID
+      tags:
+      - sessions
+  /api/v1/tool-calls:
+    get:
+      description: Retrieves paginated tool call history across all upstream servers
+        or filtered by session ID. Includes execution timestamps, arguments, results,
+        and error information for debugging and auditing.
+      parameters:
+      - description: Maximum number of records to return (1-100, default 50)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      - description: Number of records to skip for pagination (default 0)
+        in: query
+        name: offset
+        schema:
+          type: integer
+      - description: Filter tool calls by MCP session ID
+        in: query
+        name: session_id
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetToolCallsResponse'
+          description: Tool calls retrieved successfully
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Method not allowed
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to get tool calls
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get tool call history
+      tags:
+      - tool-calls
+  /api/v1/tool-calls/{id}:
+    get:
+      description: Retrieves detailed information about a specific tool call execution
+        including full request arguments, response data, execution time, and any errors
+        encountered.
+      parameters:
+      - description: Tool call ID
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetToolCallDetailResponse'
+          description: Tool call details retrieved successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Tool call ID required
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Tool call not found
+        "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Method not allowed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get tool call details by ID
+      tags:
+      - tool-calls
+  /api/v1/tool-calls/{id}/replay:
+    post:
+      description: Re-executes a previous tool call with optional modified arguments.
+        Useful for debugging and testing tool behavior with different inputs. Creates
+        a new tool call record linked to the original.
+      parameters:
+      - description: Original tool call ID to replay
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.ReplayToolCallRequest'
+        description: Optional modified arguments for replay
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ReplayToolCallResponse'
+          description: Tool call replayed successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Tool call ID required or invalid JSON payload
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Method not allowed
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to replay tool call
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Replay a tool call
+      tags:
+      - tool-calls
   /diagnostics:
     get:
       description: Get comprehensive health diagnostics including upstream errors,
@@ -1431,5 +2486,3 @@ paths:
       summary: Call a tool
       tags:
       - tools
-servers:
-- url: localhost:8080/api/v1

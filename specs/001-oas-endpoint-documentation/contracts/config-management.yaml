@@ -1,0 +1,221 @@
+# Configuration Management API Contracts
+
+## GET /api/v1/config
+
+**Summary**: Get current configuration
+**Tags**: config
+**Security**: ApiKeyAuth, ApiKeyQuery
+
+**Description**:
+Retrieves the current MCPProxy configuration including all server definitions, global settings, and runtime parameters.
+
+**Request**: None (GET)
+
+**Responses**:
+- **200 OK** - Configuration retrieved successfully
+  ```json
+  {
+    "success": true,
+    "config": {
+      "listen": "127.0.0.1:8080",
+      "data_dir": "~/.mcpproxy",
+      "api_key": "[REDACTED]",
+      "mcpServers": [...]
+    }
+  }
+  ```
+  Schema: `contracts.GetConfigResponse`
+
+- **401 Unauthorized** - Missing or invalid API key
+  ```json
+  {
+    "success": false,
+    "error": "Invalid or missing API key"
+  }
+  ```
+  Schema: `contracts.ErrorResponse`
+
+- **500 Internal Server Error** - Failed to load configuration
+  Schema: `contracts.ErrorResponse`
+
+---
+
+## POST /api/v1/config/validate
+
+**Summary**: Validate configuration without applying
+**Tags**: config
+**Security**: ApiKeyAuth, ApiKeyQuery
+
+**Description**:
+Validates a configuration object for correctness without actually applying it to the running system. Useful for testing configuration changes before deployment.
+
+**Request Body**:
+```json
+{
+  "listen": "127.0.0.1:8080",
+  "data_dir": "~/.mcpproxy",
+  "mcpServers": [
+    {
+      "name": "test-server",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "protocol": "stdio",
+      "enabled": true
+    }
+  ]
+}
+```
+Schema: `config.Config`
+
+**Responses**:
+- **200 OK** - Validation completed (check `valid` field for pass/fail)
+  ```json
+  {
+    "success": true,
+    "valid": true,
+    "errors": []
+  }
+  ```
+  Or if invalid:
+  ```json
+  {
+    "success": true,
+    "valid": false,
+    "errors": [
+      "server 'test-server': missing required field 'command'",
+      "duplicate server name: 'github-server'"
+    ]
+  }
+  ```
+  Schema: `contracts.ValidateConfigResponse`
+
+- **400 Bad Request** - Invalid JSON or malformed request
+  Schema: `contracts.ErrorResponse`
+
+- **401 Unauthorized** - Missing or invalid API key
+  Schema: `contracts.ErrorResponse`
+
+- **500 Internal Server Error** - Validation engine failure
+  Schema: `contracts.ErrorResponse`
+
+---
+
+## POST /api/v1/config/apply
+
+**Summary**: Apply configuration changes
+**Tags**: config
+**Security**: ApiKeyAuth, ApiKeyQuery
+
+**Description**:
+Applies a new configuration to the running MCPProxy instance. This operation:
+1. Validates the configuration
+2. Writes it to the config file on disk
+3. Reloads the runtime configuration
+4. Restarts affected servers
+5. Emits a `config.reloaded` event
+
+**Request Body**:
+```json
+{
+  "listen": "127.0.0.1:8080",
+  "data_dir": "~/.mcpproxy",
+  "mcpServers": [...]
+}
+```
+Schema: `config.Config`
+
+**Responses**:
+- **200 OK** - Configuration applied successfully
+  ```json
+  {
+    "success": true,
+    "changes_applied": [
+      "server added: weather-api",
+      "server removed: old-server",
+      "server updated: github-server"
+    ],
+    "servers_restarted": ["github-server"],
+    "errors": []
+  }
+  ```
+  Schema: `contracts.ConfigApplyResult`
+
+- **400 Bad Request** - Invalid configuration (validation failed)
+  ```json
+  {
+    "success": false,
+    "changes_applied": [],
+    "servers_restarted": [],
+    "errors": [
+      "server 'test': missing required field 'protocol'"
+    ]
+  }
+  ```
+  Schema: `contracts.ConfigApplyResult`
+
+- **401 Unauthorized** - Missing or invalid API key
+  Schema: `contracts.ErrorResponse`
+
+- **403 Forbidden** - Configuration management disabled (`disable_management: true`)
+  Schema: `contracts.ErrorResponse`
+
+- **500 Internal Server Error** - Failed to write config file or reload runtime
+  Schema: `contracts.ErrorResponse`
+
+---
+
+## swaggo Annotation Examples
+
+```go
+// GetConfig godoc
+// @Summary      Get current configuration
+// @Description  Retrieves the current MCPProxy configuration including all server definitions
+// @Tags         config
+// @Produce      json
+// @Success      200  {object}  contracts.GetConfigResponse  "Configuration retrieved successfully"
+// @Failure      401  {object}  contracts.ErrorResponse  "Unauthorized"
+// @Failure      500  {object}  contracts.ErrorResponse  "Internal server error"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/config [get]
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+    // Implementation
+}
+
+// ValidateConfig godoc
+// @Summary      Validate configuration without applying
+// @Description  Validates a configuration object for correctness without applying it
+// @Tags         config
+// @Accept       json
+// @Produce      json
+// @Param        config  body      config.Config  true  "Configuration to validate"
+// @Success      200     {object}  contracts.ValidateConfigResponse  "Validation result"
+// @Failure      400     {object}  contracts.ErrorResponse  "Invalid JSON"
+// @Failure      401     {object}  contracts.ErrorResponse  "Unauthorized"
+// @Failure      500     {object}  contracts.ErrorResponse  "Internal server error"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/config/validate [post]
+func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
+    // Implementation
+}
+
+// ApplyConfig godoc
+// @Summary      Apply configuration changes
+// @Description  Applies a new configuration, validates, writes to disk, reloads runtime, and restarts affected servers
+// @Tags         config
+// @Accept       json
+// @Produce      json
+// @Param        config  body      config.Config  true  "Configuration to apply"
+// @Success      200     {object}  contracts.ConfigApplyResult  "Configuration applied successfully"
+// @Failure      400     {object}  contracts.ConfigApplyResult  "Validation failed"
+// @Failure      401     {object}  contracts.ErrorResponse  "Unauthorized"
+// @Failure      403     {object}  contracts.ErrorResponse  "Configuration management disabled"
+// @Failure      500     {object}  contracts.ErrorResponse  "Failed to apply configuration"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/config/apply [post]
+func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
+    // Implementation
+}
+```

@@ -270,12 +270,12 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 // To generate the OpenAPI specification, run:
 //
 //   go install github.com/swaggo/swag/cmd/swag@latest
-//   swag init -g cmd/mcpproxy/main.go --output docs --outputTypes yaml
+//   swag init -g cmd/mcpproxy/main.go --output oas --outputTypes yaml
 //
 // This creates:
-//   docs/swagger.yaml  - OpenAPI 3.x spec
-//   docs/swagger.json  - JSON format
-//   docs/docs.go       - Go code for embedding
+//   oas/swagger.yaml   - OpenAPI 3.x spec
+//   oas/swagger.json   - JSON format
+//   oas/docs.go        - Go code for embedding
 //
 // The spec is then served at:
 //   http://localhost:8080/swagger/index.html

@@ -119,6 +119,33 @@ jobs:
         env:
           GO_TEST_TIMEOUT: 300s
 
+      - name: Check for skipped security tests
+        shell: bash
+        run: |
+          echo "Verifying that security-critical authentication tests were not skipped..."
+
+          # Run the security test explicitly and capture output
+          go test -v -timeout 2m ./internal/server -run TestE2E_TrayToCore_UnixSocket 2>&1 | tee security_test_output.log
+
+          # Check for skipped API key security tests
+          if grep -q "SKIP.*TCP_NoAPIKey_Fail" security_test_output.log; then
+            echo "::error::CRITICAL SECURITY: TCP_NoAPIKey_Fail test was skipped!"
+            echo "::error::This test verifies TCP connections require API key authentication."
+            echo "::error::Skipping this test could allow authentication bypass vulnerabilities."
+            echo "::error::See issue #159 for details."
+            exit 1
+          fi
+
+          if grep -q "SKIP.*TCP_WithAPIKey_Success" security_test_output.log; then
+            echo "::error::CRITICAL SECURITY: TCP_WithAPIKey_Success test was skipped!"
+            echo "::error::This test verifies TCP connections with valid API keys are accepted."
+            echo "::error::Skipping this test could allow authentication bypass vulnerabilities."
+            echo "::error::See issue #159 for details."
+            exit 1
+          fi
+
+          echo "✅ All security tests executed successfully (no skips detected)"
+
       - name: Run Logging E2E tests
         run: go test -v -race -timeout 5m ./internal/logs -run TestE2E
         env:
