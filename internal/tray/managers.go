@@ -748,6 +748,25 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 
 // serverSupportsOAuth determines if a server supports OAuth authentication
 func (m *MenuManager) serverSupportsOAuth(server map[string]interface{}) bool {
+	// Check if server has explicit OAuth configuration
+	if server["oauth"] != nil {
+		return true
+	}
+
+	// Check if error message indicates OAuth requirement (zero-config detection)
+	lastError, _ := server["last_error"].(string)
+	if lastError != "" {
+		errorLower := strings.ToLower(lastError)
+		if strings.Contains(errorLower, "oauth") ||
+			strings.Contains(errorLower, "authorization") ||
+			strings.Contains(errorLower, "401") ||
+			strings.Contains(errorLower, "invalid_token") ||
+			strings.Contains(errorLower, "missing or invalid access token") ||
+			strings.Contains(errorLower, "deferred for tray ui") {
+			return true
+		}
+	}
+
 	// Get server URL
 	serverURL, ok := server["url"].(string)
 	if !ok || serverURL == "" {
@@ -800,7 +819,18 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	connected, _ := server["connected"].(bool)
 
 	// Check if server needs OAuth authentication
-	needsOAuth := m.serverSupportsOAuth(server) && !quarantined && !authenticated && enabled && !connected
+	supportsOAuth := m.serverSupportsOAuth(server)
+	needsOAuth := supportsOAuth && !quarantined && !authenticated && enabled && !connected
+
+	// Debug logging to help troubleshoot menu creation
+	m.logger.Debug("Creating server action submenus",
+		zap.String("server", serverName),
+		zap.Bool("enabled", enabled),
+		zap.Bool("quarantined", quarantined),
+		zap.Bool("authenticated", authenticated),
+		zap.Bool("connected", connected),
+		zap.Bool("supports_oauth", supportsOAuth),
+		zap.Bool("needs_oauth", needsOAuth))
 
 	// OAuth Login action - show FIRST if server needs authentication
 	if needsOAuth {
