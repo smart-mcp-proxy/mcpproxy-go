@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -1101,7 +1102,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				zap.String("server", c.config.Name))
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
@@ -1167,7 +1168,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			c.clearOAuthState()
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
 				return fmt.Errorf("OAuth authorization during MCP init failed: %w", oauthErr)
 			}
@@ -1312,7 +1313,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 		zap.String("strategy", "SSE OAuth"))
 
 	// Create OAuth config using the oauth package
-	oauthConfig, _ := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config")
 	}
@@ -1420,7 +1421,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 				zap.String("server", c.config.Name))
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
 				return fmt.Errorf("SSE OAuth authorization failed: %w", oauthErr)
 			}
@@ -1721,7 +1722,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 }
 
 // handleOAuthAuthorization handles the manual OAuth flow following the mcp-go example pattern
-func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oauthConfig *client.OAuthConfig) error {
+func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oauthConfig *client.OAuthConfig, extraParams map[string]string) error {
 	// Check if OAuth is already in progress to prevent duplicate flows (CRITICAL FIX for Phase 1)
 	if c.isOAuthInProgress() {
 		c.logger.Warn("⚠️ OAuth authorization already in progress, skipping duplicate attempt",
@@ -1840,6 +1841,28 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 	if authURLErr != nil {
 		return fmt.Errorf("failed to get authorization URL: %w", authURLErr)
+	}
+
+	// Add extra OAuth parameters if configured (workaround until mcp-go supports this natively)
+	if len(extraParams) > 0 {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			c.logger.Error("Failed to parse OAuth authorization URL for extra params injection",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			return fmt.Errorf("failed to parse authorization URL: %w", err)
+		}
+
+		q := u.Query()
+		for k, v := range extraParams {
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+		authURL = u.String()
+
+		c.logger.Info("✨ Added extra OAuth parameters to authorization URL",
+			zap.String("server", c.config.Name),
+			zap.Any("extra_params", extraParams))
 	}
 
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
@@ -2074,7 +2097,7 @@ func (c *Client) ForceOAuthFlow(ctx context.Context) error {
 // forceHTTPOAuthFlow forces OAuth flow for HTTP transport
 func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 	// Create OAuth config
-	oauthConfig, _ := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
 	}
@@ -2111,7 +2134,7 @@ func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 			c.logger.Info("✅ OAuth authorization requirement triggered - starting manual OAuth flow")
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
 
@@ -2133,7 +2156,7 @@ func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 // forceSSEOAuthFlow forces OAuth flow for SSE transport
 func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 	// Create OAuth config
-	oauthConfig, _ := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
 	}
@@ -2163,7 +2186,7 @@ func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 			c.logger.Info("✅ OAuth authorization required from SSE Start() - triggering manual OAuth flow")
 
 			// Handle OAuth authorization manually
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
 
@@ -2187,7 +2210,7 @@ func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 			c.logger.Info("✅ OAuth authorization requirement from initialize - starting manual OAuth flow")
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
 
