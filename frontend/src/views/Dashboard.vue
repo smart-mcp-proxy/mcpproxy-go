@@ -15,11 +15,19 @@
       </svg>
       <div class="flex-1">
         <h3 class="font-bold">System Diagnostics</h3>
-        <div class="text-sm">
-          <span class="badge badge-sm mr-2">{{ upstreamErrors.length }} Error{{ upstreamErrors.length !== 1 ? 's' : '' }}</span>
-          <span v-if="upstreamErrors.length > 0">{{ upstreamErrors[0].server }}: {{ upstreamErrors[0].message }}</span>
-          <span v-else-if="oauthRequired.length > 0">{{ oauthRequired.length }} server{{ oauthRequired.length !== 1 ? 's' : '' }} need authentication</span>
-          <span v-else-if="missingSecrets.length > 0">{{ missingSecrets.length }} missing secret{{ missingSecrets.length !== 1 ? 's' : '' }}</span>
+        <div class="text-sm space-y-1">
+          <div v-if="upstreamErrors.length > 0">
+            <span class="badge badge-sm badge-error mr-2">{{ upstreamErrors.length }} Error{{ upstreamErrors.length !== 1 ? 's' : '' }}</span>
+            <span>{{ upstreamErrors[0].server }}: {{ upstreamErrors[0].message }}</span>
+          </div>
+          <div v-else-if="oauthRequired.length > 0">
+            <span class="badge badge-sm badge-warning mr-2">{{ oauthRequired.length }} OAuth</span>
+            <span>{{ oauthRequired.length }} server{{ oauthRequired.length !== 1 ? 's' : '' }} need authentication</span>
+          </div>
+          <div v-else-if="missingSecrets.length > 0">
+            <span class="badge badge-sm badge-warning mr-2">{{ missingSecrets.length }} Secret{{ missingSecrets.length !== 1 ? 's' : '' }}</span>
+            <span>{{ missingSecrets.length }} missing secret{{ missingSecrets.length !== 1 ? 's' : '' }}</span>
+          </div>
         </div>
       </div>
       <button class="btn btn-sm" @click="showDiagnosticsDetail = true">
@@ -30,6 +38,149 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
+    </div>
+
+    <!-- Diagnostics Detail Modal -->
+    <div v-if="showDiagnosticsDetail" class="modal modal-open">
+      <div class="modal-box max-w-4xl">
+        <div class="flex justify-between items-start mb-4">
+          <h3 class="font-bold text-2xl">System Diagnostics</h3>
+          <button @click="showDiagnosticsDetail = false" class="btn btn-sm btn-circle btn-ghost">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- Upstream Errors Section -->
+        <div v-if="upstreamErrors.length > 0" class="mb-6">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="font-semibold text-lg flex items-center">
+              <span class="badge badge-error badge-sm mr-2">{{ upstreamErrors.length }}</span>
+              Connection Error{{ upstreamErrors.length !== 1 ? 's' : '' }}
+            </h4>
+          </div>
+          <div class="space-y-3">
+            <div v-for="(error, index) in upstreamErrors" :key="`error-${index}`" class="alert alert-error">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div class="flex-1">
+                <div class="font-semibold">{{ error.server }}</div>
+                <div class="text-sm">{{ error.message }}</div>
+                <div class="text-xs opacity-70 mt-1">{{ error.timestamp }}</div>
+              </div>
+              <div class="flex gap-2">
+                <button @click="dismissError(error)" class="btn btn-sm btn-ghost">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- OAuth Required Section -->
+        <div v-if="oauthRequired.length > 0" class="mb-6">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="font-semibold text-lg flex items-center">
+              <span class="badge badge-warning badge-sm mr-2">{{ oauthRequired.length }}</span>
+              OAuth Authentication Required
+            </h4>
+          </div>
+          <div class="space-y-3">
+            <div v-for="(item, index) in oauthRequired" :key="`oauth-${index}`" class="alert alert-warning">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+              <div class="flex-1">
+                <div class="font-semibold">{{ item.server }}</div>
+                <div class="text-sm">{{ item.message }}</div>
+                <div class="text-xs opacity-70 mt-1">State: {{ item.state }}</div>
+              </div>
+              <div class="flex gap-2">
+                <button @click="triggerOAuthLogin(item.server)" class="btn btn-sm btn-primary">
+                  Login
+                </button>
+                <button @click="dismissOAuth(item.server)" class="btn btn-sm btn-ghost">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Missing Secrets Section -->
+        <div v-if="missingSecrets.length > 0" class="mb-6">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="font-semibold text-lg flex items-center">
+              <span class="badge badge-warning badge-sm mr-2">{{ missingSecrets.length }}</span>
+              Missing Secret{{ missingSecrets.length !== 1 ? 's' : '' }}
+            </h4>
+          </div>
+          <div class="space-y-3">
+            <div v-for="(secret, index) in missingSecrets" :key="`secret-${index}`" class="alert alert-warning">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+              </svg>
+              <div class="flex-1">
+                <div class="font-semibold">{{ secret.name }}</div>
+                <div class="text-sm">{{ secret.message || 'Secret is required' }}</div>
+              </div>
+              <div class="flex gap-2">
+                <button @click="dismissSecret(secret)" class="btn btn-sm btn-ghost">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Runtime Warnings Section -->
+        <div v-if="runtimeWarnings.length > 0" class="mb-6">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="font-semibold text-lg flex items-center">
+              <span class="badge badge-info badge-sm mr-2">{{ runtimeWarnings.length }}</span>
+              Runtime Warning{{ runtimeWarnings.length !== 1 ? 's' : '' }}
+            </h4>
+          </div>
+          <div class="space-y-3">
+            <div v-for="(warning, index) in runtimeWarnings" :key="`warning-${index}`" class="alert alert-info">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div class="flex-1">
+                <div class="font-semibold">{{ warning.category }}</div>
+                <div class="text-sm">{{ warning.message }}</div>
+                <div class="text-xs opacity-70 mt-1">{{ warning.timestamp }}</div>
+              </div>
+              <div class="flex gap-2">
+                <button @click="dismissWarning(warning)" class="btn btn-sm btn-ghost">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- No Issues -->
+        <div v-if="totalDiagnosticsCount === 0" class="text-center py-8">
+          <svg class="w-16 h-16 mx-auto mb-4 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <p class="text-lg font-semibold">All systems operational</p>
+          <p class="text-sm opacity-70 mt-1">No issues detected</p>
+        </div>
+
+        <!-- Actions -->
+        <div class="modal-action">
+          <button v-if="dismissedDiagnostics.size > 0" @click="restoreAllDismissed" class="btn btn-outline">
+            Restore Dismissed ({{ dismissedDiagnostics.size }})
+          </button>
+          <button @click="showDiagnosticsDetail = false" class="btn btn-primary">
+            Close
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Token Savings and Distribution -->
@@ -357,11 +508,11 @@ const upstreamErrors = computed(() => {
   if (!diagnosticsData.value?.upstream_errors) return []
 
   return diagnosticsData.value.upstream_errors.filter((error: any) => {
-    const errorKey = `error_${error.server}`
+    const errorKey = `error_${error.server_name}`
     return !dismissedDiagnostics.value.has(errorKey)
   }).map((error: any) => ({
-    server: error.server || 'Unknown',
-    message: error.message,
+    server: error.server_name || 'Unknown',
+    message: error.error_message || error.message || 'Unknown error',
     timestamp: new Date(error.timestamp).toLocaleString()
   }))
 })
@@ -369,10 +520,14 @@ const upstreamErrors = computed(() => {
 const oauthRequired = computed(() => {
   if (!diagnosticsData.value?.oauth_required) return []
 
-  return diagnosticsData.value.oauth_required.filter((server: string) => {
-    const oauthKey = `oauth_${server}`
+  return diagnosticsData.value.oauth_required.filter((item: any) => {
+    const oauthKey = `oauth_${item.server_name}`
     return !dismissedDiagnostics.value.has(oauthKey)
-  })
+  }).map((item: any) => ({
+    server: item.server_name,
+    state: item.state,
+    message: item.message
+  }))
 })
 
 const missingSecrets = computed(() => {

@@ -648,6 +648,15 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	var statusText string
 	var iconPath string
 
+	// Check for OAuth-related errors in last_error (matching web UI logic)
+	needsOAuth := lastError != "" && (
+		strings.Contains(lastError, "OAuth authentication required") ||
+		strings.Contains(lastError, "deferred for tray UI") ||
+		strings.Contains(lastError, "authorization") ||
+		strings.Contains(lastError, "401") ||
+		strings.Contains(lastError, "invalid_token") ||
+		strings.Contains(lastError, "Missing or invalid access token"))
+
 	if quarantined {
 		statusIcon = "🔒"
 		statusText = "quarantined"
@@ -656,6 +665,11 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		statusIcon = "⏸️"
 		statusText = "disabled"
 		iconPath = iconPaused
+	} else if needsOAuth {
+		// OAuth required - show as info/warning state, not error
+		statusIcon = "🔐"
+		statusText = "needs auth"
+		iconPath = iconDisconnected // Use disconnected icon (could add specific auth icon later)
 	} else if st := strings.ToLower(statusValue); st != "" {
 		switch st {
 		case "ready", "connected":

@@ -16,10 +16,11 @@
             'badge badge-sm flex-shrink-0',
             server.connected ? 'badge-success' :
             server.connecting ? 'badge-warning' :
+            needsOAuth ? 'badge-info' :
             'badge-error'
           ]"
         >
-          {{ server.connected ? 'Connected' : server.connecting ? 'Connecting' : 'Disconnected' }}
+          {{ server.connected ? 'Connected' : server.connecting ? 'Connecting' : needsOAuth ? 'Needs Auth' : 'Disconnected' }}
         </div>
       </div>
 
@@ -49,12 +50,26 @@
         </div>
       </div>
 
-      <!-- Error message -->
-      <div v-if="server.last_error" class="alert alert-error alert-sm mb-4">
+      <!-- Error/Info message -->
+      <div
+        v-if="server.last_error && !needsOAuth"
+        class="alert alert-error alert-sm mb-4"
+      >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
         <span class="text-xs">{{ server.last_error }}</span>
+      </div>
+
+      <!-- OAuth info message -->
+      <div
+        v-if="needsOAuth"
+        class="alert alert-info alert-sm mb-4"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span class="text-xs">Authentication required - click Login button</span>
       </div>
 
       <!-- Quarantine warning -->
@@ -175,7 +190,8 @@ const needsOAuth = computed(() => {
     props.server.last_error.includes('OAuth') ||
     props.server.last_error.includes('401') ||
     props.server.last_error.includes('invalid_token') ||
-    props.server.last_error.includes('Missing or invalid access token')
+    props.server.last_error.includes('Missing or invalid access token') ||
+    props.server.last_error.includes('deferred for tray UI')
   )
 
   // Check if server has OAuth configuration
