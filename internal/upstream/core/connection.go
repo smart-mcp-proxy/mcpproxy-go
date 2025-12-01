@@ -1175,7 +1175,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			// For tray mode, defer OAuth to prevent UI blocking
 			// The connection will be retried by the managed client retry logic
 			// which will eventually complete OAuth in the background
-			if c.isDeferOAuthForTray() {
+			if c.isDeferOAuthForTray(ctx) {
 				c.logger.Info("⏳ Deferring OAuth to prevent tray UI blocking - will retry in background",
 					zap.String("server", c.config.Name))
 
@@ -2348,7 +2348,17 @@ func (c *Client) hasGUIEnvironment() bool {
 }
 
 // isDeferOAuthForTray checks if OAuth should be deferred to prevent tray UI blocking
-func (c *Client) isDeferOAuthForTray() bool {
+func (c *Client) isDeferOAuthForTray(ctx context.Context) bool {
+	// Check if this is a manual OAuth flow (triggered via Login button)
+	// Manual flows should NEVER be deferred
+	if value := ctx.Value(manualOAuthKey); value != nil {
+		if isManual, ok := value.(bool); ok && isManual {
+			c.logger.Debug("Manual OAuth flow detected - NOT deferring",
+				zap.String("server", c.config.Name))
+			return false
+		}
+	}
+
 	// Check if we're in tray mode by looking for tray-specific environment or configuration
 	// During initial server startup, we should defer OAuth to prevent blocking the tray UI
 

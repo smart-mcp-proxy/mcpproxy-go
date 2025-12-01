@@ -834,7 +834,7 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 
 	// OAuth Login action - show FIRST if server needs authentication
 	if needsOAuth {
-		oauthItem := serverMenuItem.AddSubMenuItem("🔐 Login (OAuth)", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+		oauthItem := serverMenuItem.AddSubMenuItem("Login (OAuth)", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
 		m.serverOAuthItems[serverName] = oauthItem
 
 		// Set up OAuth login click handler
@@ -861,7 +861,7 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	// OAuth Login action (for authenticated servers or when not the primary action)
 	// Show as secondary option if OAuth is supported but server doesn't currently need auth
 	if m.serverSupportsOAuth(server) && !quarantined && !needsOAuth {
-		oauthItem := serverMenuItem.AddSubMenuItem("🔐 OAuth Login", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+		oauthItem := serverMenuItem.AddSubMenuItem("OAuth Login", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
 		m.serverOAuthItems[serverName] = oauthItem
 
 		// Set up OAuth login click handler
