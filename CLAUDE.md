@@ -121,6 +121,15 @@ go test ./internal/server -v
 # Run tests with coverage
 go test -coverprofile=coverage.out ./internal/...
 go tool cover -html=coverage.out
+
+# Run OAuth E2E test suite
+./scripts/run-oauth-e2e.sh
+
+# Run OAuth test server unit tests
+go test ./tests/oauthserver/... -v
+
+# Run OAuth integration tests (starts test OAuth server)
+OAUTH_INTEGRATION_TESTS=1 go test ./tests/oauthserver/... -run TestIntegration -v
 ```
 
 #### E2E Test Requirements
@@ -834,6 +843,8 @@ When making changes to this codebase, ensure you understand the modular architec
 - BBolt embedded database (`~/.mcpproxy/config.db`) for server configurations, quarantine status, and tool statistics (004-management-health-refactor)
 - BBolt embedded database (`~/.mcpproxy/config.db`) - used by existing runtime, no changes required (005-rest-management-integration)
 - N/A (documentation-only feature) (001-oas-endpoint-documentation)
+- Go 1.24.0 (as per existing project) (007-oauth-e2e-testing)
+- BBolt (existing `internal/storage/`) for token persistence (007-oauth-e2e-testing)
 
 ## Recent Changes
 - 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3

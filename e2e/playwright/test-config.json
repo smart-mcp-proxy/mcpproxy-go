@@ -1,0 +1,17 @@
+{
+  "listen": "127.0.0.1:8085",
+  "data_dir": "/tmp/mcpproxy-oauth-e2e",
+  "enable_socket": false,
+  "api_key": "test-api-key",
+  "mcpServers": [
+    {
+      "name": "oauth-test-server",
+      "url": "http://127.0.0.1:9000/mcp",
+      "protocol": "streamable-http",
+      "enabled": true,
+      "oauth": {
+        "scopes": ["read", "write"]
+      }
+    }
+  ]
+}

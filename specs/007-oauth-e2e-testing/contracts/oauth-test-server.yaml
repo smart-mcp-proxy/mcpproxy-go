@@ -1,0 +1,585 @@
+openapi: 3.1.0
+info:
+  title: OAuth Test Server API
+  description: |
+    Test OAuth 2.1 server for mcpproxy E2E testing.
+    Implements RFC 6749, 7636, 7591, 8414, 8628, 8707.
+  version: 1.0.0
+
+servers:
+  - url: http://127.0.0.1:{port}
+    description: Local test server (ephemeral port)
+    variables:
+      port:
+        default: "0"
+        description: Dynamically allocated port
+
+paths:
+  /.well-known/oauth-authorization-server:
+    get:
+      operationId: getAuthServerMetadata
+      summary: OAuth 2.0 Authorization Server Metadata
+      description: Returns server metadata per RFC 8414
+      tags: [Discovery]
+      responses:
+        "200":
+          description: Server metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthServerMetadata"
+
+  /.well-known/openid-configuration:
+    get:
+      operationId: getOpenIDConfiguration
+      summary: OpenID Connect Discovery
+      description: Alias for authorization server metadata
+      tags: [Discovery]
+      responses:
+        "200":
+          description: Server metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthServerMetadata"
+
+  /jwks.json:
+    get:
+      operationId: getJWKS
+      summary: JSON Web Key Set
+      description: Public keys for JWT verification
+      tags: [Discovery]
+      responses:
+        "200":
+          description: JWKS document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JWKS"
+
+  /authorize:
+    get:
+      operationId: authorize
+      summary: Authorization Endpoint
+      description: |
+        Initiates authorization code flow.
+        Renders login UI if user interaction required.
+      tags: [Authorization]
+      parameters:
+        - name: response_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [code]
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uri
+        - name: scope
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+        - name: code_challenge
+          in: query
+          schema:
+            type: string
+        - name: code_challenge_method
+          in: query
+          schema:
+            type: string
+            enum: [S256]
+        - name: resource
+          in: query
+          description: RFC 8707 resource indicator
+          schema:
+            type: string
+            format: uri
+      responses:
+        "200":
+          description: Login UI HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+        "302":
+          description: Redirect to callback with code or error
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+
+    post:
+      operationId: submitLogin
+      summary: Submit Login Form
+      description: Process login credentials and consent
+      tags: [Authorization]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                consent:
+                  type: string
+                  enum: ["on", ""]
+              required: [username, password]
+      responses:
+        "302":
+          description: Redirect to callback with code or error
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "200":
+          description: Error page (invalid credentials)
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /token:
+    post:
+      operationId: token
+      summary: Token Endpoint
+      description: |
+        Exchange authorization code, refresh token, client credentials,
+        or device code for access tokens.
+      tags: [Token]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/AuthCodeTokenRequest"
+                - $ref: "#/components/schemas/RefreshTokenRequest"
+                - $ref: "#/components/schemas/ClientCredentialsRequest"
+                - $ref: "#/components/schemas/DeviceCodeTokenRequest"
+      responses:
+        "200":
+          description: Token response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          description: Token error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenError"
+
+  /registration:
+    post:
+      operationId: registerClient
+      summary: Dynamic Client Registration
+      description: Register a new OAuth client per RFC 7591
+      tags: [DCR]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClientRegistrationRequest"
+      responses:
+        "201":
+          description: Client registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientRegistrationResponse"
+        "400":
+          description: Registration error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientRegistrationError"
+
+  /device_authorization:
+    post:
+      operationId: deviceAuthorization
+      summary: Device Authorization Endpoint
+      description: Initiate device code flow per RFC 8628
+      tags: [Device]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                client_id:
+                  type: string
+                scope:
+                  type: string
+                resource:
+                  type: string
+                  format: uri
+              required: [client_id]
+      responses:
+        "200":
+          description: Device authorization response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceAuthorizationResponse"
+        "400":
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+
+  /device_verification:
+    get:
+      operationId: deviceVerificationPage
+      summary: Device Verification Page
+      description: Page where user enters device code
+      tags: [Device]
+      parameters:
+        - name: user_code
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Verification form HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+    post:
+      operationId: submitDeviceVerification
+      summary: Submit Device Verification
+      description: Approve or deny device code
+      tags: [Device]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                user_code:
+                  type: string
+                action:
+                  type: string
+                  enum: [approve, deny]
+              required: [user_code, action]
+      responses:
+        "200":
+          description: Verification result page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /protected:
+    get:
+      operationId: protectedResource
+      summary: Protected Resource (Detection Test)
+      description: |
+        Returns 401 with WWW-Authenticate header for OAuth detection testing.
+        Only available when DetectionMode includes WWWAuthenticate.
+      tags: [Detection]
+      responses:
+        "401":
+          description: Authentication required
+          headers:
+            WWW-Authenticate:
+              schema:
+                type: string
+                example: 'Bearer realm="test", authorization_uri="http://127.0.0.1:12345/authorize"'
+
+components:
+  schemas:
+    AuthServerMetadata:
+      type: object
+      required:
+        - issuer
+        - authorization_endpoint
+        - token_endpoint
+      properties:
+        issuer:
+          type: string
+          format: uri
+        authorization_endpoint:
+          type: string
+          format: uri
+        token_endpoint:
+          type: string
+          format: uri
+        jwks_uri:
+          type: string
+          format: uri
+        registration_endpoint:
+          type: string
+          format: uri
+        device_authorization_endpoint:
+          type: string
+          format: uri
+        scopes_supported:
+          type: array
+          items:
+            type: string
+        response_types_supported:
+          type: array
+          items:
+            type: string
+        grant_types_supported:
+          type: array
+          items:
+            type: string
+        code_challenge_methods_supported:
+          type: array
+          items:
+            type: string
+        token_endpoint_auth_methods_supported:
+          type: array
+          items:
+            type: string
+
+    JWKS:
+      type: object
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/JWK"
+
+    JWK:
+      type: object
+      properties:
+        kty:
+          type: string
+          enum: [RSA]
+        use:
+          type: string
+          enum: [sig]
+        kid:
+          type: string
+        alg:
+          type: string
+          enum: [RS256]
+        n:
+          type: string
+          description: RSA modulus (base64url)
+        e:
+          type: string
+          description: RSA exponent (base64url)
+
+    AuthCodeTokenRequest:
+      type: object
+      properties:
+        grant_type:
+          type: string
+          enum: [authorization_code]
+        code:
+          type: string
+        redirect_uri:
+          type: string
+          format: uri
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        code_verifier:
+          type: string
+        resource:
+          type: string
+          format: uri
+      required: [grant_type, code, redirect_uri, client_id]
+
+    RefreshTokenRequest:
+      type: object
+      properties:
+        grant_type:
+          type: string
+          enum: [refresh_token]
+        refresh_token:
+          type: string
+        scope:
+          type: string
+        resource:
+          type: string
+          format: uri
+      required: [grant_type, refresh_token]
+
+    ClientCredentialsRequest:
+      type: object
+      properties:
+        grant_type:
+          type: string
+          enum: [client_credentials]
+        scope:
+          type: string
+        resource:
+          type: string
+          format: uri
+      required: [grant_type]
+
+    DeviceCodeTokenRequest:
+      type: object
+      properties:
+        grant_type:
+          type: string
+          enum: ["urn:ietf:params:oauth:grant-type:device_code"]
+        device_code:
+          type: string
+        client_id:
+          type: string
+      required: [grant_type, device_code, client_id]
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+        refresh_token:
+          type: string
+        scope:
+          type: string
+
+    TokenError:
+      type: object
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_request
+            - invalid_client
+            - invalid_grant
+            - unauthorized_client
+            - unsupported_grant_type
+            - invalid_scope
+            - authorization_pending
+            - slow_down
+            - access_denied
+            - expired_token
+        error_description:
+          type: string
+        error_uri:
+          type: string
+          format: uri
+
+    OAuthError:
+      type: object
+      properties:
+        error:
+          type: string
+        error_description:
+          type: string
+
+    ClientRegistrationRequest:
+      type: object
+      properties:
+        redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+        grant_types:
+          type: array
+          items:
+            type: string
+        response_types:
+          type: array
+          items:
+            type: string
+        client_name:
+          type: string
+        scope:
+          type: string
+        token_endpoint_auth_method:
+          type: string
+          enum: [client_secret_basic, client_secret_post, none]
+      required: [redirect_uris]
+
+    ClientRegistrationResponse:
+      type: object
+      properties:
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        client_id_issued_at:
+          type: integer
+        client_secret_expires_at:
+          type: integer
+        redirect_uris:
+          type: array
+          items:
+            type: string
+        grant_types:
+          type: array
+          items:
+            type: string
+        response_types:
+          type: array
+          items:
+            type: string
+        client_name:
+          type: string
+        token_endpoint_auth_method:
+          type: string
+
+    ClientRegistrationError:
+      type: object
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_redirect_uri
+            - invalid_client_metadata
+            - invalid_software_statement
+        error_description:
+          type: string
+
+    DeviceAuthorizationResponse:
+      type: object
+      properties:
+        device_code:
+          type: string
+        user_code:
+          type: string
+        verification_uri:
+          type: string
+          format: uri
+        verification_uri_complete:
+          type: string
+          format: uri
+        expires_in:
+          type: integer
+        interval:
+          type: integer
