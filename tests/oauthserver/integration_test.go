@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -28,30 +26,6 @@ func skipIfNoIntegration(t *testing.T) {
 	if os.Getenv("OAUTH_INTEGRATION_TESTS") != "1" {
 		t.Skip("Skipping integration test (set OAUTH_INTEGRATION_TESTS=1 to run)")
 	}
-}
-
-// findMCPProxyBinary locates the mcpproxy binary.
-func findMCPProxyBinary() (string, error) {
-	// Try common locations
-	candidates := []string{
-		"./mcpproxy",
-		"../../mcpproxy",
-		filepath.Join(os.Getenv("GOPATH"), "bin", "mcpproxy"),
-	}
-
-	for _, path := range candidates {
-		if _, err := os.Stat(path); err == nil {
-			return filepath.Abs(path)
-		}
-	}
-
-	// Try to find in PATH
-	path, err := exec.LookPath("mcpproxy")
-	if err == nil {
-		return path, nil
-	}
-
-	return "", fmt.Errorf("mcpproxy binary not found")
 }
 
 // TestIntegration_WWWAuthenticateDiscovery tests that mcpproxy can discover
