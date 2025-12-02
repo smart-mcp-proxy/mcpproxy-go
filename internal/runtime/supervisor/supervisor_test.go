@@ -342,9 +342,7 @@ func TestSupervisor_CurrentSnapshot(t *testing.T) {
 	_ = supervisor.reconcile(configSvc.Current())
 
 	snapshot := supervisor.CurrentSnapshot()
-	if snapshot == nil {
-		t.Fatal("Expected non-nil snapshot")
-	}
+	require.NotNil(t, snapshot, "Expected non-nil snapshot")
 
 	if len(snapshot.Servers) != 2 {
 		t.Errorf("Expected 2 servers, got %d", len(snapshot.Servers))
