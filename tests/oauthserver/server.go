@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 // OAuthTestServer is the main test server instance managing all OAuth endpoints.
@@ -282,8 +284,10 @@ func (s *OAuthTestServer) setupRoutes(mux *http.ServeMux) {
 	// Callback endpoint for testing - displays received OAuth parameters
 	mux.HandleFunc("/callback", s.handleCallback)
 
-	// MCP endpoint with OAuth protection - for testing mcpproxy OAuth client
-	mux.HandleFunc("/mcp", s.handleMCP)
+	// MCP endpoint with OAuth protection using mcp-go StreamableHTTPServer
+	mcpSrv := s.createMCPServer()
+	streamableServer := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithStateLess(true))
+	mux.Handle("/mcp", s.oauthMiddleware(streamableServer))
 }
 
 // handleCallback handles the OAuth callback and displays the received parameters.

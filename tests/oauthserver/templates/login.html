@@ -177,6 +177,54 @@
             border-radius: 4px;
             font-family: monospace;
         }
+        /* Auto-submit timer styles */
+        .auto-submit-banner {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            text-align: center;
+            color: white;
+        }
+        .auto-submit-banner.cancelled {
+            background: linear-gradient(135deg, #6c757d 0%, #495057 100%);
+        }
+        .auto-submit-banner h3 {
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        .timer-display {
+            font-size: 32px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .timer-progress {
+            width: 100%;
+            height: 6px;
+            background: rgba(255,255,255,0.3);
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .timer-progress-bar {
+            height: 100%;
+            background: white;
+            border-radius: 3px;
+            transition: width 0.1s linear;
+        }
+        .btn-cancel-timer {
+            background: rgba(255,255,255,0.2);
+            border: 2px solid white;
+            color: white;
+            padding: 8px 20px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+        .btn-cancel-timer:hover {
+            background: rgba(255,255,255,0.3);
+        }
     </style>
 </head>
 <body>
@@ -184,6 +232,18 @@
         <div class="logo">
             <h1>🔐 OAuth Test Server</h1>
             <p>Sign in to authorize the application</p>
+        </div>
+
+        <!-- Auto-submit timer banner -->
+        <div id="autoSubmitBanner" class="auto-submit-banner">
+            <h3>⏱️ Auto-submitting in</h3>
+            <div id="timerDisplay" class="timer-display">5</div>
+            <div class="timer-progress">
+                <div id="timerProgressBar" class="timer-progress-bar" style="width: 100%"></div>
+            </div>
+            <button type="button" id="cancelTimerBtn" class="btn-cancel-timer" onclick="cancelAutoSubmit()">
+                Cancel Auto-Submit
+            </button>
         </div>
 
         {{if .Error}}
@@ -198,7 +258,7 @@
             <p>Client ID: {{.ClientID}}</p>
         </div>
 
-        <form method="POST" action="/authorize">
+        <form id="loginForm" method="POST" action="/authorize">
             <!-- Preserve OAuth parameters -->
             <input type="hidden" name="response_type" value="{{.ResponseType}}">
             <input type="hidden" name="client_id" value="{{.ClientID}}">
@@ -208,15 +268,16 @@
             <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
             <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
             <input type="hidden" name="resource" value="{{.Resource}}">
+            <input type="hidden" id="actionInput" name="action" value="approve">
 
             <div class="form-group">
                 <label for="username">Username</label>
-                <input type="text" id="username" name="username" required autocomplete="username" placeholder="Enter username">
+                <input type="text" id="username" name="username" required autocomplete="username" placeholder="Enter username" value="testuser">
             </div>
 
             <div class="form-group">
                 <label for="password">Password</label>
-                <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="Enter password">
+                <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="Enter password" value="testpass">
             </div>
 
             <div class="consent-section">
@@ -233,14 +294,73 @@
             </div>
 
             <div class="button-group">
-                <button type="submit" name="action" value="deny" class="btn btn-secondary">Deny</button>
-                <button type="submit" name="action" value="approve" class="btn btn-primary">Approve</button>
+                <button type="submit" onclick="document.getElementById('actionInput').value='deny'" class="btn btn-secondary">Deny</button>
+                <button type="submit" onclick="document.getElementById('actionInput').value='approve'" class="btn btn-primary">Approve</button>
             </div>
         </form>
 
         <div class="test-credentials">
-            <p>Test credentials: <code>testuser</code> / <code>testpass</code></p>
+            <p>Test credentials: <code>testuser</code> / <code>testpass</code> (pre-filled)</p>
         </div>
     </div>
+
+    <script>
+        // Auto-submit configuration
+        const AUTO_SUBMIT_SECONDS = 5;
+        let timeRemaining = AUTO_SUBMIT_SECONDS;
+        let timerInterval = null;
+        let isCancelled = false;
+
+        function updateTimerDisplay() {
+            const display = document.getElementById('timerDisplay');
+            const progressBar = document.getElementById('timerProgressBar');
+
+            display.textContent = timeRemaining;
+            const progressPercent = (timeRemaining / AUTO_SUBMIT_SECONDS) * 100;
+            progressBar.style.width = progressPercent + '%';
+        }
+
+        function cancelAutoSubmit() {
+            isCancelled = true;
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+
+            const banner = document.getElementById('autoSubmitBanner');
+            banner.classList.add('cancelled');
+            banner.innerHTML = '<h3>⏹️ Auto-submit cancelled</h3><p style="font-size: 14px; margin-top: 10px;">Click Approve to continue manually</p>';
+        }
+
+        function startAutoSubmitTimer() {
+            // Don't auto-submit if there's an error
+            {{if .Error}}
+            cancelAutoSubmit();
+            return;
+            {{end}}
+
+            updateTimerDisplay();
+
+            timerInterval = setInterval(function() {
+                if (isCancelled) {
+                    clearInterval(timerInterval);
+                    return;
+                }
+
+                timeRemaining--;
+                updateTimerDisplay();
+
+                if (timeRemaining <= 0) {
+                    clearInterval(timerInterval);
+                    // Submit the form
+                    document.getElementById('actionInput').value = 'approve';
+                    document.getElementById('loginForm').submit();
+                }
+            }, 1000);
+        }
+
+        // Start timer when page loads
+        document.addEventListener('DOMContentLoaded', startAutoSubmitTimer);
+    </script>
 </body>
 </html>
