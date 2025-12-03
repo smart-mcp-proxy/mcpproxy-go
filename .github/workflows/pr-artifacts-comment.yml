@@ -59,34 +59,41 @@ jobs:
           # Build comment body
           MARKER="<!-- mcpproxy-pr-artifacts -->"
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/$RUN_ID"
-          HASH='#'
 
-          COMMENT_BODY="$MARKER
-${HASH}${HASH} 📦 Build Artifacts for PR ${HASH}$PR_NUMBER
+          read -r -d '' COMMENT_BODY << 'ENDOFCOMMENT' || true
+          <!-- mcpproxy-pr-artifacts -->
+          ## 📦 Build Artifacts
 
-**Workflow Run:** [${HASH}$RUN_ID]($RUN_URL)
-**Branch:** \`$VERSION\`
+          **Workflow Run:** [View Run](RUN_URL_PLACEHOLDER)
+          **Branch:** `VERSION_PLACEHOLDER`
 
-${HASH}${HASH}${HASH} Available Artifacts
+          ### Available Artifacts
 
-$ARTIFACTS
+          ARTIFACTS_PLACEHOLDER
 
-${HASH}${HASH}${HASH} How to Download
+          ### How to Download
 
-**Option 1: GitHub Web UI** (easiest)
-1. Go to the [workflow run page]($RUN_URL)
-2. Scroll to the bottom \"Artifacts\" section
-3. Click on the artifact you want to download
+          **Option 1: GitHub Web UI** (easiest)
+          1. Go to the workflow run page linked above
+          2. Scroll to the bottom "Artifacts" section
+          3. Click on the artifact you want to download
 
-**Option 2: GitHub CLI**
-\`\`\`bash
-gh run download $RUN_ID --repo ${{ github.repository }}
+          **Option 2: GitHub CLI**
+          ```bash
+          gh run download RUN_ID_PLACEHOLDER --repo REPO_PLACEHOLDER
+          ```
 
-${HASH} Or download a specific artifact:
-gh run download $RUN_ID --name archive-linux-amd64
-\`\`\`
+          > **Note:** Artifacts expire in 14 days.
+          ENDOFCOMMENT
 
-> **Note:** Artifacts expire in 14 days."
+          # Replace placeholders
+          COMMENT_BODY="${COMMENT_BODY//RUN_URL_PLACEHOLDER/$RUN_URL}"
+          COMMENT_BODY="${COMMENT_BODY//VERSION_PLACEHOLDER/$VERSION}"
+          COMMENT_BODY="${COMMENT_BODY//ARTIFACTS_PLACEHOLDER/$ARTIFACTS}"
+          COMMENT_BODY="${COMMENT_BODY//RUN_ID_PLACEHOLDER/$RUN_ID}"
+          COMMENT_BODY="${COMMENT_BODY//REPO_PLACEHOLDER/${{ github.repository }}}"
+          # Remove leading spaces from heredoc
+          COMMENT_BODY=$(echo "$COMMENT_BODY" | sed 's/^          //')
 
           # Check for existing comment
           EXISTING_COMMENT=$(gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
