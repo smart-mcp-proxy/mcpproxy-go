@@ -59,18 +59,19 @@ jobs:
           # Build comment body
           MARKER="<!-- mcpproxy-pr-artifacts -->"
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/$RUN_ID"
+          HASH='#'
 
           COMMENT_BODY="$MARKER
-## 📦 Build Artifacts for PR #$PR_NUMBER
+${HASH}${HASH} 📦 Build Artifacts for PR ${HASH}$PR_NUMBER
 
-**Workflow Run:** [#$RUN_ID]($RUN_URL)
+**Workflow Run:** [${HASH}$RUN_ID]($RUN_URL)
 **Branch:** \`$VERSION\`
 
-### Available Artifacts
+${HASH}${HASH}${HASH} Available Artifacts
 
 $ARTIFACTS
 
-### How to Download
+${HASH}${HASH}${HASH} How to Download
 
 **Option 1: GitHub Web UI** (easiest)
 1. Go to the [workflow run page]($RUN_URL)
@@ -81,7 +82,7 @@ $ARTIFACTS
 \`\`\`bash
 gh run download $RUN_ID --repo ${{ github.repository }}
 
-# Or download a specific artifact:
+${HASH} Or download a specific artifact:
 gh run download $RUN_ID --name archive-linux-amd64
 \`\`\`
 
