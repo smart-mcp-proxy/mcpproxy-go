@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
@@ -25,9 +26,7 @@ func TestNewService(t *testing.T) {
 	}
 
 	snapshot := svc.Current()
-	if snapshot == nil {
-		t.Fatal("Expected non-nil snapshot")
-	}
+	require.NotNil(t, snapshot, "Expected non-nil snapshot")
 
 	if snapshot.Version != 0 {
 		t.Errorf("Expected version 0, got %d", snapshot.Version)
@@ -274,9 +273,7 @@ func TestSnapshot_GetServer(t *testing.T) {
 
 	// Test existing server
 	srv := snapshot.GetServer("server1")
-	if srv == nil {
-		t.Fatal("Expected to find server1")
-	}
+	require.NotNil(t, srv, "Expected to find server1")
 
 	if srv.Name != "server1" {
 		t.Errorf("Expected server1, got %s", srv.Name)

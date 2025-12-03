@@ -1,6 +1,6 @@
 # MCPProxy Makefile
 
-.PHONY: help build swagger swagger-verify frontend-build frontend-dev backend-dev clean test lint
+.PHONY: help build swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup
 
 SWAGGER_BIN ?= $(HOME)/go/bin/swag
 SWAGGER_OUT ?= oas
@@ -15,9 +15,13 @@ help:
 	@echo "  make frontend-build  - Build frontend for production"
 	@echo "  make frontend-dev    - Start frontend development server"
 	@echo "  make backend-dev     - Build backend with dev flag (loads frontend from disk)"
-	@echo "  make clean          - Clean build artifacts"
-	@echo "  make test           - Run tests"
-	@echo "  make lint           - Run linter"
+	@echo "  make clean           - Clean build artifacts"
+	@echo "  make test            - Run unit tests"
+	@echo "  make test-coverage   - Run tests with coverage"
+	@echo "  make test-e2e        - Run all E2E tests"
+	@echo "  make test-e2e-oauth  - Run OAuth E2E tests with Playwright"
+	@echo "  make lint            - Run linter"
+	@echo "  make dev-setup       - Install development dependencies (swag, frontend, Playwright)"
 
 # Generate OpenAPI specification
 swagger:
@@ -106,4 +110,18 @@ dev-setup:
 	go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4
 	@echo "📦 Installing frontend dependencies..."
 	cd frontend && npm install
+	@echo "📦 Installing Playwright E2E test dependencies..."
+	cd e2e/playwright && npm install
+	@echo "📦 Installing Playwright browsers..."
+	cd e2e/playwright && npx playwright install chromium
 	@echo "✅ Development setup completed"
+
+# Run OAuth E2E tests with Playwright
+test-e2e-oauth:
+	@echo "🧪 Running OAuth E2E tests..."
+	./scripts/run-oauth-e2e.sh
+
+# Run all E2E tests
+test-e2e: test-e2e-oauth
+	@echo "🧪 Running E2E tests..."
+	./scripts/test-api-e2e.sh

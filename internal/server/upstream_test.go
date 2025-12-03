@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/cache"
@@ -99,9 +100,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 		t.Fatalf("handleUpstreamServers returned error: %v", err)
 	}
 
-	if result == nil {
-		t.Fatal("handleUpstreamServers returned nil result")
-	}
+	require.NotNil(t, result, "handleUpstreamServers returned nil result")
 
 	// The handler should respond quickly (within 1 second)
 	if duration > time.Second {
@@ -111,9 +110,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 	t.Logf("handleUpstreamServers completed in %v", duration)
 
 	// Verify the result contains expected fields
-	if len(result.Content) == 0 {
-		t.Fatal("Result should contain content")
-	}
+	require.NotEmpty(t, result.Content, "Result should contain content")
 
 	// The result should indicate success without hanging
 	t.Logf("Result: %+v", result.Content[0])
