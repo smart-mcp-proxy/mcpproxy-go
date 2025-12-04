@@ -98,7 +98,7 @@ MCPProxy looks for configuration in these locations (in order):
 | `top_k` | integer | `5` | Number of top search results to return (1-100) |
 | `tools_limit` | integer | `15` | Maximum number of tools to return per request (1-1000) |
 | `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited) |
-| `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`) |
+| `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
 
 ### Debug & Development
 
