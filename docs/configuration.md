@@ -434,16 +434,19 @@ See [Setup Guide - HTTPS](setup.md#optional-https-setup) for complete details.
 | `enable_file` | boolean | `false` | Enable file logging |
 | `enable_console` | boolean | `true` | Enable console logging |
 | `filename` | string | `"main.log"` | Log filename |
-| `log_dir` | string | `""` | Custom log directory (defaults to `${data_dir}/logs`) |
+| `log_dir` | string | `""` | Custom log directory (defaults to OS log root; see below) |
 | `max_size` | integer | `10` | Maximum log file size in MB before rotation |
 | `max_backups` | integer | `5` | Number of backup log files to keep |
 | `max_age` | integer | `30` | Maximum age of log files in days |
 | `compress` | boolean | `true` | Compress rotated log files |
 | `json_format` | boolean | `false` | Use JSON format (useful for log aggregation) |
 
-**Log Locations:**
-- **Main log**: `~/Library/Logs/mcpproxy/main.log` (macOS) or `~/.mcpproxy/logs/main.log` (Linux/Windows)
-- **Per-server logs**: `~/Library/Logs/mcpproxy/server-{name}.log`
+**Log Locations (defaults):**
+- **macOS:** `~/Library/Logs/mcpproxy/main.log`
+- **Linux:** `~/.local/state/mcpproxy/logs/main.log` (or `/var/log/mcpproxy` when running as root)
+- **Windows:** `%LOCALAPPDATA%\mcpproxy\logs\main.log`
+- **Per-server logs:** same directory, `server-{name}.log`
+- **Custom:** set `log_dir` to override (fallback to `${data_dir}/logs` only when a custom directory is provided)
 
 See [Logging Documentation](logging.md) for complete details.
 
@@ -496,12 +499,22 @@ See [Logging Documentation](logging.md) for complete details.
   "python": "python:3.11",
   "python3": "python:3.11",
   "uvx": "python:3.11",
+  "pip": "python:3.11",
+  "pipx": "python:3.11",
   "node": "node:20",
   "npm": "node:20",
   "npx": "node:20",
+  "yarn": "node:20",
   "go": "golang:1.21-alpine",
   "cargo": "rust:1.75-slim",
-  "binary": "alpine:3.18"
+  "rustc": "rust:1.75-slim",
+  "binary": "alpine:3.18",
+  "sh": "alpine:3.18",
+  "bash": "alpine:3.18",
+  "ruby": "ruby:3.2-alpine",
+  "gem": "ruby:3.2-alpine",
+  "php": "php:8.2-cli-alpine",
+  "composer": "php:8.2-cli-alpine"
 }
 ```
 
@@ -602,7 +615,11 @@ See [Docker Recovery Documentation](docker-recovery-phase3.md) for complete deta
 | `enhance_path` | boolean | `false` | Enable PATH enhancement for Launchd scenarios |
 
 **Default Allowed System Variables:**
-- `PATH`, `HOME`, `TMPDIR`, `TEMP`, `TMP`, `NODE_PATH`, `NPM_CONFIG_PREFIX`
+- Core: `PATH`, `HOME`, `TMPDIR`, `TEMP`, `TMP`, `SHELL`, `TERM`, `LANG`, `USER`, `USERNAME`
+- Windows-specific: `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMFILES`, `SYSTEMROOT`, `COMSPEC`
+- Unix/XDG: `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`
+- Locale: all `LC_*` variables (e.g., `LC_ALL`, `LC_CTYPE`, …)
+- Custom additions: `custom_vars` merged on top
 
 ---
 
@@ -798,13 +815,20 @@ Here's a complete configuration example with all major sections:
 Many configuration options can be overridden via environment variables:
 
 | Environment Variable | Config Field | Description |
-|---------------------|--------------|-------------|
-| `MCPPROXY_LISTEN` | `listen` | Network binding address |
-| `MCPPROXY_API_KEY` | `api_key` | API key for authentication |
+|----------------------|--------------|-------------|
+| `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
+| `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty string disables auth) |
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
+| `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
+| `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
+| `MCPPROXY_DATA` | `data_dir` | Override data directory |
 | `MCPPROXY_DEBUG` | - | Enable debug mode |
 | `MCPPROXY_DISABLE_OAUTH` | - | Disable OAuth for testing |
 | `HEADLESS` | - | Run in headless mode |
+
+**Prefix rules:**
+- General settings also accept the `MCPP_` prefix (hyphens become underscores), e.g., `MCPP_TOP_K`, `MCPP_TOOLS_LIMIT`, `MCPP_ENABLE_PROMPTS`.
+- TLS/listen/data have additional convenience overrides with the `MCPPROXY_` prefix as listed above.
 
 **Priority:** Environment variables > Config file > Defaults
 
