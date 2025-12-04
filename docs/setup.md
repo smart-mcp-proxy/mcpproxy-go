@@ -104,13 +104,13 @@ MCPProxy looks for configuration in these locations (in order):
       "name": "local-python",
       "command": "python",
       "args": ["-m", "my_server"],
-      "type": "stdio",
+      "protocol": "stdio",
       "enabled": true
     },
     {
       "name": "remote-http",
       "url": "http://localhost:3001",
-      "type": "http",
+      "protocol": "http",
       "enabled": true
     }
   ]
@@ -118,6 +118,8 @@ MCPProxy looks for configuration in these locations (in order):
 ```
 
 **📝 Note:** At first launch, MCPProxy will automatically generate a minimal configuration file if none exists.
+
+**📚 For complete configuration reference:** See [Configuration Documentation](configuration.md) for all available options, including tokenizer settings, TLS configuration, Docker isolation, and more.
 
 ## Client Setup Instructions
 
@@ -680,6 +682,8 @@ tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 
 ## Advanced Configuration
 
+**📚 For complete configuration reference:** See [Configuration Documentation](configuration.md) for all available options.
+
 ### Security Settings
 
 ```json
@@ -712,7 +716,7 @@ For servers requiring authentication:
     {
       "name": "github",
       "url": "https://api.github.com/mcp/",
-      "type": "http",
+      "protocol": "http",
       "oauth": {
         "scopes": ["repo", "user"]
       },
@@ -733,6 +737,7 @@ For servers requiring authentication:
 
 - **MCPProxy Website**: https://mcpproxy.app
 - **Documentation**: https://mcpproxy.app/docs
+- **Configuration Reference**: [Configuration Documentation](configuration.md) - Complete configuration schema reference
 - **GitHub Repository**: https://github.com/smart-mcp-proxy/mcpproxy-go
 - **MCP Specification**: https://modelcontextprotocol.io
 - **Available MCP Servers**: https://github.com/modelcontextprotocol/servers
