@@ -385,6 +385,8 @@ Edit `~/.mcpproxy/mcp_config.json`:
 }
 ```
 
+**📚 For complete TLS configuration options:** See [Configuration Documentation - TLS/HTTPS](configuration.md#tlshttps-configuration).
+
 **Step 3: Update Client Configurations**
 
 After enabling HTTPS, update your client configurations to use `https://` URLs:
@@ -462,6 +464,8 @@ After enabling HTTPS, update your client configurations to use `https://` URLs:
 - `require_client_cert`: Enable mutual TLS (mTLS) for client authentication
 - `certs_dir`: Custom directory for certificates (default: `{data_dir}/certs`)
 - `hsts`: Enable HTTP Strict Transport Security headers
+
+**📚 For complete TLS configuration reference:** See [Configuration Documentation - TLS/HTTPS](configuration.md#tlshttps-configuration).
 
 ### Certificate Management
 
@@ -567,6 +571,8 @@ mcpproxy serve --listen 127.0.0.1:8080  # Bind to specific interface
   // ... rest of config
 }
 ```
+
+**📚 For all network binding options:** See [Configuration Documentation - Basic Configuration](configuration.md#basic-configuration).
 
 **Environment Variable:**
 
