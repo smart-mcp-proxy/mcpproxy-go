@@ -113,7 +113,7 @@ MCPProxy looks for configuration in these locations (in order):
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `debug_search` | boolean | `false` | Enable debug logging for search operations |
-| `enable_prompts` | boolean | `true` | Enable MCP prompts feature |
+| `enable_prompts` | boolean | `true` | Enable MCP prompts feature for workflow guidance and interactive assistance with common tasks (finding tools, debugging search, setting up servers, troubleshooting connections) |
 | `check_server_repo` | boolean | `true` | Enable repository detection for MCP servers (shows install commands) |
 
 ---
