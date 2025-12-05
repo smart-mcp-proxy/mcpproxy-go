@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -54,6 +55,28 @@ func (e *OAuthParameterError) Error() string {
 
 func (e *OAuthParameterError) Unwrap() error {
 	return e.OriginalErr
+}
+
+// ErrOAuthPending represents a deferred OAuth authentication requirement.
+// This error indicates that OAuth is required but has been intentionally deferred
+// (e.g., for user action via tray UI or CLI) rather than being a connection failure.
+type ErrOAuthPending struct {
+	ServerName string
+	ServerURL  string
+	Message    string
+}
+
+func (e *ErrOAuthPending) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("OAuth authentication required for %s: %s", e.ServerName, e.Message)
+	}
+	return fmt.Sprintf("OAuth authentication required for %s - use 'mcpproxy auth login --server=%s' or tray menu", e.ServerName, e.ServerName)
+}
+
+// IsOAuthPending checks if an error is an ErrOAuthPending
+func IsOAuthPending(err error) bool {
+	_, ok := err.(*ErrOAuthPending)
+	return ok
 }
 
 // parseOAuthError extracts structured error information from OAuth provider responses
@@ -959,7 +982,7 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 
 // tryOAuthAuth attempts OAuth authentication
 func (c *Client) tryOAuthAuth(ctx context.Context) error {
-	c.logger.Error("🚨 OAUTH AUTH FUNCTION CALLED - START",
+	c.logger.Debug("🚨 OAUTH AUTH FUNCTION CALLED - START",
 		zap.String("server", c.config.Name))
 
 	// Check if OAuth is already in progress
@@ -993,13 +1016,18 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		zap.Bool("has_existing_token_store", hasExistingTokens),
 		zap.String("strategy", "HTTP OAuth"))
 
-	c.logger.Error("🚨 ABOUT TO CALL oauth.CreateOAuthConfig")
+	c.logger.Debug("🚨 ABOUT TO CALL oauth.CreateOAuthConfig")
 
 	// Create OAuth config using the oauth package
-	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
+	// TODO(zero-config-oauth): extraParams (including RFC 8707 resource parameter) are currently
+	// not injected into mcp-go's OAuth flow because mcp-go v0.42.0 doesn't expose OAuth URL
+	// construction. Full support requires upstream mcp-go changes to accept extra parameters
+	// in OAuthConfig or provide URL construction hooks.
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 
-	c.logger.Error("🚨 oauth.CreateOAuthConfig RETURNED",
-		zap.Bool("config_nil", oauthConfig == nil))
+	c.logger.Debug("🚨 oauth.CreateOAuthConfig RETURNED",
+		zap.Bool("config_nil", oauthConfig == nil),
+		zap.Any("extra_params", extraParams))
 
 	if oauthConfig == nil {
 		c.logger.Error("🚨 OAUTH CONFIG IS NIL - RETURNING ERROR")
@@ -1096,7 +1124,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				zap.String("server", c.config.Name))
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
@@ -1147,7 +1175,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			// For tray mode, defer OAuth to prevent UI blocking
 			// The connection will be retried by the managed client retry logic
 			// which will eventually complete OAuth in the background
-			if c.isDeferOAuthForTray() {
+			if c.isDeferOAuthForTray(ctx) {
 				c.logger.Info("⏳ Deferring OAuth to prevent tray UI blocking - will retry in background",
 					zap.String("server", c.config.Name))
 
@@ -1155,14 +1183,18 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				c.logger.Info("💡 OAuth login available via system tray menu",
 					zap.String("server", c.config.Name))
 
-				return fmt.Errorf("OAuth authorization required - deferred for background processing")
+				return &ErrOAuthPending{
+					ServerName: c.config.Name,
+					ServerURL:  c.config.URL,
+					Message:    "deferred for tray UI - login available via system tray menu",
+				}
 			}
 
 			// Clear OAuth state before starting manual flow to prevent "already in progress" errors
 			c.clearOAuthState()
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
 				return fmt.Errorf("OAuth authorization during MCP init failed: %w", oauthErr)
 			}
@@ -1307,7 +1339,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 		zap.String("strategy", "SSE OAuth"))
 
 	// Create OAuth config using the oauth package
-	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config")
 	}
@@ -1415,7 +1447,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 				zap.String("server", c.config.Name))
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
 				return fmt.Errorf("SSE OAuth authorization failed: %w", oauthErr)
 			}
@@ -1716,7 +1748,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 }
 
 // handleOAuthAuthorization handles the manual OAuth flow following the mcp-go example pattern
-func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oauthConfig *client.OAuthConfig) error {
+func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oauthConfig *client.OAuthConfig, extraParams map[string]string) error {
 	// Check if OAuth is already in progress to prevent duplicate flows (CRITICAL FIX for Phase 1)
 	if c.isOAuthInProgress() {
 		c.logger.Warn("⚠️ OAuth authorization already in progress, skipping duplicate attempt",
@@ -1739,7 +1771,11 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Get the OAuth handler from the error (as shown in the example)
 	oauthHandler := client.GetOAuthHandler(authErr)
 	if oauthHandler == nil {
-		return fmt.Errorf("failed to get OAuth handler from error")
+		c.logger.Error("Failed to get OAuth handler from authorization error",
+			zap.String("server", c.config.Name),
+			zap.Error(authErr),
+			zap.String("hint", "Server may not properly support OAuth or the error type is unexpected"))
+		return fmt.Errorf("failed to get OAuth handler from error - server may not support OAuth properly")
 	}
 
 	c.logger.Info("✅ OAuth handler obtained from error",
@@ -1817,6 +1853,14 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		zap.Bool("pkce_enabled", true),
 		zap.String("mode", oauthMode))
 
+	// Validate OAuth handler has required metadata before calling GetAuthorizationURL
+	// This prevents nil pointer panics when server metadata is incomplete
+	if oauthHandler == nil {
+		c.logger.Error("OAuth handler is nil - cannot proceed with authorization",
+			zap.String("server", c.config.Name))
+		return fmt.Errorf("OAuth handler not properly initialized - server may not support OAuth or metadata is incomplete")
+	}
+
 	// Get the authorization URL
 	// Works with: static credentials, DCR, or public client OAuth (empty client_id + PKCE)
 	var authURL string
@@ -1824,17 +1868,44 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				c.logger.Error("GetAuthorizationURL panicked",
+				c.logger.Error("GetAuthorizationURL panicked - OAuth handler or server metadata incomplete",
 					zap.String("server", c.config.Name),
-					zap.Any("panic", r))
-				authURLErr = fmt.Errorf("failed to get authorization URL: internal error (panic recovered)")
+					zap.Any("panic", r),
+					zap.String("hint", "Server may not fully support OAuth or Protected Resource Metadata is missing"))
+				authURLErr = fmt.Errorf("failed to get authorization URL: OAuth handler incomplete (server metadata missing or invalid)")
 			}
 		}()
 		authURL, authURLErr = oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
 	}()
 
 	if authURLErr != nil {
+		c.logger.Error("Failed to get authorization URL",
+			zap.String("server", c.config.Name),
+			zap.Error(authURLErr),
+			zap.String("hint", "Check if server supports OAuth and has valid Protected Resource Metadata"))
 		return fmt.Errorf("failed to get authorization URL: %w", authURLErr)
+	}
+
+	// Add extra OAuth parameters if configured (workaround until mcp-go supports this natively)
+	if len(extraParams) > 0 {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			c.logger.Error("Failed to parse OAuth authorization URL for extra params injection",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			return fmt.Errorf("failed to parse authorization URL: %w", err)
+		}
+
+		q := u.Query()
+		for k, v := range extraParams {
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+		authURL = u.String()
+
+		c.logger.Info("✨ Added extra OAuth parameters to authorization URL",
+			zap.String("server", c.config.Name),
+			zap.Any("extra_params", extraParams))
 	}
 
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
@@ -2069,7 +2140,7 @@ func (c *Client) ForceOAuthFlow(ctx context.Context) error {
 // forceHTTPOAuthFlow forces OAuth flow for HTTP transport
 func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 	// Create OAuth config
-	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
 	}
@@ -2106,7 +2177,7 @@ func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 			c.logger.Info("✅ OAuth authorization requirement triggered - starting manual OAuth flow")
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
 
@@ -2128,7 +2199,7 @@ func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 // forceSSEOAuthFlow forces OAuth flow for SSE transport
 func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 	// Create OAuth config
-	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
 		return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
 	}
@@ -2158,7 +2229,7 @@ func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 			c.logger.Info("✅ OAuth authorization required from SSE Start() - triggering manual OAuth flow")
 
 			// Handle OAuth authorization manually
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
 
@@ -2182,7 +2253,7 @@ func (c *Client) forceSSEOAuthFlow(ctx context.Context) error {
 			c.logger.Info("✅ OAuth authorization requirement from initialize - starting manual OAuth flow")
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
 				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
 
@@ -2277,7 +2348,17 @@ func (c *Client) hasGUIEnvironment() bool {
 }
 
 // isDeferOAuthForTray checks if OAuth should be deferred to prevent tray UI blocking
-func (c *Client) isDeferOAuthForTray() bool {
+func (c *Client) isDeferOAuthForTray(ctx context.Context) bool {
+	// Check if this is a manual OAuth flow (triggered via Login button)
+	// Manual flows should NEVER be deferred
+	if value := ctx.Value(manualOAuthKey); value != nil {
+		if isManual, ok := value.(bool); ok && isManual {
+			c.logger.Debug("Manual OAuth flow detected - NOT deferring",
+				zap.String("server", c.config.Name))
+			return false
+		}
+	}
+
 	// Check if we're in tray mode by looking for tray-specific environment or configuration
 	// During initial server startup, we should defer OAuth to prevent blocking the tray UI
 

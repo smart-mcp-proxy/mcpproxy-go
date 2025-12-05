@@ -578,7 +578,33 @@ MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that req
 
 ### 📝 **OAuth Server Configuration**
 
-> **Note**: The `"oauth"` configuration is **optional**. MCPProxy will automatically detect when OAuth is required and use sensible defaults in most cases. You only need to specify OAuth settings if you want to customize scopes or have pre-registered client credentials.
+#### Zero-Config OAuth
+
+MCPProxy automatically detects OAuth requirements. No manual configuration needed:
+
+```jsonc
+{
+  "mcpServers": [
+    {
+      "name": "slack",
+      "url": "https://oauth.example.com/mcp"
+    }
+  ]
+}
+```
+
+MCPProxy automatically:
+- Detects OAuth requirement from 401 response
+- Fetches Protected Resource Metadata (RFC 9728)
+- Extracts RFC 8707 resource parameters
+- Auto-discovers scopes
+- Launches browser for authentication
+
+See `docs/oauth-zero-config.md` for details.
+
+#### Manual OAuth Configuration (Optional)
+
+> **Note**: The `"oauth"` configuration is **optional**. MCPProxy will automatically detect when OAuth is required and use sensible defaults. Specify OAuth settings only to customize scopes or provide pre-registered client credentials.
 
 ```jsonc
 {

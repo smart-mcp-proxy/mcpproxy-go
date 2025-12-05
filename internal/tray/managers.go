@@ -648,6 +648,15 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	var statusText string
 	var iconPath string
 
+	// Check for OAuth-related errors in last_error (matching web UI logic)
+	needsOAuth := lastError != "" && (
+		strings.Contains(lastError, "OAuth authentication required") ||
+		strings.Contains(lastError, "deferred for tray UI") ||
+		strings.Contains(lastError, "authorization") ||
+		strings.Contains(lastError, "401") ||
+		strings.Contains(lastError, "invalid_token") ||
+		strings.Contains(lastError, "Missing or invalid access token"))
+
 	if quarantined {
 		statusIcon = "🔒"
 		statusText = "quarantined"
@@ -656,6 +665,11 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		statusIcon = "⏸️"
 		statusText = "disabled"
 		iconPath = iconPaused
+	} else if needsOAuth {
+		// OAuth required - show as info/warning state, not error
+		statusIcon = "🔐"
+		statusText = "needs auth"
+		iconPath = iconDisconnected // Use disconnected icon (could add specific auth icon later)
 	} else if st := strings.ToLower(statusValue); st != "" {
 		switch st {
 		case "ready", "connected":
@@ -666,6 +680,10 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 			statusIcon = "🟠"
 			statusText = "connecting"
 			iconPath = iconDisconnected
+		case "pending auth":
+			statusIcon = "⏳"
+			statusText = "pending auth"
+			iconPath = iconDisconnected // Use disconnected icon for now since we don't have a specific auth icon
 		case "error", "disconnected":
 			statusIcon = "🔴"
 			statusText = "connection error"
@@ -730,6 +748,25 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 
 // serverSupportsOAuth determines if a server supports OAuth authentication
 func (m *MenuManager) serverSupportsOAuth(server map[string]interface{}) bool {
+	// Check if server has explicit OAuth configuration
+	if server["oauth"] != nil {
+		return true
+	}
+
+	// Check if error message indicates OAuth requirement (zero-config detection)
+	lastError, _ := server["last_error"].(string)
+	if lastError != "" {
+		errorLower := strings.ToLower(lastError)
+		if strings.Contains(errorLower, "oauth") ||
+			strings.Contains(errorLower, "authorization") ||
+			strings.Contains(errorLower, "401") ||
+			strings.Contains(errorLower, "invalid_token") ||
+			strings.Contains(errorLower, "missing or invalid access token") ||
+			strings.Contains(errorLower, "deferred for tray ui") {
+			return true
+		}
+	}
+
 	// Get server URL
 	serverURL, ok := server["url"].(string)
 	if !ok || serverURL == "" {
@@ -778,6 +815,38 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 
 	enabled, _ := server["enabled"].(bool)
 	quarantined, _ := server["quarantined"].(bool)
+	authenticated, _ := server["authenticated"].(bool)
+	connected, _ := server["connected"].(bool)
+
+	// Check if server needs OAuth authentication
+	supportsOAuth := m.serverSupportsOAuth(server)
+	needsOAuth := supportsOAuth && !quarantined && !authenticated && enabled && !connected
+
+	// Debug logging to help troubleshoot menu creation
+	m.logger.Debug("Creating server action submenus",
+		zap.String("server", serverName),
+		zap.Bool("enabled", enabled),
+		zap.Bool("quarantined", quarantined),
+		zap.Bool("authenticated", authenticated),
+		zap.Bool("connected", connected),
+		zap.Bool("supports_oauth", supportsOAuth),
+		zap.Bool("needs_oauth", needsOAuth))
+
+	// OAuth Login action - show FIRST if server needs authentication
+	if needsOAuth {
+		oauthItem := serverMenuItem.AddSubMenuItem("Login (OAuth)", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+		m.serverOAuthItems[serverName] = oauthItem
+
+		// Set up OAuth login click handler
+		go func(name string, item *systray.MenuItem) {
+			for range item.ClickedCh {
+				if m.onServerAction != nil {
+					// Run in new goroutines to avoid blocking the event channel
+					go m.onServerAction(name, "oauth_login")
+				}
+			}
+		}(serverName, oauthItem)
+	}
 
 	// Enable/Disable action
 	var enableText string
@@ -789,9 +858,10 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
 	m.serverActionItems[serverName] = enableItem
 
-	// OAuth Login action (only for servers that support OAuth)
-	if m.serverSupportsOAuth(server) && !quarantined {
-		oauthItem := serverMenuItem.AddSubMenuItem("🔐 OAuth Login", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+	// OAuth Login action (for authenticated servers or when not the primary action)
+	// Show as secondary option if OAuth is supported but server doesn't currently need auth
+	if m.serverSupportsOAuth(server) && !quarantined && !needsOAuth {
+		oauthItem := serverMenuItem.AddSubMenuItem("OAuth Login", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
 		m.serverOAuthItems[serverName] = oauthItem
 
 		// Set up OAuth login click handler

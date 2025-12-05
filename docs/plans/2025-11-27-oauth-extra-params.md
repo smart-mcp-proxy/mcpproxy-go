@@ -1,7 +1,8 @@
 # Implementation Plan: OAuth Extra Parameters Support
 
-**Status**: Proposed
+**Status**: Partially Implemented (Workaround Active)
 **Created**: 2025-11-27
+**Updated**: 2025-12-01
 **Priority**: High (blocks Runlayer integration)
 **Related**: docs/runlayer-oauth-investigation.md
 
@@ -836,6 +837,381 @@ Initial deployment with feature flag disabled by default:
 
 4. How to handle parameter conflicts with discovered metadata?
    - **Decision**: User-specified extra_params take precedence (explicit override)
+
+## Current Implementation Status (2025-12-01)
+
+### ✅ Implemented: Simple Workaround
+
+A **15-line workaround** has been successfully implemented that injects `extraParams` into the OAuth authorization URL after mcp-go constructs it:
+
+**Location**: `internal/upstream/core/connection.go:1845-1865`
+
+**Implementation**:
+```go
+// Add extra OAuth parameters if configured (workaround until mcp-go supports this natively)
+if len(extraParams) > 0 {
+    u, err := url.Parse(authURL)
+    if err != nil {
+        return fmt.Errorf("failed to parse authorization URL: %w", err)
+    }
+
+    q := u.Query()
+    for k, v := range extraParams {
+        q.Set(k, v)
+    }
+    u.RawQuery = q.Encode()
+    authURL = u.String()
+
+    c.logger.Info("✨ Added extra OAuth parameters to authorization URL",
+        zap.String("server", c.config.Name),
+        zap.Any("extra_params", extraParams))
+}
+```
+
+**Results**:
+- ✅ Slack (Runlayer) OAuth working with `resource` parameter
+- ✅ Glean (Runlayer) OAuth working with `resource` parameter
+- ✅ Zero-configuration for Runlayer servers (auto-detected from `.well-known/oauth-authorization-server`)
+- ✅ 14 Slack tools and 7 Glean tools accessible
+
+**Testing**:
+```bash
+./mcpproxy auth login --server=slack
+# ✅ OAuth succeeds with resource parameter injected
+# ✅ Authorization URL includes: &resource=https%3A%2F%2F...%2Fmcp
+
+./mcpproxy tools list --server=slack
+# ✅ 14 tools available (search_messages, post_message, etc.)
+```
+
+### ❌ UX Gap: OAuth Pending State Appears as Error
+
+**Problem**: When OAuth-required servers connect during startup, they show as "failed" even though they just need user authentication.
+
+**Current User Experience**:
+1. User adds Runlayer Slack server to config
+2. MCPProxy starts, attempts automatic connection
+3. Logs show: `"failed to connect: OAuth authorization required - deferred for background processing"`
+4. Server state: `Error` (❌)
+5. User sees error and thinks something is broken
+6. User must discover tray menu or `auth login` command manually
+
+**Code Location**: `internal/upstream/core/connection.go:1164`
+```go
+return fmt.Errorf("OAuth authorization required - deferred for background processing")
+```
+
+**Impact**:
+- 🚨 **Confusing**: Appears as an error when it's really a pending state
+- 🚨 **Poor Discoverability**: No clear indication that user needs to take action
+- 🚨 **Misleading Status**: Server shows "Error" instead of "Pending Auth"
+- 🚨 **Hidden Solution**: OAuth login action not prominently surfaced
+
+**Desired User Experience**:
+1. User adds Runlayer Slack server to config
+2. MCPProxy starts, detects OAuth requirement
+3. Logs show: `"⏳ Slack requires authentication - login via tray menu or CLI"`
+4. Server state: `PendingAuth` (⏳)
+5. Tray shows: "🔐 Slack - Click to authenticate"
+6. User clicks tray menu → OAuth flow starts immediately
+
+**Proposed Solutions**:
+
+#### Option A: New Server State (Recommended)
+Add a `PendingAuth` state separate from `Error`:
+```go
+// internal/upstream/manager.go
+const (
+    StateDisconnected = "Disconnected"
+    StateConnecting   = "Connecting"
+    StatePendingAuth  = "PendingAuth"  // NEW
+    StateReady        = "Ready"
+    StateError        = "Error"
+)
+```
+
+**Changes Required**:
+1. Add `PendingAuth` state to state machine
+2. Return special error type for OAuth deferral: `ErrOAuthPending`
+3. Supervisor recognizes `ErrOAuthPending` → transition to `PendingAuth`
+4. Tray UI shows ⏳ icon with "Click to authenticate" tooltip
+5. `upstream list` shows: `slack    ⏳ Pending Auth    Login required`
+
+#### Option B: Proactive OAuth Notification
+Show system notification when OAuth-required server is detected:
+```go
+if isDeferOAuthForTray() {
+    notification.Show("Slack requires authentication", "Click here to login")
+    // Auto-highlight tray menu item
+}
+```
+
+#### Option C: Auto-trigger OAuth Flow
+Automatically open OAuth flow on first connection attempt (with user consent):
+```go
+if firstConnectionAttempt && requiresOAuth && !userOptedOut {
+    // Start OAuth flow immediately instead of deferring
+    handleOAuthAuthorization(ctx, err, oauthConfig, extraParams)
+}
+```
+
+**Recommendation**: Implement **Option A (New State)** + **Option B (Notification)** for best UX.
+
+### 🔧 Required Implementation Work
+
+To properly address the UX gap:
+
+#### 1. State Machine Changes
+- Add `PendingAuth` state to `internal/upstream/manager.go`
+- Create `ErrOAuthPending` error type
+- Update state transition logic to handle OAuth deferral
+
+#### 2. Connection Layer Changes
+- Return `ErrOAuthPending` instead of generic error (line 1164)
+- Add metadata: OAuth URL, server name, instructions
+
+#### 3. UI/UX Changes
+- Tray: Show ⏳ icon for `PendingAuth` servers with "Authenticate" action
+- CLI: `upstream list` displays "Pending Auth" with clear instructions
+- Logs: Use INFO level instead of ERROR for OAuth deferral
+- Notification: Optional system notification for new OAuth requirements
+
+#### 4. Testing
+- Unit tests for `PendingAuth` state transitions
+- E2E test: Add OAuth server, verify state is `PendingAuth` not `Error`
+- UX test: Verify tray menu shows authentication action
+
+#### 5. Documentation
+- Update user guide: "Understanding OAuth Server States"
+- CLI help text: Explain `PendingAuth` status
+- Troubleshooting: "Server shows as pending - what to do?"
+
+### Timeline Estimate
+
+| Task | Effort | Priority |
+|------|--------|----------|
+| State machine refactor | 2-3 hours | High |
+| Connection error handling | 1-2 hours | High |
+| Tray UI updates | 2-3 hours | High |
+| CLI display updates | 1 hour | Medium |
+| System notifications | 2 hours | Low |
+| Testing | 2-3 hours | High |
+| Documentation | 1-2 hours | Medium |
+| **Total** | **11-16 hours** | **~2 days** |
+
+### Success Criteria
+
+- ✅ OAuth-required servers never show state as `Error` before user authentication
+- ✅ Server state shows `PendingAuth` with clear action required
+- ✅ Tray menu prominently displays "Authenticate" action for pending servers
+- ✅ `upstream list` output clearly distinguishes pending auth from actual errors
+- ✅ Logs use INFO level for OAuth deferral, not ERROR
+- ✅ Optional: System notification alerts user to authentication requirement
+- ✅ User can complete authentication within 30 seconds of seeing notification
+
+### ❌ Bug: `authenticated` Field Always False in API Responses
+
+**Problem**: The `auth status` CLI command shows OAuth servers as "⏳ Pending Authentication" even after successful authentication, while `upstream list` correctly shows them as connected.
+
+**Root Cause**: `internal/runtime/runtime.go:1534`
+```go
+"authenticated":   false, // Will be populated from OAuth status in Phase 0 Task 2
+```
+
+The `authenticated` field in API responses is hardcoded to `false` and never populated with actual OAuth token state.
+
+**Current Behavior**:
+```bash
+$ ./mcpproxy upstream list
+slack     yes    streamable-http    yes    14    connected
+
+$ ./mcpproxy auth status
+Server: slack
+  Status: ⏳ Pending Authentication    # WRONG - should be ✅ Authenticated
+```
+
+**Impact**:
+- 🐛 **Misleading CLI Output**: `auth status` incorrectly reports authenticated servers as pending
+- 🐛 **API Inconsistency**: `/api/v1/servers` endpoint returns `authenticated: false` for connected OAuth servers
+- 🐛 **Monitoring Issues**: External tools querying the API cannot detect OAuth authentication state
+- 🐛 **User Confusion**: Web UI may show incorrect OAuth status based on API data
+
+**Code Location**:
+- **Bug**: `internal/runtime/runtime.go:1534` - hardcoded `false`
+- **Consumer**: `cmd/mcpproxy/auth_cmd.go:200` - reads `authenticated` field from API
+- **API Response**: `internal/httpapi/server.go:582-615` - serves data from runtime
+
+**Expected Behavior**:
+The `authenticated` field should reflect the actual OAuth token state:
+- `true` when server has valid OAuth tokens (access token not expired)
+- `false` when server requires OAuth but has no valid tokens
+
+**Fix Required**:
+```go
+// internal/runtime/runtime.go:1534
+// Replace hardcoded false with actual token state check
+authenticated := r.isServerAuthenticated(serverStatus.Name, serverStatus.Config)
+
+// Add helper method:
+func (r *Runtime) isServerAuthenticated(serverName string, cfg *config.ServerConfig) bool {
+    if cfg == nil || cfg.OAuth == nil {
+        return false // No OAuth configured
+    }
+
+    tokenManager := oauth.GetTokenStoreManager()
+    if !tokenManager.HasTokenStore(serverName) {
+        return false // No tokens stored
+    }
+
+    // Check if token is valid (not expired)
+    // This requires access to token expiry from token manager
+    return tokenManager.HasValidToken(serverName)
+}
+```
+
+**Testing**:
+```bash
+# After OAuth login
+./mcpproxy auth login --server=slack
+# ✅ OAuth succeeds
+
+./mcpproxy auth status --server=slack
+# Should show: ✅ Authenticated (currently shows ⏳ Pending)
+
+# Check API directly
+curl "http://127.0.0.1:8080/api/v1/servers?apikey=..." | jq '.servers[] | select(.name=="slack") | .authenticated'
+# Should return: true (currently returns: false)
+```
+
+**Timeline**: 2-3 hours
+- Add `HasValidToken()` method to token manager
+- Implement `isServerAuthenticated()` helper
+- Update `GetAllServers()` to populate field correctly
+- Add unit tests for token state detection
+- Add E2E test: verify `auth status` shows correct state after OAuth login
+
+**Priority**: Medium (affects UX but doesn't break functionality - servers still work)
+
+## Optional Followup Tasks
+
+The following enhancements were identified during implementation but are **not required** for core functionality. They can be implemented in future iterations if desired.
+
+### Task 1: System Notifications for OAuth Pending State
+
+**Status**: Optional Enhancement
+**Priority**: Low
+**Effort**: 2-3 hours
+
+**Description**:
+Currently, when a server enters `StatePendingAuth`, the user is notified through:
+- ⏳ Icon in tray UI
+- "Authenticate" menu item in tray
+- `pending_auth` status in `upstream list` CLI output
+- Documentation explaining this is a normal waiting state
+
+This task would add **desktop notifications** to provide an additional notification channel.
+
+**Current Infrastructure**:
+MCPProxy already has a notification system:
+- `internal/upstream/notifications.go` - NotificationManager with `NotifyOAuthRequired()` method
+- `internal/tray/notifications.go` - Desktop notification handler using `beeep` library
+- `StateChangeNotifier()` - Triggers notifications on state transitions
+
+**What Would Be Added**:
+1. Update `StateChangeNotifier()` in `internal/upstream/notifications.go` to handle `StatePendingAuth`:
+   ```go
+   case types.StatePendingAuth:
+       if oldState == types.StateConnecting {
+           nm.NotifyOAuthRequired(serverName)
+       }
+   ```
+
+2. Optionally make notification clickable to trigger `auth login` directly
+
+**Why Optional**:
+- User experience is already good through UI feedback
+- Desktop notifications can be intrusive
+- Infrastructure exists for easy future addition
+- Current implementation meets all core requirements
+
+**Example Notification**:
+```
+┌─────────────────────────────────────┐
+│ 🔐 Authentication Required          │
+│ OAuth authentication required for   │
+│ slack-server                        │
+│ Click to authenticate →             │
+└─────────────────────────────────────┘
+```
+
+**Testing**:
+- Test on macOS, Windows, Linux
+- Verify notification timing (only on first pending_auth transition)
+- Test with multiple servers requiring auth simultaneously
+- Verify notification preferences (user can disable)
+
+### Task 2: Upstream Contribution to mcp-go Library
+
+**Status**: Optional Enhancement
+**Priority**: Low
+**Effort**: 8-12 hours (includes upstream coordination)
+
+**Description**:
+The current implementation uses URL injection as a workaround to add extra parameters to OAuth authorization URLs. The mcp-go library (v0.42.0) doesn't natively support extra parameters in its OAuth configuration.
+
+**Current Workaround** (works well):
+```go
+// internal/upstream/core/connection.go:1873-1900
+// Extract extra params and inject into authorization URL
+u, err := url.Parse(authURL)
+query := u.Query()
+for key, value := range extraParams {
+    query.Set(key, value)
+}
+u.RawQuery = query.Encode()
+```
+
+**Proposed Upstream Enhancement**:
+Add native support for extra parameters in mcp-go's `OAuthConfig`:
+```go
+// Proposed addition to github.com/mark3labs/mcp-go/client
+type OAuthConfig struct {
+    ClientID              string
+    ClientSecret          string
+    RedirectURI           string
+    Scopes                []string
+    ExtraParams           map[string]string // NEW FIELD
+    TokenStore            TokenStore
+    PKCEEnabled           bool
+    AuthServerMetadataURL string
+}
+```
+
+**Benefits of Upstream Contribution**:
+- Cleaner implementation (no URL parsing workaround)
+- Official support in mcp-go library
+- Helps other projects using mcp-go with RFC 8707 providers
+- Better maintainability (no custom URL injection)
+
+**Why Optional**:
+- Current workaround is robust and well-tested
+- Requires coordination with upstream maintainers
+- May take time for upstream review/merge
+- Current implementation meets all requirements
+
+**Steps for Contribution**:
+1. Fork mcp-go repository
+2. Add `ExtraParams` field to `OAuthConfig`
+3. Update OAuth URL construction to include extra params
+4. Add tests for RFC 8707 resource parameter
+5. Submit pull request with documentation
+6. Wait for upstream review/merge
+7. Update MCPProxy to use new mcp-go version after merge
+
+**Timeline**:
+- Implementation: 4-6 hours
+- Testing/documentation: 2-3 hours
+- Upstream coordination: Variable (days to weeks)
 
 ## References
 

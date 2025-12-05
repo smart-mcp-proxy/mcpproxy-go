@@ -16,10 +16,11 @@
             'badge badge-sm flex-shrink-0',
             server.connected ? 'badge-success' :
             server.connecting ? 'badge-warning' :
+            needsOAuth ? 'badge-info' :
             'badge-error'
           ]"
         >
-          {{ server.connected ? 'Connected' : server.connecting ? 'Connecting' : 'Disconnected' }}
+          {{ server.connected ? 'Connected' : server.connecting ? 'Connecting' : needsOAuth ? 'Needs Auth' : 'Disconnected' }}
         </div>
       </div>
 
@@ -49,12 +50,41 @@
         </div>
       </div>
 
-      <!-- Error message -->
-      <div v-if="server.last_error" class="alert alert-error alert-sm mb-4">
+      <!-- Error/Info message -->
+      <div
+        v-if="server.last_error && !needsOAuth && errorCategory"
+        :class="[
+          'alert alert-sm mb-4',
+          errorCategory.type === 'warning' ? 'alert-warning' : 'alert-error'
+        ]"
+      >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
-        <span class="text-xs">{{ server.last_error }}</span>
+        <div class="flex-1 text-xs">
+          <div class="font-medium">{{ errorCategory.icon }} {{ errorCategory.message }}</div>
+          <div v-if="showErrorDetails" class="mt-1 text-xs opacity-70 break-all">
+            {{ server.last_error }}
+          </div>
+          <button
+            v-if="server.last_error.length > 100"
+            @click="showErrorDetails = !showErrorDetails"
+            class="link link-hover text-xs mt-1"
+          >
+            {{ showErrorDetails ? 'Hide details' : 'Show details' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- OAuth info message -->
+      <div
+        v-if="needsOAuth"
+        class="alert alert-info alert-sm mb-4"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span class="text-xs">Authentication required - click Login button</span>
       </div>
 
       <!-- Quarantine warning -->
@@ -162,6 +192,82 @@ const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const loading = ref(false)
 const showDeleteConfirmation = ref(false)
+const showErrorDetails = ref(false)
+
+// Utility function to extract domain from URL
+function extractDomain(urlString: string): string {
+  try {
+    // Handle various URL formats in error messages
+    const urlMatch = urlString.match(/https?:\/\/([^/:\s]+)/)
+    return urlMatch ? urlMatch[1] : urlString
+  } catch {
+    return urlString
+  }
+}
+
+const errorCategory = computed(() => {
+  if (!props.server.last_error) return null
+
+  const error = props.server.last_error.toLowerCase()
+
+  // Timeout errors
+  if (error.includes('context deadline exceeded') || error.includes('timeout')) {
+    return {
+      type: 'error',
+      icon: '⏱️',
+      message: 'Request timed out',
+      action: 'retry'
+    }
+  }
+
+  // Already connected (transient state)
+  if (error.includes('client already connected')) {
+    return {
+      type: 'warning',
+      icon: '⚠️',
+      message: 'Connection in progress...',
+      action: null
+    }
+  }
+
+  // Connection/Network errors
+  if (error.includes('connection refused') ||
+      error.includes('failed to connect') ||
+      error.includes('failed to send request') ||
+      error.includes('transport error')) {
+    // Extract domain for cleaner display
+    const domain = extractDomain(props.server.last_error)
+    return {
+      type: 'error',
+      icon: '🔌',
+      message: `Connection failed to ${domain}`,
+      action: 'retry'
+    }
+  }
+
+  // Configuration errors
+  if (error.includes('invalid') && (error.includes('config') || error.includes('url'))) {
+    return {
+      type: 'error',
+      icon: '⚙️',
+      message: 'Configuration error',
+      action: 'configure'
+    }
+  }
+
+  // Generic error with truncation
+  const maxLength = 100
+  const message = props.server.last_error.length > maxLength
+    ? props.server.last_error.substring(0, maxLength) + '...'
+    : props.server.last_error
+
+  return {
+    type: 'error',
+    icon: '❌',
+    message: message,
+    action: 'restart'
+  }
+})
 
 const needsOAuth = computed(() => {
   // Check if server requires OAuth authentication
@@ -175,7 +281,8 @@ const needsOAuth = computed(() => {
     props.server.last_error.includes('OAuth') ||
     props.server.last_error.includes('401') ||
     props.server.last_error.includes('invalid_token') ||
-    props.server.last_error.includes('Missing or invalid access token')
+    props.server.last_error.includes('Missing or invalid access token') ||
+    props.server.last_error.includes('deferred for tray UI')
   )
 
   // Check if server has OAuth configuration
