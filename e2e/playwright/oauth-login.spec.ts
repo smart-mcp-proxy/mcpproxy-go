@@ -76,8 +76,8 @@ test.describe('OAuth Login Flow', () => {
     const consentCheckbox = page.locator('#consent');
     await expect(consentCheckbox).toBeChecked();
 
-    // Click approve button
-    await page.click('button[value="approve"]');
+    // Click approve button (uses onclick to set hidden input, not value attribute)
+    await page.click('button:has-text("Approve")');
 
     // Wait for redirect to callback
     await page.waitForURL(/\/callback\?/);
@@ -115,7 +115,7 @@ test.describe('OAuth Login Flow', () => {
     // Fill in wrong password
     await page.fill('#username', 'testuser');
     await page.fill('#password', 'wrongpassword');
-    await page.click('button[value="approve"]');
+    await page.click('button:has-text("Approve")');
 
     // Should stay on login page with error
     await expect(page.locator('.error-message')).toContainText('Invalid username or password');
@@ -145,7 +145,7 @@ test.describe('OAuth Login Flow', () => {
     await page.fill('#password', 'testpass');
 
     // Click deny button
-    await page.click('button[value="deny"]');
+    await page.click('button:has-text("Deny")');
 
     // Wait for redirect to callback
     await page.waitForURL(/\/callback\?/);
@@ -179,7 +179,7 @@ test.describe('OAuth Login Flow', () => {
     await page.uncheck('#consent');
 
     // Click approve (but consent unchecked)
-    await page.click('button[value="approve"]');
+    await page.click('button:has-text("Approve")');
 
     // Wait for redirect to callback
     await page.waitForURL(/\/callback\?/);

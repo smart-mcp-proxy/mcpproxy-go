@@ -40,6 +40,11 @@ components:
           type: string
         client_secret:
           type: string
+        extra_params:
+          additionalProperties:
+            type: string
+          description: Additional OAuth parameters (e.g., RFC 8707 resource)
+          type: object
         pkce_enabled:
           type: boolean
         redirect_uri:
@@ -354,6 +359,8 @@ components:
           additionalProperties:
             type: string
           type: object
+        pkce_enabled:
+          type: boolean
         redirect_port:
           type: integer
         scopes:
@@ -361,8 +368,14 @@ components:
             type: string
           type: array
           uniqueItems: false
+        token_expires_at:
+          description: When the OAuth token expires
+          type: string
         token_url:
           type: string
+        token_valid:
+          description: Whether token is currently valid
+          type: boolean
       type: object
     contracts.OAuthIssue:
       properties:

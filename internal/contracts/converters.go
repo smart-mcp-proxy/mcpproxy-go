@@ -266,6 +266,17 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			if redirectPort, ok := oauth["redirect_port"].(int); ok {
 				server.OAuth.RedirectPort = redirectPort
 			}
+			if pkceEnabled, ok := oauth["pkce_enabled"].(bool); ok {
+				server.OAuth.PKCEEnabled = pkceEnabled
+			}
+			if tokenExpiresAt, ok := oauth["token_expires_at"].(string); ok && tokenExpiresAt != "" {
+				if parsedTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
+					server.OAuth.TokenExpiresAt = &parsedTime
+				}
+			}
+			if tokenValid, ok := oauth["token_valid"].(bool); ok {
+				server.OAuth.TokenValid = tokenValid
+			}
 		}
 
 		// Extract timestamps

@@ -145,6 +145,12 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			zap.String("client_id", cfg.OAuthConfig.ClientID),
 			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
 
+		// Log if extra params wrapper is active (custom HTTP client configured)
+		if cfg.OAuthConfig.HTTPClient != nil {
+			logger.Debug("🔧 Using custom HTTP client with OAuth extra params wrapper",
+				zap.String("note", "Extra parameters will be injected into OAuth requests"))
+		}
+
 		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig)
 		if err != nil {
 			logger.Error("Failed to create OAuth client", zap.Error(err))
@@ -244,6 +250,12 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled),
 			zap.String("client_id", cfg.OAuthConfig.ClientID),
 			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
+
+		// Log if extra params wrapper is active (custom HTTP client configured)
+		if cfg.OAuthConfig.HTTPClient != nil {
+			logger.Debug("🔧 Using custom HTTP client with OAuth extra params wrapper",
+				zap.String("note", "Extra parameters will be injected into OAuth requests"))
+		}
 
 		client, err := client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig)
 		if err != nil {

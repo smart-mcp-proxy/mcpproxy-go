@@ -210,7 +210,10 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			if clientID, ok := oauthRaw["client_id"].(string); ok {
 				oauthCfg.ClientID = clientID
 			}
-			if scopes, ok := oauthRaw["scopes"].([]interface{}); ok {
+			// Try both []string (from runtime) and []interface{} (from generic conversion)
+			if scopes, ok := oauthRaw["scopes"].([]string); ok {
+				oauthCfg.Scopes = scopes
+			} else if scopes, ok := oauthRaw["scopes"].([]interface{}); ok {
 				oauthCfg.Scopes = make([]string, 0, len(scopes))
 				for _, scope := range scopes {
 					if scopeStr, ok := scope.(string); ok {
@@ -223,6 +226,31 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			}
 			if tokenURL, ok := oauthRaw["token_url"].(string); ok {
 				oauthCfg.TokenURL = tokenURL
+			}
+			// Try both map[string]string (from runtime) and map[string]interface{} (from generic conversion)
+			if extraParams, ok := oauthRaw["extra_params"].(map[string]string); ok {
+				oauthCfg.ExtraParams = extraParams
+			} else if extraParams, ok := oauthRaw["extra_params"].(map[string]interface{}); ok {
+				oauthCfg.ExtraParams = make(map[string]string)
+				for k, v := range extraParams {
+					if vStr, ok := v.(string); ok {
+						oauthCfg.ExtraParams[k] = vStr
+					}
+				}
+			}
+			if redirectPort, ok := oauthRaw["redirect_port"].(int); ok {
+				oauthCfg.RedirectPort = redirectPort
+			}
+			if pkceEnabled, ok := oauthRaw["pkce_enabled"].(bool); ok {
+				oauthCfg.PKCEEnabled = pkceEnabled
+			}
+			if tokenExpiresAt, ok := oauthRaw["token_expires_at"].(string); ok && tokenExpiresAt != "" {
+				if parsedTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
+					oauthCfg.TokenExpiresAt = &parsedTime
+				}
+			}
+			if tokenValid, ok := oauthRaw["token_valid"].(bool); ok {
+				oauthCfg.TokenValid = tokenValid
 			}
 			srv.OAuth = oauthCfg
 		}

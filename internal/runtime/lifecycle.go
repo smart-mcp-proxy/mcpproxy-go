@@ -368,12 +368,17 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	r.logger.Debug("Starting synchronous storage save phase", zap.Int("total_servers", len(cfg.Servers)))
 	for _, serverCfg := range cfg.Servers {
 		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
+
+		// Check if OAuth config changed (requires reconnection)
+		oauthChanged := existsInStorage && config.OAuthConfigChanged(storedServer.OAuth, serverCfg.OAuth)
+
 		hasChanged := !existsInStorage ||
 			storedServer.Enabled != serverCfg.Enabled ||
 			storedServer.Quarantined != serverCfg.Quarantined ||
 			storedServer.URL != serverCfg.URL ||
 			storedServer.Command != serverCfg.Command ||
-			storedServer.Protocol != serverCfg.Protocol
+			storedServer.Protocol != serverCfg.Protocol ||
+			oauthChanged
 
 		if hasChanged {
 			changed = true
@@ -381,7 +386,19 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 				zap.String("server", serverCfg.Name),
 				zap.Bool("new", !existsInStorage),
 				zap.Bool("enabled_changed", existsInStorage && storedServer.Enabled != serverCfg.Enabled),
-				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined))
+				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined),
+				zap.Bool("oauth_changed", oauthChanged))
+
+			// Clear OAuth state if OAuth config changed
+			if oauthChanged && r.storageManager != nil {
+				r.logger.Info("OAuth config changed, clearing cached OAuth state",
+					zap.String("server", serverCfg.Name))
+				if err := r.storageManager.ClearOAuthState(serverCfg.Name); err != nil {
+					r.logger.Warn("Failed to clear OAuth state",
+						zap.String("server", serverCfg.Name),
+						zap.Error(err))
+				}
+			}
 		}
 
 		// Save synchronously to ensure storage is populated for API queries

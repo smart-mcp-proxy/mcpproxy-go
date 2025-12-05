@@ -45,12 +45,15 @@ type Server struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	AuthURL      string            `json:"auth_url"`
-	TokenURL     string            `json:"token_url"`
-	ClientID     string            `json:"client_id"`
-	Scopes       []string          `json:"scopes,omitempty"`
-	ExtraParams  map[string]string `json:"extra_params,omitempty"`
-	RedirectPort int               `json:"redirect_port,omitempty"`
+	AuthURL        string            `json:"auth_url"`
+	TokenURL       string            `json:"token_url"`
+	ClientID       string            `json:"client_id"`
+	Scopes         []string          `json:"scopes,omitempty"`
+	ExtraParams    map[string]string `json:"extra_params,omitempty"`
+	RedirectPort   int               `json:"redirect_port,omitempty"`
+	PKCEEnabled    bool              `json:"pkce_enabled,omitempty"`
+	TokenExpiresAt *time.Time        `json:"token_expires_at,omitempty"` // When the OAuth token expires
+	TokenValid     bool              `json:"token_valid,omitempty"`      // Whether token is currently valid
 }
 
 // IsolationConfig represents Docker isolation configuration
