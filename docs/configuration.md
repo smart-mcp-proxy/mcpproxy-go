@@ -64,7 +64,7 @@ MCPProxy looks for configuration in these locations (in order):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `data_dir` | string | `"~/.mcpproxy"` | Directory for database, logs, and certificates. Supports `~` expansion for home directory |
+| `data_dir` | string | `"~/.mcpproxy"` | Directory for database and certificates. Supports `~` expansion for home directory. Logs use OS log directories unless `log_dir` is set |
 
 ### Tray Application
 
@@ -233,7 +233,7 @@ MCPProxy looks for configuration in these locations (in order):
 | `client_secret` | string | No | OAuth client secret (can reference secure storage) |
 | `redirect_uri` | string | No | OAuth redirect URI (auto-generated if not provided) |
 | `scopes` | array | No | OAuth scopes to request |
-| `pkce_enabled` | boolean | No | Enable PKCE for OAuth (RFC 8252, default: `true`) |
+| `pkce_enabled` | boolean | No | PKCE is always enabled for security; this flag is currently ignored |
 
 See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 
@@ -253,7 +253,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `api_key` | string | Auto-generated | API key for REST API authentication. Empty string disables authentication. Auto-generated if not set (logged on startup) |
+| `api_key` | string | Auto-generated | API key for REST API authentication. Required; if empty, one is auto-generated and enforced (logged on startup) |
 | `read_only_mode` | boolean | `false` | Prevent all configuration modifications |
 | `disable_management` | boolean | `false` | Disable server management operations (restart, enable, disable) |
 | `allow_server_add` | boolean | `true` | Allow adding new servers via API/tools |
@@ -261,7 +261,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 
 **Security Notes:**
 - **API Key**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
-- **Empty API Key**: Disables authentication (useful for testing, not recommended for production)
+- **Empty API Key**: Empty values are replaced with an auto-generated key; authentication is always enforced
 - **Auto-Generation**: If no API key is provided, one is generated and logged for easy access
 - **Tray Integration**: Tray app automatically manages API keys for core communication
 
@@ -446,7 +446,10 @@ See [Setup Guide - HTTPS](setup.md#optional-https-setup) for complete details.
 - **Linux:** `~/.local/state/mcpproxy/logs/main.log` (or `/var/log/mcpproxy` when running as root)
 - **Windows:** `%LOCALAPPDATA%\mcpproxy\logs\main.log`
 - **Per-server logs:** same directory, `server-{name}.log`
-- **Custom:** set `log_dir` to override (fallback to `${data_dir}/logs` only when a custom directory is provided)
+- **Custom:** set `log_dir` to override (supports `~` expansion)
+
+**Behavior notes:**
+- `mcpproxy serve` enables file logging by default unless `--log-to-file` is explicitly set to `false`
 
 See [Logging Documentation](logging.md) for complete details.
 
@@ -718,6 +721,8 @@ See [Search Servers Documentation](search_servers.md) for complete details.
 
 Here's a complete configuration example with all major sections:
 
+**Note:** Leaving `api_key` empty will cause MCPProxy to generate and enforce a new key on startup.
+
 ```json
 {
   "listen": "127.0.0.1:8080",
@@ -817,12 +822,11 @@ Many configuration options can be overridden via environment variables:
 | Environment Variable | Config Field | Description |
 |----------------------|--------------|-------------|
 | `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
-| `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty string disables auth) |
+| `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
 | `MCPPROXY_DATA` | `data_dir` | Override data directory |
-| `MCPPROXY_DEBUG` | - | Enable debug mode |
 | `MCPPROXY_DISABLE_OAUTH` | - | Disable OAuth for testing |
 | `HEADLESS` | - | Run in headless mode |
 
