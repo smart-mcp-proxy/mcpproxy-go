@@ -221,8 +221,9 @@ test.describe('Advanced OAuth Scenarios', () => {
       const oauthServer = servers.find((s: any) => s.name === 'oauth-test-server');
 
       // Status should indicate authentication requirement
-      // Valid statuses: 'ready', 'connecting', 'error', 'authenticating', 'requires_auth', 'disconnected', etc.
-      const validStatuses = ['ready', 'connecting', 'error', 'authenticating', 'requires_auth', 'disabled', 'quarantined', 'disconnected'];
+      // Valid statuses: 'ready', 'connecting', 'error', 'authenticating', 'requires_auth', 'pending_auth', 'disconnected', etc.
+      // Note: 'Error' (capitalized) can appear during transitions, so include both cases
+      const validStatuses = ['ready', 'connecting', 'error', 'Error', 'authenticating', 'requires_auth', 'pending_auth', 'disabled', 'quarantined', 'disconnected'];
       expect(validStatuses).toContain(oauthServer.status);
     });
 

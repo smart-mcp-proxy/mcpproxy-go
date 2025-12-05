@@ -666,6 +666,10 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 			statusIcon = "🟠"
 			statusText = "connecting"
 			iconPath = iconDisconnected
+		case "pending auth":
+			statusIcon = "⏳"
+			statusText = "pending auth"
+			iconPath = iconDisconnected // Use disconnected icon for now since we don't have a specific auth icon
 		case "error", "disconnected":
 			statusIcon = "🔴"
 			statusText = "connection error"

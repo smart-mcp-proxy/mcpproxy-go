@@ -550,16 +550,22 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		}
 
 		// Map connection state to string
-		if state.Connected {
+		// Use detailed state from ConnectionInfo if available, otherwise fall back to simple logic
+		if state.ConnectionInfo != nil && state.ConnectionInfo.State != types.StateDisconnected {
+			// Use the detailed state string from the managed client (e.g., "Pending Auth", "Authenticating", "Ready")
+			status.State = state.ConnectionInfo.State.String()
+		} else if state.Connected {
 			status.State = "connected"
-			if !state.LastSeen.IsZero() {
-				t := state.LastSeen
-				status.ConnectedAt = &t
-			}
 		} else if state.Enabled && !state.Quarantined {
 			status.State = "connecting"
 		} else {
 			status.State = "idle"
+		}
+
+		// Update connection time if connected
+		if state.Connected && !state.LastSeen.IsZero() {
+			t := state.LastSeen
+			status.ConnectedAt = &t
 		}
 
 		// Update connection info if available
@@ -747,8 +753,17 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			// Update stateview
 			s.stateView.UpdateServer(event.ServerName, func(status *stateview.ServerStatus) {
 				status.Connected = connected
-				if connected {
+
+				// Use detailed state from ConnectionInfo if available
+				if connInfo != nil && connInfo.State != types.StateDisconnected {
+					status.State = connInfo.State.String()
+				} else if connected {
 					status.State = "connected"
+				} else {
+					status.State = "disconnected"
+				}
+
+				if connected {
 					t := event.Timestamp
 					status.ConnectedAt = &t
 					// Don't populate Tools here - background indexing will handle it
@@ -759,7 +774,6 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					}
 					// If tools are already populated, keep the existing count
 				} else {
-					status.State = "disconnected"
 					t := event.Timestamp
 					status.DisconnectedAt = &t
 					status.Tools = nil // Clear tools on disconnect

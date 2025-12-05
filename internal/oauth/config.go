@@ -240,6 +240,56 @@ func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
 	return isRecent
 }
 
+// HasValidToken checks if a server has a valid, non-expired OAuth token
+// Returns true if token exists and hasn't expired (with grace period)
+func (m *TokenStoreManager) HasValidToken(ctx context.Context, serverName string, storage *storage.BoltDB) bool {
+	m.mu.RLock()
+	store, exists := m.stores[serverName]
+	m.mu.RUnlock()
+
+	if !exists {
+		m.logger.Debug("No token store found for server",
+			zap.String("server", serverName))
+		return false
+	}
+
+	// Try to get token from persistent store if available
+	if persistentStore, ok := store.(*PersistentTokenStore); ok && storage != nil {
+		token, err := persistentStore.GetToken(ctx)
+		if err != nil {
+			// No token or error retrieving it
+			m.logger.Debug("Failed to retrieve token from persistent store",
+				zap.String("server", serverName),
+				zap.Error(err))
+			return false
+		}
+
+		// Check if token is expired (considering grace period)
+		now := time.Now()
+		if token.ExpiresAt.IsZero() {
+			// No expiration time means token is always valid (unusual but possible)
+			m.logger.Debug("Token has no expiration, treating as valid",
+				zap.String("server", serverName))
+			return true
+		}
+
+		isExpired := now.After(token.ExpiresAt)
+		m.logger.Debug("Token expiration check",
+			zap.String("server", serverName),
+			zap.Bool("is_expired", isExpired),
+			zap.Time("expires_at", token.ExpiresAt),
+			zap.Duration("time_until_expiry", token.ExpiresAt.Sub(now)))
+
+		return !isExpired
+	}
+
+	// For in-memory stores, just check if store exists
+	// (no expiration checking for non-persistent stores)
+	m.logger.Debug("Using in-memory token store, assuming valid",
+		zap.String("server", serverName))
+	return true
+}
+
 // CreateOAuthConfig creates an OAuth configuration for dynamic client registration
 // This implements proper callback server coordination required for Cloudflare OAuth
 func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltDB) *client.OAuthConfig {
@@ -771,4 +821,27 @@ func parseBaseURL(fullURL string) (string, error) {
 	}
 
 	return fmt.Sprintf("%s://%s", u.Scheme, u.Host), nil
+}
+
+// IsOAuthCapable determines if a server can use OAuth authentication
+// Returns true if:
+//  1. OAuth is explicitly configured in config, OR
+//  2. Server uses HTTP-based protocol (OAuth auto-detection available)
+func IsOAuthCapable(serverConfig *config.ServerConfig) bool {
+	// Explicitly configured
+	if serverConfig.OAuth != nil {
+		return true
+	}
+
+	// Auto-detection available for HTTP-based protocols
+	protocol := strings.ToLower(serverConfig.Protocol)
+	switch protocol {
+	case "http", "sse", "streamable-http", "auto":
+		return true // OAuth can be auto-detected
+	case "stdio":
+		return false // OAuth not applicable for stdio
+	default:
+		// Unknown protocol - assume HTTP-based and try OAuth
+		return true
+	}
 }
