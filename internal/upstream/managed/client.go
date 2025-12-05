@@ -104,14 +104,20 @@ func (mc *Client) Connect(ctx context.Context) error {
 	if err := mc.coreClient.Connect(ctx); err != nil {
 		// Check if this is an OAuth authorization requirement (not an error)
 		if mc.isOAuthAuthorizationRequired(err) {
+			// Check if this is a token refresh scenario vs full re-auth
+			isRefreshScenario := mc.isTokenRefreshScenario(err)
 			mc.logger.Info("🎯 OAuth authorization required during MCP initialization",
-				zap.String("server", mc.Config.Name))
+				zap.String("server", mc.Config.Name),
+				zap.Bool("token_refresh_scenario", isRefreshScenario))
 			// Don't apply backoff for OAuth authorization requirement
 			mc.StateManager.SetError(err)
 			return fmt.Errorf("OAuth authorization during MCP init failed: %w", err)
 		} else if mc.isOAuthError(err) {
+			// Check if this is a token refresh scenario vs full re-auth
+			isRefreshScenario := mc.isTokenRefreshScenario(err)
 			mc.logger.Warn("OAuth authentication failed, applying extended backoff",
 				zap.String("server", mc.Config.Name),
+				zap.Bool("token_refresh_scenario", isRefreshScenario),
 				zap.Error(err))
 			mc.StateManager.SetOAuthError(err)
 		} else {
@@ -756,6 +762,36 @@ func (mc *Client) isOAuthAuthorizationRequired(err error) bool {
 
 	for _, authErr := range authRequiredErrors {
 		if containsString(errStr, authErr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isTokenRefreshScenario checks if we're in a token refresh scenario vs full re-auth.
+// Returns true if we have a refresh token available but need new access token.
+func (mc *Client) isTokenRefreshScenario(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	// Token refresh scenarios typically involve expired access tokens
+	// but still having a valid refresh token
+	tokenRefreshIndicators := []string{
+		"token expired",
+		"access_token expired",
+		"token refresh",
+		"refresh_token",
+		"automatic refresh",
+	}
+
+	for _, indicator := range tokenRefreshIndicators {
+		if containsString(errStr, indicator) {
+			mc.logger.Debug("🔄 Detected token refresh scenario",
+				zap.String("server", mc.Config.Name),
+				zap.String("indicator", indicator))
 			return true
 		}
 	}

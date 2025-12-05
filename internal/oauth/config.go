@@ -78,12 +78,74 @@ func (m *TokenStoreManager) GetOrCreateTokenStore(serverName string) client.Toke
 	return store
 }
 
-// HasTokenStore checks if a token store exists for the server (for debugging)
+// HasTokenStore checks if a token store exists for the server in memory (for debugging)
+// Note: This only checks the in-memory store, not persisted tokens in BBolt.
+// Use HasPersistedToken() to check for tokens in persistent storage.
 func (m *TokenStoreManager) HasTokenStore(serverName string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	_, exists := m.stores[serverName]
 	return exists
+}
+
+// HasPersistedToken checks if a token exists in persistent storage (BBolt) for the server.
+// This is the preferred method to check for existing tokens as it reflects actual token availability.
+func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB) (hasToken bool, hasRefreshToken bool, isExpired bool) {
+	if boltStorage == nil {
+		return false, false, false
+	}
+
+	serverKey := generateServerKey(serverName, serverURL)
+	record, err := boltStorage.GetOAuthToken(serverKey)
+	if err != nil || record == nil {
+		return false, false, false
+	}
+
+	hasToken = record.AccessToken != ""
+	hasRefreshToken = record.RefreshToken != ""
+	isExpired = time.Now().After(record.ExpiresAt)
+	return
+}
+
+// GetPersistedRefreshToken retrieves the refresh token from persistent storage if available.
+// Returns empty string if no token exists or token has no refresh_token.
+func GetPersistedRefreshToken(serverName, serverURL string, boltStorage *storage.BoltDB) string {
+	if boltStorage == nil {
+		return ""
+	}
+
+	serverKey := generateServerKey(serverName, serverURL)
+	record, err := boltStorage.GetOAuthToken(serverKey)
+	if err != nil || record == nil {
+		return ""
+	}
+
+	return record.RefreshToken
+}
+
+// TokenRefreshResult contains the result of a token refresh attempt.
+type TokenRefreshResult struct {
+	Success     bool
+	NewToken    *storage.OAuthTokenRecord
+	Error       error
+	Attempt     int
+	MaxAttempts int
+}
+
+// RefreshTokenConfig contains configuration for token refresh operations.
+type RefreshTokenConfig struct {
+	MaxAttempts    int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+}
+
+// DefaultRefreshConfig returns the default token refresh configuration.
+func DefaultRefreshConfig() RefreshTokenConfig {
+	return RefreshTokenConfig{
+		MaxAttempts:    3,
+		InitialBackoff: 1 * time.Second,
+		MaxBackoff:     10 * time.Second,
+	}
 }
 
 // GetTokenStoreManager returns the global token store manager for debugging
@@ -181,11 +243,19 @@ func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
 // CreateOAuthConfig creates an OAuth configuration for dynamic client registration
 // This implements proper callback server coordination required for Cloudflare OAuth
 func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltDB) *client.OAuthConfig {
+	startTime := time.Now()
 	logger := zap.L().Named("oauth")
 
-	logger.Error("🚨 OAUTH CONFIG CREATION CALLED - THIS SHOULD APPEAR IN LOGS",
+	logger.Debug("🚀 Starting OAuth config creation",
 		zap.String("server", serverConfig.Name),
 		zap.String("url", serverConfig.URL))
+
+	// Defer logging of total duration
+	defer func() {
+		logger.Debug("⏱️ OAuth config creation completed",
+			zap.String("server", serverConfig.Name),
+			zap.Duration("total_duration", time.Since(startTime)))
+	}()
 
 	logger.Debug("Creating OAuth config for dynamic registration",
 		zap.String("server", serverConfig.Name))
@@ -229,15 +299,11 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 						logger.Debug("Protected Resource Metadata discovery failed",
 							zap.String("server", serverConfig.Name),
 							zap.Error(err))
-					} else if err == nil {
+					} else {
+						// err == nil but no scopes returned
 						logger.Warn("Protected Resource Metadata returned no scopes - some clients wait for this before showing OAuth UI",
 							zap.String("server", serverConfig.Name),
 							zap.String("metadata_url", metadataURL))
-					} else {
-						logger.Warn("Protected Resource Metadata discovery failed",
-							zap.String("server", serverConfig.Name),
-							zap.String("metadata_url", metadataURL),
-							zap.Error(err))
 					}
 				} else {
 					logger.Warn("WWW-Authenticate header missing resource_metadata; OAuth clients may refuse to launch browser until PRM exists",
