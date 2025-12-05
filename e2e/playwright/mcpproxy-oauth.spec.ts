@@ -71,8 +71,8 @@ const completeOAuthLogin = async (
     await consentCheckbox.check();
   }
 
-  // Click approve button
-  await page.click('button[value="approve"]');
+  // Click approve button (uses onclick to set hidden input, not value attribute)
+  await page.click('button:has-text("Approve")');
 };
 
 // Check if mcpproxy is reachable
