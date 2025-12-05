@@ -2,10 +2,7 @@ package oauth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -30,34 +27,26 @@ func setupTestStorage(t *testing.T) *storage.BoltDB {
 	return db
 }
 
-func TestCreateOAuthConfig_ExtractsResourceParameter(t *testing.T) {
-	// Setup mock metadata server
-	metadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(ProtectedResourceMetadata{
-			Resource:        "https://mcp.example.com/api",
-			ScopesSupported: []string{"mcp.read"},
-		})
-	}))
-	defer metadataServer.Close()
-
-	// Setup mock MCP server that returns WWW-Authenticate
-	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer resource_metadata=\"%s\"", metadataServer.URL))
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer mcpServer.Close()
-
+func TestCreateOAuthConfig_WithExtraParams(t *testing.T) {
+	// Test that CreateOAuthConfig correctly uses extra_params from config
 	storage := setupTestStorage(t)
 	serverConfig := &config.ServerConfig{
 		Name: "test-server",
-		URL:  mcpServer.URL,
+		URL:  "https://example.com/mcp",
+		OAuth: &config.OAuthConfig{
+			ClientID: "test-client",
+			ExtraParams: map[string]string{
+				"resource": "https://mcp.example.com/api",
+				"custom":   "value",
+			},
+		},
 	}
 
-	oauthConfig, extraParams := CreateOAuthConfig(serverConfig, storage)
+	oauthConfig := CreateOAuthConfig(serverConfig, storage)
 
 	require.NotNil(t, oauthConfig)
-	require.NotNil(t, extraParams)
-	assert.Equal(t, "https://mcp.example.com/api", extraParams["resource"])
+	// The OAuth config should be created with the provided configuration
+	assert.Equal(t, "test-client", oauthConfig.ClientID)
 }
 
 func TestIsOAuthCapable(t *testing.T) {

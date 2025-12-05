@@ -20,7 +20,6 @@ import (
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
-	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/runtime/configsvc"
 	"mcpproxy-go/internal/runtime/supervisor"
@@ -1573,10 +1572,6 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			}
 		}
 
-		// Check OAuth authentication status
-		hasOAuthConfig := serverStatus.Config != nil && serverStatus.Config.OAuth != nil
-		authenticated := r.isServerAuthenticated(serverStatus.Name, hasOAuthConfig)
-
 		result = append(result, map[string]interface{}{
 			"name":            serverStatus.Name,
 			"url":             url,
@@ -1600,38 +1595,6 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 	r.logger.Debug("GetAllServers completed", zap.Int("server_count", len(result)))
 	return result, nil
-}
-
-// isServerAuthenticated checks if a server has a valid OAuth token
-// Returns true if the server has a non-expired OAuth token stored
-func (r *Runtime) isServerAuthenticated(serverName string, hasOAuthConfig bool) bool {
-	// Non-OAuth servers are always "authenticated" (no auth required)
-	if !hasOAuthConfig {
-		return true
-	}
-
-	// OAuth-enabled server - check for valid token
-	tokenManager := oauth.GetTokenStoreManager()
-	if tokenManager == nil {
-		r.logger.Debug("Token manager not available, assuming not authenticated",
-			zap.String("server", serverName))
-		return false
-	}
-
-	// Check if we have a valid, non-expired token
-	// Pass storage manager for persistent token stores
-	var db *storage.BoltDB
-	if r.storageManager != nil {
-		db = r.storageManager.GetBoltDB()
-	}
-
-	ctx := context.Background()
-	hasValid := tokenManager.HasValidToken(ctx, serverName, db)
-	r.logger.Debug("OAuth authentication status check",
-		zap.String("server", serverName),
-		zap.Bool("has_valid_token", hasValid))
-
-	return hasValid
 }
 
 // getAllServersLegacy is the storage-based fallback implementation.
