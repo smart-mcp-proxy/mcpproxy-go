@@ -959,41 +959,81 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 
 // tryOAuthAuth attempts OAuth authentication
 func (c *Client) tryOAuthAuth(ctx context.Context) error {
-	c.logger.Error("🚨 OAUTH AUTH FUNCTION CALLED - START",
-		zap.String("server", c.config.Name))
+	// Use the global OAuth flow coordinator to prevent race conditions
+	coordinator := oauth.GetGlobalCoordinator()
 
-	// Check if OAuth is already in progress
-	if c.isOAuthInProgress() {
-		c.logger.Warn("⚠️ OAuth is already in progress, clearing stale state and retrying",
-			zap.String("server", c.config.Name))
-		c.clearOAuthState()
+	// Try to start a new OAuth flow for this server
+	flowCtx, err := coordinator.StartFlow(c.config.Name)
+	if err != nil {
+		if err == oauth.ErrFlowInProgress {
+			// Another flow is already in progress for this server
+			// Wait for it to complete instead of starting a new one
+			c.logger.Info("⏳ OAuth flow already in progress for this server, waiting for completion",
+				zap.String("server", c.config.Name))
+
+			waitErr := coordinator.WaitForFlow(ctx, c.config.Name, oauth.DefaultFlowTimeout)
+			if waitErr != nil {
+				return fmt.Errorf("waiting for OAuth flow failed: %w", waitErr)
+			}
+
+			// Flow completed, try to connect with the new tokens
+			c.logger.Info("✅ OAuth flow completed by another goroutine, retrying connection",
+				zap.String("server", c.config.Name))
+			return nil // The caller will retry the connection
+		}
+		return fmt.Errorf("failed to start OAuth flow: %w", err)
 	}
+
+	// We own this OAuth flow, make sure to end it when done
+	// Use named return to capture final error state
+	var oauthErr error
+	defer func() {
+		success := oauthErr == nil
+		coordinator.EndFlow(c.config.Name, success, oauthErr)
+	}()
+
+	// Update the flow context with the one from the coordinator
+	ctx = oauth.WithFlowContext(ctx, flowCtx)
+	logger := oauth.CorrelationLoggerWithFlow(ctx, c.logger)
+
+	oauth.LogOAuthFlowStart(logger, c.config.Name, flowCtx.CorrelationID)
+
+	logger.Debug("🚨 OAUTH AUTH FUNCTION CALLED - START")
 
 	// Check if OAuth was recently completed by another client (e.g., tray OAuth)
 	tokenManager := oauth.GetTokenStoreManager()
 	if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
-		c.logger.Info("🔄 OAuth was recently completed by another client, creating OAuth client to reuse tokens",
-			zap.String("server", c.config.Name))
+		logger.Info("🔄 OAuth was recently completed by another client, creating OAuth client to reuse tokens")
 		// OAuth was recently completed by another client
 		// Create OAuth-enabled client that should be able to use the stored tokens
 		// Skip the browser flow since tokens should be available
 	}
 
-	c.logger.Debug("🔐 Attempting OAuth authentication",
-		zap.String("server", c.config.Name),
+	logger.Debug("🔐 Attempting OAuth authentication",
 		zap.String("url", c.config.URL))
 
-	// Mark OAuth as in progress
+	// Mark OAuth as in progress (local state, coordinator handles cross-goroutine coordination)
 	c.markOAuthInProgress()
 
-	// Check if tokens already exist for this server
-	hasExistingTokens := tokenManager.HasTokenStore(c.config.Name)
-	c.logger.Info("🔍 HTTP OAuth strategy token store status",
-		zap.String("server", c.config.Name),
-		zap.Bool("has_existing_token_store", hasExistingTokens),
+	// Check if tokens already exist for this server (both in-memory and persisted)
+	hasInMemoryTokens := tokenManager.HasTokenStore(c.config.Name)
+	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	logger.Info("🔍 HTTP OAuth strategy token status",
+		zap.Bool("has_in_memory_token_store", hasInMemoryTokens),
+		zap.Bool("has_persisted_token", hasPersistedToken),
+		zap.Bool("has_refresh_token", hasRefreshToken),
+		zap.Bool("token_expired", isExpired),
 		zap.String("strategy", "HTTP OAuth"))
 
-	c.logger.Error("🚨 ABOUT TO CALL oauth.CreateOAuthConfig")
+	// If we have a persisted token with refresh_token but it's expired,
+	// mcp-go should automatically try to refresh it when we call Start().
+	// Log this scenario for debugging.
+	if hasPersistedToken && hasRefreshToken && isExpired {
+		logger.Info("🔄 Token expired but refresh_token available - mcp-go will attempt automatic refresh",
+			zap.String("strategy", "HTTP OAuth"))
+	}
+
+	logger.Debug("🔧 Creating OAuth config")
 
 	// Create OAuth config using the oauth package
 	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
@@ -1003,7 +1043,8 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 	if oauthConfig == nil {
 		c.logger.Error("🚨 OAUTH CONFIG IS NIL - RETURNING ERROR")
-		return fmt.Errorf("failed to create OAuth config")
+		oauthErr = fmt.Errorf("failed to create OAuth config")
+		return oauthErr
 	}
 
 	c.logger.Info("🌟 Starting OAuth authentication flow",
@@ -1088,17 +1129,65 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		zap.String("server", c.config.Name),
 		zap.Duration("callback_timeout", 120*time.Second))
 
-	err = c.client.Start(ctx)
-	if err != nil {
+	// Token refresh retry configuration
+	refreshConfig := oauth.DefaultRefreshConfig()
+	var lastErr error
+
+	// If we have a refresh token, retry Start() with exponential backoff
+	// to give mcp-go's automatic token refresh a chance to succeed
+	if hasRefreshToken {
+		backoff := refreshConfig.InitialBackoff
+		for attempt := 1; attempt <= refreshConfig.MaxAttempts; attempt++ {
+			oauth.LogTokenRefreshAttempt(c.logger, attempt, refreshConfig.MaxAttempts)
+
+			err = c.client.Start(ctx)
+			if err == nil {
+				oauth.LogTokenRefreshSuccess(c.logger, time.Duration(attempt)*backoff)
+				lastErr = nil
+				break
+			}
+
+			// If not an OAuth error, don't retry for token refresh
+			if !client.IsOAuthAuthorizationRequiredError(err) {
+				c.logger.Error("❌ OAuth client start failed with non-OAuth error",
+					zap.String("server", c.config.Name),
+					zap.Error(err))
+				oauthErr = fmt.Errorf("OAuth client start failed: %w", err)
+				return oauthErr
+			}
+
+			oauth.LogTokenRefreshFailure(c.logger, attempt, err)
+			lastErr = err
+
+			// Don't sleep on the last attempt
+			if attempt < refreshConfig.MaxAttempts {
+				c.logger.Debug("⏳ Waiting before retry",
+					zap.String("server", c.config.Name),
+					zap.Duration("backoff", backoff),
+					zap.Int("attempt", attempt))
+				time.Sleep(backoff)
+				backoff = min(backoff*2, refreshConfig.MaxBackoff)
+			}
+		}
+	} else {
+		// No refresh token, single attempt
+		err = c.client.Start(ctx)
+		lastErr = err
+	}
+
+	// If we still have an error after retries, proceed with browser OAuth flow
+	if lastErr != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
-		if client.IsOAuthAuthorizationRequiredError(err) {
-			c.logger.Info("🎯 OAuth authorization required - starting manual OAuth flow",
-				zap.String("server", c.config.Name))
+		if client.IsOAuthAuthorizationRequiredError(lastErr) {
+			c.logger.Info("🎯 OAuth authorization required after refresh attempts - starting manual OAuth flow",
+				zap.String("server", c.config.Name),
+				zap.Bool("had_refresh_token", hasRefreshToken))
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if handleErr := c.handleOAuthAuthorization(ctx, lastErr, oauthConfig); handleErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
-				return fmt.Errorf("OAuth authorization failed: %w", oauthErr)
+				oauthErr = fmt.Errorf("OAuth authorization failed: %w", handleErr)
+				return oauthErr
 			}
 
 			// Retry starting the client after OAuth is complete
@@ -1110,7 +1199,8 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				c.logger.Error("❌ OAuth client start failed after authorization",
 					zap.String("server", c.config.Name),
 					zap.Error(err))
-				return fmt.Errorf("OAuth client start failed after authorization: %w", err)
+				oauthErr = fmt.Errorf("OAuth client start failed after authorization: %w", err)
+				return oauthErr
 			}
 
 			c.logger.Info("✅ OAuth client start successful after authorization",
@@ -1118,8 +1208,9 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		} else {
 			c.logger.Error("❌ OAuth client start failed with non-OAuth error",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
-			return fmt.Errorf("OAuth client start failed: %w", err)
+				zap.Error(lastErr))
+			oauthErr = fmt.Errorf("OAuth client start failed: %w", lastErr)
+			return oauthErr
 		}
 	}
 
@@ -1155,16 +1246,18 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				c.logger.Info("💡 OAuth login available via system tray menu",
 					zap.String("server", c.config.Name))
 
-				return fmt.Errorf("OAuth authorization required - deferred for background processing")
+				oauthErr = fmt.Errorf("OAuth authorization required - deferred for background processing")
+				return oauthErr
 			}
 
 			// Clear OAuth state before starting manual flow to prevent "already in progress" errors
 			c.clearOAuthState()
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if handleErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); handleErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
-				return fmt.Errorf("OAuth authorization during MCP init failed: %w", oauthErr)
+				oauthErr = fmt.Errorf("OAuth authorization during MCP init failed: %w", handleErr)
+				return oauthErr
 			}
 
 			// Retry MCP initialization after OAuth is complete
@@ -1175,13 +1268,15 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				c.logger.Error("❌ MCP initialization failed after OAuth authorization",
 					zap.String("server", c.config.Name),
 					zap.Error(retryErr))
-				return fmt.Errorf("MCP initialize failed after OAuth authorization: %w", retryErr)
+				oauthErr = fmt.Errorf("MCP initialize failed after OAuth authorization: %w", retryErr)
+				return oauthErr
 			}
 
 			c.logger.Info("✅ MCP initialization successful after OAuth authorization",
 				zap.String("server", c.config.Name))
 		} else {
-			return fmt.Errorf("MCP initialize failed during OAuth strategy: %w", err)
+			oauthErr = fmt.Errorf("MCP initialize failed during OAuth strategy: %w", err)
+			return oauthErr
 		}
 	}
 
@@ -1275,41 +1370,83 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 
 // trySSEOAuthAuth attempts SSE OAuth authentication
 func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
-	// Check if OAuth is already in progress
-	if c.isOAuthInProgress() {
-		c.logger.Warn("⚠️ SSE OAuth is already in progress, clearing stale state and retrying",
-			zap.String("server", c.config.Name))
-		c.clearOAuthState()
+	// Use the global OAuth flow coordinator to prevent race conditions
+	coordinator := oauth.GetGlobalCoordinator()
+
+	// Try to start a new OAuth flow for this server
+	flowCtx, err := coordinator.StartFlow(c.config.Name)
+	if err != nil {
+		if err == oauth.ErrFlowInProgress {
+			// Another flow is already in progress for this server
+			// Wait for it to complete instead of starting a new one
+			c.logger.Info("⏳ SSE OAuth flow already in progress for this server, waiting for completion",
+				zap.String("server", c.config.Name))
+
+			waitErr := coordinator.WaitForFlow(ctx, c.config.Name, oauth.DefaultFlowTimeout)
+			if waitErr != nil {
+				return fmt.Errorf("waiting for SSE OAuth flow failed: %w", waitErr)
+			}
+
+			// Flow completed, try to connect with the new tokens
+			c.logger.Info("✅ SSE OAuth flow completed by another goroutine, retrying connection",
+				zap.String("server", c.config.Name))
+			return nil // The caller will retry the connection
+		}
+		return fmt.Errorf("failed to start SSE OAuth flow: %w", err)
 	}
+
+	// We own this OAuth flow, make sure to end it when done
+	// Use named return to capture final error state
+	var oauthErr error
+	defer func() {
+		success := oauthErr == nil
+		coordinator.EndFlow(c.config.Name, success, oauthErr)
+	}()
+
+	// Update the flow context with the one from the coordinator
+	ctx = oauth.WithFlowContext(ctx, flowCtx)
+	logger := oauth.CorrelationLoggerWithFlow(ctx, c.logger)
+
+	oauth.LogOAuthFlowStart(logger, c.config.Name, flowCtx.CorrelationID)
 
 	// Check if OAuth was recently completed by another client (e.g., tray OAuth)
 	tokenManager := oauth.GetTokenStoreManager()
 	if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
-		c.logger.Info("🔄 SSE OAuth was recently completed by another client, creating OAuth client to reuse tokens",
-			zap.String("server", c.config.Name))
+		logger.Info("🔄 SSE OAuth was recently completed by another client, creating OAuth client to reuse tokens")
 		// OAuth was recently completed by another client
 		// Create OAuth-enabled SSE client that should be able to use the stored tokens
 		// Skip the browser flow since tokens should be available
 	}
 
-	c.logger.Debug("🔐 Attempting SSE OAuth authentication",
-		zap.String("server", c.config.Name),
+	logger.Debug("🔐 Attempting SSE OAuth authentication",
 		zap.String("url", c.config.URL))
 
 	// Mark OAuth as in progress
 	c.markOAuthInProgress()
 
-	// Check if tokens already exist for this server
-	hasExistingTokens := tokenManager.HasTokenStore(c.config.Name)
-	c.logger.Info("🔍 SSE OAuth strategy token store status",
-		zap.String("server", c.config.Name),
-		zap.Bool("has_existing_token_store", hasExistingTokens),
+	// Check if tokens already exist for this server (both in-memory and persisted)
+	hasInMemoryTokens := tokenManager.HasTokenStore(c.config.Name)
+	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	logger.Info("🔍 SSE OAuth strategy token status",
+		zap.Bool("has_in_memory_token_store", hasInMemoryTokens),
+		zap.Bool("has_persisted_token", hasPersistedToken),
+		zap.Bool("has_refresh_token", hasRefreshToken),
+		zap.Bool("token_expired", isExpired),
 		zap.String("strategy", "SSE OAuth"))
+
+	// If we have a persisted token with refresh_token but it's expired,
+	// mcp-go should automatically try to refresh it when we call Start().
+	// Log this scenario for debugging.
+	if hasPersistedToken && hasRefreshToken && isExpired {
+		logger.Info("🔄 Token expired but refresh_token available - mcp-go will attempt automatic refresh",
+			zap.String("strategy", "SSE OAuth"))
+	}
 
 	// Create OAuth config using the oauth package
 	oauthConfig := oauth.CreateOAuthConfig(c.config, c.storage)
 	if oauthConfig == nil {
-		return fmt.Errorf("failed to create OAuth config")
+		oauthErr = fmt.Errorf("failed to create OAuth config")
+		return oauthErr
 	}
 
 	c.logger.Info("🌟 Starting SSE OAuth authentication flow",
@@ -1407,17 +1544,65 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	c.logger.Debug("🔍 Starting SSE OAuth client with persistent context",
 		zap.String("server", c.config.Name))
 
-	err = c.client.Start(persistentCtx)
-	if err != nil {
+	// Token refresh retry configuration
+	refreshConfig := oauth.DefaultRefreshConfig()
+	var lastErr error
+
+	// If we have a refresh token, retry Start() with exponential backoff
+	// to give mcp-go's automatic token refresh a chance to succeed
+	if hasRefreshToken {
+		backoff := refreshConfig.InitialBackoff
+		for attempt := 1; attempt <= refreshConfig.MaxAttempts; attempt++ {
+			oauth.LogTokenRefreshAttempt(c.logger, attempt, refreshConfig.MaxAttempts)
+
+			err = c.client.Start(persistentCtx)
+			if err == nil {
+				oauth.LogTokenRefreshSuccess(c.logger, time.Duration(attempt)*backoff)
+				lastErr = nil
+				break
+			}
+
+			// If not an OAuth error, don't retry for token refresh
+			if !client.IsOAuthAuthorizationRequiredError(err) {
+				c.logger.Error("❌ SSE OAuth client start failed with non-OAuth error",
+					zap.String("server", c.config.Name),
+					zap.Error(err))
+				oauthErr = fmt.Errorf("SSE OAuth client start failed: %w", err)
+				return oauthErr
+			}
+
+			oauth.LogTokenRefreshFailure(c.logger, attempt, err)
+			lastErr = err
+
+			// Don't sleep on the last attempt
+			if attempt < refreshConfig.MaxAttempts {
+				c.logger.Debug("⏳ Waiting before retry",
+					zap.String("server", c.config.Name),
+					zap.Duration("backoff", backoff),
+					zap.Int("attempt", attempt))
+				time.Sleep(backoff)
+				backoff = min(backoff*2, refreshConfig.MaxBackoff)
+			}
+		}
+	} else {
+		// No refresh token, single attempt
+		err = c.client.Start(persistentCtx)
+		lastErr = err
+	}
+
+	// If we still have an error after retries, proceed with browser OAuth flow
+	if lastErr != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
-		if client.IsOAuthAuthorizationRequiredError(err) {
-			c.logger.Info("🎯 SSE OAuth authorization required - starting manual OAuth flow",
-				zap.String("server", c.config.Name))
+		if client.IsOAuthAuthorizationRequiredError(lastErr) {
+			c.logger.Info("🎯 SSE OAuth authorization required after refresh attempts - starting manual OAuth flow",
+				zap.String("server", c.config.Name),
+				zap.Bool("had_refresh_token", hasRefreshToken))
 
 			// Handle OAuth authorization manually using the example pattern
-			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig); oauthErr != nil {
+			if handleErr := c.handleOAuthAuthorization(ctx, lastErr, oauthConfig); handleErr != nil {
 				c.clearOAuthState() // Clear state on OAuth failure
-				return fmt.Errorf("SSE OAuth authorization failed: %w", oauthErr)
+				oauthErr = fmt.Errorf("SSE OAuth authorization failed: %w", handleErr)
+				return oauthErr
 			}
 
 			// Create a fresh context for the retry to avoid cancellation issues
@@ -1430,13 +1615,15 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 				c.logger.Error("❌ SSE OAuth client start failed after authorization",
 					zap.String("server", c.config.Name),
 					zap.Error(err))
-				return fmt.Errorf("SSE OAuth client start failed after authorization: %w", err)
+				oauthErr = fmt.Errorf("SSE OAuth client start failed after authorization: %w", err)
+				return oauthErr
 			}
 		} else {
 			c.logger.Error("❌ SSE OAuth client start failed with non-OAuth error",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
-			return fmt.Errorf("SSE OAuth client start failed: %w", err)
+				zap.Error(lastErr))
+			oauthErr = fmt.Errorf("SSE OAuth client start failed: %w", lastErr)
+			return oauthErr
 		}
 	}
 
@@ -1449,7 +1636,8 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	// CRITICAL FIX: Test initialize() to verify connection and set serverInfo
 	// This ensures consistency with other auth strategies and sets c.serverInfo for ListTools
 	if err := c.initialize(ctx); err != nil {
-		return fmt.Errorf("MCP initialize failed during SSE OAuth strategy: %w", err)
+		oauthErr = fmt.Errorf("MCP initialize failed during SSE OAuth strategy: %w", err)
+		return oauthErr
 	}
 
 	return nil

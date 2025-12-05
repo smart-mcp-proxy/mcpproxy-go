@@ -70,12 +70,8 @@ func DiscoverScopesFromProtectedResource(metadataURL string, timeout time.Durati
 
 	req.Header.Set("Accept", "application/json")
 
-	// TRACE: Log HTTP request details
-	logger.Debug("🌐 HTTP Request - Protected Resource Metadata (RFC 9728)",
-		zap.String("method", req.Method),
-		zap.String("url", metadataURL),
-		zap.Any("headers", req.Header),
-		zap.Duration("timeout", timeout))
+	// TRACE: Log HTTP request details (using standard logging function for consistent redaction)
+	LogOAuthRequest(logger, req.Method, metadataURL, req.Header)
 
 	startTime := time.Now()
 	client := &http.Client{Timeout: timeout}
@@ -91,13 +87,8 @@ func DiscoverScopesFromProtectedResource(metadataURL string, timeout time.Durati
 	}
 	defer resp.Body.Close()
 
-	// TRACE: Log HTTP response details
-	logger.Debug("📥 HTTP Response - Protected Resource Metadata",
-		zap.String("url", metadataURL),
-		zap.Int("status_code", resp.StatusCode),
-		zap.String("status", resp.Status),
-		zap.Any("headers", resp.Header),
-		zap.Duration("elapsed", elapsed))
+	// TRACE: Log HTTP response details (using standard logging function for consistent redaction)
+	LogOAuthResponse(logger, resp.StatusCode, resp.Header, elapsed)
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Debug("⚠️ Non-200 status code from metadata endpoint",
@@ -149,13 +140,8 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 
 	req.Header.Set("Accept", "application/json")
 
-	// TRACE: Log HTTP request details
-	logger.Debug("🌐 HTTP Request - Authorization Server Metadata (RFC 8414)",
-		zap.String("method", req.Method),
-		zap.String("url", metadataURL),
-		zap.String("base_url", baseURL),
-		zap.Any("headers", req.Header),
-		zap.Duration("timeout", timeout))
+	// TRACE: Log HTTP request details (using standard logging function for consistent redaction)
+	LogOAuthRequest(logger, req.Method, metadataURL, req.Header)
 
 	startTime := time.Now()
 	client := &http.Client{Timeout: timeout}
@@ -171,13 +157,8 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 	}
 	defer resp.Body.Close()
 
-	// TRACE: Log HTTP response details
-	logger.Debug("📥 HTTP Response - Authorization Server Metadata",
-		zap.String("url", metadataURL),
-		zap.Int("status_code", resp.StatusCode),
-		zap.String("status", resp.Status),
-		zap.Any("headers", resp.Header),
-		zap.Duration("elapsed", elapsed))
+	// TRACE: Log HTTP response details (using standard logging function for consistent redaction)
+	LogOAuthResponse(logger, resp.StatusCode, resp.Header, elapsed)
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Debug("⚠️ Non-200 status code from metadata endpoint",

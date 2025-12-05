@@ -6,14 +6,15 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: '.',
-  /* Run tests in files in parallel */
-  fullyParallel: true,
+  /* Run tests sequentially - OAuth tests share a single mcpproxy instance and OAuth server,
+   * so parallel execution causes state conflicts (state mismatch errors) */
+  fullyParallel: false,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
   /* Retry on CI only */
   retries: process.env.CI ? 2 : 0,
-  /* Opt out of parallel tests on CI. */
-  workers: process.env.CI ? 1 : undefined,
+  /* Single worker for OAuth tests - prevents concurrent OAuth flows from interfering */
+  workers: 1,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   reporter: process.env.CI ? 'github' : 'html',
   /* Shared settings for all the projects below. */

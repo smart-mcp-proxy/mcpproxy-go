@@ -2,6 +2,7 @@
   "listen": "127.0.0.1:8085",
   "data_dir": "/tmp/mcpproxy-oauth-e2e",
   "enable_socket": false,
+  "enable_web_ui": true,
   "api_key": "test-api-key",
   "mcpServers": [
     {

@@ -3,6 +3,21 @@
 # This script runs the complete OAuth E2E test suite including:
 # 1. Go unit tests for the OAuth test server
 # 2. Full mcpproxy OAuth flow tests with Playwright
+#
+# Test Scenarios (Spec 008):
+# - T047: Token refresh with short TTL
+# - T048: Persisted token loading on restart
+# - T049: Correlation ID verification
+# - T050: Race condition prevention (rapid reconnections)
+# - T051: Error injection (invalid_grant)
+# - T052: Web UI OAuth status verification
+# - T053: REST API OAuth status verification
+#
+# Usage:
+#   ./scripts/run-oauth-e2e.sh                    # Run all tests
+#   ./scripts/run-oauth-e2e.sh --short-ttl        # Run with 30s token TTL
+#   ./scripts/run-oauth-e2e.sh --error-injection  # Run with error injection tests
+#   ./scripts/run-oauth-e2e.sh --verbose          # Show verbose output
 
 set -e
 
@@ -10,7 +25,29 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Parse arguments
+SHORT_TTL=false
+ERROR_INJECTION=false
+VERBOSE=false
+for arg in "$@"; do
+  case $arg in
+    --short-ttl)
+      SHORT_TTL=true
+      shift
+      ;;
+    --error-injection)
+      ERROR_INJECTION=true
+      shift
+      ;;
+    --verbose)
+      VERBOSE=true
+      shift
+      ;;
+  esac
+done
 
 # Configuration
 OAUTH_SERVER_PORT=${OAUTH_SERVER_PORT:-9000}
@@ -20,6 +57,14 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 PLAYWRIGHT_DIR="$PROJECT_ROOT/e2e/playwright"
 TEST_CONFIG="$PLAYWRIGHT_DIR/test-config.json"
 TEST_DATA_DIR="/tmp/mcpproxy-oauth-e2e"
+TEST_RESULTS_DIR="$PLAYWRIGHT_DIR/test-results"
+
+# Token TTL for short TTL mode (T047)
+if [ "$SHORT_TTL" = true ]; then
+  ACCESS_TOKEN_TTL="30s"
+else
+  ACCESS_TOKEN_TTL="1h"
+fi
 
 # PIDs for cleanup
 OAUTH_SERVER_PID=""
@@ -112,9 +157,13 @@ echo ""
 # Create test data directory
 mkdir -p "$TEST_DATA_DIR"
 
-# Start OAuth test server
+# Create test results directory
+mkdir -p "$TEST_RESULTS_DIR"
+
+# Start OAuth test server with configured TTL
 echo -e "${YELLOW}Starting OAuth test server on port $OAUTH_SERVER_PORT...${NC}"
-go run ./tests/oauthserver/cmd/server -port $OAUTH_SERVER_PORT &
+echo -e "${BLUE}  Access Token TTL: $ACCESS_TOKEN_TTL${NC}"
+go run ./tests/oauthserver/cmd/server -port $OAUTH_SERVER_PORT -access-token-ttl=$ACCESS_TOKEN_TTL &
 OAUTH_SERVER_PID=$!
 sleep 3
 

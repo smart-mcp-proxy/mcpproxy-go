@@ -116,6 +116,15 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 		Scope:        scope,
 	}
 
+	// Log token metadata for debugging (using the new logging utility)
+	LogTokenMetadata(p.logger, TokenMetadata{
+		TokenType:       record.TokenType,
+		ExpiresAt:       record.ExpiresAt,
+		ExpiresIn:       timeUntilExpiry,
+		Scope:           scope,
+		HasRefreshToken: record.RefreshToken != "",
+	})
+
 	// Return the token - mcp-go library will check IsExpired() and handle refresh if needed
 	// By subtracting the grace period from ExpiresAt, we trigger refresh earlier
 	return token, nil
@@ -169,6 +178,16 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	p.logger.Info("✅ OAuth token saved to persistent storage successfully",
 		zap.String("server_key", p.serverKey),
 		zap.Duration("valid_for", timeUntilExpiry))
+
+	// Log token metadata for debugging (using the standard logging utility)
+	LogTokenMetadata(p.logger, TokenMetadata{
+		TokenType:       token.TokenType,
+		ExpiresAt:       token.ExpiresAt,
+		ExpiresIn:       timeUntilExpiry,
+		Scope:           token.Scope,
+		HasRefreshToken: token.RefreshToken != "",
+	})
+
 	return nil
 }
 

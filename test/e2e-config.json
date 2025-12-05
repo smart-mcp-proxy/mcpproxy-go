@@ -1,12 +1,9 @@
 {
-  "listen": ":18085",
+  "listen": ":8088",
+  "enable_socket": true,
   "data_dir": "./test-data",
   "enable_tray": false,
-  "api_key": "",
   "debug_search": false,
-  "tls": {
-    "enabled": false
-  },
   "mcpServers": [
     {
       "name": "everything",
@@ -16,10 +13,11 @@
         "-y",
         "@modelcontextprotocol/server-everything"
       ],
+      "oauth": null,
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-09-23T10:13:46.357736+03:00"
+      "updated": "2025-12-04T15:48:19.750309+02:00"
     }
   ],
   "top_k": 10,
@@ -51,6 +49,7 @@
     "compress": true,
     "json_format": false
   },
+  "api_key": "69bb5776a19715ab51b5df4e02836f639314cca5884afc0b0b3e0558643d7efd",
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,
@@ -168,5 +167,18 @@
     "enable_tray": true,
     "enable_debug_logging": false,
     "enable_contract_tests": false
-  }
+  },
+  "tls": {
+    "enabled": false,
+    "require_client_cert": false,
+    "hsts": true
+  },
+  "tokenizer": {
+    "enabled": true,
+    "default_model": "gpt-4",
+    "encoding": "cl100k_base"
+  },
+  "enable_code_execution": false,
+  "code_execution_timeout_ms": 120000,
+  "code_execution_pool_size": 10
 }

@@ -808,6 +808,10 @@ The event bus enables real-time communication between runtime and UI components:
 - RFC 8252 compliant with PKCE for security
 - Automatic browser launching for authentication flows
 - Global callback server manager prevents port conflicts
+- **OAuth Flow Coordinator** (`internal/oauth/coordinator.go`): Prevents race conditions with per-server OAuth flow coordination
+- **Token Refresh**: Automatic token refresh using refresh_token before browser re-authentication
+- **Correlation IDs**: UUID-based tracing for all OAuth operations (`internal/oauth/correlation.go`)
+- **Token Redaction**: Sensitive data automatically redacted in logs (`internal/oauth/logging.go`)
 
 ### Connection Management
 - Background connection attempts with exponential backoff
@@ -845,6 +849,8 @@ When making changes to this codebase, ensure you understand the modular architec
 - N/A (documentation-only feature) (001-oas-endpoint-documentation)
 - Go 1.24.0 (as per existing project) (007-oauth-e2e-testing)
 - BBolt (existing `internal/storage/`) for token persistence (007-oauth-e2e-testing)
+- Go 1.24.0 + mcp-go (OAuth transport), zap (logging), BBolt (token persistence), google/uuid (correlation IDs) (008-oauth-token-refresh)
+- BBolt embedded database (`~/.mcpproxy/config.db`) - `oauth_tokens` and `oauth_completion` buckets (008-oauth-token-refresh)
 
 ## Recent Changes
 - 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3
