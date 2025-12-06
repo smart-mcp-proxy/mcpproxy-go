@@ -107,13 +107,33 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 
 	// Adjust ExpiresAt to trigger proactive refresh within grace period
 	// This prevents race conditions where tokens expire during API calls
-	adjustedExpiresAt := record.ExpiresAt.Add(-TokenRefreshGracePeriod)
+	//
+	// IMPORTANT: Only apply grace period if the token has enough remaining lifetime.
+	// For short-lived tokens (e.g., 30 seconds), subtracting 5 minutes would make
+	// them appear expired immediately, causing unnecessary re-authentication.
+	adjustedExpiresAt := record.ExpiresAt
+	if timeUntilExpiry > TokenRefreshGracePeriod {
+		// Token has enough lifetime - apply full grace period for proactive refresh
+		adjustedExpiresAt = record.ExpiresAt.Add(-TokenRefreshGracePeriod)
+		p.logger.Debug("Applied grace period adjustment for proactive refresh",
+			zap.Duration("grace_period", TokenRefreshGracePeriod),
+			zap.Time("original_expires_at", record.ExpiresAt),
+			zap.Time("adjusted_expires_at", adjustedExpiresAt))
+	} else if timeUntilExpiry > 0 {
+		// Token is short-lived but not yet expired - use actual expiration
+		// This allows the token to be used until it actually expires
+		p.logger.Debug("Skipping grace period for short-lived token",
+			zap.Duration("time_until_expiry", timeUntilExpiry),
+			zap.Duration("grace_period", TokenRefreshGracePeriod),
+			zap.Time("expires_at", record.ExpiresAt))
+	}
+	// If timeUntilExpiry <= 0, token is already expired - adjustedExpiresAt stays as record.ExpiresAt
 
 	token := &client.Token{
 		AccessToken:  record.AccessToken,
 		RefreshToken: record.RefreshToken,
 		TokenType:    record.TokenType,
-		ExpiresAt:    adjustedExpiresAt, // Use grace period for proactive refresh
+		ExpiresAt:    adjustedExpiresAt,
 		Scope:        scope,
 	}
 
@@ -127,7 +147,8 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	})
 
 	// Return the token - mcp-go library will check IsExpired() and handle refresh if needed
-	// By subtracting the grace period from ExpiresAt, we trigger refresh earlier
+	// For long-lived tokens, we subtract the grace period from ExpiresAt to trigger refresh earlier
+	// For short-lived tokens, we use the actual expiration to avoid falsely marking them as expired
 	return token, nil
 }
 
