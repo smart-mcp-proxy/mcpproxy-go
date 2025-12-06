@@ -95,7 +95,7 @@ func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB
 		return false, false, false
 	}
 
-	serverKey := generateServerKey(serverName, serverURL)
+	serverKey := GenerateServerKey(serverName, serverURL)
 	record, err := boltStorage.GetOAuthToken(serverKey)
 	if err != nil || record == nil {
 		return false, false, false
@@ -114,7 +114,7 @@ func GetPersistedRefreshToken(serverName, serverURL string, boltStorage *storage
 		return ""
 	}
 
-	serverKey := generateServerKey(serverName, serverURL)
+	serverKey := GenerateServerKey(serverName, serverURL)
 	record, err := boltStorage.GetOAuthToken(serverKey)
 	if err != nil || record == nil {
 		return ""
@@ -519,13 +519,35 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltD
 			zap.String("server", serverConfig.Name),
 			zap.String("client_id", clientID))
 	} else {
-		// Empty credentials - will attempt DCR or use public client OAuth with PKCE
-		clientID = ""
-		clientSecret = ""
-		registrationMode = "public client (PKCE)"
-		logger.Info("🔓 No OAuth credentials provided - will attempt DCR or use public client mode",
-			zap.String("server", serverConfig.Name),
-			zap.String("mode", "Public client OAuth with PKCE"))
+		// Try to load persisted DCR credentials for token refresh
+		if storage != nil {
+			serverKey := GenerateServerKey(serverConfig.Name, serverConfig.URL)
+			persistedClientID, persistedClientSecret, err := storage.GetOAuthClientCredentials(serverKey)
+			if err == nil && persistedClientID != "" {
+				clientID = persistedClientID
+				clientSecret = persistedClientSecret
+				registrationMode = "persisted DCR credentials"
+				logger.Info("✅ Using persisted DCR credentials for token refresh",
+					zap.String("server", serverConfig.Name),
+					zap.String("client_id", clientID))
+			} else {
+				// No persisted credentials - will attempt DCR or use public client OAuth with PKCE
+				clientID = ""
+				clientSecret = ""
+				registrationMode = "public client (PKCE)"
+				logger.Info("🔓 No persisted DCR credentials found - will attempt DCR or use public client mode",
+					zap.String("server", serverConfig.Name),
+					zap.String("mode", "Public client OAuth with PKCE"))
+			}
+		} else {
+			// No storage available (CLI mode) - will attempt DCR
+			clientID = ""
+			clientSecret = ""
+			registrationMode = "public client (PKCE)"
+			logger.Info("🔓 No storage available - will attempt DCR or use public client mode",
+				zap.String("server", serverConfig.Name),
+				zap.String("mode", "Public client OAuth with PKCE"))
+		}
 	}
 
 	oauthConfig := &client.OAuthConfig{

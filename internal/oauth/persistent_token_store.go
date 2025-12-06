@@ -32,7 +32,7 @@ type PersistentTokenStore struct {
 // NewPersistentTokenStore creates a new persistent token store for a server
 func NewPersistentTokenStore(serverName, serverURL string, storage *storage.BoltDB) client.TokenStore {
 	// Create unique key combining server name and URL to handle servers with same name but different URLs
-	serverKey := generateServerKey(serverName, serverURL)
+	serverKey := GenerateServerKey(serverName, serverURL)
 
 	return &PersistentTokenStore{
 		serverKey: serverKey,
@@ -41,8 +41,9 @@ func NewPersistentTokenStore(serverName, serverURL string, storage *storage.Bolt
 	}
 }
 
-// generateServerKey creates a unique key for a server by combining name and URL
-func generateServerKey(serverName, serverURL string) string {
+// GenerateServerKey creates a unique key for a server by combining name and URL
+// Exported for use by connection.go when persisting DCR credentials
+func GenerateServerKey(serverName, serverURL string) string {
 	// Create a unique identifier by combining server name and URL
 	combined := fmt.Sprintf("%s|%s", serverName, serverURL)
 

@@ -389,6 +389,63 @@ func (b *BoltDB) DeleteOAuthToken(serverName string) error {
 	})
 }
 
+// UpdateOAuthClientCredentials updates just the client credentials (from DCR) on an existing token
+// This is called after successful Dynamic Client Registration to persist the obtained client_id/secret
+func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret string) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		data := bucket.Get([]byte(serverKey))
+
+		var record *OAuthTokenRecord
+		if data != nil {
+			// Update existing record
+			record = &OAuthTokenRecord{}
+			if err := record.UnmarshalBinary(data); err != nil {
+				return err
+			}
+			record.ClientID = clientID
+			record.ClientSecret = clientSecret
+			record.Updated = time.Now()
+		} else {
+			// Create minimal record with just client credentials
+			// Full token will be saved later during OAuth completion
+			record = &OAuthTokenRecord{
+				ServerName:   serverKey,
+				ClientID:     clientID,
+				ClientSecret: clientSecret,
+				Created:      time.Now(),
+				Updated:      time.Now(),
+			}
+		}
+
+		newData, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(serverKey), newData)
+	})
+}
+
+// GetOAuthClientCredentials retrieves just the client credentials for token refresh
+func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSecret string, err error) {
+	err = b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		data := bucket.Get([]byte(serverKey))
+		if data == nil {
+			return nil // No credentials stored
+		}
+
+		record := &OAuthTokenRecord{}
+		if err := record.UnmarshalBinary(data); err != nil {
+			return err
+		}
+		clientID = record.ClientID
+		clientSecret = record.ClientSecret
+		return nil
+	})
+	return
+}
+
 // ListOAuthTokens returns all OAuth token records
 func (b *BoltDB) ListOAuthTokens() ([]*OAuthTokenRecord, error) {
 	var records []*OAuthTokenRecord
