@@ -91,7 +91,7 @@
           v-if="needsOAuth"
           @click="triggerOAuth"
           :disabled="loading"
-          class="btn btn-sm btn-primary"
+          class="btn btn-sm btn-outline"
         >
           <span v-if="loading" class="loading loading-spinner loading-xs"></span>
           Login
