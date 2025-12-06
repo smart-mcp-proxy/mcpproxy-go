@@ -46,6 +46,14 @@ export const useServersStore = defineStore('servers', () => {
         // Update existing server in-place (preserves object reference)
         // Only update properties that have changed
         let hasChanges = false
+
+        // IMPORTANT: Clear last_error if not present in incoming server
+        // Object.assign won't clear properties that are missing from source
+        if (!('last_error' in incomingServer) && existingServer.last_error) {
+          delete existingServer.last_error
+          hasChanges = true
+        }
+
         Object.assign(existingServer, incomingServer)
         hasChanges = true
 

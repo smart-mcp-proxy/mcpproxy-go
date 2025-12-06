@@ -568,6 +568,13 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 			status.ConnectedAt = &t
 		}
 
+		// CRITICAL: Clear error when connected, even if ConnectionInfo is unavailable
+		// This ensures stale OAuth/connection errors don't persist after successful reconnection
+		if state.Connected {
+			status.LastError = ""
+			status.LastErrorTime = nil
+		}
+
 		// Update connection info if available
 		if state.ConnectionInfo != nil {
 			// Extract LastError from ConnectionInfo and convert to string with limit
@@ -585,10 +592,9 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 					t := state.ConnectionInfo.LastRetryTime
 					status.LastErrorTime = &t
 				}
-			} else {
-				status.LastError = ""
-				status.LastErrorTime = nil
 			}
+			// Note: error already cleared above if connected=true
+			// Only set error from ConnectionInfo if it has one
 
 			// Copy retry count
 			status.RetryCount = state.ConnectionInfo.RetryCount
@@ -773,6 +779,11 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						status.ToolCount = toolCount
 					}
 					// If tools are already populated, keep the existing count
+
+					// CRITICAL: Clear error when connected, even if connInfo is unavailable
+					// This ensures stale OAuth/connection errors don't persist after successful reconnection
+					status.LastError = ""
+					status.LastErrorTime = nil
 				} else {
 					t := event.Timestamp
 					status.DisconnectedAt = &t
@@ -794,10 +805,9 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 							t := connInfo.LastRetryTime
 							status.LastErrorTime = &t
 						}
-					} else {
-						status.LastError = ""
-						status.LastErrorTime = nil
 					}
+					// Note: We already cleared error above when connected=true
+					// Only set error from connInfo if it has one
 					status.RetryCount = connInfo.RetryCount
 				}
 			})
