@@ -203,6 +203,125 @@ func TestPersistentTokenStoreMultipleServers(t *testing.T) {
 	}
 }
 
+// TestPersistentTokenStoreShortLivedToken verifies that short-lived tokens
+// (with lifetime shorter than the grace period) don't get their expiration
+// adjusted, preventing them from appearing expired immediately after creation.
+func TestPersistentTokenStoreShortLivedToken(t *testing.T) {
+	// Create a temporary directory for test database
+	tmpDir := t.TempDir()
+
+	// Create logger
+	logger := zap.NewNop().Sugar()
+
+	// Create storage
+	db, err := storage.NewBoltDB(tmpDir, logger)
+	if err != nil {
+		t.Fatalf("Failed to create BoltDB: %v", err)
+	}
+	defer db.Close()
+
+	// Create token store
+	tokenStore := NewPersistentTokenStore("test-server", "https://test.example.com/mcp", db)
+
+	// Test case 1: Short-lived token (30 seconds - much less than 5 minute grace period)
+	// This token should NOT have grace period applied, as it would make it appear expired
+	shortLivedToken := &client.Token{
+		AccessToken:  "short-lived-access-token",
+		RefreshToken: "short-lived-refresh-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(30 * time.Second), // 30 seconds - less than grace period
+		Scope:        "mcp.read",
+	}
+
+	err = tokenStore.SaveToken(context.Background(), shortLivedToken)
+	if err != nil {
+		t.Fatalf("Failed to save short-lived token: %v", err)
+	}
+
+	retrievedToken, err := tokenStore.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to get short-lived token: %v", err)
+	}
+
+	// For short-lived tokens, ExpiresAt should NOT be adjusted by grace period
+	// It should be the same as the original (within 1 second tolerance for test timing)
+	timeDiff := retrievedToken.ExpiresAt.Sub(shortLivedToken.ExpiresAt).Abs()
+	if timeDiff > 1*time.Second {
+		t.Errorf("Short-lived token ExpiresAt should not be adjusted: got %v, want approximately %v (diff: %v)",
+			retrievedToken.ExpiresAt, shortLivedToken.ExpiresAt, timeDiff)
+	}
+
+	// Most importantly, the token should NOT appear expired immediately
+	if retrievedToken.IsExpired() {
+		t.Error("Short-lived token should NOT appear expired immediately after creation")
+	}
+
+	// Test case 2: Long-lived token (1 hour - more than 5 minute grace period)
+	// This token SHOULD have grace period applied for proactive refresh
+	longLivedToken := &client.Token{
+		AccessToken:  "long-lived-access-token",
+		RefreshToken: "long-lived-refresh-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(1 * time.Hour), // 1 hour - more than grace period
+		Scope:        "mcp.read",
+	}
+
+	// Need a separate store to avoid key collision
+	tokenStore2 := NewPersistentTokenStore("test-server-long", "https://test.example.com/mcp", db)
+
+	err = tokenStore2.SaveToken(context.Background(), longLivedToken)
+	if err != nil {
+		t.Fatalf("Failed to save long-lived token: %v", err)
+	}
+
+	retrievedLongToken, err := tokenStore2.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to get long-lived token: %v", err)
+	}
+
+	// For long-lived tokens, ExpiresAt SHOULD be adjusted by grace period
+	expectedAdjustedExpiresAt := longLivedToken.ExpiresAt.Add(-TokenRefreshGracePeriod)
+	timeDiff = retrievedLongToken.ExpiresAt.Sub(expectedAdjustedExpiresAt).Abs()
+	if timeDiff > 1*time.Second {
+		t.Errorf("Long-lived token ExpiresAt should be adjusted by grace period: got %v, want approximately %v (diff: %v)",
+			retrievedLongToken.ExpiresAt, expectedAdjustedExpiresAt, timeDiff)
+	}
+
+	// Test case 3: Token with exactly grace period lifetime
+	// Edge case: token with exactly 5 minutes should NOT get adjusted (would make it appear expired)
+	edgeCaseToken := &client.Token{
+		AccessToken:  "edge-case-token",
+		RefreshToken: "edge-case-refresh",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(TokenRefreshGracePeriod), // Exactly 5 minutes
+		Scope:        "mcp.read",
+	}
+
+	tokenStore3 := NewPersistentTokenStore("test-server-edge", "https://test.example.com/mcp", db)
+
+	err = tokenStore3.SaveToken(context.Background(), edgeCaseToken)
+	if err != nil {
+		t.Fatalf("Failed to save edge case token: %v", err)
+	}
+
+	retrievedEdgeToken, err := tokenStore3.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to get edge case token: %v", err)
+	}
+
+	// Edge case token should NOT be adjusted (timeUntilExpiry <= grace period)
+	timeDiff = retrievedEdgeToken.ExpiresAt.Sub(edgeCaseToken.ExpiresAt).Abs()
+	if timeDiff > 1*time.Second {
+		t.Errorf("Edge case token ExpiresAt should not be adjusted: got %v, want approximately %v (diff: %v)",
+			retrievedEdgeToken.ExpiresAt, edgeCaseToken.ExpiresAt, timeDiff)
+	}
+
+	// The edge case token should NOT appear expired
+	if retrievedEdgeToken.IsExpired() {
+		t.Error("Edge case token should NOT appear expired")
+	}
+}
+
 func TestPersistentTokenStoreSameNameDifferentURL(t *testing.T) {
 	// Create a temporary directory for test database
 	tmpDir := t.TempDir()

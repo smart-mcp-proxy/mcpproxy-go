@@ -1976,17 +1976,25 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		zap.String("server", c.config.Name),
 		zap.String("state", state))
 
-	// Check if static OAuth credentials are provided
+	// Check if OAuth credentials are available (either from config or persisted DCR)
+	// oauthConfig.ClientID may contain persisted DCR credentials loaded by CreateOAuthConfig()
 	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
+	hasPersistedCredentials := oauthConfig.ClientID != ""
 
 	// Determine OAuth mode and attempt registration if needed
 	var oauthMode string
 	if hasStaticCredentials {
-		// Skip DCR when static credentials are provided
+		// Skip DCR when static credentials are provided in config
 		oauthMode = "static credentials"
 		c.logger.Info("⏩ Skipping Dynamic Client Registration (static credentials provided)",
 			zap.String("server", c.config.Name),
 			zap.String("client_id", c.config.OAuth.ClientID))
+	} else if hasPersistedCredentials {
+		// Skip DCR when we have persisted DCR credentials from a previous OAuth flow
+		oauthMode = "persisted DCR credentials"
+		c.logger.Info("⏩ Skipping Dynamic Client Registration (using persisted DCR credentials)",
+			zap.String("server", c.config.Name),
+			zap.String("client_id", oauthConfig.ClientID))
 	} else {
 		// Attempt DCR for servers without static credentials
 		c.logger.Info("📋 Attempting Dynamic Client Registration (optional)",

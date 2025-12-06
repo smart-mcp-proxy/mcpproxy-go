@@ -231,7 +231,25 @@ func RefreshToken(client *mcp.Client) error {
 }
 ```
 
-### 7.3 PKCE Implementation Gaps
+### 7.3 "Connected but Token Expired" Status
+
+**Problem**: `mcpproxy auth status` shows server as "Authenticated & Connected" but token shows "⚠️ EXPIRED".
+
+**Explanation**: This is expected behavior, not a bug:
+- **Connection persists after token expiration**: Once an MCP connection is established, it remains active. HTTP connections don't automatically drop when tokens expire.
+- **Token refresh happens in-memory**: mcp-go's OAuth handler automatically refreshes tokens during API calls. The refreshed token lives in mcp-go's memory.
+- **Status displays storage value**: `auth status` reads the **original** expiration from persistent storage (BBolt), which may lag behind in-memory state.
+
+**When this occurs**:
+- Short-lived tokens (e.g., 30-second TTL) expire quickly after storage
+- Server connected successfully, then stored token expired
+- mcp-go refreshed the token automatically OR the connection is still active from before expiration
+
+**How to verify**: Call a tool on the server. If it works, mcp-go is refreshing tokens automatically.
+
+**Contrast with "Disconnected + Expired"**: If status shows "Disconnected" with "EXPIRED" token, the refresh token also failed (expired or missing), requiring re-authentication via `mcpproxy auth login`.
+
+### 7.4 PKCE Implementation Gaps
 
 **Problem**: Code interception via port sniffing.
 
