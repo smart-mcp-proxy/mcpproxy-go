@@ -71,6 +71,10 @@ type OAuthTokenRecord struct {
 	Scopes       []string  `json:"scopes,omitempty"`
 	Created      time.Time `json:"created"`
 	Updated      time.Time `json:"updated"`
+	// ClientID and ClientSecret are persisted for DCR (Dynamic Client Registration)
+	// These are required for token refresh when using DCR-obtained credentials
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
 }
 
 // OAuthCompletionEvent represents an OAuth completion event for cross-process notification

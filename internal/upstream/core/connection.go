@@ -2016,8 +2016,26 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 				zap.Strings("scopes", oauthConfig.Scopes))
 		} else {
 			oauthMode = "dynamic client registration"
+
+			// Persist DCR credentials for token refresh
+			clientID := oauthHandler.GetClientID()
+			clientSecret := oauthHandler.GetClientSecret()
+			if c.storage != nil && clientID != "" {
+				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+				if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret); err != nil {
+					c.logger.Warn("Failed to persist DCR credentials - token refresh may fail later",
+						zap.String("server", c.config.Name),
+						zap.Error(err))
+				} else {
+					c.logger.Info("✅ DCR credentials persisted for token refresh",
+						zap.String("server", c.config.Name),
+						zap.String("client_id", clientID))
+				}
+			}
+
 			c.logger.Info("✅ Dynamic Client Registration successful",
-				zap.String("server", c.config.Name))
+				zap.String("server", c.config.Name),
+				zap.String("client_id", clientID))
 		}
 	}
 
