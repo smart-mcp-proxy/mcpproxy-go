@@ -1258,21 +1258,21 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			c.logger.Info("🎯 OAuth authorization required during MCP init - deferring OAuth for background processing",
 				zap.String("server", c.config.Name))
 
-			// For tray mode, defer OAuth to prevent UI blocking
+			// For daemon mode, defer OAuth to prevent UI blocking
 			// The connection will be retried by the managed client retry logic
 			// which will eventually complete OAuth in the background
 			if c.isDeferOAuthForTray() {
-				c.logger.Info("⏳ Deferring OAuth to prevent tray UI blocking - will retry in background",
+				c.logger.Info("⏳ Deferring OAuth to prevent UI blocking - will retry in background",
 					zap.String("server", c.config.Name))
 
-				// Log a user-friendly message about OAuth being available via tray
-				c.logger.Info("💡 OAuth login available via system tray menu",
+				// Log a user-friendly message about OAuth login options
+				c.logger.Info("💡 OAuth login available via Web UI, system tray menu, or CLI command",
 					zap.String("server", c.config.Name))
 
 				return &ErrOAuthPending{
 					ServerName: c.config.Name,
 					ServerURL:  c.config.URL,
-					Message:    "deferred for tray UI - login available via system tray menu",
+					Message:    "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
 				}
 			}
 

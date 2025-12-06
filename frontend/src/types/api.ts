@@ -17,7 +17,7 @@ export interface Server {
   connecting: boolean
   authenticated?: boolean
   tool_count: number
-  last_error: string
+  last_error?: string
   tool_list_token_size?: number
   oauth?: {
     client_id: string
