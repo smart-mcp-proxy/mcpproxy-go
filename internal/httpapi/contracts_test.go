@@ -74,6 +74,10 @@ func (m *mockManagementService) TriggerOAuthLogin(ctx context.Context, name stri
 	return nil
 }
 
+func (m *mockManagementService) TriggerOAuthLogout(ctx context.Context, name string) error {
+	return nil
+}
+
 func (m *MockServerController) IsRunning() bool          { return true }
 func (m *MockServerController) GetListenAddress() string { return ":8080" }
 func (m *MockServerController) GetManagementService() interface{} {
@@ -453,6 +457,7 @@ func TestEndpointResponseTypes(t *testing.T) {
 		{"POST", "/api/v1/servers/test-server/disable", "disable"},
 		{"POST", "/api/v1/servers/test-server/restart", "restart"},
 		{"POST", "/api/v1/servers/test-server/login", "login"},
+		{"POST", "/api/v1/servers/test-server/logout", "logout"},
 	}
 
 	for _, tt := range actionTests {

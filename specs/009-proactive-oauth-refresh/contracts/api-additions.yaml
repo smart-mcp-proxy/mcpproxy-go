@@ -1,0 +1,171 @@
+# OpenAPI 3.1 Additions for Proactive OAuth Token Refresh & UX Improvements
+# These additions should be incorporated into oas/swagger.yaml via Swagger annotations
+# in internal/httpapi/server.go
+
+# New Endpoint: POST /servers/{id}/logout
+# ---
+# Follows the same pattern as POST /servers/{id}/login
+
+paths:
+  /servers/{id}/logout:
+    post:
+      summary: Trigger OAuth logout for server
+      description: |
+        Clear OAuth token and disconnect a specific upstream MCP server.
+        This endpoint clears stored OAuth credentials from persistent storage
+        and disconnects the server. The server will require re-authentication
+        before making tool calls.
+      operationId: logoutServer
+      tags:
+        - servers
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Server ID or name
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OAuth logout completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
+              example:
+                action: logout
+                server: sentry
+        '400':
+          description: Bad request (server does not use OAuth)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+              example:
+                error: server does not use OAuth
+        '404':
+          description: Server not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+              example:
+                error: server not found
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+
+# Extended Server Schema
+# ---
+# Add oauth_status and token_expires_at fields to Server response
+
+components:
+  schemas:
+    contracts.Server:
+      # Existing fields remain unchanged
+      # Add these new fields:
+      properties:
+        oauth_status:
+          type: string
+          enum:
+            - authenticated
+            - expired
+            - error
+            - none
+          description: |
+            Current OAuth authentication status:
+            - authenticated: Valid OAuth token available
+            - expired: OAuth token has expired
+            - error: OAuth authentication error occurred
+            - none: Server does not use OAuth
+          example: authenticated
+        token_expires_at:
+          type: string
+          format: date-time
+          description: |
+            ISO 8601 timestamp when the OAuth token expires.
+            Only present when oauth_status is "authenticated".
+          example: "2025-12-07T14:30:00Z"
+
+# New SSE Event Types
+# ---
+# These events are emitted on the /events endpoint
+
+# Event: oauth.token_refreshed
+# Emitted when proactive token refresh succeeds
+# Payload:
+#   server_name: string - Name of the server
+#   expires_at: string - ISO 8601 timestamp of new expiration
+
+# Event: oauth.refresh_failed
+# Emitted when proactive token refresh fails after retries
+# Payload:
+#   server_name: string - Name of the server
+#   error: string - Error message describing failure reason
+
+# Implementation Notes for internal/httpapi/server.go
+# ---
+
+# Swagger annotation for logout endpoint:
+#
+# // @Summary      Trigger OAuth logout for server
+# // @Description  Clear OAuth token and disconnect a specific upstream MCP server
+# // @Tags         servers
+# // @Accept       json
+# // @Produce      json
+# // @Param        id   path      string  true  "Server ID or name"
+# // @Success      200  {object}  contracts.ServerActionResponse  "OAuth logout completed successfully"
+# // @Failure      400  {object}  contracts.ErrorResponse         "Bad request (server does not use OAuth)"
+# // @Failure      404  {object}  contracts.ErrorResponse         "Server not found"
+# // @Failure      500  {object}  contracts.ErrorResponse         "Internal server error"
+# // @Security     ApiKeyAuth
+# // @Security     ApiKeyQuery
+# // @Router       /servers/{id}/logout [post]
+
+# Handler implementation pattern (mirrors handleServerLogin):
+#
+# func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
+#     serverID := chi.URLParam(r, "id")
+#     if serverID == "" {
+#         s.writeError(w, http.StatusBadRequest, "server ID required")
+#         return
+#     }
+#
+#     // Use management service for consistent behavior
+#     mgmtSvc, ok := s.controller.GetManagementService().(interface {
+#         TriggerOAuthLogout(ctx context.Context, name string) error
+#     })
+#     if !ok {
+#         s.logger.Error("Management service not available or missing TriggerOAuthLogout method")
+#         s.writeError(w, http.StatusInternalServerError, "management service unavailable")
+#         return
+#     }
+#
+#     if err := mgmtSvc.TriggerOAuthLogout(r.Context(), serverID); err != nil {
+#         if errors.Is(err, ErrServerNotFound) {
+#             s.writeError(w, http.StatusNotFound, "server not found")
+#             return
+#         }
+#         if errors.Is(err, ErrServerNotOAuth) {
+#             s.writeError(w, http.StatusBadRequest, "server does not use OAuth")
+#             return
+#         }
+#         s.writeError(w, http.StatusInternalServerError, err.Error())
+#         return
+#     }
+#
+#     s.writeSuccess(w, map[string]interface{}{
+#         "action": "logout",
+#         "server": serverID,
+#     })
+# }
+
+# Route registration (add after /login route):
+#
+# r.Post("/api/v1/servers/{id}/logout", s.handleServerLogout)

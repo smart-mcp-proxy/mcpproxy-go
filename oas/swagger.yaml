@@ -570,6 +570,9 @@ components:
           type: string
         oauth:
           $ref: '#/components/schemas/contracts.OAuthConfig'
+        oauth_status:
+          description: 'OAuth status: "authenticated", "expired", "error", "none"'
+          type: string
         protocol:
           type: string
         quarantined:
@@ -581,6 +584,9 @@ components:
         should_retry:
           type: boolean
         status:
+          type: string
+        token_expires_at:
+          description: When the OAuth token expires (ISO 8601)
           type: string
         tool_count:
           type: integer
@@ -1936,6 +1942,55 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Trigger OAuth login for server
+      tags:
+      - servers
+  /servers/{id}/logout:
+    post:
+      description: Clear OAuth authentication token and disconnect a specific upstream
+        MCP server. The server will need to re-authenticate before tools can be used
+        again.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
+          description: OAuth logout completed successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (management disabled or read-only mode)
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Clear OAuth token and disconnect server
       tags:
       - servers
   /servers/{id}/logs:

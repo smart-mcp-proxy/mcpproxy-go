@@ -205,6 +205,21 @@ export const useServersStore = defineStore('servers', () => {
     }
   }
 
+  async function triggerOAuthLogout(serverName: string) {
+    try {
+      const response = await api.triggerOAuthLogout(serverName)
+      if (response.success) {
+        // The SSE event will trigger a full refresh with actual state
+        return true
+      } else {
+        throw new Error(response.error || 'Failed to trigger OAuth logout')
+      }
+    } catch (error) {
+      console.error('Failed to trigger OAuth logout:', error)
+      throw error
+    }
+  }
+
   async function quarantineServer(serverName: string) {
     try {
       const response = await api.quarantineServer(serverName)
@@ -332,6 +347,7 @@ export const useServersStore = defineStore('servers', () => {
     disableServer,
     restartServer,
     triggerOAuthLogin,
+    triggerOAuthLogout,
     quarantineServer,
     unquarantineServer,
     deleteServer,

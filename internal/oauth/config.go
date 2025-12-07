@@ -51,7 +51,8 @@ type TokenStoreManager struct {
 	completedOAuth          map[string]time.Time // Track successful OAuth completions
 	mu                      sync.RWMutex
 	logger                  *zap.Logger
-	oauthCompletionCallback func(serverName string) // Callback when OAuth completes
+	oauthCompletionCallback func(serverName string)                      // Callback when OAuth completes
+	tokenSavedCallback      func(serverName string, expiresAt time.Time) // Callback when token is saved
 }
 
 var globalTokenStoreManager = &TokenStoreManager{
@@ -158,6 +159,26 @@ func (m *TokenStoreManager) SetOAuthCompletionCallback(callback func(serverName 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.oauthCompletionCallback = callback
+}
+
+// SetTokenSavedCallback sets a callback function to be called when a token is saved.
+// Used by RefreshManager to reschedule proactive refresh when tokens are updated.
+func (m *TokenStoreManager) SetTokenSavedCallback(callback func(serverName string, expiresAt time.Time)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokenSavedCallback = callback
+}
+
+// NotifyTokenSaved triggers the token saved callback if set.
+// Called by PersistentTokenStore.SaveToken() to notify the RefreshManager.
+func (m *TokenStoreManager) NotifyTokenSaved(serverName string, expiresAt time.Time) {
+	m.mu.RLock()
+	callback := m.tokenSavedCallback
+	m.mu.RUnlock()
+
+	if callback != nil {
+		callback(serverName, expiresAt)
+	}
 }
 
 // MarkOAuthCompleted records that OAuth was successfully completed for a server

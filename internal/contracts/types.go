@@ -37,6 +37,8 @@ type Server struct {
 	Updated           time.Time         `json:"updated"`
 	Isolation         *IsolationConfig  `json:"isolation,omitempty"`
 	Authenticated     bool              `json:"authenticated"`                  // OAuth authentication status
+	OAuthStatus       string            `json:"oauth_status,omitempty"`         // OAuth status: "authenticated", "expired", "error", "none"
+	TokenExpiresAt    *time.Time        `json:"token_expires_at,omitempty"`     // When the OAuth token expires (ISO 8601)
 	ToolListTokenSize int               `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
 	ShouldRetry       bool              `json:"should_retry,omitempty"`
 	RetryCount        int               `json:"retry_count,omitempty"`

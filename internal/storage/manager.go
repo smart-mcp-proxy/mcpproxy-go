@@ -1326,6 +1326,19 @@ func (m *Manager) GetOAuthToken(serverName string) (*OAuthTokenRecord, error) {
 	return m.db.GetOAuthToken(serverName)
 }
 
+// ListOAuthTokens returns all OAuth token records from storage.
+// Used by RefreshManager to initialize proactive refresh schedules on startup.
+func (m *Manager) ListOAuthTokens() ([]*OAuthTokenRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.db == nil {
+		return nil, fmt.Errorf("storage not initialized")
+	}
+
+	return m.db.ListOAuthTokens()
+}
+
 // ClearOAuthState clears all OAuth state for a server (tokens, client registration, etc.)
 // This should be called when OAuth configuration changes to force re-authentication
 func (m *Manager) ClearOAuthState(serverName string) error {

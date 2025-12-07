@@ -432,3 +432,32 @@ func (c *Client) hasOAuthConfig() bool {
 
 	return false
 }
+
+// ClearOAuthToken clears the OAuth token from persistent storage for this server.
+// This is used by the CLI logout command in standalone mode.
+func (c *Client) ClearOAuthToken(_ context.Context) error {
+	c.logger.Info("🗑️ Clearing OAuth token for server...",
+		zap.String("server", c.config.Name))
+
+	if c.storage == nil {
+		return fmt.Errorf("storage not available - cannot clear OAuth token")
+	}
+
+	// Generate the server key using the same method as PersistentTokenStore
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+
+	// Delete the OAuth token from storage
+	if err := c.storage.DeleteOAuthToken(serverKey); err != nil {
+		c.logger.Error("❌ Failed to clear OAuth token",
+			zap.String("server", c.config.Name),
+			zap.String("server_key", serverKey),
+			zap.Error(err))
+		return fmt.Errorf("failed to clear OAuth token: %w", err)
+	}
+
+	c.logger.Info("✅ OAuth token cleared successfully",
+		zap.String("server", c.config.Name),
+		zap.String("server_key", serverKey))
+
+	return nil
+}

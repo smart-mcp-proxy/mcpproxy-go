@@ -14,6 +14,10 @@ const (
 	EventTypeConfigSaved EventType = "config.saved"
 	// EventTypeSecretsChanged is emitted when secrets are added, updated, or deleted.
 	EventTypeSecretsChanged EventType = "secrets.changed"
+	// EventTypeOAuthTokenRefreshed is emitted when proactive token refresh succeeds.
+	EventTypeOAuthTokenRefreshed EventType = "oauth.token_refreshed"
+	// EventTypeOAuthRefreshFailed is emitted when proactive token refresh fails after retries.
+	EventTypeOAuthRefreshFailed EventType = "oauth.refresh_failed"
 )
 
 // Event is a typed notification published by the runtime event bus.

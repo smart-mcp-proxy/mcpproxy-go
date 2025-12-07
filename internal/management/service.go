@@ -99,6 +99,18 @@ type Service interface {
 	// Returns error if server name is empty, server not found, config gates block operation,
 	// or server doesn't support OAuth.
 	TriggerOAuthLogin(ctx context.Context, name string) error
+
+	// TriggerOAuthLogout clears OAuth token and disconnects a specific server.
+	// This operation respects disable_management and read_only configuration gates.
+	// Emits "servers.changed" event on successful logout.
+	// Returns error if server name is empty, server not found, config gates block operation,
+	// or server doesn't support OAuth.
+	TriggerOAuthLogout(ctx context.Context, name string) error
+
+	// LogoutAllOAuth clears OAuth tokens for all OAuth-enabled servers.
+	// Returns BulkOperationResult with success/failure counts.
+	// This operation respects disable_management and read_only configuration gates.
+	LogoutAllOAuth(ctx context.Context) (*BulkOperationResult, error)
 }
 
 // EventEmitter defines the interface for emitting runtime events.
@@ -116,6 +128,8 @@ type RuntimeOperations interface {
 	BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error)
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
 	TriggerOAuthLogin(serverName string) error
+	TriggerOAuthLogout(serverName string) error
+	RefreshOAuthToken(serverName string) error
 }
 
 // service implements the Service interface with dependency injection.
@@ -691,4 +705,132 @@ func (s *service) TriggerOAuthLogin(ctx context.Context, name string) error {
 func (s *service) AuthStatus(ctx context.Context, name string) (*contracts.AuthStatus, error) {
 	// TODO: Implement later (not in critical path)
 	return nil, fmt.Errorf("not implemented")
+}
+
+// TriggerOAuthLogout clears OAuth token and disconnects a specific server.
+// This method checks config gates, delegates to runtime, and emits events on completion.
+func (s *service) TriggerOAuthLogout(ctx context.Context, name string) error {
+	correlationID := reqcontext.GetCorrelationID(ctx)
+	source := reqcontext.GetRequestSource(ctx)
+
+	// Validate input
+	if name == "" {
+		return fmt.Errorf("server name required")
+	}
+
+	s.logger.Infow("OAuth logout initiated",
+		"correlation_id", correlationID,
+		"source", source,
+		"server", name)
+
+	// Check configuration gates
+	if err := s.checkWriteGates(); err != nil {
+		s.logger.Warnw("TriggerOAuthLogout blocked by configuration gate",
+			"correlation_id", correlationID,
+			"source", source,
+			"server", name,
+			"error", err)
+		return err
+	}
+
+	// Delegate to runtime
+	if err := s.runtime.TriggerOAuthLogout(name); err != nil {
+		s.logger.Errorw("Failed to trigger OAuth logout",
+			"correlation_id", correlationID,
+			"source", source,
+			"server", name,
+			"error", err)
+		return fmt.Errorf("failed to logout: %w", err)
+	}
+
+	s.logger.Infow("OAuth logout completed successfully",
+		"correlation_id", correlationID,
+		"source", source,
+		"server", name)
+
+	// Emit event for UI updates
+	if s.eventEmitter != nil {
+		s.eventEmitter.EmitServersChanged("oauth_logout", map[string]any{"server": name})
+	}
+
+	return nil
+}
+
+// LogoutAllOAuth clears OAuth tokens for all OAuth-enabled servers.
+// Returns BulkOperationResult with success/failure counts.
+func (s *service) LogoutAllOAuth(ctx context.Context) (*BulkOperationResult, error) {
+	startTime := time.Now()
+	correlationID := reqcontext.GetCorrelationID(ctx)
+	source := reqcontext.GetRequestSource(ctx)
+
+	s.logger.Infow("Bulk OAuth logout initiated",
+		"correlation_id", correlationID,
+		"source", source)
+
+	// Check configuration gates
+	if err := s.checkWriteGates(); err != nil {
+		s.logger.Warnw("LogoutAllOAuth blocked by configuration gate",
+			"correlation_id", correlationID,
+			"source", source,
+			"error", err)
+		return nil, err
+	}
+
+	// Get all servers
+	servers, err := s.runtime.GetAllServers()
+	if err != nil {
+		s.logger.Errorw("Failed to get servers for LogoutAllOAuth",
+			"correlation_id", correlationID,
+			"source", source,
+			"error", err)
+		return nil, fmt.Errorf("failed to get servers: %w", err)
+	}
+
+	result := &BulkOperationResult{
+		Errors: make(map[string]string),
+	}
+
+	// Filter to only OAuth-enabled servers and attempt logout
+	for _, server := range servers {
+		name, ok := server["name"].(string)
+		if !ok {
+			continue
+		}
+
+		// Check if server has OAuth config
+		if _, hasOAuth := server["oauth"]; !hasOAuth {
+			continue
+		}
+
+		result.Total++
+
+		if err := s.runtime.TriggerOAuthLogout(name); err != nil {
+			s.logger.Warnw("Failed to logout OAuth server in bulk operation",
+				"correlation_id", correlationID,
+				"server", name,
+				"error", err)
+			result.Failed++
+			result.Errors[name] = err.Error()
+		} else {
+			result.Successful++
+		}
+	}
+
+	duration := time.Since(startTime)
+	s.logger.Infow("LogoutAllOAuth completed",
+		"correlation_id", correlationID,
+		"source", source,
+		"duration_ms", duration.Milliseconds(),
+		"total", result.Total,
+		"successful", result.Successful,
+		"failed", result.Failed)
+
+	// Emit single event for all changes
+	if s.eventEmitter != nil && result.Successful > 0 {
+		s.eventEmitter.EmitServersChanged("oauth_logout_all", map[string]any{
+			"count": result.Successful,
+		})
+	}
+
+	return result, nil
 }

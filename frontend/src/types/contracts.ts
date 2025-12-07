@@ -31,6 +31,8 @@ export interface Server {
   created: string; // ISO date string
   updated: string; // ISO date string
   isolation?: IsolationConfig;
+  oauth_status?: 'authenticated' | 'expired' | 'error' | 'none'; // OAuth authentication status
+  token_expires_at?: string; // ISO date string when OAuth token expires
 }
 
 export interface OAuthConfig {
@@ -219,7 +221,20 @@ export type SSEEventType =
   | 'server.connected'
   | 'server.disconnected'
   | 'config.reloaded'
-  | 'tools.indexed';
+  | 'tools.indexed'
+  | 'oauth.token_refreshed'
+  | 'oauth.refresh_failed';
+
+// OAuth SSE Event Payloads
+export interface OAuthTokenRefreshedEvent {
+  server_name: string;
+  expires_at: string; // ISO date string
+}
+
+export interface OAuthRefreshFailedEvent {
+  server_name: string;
+  error: string;
+}
 
 export interface SSEEvent {
   type: SSEEventType;
