@@ -986,6 +986,14 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
+		// Skip clients where user explicitly logged out (waiting for manual re-login)
+		if client.IsUserLoggedOut() {
+			m.logger.Debug("Skipping client - user explicitly logged out, waiting for manual login",
+				zap.String("id", id),
+				zap.String("name", client.Config.Name))
+			continue
+		}
+
 		// Check connection eligibility with detailed logging
 		if client.IsConnected() {
 			m.logger.Debug("Client already connected, skipping",
@@ -2104,6 +2112,26 @@ func (m *Manager) DisconnectServer(serverName string) error {
 
 	m.logger.Info("Server disconnected",
 		zap.String("server", serverName))
+
+	return nil
+}
+
+// SetUserLoggedOut marks a server as explicitly logged out by the user.
+// This prevents automatic reconnection until the user explicitly logs in again.
+func (m *Manager) SetUserLoggedOut(serverName string, loggedOut bool) error {
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("server not found: %s", serverName)
+	}
+
+	client.SetUserLoggedOut(loggedOut)
+
+	m.logger.Info("Server user logged out state changed",
+		zap.String("server", serverName),
+		zap.Bool("logged_out", loggedOut))
 
 	return nil
 }

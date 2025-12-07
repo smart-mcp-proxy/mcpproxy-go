@@ -1749,6 +1749,14 @@ func (r *Runtime) TriggerOAuthLogin(serverName string) error {
 		return fmt.Errorf("upstream manager not available")
 	}
 
+	// Clear the user logged out flag to allow connection after successful OAuth
+	if err := r.upstreamManager.SetUserLoggedOut(serverName, false); err != nil {
+		r.logger.Warn("Failed to clear user logged out state",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Continue - this is not a fatal error
+	}
+
 	// StartManualOAuth launches browser and starts callback server
 	if err := r.upstreamManager.StartManualOAuth(serverName, true); err != nil {
 		return fmt.Errorf("failed to start OAuth flow: %w", err)
@@ -1764,6 +1772,16 @@ func (r *Runtime) TriggerOAuthLogout(serverName string) error {
 
 	if r.upstreamManager == nil {
 		return fmt.Errorf("upstream manager not available")
+	}
+
+	// IMPORTANT: Set user logged out flag FIRST before any other operations
+	// This prevents race conditions where reconnection logic kicks in
+	// during ClearOAuthToken or DisconnectServer operations
+	if err := r.upstreamManager.SetUserLoggedOut(serverName, true); err != nil {
+		r.logger.Warn("Failed to set user logged out state",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Continue - still try to clear token and disconnect
 	}
 
 	// Clear OAuth token from persistent storage

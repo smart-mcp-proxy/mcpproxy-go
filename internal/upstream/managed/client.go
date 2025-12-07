@@ -296,6 +296,17 @@ func (mc *Client) ShouldRetry() bool {
 	return mc.StateManager.ShouldRetry()
 }
 
+// SetUserLoggedOut marks that the user has explicitly logged out
+// This prevents automatic reconnection until cleared (e.g., by explicit login)
+func (mc *Client) SetUserLoggedOut(loggedOut bool) {
+	mc.StateManager.SetUserLoggedOut(loggedOut)
+}
+
+// IsUserLoggedOut returns true if the user has explicitly logged out
+func (mc *Client) IsUserLoggedOut() bool {
+	return mc.StateManager.IsUserLoggedOut()
+}
+
 // SetStateChangeCallback sets a callback for state changes
 func (mc *Client) SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo)) {
 	mc.StateManager.SetStateChangeCallback(callback)
