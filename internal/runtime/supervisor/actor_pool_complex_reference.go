@@ -285,6 +285,24 @@ func (p *ActorPool) GetAllStates() map[string]*ServerState {
 	return states
 }
 
+// IsUserLoggedOut returns true if the user explicitly logged out from the server.
+// This prevents automatic reconnection after explicit logout.
+func (p *ActorPool) IsUserLoggedOut(name string) bool {
+	p.mu.RLock()
+	a, exists := p.actors[name]
+	p.mu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	client := a.GetClient()
+	if client == nil {
+		return false
+	}
+	return client.IsUserLoggedOut()
+}
+
 // forwardActorEvents subscribes to actor events and forwards them as supervisor events.
 func (p *ActorPool) forwardActorEvents(name string, a *actor.Actor) {
 	events := a.Events()

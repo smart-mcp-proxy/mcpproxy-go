@@ -105,6 +105,11 @@ func (m *MockUpstreamAdapter) GetAllStates() map[string]*ServerState {
 	return statesCopy
 }
 
+func (m *MockUpstreamAdapter) IsUserLoggedOut(name string) bool {
+	// Mock always returns false - tests can override behavior if needed
+	return false
+}
+
 func (m *MockUpstreamAdapter) Subscribe() <-chan Event {
 	return m.eventCh
 }
