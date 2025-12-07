@@ -63,7 +63,8 @@ type ToolHashRecord struct {
 
 // OAuthTokenRecord represents stored OAuth tokens for a server
 type OAuthTokenRecord struct {
-	ServerName   string    `json:"server_name"`
+	ServerName   string    `json:"server_name"`             // Storage key (serverName_hash format)
+	DisplayName  string    `json:"display_name,omitempty"`  // Actual server name (for RefreshManager lookup)
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	TokenType    string    `json:"token_type"`
@@ -75,6 +76,15 @@ type OAuthTokenRecord struct {
 	// These are required for token refresh when using DCR-obtained credentials
 	ClientID     string `json:"client_id,omitempty"`
 	ClientSecret string `json:"client_secret,omitempty"`
+}
+
+// GetServerName returns the actual server name for RefreshManager lookup.
+// Falls back to ServerName if DisplayName is not set (for backward compatibility).
+func (r *OAuthTokenRecord) GetServerName() string {
+	if r.DisplayName != "" {
+		return r.DisplayName
+	}
+	return r.ServerName
 }
 
 // OAuthCompletionEvent represents an OAuth completion event for cross-process notification

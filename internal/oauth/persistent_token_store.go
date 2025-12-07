@@ -24,9 +24,10 @@ const (
 
 // PersistentTokenStore implements client.TokenStore using BBolt storage
 type PersistentTokenStore struct {
-	serverKey string // Unique key combining server name and URL
-	storage   *storage.BoltDB
-	logger    *zap.Logger
+	serverName string // Original server name (used for RefreshManager)
+	serverKey  string // Unique key combining server name and URL (used for storage)
+	storage    *storage.BoltDB
+	logger     *zap.Logger
 }
 
 // NewPersistentTokenStore creates a new persistent token store for a server
@@ -35,9 +36,10 @@ func NewPersistentTokenStore(serverName, serverURL string, storage *storage.Bolt
 	serverKey := GenerateServerKey(serverName, serverURL)
 
 	return &PersistentTokenStore{
-		serverKey: serverKey,
-		storage:   storage,
-		logger:    zap.L().Named("persistent-token-store").With(zap.String("server_key", serverKey)),
+		serverName: serverName,
+		serverKey:  serverKey,
+		storage:    storage,
+		logger:     zap.L().Named("persistent-token-store").With(zap.String("server", serverName), zap.String("server_key", serverKey)),
 	}
 }
 
@@ -179,7 +181,8 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	}
 
 	record := &storage.OAuthTokenRecord{
-		ServerName:   p.serverKey,
+		ServerName:   p.serverKey,  // Storage key (for bucket lookup)
+		DisplayName:  p.serverName, // Actual server name (for RefreshManager)
 		AccessToken:  token.AccessToken,
 		RefreshToken: token.RefreshToken,
 		TokenType:    token.TokenType,
@@ -192,12 +195,14 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	err := p.storage.SaveOAuthToken(record)
 	if err != nil {
 		p.logger.Error("❌ Failed to save OAuth token to persistent storage",
+			zap.String("server", p.serverName),
 			zap.String("server_key", p.serverKey),
 			zap.Error(err))
 		return fmt.Errorf("failed to save OAuth token: %w", err)
 	}
 
 	p.logger.Info("✅ OAuth token saved to persistent storage successfully",
+		zap.String("server", p.serverName),
 		zap.String("server_key", p.serverKey),
 		zap.Duration("valid_for", timeUntilExpiry))
 
@@ -211,7 +216,8 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	})
 
 	// Notify RefreshManager about the new token so it can schedule proactive refresh
-	globalTokenStoreManager.NotifyTokenSaved(p.serverKey, token.ExpiresAt)
+	// Use serverName (not serverKey) so RefreshManager can look up the actual server
+	globalTokenStoreManager.NotifyTokenSaved(p.serverName, token.ExpiresAt)
 
 	return nil
 }
