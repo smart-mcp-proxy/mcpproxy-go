@@ -2046,6 +2046,7 @@ func (m *Manager) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 
 // ClearOAuthToken clears the OAuth token for a specific server.
 // This is called by the OAuth logout flow to remove stored credentials.
+// Works for both explicit OAuth config and discovered OAuth (server-announced OAuth).
 func (m *Manager) ClearOAuthToken(serverName string) error {
 	m.mu.RLock()
 	client, exists := m.clients[serverName]
@@ -2055,24 +2056,29 @@ func (m *Manager) ClearOAuthToken(serverName string) error {
 		return fmt.Errorf("server not found: %s", serverName)
 	}
 
-	// Get the server config to check if it uses OAuth
+	// Get the server config for logging (but don't require explicit OAuth config)
 	serverConfig := client.GetConfig()
-	if serverConfig == nil || serverConfig.OAuth == nil {
-		return fmt.Errorf("server does not use OAuth: %s", serverName)
-	}
+	hasExplicitOAuth := serverConfig != nil && serverConfig.OAuth != nil
 
 	// Clear token from persistent storage
+	// This works for both explicit OAuth config and discovered OAuth (server-announced)
 	if m.storageMgr != nil {
 		if err := m.storageMgr.ClearOAuthState(serverName); err != nil {
 			m.logger.Warn("Failed to clear OAuth state from storage",
 				zap.String("server", serverName),
+				zap.Bool("has_explicit_oauth", hasExplicitOAuth),
 				zap.Error(err))
 			// Continue - storage might not have the token
 		}
 	}
 
+	// Note: We don't need to clear in-memory OAuth state on the managed client
+	// because the managed client will pick up the cleared state from storage
+	// on the next connection attempt via DisconnectServer + reconnection flow.
+
 	m.logger.Info("OAuth token cleared",
-		zap.String("server", serverName))
+		zap.String("server", serverName),
+		zap.Bool("has_explicit_oauth", hasExplicitOAuth))
 
 	return nil
 }
