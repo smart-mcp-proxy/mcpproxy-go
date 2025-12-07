@@ -178,6 +178,12 @@ const needsOAuth = computed(() => {
   const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
   const notConnected = !props.server.connected
   const isEnabled = props.server.enabled
+  const notAuthenticated = !props.server.authenticated
+
+  // If server is already authenticated, show Logout button instead of Login
+  if (!notAuthenticated) {
+    return false
+  }
 
   // Check for OAuth-related errors in last_error
   const hasOAuthError = props.server.last_error && (
@@ -191,10 +197,7 @@ const needsOAuth = computed(() => {
   // Check if server has OAuth configuration
   const hasOAuthConfig = props.server.oauth !== null && props.server.oauth !== undefined
 
-  // Check if server is authenticated
-  const notAuthenticated = !props.server.authenticated
-
-  return isHttpProtocol && notConnected && isEnabled && (hasOAuthError || (hasOAuthConfig && notAuthenticated))
+  return isHttpProtocol && notConnected && isEnabled && (hasOAuthError || hasOAuthConfig)
 })
 
 const canLogout = computed(() => {
