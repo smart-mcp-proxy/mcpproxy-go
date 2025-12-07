@@ -207,15 +207,32 @@ export const useServersStore = defineStore('servers', () => {
 
   async function triggerOAuthLogout(serverName: string) {
     try {
+      const server = servers.value.find(s => s.name === serverName)
+
+      // Optimistic update: clear authentication status immediately
+      // This ensures Login button appears right away instead of waiting for SSE
+      if (server) {
+        server.authenticated = false
+      }
+
       const response = await api.triggerOAuthLogout(serverName)
       if (response.success) {
         // The SSE event will trigger a full refresh with actual state
         return true
       } else {
+        // Revert optimistic update on error
+        if (server) {
+          server.authenticated = true
+        }
         throw new Error(response.error || 'Failed to trigger OAuth logout')
       }
     } catch (error) {
       console.error('Failed to trigger OAuth logout:', error)
+      // Revert optimistic update on error
+      const server = servers.value.find(s => s.name === serverName)
+      if (server) {
+        server.authenticated = true
+      }
       throw error
     }
   }
