@@ -102,10 +102,25 @@ The same `skipBrowserFlow` logic was applied to the SSE OAuth flow to handle SSE
 4. Server automatically retries connection with existing token
 5. Server status updates to "Connected" (or returns retriable error for managed client to retry)
 
+## Additional Improvements
+
+### 4. "Connecting" State Notification (notifications.go)
+Added `StateConnecting` to the state change notifier so UI shows "Connecting" immediately when reconnection starts:
+```go
+case types.StateConnecting:
+    // Notify when connection attempt starts (important for UI feedback after OAuth)
+    if oldState != types.StateConnecting {
+        nm.NotifyServerConnecting(serverName)
+    }
+```
+
+This triggers an SSE event to refresh the UI, showing "Connecting" badge instead of "Disconnected" during reconnection.
+
 ## Impact
 - ✅ Better user experience - no manual intervention needed after OAuth
-- ✅ Clear feedback about OAuth status
+- ✅ Clear feedback about OAuth status ("Connecting" badge during reconnection)
 - ✅ Reduced confusion about whether OAuth succeeded
+- ✅ Real-time UI updates via SSE when connection state changes
 
 ## Related
 - Feature 009: Proactive OAuth Token Refresh (this bug was discovered during testing)
