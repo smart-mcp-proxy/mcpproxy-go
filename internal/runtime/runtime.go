@@ -1519,6 +1519,8 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		var url, command, protocol string
 		var oauthConfig map[string]interface{}
 		var authenticated bool
+		var oauthStatus string // OAuth status: "authenticated", "expired", "error", "none"
+		var tokenExpiresAt time.Time
 		if serverStatus.Config != nil {
 			created = serverStatus.Config.Created
 			url = serverStatus.Config.URL
@@ -1567,6 +1569,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 				if err == nil && token != nil {
 					authenticated = true
+					tokenExpiresAt = token.ExpiresAt
 					r.logger.Info("OAuth token found for server",
 						zap.String("server", serverStatus.Name),
 						zap.String("server_key", serverKey),
@@ -1583,16 +1586,35 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					if !token.ExpiresAt.IsZero() {
 						oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
 						// Check if token is expired
-						oauthConfig["token_valid"] = time.Now().Before(token.ExpiresAt)
+						isValid := time.Now().Before(token.ExpiresAt)
+						oauthConfig["token_valid"] = isValid
+						if isValid {
+							oauthStatus = string(oauth.OAuthStatusAuthenticated)
+						} else {
+							oauthStatus = string(oauth.OAuthStatusExpired)
+						}
 					} else {
 						// No expiration means token is valid indefinitely
 						oauthConfig["token_valid"] = true
+						oauthStatus = string(oauth.OAuthStatusAuthenticated)
+					}
+				} else {
+					// No token found - check if OAuth config exists to determine status
+					if oauthConfig != nil {
+						oauthStatus = string(oauth.OAuthStatusNone)
 					}
 				}
 			}
 		}
 
-		result = append(result, map[string]interface{}{
+		// Check for OAuth error in last_error
+		if oauthStatus != string(oauth.OAuthStatusExpired) && serverStatus.LastError != "" {
+			if oauth.IsOAuthError(serverStatus.LastError) {
+				oauthStatus = string(oauth.OAuthStatusError)
+			}
+		}
+
+		serverMap := map[string]interface{}{
 			"name":            serverStatus.Name,
 			"url":             url,
 			"command":         command,
@@ -1610,7 +1632,17 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			"last_retry_time": nil,
 			"oauth":           oauthConfig,
 			"authenticated":   authenticated,
-		})
+		}
+
+		// Add OAuth status fields if available
+		if oauthStatus != "" {
+			serverMap["oauth_status"] = oauthStatus
+		}
+		if !tokenExpiresAt.IsZero() {
+			serverMap["token_expires_at"] = tokenExpiresAt
+		}
+
+		result = append(result, serverMap)
 	}
 
 	r.logger.Debug("GetAllServers completed", zap.Int("server_count", len(result)))

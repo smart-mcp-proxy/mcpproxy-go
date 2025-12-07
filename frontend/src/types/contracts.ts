@@ -22,6 +22,8 @@ export interface Server {
   enabled: boolean;
   quarantined: boolean;
   connected: boolean;
+  connecting?: boolean; // Connection attempt in progress
+  authenticated?: boolean; // Has stored OAuth token (regardless of validity)
   status: string;
   last_error?: string;
   connected_at?: string; // ISO date string

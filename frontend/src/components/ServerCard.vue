@@ -174,18 +174,36 @@ const loading = ref(false)
 const showDeleteConfirmation = ref(false)
 
 const needsOAuth = computed(() => {
-  // Check if server requires OAuth authentication
-  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
-  const notConnected = !props.server.connected
-  const isEnabled = props.server.enabled
-  const notAuthenticated = !props.server.authenticated
+  // Don't show Login button if server is disabled
+  if (!props.server.enabled) return false
 
-  // If server is already authenticated, show Logout button instead of Login
-  if (!notAuthenticated) {
-    return false
+  // Don't show Login button while connecting (let the connection attempt finish)
+  if (props.server.connecting) return false
+
+  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
+  if (!isHttpProtocol) return false
+
+  // Don't show Login if already connected
+  if (props.server.connected) return false
+
+  // Check if server has OAuth configuration
+  const hasOAuthConfig = props.server.oauth !== null && props.server.oauth !== undefined
+  if (!hasOAuthConfig) return false
+
+  // Use oauth_status for more accurate token state detection
+  // Show Login if: no token, expired token, or error state
+  const oauthStatus = props.server.oauth_status
+  if (oauthStatus === 'expired' || oauthStatus === 'error' || oauthStatus === 'none') {
+    return true
   }
 
-  // Check for OAuth-related errors in last_error
+  // Fallback: if oauth_status not available, use authenticated flag
+  // Show Login if not authenticated (no stored token)
+  if (!props.server.authenticated) {
+    return true
+  }
+
+  // Check for OAuth-related errors that indicate re-authentication is needed
   const hasOAuthError = props.server.last_error && (
     props.server.last_error.includes('authorization') ||
     props.server.last_error.includes('OAuth') ||
@@ -194,18 +212,46 @@ const needsOAuth = computed(() => {
     props.server.last_error.includes('Missing or invalid access token')
   )
 
-  // Check if server has OAuth configuration
-  const hasOAuthConfig = props.server.oauth !== null && props.server.oauth !== undefined
-
-  return isHttpProtocol && notConnected && isEnabled && (hasOAuthError || hasOAuthConfig)
+  return hasOAuthError
 })
 
 const canLogout = computed(() => {
-  // Show logout button if server is authenticated (has OAuth token)
-  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
-  const isAuthenticated = props.server.authenticated === true
+  // Don't show Logout button if server is disabled
+  if (!props.server.enabled) return false
 
-  return isHttpProtocol && isAuthenticated
+  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
+  if (!isHttpProtocol) return false
+
+  const hasToken = props.server.authenticated === true
+  if (!hasToken) return false
+
+  // Show Logout when:
+  // 1. Connected with valid token (normal case)
+  // 2. Has error but token is still valid (user may want to clear token to re-authenticate)
+  //
+  // Don't show Logout when:
+  // - Disconnected without error and token expired (show Login instead)
+  // - Server is connecting (wait for connection to complete)
+
+  if (props.server.connecting) return false
+
+  // If connected, always show Logout (user can log out of working connection)
+  if (props.server.connected) return true
+
+  // If not connected but has error, show Logout so user can clear token
+  // This handles cases where the token might be the problem
+  if (props.server.last_error) {
+    // Don't show Logout if oauth_status says token is expired
+    // In that case, Login is more appropriate
+    if (props.server.oauth_status === 'expired') return false
+    return true
+  }
+
+  // Not connected, no error, has token - mcpproxy is likely trying to reconnect
+  // Show Logout only if token is still valid (authenticated status)
+  if (props.server.oauth_status === 'authenticated') return true
+
+  return false
 })
 
 async function toggleEnabled() {

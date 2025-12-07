@@ -24,6 +24,8 @@ export interface Server {
     auth_url: string
     token_url: string
   }
+  oauth_status?: 'authenticated' | 'expired' | 'error' | 'none'
+  token_expires_at?: string
 }
 
 // Tool Annotation types

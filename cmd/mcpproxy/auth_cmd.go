@@ -245,18 +245,38 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 
 		hasOAuthServers = true
 
-		// Determine status emoji and text (improved logic)
+		// Determine status emoji and text using oauth_status for accurate state
+		oauthStatus, _ := srv["oauth_status"].(string)
 		var status string
-		if authenticated && connected {
-			status = "✅ Authenticated & Connected"
-		} else if authenticated && !connected {
-			status = "✅ Authenticated (Disconnected)"
-		} else if connected {
-			status = "⚠️  Connected (No OAuth Token)"
-		} else if lastError != "" {
-			status = "❌ Authentication Failed"
+		if connected {
+			// Connected states
+			if authenticated {
+				status = "✅ Authenticated & Connected"
+			} else {
+				status = "⚠️  Connected (No OAuth Token)"
+			}
 		} else {
-			status = "⏳ Pending Authentication"
+			// Disconnected states - use oauth_status for clarity
+			switch oauthStatus {
+			case "authenticated":
+				// Token valid but not connected - likely reconnecting
+				status = "⏳ Reconnecting (Token Valid)"
+			case "expired":
+				// Token expired - needs re-authentication
+				status = "⚠️  Token Expired (Login Required)"
+			case "error":
+				status = "❌ Authentication Error"
+			default:
+				// No token or oauth_status not set
+				if lastError != "" {
+					status = "❌ Authentication Failed"
+				} else if authenticated {
+					// Fallback: has token but no oauth_status
+					status = "⏳ Reconnecting"
+				} else {
+					status = "⏳ Pending Authentication"
+				}
+			}
 		}
 
 		fmt.Printf("Server: %s\n", name)

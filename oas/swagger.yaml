@@ -544,6 +544,8 @@ components:
           type: boolean
         connected_at:
           type: string
+        connecting:
+          type: boolean
         created:
           type: string
         enabled:

@@ -58,6 +58,12 @@ func CalculateOAuthStatus(token *storage.OAuthTokenRecord, lastError string) OAu
 	return OAuthStatusAuthenticated
 }
 
+// IsOAuthError checks if an error message indicates an OAuth-related problem.
+// This is the exported version for use by other packages.
+func IsOAuthError(err string) bool {
+	return containsOAuthError(err)
+}
+
 // containsOAuthError checks if an error message indicates an OAuth-related problem.
 func containsOAuthError(err string) bool {
 	lowerErr := strings.ToLower(err)
