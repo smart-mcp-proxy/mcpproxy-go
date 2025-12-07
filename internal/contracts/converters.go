@@ -172,6 +172,9 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		if connected, ok := generic["connected"].(bool); ok {
 			server.Connected = connected
 		}
+		if connecting, ok := generic["connecting"].(bool); ok {
+			server.Connecting = connecting
+		}
 		if status, ok := generic["status"].(string); ok {
 			server.Status = status
 		}

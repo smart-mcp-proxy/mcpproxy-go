@@ -27,6 +27,7 @@ type Server struct {
 	Enabled           bool              `json:"enabled"`
 	Quarantined       bool              `json:"quarantined"`
 	Connected         bool              `json:"connected"`
+	Connecting        bool              `json:"connecting"`
 	Status            string            `json:"status"`
 	LastError         string            `json:"last_error,omitempty"`
 	ConnectedAt       *time.Time        `json:"connected_at,omitempty"`
