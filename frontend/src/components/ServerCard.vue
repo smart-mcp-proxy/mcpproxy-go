@@ -174,12 +174,41 @@ const loading = ref(false)
 const showDeleteConfirmation = ref(false)
 
 const needsOAuth = computed(() => {
-  // Check if server requires OAuth authentication
-  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
-  const notConnected = !props.server.connected
-  const isEnabled = props.server.enabled
+  // Don't show Login button if server is disabled
+  if (!props.server.enabled) return false
 
-  // Check for OAuth-related errors in last_error
+  // Don't show Login button while connecting (let the connection attempt finish)
+  if (props.server.connecting) return false
+
+  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
+  if (!isHttpProtocol) return false
+
+  // Don't show Login if already connected
+  if (props.server.connected) return false
+
+  // Check if server has OAuth configuration
+  const hasOAuthConfig = props.server.oauth !== null && props.server.oauth !== undefined
+  if (!hasOAuthConfig) return false
+
+  // Show Login if user explicitly logged out
+  if (props.server.user_logged_out) {
+    return true
+  }
+
+  // Use oauth_status for more accurate token state detection
+  // Show Login if: no token, expired token, or error state
+  const oauthStatus = props.server.oauth_status
+  if (oauthStatus === 'expired' || oauthStatus === 'error' || oauthStatus === 'none') {
+    return true
+  }
+
+  // Fallback: if oauth_status not available, use authenticated flag
+  // Show Login if not authenticated (no stored token)
+  if (!props.server.authenticated) {
+    return true
+  }
+
+  // Check for OAuth-related errors that indicate re-authentication is needed
   const hasOAuthError = props.server.last_error && (
     props.server.last_error.includes('authorization') ||
     props.server.last_error.includes('OAuth') ||
@@ -188,21 +217,58 @@ const needsOAuth = computed(() => {
     props.server.last_error.includes('Missing or invalid access token')
   )
 
-  // Check if server has OAuth configuration
-  const hasOAuthConfig = props.server.oauth !== null && props.server.oauth !== undefined
-
-  // Check if server is authenticated
-  const notAuthenticated = !props.server.authenticated
-
-  return isHttpProtocol && notConnected && isEnabled && (hasOAuthError || (hasOAuthConfig && notAuthenticated))
+  return hasOAuthError
 })
 
 const canLogout = computed(() => {
-  // Show logout button if server is authenticated (has OAuth token)
-  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
-  const isAuthenticated = props.server.authenticated === true
+  // Don't show Logout button if server is disabled
+  if (!props.server.enabled) return false
 
-  return isHttpProtocol && isAuthenticated
+  // Don't show Logout if user already explicitly logged out
+  if (props.server.user_logged_out) return false
+
+  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
+  if (!isHttpProtocol) return false
+
+  const hasToken = props.server.authenticated === true
+  if (!hasToken) return false
+
+  // Show Logout when:
+  // 1. Connected with valid token (normal case)
+  // 2. Has error but token is still valid (user may want to clear token to re-authenticate)
+  //
+  // Don't show Logout when:
+  // - Disconnected without error and token expired (show Login instead)
+  // - Server is connecting (wait for connection to complete)
+
+  if (props.server.connecting) return false
+
+  // If connected, always show Logout (user can log out of working connection)
+  if (props.server.connected) return true
+
+  // If not connected but has error, check if it's an OAuth authentication error
+  // If OAuth auth is required, show Login instead of Logout
+  if (props.server.last_error) {
+    // Don't show Logout if oauth_status says token is expired
+    // In that case, Login is more appropriate
+    if (props.server.oauth_status === 'expired') return false
+
+    // Don't show Logout if the error indicates OAuth authentication is required
+    // This means the stored token isn't valid, so Login is more appropriate
+    const isOAuthRequired = props.server.last_error.includes('OAuth authentication required') ||
+      props.server.last_error.includes('authorization') ||
+      props.server.last_error.includes('401') ||
+      props.server.last_error.includes('invalid_token')
+    if (isOAuthRequired) return false
+
+    return true
+  }
+
+  // Not connected, no error, has token - mcpproxy is likely trying to reconnect
+  // Show Logout only if token is still valid (authenticated status)
+  if (props.server.oauth_status === 'authenticated') return true
+
+  return false
 })
 
 async function toggleEnabled() {

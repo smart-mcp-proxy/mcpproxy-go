@@ -73,6 +73,7 @@ type StateManager struct {
 	lastOAuthAttempt time.Time
 	oauthRetryCount  int
 	isOAuthError     bool
+	userLoggedOut    bool // When true, prevents auto-reconnection until user explicitly logs in
 
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
@@ -144,6 +145,7 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 		sm.retryCount = 0
 		sm.isOAuthError = false
 		sm.oauthRetryCount = 0
+		sm.userLoggedOut = false // Clear logout flag on successful connection
 	}
 
 	info := ConnectionInfo{
@@ -206,10 +208,30 @@ func (sm *StateManager) SetServerInfo(name, version string) {
 	sm.serverVersion = version
 }
 
+// SetUserLoggedOut marks that the user has explicitly logged out
+// This prevents automatic reconnection until cleared (e.g., by explicit login)
+func (sm *StateManager) SetUserLoggedOut(loggedOut bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.userLoggedOut = loggedOut
+}
+
+// IsUserLoggedOut returns true if the user has explicitly logged out
+func (sm *StateManager) IsUserLoggedOut() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.userLoggedOut
+}
+
 // ShouldRetry returns true if the connection should be retried based on exponential backoff
 func (sm *StateManager) ShouldRetry() bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+
+	// Don't auto-reconnect if user explicitly logged out
+	if sm.userLoggedOut {
+		return false
+	}
 
 	if sm.currentState != StateError {
 		return false
@@ -355,6 +377,11 @@ func (sm *StateManager) SetOAuthError(err error) {
 func (sm *StateManager) ShouldRetryOAuth() bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+
+	// Don't auto-retry OAuth flows if the user explicitly logged out
+	if sm.userLoggedOut {
+		return false
+	}
 
 	if !sm.isOAuthError || sm.currentState != StateError {
 		return false

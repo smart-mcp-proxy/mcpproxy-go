@@ -27,6 +27,7 @@ type Server struct {
 	Enabled           bool              `json:"enabled"`
 	Quarantined       bool              `json:"quarantined"`
 	Connected         bool              `json:"connected"`
+	Connecting        bool              `json:"connecting"`
 	Status            string            `json:"status"`
 	LastError         string            `json:"last_error,omitempty"`
 	ConnectedAt       *time.Time        `json:"connected_at,omitempty"`
@@ -43,6 +44,7 @@ type Server struct {
 	ShouldRetry       bool              `json:"should_retry,omitempty"`
 	RetryCount        int               `json:"retry_count,omitempty"`
 	LastRetryTime     *time.Time        `json:"last_retry_time,omitempty"`
+	UserLoggedOut     bool              `json:"user_logged_out,omitempty"` // True if user explicitly logged out (prevents auto-reconnection)
 }
 
 // OAuthConfig represents OAuth configuration for a server

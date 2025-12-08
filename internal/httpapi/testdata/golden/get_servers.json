@@ -8,6 +8,7 @@
         "authenticated": false,
         "command": "echo",
         "connected": true,
+        "connecting": false,
         "created": "0001-01-01T00:00:00Z",
         "enabled": true,
         "id": "test-server",

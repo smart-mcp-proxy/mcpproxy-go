@@ -130,11 +130,26 @@ func (nm *NotificationManager) NotifyOAuthRequired(serverName string) {
 	})
 }
 
+// NotifyServerConnecting sends a notification when a server starts connecting
+func (nm *NotificationManager) NotifyServerConnecting(serverName string) {
+	nm.SendNotification(&Notification{
+		Level:      NotificationInfo,
+		Title:      "Server Connecting",
+		Message:    fmt.Sprintf("Connecting to %s...", serverName),
+		ServerName: serverName,
+	})
+}
+
 // StateChangeNotifier creates state change notifications based on state transitions
 func StateChangeNotifier(nm *NotificationManager, serverName string) func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
 	return func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
 		// Only send notifications for significant state changes
 		switch newState {
+		case types.StateConnecting:
+			// Notify when connection attempt starts (important for UI feedback after OAuth)
+			if oldState != types.StateConnecting {
+				nm.NotifyServerConnecting(serverName)
+			}
 		case types.StateReady:
 			if oldState != types.StateReady {
 				nm.NotifyServerConnected(serverName)

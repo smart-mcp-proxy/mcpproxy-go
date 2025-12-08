@@ -205,6 +205,9 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		if connected, ok := srvRaw["connected"].(bool); ok {
 			srv.Connected = connected
 		}
+		if connecting, ok := srvRaw["connecting"].(bool); ok {
+			srv.Connecting = connecting
+		}
 		if quarantined, ok := srvRaw["quarantined"].(bool); ok {
 			srv.Quarantined = quarantined
 		}

@@ -1,5 +1,10 @@
 # Bug: Server doesn't connect immediately after OAuth login
 
+## Status: FIXED
+
+**Fixed in:** PR #181 (fix/oauth-reconnection-after-login branch)
+**Fix Date:** 2025-12-07
+
 ## Summary
 After successful OAuth authentication via browser flow, the server remains in "Disconnected" status instead of automatically connecting. Users must manually restart the server to establish a connection.
 
@@ -9,7 +14,7 @@ After OAuth login completes successfully:
 2. Server automatically attempts connection using the new token
 3. Server status updates to "Connected" in UI
 
-## Actual Behavior
+## Actual Behavior (BEFORE FIX)
 After OAuth login completes:
 1. Token is saved to persistent storage ✅
 2. `RetryConnection` is called but fails with "OAuth authentication required"
@@ -17,60 +22,72 @@ After OAuth login completes:
 
 ## Root Cause Analysis
 
-The issue is in `internal/upstream/core/connection.go` lines 1028-1033:
+The issue was in `internal/upstream/core/connection.go`:
 
+1. **Cross-process OAuth issue**: When CLI completed OAuth, the daemon's `HasRecentOAuthCompletion()` check returned false because it only checks in-memory state (per-process)
+2. **Missing token pre-check**: The code didn't directly check if a valid persisted token existed before triggering browser OAuth flow
+3. **No flow skip logic**: Even when a valid token was detected, the code only logged the finding but didn't actually skip the browser OAuth flow
+
+### Why this happened:
+
+1. **Managed client calls `RetryConnection`** (`internal/upstream/manager.go`)
+2. **Core client's `Connect()` is called** which goes through `tryOAuthAuth()`
+3. **`tryOAuthAuth()` checks `HasRecentOAuthCompletion()`** - but this is per-process, so cross-process OAuth (CLI → daemon) wasn't detected
+4. **OAuth flow coordinator triggers browser flow** even though valid token exists in storage
+5. **Connection fails** unnecessarily
+
+## The Fix
+
+The fix adds three key improvements to `internal/upstream/core/connection.go`:
+
+### 1. Direct Persisted Token Check (lines ~1032-1045)
 ```go
-// Check if we have a recently completed OAuth flow that should have tokens
-if oauth.GetTokenStoreManager().HasRecentOAuthCompletion(c.serverName) {
-    c.logger.Info("OAuth flow recently completed, tokens should be available",
-        zap.String("server", c.serverName))
-    // Skip the browser flow since tokens should be available
+// First check for valid persisted token directly (handles cross-process OAuth)
+hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+if hasTokenPrecheck && !tokenExpiredPrecheck {
+    logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
+        zap.String("server", c.config.Name),
+        zap.Bool("has_refresh_token", hasRefreshPrecheck))
+    skipBrowserFlow = true
+} else if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+    // Also check in-memory completion flag (same-process OAuth)
+    ...
 }
 ```
 
-**Problem**: The code logs "Skip the browser flow since tokens should be available" but doesn't actually change the control flow. The browser OAuth flow is still triggered, which fails because OAuth is already complete.
-
-### Why this happens:
-
-1. **Managed client calls `RetryConnection`** (`internal/upstream/manager.go:1326-1355`)
-2. **Core client's `Connect()` is called** which goes through `connectWithOAuth()`
-3. **`connectWithOAuth()` checks `HasRecentOAuthCompletion()`** but only logs - doesn't skip OAuth
-4. **OAuth flow coordinator returns "flow already active" or times out**
-5. **Connection fails** even though valid token exists in storage
-
-### The architectural issue:
-
-The core client (`internal/upstream/core/`) doesn't directly read tokens from the persistent token store during connection. Instead:
-- Tokens are managed by `PersistentTokenStore` in `internal/oauth/persistent_token_store.go`
-- Core client relies on OAuth flow to provide tokens
-- When OAuth flow is skipped/already complete, no mechanism exists to retrieve existing tokens
-
-## Proposed Fix
-
-Option A: **Skip OAuth flow when recent completion detected**
+### 2. Skip Browser Flow When Token Exists (lines ~1217-1230)
 ```go
-if oauth.GetTokenStoreManager().HasRecentOAuthCompletion(c.serverName) {
-    c.logger.Info("OAuth flow recently completed, using existing token")
-    // Actually skip the OAuth flow - just attempt connection with existing token
-    return c.connectWithExistingToken(ctx)
+if client.IsOAuthAuthorizationRequiredError(lastErr) {
+    // CRITICAL FIX: If we have a valid persisted token (e.g., from CLI OAuth),
+    // skip browser flow and return retriable error. The token exists but
+    // the mcp-go client needs to pick it up on retry.
+    if skipBrowserFlow {
+        c.logger.Info("🔄 OAuth authorization error but valid token exists - skipping browser flow",
+            zap.String("server", c.config.Name),
+            zap.String("tip", "Token should be used on next connection attempt"))
+
+        c.clearOAuthState()
+        return fmt.Errorf("OAuth token exists in storage, retry connection to use it: %w", lastErr)
+    }
+    // ... proceed with browser flow only if no valid token exists
 }
 ```
 
-Option B: **Add token retrieval to core client**
-- Add method to retrieve token from persistent store
-- Use token directly in HTTP transport without triggering OAuth flow
-
-Option C: **Fix RetryConnection to reinitialize transport with token**
-- When `RetryConnection` is called after OAuth completion
-- Reinitialize the HTTP transport with the token from storage
-- Skip the full OAuth flow
+### 3. Same Fix Applied to SSE OAuth Flow (lines ~1465-1683)
+The same `skipBrowserFlow` logic was applied to the SSE OAuth flow to handle SSE-based OAuth servers.
 
 ## Affected Files
 - `internal/upstream/core/connection.go` - Main fix location
-- `internal/upstream/core/client.go` - May need token retrieval method
-- `internal/upstream/manager.go` - RetryConnection logic
+  - HTTP OAuth flow: lines ~1026-1350
+  - SSE OAuth flow: lines ~1465-1710
 
-## Reproduction Steps
+## Test Results
+- ✅ Core unit tests pass
+- ✅ OAuth unit tests pass
+- ✅ OAuth E2E tests pass (29 tests)
+- ✅ API E2E tests pass (except 1 unrelated test)
+
+## Reproduction Steps (BEFORE FIX)
 1. Configure an OAuth-enabled server (e.g., cloudflare-logs)
 2. Start mcpproxy - server shows as "Disconnected"
 3. Click "Login" button or run `mcpproxy auth login --server=<name>`
@@ -78,13 +95,32 @@ Option C: **Fix RetryConnection to reinitialize transport with token**
 5. Observe: Server still shows "Disconnected" despite successful login
 6. Click "Restart" to manually connect
 
-## Impact
-- User experience degradation - requires manual intervention after OAuth
-- Confusion about whether OAuth succeeded
-- Extra clicks/commands to get server connected
+## Expected Behavior (AFTER FIX)
+1. Configure an OAuth-enabled server
+2. Start mcpproxy - server shows as "Disconnected"
+3. Complete OAuth login via CLI or Web UI
+4. Server automatically retries connection with existing token
+5. Server status updates to "Connected" (or returns retriable error for managed client to retry)
 
-## Priority
-Medium - Workaround exists (manual restart), but UX is poor
+## Additional Improvements
+
+### 4. "Connecting" State Notification (notifications.go)
+Added `StateConnecting` to the state change notifier so UI shows "Connecting" immediately when reconnection starts:
+```go
+case types.StateConnecting:
+    // Notify when connection attempt starts (important for UI feedback after OAuth)
+    if oldState != types.StateConnecting {
+        nm.NotifyServerConnecting(serverName)
+    }
+```
+
+This triggers an SSE event to refresh the UI, showing "Connecting" badge instead of "Disconnected" during reconnection.
+
+## Impact
+- ✅ Better user experience - no manual intervention needed after OAuth
+- ✅ Clear feedback about OAuth status ("Connecting" badge during reconnection)
+- ✅ Reduced confusion about whether OAuth succeeded
+- ✅ Real-time UI updates via SSE when connection state changes
 
 ## Related
 - Feature 009: Proactive OAuth Token Refresh (this bug was discovered during testing)

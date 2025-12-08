@@ -236,6 +236,16 @@ func (p *ActorPoolSimple) GetAllStates() map[string]*ServerState {
 	return states
 }
 
+// IsUserLoggedOut returns true if the user explicitly logged out from the server.
+// This prevents automatic reconnection after explicit logout.
+func (p *ActorPoolSimple) IsUserLoggedOut(name string) bool {
+	client, exists := p.manager.GetClient(name)
+	if !exists {
+		return false
+	}
+	return client.IsUserLoggedOut()
+}
+
 // Subscribe returns a channel that receives supervisor events.
 func (p *ActorPoolSimple) Subscribe() <-chan Event {
 	p.eventMu.Lock()

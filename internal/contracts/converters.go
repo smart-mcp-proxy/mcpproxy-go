@@ -172,6 +172,9 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		if connected, ok := generic["connected"].(bool); ok {
 			server.Connected = connected
 		}
+		if connecting, ok := generic["connecting"].(bool); ok {
+			server.Connecting = connecting
+		}
 		if status, ok := generic["status"].(string); ok {
 			server.Status = status
 		}
@@ -186,6 +189,12 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		}
 		if authenticated, ok := generic["authenticated"].(bool); ok {
 			server.Authenticated = authenticated
+		}
+		if oauthStatus, ok := generic["oauth_status"].(string); ok {
+			server.OAuthStatus = oauthStatus
+		}
+		if tokenExpiresAt, ok := generic["token_expires_at"].(time.Time); ok {
+			server.TokenExpiresAt = &tokenExpiresAt
 		}
 		if shouldRetry, ok := generic["should_retry"].(bool); ok {
 			server.ShouldRetry = shouldRetry

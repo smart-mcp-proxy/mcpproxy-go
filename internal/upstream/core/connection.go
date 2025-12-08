@@ -1023,13 +1023,25 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 	logger.Debug("🚨 OAUTH AUTH FUNCTION CALLED - START")
 
-	// Check if OAuth was recently completed by another client (e.g., tray OAuth)
+	// Check if OAuth was recently completed by another client (e.g., tray OAuth, CLI)
+	// If so, we should skip the browser flow and try to use the existing tokens
+	// This handles cross-process OAuth completion (e.g., CLI completed OAuth, daemon needs to reconnect)
 	tokenManager := oauth.GetTokenStoreManager()
-	if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
-		logger.Info("🔄 OAuth was recently completed by another client, creating OAuth client to reuse tokens")
-		// OAuth was recently completed by another client
-		// Create OAuth-enabled client that should be able to use the stored tokens
-		// Skip the browser flow since tokens should be available
+	skipBrowserFlow := false
+
+	// First check for valid persisted token directly (handles cross-process OAuth)
+	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	if hasTokenPrecheck && !tokenExpiredPrecheck {
+		logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
+			zap.String("server", c.config.Name),
+			zap.Bool("has_refresh_token", hasRefreshPrecheck))
+		skipBrowserFlow = true
+	} else if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+		// Also check in-memory completion flag (same-process OAuth)
+		logger.Info("🔄 OAuth was recently completed in this process but token may be stale",
+			zap.String("server", c.config.Name),
+			zap.Bool("has_token", hasTokenPrecheck),
+			zap.Bool("token_expired", tokenExpiredPrecheck))
 	}
 
 	logger.Debug("🔐 Attempting OAuth authentication",
@@ -1202,6 +1214,21 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	if lastErr != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(lastErr) {
+			// CRITICAL FIX: If we have a valid persisted token (e.g., from CLI OAuth),
+			// skip browser flow and return retriable error. The token exists but
+			// the mcp-go client needs to pick it up on retry.
+			if skipBrowserFlow {
+				c.logger.Info("🔄 OAuth authorization error but valid token exists - skipping browser flow",
+					zap.String("server", c.config.Name),
+					zap.String("tip", "Token should be used on next connection attempt"))
+
+				// Clear in-progress state so retry can proceed
+				c.clearOAuthState()
+
+				// Return a retriable error - the managed client will retry and pick up the token
+				return fmt.Errorf("OAuth token exists in storage, retry connection to use it: %w", lastErr)
+			}
+
 			c.logger.Info("🎯 OAuth authorization required after refresh attempts - starting manual OAuth flow",
 				zap.String("server", c.config.Name),
 				zap.Bool("had_refresh_token", hasRefreshToken))
@@ -1274,6 +1301,19 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 					ServerURL:  c.config.URL,
 					Message:    "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
 				}
+			}
+
+			// CRITICAL FIX: If we have a valid persisted token, skip browser flow
+			if skipBrowserFlow {
+				c.logger.Info("🔄 OAuth authorization error during MCP init but valid token exists - skipping browser flow",
+					zap.String("server", c.config.Name),
+					zap.String("tip", "Token should be used on next connection attempt"))
+
+				// Clear in-progress state so retry can proceed
+				c.clearOAuthState()
+
+				// Return a retriable error - the managed client will retry and pick up the token
+				return fmt.Errorf("OAuth token exists in storage, retry connection to use it: %w", err)
 			}
 
 			// Clear OAuth state before starting manual flow to prevent "already in progress" errors
@@ -1435,13 +1475,24 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 
 	oauth.LogOAuthFlowStart(logger, c.config.Name, flowCtx.CorrelationID)
 
-	// Check if OAuth was recently completed by another client (e.g., tray OAuth)
+	// Check if OAuth was recently completed by another client (e.g., tray OAuth, CLI)
+	// This handles cross-process OAuth completion (e.g., CLI completed OAuth, daemon needs to reconnect)
 	tokenManager := oauth.GetTokenStoreManager()
-	if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
-		logger.Info("🔄 SSE OAuth was recently completed by another client, creating OAuth client to reuse tokens")
-		// OAuth was recently completed by another client
-		// Create OAuth-enabled SSE client that should be able to use the stored tokens
-		// Skip the browser flow since tokens should be available
+	skipBrowserFlow := false
+
+	// First check for valid persisted token directly (handles cross-process OAuth)
+	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	if hasTokenPrecheck && !tokenExpiredPrecheck {
+		logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
+			zap.String("server", c.config.Name),
+			zap.Bool("has_refresh_token", hasRefreshPrecheck))
+		skipBrowserFlow = true
+	} else if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+		// Also check in-memory completion flag (same-process OAuth)
+		logger.Info("🔄 SSE OAuth was recently completed in this process but token may be stale",
+			zap.String("server", c.config.Name),
+			zap.Bool("has_token", hasTokenPrecheck),
+			zap.Bool("token_expired", tokenExpiredPrecheck))
 	}
 
 	logger.Debug("🔐 Attempting SSE OAuth authentication",
@@ -1620,6 +1671,21 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	if lastErr != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(lastErr) {
+			// CRITICAL FIX: If we have a valid persisted token (e.g., from CLI OAuth),
+			// skip browser flow and return retriable error. The token exists but
+			// the mcp-go client needs to pick it up on retry.
+			if skipBrowserFlow {
+				c.logger.Info("🔄 SSE OAuth authorization error but valid token exists - skipping browser flow",
+					zap.String("server", c.config.Name),
+					zap.String("tip", "Token should be used on next connection attempt"))
+
+				// Clear in-progress state so retry can proceed
+				c.clearOAuthState()
+
+				// Return a retriable error - the managed client will retry and pick up the token
+				return fmt.Errorf("OAuth token exists in storage, retry connection to use it: %w", lastErr)
+			}
+
 			c.logger.Info("🎯 SSE OAuth authorization required after refresh attempts - starting manual OAuth flow",
 				zap.String("server", c.config.Name),
 				zap.Bool("had_refresh_token", hasRefreshToken))

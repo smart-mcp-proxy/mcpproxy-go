@@ -146,7 +146,10 @@ func (m *RefreshManager) Start(ctx context.Context) error {
 		} else {
 			for _, token := range tokens {
 				if token != nil && !token.ExpiresAt.IsZero() {
-					m.scheduleRefreshLocked(token.ServerName, token.ExpiresAt)
+					// Use GetServerName() which returns DisplayName if available,
+					// falling back to ServerName for backward compatibility
+					serverName := token.GetServerName()
+					m.scheduleRefreshLocked(serverName, token.ExpiresAt)
 				}
 			}
 			m.logger.Info("Loaded existing tokens",

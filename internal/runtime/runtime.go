@@ -62,15 +62,15 @@ type Runtime struct {
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
 
-	storageManager   *storage.Manager
-	indexManager     *index.Manager
-	upstreamManager  *upstream.Manager
-	cacheManager     *cache.Manager
-	truncator        *truncate.Truncator
-	secretResolver   *secret.Resolver
-	tokenizer        tokens.Tokenizer
-	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
-	managementService interface{} // Initialized later to avoid import cycle
+	storageManager    *storage.Manager
+	indexManager      *index.Manager
+	upstreamManager   *upstream.Manager
+	cacheManager      *cache.Manager
+	truncator         *truncate.Truncator
+	secretResolver    *secret.Resolver
+	tokenizer         tokens.Tokenizer
+	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
+	managementService interface{}           // Initialized later to avoid import cycle
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
@@ -959,18 +959,18 @@ func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*
 
 	// Convert to contract type
 	return &contracts.ToolCallRecord{
-		ID:               newCall.ID,
-		ServerID:         newCall.ServerID,
-		ServerName:       newCall.ServerName,
-		ToolName:         newCall.ToolName,
-		Arguments:        newCall.Arguments,
-		Response:         newCall.Response,
-		Error:            newCall.Error,
-		Duration:         newCall.Duration,
-		Timestamp:        newCall.Timestamp,
-		ConfigPath:       newCall.ConfigPath,
-		RequestID:        newCall.RequestID,
-		Annotations:      convertToolAnnotations(newCall.Annotations),
+		ID:          newCall.ID,
+		ServerID:    newCall.ServerID,
+		ServerName:  newCall.ServerName,
+		ToolName:    newCall.ToolName,
+		Arguments:   newCall.Arguments,
+		Response:    newCall.Response,
+		Error:       newCall.Error,
+		Duration:    newCall.Duration,
+		Timestamp:   newCall.Timestamp,
+		ConfigPath:  newCall.ConfigPath,
+		RequestID:   newCall.RequestID,
+		Annotations: convertToolAnnotations(newCall.Annotations),
 	}, nil
 }
 
@@ -1497,7 +1497,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	for _, serverStatus := range snapshot.Servers {
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
-		connecting := serverStatus.State == "connecting"
+		connecting := strings.EqualFold(serverStatus.State, "connecting")
 
 		status := serverStatus.State
 		if status == "" {
@@ -1519,6 +1519,8 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		var url, command, protocol string
 		var oauthConfig map[string]interface{}
 		var authenticated bool
+		var oauthStatus string // OAuth status: "authenticated", "expired", "error", "none"
+		var tokenExpiresAt time.Time
 		if serverStatus.Config != nil {
 			created = serverStatus.Config.Created
 			url = serverStatus.Config.URL
@@ -1567,6 +1569,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 				if err == nil && token != nil {
 					authenticated = true
+					tokenExpiresAt = token.ExpiresAt
 					r.logger.Info("OAuth token found for server",
 						zap.String("server", serverStatus.Name),
 						zap.String("server_key", serverKey),
@@ -1583,16 +1586,35 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					if !token.ExpiresAt.IsZero() {
 						oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
 						// Check if token is expired
-						oauthConfig["token_valid"] = time.Now().Before(token.ExpiresAt)
+						isValid := time.Now().Before(token.ExpiresAt)
+						oauthConfig["token_valid"] = isValid
+						if isValid {
+							oauthStatus = string(oauth.OAuthStatusAuthenticated)
+						} else {
+							oauthStatus = string(oauth.OAuthStatusExpired)
+						}
 					} else {
 						// No expiration means token is valid indefinitely
 						oauthConfig["token_valid"] = true
+						oauthStatus = string(oauth.OAuthStatusAuthenticated)
+					}
+				} else {
+					// No token found - check if OAuth config exists to determine status
+					if oauthConfig != nil {
+						oauthStatus = string(oauth.OAuthStatusNone)
 					}
 				}
 			}
 		}
 
-		result = append(result, map[string]interface{}{
+		// Check for OAuth error in last_error
+		if oauthStatus != string(oauth.OAuthStatusExpired) && serverStatus.LastError != "" {
+			if oauth.IsOAuthError(serverStatus.LastError) {
+				oauthStatus = string(oauth.OAuthStatusError)
+			}
+		}
+
+		serverMap := map[string]interface{}{
 			"name":            serverStatus.Name,
 			"url":             url,
 			"command":         command,
@@ -1610,7 +1632,27 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			"last_retry_time": nil,
 			"oauth":           oauthConfig,
 			"authenticated":   authenticated,
-		})
+		}
+
+		// Add OAuth status fields if available
+		if oauthStatus != "" {
+			serverMap["oauth_status"] = oauthStatus
+		}
+		if !tokenExpiresAt.IsZero() {
+			serverMap["token_expires_at"] = tokenExpiresAt
+		}
+
+		// Add user_logged_out flag from managed client
+		// This indicates if the user explicitly logged out, which prevents auto-reconnection
+		var userLoggedOut bool
+		if r.upstreamManager != nil {
+			if client, exists := r.upstreamManager.GetClient(serverStatus.Name); exists && client != nil {
+				userLoggedOut = client.IsUserLoggedOut()
+			}
+		}
+		serverMap["user_logged_out"] = userLoggedOut
+
+		result = append(result, serverMap)
 	}
 
 	r.logger.Debug("GetAllServers completed", zap.Int("server_count", len(result)))
@@ -1691,9 +1733,9 @@ func (r *Runtime) GetServerTools(serverName string) ([]map[string]interface{}, e
 	tools := make([]map[string]interface{}, 0, len(serverStatus.Tools))
 	for _, tool := range serverStatus.Tools {
 		toolMap := map[string]interface{}{
-			"name":         tool.Name,
-			"description":  tool.Description,
-			"server_name":  serverName,
+			"name":        tool.Name,
+			"description": tool.Description,
+			"server_name": serverName,
 		}
 		if tool.InputSchema != nil {
 			toolMap["inputSchema"] = tool.InputSchema
@@ -1717,6 +1759,14 @@ func (r *Runtime) TriggerOAuthLogin(serverName string) error {
 		return fmt.Errorf("upstream manager not available")
 	}
 
+	// Clear the user logged out flag to allow connection after successful OAuth
+	if err := r.upstreamManager.SetUserLoggedOut(serverName, false); err != nil {
+		r.logger.Warn("Failed to clear user logged out state",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Continue - this is not a fatal error
+	}
+
 	// StartManualOAuth launches browser and starts callback server
 	if err := r.upstreamManager.StartManualOAuth(serverName, true); err != nil {
 		return fmt.Errorf("failed to start OAuth flow: %w", err)
@@ -1732,6 +1782,16 @@ func (r *Runtime) TriggerOAuthLogout(serverName string) error {
 
 	if r.upstreamManager == nil {
 		return fmt.Errorf("upstream manager not available")
+	}
+
+	// IMPORTANT: Set user logged out flag FIRST before any other operations
+	// This prevents race conditions where reconnection logic kicks in
+	// during ClearOAuthToken or DisconnectServer operations
+	if err := r.upstreamManager.SetUserLoggedOut(serverName, true); err != nil {
+		r.logger.Warn("Failed to set user logged out state",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Continue - still try to clear token and disconnect
 	}
 
 	// Clear OAuth token from persistent storage

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -894,9 +895,9 @@ type SessionRecord struct {
 	ToolCallCount int        `json:"tool_call_count"`
 	TotalTokens   int        `json:"total_tokens"`
 	// MCP Client Capabilities
-	HasRoots     bool     `json:"has_roots,omitempty"`      // Whether client supports roots
-	HasSampling  bool     `json:"has_sampling,omitempty"`   // Whether client supports sampling
-	Experimental []string `json:"experimental,omitempty"`   // Experimental capability names
+	HasRoots     bool     `json:"has_roots,omitempty"`    // Whether client supports roots
+	HasSampling  bool     `json:"has_sampling,omitempty"` // Whether client supports sampling
+	Experimental []string `json:"experimental,omitempty"` // Experimental capability names
 }
 
 // CreateSession creates a new session record
@@ -1349,14 +1350,36 @@ func (m *Manager) ClearOAuthState(serverName string) error {
 		return fmt.Errorf("storage not initialized")
 	}
 
-	// Delete OAuth token
-	if err := m.db.DeleteOAuthToken(serverName); err != nil {
-		// Log but don't fail - token may not exist
-		m.logger.Debugw("OAuth token not found during clear (expected if none exists)",
-			"server", serverName,
-			"error", err)
+	// Delete the exact server name key (legacy) and any hashed serverKey entries.
+	// Tokens are stored using oauth.GenerateServerKey(name, url) which prefixes the server
+	// name and appends a hash of the URL; clear both to ensure logout actually removes tokens.
+	cleared := 0
+	if err := m.db.DeleteOAuthToken(serverName); err == nil {
+		cleared++
+	}
+
+	if err := m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		if bucket == nil {
+			return fmt.Errorf("oauth token bucket not found")
+		}
+
+		prefix := []byte(serverName + "_")
+		cursor := bucket.Cursor()
+		for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
+			if err := bucket.Delete(k); err != nil {
+				return err
+			}
+			cleared++
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to clear OAuth state: %w", err)
 	}
 
 	m.logger.Infow("Cleared OAuth state for server", "server", serverName)
+	if cleared == 0 {
+		m.logger.Debugw("No OAuth tokens found to clear (expected if already removed)", "server", serverName)
+	}
 	return nil
 }

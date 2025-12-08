@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"strings"
+
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
@@ -73,6 +75,7 @@ type UpstreamInterface interface {
 	ConnectAll(ctx context.Context) error
 	GetServerState(name string) (*ServerState, error)
 	GetAllStates() map[string]*ServerState
+	IsUserLoggedOut(name string) bool // Returns true if user explicitly logged out (prevents auto-reconnect)
 	Subscribe() <-chan Event
 	Unsubscribe(ch <-chan Event)
 	Close()
@@ -319,7 +322,12 @@ func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot) *R
 				plan.Actions[name] = ActionReconnect
 			} else if desiredServer.Enabled && (!desiredServer.Quarantined || s.IsInspectionExempted(name)) && !currentState.Connected {
 				// Should be connected but isn't (or has inspection exemption)
-				plan.Actions[name] = ActionConnect
+				// BUT: Don't auto-reconnect if user explicitly logged out
+				if s.upstream.IsUserLoggedOut(name) {
+					plan.Actions[name] = ActionNone
+				} else {
+					plan.Actions[name] = ActionConnect
+				}
 			} else if (!desiredServer.Enabled || (desiredServer.Quarantined && !s.IsInspectionExempted(name))) && currentState.Connected {
 				// Shouldn't be connected but is (or exemption expired)
 				plan.Actions[name] = ActionDisconnect
@@ -550,14 +558,15 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		}
 
 		// Map connection state to string
-		// Use detailed state from ConnectionInfo if available, otherwise fall back to simple logic
-		if state.ConnectionInfo != nil && state.ConnectionInfo.State != types.StateDisconnected {
-			// Use the detailed state string from the managed client (e.g., "Pending Auth", "Authenticating", "Ready")
-			status.State = state.ConnectionInfo.State.String()
+		// Use detailed state from ConnectionInfo when available to avoid mislabeling disconnected servers as "connecting"
+		if state.ConnectionInfo != nil {
+			status.State = strings.ToLower(state.ConnectionInfo.State.String())
 		} else if state.Connected {
 			status.State = "connected"
 		} else if state.Enabled && !state.Quarantined {
 			status.State = "connecting"
+		} else if state.Enabled {
+			status.State = "disconnected"
 		} else {
 			status.State = "idle"
 		}
@@ -971,9 +980,9 @@ func (s *Supervisor) IsInspectionExempted(serverName string) bool {
 // ===== Circuit Breaker for Inspection Failures (Issue #105) =====
 
 const (
-	maxInspectionFailures  = 3                // Max consecutive failures before cooldown
-	inspectionCooldown     = 5 * time.Minute  // Cooldown duration after max failures
-	failureResetTimeout    = 10 * time.Minute // Reset counter if no failures for this long
+	maxInspectionFailures = 3                // Max consecutive failures before cooldown
+	inspectionCooldown    = 5 * time.Minute  // Cooldown duration after max failures
+	failureResetTimeout   = 10 * time.Minute // Reset counter if no failures for this long
 )
 
 // CanInspect checks if inspection is allowed for a server (circuit breaker)

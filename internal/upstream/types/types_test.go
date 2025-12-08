@@ -1,7 +1,9 @@
 package types
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -79,4 +81,20 @@ func TestStateManager_GetConnectionInfo_PendingAuth(t *testing.T) {
 	info := sm.GetConnectionInfo()
 	assert.Equal(t, StatePendingAuth, info.State)
 	assert.Equal(t, "Pending Auth", info.State.String())
+}
+
+// Ensure OAuth retries are blocked after an explicit logout
+func TestStateManager_ShouldRetryOAuth_LoggedOut(t *testing.T) {
+	sm := NewStateManager()
+
+	// Simulate an OAuth error
+	sm.SetOAuthError(errors.New("oauth failed"))
+	sm.lastOAuthAttempt = time.Now().Add(-6 * time.Minute)
+	sm.oauthRetryCount = 1
+
+	assert.True(t, sm.ShouldRetryOAuth())
+
+	// Mark user logged out and ensure retries are suppressed
+	sm.SetUserLoggedOut(true)
+	assert.False(t, sm.ShouldRetryOAuth())
 }

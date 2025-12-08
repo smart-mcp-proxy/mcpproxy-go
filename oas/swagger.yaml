@@ -544,6 +544,8 @@ components:
           type: boolean
         connected_at:
           type: string
+        connecting:
+          type: boolean
         created:
           type: string
         enabled:
@@ -597,6 +599,9 @@ components:
           type: string
         url:
           type: string
+        user_logged_out:
+          description: True if user explicitly logged out (prevents auto-reconnection)
+          type: boolean
         working_dir:
           type: string
       type: object

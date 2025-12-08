@@ -296,6 +296,17 @@ func (mc *Client) ShouldRetry() bool {
 	return mc.StateManager.ShouldRetry()
 }
 
+// SetUserLoggedOut marks that the user has explicitly logged out
+// This prevents automatic reconnection until cleared (e.g., by explicit login)
+func (mc *Client) SetUserLoggedOut(loggedOut bool) {
+	mc.StateManager.SetUserLoggedOut(loggedOut)
+}
+
+// IsUserLoggedOut returns true if the user has explicitly logged out
+func (mc *Client) IsUserLoggedOut() bool {
+	return mc.StateManager.IsUserLoggedOut()
+}
+
 // SetStateChangeCallback sets a callback for state changes
 func (mc *Client) SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo)) {
 	mc.StateManager.SetStateChangeCallback(callback)
@@ -536,6 +547,13 @@ func (mc *Client) backgroundHealthCheck() {
 
 // performHealthCheck checks if the connection is still healthy and attempts reconnection if needed
 func (mc *Client) performHealthCheck() {
+	// Skip all health/reconnect work when user explicitly logged out
+	if mc.IsUserLoggedOut() {
+		mc.logger.Debug("Health check skipped - user explicitly logged out",
+			zap.String("server", mc.Config.Name))
+		return
+	}
+
 	// Handle OAuth errors with extended backoff
 	if mc.StateManager.GetState() == types.StateError && mc.StateManager.IsOAuthError() {
 		if mc.StateManager.ShouldRetryOAuth() {
@@ -618,6 +636,13 @@ func (mc *Client) ForceReconnect(reason string) {
 		return
 	}
 
+	if mc.IsUserLoggedOut() {
+		mc.logger.Info("Force reconnect skipped - user explicitly logged out",
+			zap.String("server", mc.Config.Name),
+			zap.String("reason", reason))
+		return
+	}
+
 	serverName := ""
 	if mc.Config != nil {
 		serverName = mc.Config.Name
@@ -647,6 +672,12 @@ func (mc *Client) ForceReconnect(reason string) {
 
 // tryReconnect attempts to reconnect the client with proper error handling
 func (mc *Client) tryReconnect() {
+	if mc.IsUserLoggedOut() {
+		mc.logger.Info("Skipping reconnection attempt - user explicitly logged out",
+			zap.String("server", mc.Config.Name))
+		return
+	}
+
 	// CRITICAL FIX: Prevent concurrent reconnection attempts to avoid duplicate containers
 	mc.reconnectMu.Lock()
 	if mc.reconnectInProgress {
