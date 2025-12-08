@@ -225,6 +225,12 @@ class APIService {
     })
   }
 
+  async triggerOAuthLogout(serverName: string): Promise<APIResponse> {
+    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/logout`, {
+      method: 'POST',
+    })
+  }
+
   async quarantineServer(serverName: string): Promise<APIResponse> {
     return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/quarantine`, {
       method: 'POST',

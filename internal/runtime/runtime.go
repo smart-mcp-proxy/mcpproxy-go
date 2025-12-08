@@ -20,6 +20,7 @@ import (
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/index"
+	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/registries"
 	"mcpproxy-go/internal/runtime/configsvc"
 	"mcpproxy-go/internal/runtime/supervisor"
@@ -68,6 +69,7 @@ type Runtime struct {
 	truncator        *truncate.Truncator
 	secretResolver   *secret.Resolver
 	tokenizer        tokens.Tokenizer
+	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
 	managementService interface{} // Initialized later to avoid import cycle
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
@@ -146,6 +148,15 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	actorPool := supervisor.NewActorPoolSimple(upstreamManager, logger)
 	supervisorInstance := supervisor.New(configSvc, actorPool, logger)
 
+	// Initialize OAuth refresh manager for proactive token refresh
+	// Uses storageManager as the token store and global coordinator for flow coordination
+	refreshManager := oauth.NewRefreshManager(
+		storageManager,
+		oauth.GetGlobalCoordinator(),
+		nil, // Use default config (80% threshold, 3 max retries)
+		logger,
+	)
+
 	rt := &Runtime{
 		cfg:             cfg,
 		cfgPath:         cfgPath,
@@ -158,6 +169,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		truncator:       truncator,
 		secretResolver:  secretResolver,
 		tokenizer:       tokenizer,
+		refreshManager:  refreshManager,
 		supervisor:      supervisorInstance,
 		appCtx:          appCtx,
 		appCancel:       appCancel,
@@ -450,6 +462,14 @@ func (r *Runtime) Close() error {
 	r.mu.Unlock()
 
 	var errs []error
+
+	// Stop OAuth refresh manager first to prevent refresh attempts during shutdown
+	if r.refreshManager != nil {
+		r.refreshManager.Stop()
+		if r.logger != nil {
+			r.logger.Info("OAuth refresh manager stopped")
+		}
+	}
 
 	// Phase 6: Stop Supervisor first to stop reconciliation
 	if r.supervisor != nil {
@@ -1700,6 +1720,48 @@ func (r *Runtime) TriggerOAuthLogin(serverName string) error {
 	// StartManualOAuth launches browser and starts callback server
 	if err := r.upstreamManager.StartManualOAuth(serverName, true); err != nil {
 		return fmt.Errorf("failed to start OAuth flow: %w", err)
+	}
+
+	return nil
+}
+
+// TriggerOAuthLogout implements RuntimeOperations interface for management service.
+// Clears OAuth token and disconnects a specific server.
+func (r *Runtime) TriggerOAuthLogout(serverName string) error {
+	r.logger.Debug("Runtime.TriggerOAuthLogout called", zap.String("server", serverName))
+
+	if r.upstreamManager == nil {
+		return fmt.Errorf("upstream manager not available")
+	}
+
+	// Clear OAuth token from persistent storage
+	if err := r.upstreamManager.ClearOAuthToken(serverName); err != nil {
+		return fmt.Errorf("failed to clear OAuth token: %w", err)
+	}
+
+	// Disconnect the server to force re-authentication
+	if err := r.upstreamManager.DisconnectServer(serverName); err != nil {
+		r.logger.Warn("Failed to disconnect server after OAuth logout",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Continue - token was cleared which is the primary goal
+	}
+
+	return nil
+}
+
+// RefreshOAuthToken implements RuntimeOperations interface for management service.
+// Triggers token refresh for a specific server.
+func (r *Runtime) RefreshOAuthToken(serverName string) error {
+	r.logger.Debug("Runtime.RefreshOAuthToken called", zap.String("server", serverName))
+
+	if r.upstreamManager == nil {
+		return fmt.Errorf("upstream manager not available")
+	}
+
+	// Delegate to upstream manager to refresh the token
+	if err := r.upstreamManager.RefreshOAuthToken(serverName); err != nil {
+		return fmt.Errorf("failed to refresh OAuth token: %w", err)
 	}
 
 	return nil

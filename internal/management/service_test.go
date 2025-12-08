@@ -352,6 +352,28 @@ func (m *mockRuntimeOperations) TriggerOAuthLogin(serverName string) error {
 	return nil
 }
 
+// TriggerOAuthLogout implements RuntimeOperations for testing
+func (m *mockRuntimeOperations) TriggerOAuthLogout(serverName string) error {
+	if m.failOnServer != "" && serverName == m.failOnServer {
+		return fmt.Errorf("OAuth logout failed")
+	}
+	if serverName == "" {
+		return fmt.Errorf("server name required")
+	}
+	return nil
+}
+
+// RefreshOAuthToken implements RuntimeOperations for testing
+func (m *mockRuntimeOperations) RefreshOAuthToken(serverName string) error {
+	if m.failOnServer != "" && serverName == m.failOnServer {
+		return fmt.Errorf("OAuth refresh failed")
+	}
+	if serverName == "" {
+		return fmt.Errorf("server name required")
+	}
+	return nil
+}
+
 // T065: Unit test for RestartAll() - verify sequential execution and partial failure handling
 func TestRestartAll(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()

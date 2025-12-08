@@ -952,6 +952,8 @@ When making changes to this codebase, ensure you understand the modular architec
 - BBolt (existing `internal/storage/`) for token persistence (007-oauth-e2e-testing)
 - Go 1.24.0 + mcp-go (OAuth transport), zap (logging), BBolt (token persistence), google/uuid (correlation IDs) (008-oauth-token-refresh)
 - BBolt embedded database (`~/.mcpproxy/config.db`) - `oauth_tokens` and `oauth_completion` buckets (008-oauth-token-refresh)
+- Go 1.24.0 + mcp-go (v0.43.1), zap (logging), chi (HTTP router), BBolt (storage), Vue 3 + TypeScript (frontend) (009-proactive-oauth-refresh)
+- BBolt embedded database (`~/.mcpproxy/config.db`) - `oauth_tokens` bucke (009-proactive-oauth-refresh)
 
 ## Recent Changes
 - 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3

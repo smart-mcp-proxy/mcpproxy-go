@@ -210,6 +210,9 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		HasRefreshToken: token.RefreshToken != "",
 	})
 
+	// Notify RefreshManager about the new token so it can schedule proactive refresh
+	globalTokenStoreManager.NotifyTokenSaved(p.serverKey, token.ExpiresAt)
+
 	return nil
 }
 

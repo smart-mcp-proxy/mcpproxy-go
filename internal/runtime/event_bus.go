@@ -1,5 +1,7 @@
 package runtime
 
+import "time"
+
 const defaultEventBuffer = 16
 
 // SubscribeEvents registers a new subscriber and returns a channel that will receive runtime events.
@@ -60,4 +62,24 @@ func (r *Runtime) emitSecretsChanged(operation string, secretName string, extra 
 	payload["operation"] = operation
 	payload["secret_name"] = secretName
 	r.publishEvent(newEvent(EventTypeSecretsChanged, payload))
+}
+
+// EmitOAuthTokenRefreshed emits an event when proactive token refresh succeeds.
+// This is used by the RefreshManager to notify subscribers of successful token refresh.
+func (r *Runtime) EmitOAuthTokenRefreshed(serverName string, expiresAt time.Time) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"expires_at":  expiresAt.Format(time.RFC3339),
+	}
+	r.publishEvent(newEvent(EventTypeOAuthTokenRefreshed, payload))
+}
+
+// EmitOAuthRefreshFailed emits an event when proactive token refresh fails after retries.
+// This is used by the RefreshManager to notify subscribers that re-authentication is needed.
+func (r *Runtime) EmitOAuthRefreshFailed(serverName string, errorMsg string) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"error":       errorMsg,
+	}
+	r.publishEvent(newEvent(EventTypeOAuthRefreshFailed, payload))
 }

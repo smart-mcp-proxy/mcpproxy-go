@@ -56,6 +56,24 @@ Examples:
 		RunE: runAuthStatus,
 	}
 
+	authLogoutCmd = &cobra.Command{
+		Use:   "logout",
+		Short: "Clear OAuth token and disconnect from a server",
+		Long: `Clear OAuth authentication token and disconnect from a specific upstream server.
+This is useful when:
+- You want to revoke access to an OAuth-enabled server
+- You need to re-authenticate with different credentials
+- Troubleshooting authentication issues
+
+The command clears the stored OAuth token and disconnects the server.
+You will need to re-authenticate before using the server's tools again.
+
+Examples:
+  mcpproxy auth logout --server=Sentry-2
+  mcpproxy auth logout --server=github-server --log-level=debug`,
+		RunE: runAuthLogout,
+	}
+
 	// Command flags for auth commands
 	authServerName string
 	authLogLevel   string
@@ -73,6 +91,7 @@ func init() {
 	// Add subcommands to auth command
 	authCmd.AddCommand(authLoginCmd)
 	authCmd.AddCommand(authStatusCmd)
+	authCmd.AddCommand(authLogoutCmd)
 
 	// Define flags for auth login command
 	authLoginCmd.Flags().StringVarP(&authServerName, "server", "s", "", "Server name to authenticate with (required)")
@@ -86,8 +105,19 @@ func init() {
 	authStatusCmd.Flags().StringVarP(&authConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	authStatusCmd.Flags().BoolVar(&authAll, "all", false, "Show status for all servers")
 
+	// Define flags for auth logout command
+	authLogoutCmd.Flags().StringVarP(&authServerName, "server", "s", "", "Server name to logout from (required)")
+	authLogoutCmd.Flags().StringVarP(&authLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
+	authLogoutCmd.Flags().StringVarP(&authConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	authLogoutCmd.Flags().DurationVar(&authTimeout, "timeout", 30*time.Second, "Logout timeout")
+
 	// Mark required flags
 	err := authLoginCmd.MarkFlagRequired("server")
+	if err != nil {
+		panic(fmt.Sprintf("Failed to mark server flag as required: %v", err))
+	}
+
+	err = authLogoutCmd.MarkFlagRequired("server")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to mark server flag as required: %v", err))
 	}
@@ -110,6 +140,12 @@ func init() {
 
   # Check status with debug logging
   mcpproxy auth status --all --log-level=debug`
+
+	authLogoutCmd.Example = `  # Logout from Sentry-2 server
+  mcpproxy auth logout --server=Sentry-2
+
+  # Logout with debug logging
+  mcpproxy auth logout --server=github-server --log-level=debug`
 }
 
 func runAuthLogin(_ *cobra.Command, _ []string) error {
@@ -465,4 +501,98 @@ func formatDuration(d time.Duration) string {
 	} else {
 		return fmt.Sprintf("%dm", minutes)
 	}
+}
+
+func runAuthLogout(_ *cobra.Command, _ []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
+	defer cancel()
+
+	// Load configuration to get data directory
+	cfg, err := loadAuthConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Check if daemon is running and use client mode
+	if shouldUseAuthDaemon(cfg.DataDir) {
+		return runAuthLogoutClientMode(ctx, cfg.DataDir, authServerName)
+	}
+
+	// No daemon detected, use standalone mode
+	return runAuthLogoutStandalone(ctx, authServerName, cfg)
+}
+
+// runAuthLogoutClientMode triggers OAuth logout via daemon HTTP API over socket.
+func runAuthLogoutClientMode(ctx context.Context, dataDir, serverName string) error {
+	socketPath := socket.DetectSocketPath(dataDir)
+	// Create simple logger for client (no file logging for command)
+	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Ping daemon to verify connectivity
+	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer pingCancel()
+	if err := client.Ping(pingCtx); err != nil {
+		logger.Warn("Failed to ping daemon, falling back to standalone mode",
+			zap.Error(err),
+			zap.String("socket_path", socketPath))
+
+		// Load config for standalone mode
+		cfg, loadErr := loadAuthConfig()
+		if loadErr != nil {
+			return fmt.Errorf("failed to load configuration for standalone: %w", loadErr)
+		}
+		return runAuthLogoutStandalone(ctx, serverName, cfg)
+	}
+
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - coordinating OAuth logout with running server\n\n")
+
+	// Trigger OAuth logout via daemon
+	if err := client.TriggerOAuthLogout(ctx, serverName); err != nil {
+		return fmt.Errorf("failed to trigger OAuth logout via daemon: %w", err)
+	}
+
+	fmt.Printf("✅ OAuth logout completed successfully for server: %s\n", serverName)
+	fmt.Println("   The OAuth token has been cleared and the server has been disconnected.")
+	fmt.Println("   Use 'mcpproxy auth login --server=" + serverName + "' to re-authenticate.")
+
+	return nil
+}
+
+// runAuthLogoutStandalone clears OAuth token in standalone mode.
+func runAuthLogoutStandalone(ctx context.Context, serverName string, cfg *config.Config) error {
+	fmt.Printf("🔐 OAuth Logout - Server: %s\n", serverName)
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+	// Validate server exists in config
+	if !authServerExistsInConfig(serverName, cfg) {
+		return fmt.Errorf("server '%s' not found in configuration. Available servers: %v",
+			serverName, getAuthAvailableServerNames(cfg))
+	}
+
+	// Create CLI client for OAuth logout
+	fmt.Printf("🔗 Clearing OAuth token for server '%s'...\n", serverName)
+	fmt.Println("   Note: Running in standalone mode (no daemon detected)")
+	fmt.Println()
+
+	cliClient, err := cli.NewClient(serverName, cfg, authLogLevel)
+	if err != nil {
+		return fmt.Errorf("failed to create CLI client: %w", err)
+	}
+	defer cliClient.Close()
+
+	// Clear OAuth token
+	if err := cliClient.ClearOAuthToken(ctx); err != nil {
+		return fmt.Errorf("failed to clear OAuth token: %w", err)
+	}
+
+	fmt.Printf("✅ OAuth token cleared successfully for server '%s'!\n", serverName)
+	fmt.Println("   Use 'mcpproxy auth login --server=" + serverName + "' to re-authenticate.")
+
+	return nil
 }

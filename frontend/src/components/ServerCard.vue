@@ -97,6 +97,16 @@
           Login
         </button>
 
+        <button
+          v-if="canLogout"
+          @click="triggerLogout"
+          :disabled="loading"
+          class="btn btn-sm btn-outline btn-warning"
+        >
+          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
+          Logout
+        </button>
+
         <router-link
           :to="`/servers/${server.name}`"
           class="btn btn-sm btn-outline"
@@ -187,6 +197,14 @@ const needsOAuth = computed(() => {
   return isHttpProtocol && notConnected && isEnabled && (hasOAuthError || (hasOAuthConfig && notAuthenticated))
 })
 
+const canLogout = computed(() => {
+  // Show logout button if server is authenticated (has OAuth token)
+  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
+  const isAuthenticated = props.server.authenticated === true
+
+  return isHttpProtocol && isAuthenticated
+})
+
 async function toggleEnabled() {
   loading.value = true
   try {
@@ -249,6 +267,26 @@ async function triggerOAuth() {
     systemStore.addToast({
       type: 'error',
       title: 'OAuth Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } finally {
+    loading.value = false
+  }
+}
+
+async function triggerLogout() {
+  loading.value = true
+  try {
+    await serversStore.triggerOAuthLogout(props.server.name)
+    systemStore.addToast({
+      type: 'success',
+      title: 'OAuth Logout Successful',
+      message: `${props.server.name} has been logged out`,
+    })
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Logout Failed',
       message: error instanceof Error ? error.message : 'Unknown error',
     })
   } finally {

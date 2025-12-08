@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/runtime/configsvc"
 	"mcpproxy-go/internal/runtime/supervisor"
 )
@@ -16,6 +17,23 @@ const connectAttemptTimeout = 45 * time.Second
 
 // StartBackgroundInitialization kicks off configuration sync and background loops.
 func (r *Runtime) StartBackgroundInitialization() {
+	// Start proactive OAuth token refresh manager
+	if r.refreshManager != nil {
+		r.refreshManager.SetRuntime(r)
+		r.refreshManager.SetEventEmitter(r)
+		if err := r.refreshManager.Start(r.appCtx); err != nil {
+			r.logger.Error("Failed to start OAuth refresh manager", zap.Error(err))
+		} else {
+			r.logger.Info("OAuth refresh manager started")
+		}
+
+		// Register token saved callback to wire PersistentTokenStore -> RefreshManager
+		oauth.GetTokenStoreManager().SetTokenSavedCallback(func(serverName string, expiresAt time.Time) {
+			r.refreshManager.OnTokenSaved(serverName, expiresAt)
+		})
+		r.logger.Info("Token saved callback registered for proactive refresh")
+	}
+
 	// Phase 6: Start Supervisor for state reconciliation and lock-free reads
 	if r.supervisor != nil {
 		r.supervisor.Start()

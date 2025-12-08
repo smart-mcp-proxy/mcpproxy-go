@@ -327,6 +327,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/disable", s.handleDisableServer)
 			r.Post("/restart", s.handleRestartServer)
 			r.Post("/login", s.handleServerLogin)
+			r.Post("/logout", s.handleServerLogout)
 			r.Post("/quarantine", s.handleQuarantineServer)
 			r.Post("/unquarantine", s.handleUnquarantineServer)
 			r.Get("/tools", s.handleGetServerTools)
@@ -1087,6 +1088,62 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	response := contracts.ServerActionResponse{
 		Server:  serverID,
 		Action:  "login",
+		Success: true,
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// handleServerLogout godoc
+// @Summary Clear OAuth token and disconnect server
+// @Description Clear OAuth authentication token and disconnect a specific upstream MCP server. The server will need to re-authenticate before tools can be used again.
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "OAuth logout completed successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (management disabled or read-only mode)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /servers/{id}/logout [post]
+func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	// Call management service TriggerOAuthLogout
+	mgmtSvc, ok := s.controller.GetManagementService().(interface {
+		TriggerOAuthLogout(ctx context.Context, name string) error
+	})
+	if !ok {
+		s.logger.Error("Management service not available or missing TriggerOAuthLogout method")
+		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	if err := mgmtSvc.TriggerOAuthLogout(r.Context(), serverID); err != nil {
+		s.logger.Error("Failed to trigger OAuth logout", "server", serverID, "error", err)
+
+		// Map errors to HTTP status codes
+		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {
+			s.writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to trigger logout: %v", err))
+		return
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "logout",
 		Success: true,
 	}
 

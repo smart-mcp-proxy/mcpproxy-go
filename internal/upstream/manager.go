@@ -2043,3 +2043,89 @@ func (m *Manager) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 	stateCopy := *m.dockerRecoveryState
 	return &stateCopy
 }
+
+// ClearOAuthToken clears the OAuth token for a specific server.
+// This is called by the OAuth logout flow to remove stored credentials.
+func (m *Manager) ClearOAuthToken(serverName string) error {
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("server not found: %s", serverName)
+	}
+
+	// Get the server config to check if it uses OAuth
+	serverConfig := client.GetConfig()
+	if serverConfig == nil || serverConfig.OAuth == nil {
+		return fmt.Errorf("server does not use OAuth: %s", serverName)
+	}
+
+	// Clear token from persistent storage
+	if m.storageMgr != nil {
+		if err := m.storageMgr.ClearOAuthState(serverName); err != nil {
+			m.logger.Warn("Failed to clear OAuth state from storage",
+				zap.String("server", serverName),
+				zap.Error(err))
+			// Continue - storage might not have the token
+		}
+	}
+
+	m.logger.Info("OAuth token cleared",
+		zap.String("server", serverName))
+
+	return nil
+}
+
+// DisconnectServer disconnects a specific server without removing its configuration.
+// This is used after OAuth logout to force re-authentication on next connect.
+func (m *Manager) DisconnectServer(serverName string) error {
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("server not found: %s", serverName)
+	}
+
+	// Disconnect the client
+	if err := client.Disconnect(); err != nil {
+		m.logger.Warn("Error during server disconnect",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Continue - we want to mark as disconnected regardless
+	}
+
+	m.logger.Info("Server disconnected",
+		zap.String("server", serverName))
+
+	return nil
+}
+
+// RefreshOAuthToken triggers a token refresh for a specific server.
+// This is called by the RefreshManager for proactive token refresh.
+// TODO: This will be fully implemented in Phase 3 (US1) with RefreshManager integration.
+func (m *Manager) RefreshOAuthToken(serverName string) error {
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("server not found: %s", serverName)
+	}
+
+	// Get the server config to check if it uses OAuth
+	serverConfig := client.GetConfig()
+	if serverConfig == nil || serverConfig.OAuth == nil {
+		return fmt.Errorf("server does not use OAuth: %s", serverName)
+	}
+
+	// TODO: Implement actual token refresh in Phase 3
+	// For now, force a reconnection which will trigger token refresh if needed
+	client.ForceReconnect("manual_token_refresh")
+
+	m.logger.Info("OAuth token refresh requested",
+		zap.String("server", serverName))
+
+	return nil
+}

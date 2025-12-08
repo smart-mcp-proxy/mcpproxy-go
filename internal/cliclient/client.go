@@ -653,3 +653,47 @@ func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error
 
 	return nil
 }
+
+// TriggerOAuthLogout clears OAuth token and disconnects a server.
+func (c *Client) TriggerOAuthLogout(ctx context.Context, serverName string) error {
+	url := fmt.Sprintf("%s/api/v1/servers/%s/logout", c.baseURL, serverName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to call logout API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Server  string `json:"server"`
+			Action  string `json:"action"`
+			Success bool   `json:"success"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return fmt.Errorf("logout failed: %s", apiResp.Error)
+	}
+
+	return nil
+}
