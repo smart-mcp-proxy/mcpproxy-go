@@ -227,6 +227,23 @@ fi
 # Create Applications symlink
 ln -s /Applications "$TEMP_DIR/Applications"
 
+# Include release notes if available
+# Look for release notes file in current directory (downloaded from artifact)
+RELEASE_NOTES_FILE=""
+for file in RELEASE_NOTES-*.md RELEASE_NOTES.md; do
+    if [ -f "$file" ]; then
+        RELEASE_NOTES_FILE="$file"
+        break
+    fi
+done
+
+if [ -n "$RELEASE_NOTES_FILE" ]; then
+    cp "$RELEASE_NOTES_FILE" "$TEMP_DIR/RELEASE_NOTES.md"
+    echo "✅ Release notes included in DMG: $RELEASE_NOTES_FILE"
+else
+    echo "⚠️  No release notes file found, DMG will be created without release notes"
+fi
+
 # Create DMG using hdiutil
 echo "Creating DMG..."
 hdiutil create -size 100m -fs HFS+ -volname "mcpproxy ${VERSION#v}" -srcfolder "$TEMP_DIR" "${DMG_NAME}.dmg"
