@@ -86,6 +86,38 @@ wix build -arch x64 -d Version=1.0.0.0 -d BinPath=dist\windows-amd64 wix\Package
 
 See `docs/prerelease-builds.md` for download instructions and workflow details.
 
+### Release Notes Generation
+
+MCPProxy automatically generates AI-powered release notes when tags are pushed:
+
+**How it works**:
+1. GitHub Actions workflow triggers on tag push (`v*`)
+2. Collects commit messages since previous tag (max 200)
+3. Calls Claude API to generate categorized release notes
+4. Adds generated notes to GitHub release page
+5. Includes release notes file in DMG and Windows installers
+
+**Local testing**:
+```bash
+# Test release notes generation locally
+export ANTHROPIC_API_KEY="your-key"
+./scripts/generate-release-notes.sh v1.0.0
+
+# Optional environment variables
+CLAUDE_MODEL="claude-sonnet-4-5-20250929"  # Model (default: claude-sonnet-4-5-20250929)
+MAX_TOKENS="1024"                           # Max output tokens
+MAX_COMMITS="200"                           # Max commits to include
+API_TIMEOUT="30"                            # API timeout in seconds
+```
+
+**Requirements**:
+- `ANTHROPIC_API_KEY` GitHub secret (get from https://console.anthropic.com/)
+- `curl` and `jq` for API calls
+
+**Fallback behavior**: If API call fails, releases continue with a fallback message directing users to the commit history.
+
+See `docs/release-notes-generation.md` for detailed documentation.
+
 ### Testing
 
 **IMPORTANT: Always run tests before committing changes!**
@@ -954,6 +986,8 @@ When making changes to this codebase, ensure you understand the modular architec
 - BBolt embedded database (`~/.mcpproxy/config.db`) - `oauth_tokens` and `oauth_completion` buckets (008-oauth-token-refresh)
 - Go 1.24.0 + mcp-go (v0.43.1), zap (logging), chi (HTTP router), BBolt (storage), Vue 3 + TypeScript (frontend) (009-proactive-oauth-refresh)
 - BBolt embedded database (`~/.mcpproxy/config.db`) - `oauth_tokens` bucke (009-proactive-oauth-refresh)
+- Bash (GitHub Actions), Go 1.25 (existing project) + curl, jq, GitHub Actions, Anthropic Messages API (010-release-notes-generator)
+- N/A (ephemeral workflow artifacts only) (010-release-notes-generator)
 
 ## Recent Changes
 - 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3

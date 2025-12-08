@@ -104,7 +104,20 @@ if ($InstallerType -eq 'inno' -or $InstallerType -eq 'both') {
         $InnoScript = Join-Path $RepoRoot "scripts\installer.iss"
         $RelativeBinPath = "..\dist\windows-$Arch"
 
-        & $ISCC /DVersion=$Version /DArch=$Arch "/DBinPath=$RelativeBinPath" $InnoScript
+        # Check for release notes file (downloaded from workflow artifact)
+        $ReleaseNotesFile = Get-ChildItem -Path $RepoRoot -Filter "RELEASE_NOTES-*.md" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $ReleaseNotesFile) {
+            $ReleaseNotesFile = Get-ChildItem -Path $RepoRoot -Filter "RELEASE_NOTES.md" -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+
+        if ($ReleaseNotesFile) {
+            Write-Host "    Including release notes: $($ReleaseNotesFile.Name)" -ForegroundColor Cyan
+            $ReleaseNotesPath = $ReleaseNotesFile.FullName
+            & $ISCC /DVersion=$Version /DArch=$Arch "/DBinPath=$RelativeBinPath" "/DReleaseNotesPath=$ReleaseNotesPath" $InnoScript
+        } else {
+            Write-Host "    No release notes file found, building without" -ForegroundColor Yellow
+            & $ISCC /DVersion=$Version /DArch=$Arch "/DBinPath=$RelativeBinPath" $InnoScript
+        }
 
         if ($LASTEXITCODE -eq 0) {
             $InnoOutput = Join-Path $DistDir "mcpproxy-setup-$Version-$Arch.exe"

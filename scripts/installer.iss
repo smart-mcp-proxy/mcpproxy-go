@@ -70,6 +70,11 @@ Source: "{#BinPath}\mcpproxy.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Tray application (architecture-specific)
 Source: "{#BinPath}\mcpproxy-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; Release notes (optional - included if available, installed to docs subdirectory)
+#ifdef ReleaseNotesPath
+Source: "{#ReleaseNotesPath}"; DestDir: "{app}\docs"; DestName: "RELEASE_NOTES.md"; Flags: ignoreversion
+#endif
+
 [Icons]
 ; Start Menu shortcut (FR-004)
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"

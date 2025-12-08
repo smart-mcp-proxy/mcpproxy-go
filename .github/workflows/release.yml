@@ -12,6 +12,175 @@ env:
   GITHUB_ENVIRONMENT: production
 
 jobs:
+  # Generate AI-powered release notes using Claude API
+  generate-notes:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    outputs:
+      notes: ${{ steps.generate.outputs.notes }}
+      notes_file: ${{ steps.generate.outputs.notes_file }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git log
+
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          # Get the tag before the current one
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          echo "tag=$PREV_TAG" >> $GITHUB_OUTPUT
+          if [ -n "$PREV_TAG" ]; then
+            echo "Previous tag: $PREV_TAG"
+          else
+            echo "No previous tag found (first release)"
+          fi
+
+      - name: Collect commits
+        id: commits
+        run: |
+          PREV_TAG="${{ steps.prev_tag.outputs.tag }}"
+          MAX_COMMITS=200
+
+          if [ -z "$PREV_TAG" ]; then
+            # First release - get all commits
+            echo "Collecting all commits (first release)"
+            COMMITS=$(git log --pretty=format:"- %s" --no-merges | head -n $MAX_COMMITS)
+            TOTAL=$(git rev-list --count --no-merges HEAD)
+          else
+            # Get commits since previous tag
+            echo "Collecting commits from $PREV_TAG to HEAD"
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" --no-merges | head -n $MAX_COMMITS)
+            TOTAL=$(git rev-list --count --no-merges "${PREV_TAG}..HEAD")
+          fi
+
+          # Filter out noise (merge commits, version bumps)
+          COMMITS=$(echo "$COMMITS" | grep -v -E "^- (Merge branch|Merge pull request|Bump version|chore\(deps\)|chore\(release\))" || echo "$COMMITS")
+
+          # Add truncation note if needed
+          if [ "$TOTAL" -gt "$MAX_COMMITS" ]; then
+            COMMITS="$COMMITS
+
+          (Showing $MAX_COMMITS most recent of $TOTAL commits)"
+            echo "::warning::Truncated to $MAX_COMMITS commits (total: $TOTAL)"
+          fi
+
+          # Output commits using heredoc for multiline
+          echo "commits<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "Collected $(echo "$COMMITS" | wc -l) commits"
+
+      - name: Generate release notes with Claude
+        id: generate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          COMMITS="${{ steps.commits.outputs.commits }}"
+
+          # Check if API key is configured
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not configured, using fallback message"
+            NOTES="Release notes could not be generated automatically (API key not configured). See commit history for changes."
+            echo "notes<<EOF" >> $GITHUB_OUTPUT
+            echo "$NOTES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Build the prompt
+          PROMPT="Generate concise release notes for version ${VERSION} of MCPProxy (Smart MCP Proxy).
+
+          MCPProxy is a desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, token savings, and security quarantine for MCP servers.
+
+          Commits since last release:
+          ${COMMITS}
+
+          Requirements:
+          - Maximum 400 words
+          - Use markdown format
+          - Start with a brief 1-2 sentence summary of this release
+          - Group changes into sections (use only sections that have content):
+            - **New Features** - New functionality (feat: commits)
+            - **Bug Fixes** - Fixed issues (fix: commits)
+            - **Breaking Changes** - Changes requiring user action
+            - **Improvements** - Enhancements to existing features
+          - Skip internal changes (chore:, docs:, test:, ci: commits) unless significant
+          - Use bullet points for each change
+          - Be specific but brief
+          - If there are no meaningful changes, say 'Minor internal improvements and maintenance updates.'"
+
+          # Call Claude API using jq for proper JSON escaping
+          PAYLOAD=$(jq -n \
+            --arg model "claude-sonnet-4-5-20250929" \
+            --argjson max_tokens 1024 \
+            --arg prompt "$PROMPT" \
+            '{
+              model: $model,
+              max_tokens: $max_tokens,
+              messages: [{
+                role: "user",
+                content: $prompt
+              }]
+            }')
+
+          echo "Calling Claude API..."
+          RESPONSE=$(curl -s --max-time 30 \
+            https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "content-type: application/json" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$PAYLOAD" 2>&1) || {
+            echo "::warning::Claude API request failed (timeout or network error)"
+            NOTES="Release notes could not be generated automatically. See commit history for changes."
+            echo "notes<<EOF" >> $GITHUB_OUTPUT
+            echo "$NOTES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            exit 0
+          }
+
+          # Check for API errors
+          ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || echo "")
+          if [ -n "$ERROR_MSG" ]; then
+            echo "::warning::Claude API error: $ERROR_MSG"
+            NOTES="Release notes could not be generated automatically. See commit history for changes."
+            echo "notes<<EOF" >> $GITHUB_OUTPUT
+            echo "$NOTES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract the generated notes
+          NOTES=$(echo "$RESPONSE" | jq -r '.content[0].text // empty' 2>/dev/null || echo "")
+
+          if [ -z "$NOTES" ]; then
+            echo "::warning::Failed to extract release notes from API response"
+            NOTES="Release notes could not be generated automatically. See commit history for changes."
+          else
+            echo "✅ Release notes generated successfully"
+          fi
+
+          # Output notes
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Save to file for artifact
+          NOTES_FILE="RELEASE_NOTES-${VERSION}.md"
+          echo "$NOTES" > "$NOTES_FILE"
+          echo "notes_file=$NOTES_FILE" >> $GITHUB_OUTPUT
+
+      - name: Upload release notes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES-${{ github.ref_name }}.md
+          if-no-files-found: ignore
+
   build:
     environment: production
     # Only run on version tags
@@ -63,6 +232,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download release notes artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+        continue-on-error: true  # Don't fail if notes not yet available
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -718,7 +894,7 @@ jobs:
           path: installers-artifact/*
 
   release:
-    needs: build
+    needs: [build, generate-notes]
     runs-on: ubuntu-latest
     environment: production
 
@@ -807,6 +983,10 @@ jobs:
         with:
           files: release-files/*
           body: |
+            ${{ needs.generate-notes.outputs.notes }}
+
+            ---
+
             ## mcpproxy ${{ github.ref_name }}
 
             Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
