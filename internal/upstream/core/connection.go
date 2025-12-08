@@ -407,14 +407,25 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
 		}
 	} else {
+		// For direct docker commands, inject env vars as -e flags before shell wrapping
+		argsToWrap := args
+		isDirectDockerRun := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun
+		if isDirectDockerRun && len(c.config.Env) > 0 {
+			argsToWrap = c.injectEnvVarsIntoDockerArgs(args, c.config.Env)
+			c.logger.Debug("Injected env vars into direct docker command",
+				zap.String("server", c.config.Name),
+				zap.Int("env_count", len(c.config.Env)),
+				zap.Strings("modified_args", argsToWrap))
+		}
+
 		// Use shell wrapping for environment inheritance
 		// This fixes issues when mcpproxy is launched via Launchd and doesn't inherit
 		// user's shell environment (like PATH customizations from .bashrc, .zshrc, etc.)
-		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, args)
+		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, argsToWrap)
 		c.isDockerCommand = false
 
 		// Handle explicit docker commands
-		if (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun {
+		if isDirectDockerRun {
 			c.isDockerCommand = true
 			if cidFile != "" {
 				// For shell-wrapped Docker commands, we need to modify the shell command string
@@ -649,6 +660,29 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	// CRITICAL FIX: Wrap Docker command with user shell to inherit proper PATH
 	// This fixes issues when mcpproxy is launched via Launchpad/GUI where PATH doesn't include Docker
 	return c.wrapWithUserShell(cmdDocker, finalArgs)
+}
+
+// injectEnvVarsIntoDockerArgs injects environment variables as -e flags into Docker run args
+// The flags are inserted after "run" but before the image name
+// Example: ["run", "-i", "--rm", "image"] -> ["run", "-e", "KEY=VAL", "-i", "--rm", "image"]
+func (c *Client) injectEnvVarsIntoDockerArgs(args []string, envVars map[string]string) []string {
+	if len(args) < 2 || args[0] != cmdRun {
+		return args
+	}
+
+	// Build new args with env vars injected after "run"
+	newArgs := make([]string, 0, len(args)+len(envVars)*2)
+	newArgs = append(newArgs, args[0]) // "run"
+
+	// Add -e flags for each env var
+	for key, value := range envVars {
+		newArgs = append(newArgs, "-e", fmt.Sprintf("%s=%s", key, value))
+	}
+
+	// Add remaining args (flags and image name)
+	newArgs = append(newArgs, args[1:]...)
+
+	return newArgs
 }
 
 // insertCidfileIntoShellDockerCommand inserts --cidfile into a shell-wrapped Docker command
