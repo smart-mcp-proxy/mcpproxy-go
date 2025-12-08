@@ -77,8 +77,9 @@
           Unquarantine
         </button>
 
+        <!-- Restart button only for stdio servers (HTTP servers use Login/Reconnect) -->
         <button
-          v-if="!server.connected && server.enabled"
+          v-if="!server.connected && server.enabled && !isHttpProtocol"
           @click="restart"
           :disabled="loading"
           class="btn btn-sm btn-outline"
@@ -173,6 +174,10 @@ const systemStore = useSystemStore()
 const loading = ref(false)
 const showDeleteConfirmation = ref(false)
 
+const isHttpProtocol = computed(() => {
+  return props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
+})
+
 const needsOAuth = computed(() => {
   // Don't show Login button if server is disabled
   if (!props.server.enabled) return false
@@ -180,15 +185,16 @@ const needsOAuth = computed(() => {
   // Don't show Login button while connecting (let the connection attempt finish)
   if (props.server.connecting) return false
 
-  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
-  if (!isHttpProtocol) return false
+  if (!isHttpProtocol.value) return false
 
   // Don't show Login if already connected
   if (props.server.connected) return false
 
-  // Check if server has OAuth configuration
-  const hasOAuthConfig = props.server.oauth !== null && props.server.oauth !== undefined
-  if (!hasOAuthConfig) return false
+  // HTTP servers always support OAuth via autodiscovery, even without explicit oauth config
+  // oauth: null (new server) and oauth: {} (explicit empty config) should both allow Login
+  // Only require explicit oauth config for non-HTTP protocols (though they don't reach here)
+  const hasOAuthSupport = isHttpProtocol.value || (props.server.oauth !== null && props.server.oauth !== undefined)
+  if (!hasOAuthSupport) return false
 
   // Show Login if user explicitly logged out
   if (props.server.user_logged_out) {
@@ -227,8 +233,7 @@ const canLogout = computed(() => {
   // Don't show Logout if user already explicitly logged out
   if (props.server.user_logged_out) return false
 
-  const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
-  if (!isHttpProtocol) return false
+  if (!isHttpProtocol.value) return false
 
   const hasToken = props.server.authenticated === true
   if (!hasToken) return false

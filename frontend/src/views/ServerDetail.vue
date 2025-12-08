@@ -77,7 +77,7 @@
               <li v-if="server.enabled">
                 <button @click="restartServer" :disabled="actionLoading">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                  Restart
+                  {{ isHttpProtocol ? 'Reconnect' : 'Restart' }}
                 </button>
               </li>
               <li v-if="needsOAuth">
@@ -460,9 +460,13 @@ const logsError = ref<string | null>(null)
 const logTail = ref(100)
 
 // Computed
+const isHttpProtocol = computed(() => {
+  return server.value?.protocol === 'http' || server.value?.protocol === 'streamable-http'
+})
+
 const needsOAuth = computed(() => {
   return server.value &&
-         (server.value.protocol === 'http' || server.value.protocol === 'streamable-http') &&
+         isHttpProtocol.value &&
          !server.value.connected &&
          server.value.enabled &&
          server.value.last_error?.includes('authorization')
