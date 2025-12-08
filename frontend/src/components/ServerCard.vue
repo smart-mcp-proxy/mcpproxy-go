@@ -190,6 +190,11 @@ const needsOAuth = computed(() => {
   const hasOAuthConfig = props.server.oauth !== null && props.server.oauth !== undefined
   if (!hasOAuthConfig) return false
 
+  // Show Login if user explicitly logged out
+  if (props.server.user_logged_out) {
+    return true
+  }
+
   // Use oauth_status for more accurate token state detection
   // Show Login if: no token, expired token, or error state
   const oauthStatus = props.server.oauth_status
@@ -219,6 +224,9 @@ const canLogout = computed(() => {
   // Don't show Logout button if server is disabled
   if (!props.server.enabled) return false
 
+  // Don't show Logout if user already explicitly logged out
+  if (props.server.user_logged_out) return false
+
   const isHttpProtocol = props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
   if (!isHttpProtocol) return false
 
@@ -238,12 +246,21 @@ const canLogout = computed(() => {
   // If connected, always show Logout (user can log out of working connection)
   if (props.server.connected) return true
 
-  // If not connected but has error, show Logout so user can clear token
-  // This handles cases where the token might be the problem
+  // If not connected but has error, check if it's an OAuth authentication error
+  // If OAuth auth is required, show Login instead of Logout
   if (props.server.last_error) {
     // Don't show Logout if oauth_status says token is expired
     // In that case, Login is more appropriate
     if (props.server.oauth_status === 'expired') return false
+
+    // Don't show Logout if the error indicates OAuth authentication is required
+    // This means the stored token isn't valid, so Login is more appropriate
+    const isOAuthRequired = props.server.last_error.includes('OAuth authentication required') ||
+      props.server.last_error.includes('authorization') ||
+      props.server.last_error.includes('401') ||
+      props.server.last_error.includes('invalid_token')
+    if (isOAuthRequired) return false
+
     return true
   }
 

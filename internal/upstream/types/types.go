@@ -378,6 +378,11 @@ func (sm *StateManager) ShouldRetryOAuth() bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
+	// Don't auto-retry OAuth flows if the user explicitly logged out
+	if sm.userLoggedOut {
+		return false
+	}
+
 	if !sm.isOAuthError || sm.currentState != StateError {
 		return false
 	}

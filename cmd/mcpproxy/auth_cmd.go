@@ -230,6 +230,8 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		authenticated, _ := srv["authenticated"].(bool)
 		connected, _ := srv["connected"].(bool)
 		lastError, _ := srv["last_error"].(string)
+		enabled, _ := srv["enabled"].(bool)
+		userLoggedOut, _ := srv["user_logged_out"].(bool)
 
 		// Check if this is an OAuth server by:
 		// 1. Has oauth config OR
@@ -248,7 +250,15 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		// Determine status emoji and text using oauth_status for accurate state
 		oauthStatus, _ := srv["oauth_status"].(string)
 		var status string
-		if connected {
+
+		// Check priority states first
+		if !enabled {
+			// Server is disabled - no reconnection attempts
+			status = "⏸️  Disabled"
+		} else if userLoggedOut {
+			// User explicitly logged out - no auto-reconnection
+			status = "🚪 Logged Out (Login Required)"
+		} else if connected {
 			// Connected states
 			if authenticated {
 				status = "✅ Authenticated & Connected"

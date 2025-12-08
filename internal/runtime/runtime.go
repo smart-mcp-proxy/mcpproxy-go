@@ -62,15 +62,15 @@ type Runtime struct {
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
 
-	storageManager   *storage.Manager
-	indexManager     *index.Manager
-	upstreamManager  *upstream.Manager
-	cacheManager     *cache.Manager
-	truncator        *truncate.Truncator
-	secretResolver   *secret.Resolver
-	tokenizer        tokens.Tokenizer
-	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
-	managementService interface{} // Initialized later to avoid import cycle
+	storageManager    *storage.Manager
+	indexManager      *index.Manager
+	upstreamManager   *upstream.Manager
+	cacheManager      *cache.Manager
+	truncator         *truncate.Truncator
+	secretResolver    *secret.Resolver
+	tokenizer         tokens.Tokenizer
+	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
+	managementService interface{}           // Initialized later to avoid import cycle
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
@@ -959,18 +959,18 @@ func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*
 
 	// Convert to contract type
 	return &contracts.ToolCallRecord{
-		ID:               newCall.ID,
-		ServerID:         newCall.ServerID,
-		ServerName:       newCall.ServerName,
-		ToolName:         newCall.ToolName,
-		Arguments:        newCall.Arguments,
-		Response:         newCall.Response,
-		Error:            newCall.Error,
-		Duration:         newCall.Duration,
-		Timestamp:        newCall.Timestamp,
-		ConfigPath:       newCall.ConfigPath,
-		RequestID:        newCall.RequestID,
-		Annotations:      convertToolAnnotations(newCall.Annotations),
+		ID:          newCall.ID,
+		ServerID:    newCall.ServerID,
+		ServerName:  newCall.ServerName,
+		ToolName:    newCall.ToolName,
+		Arguments:   newCall.Arguments,
+		Response:    newCall.Response,
+		Error:       newCall.Error,
+		Duration:    newCall.Duration,
+		Timestamp:   newCall.Timestamp,
+		ConfigPath:  newCall.ConfigPath,
+		RequestID:   newCall.RequestID,
+		Annotations: convertToolAnnotations(newCall.Annotations),
 	}, nil
 }
 
@@ -1497,7 +1497,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	for _, serverStatus := range snapshot.Servers {
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
-		connecting := serverStatus.State == "connecting"
+		connecting := strings.EqualFold(serverStatus.State, "connecting")
 
 		status := serverStatus.State
 		if status == "" {
@@ -1642,6 +1642,16 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["token_expires_at"] = tokenExpiresAt
 		}
 
+		// Add user_logged_out flag from managed client
+		// This indicates if the user explicitly logged out, which prevents auto-reconnection
+		var userLoggedOut bool
+		if r.upstreamManager != nil {
+			if client, exists := r.upstreamManager.GetClient(serverStatus.Name); exists && client != nil {
+				userLoggedOut = client.IsUserLoggedOut()
+			}
+		}
+		serverMap["user_logged_out"] = userLoggedOut
+
 		result = append(result, serverMap)
 	}
 
@@ -1723,9 +1733,9 @@ func (r *Runtime) GetServerTools(serverName string) ([]map[string]interface{}, e
 	tools := make([]map[string]interface{}, 0, len(serverStatus.Tools))
 	for _, tool := range serverStatus.Tools {
 		toolMap := map[string]interface{}{
-			"name":         tool.Name,
-			"description":  tool.Description,
-			"server_name":  serverName,
+			"name":        tool.Name,
+			"description": tool.Description,
+			"server_name": serverName,
 		}
 		if tool.InputSchema != nil {
 			toolMap["inputSchema"] = tool.InputSchema

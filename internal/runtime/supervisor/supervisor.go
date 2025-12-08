@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"strings"
+
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
@@ -556,14 +558,15 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		}
 
 		// Map connection state to string
-		// Use detailed state from ConnectionInfo if available, otherwise fall back to simple logic
-		if state.ConnectionInfo != nil && state.ConnectionInfo.State != types.StateDisconnected {
-			// Use the detailed state string from the managed client (e.g., "Pending Auth", "Authenticating", "Ready")
-			status.State = state.ConnectionInfo.State.String()
+		// Use detailed state from ConnectionInfo when available to avoid mislabeling disconnected servers as "connecting"
+		if state.ConnectionInfo != nil {
+			status.State = strings.ToLower(state.ConnectionInfo.State.String())
 		} else if state.Connected {
 			status.State = "connected"
 		} else if state.Enabled && !state.Quarantined {
 			status.State = "connecting"
+		} else if state.Enabled {
+			status.State = "disconnected"
 		} else {
 			status.State = "idle"
 		}
@@ -977,9 +980,9 @@ func (s *Supervisor) IsInspectionExempted(serverName string) bool {
 // ===== Circuit Breaker for Inspection Failures (Issue #105) =====
 
 const (
-	maxInspectionFailures  = 3                // Max consecutive failures before cooldown
-	inspectionCooldown     = 5 * time.Minute  // Cooldown duration after max failures
-	failureResetTimeout    = 10 * time.Minute // Reset counter if no failures for this long
+	maxInspectionFailures = 3                // Max consecutive failures before cooldown
+	inspectionCooldown    = 5 * time.Minute  // Cooldown duration after max failures
+	failureResetTimeout   = 10 * time.Minute // Reset counter if no failures for this long
 )
 
 // CanInspect checks if inspection is allowed for a server (circuit breaker)

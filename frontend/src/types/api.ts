@@ -26,6 +26,7 @@ export interface Server {
   }
   oauth_status?: 'authenticated' | 'expired' | 'error' | 'none'
   token_expires_at?: string
+  user_logged_out?: boolean // True if user explicitly logged out (prevents auto-reconnection)
 }
 
 // Tool Annotation types
