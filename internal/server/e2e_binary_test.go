@@ -35,7 +35,7 @@ func TestBinaryStartupAndShutdown(t *testing.T) {
 	env.Start()
 
 	// Verify server is responding
-	client := testutil.NewHTTPClient(env.GetAPIURL())
+	client := env.GetHTTPClient()
 	var response testutil.TestServerList
 	err := client.GetJSON("/servers", &response)
 	require.NoError(t, err)
@@ -50,7 +50,7 @@ func TestBinaryAPIEndpoints(t *testing.T) {
 	env.Start()
 	env.WaitForEverythingServer()
 
-	client := testutil.NewHTTPClient(env.GetAPIURL())
+	client := env.GetHTTPClient()
 
 	t.Run("GET /servers", func(t *testing.T) {
 		var response testutil.TestServerList
@@ -205,13 +205,14 @@ func TestBinaryErrorHandling(t *testing.T) {
 	env.Start()
 	env.WaitForEverythingServer()
 
-	client := testutil.NewHTTPClient(env.GetAPIURL())
+	client := env.GetHTTPClient()
 
 	t.Run("GET /servers/nonexistent/tools", func(t *testing.T) {
 		resp, err := client.Get("/servers/nonexistent/tools")
 		require.NoError(t, err)
 		defer resp.Body.Close()
-		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		// 404 is the expected response for a nonexistent server
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 
 	t.Run("GET /index/search without query", func(t *testing.T) {
@@ -225,6 +226,7 @@ func TestBinaryErrorHandling(t *testing.T) {
 		resp, err := client.PostJSON("/servers/nonexistent/enable", nil)
 		require.NoError(t, err)
 		defer resp.Body.Close()
+		// Note: POST returns 500 for nonexistent servers (different from GET's 404)
 		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	})
 }
@@ -239,7 +241,7 @@ func TestBinarySSEEvents(t *testing.T) {
 	// Wait a moment for the server to start sending events
 	time.Sleep(500 * time.Millisecond)
 
-	client := testutil.NewHTTPClient(env.GetBaseURL())
+	client := testutil.NewHTTPClientWithAPIKey(env.GetBaseURL(), testutil.TestAPIKey)
 	resp, err := client.Get("/events")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -272,7 +274,7 @@ func TestBinaryConcurrentRequests(t *testing.T) {
 	env.Start()
 	env.WaitForEverythingServer()
 
-	client := testutil.NewHTTPClient(env.GetAPIURL())
+	client := env.GetHTTPClient()
 
 	// Make multiple concurrent requests
 	done := make(chan bool, 5)
@@ -320,7 +322,7 @@ func TestBinaryPerformance(t *testing.T) {
 	env.Start()
 	env.WaitForEverythingServer()
 
-	client := testutil.NewHTTPClient(env.GetAPIURL())
+	client := env.GetHTTPClient()
 
 	t.Run("Server list response time", func(t *testing.T) {
 		start := time.Now()
@@ -368,7 +370,7 @@ func TestBinaryHealthAndRecovery(t *testing.T) {
 	env.Start()
 	env.WaitForEverythingServer()
 
-	client := testutil.NewHTTPClient(env.GetAPIURL())
+	client := env.GetHTTPClient()
 
 	t.Run("Server restart and recovery", func(t *testing.T) {
 		// Restart the memory server
