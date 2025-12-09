@@ -311,10 +311,10 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// upstream_servers - Basic server management (with security checks)
 	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
 		upstreamServersTool := mcp.NewTool("upstream_servers",
-			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Configure per-server Docker images, CPU/memory limits, and network isolation. Use 'isolation_enabled', 'isolation_image', 'isolation_memory_limit', 'isolation_cpu_limit' parameters for custom settings."),
+			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Configure per-server Docker images, CPU/memory limits, and network isolation. Use 'isolation_enabled', 'isolation_image', 'isolation_memory_limit', 'isolation_cpu_limit' parameters for custom settings.\n\nUpdate/Patch Behavior: Both 'update' and 'patch' operations use FULL REPLACEMENT for env_json, args_json, and headers_json fields. The provided value completely replaces the existing value. To delete all env vars, provide empty object '{}'. To keep some keys while removing others, provide only the keys you want to keep."),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Operation: list, add, remove, update, patch, tail_log. For quarantine operations, use the 'quarantine_security' tool."),
+				mcp.Description("Operation: list, add, remove, update, patch, tail_log. 'update' and 'patch' both use full replacement for env/args/headers fields. For quarantine operations, use the 'quarantine_security' tool."),
 				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log"),
 			),
 			mcp.WithString("name",
@@ -327,10 +327,10 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Description("Command to run for stdio servers (e.g., 'uvx', 'python')"),
 			),
 			mcp.WithString("args_json",
-				mcp.Description("Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]')"),
+				mcp.Description("Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]'). For update/patch: REPLACES all existing args."),
 			),
 			mcp.WithString("env_json",
-				mcp.Description("Environment variables for stdio servers as JSON string (e.g., '{\"API_KEY\": \"value\"}')"),
+				mcp.Description("Environment variables for stdio servers as JSON object (e.g., '{\"API_KEY\": \"value\"}'). For update/patch: REPLACES all existing env vars. Use '{}' to clear all env vars."),
 			),
 			mcp.WithString("url",
 				mcp.Description("Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')"),
@@ -340,13 +340,10 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Enum("stdio", "http", "sse", "streamable-http", "auto"),
 			),
 			mcp.WithString("headers_json",
-				mcp.Description("HTTP headers for authentication as JSON string (e.g., '{\"Authorization\": \"Bearer token\"}')"),
+				mcp.Description("HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: REPLACES all existing headers. Use '{}' to clear all headers."),
 			),
 			mcp.WithBoolean("enabled",
 				mcp.Description("Whether server should be enabled (default: true)"),
-			),
-			mcp.WithString("patch_json",
-				mcp.Description("Fields to update for patch operations as JSON string"),
 			),
 			// Docker isolation parameters
 			mcp.WithBoolean("isolation_enabled",
@@ -2034,7 +2031,40 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
 		updatedServer.WorkingDir = workingDir
 	}
+	if command := request.GetString("command", ""); command != "" {
+		updatedServer.Command = command
+	}
 	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
+
+	// Handle env JSON string for update
+	if envJSON := request.GetString("env_json", ""); envJSON != "" {
+		var env map[string]string
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid env_json format: %v", err)), nil
+		}
+		updatedServer.Env = env
+		p.logger.Info("Server env vars updated via MCP tool",
+			zap.String("server", name),
+			zap.String("operation", "update"))
+	}
+
+	// Handle args JSON string for update
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		var args []string
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
+		}
+		updatedServer.Args = args
+	}
+
+	// Handle headers JSON string for update
+	if headersJSON := request.GetString("headers_json", ""); headersJSON != "" {
+		var headers map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid headers_json format: %v", err)), nil
+		}
+		updatedServer.Headers = headers
+	}
 
 	// Update in storage
 	if err := p.storage.UpdateUpstream(serverID, &updatedServer); err != nil {
@@ -2128,7 +2158,40 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
 		updatedServer.WorkingDir = workingDir
 	}
+	if command := request.GetString("command", ""); command != "" {
+		updatedServer.Command = command
+	}
 	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
+
+	// Handle env JSON string for patch
+	if envJSON := request.GetString("env_json", ""); envJSON != "" {
+		var env map[string]string
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid env_json format: %v", err)), nil
+		}
+		updatedServer.Env = env
+		p.logger.Info("Server env vars updated via MCP tool",
+			zap.String("server", name),
+			zap.String("operation", "patch"))
+	}
+
+	// Handle args JSON string for patch
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		var args []string
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
+		}
+		updatedServer.Args = args
+	}
+
+	// Handle headers JSON string for patch
+	if headersJSON := request.GetString("headers_json", ""); headersJSON != "" {
+		var headers map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid headers_json format: %v", err)), nil
+		}
+		updatedServer.Headers = headers
+	}
 
 	// Update in storage
 	if err := p.storage.UpdateUpstream(serverID, &updatedServer); err != nil {
@@ -2656,7 +2719,20 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	case "doctor":
 		result, err = p.handleDoctor(ctx, request)
 	default:
-		return nil, fmt.Errorf("unknown tool: %s", toolName)
+		// Check if this is an upstream tool in server:tool format
+		if strings.Contains(toolName, ":") {
+			// Route upstream tools through handleCallTool which handles server:tool format
+			// Create a request with the tool name in the "name" parameter
+			upstreamRequest := mcp.CallToolRequest{}
+			upstreamRequest.Params.Name = "call_tool"
+			upstreamRequest.Params.Arguments = map[string]interface{}{
+				"name": toolName,
+				"args": request.Params.Arguments,
+			}
+			result, err = p.handleCallTool(ctx, upstreamRequest)
+		} else {
+			return nil, fmt.Errorf("unknown tool: %s", toolName)
+		}
 	}
 
 	if err != nil {

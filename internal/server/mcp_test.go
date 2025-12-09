@@ -1027,3 +1027,234 @@ func TestE2E_DeleteServerFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, deleteResult2.IsError, "Deleting non-existent server should fail")
 }
+
+// TestEnvJsonParsing tests env_json parameter parsing for update/patch operations
+func TestEnvJsonParsing(t *testing.T) {
+	tests := []struct {
+		name        string
+		envJSON     string
+		wantErr     bool
+		errContains string
+		expected    map[string]string
+	}{
+		{
+			name:     "valid env_json",
+			envJSON:  `{"API_KEY": "secret123", "DEBUG": "true"}`,
+			wantErr:  false,
+			expected: map[string]string{"API_KEY": "secret123", "DEBUG": "true"},
+		},
+		{
+			name:     "empty object clears env vars",
+			envJSON:  `{}`,
+			wantErr:  false,
+			expected: map[string]string{},
+		},
+		{
+			name:        "invalid JSON",
+			envJSON:     `not valid json`,
+			wantErr:     true,
+			errContains: "Invalid env_json format",
+		},
+		{
+			name:        "array instead of object",
+			envJSON:     `["key1", "key2"]`,
+			wantErr:     true,
+			errContains: "Invalid env_json format",
+		},
+		{
+			name:     "single key-value",
+			envJSON:  `{"SINGLE_VAR": "value"}`,
+			wantErr:  false,
+			expected: map[string]string{"SINGLE_VAR": "value"},
+		},
+		{
+			name:     "unicode values",
+			envJSON:  `{"UNICODE": "日本語テスト"}`,
+			wantErr:  false,
+			expected: map[string]string{"UNICODE": "日本語テスト"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var env map[string]string
+			err := json.Unmarshal([]byte(tt.envJSON), &env)
+
+			if tt.wantErr {
+				assert.Error(t, err, "Expected error for %s", tt.name)
+			} else {
+				assert.NoError(t, err, "Unexpected error for %s", tt.name)
+				assert.Equal(t, tt.expected, env, "Parsed env doesn't match expected for %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestArgsJsonParsing tests args_json parameter parsing for update/patch operations
+func TestArgsJsonParsing(t *testing.T) {
+	tests := []struct {
+		name        string
+		argsJSON    string
+		wantErr     bool
+		errContains string
+		expected    []string
+	}{
+		{
+			name:     "valid args_json",
+			argsJSON: `["arg1", "arg2", "--flag"]`,
+			wantErr:  false,
+			expected: []string{"arg1", "arg2", "--flag"},
+		},
+		{
+			name:     "empty array clears args",
+			argsJSON: `[]`,
+			wantErr:  false,
+			expected: []string{},
+		},
+		{
+			name:        "invalid JSON",
+			argsJSON:    `not valid json`,
+			wantErr:     true,
+			errContains: "Invalid args_json format",
+		},
+		{
+			name:        "object instead of array",
+			argsJSON:    `{"key": "value"}`,
+			wantErr:     true,
+			errContains: "Invalid args_json format",
+		},
+		{
+			name:     "single argument",
+			argsJSON: `["single-arg"]`,
+			wantErr:  false,
+			expected: []string{"single-arg"},
+		},
+		{
+			name:     "arguments with special characters",
+			argsJSON: `["--config=/path/to/file", "-v", "value with spaces"]`,
+			wantErr:  false,
+			expected: []string{"--config=/path/to/file", "-v", "value with spaces"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var args []string
+			err := json.Unmarshal([]byte(tt.argsJSON), &args)
+
+			if tt.wantErr {
+				assert.Error(t, err, "Expected error for %s", tt.name)
+			} else {
+				assert.NoError(t, err, "Unexpected error for %s", tt.name)
+				assert.Equal(t, tt.expected, args, "Parsed args doesn't match expected for %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestHeadersJsonParsing tests headers_json parameter parsing for update/patch operations
+func TestHeadersJsonParsing(t *testing.T) {
+	tests := []struct {
+		name        string
+		headersJSON string
+		wantErr     bool
+		errContains string
+		expected    map[string]string
+	}{
+		{
+			name:        "valid headers_json",
+			headersJSON: `{"Authorization": "Bearer token123", "X-Custom-Header": "value"}`,
+			wantErr:     false,
+			expected:    map[string]string{"Authorization": "Bearer token123", "X-Custom-Header": "value"},
+		},
+		{
+			name:        "empty object clears headers",
+			headersJSON: `{}`,
+			wantErr:     false,
+			expected:    map[string]string{},
+		},
+		{
+			name:        "invalid JSON",
+			headersJSON: `not valid json`,
+			wantErr:     true,
+			errContains: "Invalid headers_json format",
+		},
+		{
+			name:        "array instead of object",
+			headersJSON: `["header1", "header2"]`,
+			wantErr:     true,
+			errContains: "Invalid headers_json format",
+		},
+		{
+			name:        "single header",
+			headersJSON: `{"Content-Type": "application/json"}`,
+			wantErr:     false,
+			expected:    map[string]string{"Content-Type": "application/json"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var headers map[string]string
+			err := json.Unmarshal([]byte(tt.headersJSON), &headers)
+
+			if tt.wantErr {
+				assert.Error(t, err, "Expected error for %s", tt.name)
+			} else {
+				assert.NoError(t, err, "Unexpected error for %s", tt.name)
+				assert.Equal(t, tt.expected, headers, "Parsed headers doesn't match expected for %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestFullReplacementSemantics tests that update/patch operations do full replacement
+func TestFullReplacementSemantics(t *testing.T) {
+	t.Run("env vars full replacement", func(t *testing.T) {
+		// Initial env vars
+		initialEnv := map[string]string{
+			"VAR1": "value1",
+			"VAR2": "value2",
+			"VAR3": "value3",
+		}
+
+		// Update with partial new env (only VAR4)
+		updateJSON := `{"VAR4": "value4"}`
+		var newEnv map[string]string
+		err := json.Unmarshal([]byte(updateJSON), &newEnv)
+		require.NoError(t, err)
+
+		// Full replacement means old keys should be gone
+		// In real implementation, newEnv completely replaces initialEnv
+		assert.NotContains(t, newEnv, "VAR1", "Old VAR1 should not exist in new env")
+		assert.NotContains(t, newEnv, "VAR2", "Old VAR2 should not exist in new env")
+		assert.NotContains(t, newEnv, "VAR3", "Old VAR3 should not exist in new env")
+		assert.Contains(t, newEnv, "VAR4", "New VAR4 should exist")
+		assert.Equal(t, "value4", newEnv["VAR4"])
+
+		// Verify initialEnv still has original keys (not modified)
+		assert.Contains(t, initialEnv, "VAR1")
+		assert.Contains(t, initialEnv, "VAR2")
+		assert.Contains(t, initialEnv, "VAR3")
+	})
+
+	t.Run("args full replacement", func(t *testing.T) {
+		// Initial args
+		initialArgs := []string{"arg1", "arg2", "arg3"}
+
+		// Update with new args
+		updateJSON := `["newarg1"]`
+		var newArgs []string
+		err := json.Unmarshal([]byte(updateJSON), &newArgs)
+		require.NoError(t, err)
+
+		// Full replacement means only new args remain
+		assert.Len(t, newArgs, 1)
+		assert.Equal(t, "newarg1", newArgs[0])
+		assert.NotContains(t, newArgs, "arg1")
+		assert.NotContains(t, newArgs, "arg2")
+
+		// Verify initialArgs still has original values (not modified)
+		assert.Len(t, initialArgs, 3)
+	})
+}

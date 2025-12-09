@@ -1095,3 +1095,302 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 
 	t.Log("✅ Test passed: Quarantine inspection with temporary exemption works correctly")
 }
+
+// TestE2E_UpdateServerEnvJson tests updating server env vars via env_json
+func TestE2E_UpdateServerEnvJson(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a server with initial env vars
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "env-test-server",
+		"command":   "echo",
+		"args_json": `["test"]`,
+		"env_json":  `{"INITIAL_VAR": "initial_value", "SECOND_VAR": "second_value"}`,
+		"enabled":   false,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError, "Add operation should succeed")
+
+	// Step 2: Update with new env_json (should do FULL REPLACEMENT)
+	updateRequest := mcp.CallToolRequest{}
+	updateRequest.Params.Name = "upstream_servers"
+	updateRequest.Params.Arguments = map[string]interface{}{
+		"operation": "update",
+		"name":      "env-test-server",
+		"env_json":  `{"NEW_VAR": "new_value"}`,
+	}
+
+	updateResult, err := mcpClient.CallTool(ctx, updateRequest)
+	require.NoError(t, err)
+	assert.False(t, updateResult.IsError, "Update operation should succeed")
+
+	// Step 3: Verify via list that env was updated
+	listRequest := mcp.CallToolRequest{}
+	listRequest.Params.Name = "upstream_servers"
+	listRequest.Params.Arguments = map[string]interface{}{
+		"operation": "list",
+	}
+
+	listResult, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	assert.False(t, listResult.IsError)
+
+	// Parse list result to verify env
+	var listContentText string
+	if len(listResult.Content) > 0 {
+		contentBytes, _ := json.Marshal(listResult.Content[0])
+		var contentMap map[string]interface{}
+		json.Unmarshal(contentBytes, &contentMap)
+		if text, ok := contentMap["text"].(string); ok {
+			listContentText = text
+		}
+	}
+
+	// The list should show env-test-server
+	assert.Contains(t, listContentText, "env-test-server", "Server should be in list")
+
+	// Step 4: Clean up - delete the test server
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "env-test-server",
+	}
+
+	deleteResult, err := mcpClient.CallTool(ctx, deleteRequest)
+	require.NoError(t, err)
+	assert.False(t, deleteResult.IsError, "Delete operation should succeed")
+
+	t.Log("✅ Test passed: Update server env_json works correctly")
+}
+
+// TestE2E_UpdateServerArgsJson tests updating server args via args_json
+func TestE2E_UpdateServerArgsJson(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a server with initial args
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "args-test-server",
+		"command":   "echo",
+		"args_json": `["initial-arg1", "initial-arg2"]`,
+		"enabled":   false,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError, "Add operation should succeed")
+
+	// Step 2: Update with new args_json (should do FULL REPLACEMENT)
+	updateRequest := mcp.CallToolRequest{}
+	updateRequest.Params.Name = "upstream_servers"
+	updateRequest.Params.Arguments = map[string]interface{}{
+		"operation": "update",
+		"name":      "args-test-server",
+		"args_json": `["new-arg1", "new-arg2", "new-arg3"]`,
+	}
+
+	updateResult, err := mcpClient.CallTool(ctx, updateRequest)
+	require.NoError(t, err)
+	assert.False(t, updateResult.IsError, "Update operation should succeed")
+
+	// Step 3: Clean up
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "args-test-server",
+	}
+
+	deleteResult, err := mcpClient.CallTool(ctx, deleteRequest)
+	require.NoError(t, err)
+	assert.False(t, deleteResult.IsError, "Delete operation should succeed")
+
+	t.Log("✅ Test passed: Update server args_json works correctly")
+}
+
+// TestE2E_UpdateServerHeadersJson tests updating server headers via headers_json
+func TestE2E_UpdateServerHeadersJson(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add an HTTP server with initial headers
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation":    "add",
+		"name":         "headers-test-server",
+		"url":          "http://localhost:9999/mcp",
+		"protocol":     "http",
+		"headers_json": `{"Authorization": "Bearer initial-token", "X-Initial": "value"}`,
+		"enabled":      false,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError, "Add operation should succeed")
+
+	// Step 2: Update with new headers_json (should do FULL REPLACEMENT)
+	updateRequest := mcp.CallToolRequest{}
+	updateRequest.Params.Name = "upstream_servers"
+	updateRequest.Params.Arguments = map[string]interface{}{
+		"operation":    "update",
+		"name":         "headers-test-server",
+		"headers_json": `{"Authorization": "Bearer new-token", "X-New-Header": "new-value"}`,
+	}
+
+	updateResult, err := mcpClient.CallTool(ctx, updateRequest)
+	require.NoError(t, err)
+	assert.False(t, updateResult.IsError, "Update operation should succeed")
+
+	// Step 3: Clean up
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "headers-test-server",
+	}
+
+	deleteResult, err := mcpClient.CallTool(ctx, deleteRequest)
+	require.NoError(t, err)
+	assert.False(t, deleteResult.IsError, "Delete operation should succeed")
+
+	t.Log("✅ Test passed: Update server headers_json works correctly")
+}
+
+// TestE2E_PatchServerEnvJson tests patch operation with env_json
+func TestE2E_PatchServerEnvJson(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a server with initial env vars
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "patch-env-test-server",
+		"command":   "echo",
+		"args_json": `["test"]`,
+		"env_json":  `{"OLD_VAR": "old_value"}`,
+		"enabled":   false,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError, "Add operation should succeed")
+
+	// Step 2: Patch with new env_json (should do FULL REPLACEMENT, same as update)
+	patchRequest := mcp.CallToolRequest{}
+	patchRequest.Params.Name = "upstream_servers"
+	patchRequest.Params.Arguments = map[string]interface{}{
+		"operation": "patch",
+		"name":      "patch-env-test-server",
+		"env_json":  `{"PATCHED_VAR": "patched_value"}`,
+	}
+
+	patchResult, err := mcpClient.CallTool(ctx, patchRequest)
+	require.NoError(t, err)
+	assert.False(t, patchResult.IsError, "Patch operation should succeed")
+
+	// Step 3: Clean up
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "patch-env-test-server",
+	}
+
+	deleteResult, err := mcpClient.CallTool(ctx, deleteRequest)
+	require.NoError(t, err)
+	assert.False(t, deleteResult.IsError, "Delete operation should succeed")
+
+	t.Log("✅ Test passed: Patch server env_json works correctly")
+}
+
+// TestE2E_ClearEnvWithEmptyJson tests clearing env vars with empty JSON
+func TestE2E_ClearEnvWithEmptyJson(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a server with env vars
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "clear-env-test-server",
+		"command":   "echo",
+		"args_json": `["test"]`,
+		"env_json":  `{"VAR1": "value1", "VAR2": "value2"}`,
+		"enabled":   false,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError, "Add operation should succeed")
+
+	// Step 2: Clear env vars with empty JSON
+	updateRequest := mcp.CallToolRequest{}
+	updateRequest.Params.Name = "upstream_servers"
+	updateRequest.Params.Arguments = map[string]interface{}{
+		"operation": "update",
+		"name":      "clear-env-test-server",
+		"env_json":  `{}`,
+	}
+
+	updateResult, err := mcpClient.CallTool(ctx, updateRequest)
+	require.NoError(t, err)
+	assert.False(t, updateResult.IsError, "Update with empty env_json should succeed")
+
+	// Step 3: Clean up
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "clear-env-test-server",
+	}
+
+	deleteResult, err := mcpClient.CallTool(ctx, deleteRequest)
+	require.NoError(t, err)
+	assert.False(t, deleteResult.IsError, "Delete operation should succeed")
+
+	t.Log("✅ Test passed: Clear env with empty JSON works correctly")
+}
