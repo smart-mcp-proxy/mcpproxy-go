@@ -265,6 +265,7 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Health and readiness endpoints (Kubernetes-compatible with legacy aliases)
+	// See healthzHandler() and readyzHandler() for swagger documentation
 	livenessHandler := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -443,6 +444,29 @@ func (rw *responseWriter) Flush() {
 	}
 }
 
+// Health and readiness documentation handlers (for swagger generation only)
+// The actual handlers are registered in setupRoutes() and may come from observability package
+
+// healthzHandler godoc
+// @Summary      Get health status
+// @Description  Get comprehensive health status including all component health (Kubernetes-compatible liveness probe)
+// @Tags         health
+// @Produce      json
+// @Success      200 {object} observability.HealthResponse "Service is healthy"
+// @Failure      503 {object} observability.HealthResponse "Service is unhealthy"
+// @Router       /healthz [get]
+func _healthzHandler() {} //nolint:unused // swagger documentation stub
+
+// readyzHandler godoc
+// @Summary      Get readiness status
+// @Description  Get readiness status including all component readiness checks (Kubernetes-compatible readiness probe)
+// @Tags         health
+// @Produce      json
+// @Success      200 {object} observability.ReadinessResponse "Service is ready"
+// @Failure      503 {object} observability.ReadinessResponse "Service is not ready"
+// @Router       /readyz [get]
+func _readyzHandler() {} //nolint:unused // swagger documentation stub
+
 // JSON response helpers
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -472,7 +496,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Server status information"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /status [get]
+// @Router /api/v1/status [get]
 func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	response := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
@@ -495,7 +519,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Server information"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /info [get]
+// @Router /api/v1/info [get]
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	listenAddr := s.controller.GetListenAddress()
 
@@ -579,7 +603,7 @@ func getSocketPath() string {
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.GetServersResponse "Server list with statistics"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers [get]
+// @Router /api/v1/servers [get]
 func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
@@ -648,7 +672,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/enable [post]
+// @Router /api/v1/servers/{id}/enable [post]
 func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -714,7 +738,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/disable [post]
+// @Router /api/v1/servers/{id}/disable [post]
 func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -778,7 +802,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 // @Param reason query string false "Reason for reconnection"
 // @Success 200 {object} contracts.ServerActionResponse "All servers reconnected successfully"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/reconnect [post]
+// @Router /api/v1/servers/reconnect [post]
 func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Request) {
 	reason := r.URL.Query().Get("reason")
 
@@ -809,7 +833,7 @@ func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Requ
 // @Success 200 {object} management.BulkOperationResult "Bulk restart results with success/failure counts"
 // @Failure 403 {object} contracts.ErrorResponse "Forbidden (management disabled)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/restart_all [post]
+// @Router /api/v1/servers/restart_all [post]
 func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
 	mgmtSvc, ok := s.controller.GetManagementService().(interface {
@@ -841,7 +865,7 @@ func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} management.BulkOperationResult "Bulk enable results with success/failure counts"
 // @Failure 403 {object} contracts.ErrorResponse "Forbidden (management disabled)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/enable_all [post]
+// @Router /api/v1/servers/enable_all [post]
 func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
 	mgmtSvc, ok := s.controller.GetManagementService().(interface {
@@ -873,7 +897,7 @@ func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} management.BulkOperationResult "Bulk disable results with success/failure counts"
 // @Failure 403 {object} contracts.ErrorResponse "Forbidden (management disabled)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/disable_all [post]
+// @Router /api/v1/servers/disable_all [post]
 func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
 	mgmtSvc, ok := s.controller.GetManagementService().(interface {
@@ -907,7 +931,7 @@ func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/restart [post]
+// @Router /api/v1/servers/{id}/restart [post]
 func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -1051,7 +1075,7 @@ func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) 
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/login [post]
+// @Router /api/v1/servers/{id}/login [post]
 func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -1107,7 +1131,7 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 // @Failure 403 {object} contracts.ErrorResponse "Forbidden (management disabled or read-only mode)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/logout [post]
+// @Router /api/v1/servers/{id}/logout [post]
 func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -1162,7 +1186,7 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/quarantine [post]
+// @Router /api/v1/servers/{id}/quarantine [post]
 func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -1197,7 +1221,7 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/unquarantine [post]
+// @Router /api/v1/servers/{id}/unquarantine [post]
 func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -1232,7 +1256,7 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/tools [get]
+// @Router /api/v1/servers/{id}/tools [get]
 func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -1288,7 +1312,7 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /servers/{id}/logs [get]
+// @Router /api/v1/servers/{id}/logs [get]
 func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -1332,7 +1356,7 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.SearchToolsResponse "Search results"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing query parameter)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /index/search [get]
+// @Router /api/v1/index/search [get]
 func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -1779,8 +1803,8 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.Diagnostics "Health diagnostics"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /diagnostics [get]
-// @Router /doctor [get]
+// @Router /api/v1/diagnostics [get]
+// @Router /api/v1/doctor [get]
 func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1872,7 +1896,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Token statistics"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /stats/tokens [get]
+// @Router /api/v1/stats/tokens [get]
 func (s *Server) handleGetTokenStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2336,7 +2360,7 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.SuccessResponse "Tool call result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (invalid payload or missing tool name)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error or tool execution failure"
-// @Router /tools/call [post]
+// @Router /api/v1/tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2648,7 +2672,7 @@ func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) 
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Docker status information"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Router /docker/status [get]
+// @Router /api/v1/docker/status [get]
 func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 	status := s.controller.GetDockerRecoveryStatus()
 	if status == nil {

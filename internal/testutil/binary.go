@@ -144,6 +144,9 @@ func NewBinaryTestEnv(t *testing.T) *BinaryTestEnv {
 	return env
 }
 
+// TestAPIKey is the fixed API key used in binary tests
+const TestAPIKey = "test-binary-api-key-12345"
+
 // Start starts the mcpproxy binary
 func (env *BinaryTestEnv) Start() {
 	// Check if binary exists
@@ -154,8 +157,8 @@ func (env *BinaryTestEnv) Start() {
 	// Start the binary
 	env.cmd = exec.Command(env.binaryPath, "serve", "--config="+env.configPath, "--log-level=debug")
 	env.cmd.Env = append(os.Environ(),
-		"MCPPROXY_DISABLE_OAUTH=true", // Disable OAuth for testing
-		"MCPPROXY_API_KEY=",           // Disable API key for testing
+		"MCPPROXY_DISABLE_OAUTH=true",        // Disable OAuth for testing
+		"MCPPROXY_API_KEY="+TestAPIKey,       // Set API key for testing
 	)
 
 	err := env.cmd.Start()
@@ -233,7 +236,12 @@ func (env *BinaryTestEnv) waitForToolIndexing() {
 		case <-ticker.C:
 			// Try to get tool count from server status
 			client := &http.Client{Timeout: 2 * time.Second}
-			resp, err := client.Get(env.apiURL + "/api/v1/servers")
+			req, err := http.NewRequest("GET", env.apiURL+"/servers", nil)
+			if err != nil {
+				continue // Request creation error, retry
+			}
+			req.Header.Set("X-API-Key", TestAPIKey)
+			resp, err := client.Do(req)
 			if err != nil {
 				continue // Network error, retry
 			}
@@ -262,7 +270,12 @@ func (env *BinaryTestEnv) waitForToolIndexing() {
 // isServerReady checks if the server is accepting HTTP requests
 func (env *BinaryTestEnv) isServerReady() bool {
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Get(env.apiURL + "/servers")
+	req, err := http.NewRequest("GET", env.apiURL+"/servers", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-API-Key", TestAPIKey)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -273,7 +286,13 @@ func (env *BinaryTestEnv) isServerReady() bool {
 // isEverythingServerReady checks if the test server is connected and ready
 func (env *BinaryTestEnv) isEverythingServerReady() bool {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(env.apiURL + "/servers")
+	req, err := http.NewRequest("GET", env.apiURL+"/servers", nil)
+	if err != nil {
+		env.t.Logf("Failed to create request: %v", err)
+		return false
+	}
+	req.Header.Set("X-API-Key", TestAPIKey)
+	resp, err := client.Do(req)
 	if err != nil {
 		env.t.Logf("Failed to get servers: %v", err)
 		return false
@@ -351,6 +370,11 @@ func (env *BinaryTestEnv) GetAPIURL() string {
 	return env.apiURL
 }
 
+// GetHTTPClient returns an HTTP client configured with the test API key
+func (env *BinaryTestEnv) GetHTTPClient() *HTTPClient {
+	return NewHTTPClientWithAPIKey(env.apiURL, TestAPIKey)
+}
+
 // GetConfigPath returns the path to the test config file
 func (env *BinaryTestEnv) GetConfigPath() string {
 	return env.configPath
@@ -376,7 +400,7 @@ func createTestConfig(t *testing.T, configPath string, port int, dataDir string)
 	config := fmt.Sprintf(`{
   "listen": ":%d",
   "data_dir": "%s",
-  "api_key": "",
+  "api_key": "%s",
   "enable_tray": false,
   "debug_search": true,
   "top_k": 10,
@@ -412,7 +436,7 @@ func createTestConfig(t *testing.T, configPath string, port int, dataDir string)
   "docker_isolation": {
     "enabled": false
   }
-}`, port, dataDir)
+}`, port, dataDir, TestAPIKey)
 
 	err := os.WriteFile(configPath, []byte(config), 0600)
 	require.NoError(t, err)

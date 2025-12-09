@@ -167,14 +167,22 @@ func TestGracefulShutdownNoPanic(t *testing.T) {
 		"--listen", listenAddr,
 		"--log-level", "debug")
 
-	// Disable API key authentication for E2E tests
-	cmd.Env = append(os.Environ(), "MCPPROXY_API_KEY=")
+	// Set a fixed API key for E2E tests
+	cmd.Env = append(os.Environ(), "MCPPROXY_API_KEY=e2e-test-api-key-12345")
 
 	// Capture stderr to check for panic messages
 	stderrPipe, err := cmd.StderrPipe()
 	require.NoError(t, err)
 
 	require.NoError(t, cmd.Start(), "Failed to start server")
+
+	// Start reading stderr immediately in a goroutine to prevent blocking
+	// (with --log-level=debug, the pipe buffer can fill up quickly)
+	stderrOutput := make(chan string, 1)
+	go func() {
+		output, _ := io.ReadAll(stderrPipe)
+		stderrOutput <- string(output)
+	}()
 
 	// Wait for server to be ready
 	serverURL := fmt.Sprintf("http://%s", listenAddr)
@@ -191,13 +199,6 @@ func TestGracefulShutdownNoPanic(t *testing.T) {
 	// Send SIGINT (Ctrl+C) to the process
 	t.Log("Sending SIGINT to server process...")
 	require.NoError(t, cmd.Process.Signal(syscall.SIGINT))
-
-	// Read stderr in a goroutine
-	stderrOutput := make(chan string, 1)
-	go func() {
-		output, _ := io.ReadAll(stderrPipe)
-		stderrOutput <- string(output)
-	}()
 
 	// Wait for process to exit (with timeout)
 	done := make(chan error, 1)
@@ -254,8 +255,8 @@ func TestSocketInfoEndpoint(t *testing.T) {
 		"--listen", "127.0.0.1:0", // Random port for HTTP
 		"--enable-socket", "true")
 
-	// Disable API key authentication for E2E tests
-	cmd.Env = append(os.Environ(), "MCPPROXY_API_KEY=")
+	// Set a fixed API key for E2E tests
+	cmd.Env = append(os.Environ(), "MCPPROXY_API_KEY=e2e-test-api-key-12345")
 
 	require.NoError(t, cmd.Start(), "Failed to start server")
 	defer func() {

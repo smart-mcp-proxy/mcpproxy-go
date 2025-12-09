@@ -13,6 +13,7 @@ import (
 type HTTPClient struct {
 	client  *http.Client
 	baseURL string
+	apiKey  string
 }
 
 // NewHTTPClient creates a new HTTP client for testing
@@ -25,16 +26,42 @@ func NewHTTPClient(baseURL string) *HTTPClient {
 	}
 }
 
+// NewHTTPClientWithAPIKey creates a new HTTP client with API key authentication
+func NewHTTPClientWithAPIKey(baseURL string, apiKey string) *HTTPClient {
+	return &HTTPClient{
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
+	}
+}
+
 // Get performs a GET request
 func (c *HTTPClient) Get(path string) (*http.Response, error) {
 	url := c.baseURL + path
-	return c.client.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	return c.client.Do(req)
 }
 
 // Post performs a POST request
 func (c *HTTPClient) Post(path string, body io.Reader) (*http.Response, error) {
 	url := c.baseURL + path
-	return c.client.Post(url, "application/json", body)
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	return c.client.Do(req)
 }
 
 // PostJSON performs a POST request with JSON data
