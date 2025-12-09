@@ -331,7 +331,8 @@ func runBuiltInTool(ctx context.Context, toolName string, args map[string]interf
 	switch callOutputFormat {
 	case outputFormatJSON:
 		return outputCallResultAsJSON(result)
-	case outputFormatPretty:
+	case outputFormatPretty, "":
+		fallthrough
 	default:
 		fmt.Printf("✅ Built-in tool call completed successfully!\n\n")
 		outputCallResultPretty(result)
@@ -402,9 +403,9 @@ func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}
 	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	// Ping daemon to verify connectivity
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx); err != nil {
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer pingCancel()
+	if err := client.Ping(pingCtx); err != nil {
 		logger.Warn("Failed to ping daemon, falling back to standalone mode",
 			zap.Error(err),
 			zap.String("socket_path", socketPath),
@@ -414,7 +415,8 @@ func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}
 		cfg, _ := loadCallConfig()
 		parts := strings.SplitN(toolName, ":", 2)
 		if len(parts) == 2 {
-			return runCallToolStandalone(ctx, parts[0], parts[1], args, cfg)
+			standaloneCtx := context.Background()
+			return runCallToolStandalone(standaloneCtx, parts[0], parts[1], args, cfg)
 		}
 		return fmt.Errorf("invalid tool name format: %s", toolName)
 	}
@@ -422,9 +424,11 @@ func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}
 	// ADD CLI mode indicator
 	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n")
 
-	// Call tool via daemon
+	// Call tool via daemon with appropriate timeout
 	fmt.Printf("🔗 Calling tool via daemon socket...\n")
-	result, err := client.CallTool(ctx, toolName, args)
+	callCtx, callCancel := context.WithTimeout(context.Background(), callTimeout)
+	defer callCancel()
+	result, err := client.CallTool(callCtx, toolName, args)
 	if err != nil {
 		return fmt.Errorf("failed to call tool via daemon: %w", err)
 	}
@@ -433,7 +437,8 @@ func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}
 	switch callOutputFormat {
 	case outputFormatJSON:
 		return outputCallResultAsJSON(result)
-	case outputFormatPretty:
+	case outputFormatPretty, "":
+		fallthrough
 	default:
 		fmt.Printf("✅ Tool call completed successfully!\n\n")
 		outputCallResultPretty(result)
@@ -477,7 +482,8 @@ func runCallToolStandalone(ctx context.Context, serverName, toolName string, arg
 	switch callOutputFormat {
 	case outputFormatJSON:
 		return outputCallResultAsJSON(result)
-	case outputFormatPretty:
+	case outputFormatPretty, "":
+		fallthrough
 	default:
 		fmt.Printf("✅ Tool call completed successfully!\n\n")
 		outputCallResultPretty(result)

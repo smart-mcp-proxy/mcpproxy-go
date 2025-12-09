@@ -2719,7 +2719,20 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	case "doctor":
 		result, err = p.handleDoctor(ctx, request)
 	default:
-		return nil, fmt.Errorf("unknown tool: %s", toolName)
+		// Check if this is an upstream tool in server:tool format
+		if strings.Contains(toolName, ":") {
+			// Route upstream tools through handleCallTool which handles server:tool format
+			// Create a request with the tool name in the "name" parameter
+			upstreamRequest := mcp.CallToolRequest{}
+			upstreamRequest.Params.Name = "call_tool"
+			upstreamRequest.Params.Arguments = map[string]interface{}{
+				"name": toolName,
+				"args": request.Params.Arguments,
+			}
+			result, err = p.handleCallTool(ctx, upstreamRequest)
+		} else {
+			return nil, fmt.Errorf("unknown tool: %s", toolName)
+		}
 	}
 
 	if err != nil {
