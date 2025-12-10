@@ -275,3 +275,155 @@ func TestDiscoverScopesFromAuthorizationServer_Timeout(t *testing.T) {
 		t.Errorf("Expected nil scopes on timeout, got %v", scopes)
 	}
 }
+
+// T002: Test DiscoverProtectedResourceMetadata returns full struct
+func TestDiscoverProtectedResourceMetadata_ReturnsFullStruct(t *testing.T) {
+	tests := []struct {
+		name             string
+		responseCode     int
+		responseBody     string
+		expectedResource string
+		expectedScopes   []string
+		expectedAuthSrvs []string
+		expectError      bool
+	}{
+		{
+			name:         "Valid metadata with all fields",
+			responseCode: 200,
+			responseBody: `{
+				"resource": "https://api.example.com/mcp",
+				"resource_name": "Example MCP Server",
+				"authorization_servers": ["https://auth.example.com"],
+				"scopes_supported": ["repo", "user:email", "read:org"],
+				"bearer_methods_supported": ["header"]
+			}`,
+			expectedResource: "https://api.example.com/mcp",
+			expectedScopes:   []string{"repo", "user:email", "read:org"},
+			expectedAuthSrvs: []string{"https://auth.example.com"},
+			expectError:      false,
+		},
+		{
+			name:         "Runlayer-style metadata",
+			responseCode: 200,
+			responseBody: `{
+				"resource": "https://oauth.runlayer.com/api/v1/proxy/abc123/mcp",
+				"authorization_servers": ["https://oauth.runlayer.com"],
+				"scopes_supported": ["mcp"]
+			}`,
+			expectedResource: "https://oauth.runlayer.com/api/v1/proxy/abc123/mcp",
+			expectedScopes:   []string{"mcp"},
+			expectedAuthSrvs: []string{"https://oauth.runlayer.com"},
+			expectError:      false,
+		},
+		{
+			name:         "Metadata without resource field",
+			responseCode: 200,
+			responseBody: `{
+				"authorization_servers": ["https://auth.example.com"],
+				"scopes_supported": ["read"]
+			}`,
+			expectedResource: "",
+			expectedScopes:   []string{"read"},
+			expectedAuthSrvs: []string{"https://auth.example.com"},
+			expectError:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.responseCode)
+				w.Write([]byte(tt.responseBody))
+			}))
+			defer server.Close()
+
+			metadata, err := DiscoverProtectedResourceMetadata(server.URL, 5*time.Second)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+
+			if metadata.Resource != tt.expectedResource {
+				t.Errorf("Resource = %q, want %q", metadata.Resource, tt.expectedResource)
+			}
+
+			if len(metadata.ScopesSupported) != len(tt.expectedScopes) {
+				t.Errorf("Scopes count = %d, want %d", len(metadata.ScopesSupported), len(tt.expectedScopes))
+			}
+
+			if len(metadata.AuthorizationServers) != len(tt.expectedAuthSrvs) {
+				t.Errorf("AuthorizationServers count = %d, want %d", len(metadata.AuthorizationServers), len(tt.expectedAuthSrvs))
+			}
+		})
+	}
+}
+
+// T003: Test DiscoverProtectedResourceMetadata handles errors
+func TestDiscoverProtectedResourceMetadata_HandlesError(t *testing.T) {
+	tests := []struct {
+		name         string
+		responseCode int
+		responseBody string
+	}{
+		{
+			name:         "404 response",
+			responseCode: 404,
+			responseBody: `Not Found`,
+		},
+		{
+			name:         "500 response",
+			responseCode: 500,
+			responseBody: `Internal Server Error`,
+		},
+		{
+			name:         "Invalid JSON",
+			responseCode: 200,
+			responseBody: `{invalid json}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.responseCode)
+				w.Write([]byte(tt.responseBody))
+			}))
+			defer server.Close()
+
+			metadata, err := DiscoverProtectedResourceMetadata(server.URL, 5*time.Second)
+
+			if err == nil {
+				t.Errorf("Expected error but got nil")
+			}
+			if metadata != nil {
+				t.Errorf("Expected nil metadata on error, got %+v", metadata)
+			}
+		})
+	}
+}
+
+func TestDiscoverProtectedResourceMetadata_Timeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(3 * time.Second)
+		w.WriteHeader(200)
+		w.Write([]byte(`{"resource": "https://example.com"}`))
+	}))
+	defer server.Close()
+
+	metadata, err := DiscoverProtectedResourceMetadata(server.URL, 1*time.Second)
+
+	if err == nil {
+		t.Errorf("Expected timeout error but got nil")
+	}
+	if metadata != nil {
+		t.Errorf("Expected nil metadata on timeout, got %+v", metadata)
+	}
+}

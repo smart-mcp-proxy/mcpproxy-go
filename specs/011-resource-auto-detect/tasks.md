@@ -24,7 +24,7 @@
 
 **Purpose**: No new project setup needed - working within existing codebase
 
-- [ ] T001 Verify branch `011-resource-auto-detect` is up to date with main
+- [x] T001 Verify branch `011-resource-auto-detect` is up to date with main
 
 **Checkpoint**: Ready to begin foundational changes
 
@@ -38,14 +38,14 @@
 
 ### Tests for Discovery Layer
 
-- [ ] T002 [P] Add unit test `TestDiscoverProtectedResourceMetadata_ReturnsFullStruct` in internal/oauth/discovery_test.go
-- [ ] T003 [P] Add unit test `TestDiscoverProtectedResourceMetadata_HandlesError` in internal/oauth/discovery_test.go
+- [x] T002 [P] Add unit test `TestDiscoverProtectedResourceMetadata_ReturnsFullStruct` in internal/oauth/discovery_test.go
+- [x] T003 [P] Add unit test `TestDiscoverProtectedResourceMetadata_HandlesError` in internal/oauth/discovery_test.go
 
 ### Implementation for Discovery Layer
 
-- [ ] T004 Add `DiscoverProtectedResourceMetadata()` function in internal/oauth/discovery.go
-- [ ] T005 Refactor `DiscoverScopesFromProtectedResource()` to delegate to new function in internal/oauth/discovery.go
-- [ ] T006 Run tests: `go test ./internal/oauth/... -v -run TestDiscoverProtectedResourceMetadata`
+- [x] T004 Add `DiscoverProtectedResourceMetadata()` function in internal/oauth/discovery.go
+- [x] T005 Refactor `DiscoverScopesFromProtectedResource()` to delegate to new function in internal/oauth/discovery.go
+- [x] T006 Run tests: `go test ./internal/oauth/... -v -run TestDiscoverProtectedResourceMetadata`
 
 **Checkpoint**: Discovery layer ready - `DiscoverProtectedResourceMetadata()` returns full metadata struct including `resource` field
 
