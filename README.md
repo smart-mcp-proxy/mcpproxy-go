@@ -559,9 +559,11 @@ docker ps -a --filter label=com.mcpproxy.managed=true -q | xargs docker rm -f
 
 ## OAuth Authentication Support
 
-MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that require user authorization (like Cloudflare AutoRAG, GitHub, etc.):
+MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that require user authorization (like Cloudflare AutoRAG, Runlayer, GitHub, etc.):
 
 ### ✨ **Key Features**
+- **Zero-Config OAuth**: Automatic detection and configuration for most OAuth servers
+- **RFC 8707 Resource Auto-Detection**: Automatically discovers resource parameters from server metadata
 - **RFC 8252 Compliant**: Dynamic port allocation for secure callback handling
 - **PKCE Security**: Proof Key for Code Exchange for enhanced security
 - **Auto Browser Launch**: Opens your default browser for authentication
@@ -570,27 +572,62 @@ MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that req
 
 ### 🔄 **How It Works**
 1. **Add OAuth Server**: Configure an OAuth-enabled MCP server in your config
-2. **Auto Authentication**: MCPProxy detects when OAuth is required (401 response)
+2. **Auto Detection**: MCPProxy detects OAuth requirements and auto-configures parameters
 3. **Browser Opens**: Your default browser opens to the OAuth provider's login page
 4. **Dynamic Callback**: MCPProxy starts a local callback server on a random port
 5. **Token Exchange**: Authorization code is automatically exchanged for access tokens
 6. **Ready to Use**: Server becomes available for tool calls immediately
 
-### 📝 **OAuth Server Configuration**
+### 📝 **OAuth Configuration Examples**
 
-> **Note**: The `"oauth"` configuration is **optional**. MCPProxy will automatically detect when OAuth is required and use sensible defaults in most cases. You only need to specify OAuth settings if you want to customize scopes or have pre-registered client credentials.
+#### Zero-Config OAuth (Recommended)
 
-```jsonc
+For most OAuth servers (including Runlayer, Cloudflare, etc.), **no OAuth configuration is needed**. MCPProxy automatically:
+- Detects OAuth requirements via 401 responses
+- Discovers Protected Resource Metadata (RFC 9728)
+- Injects the RFC 8707 `resource` parameter automatically
+
+```json
 {
   "mcpServers": [
     {
+      "name": "runlayer-slack",
+      "url": "https://oauth.runlayer.com/api/v1/proxy/YOUR-UUID/mcp"
+    },
+    {
       "name": "cloudflare_autorag",
       "url": "https://autorag.mcp.cloudflare.com/mcp",
-      "protocol": "streamable-http",
-      "enabled": true,
+      "protocol": "streamable-http"
+    }
+  ]
+}
+```
+
+That's it - **no `oauth` block needed**. MCPProxy handles everything automatically.
+
+#### Explicit OAuth Configuration
+
+Use explicit configuration when you need to:
+- Customize OAuth scopes
+- Override auto-detected parameters
+- Use pre-registered client credentials
+- Support providers with non-standard requirements
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "github-enterprise",
+      "url": "https://github.example.com/mcp",
+      "protocol": "http",
       "oauth": {
-        "scopes": ["mcp.read", "mcp.write"],
-        "pkce_enabled": true
+        "scopes": ["repo", "user:email", "read:org"],
+        "pkce_enabled": true,
+        "client_id": "your-registered-client-id",
+        "extra_params": {
+          "resource": "https://api.github.example.com",
+          "audience": "github-enterprise-api"
+        }
       }
     }
   ]
@@ -598,10 +635,25 @@ MCPProxy provides **seamless OAuth 2.1 authentication** for MCP servers that req
 ```
 
 **OAuth Configuration Options** (all optional):
-- `scopes`: OAuth scopes to request (default: `["mcp.read", "mcp.write"]`)
+- `scopes`: OAuth scopes to request (auto-discovered if not specified)
 - `pkce_enabled`: Enable PKCE for security (default: `true`, recommended)
-- `client_id`: Pre-registered client ID (optional, uses Dynamic Client Registration if empty)
+- `client_id`: Pre-registered client ID (uses Dynamic Client Registration if empty)
 - `client_secret`: Client secret (optional, for confidential clients)
+- `extra_params`: Additional OAuth parameters (override auto-detected values)
+
+### 🔍 **OAuth Diagnostics**
+
+Check OAuth status and auto-detected parameters:
+```bash
+# View OAuth status for a specific server
+mcpproxy auth status --server=runlayer-slack
+
+# View all OAuth-enabled servers
+mcpproxy auth status --all
+
+# Run health diagnostics including OAuth issues
+mcpproxy doctor
+```
 
 ### 🔧 **OAuth Debugging**
 
