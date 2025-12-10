@@ -357,8 +357,8 @@ func CreateOAuthConfigWithExtraParams(serverConfig *config.ServerConfig, storage
 // autoDetectResource attempts to discover the RFC 8707 resource parameter.
 // Returns the detected resource URL, or server URL as fallback, or empty string on failure.
 func autoDetectResource(serverConfig *config.ServerConfig, logger *zap.Logger) string {
-	// Make a preflight HEAD request to get WWW-Authenticate header
-	resp, err := http.Head(serverConfig.URL)
+	// POST is the only method guaranteed by MCP spec for the main endpoint
+	resp, err := http.Post(serverConfig.URL, "application/json", strings.NewReader("{}"))
 	if err != nil {
 		logger.Debug("Failed to make preflight request for resource detection",
 			zap.String("server", serverConfig.Name),

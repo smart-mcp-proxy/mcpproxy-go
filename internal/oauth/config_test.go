@@ -310,7 +310,7 @@ func TestCreateOAuthConfig_AutoDetectsResource(t *testing.T) {
 			return
 		}
 		// Return 401 with resource_metadata link in WWW-Authenticate header
-		if r.Method == "HEAD" {
+		if r.Method == "POST" {
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -359,7 +359,7 @@ func TestCreateOAuthConfig_ManualOverride(t *testing.T) {
 			return
 		}
 		// Return 401 with resource_metadata link in WWW-Authenticate header
-		if r.Method == "HEAD" {
+		if r.Method == "POST" {
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -411,7 +411,7 @@ func TestCreateOAuthConfig_MergesExtraParams(t *testing.T) {
 			}`))
 			return
 		}
-		if r.Method == "HEAD" {
+		if r.Method == "POST" {
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -469,7 +469,7 @@ func TestCreateOAuthConfig_FallsBackToServerURL(t *testing.T) {
 			return
 		}
 		// Return 401 with resource_metadata link in WWW-Authenticate header
-		if r.Method == "HEAD" {
+		if r.Method == "POST" {
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
 			w.WriteHeader(http.StatusUnauthorized)
 			return
