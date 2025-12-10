@@ -341,6 +341,116 @@ func TestCreateOAuthConfig_AutoDetectsResource(t *testing.T) {
 	assert.Equal(t, "https://api.example.com/mcp/v1", resource, "Resource should be auto-detected from metadata")
 }
 
+// T022: Test that manual extra_params.resource overrides auto-detected value
+func TestCreateOAuthConfig_ManualOverride(t *testing.T) {
+	// Variable to hold server URL for use in handler
+	var serverURL string
+
+	// Create a mock server that returns Protected Resource Metadata with resource field
+	mockMetadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-protected-resource" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"resource": "https://auto-detected-resource.example.com/mcp",
+				"authorization_servers": ["https://auth.example.com"],
+				"scopes_supported": ["mcp"]
+			}`))
+			return
+		}
+		// Return 401 with resource_metadata link in WWW-Authenticate header
+		if r.Method == "HEAD" {
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockMetadataServer.Close()
+
+	// Assign server URL after server is created
+	serverURL = mockMetadataServer.URL
+
+	testStorage := setupTestStorage(t)
+	serverConfig := &config.ServerConfig{
+		Name: "test-manual-override",
+		URL:  mockMetadataServer.URL + "/mcp",
+		OAuth: &config.OAuthConfig{
+			ExtraParams: map[string]string{
+				"resource": "https://manual-override.example.com/api", // Manual override
+			},
+		},
+	}
+
+	// Call CreateOAuthConfigWithExtraParams
+	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(serverConfig, testStorage)
+
+	require.NotNil(t, oauthConfig, "OAuth config should be created")
+	require.NotNil(t, extraParams, "Extra params should be returned")
+
+	// Verify manual resource overrides auto-detected value
+	resource, hasResource := extraParams["resource"]
+	assert.True(t, hasResource, "extraParams should contain 'resource' key")
+	assert.Equal(t, "https://manual-override.example.com/api", resource, "Manual resource should override auto-detected value")
+}
+
+// T023: Test that manual extra_params are merged with auto-detected params
+func TestCreateOAuthConfig_MergesExtraParams(t *testing.T) {
+	// Variable to hold server URL for use in handler
+	var serverURL string
+
+	// Create a mock server that returns Protected Resource Metadata
+	mockMetadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-protected-resource" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"resource": "https://auto-detected.example.com/mcp",
+				"authorization_servers": ["https://auth.example.com"],
+				"scopes_supported": ["mcp"]
+			}`))
+			return
+		}
+		if r.Method == "HEAD" {
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockMetadataServer.Close()
+
+	serverURL = mockMetadataServer.URL
+
+	testStorage := setupTestStorage(t)
+	serverConfig := &config.ServerConfig{
+		Name: "test-merge-params",
+		URL:  mockMetadataServer.URL + "/mcp",
+		OAuth: &config.OAuthConfig{
+			ExtraParams: map[string]string{
+				"tenant_id": "12345",          // Additional param (should be preserved)
+				"audience":  "custom-audience", // Additional param (should be preserved)
+				// Note: no "resource" - should be auto-detected
+			},
+		},
+	}
+
+	// Call CreateOAuthConfigWithExtraParams
+	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(serverConfig, testStorage)
+
+	require.NotNil(t, oauthConfig, "OAuth config should be created")
+	require.NotNil(t, extraParams, "Extra params should be returned")
+
+	// Verify manual params are preserved
+	assert.Equal(t, "12345", extraParams["tenant_id"], "Manual tenant_id should be preserved")
+	assert.Equal(t, "custom-audience", extraParams["audience"], "Manual audience should be preserved")
+
+	// Verify resource is auto-detected since not manually specified
+	resource, hasResource := extraParams["resource"]
+	assert.True(t, hasResource, "extraParams should contain auto-detected 'resource' key")
+	assert.Equal(t, "https://auto-detected.example.com/mcp", resource, "Resource should be auto-detected")
+}
+
 // T008: Test CreateOAuthConfig falls back to server URL when metadata lacks resource field
 func TestCreateOAuthConfig_FallsBackToServerURL(t *testing.T) {
 	// Variable to hold server URL for use in handler

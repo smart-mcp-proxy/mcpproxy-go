@@ -90,15 +90,15 @@
 
 ### Tests for User Story 2
 
-- [ ] T022 [P] [US2] Add unit test `TestCreateOAuthConfig_ManualOverride` in internal/oauth/config_test.go
-- [ ] T023 [P] [US2] Add unit test `TestCreateOAuthConfig_MergesExtraParams` in internal/oauth/config_test.go
+- [x] T022 [P] [US2] Add unit test `TestCreateOAuthConfig_ManualOverride` in internal/oauth/config_test.go
+- [x] T023 [P] [US2] Add unit test `TestCreateOAuthConfig_MergesExtraParams` in internal/oauth/config_test.go
 
 ### Implementation for User Story 2
 
-- [ ] T024 [US2] Add merge logic for manual `extra_params` in `CreateOAuthConfig()` in internal/oauth/config.go
-- [ ] T025 [US2] Ensure manual values override auto-detected values in internal/oauth/config.go
-- [ ] T026 [US2] Add INFO logging when manual override is applied in internal/oauth/config.go
-- [ ] T027 [US2] Run unit tests: `go test ./internal/oauth/... -v -run TestCreateOAuthConfig`
+- [x] T024 [US2] Add merge logic for manual `extra_params` in `CreateOAuthConfig()` in internal/oauth/config.go (done in US1)
+- [x] T025 [US2] Ensure manual values override auto-detected values in internal/oauth/config.go (done in US1)
+- [x] T026 [US2] Add INFO logging when manual override is applied in internal/oauth/config.go (done in US1)
+- [x] T027 [US2] Run unit tests: `go test ./internal/oauth/... -v -run TestCreateOAuthConfig`
 
 **Checkpoint**: User Story 2 complete - Manual `extra_params` override auto-detected values
 
