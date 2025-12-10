@@ -311,6 +311,110 @@ func (m *TokenStoreManager) HasValidToken(ctx context.Context, serverName string
 	return true
 }
 
+// CreateOAuthConfigWithExtraParams creates an OAuth configuration and returns auto-detected extra parameters.
+// This function implements RFC 8707 resource auto-detection for zero-config OAuth.
+//
+// The function returns:
+//   - *client.OAuthConfig: The OAuth configuration for mcp-go client
+//   - map[string]string: Extra parameters (including auto-detected resource) to inject into authorization URL
+//
+// Resource auto-detection logic (in priority order):
+//  1. Manual extra_params.resource from config (highest priority - preserves backward compatibility)
+//  2. Auto-detected resource from RFC 9728 Protected Resource Metadata
+//  3. Fallback to server URL if metadata is unavailable or lacks resource field
+func CreateOAuthConfigWithExtraParams(serverConfig *config.ServerConfig, storage *storage.BoltDB) (*client.OAuthConfig, map[string]string) {
+	logger := zap.L().Named("oauth")
+
+	// Initialize extraParams map
+	extraParams := make(map[string]string)
+
+	// Priority 1: Check for manual extra_params.resource from config
+	if serverConfig.OAuth != nil && len(serverConfig.OAuth.ExtraParams) > 0 {
+		for key, value := range serverConfig.OAuth.ExtraParams {
+			extraParams[key] = value
+		}
+		if resource, hasResource := extraParams["resource"]; hasResource {
+			logger.Info("Using manual resource parameter from config",
+				zap.String("server", serverConfig.Name),
+				zap.String("resource", resource))
+		}
+	}
+
+	// Priority 2 & 3: Auto-detect resource if not manually specified
+	if _, hasResource := extraParams["resource"]; !hasResource {
+		detectedResource := autoDetectResource(serverConfig, logger)
+		if detectedResource != "" {
+			extraParams["resource"] = detectedResource
+		}
+	}
+
+	// Create the base OAuth config using existing function
+	oauthConfig := CreateOAuthConfig(serverConfig, storage)
+
+	return oauthConfig, extraParams
+}
+
+// autoDetectResource attempts to discover the RFC 8707 resource parameter.
+// Returns the detected resource URL, or server URL as fallback, or empty string on failure.
+func autoDetectResource(serverConfig *config.ServerConfig, logger *zap.Logger) string {
+	// Make a preflight HEAD request to get WWW-Authenticate header
+	resp, err := http.Head(serverConfig.URL)
+	if err != nil {
+		logger.Debug("Failed to make preflight request for resource detection",
+			zap.String("server", serverConfig.Name),
+			zap.Error(err))
+		// Fallback to server URL
+		return serverConfig.URL
+	}
+	defer resp.Body.Close()
+
+	// Check for 401 with WWW-Authenticate header containing resource_metadata
+	if resp.StatusCode == http.StatusUnauthorized {
+		wwwAuth := resp.Header.Get("WWW-Authenticate")
+		metadataURL := ExtractResourceMetadataURL(wwwAuth)
+
+		if metadataURL != "" {
+			// Try to fetch Protected Resource Metadata
+			metadata, err := DiscoverProtectedResourceMetadata(metadataURL, 5*time.Second)
+			if err != nil {
+				logger.Debug("Failed to fetch Protected Resource Metadata",
+					zap.String("server", serverConfig.Name),
+					zap.String("metadata_url", metadataURL),
+					zap.Error(err))
+				// Fallback to server URL
+				return serverConfig.URL
+			}
+
+			// Use resource from metadata if available
+			if metadata.Resource != "" {
+				logger.Info("Auto-detected resource parameter from Protected Resource Metadata (RFC 9728)",
+					zap.String("server", serverConfig.Name),
+					zap.String("resource", metadata.Resource))
+				return metadata.Resource
+			}
+
+			// Metadata exists but lacks resource field - fallback to server URL
+			logger.Info("Protected Resource Metadata lacks resource field, using server URL as fallback",
+				zap.String("server", serverConfig.Name),
+				zap.String("fallback_resource", serverConfig.URL))
+			return serverConfig.URL
+		}
+
+		// No resource_metadata in WWW-Authenticate - fallback to server URL
+		logger.Debug("WWW-Authenticate header lacks resource_metadata, using server URL as fallback",
+			zap.String("server", serverConfig.Name),
+			zap.String("fallback_resource", serverConfig.URL))
+		return serverConfig.URL
+	}
+
+	// Non-401 response - server might not require OAuth or is accessible
+	// Don't set resource parameter in this case
+	logger.Debug("Server did not return 401, skipping resource auto-detection",
+		zap.String("server", serverConfig.Name),
+		zap.Int("status_code", resp.StatusCode))
+	return ""
+}
+
 // CreateOAuthConfig creates an OAuth configuration for dynamic client registration
 // This implements proper callback server coordination required for Cloudflare OAuth
 func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltDB) *client.OAuthConfig {

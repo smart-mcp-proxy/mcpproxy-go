@@ -3,6 +3,8 @@ package oauth
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -284,4 +286,106 @@ func TestTokenStoreManager_HasValidToken_NilStorage(t *testing.T) {
 	result := manager.HasValidToken(context.Background(), "test-server", nil)
 
 	assert.True(t, result, "Expected true for in-memory store with nil storage")
+}
+
+// =============================================================================
+// T007-T008: Tests for RFC 8707 Resource Auto-Detection (User Story 1)
+// =============================================================================
+
+// T007: Test CreateOAuthConfig auto-detects resource from Protected Resource Metadata
+func TestCreateOAuthConfig_AutoDetectsResource(t *testing.T) {
+	// Variable to hold server URL for use in handler
+	var serverURL string
+
+	// Create a mock server that returns Protected Resource Metadata with resource field
+	mockMetadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-protected-resource" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"resource": "https://api.example.com/mcp/v1",
+				"authorization_servers": ["https://auth.example.com"],
+				"scopes_supported": ["mcp"]
+			}`))
+			return
+		}
+		// Return 401 with resource_metadata link in WWW-Authenticate header
+		if r.Method == "HEAD" {
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockMetadataServer.Close()
+
+	// Assign server URL after server is created
+	serverURL = mockMetadataServer.URL
+
+	testStorage := setupTestStorage(t)
+	serverConfig := &config.ServerConfig{
+		Name: "test-resource-detection",
+		URL:  mockMetadataServer.URL + "/mcp",
+		// No OAuth config - should auto-detect
+	}
+
+	// Call CreateOAuthConfigWithExtraParams to get both config and extraParams
+	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(serverConfig, testStorage)
+
+	require.NotNil(t, oauthConfig, "OAuth config should be created")
+	require.NotNil(t, extraParams, "Extra params should be returned")
+
+	// Verify resource was auto-detected from Protected Resource Metadata
+	resource, hasResource := extraParams["resource"]
+	assert.True(t, hasResource, "extraParams should contain 'resource' key")
+	assert.Equal(t, "https://api.example.com/mcp/v1", resource, "Resource should be auto-detected from metadata")
+}
+
+// T008: Test CreateOAuthConfig falls back to server URL when metadata lacks resource field
+func TestCreateOAuthConfig_FallsBackToServerURL(t *testing.T) {
+	// Variable to hold server URL for use in handler
+	var serverURL string
+
+	// Create a mock server that returns Protected Resource Metadata WITHOUT resource field
+	mockMetadataServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-protected-resource" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			// Metadata without resource field
+			w.Write([]byte(`{
+				"authorization_servers": ["https://auth.example.com"],
+				"scopes_supported": ["mcp"]
+			}`))
+			return
+		}
+		// Return 401 with resource_metadata link in WWW-Authenticate header
+		if r.Method == "HEAD" {
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockMetadataServer.Close()
+
+	// Assign server URL after server is created
+	serverURL = mockMetadataServer.URL
+
+	testStorage := setupTestStorage(t)
+	serverConfig := &config.ServerConfig{
+		Name: "test-fallback",
+		URL:  mockMetadataServer.URL + "/mcp",
+		// No OAuth config - should auto-detect and fallback
+	}
+
+	// Call CreateOAuthConfigWithExtraParams to get both config and extraParams
+	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(serverConfig, testStorage)
+
+	require.NotNil(t, oauthConfig, "OAuth config should be created")
+	require.NotNil(t, extraParams, "Extra params should be returned")
+
+	// Verify resource falls back to server URL when metadata doesn't provide it
+	resource, hasResource := extraParams["resource"]
+	assert.True(t, hasResource, "extraParams should contain 'resource' key (fallback)")
+	assert.Equal(t, mockMetadataServer.URL+"/mcp", resource, "Resource should fall back to server URL")
 }
