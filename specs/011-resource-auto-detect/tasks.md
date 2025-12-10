@@ -136,11 +136,11 @@
 
 ### Implementation for User Story 4
 
-- [ ] T032 [US4] Add `resource` field to auth status output in cmd/mcpproxy/auth_cmd.go
-- [ ] T033 [US4] Add resource parameter to doctor diagnostics in cmd/mcpproxy/doctor_cmd.go
-- [ ] T034 [US4] Test manually: `go build && ./mcpproxy auth status --server=test`
+- [x] T032 [US4] Add `resource` field to auth status output in cmd/mcpproxy/auth_cmd.go
+- [x] T033 [US4] Add resource parameter to doctor diagnostics in cmd/mcpproxy/doctor_cmd.go
+- [x] T034 [US4] Test manually: `go build && ./mcpproxy auth status --server=test`
 
-**Checkpoint**: User Story 4 complete - Diagnostic commands show detected resource parameter
+**Checkpoint**: User Story 4 complete - Diagnostic commands show detected resource parameter ✅
 
 ---
 
@@ -148,11 +148,11 @@
 
 **Purpose**: Final validation and documentation
 
-- [ ] T035 [P] Run full test suite: `./scripts/run-all-tests.sh`
-- [ ] T036 [P] Run linter: `./scripts/run-linter.sh`
-- [ ] T037 Update CLAUDE.md OAuth section if needed
-- [ ] T038 Run quickstart.md validation steps manually
-- [ ] T039 [P] Add E2E test with mock OAuth server requiring resource in internal/server/e2e_oauth_test.go
+- [x] T035 [P] Run full test suite: `./scripts/run-all-tests.sh`
+- [x] T036 [P] Run linter: `./scripts/run-linter.sh`
+- [x] T037 Update CLAUDE.md OAuth section if needed
+- [x] T038 Run quickstart.md validation steps manually
+- [x] T039 [P] Add E2E test with mock OAuth server requiring resource in internal/server/e2e_oauth_test.go
 
 ---
 

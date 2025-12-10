@@ -565,12 +565,51 @@ The `working_dir` field specifies the working directory for stdio MCP servers. U
 - If directory doesn't exist, server startup fails with detailed error
 - Compatible with Docker isolation (`isolation.working_dir` for container path)
 
+### Zero-Config OAuth with Resource Auto-Detection (RFC 8707/9728)
+
+MCPProxy automatically detects and injects the RFC 8707 `resource` parameter for OAuth providers like Runlayer. This enables zero-configuration OAuth for servers advertising Protected Resource Metadata (RFC 9728).
+
+**How it works**:
+1. MCPProxy sends a preflight HEAD request to the MCP server URL
+2. If server returns 401 with `WWW-Authenticate` header containing `resource_metadata` URL, MCPProxy fetches the Protected Resource Metadata
+3. The `resource` field from metadata is automatically injected into OAuth authorization URL and token requests
+4. If metadata doesn't contain `resource`, MCPProxy falls back to using the server URL
+
+**Zero-Config Example (Runlayer)**:
+```json
+{
+  "mcpServers": [
+    {
+      "name": "runlayer-slack",
+      "url": "https://oauth.runlayer.com/api/v1/proxy/abc123def/mcp",
+      "protocol": "http",
+      "enabled": true
+      // No OAuth config needed! Resource parameter auto-detected from metadata
+    }
+  ]
+}
+```
+
+**Priority Order for Resource Parameter**:
+1. Manual `extra_params.resource` in config (highest priority - preserves backward compatibility)
+2. Auto-detected resource from RFC 9728 Protected Resource Metadata
+3. Fallback to server URL if metadata unavailable or lacks resource field
+
+**Diagnostic Commands**:
+```bash
+# View auto-detected resource parameter
+mcpproxy auth status --server=runlayer-slack
+
+# Check for OAuth issues including resource detection
+mcpproxy doctor
+```
+
 ### OAuth Extra Parameters Configuration
 
-MCPProxy supports arbitrary OAuth 2.0/2.1 extra parameters via the `extra_params` field in OAuth configuration. This enables integration with OAuth providers requiring non-standard parameters like RFC 8707 resource indicators.
+MCPProxy also supports manual `extra_params` for OAuth providers requiring non-standard parameters. Manual params override auto-detected values.
 
 **Use Cases**:
-- **RFC 8707 Resource Indicators**: Specify target resource servers for multi-tenant authorization
+- **RFC 8707 Resource Indicators**: Override auto-detected resource for multi-tenant authorization
 - **Audience-Restricted Tokens**: Request tokens for specific API audiences
 - **Tenant Identification**: Pass tenant/organization identifiers for multi-tenant OAuth
 - **Custom Provider Extensions**: Support proprietary OAuth extensions from specific providers
@@ -988,6 +1027,8 @@ When making changes to this codebase, ensure you understand the modular architec
 - BBolt embedded database (`~/.mcpproxy/config.db`) - `oauth_tokens` bucke (009-proactive-oauth-refresh)
 - Bash (GitHub Actions), Go 1.25 (existing project) + curl, jq, GitHub Actions, Anthropic Messages API (010-release-notes-generator)
 - N/A (ephemeral workflow artifacts only) (010-release-notes-generator)
+- Go 1.24.0 + mcp-go (OAuth transport), zap (logging), BBolt (storage) (011-resource-auto-detect)
+- BBolt embedded database (`~/.mcpproxy/config.db`) for OAuth tokens (011-resource-auto-detect)
 
 ## Recent Changes
 - 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3

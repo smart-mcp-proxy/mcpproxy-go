@@ -322,22 +322,39 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 			}
 
 			// Handle both map[string]string (from runtime) and map[string]interface{} (from conversions)
+			var hasManualResource bool
 			if extraParams, ok := oauth["extra_params"].(map[string]string); ok && len(extraParams) > 0 {
 				paramParts := make([]string, 0, len(extraParams))
 				for key, val := range extraParams {
 					paramParts = append(paramParts, fmt.Sprintf("%s=%v", key, val))
+					if key == "resource" {
+						hasManualResource = true
+					}
 				}
 				fmt.Printf("  Extra Params: %s\n", strings.Join(paramParts, ", "))
 			} else if extraParams, ok := oauth["extra_params"].(map[string]interface{}); ok && len(extraParams) > 0 {
 				paramParts := make([]string, 0, len(extraParams))
 				for key, val := range extraParams {
 					paramParts = append(paramParts, fmt.Sprintf("%s=%v", key, val))
+					if key == "resource" {
+						hasManualResource = true
+					}
 				}
 				fmt.Printf("  Extra Params: %s\n", strings.Join(paramParts, ", "))
+			}
+
+			// Show RFC 8707 resource parameter status
+			if hasManualResource {
+				fmt.Printf("  Resource: Configured (manual override)\n")
+			} else {
+				// Resource will be auto-detected from RFC 9728 Protected Resource Metadata
+				fmt.Printf("  Resource: Auto-detect (RFC 9728)\n")
 			}
 		} else {
 			// Server requires OAuth but has no explicit config (discovery/DCR)
 			fmt.Printf("  OAuth: Discovered via Dynamic Client Registration\n")
+			// RFC 8707 resource will be auto-detected for zero-config OAuth servers
+			fmt.Printf("  Resource: Auto-detect (RFC 9728)\n")
 		}
 
 		// Display token expiration if available
