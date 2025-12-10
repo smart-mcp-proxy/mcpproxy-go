@@ -357,8 +357,11 @@ func CreateOAuthConfigWithExtraParams(serverConfig *config.ServerConfig, storage
 // autoDetectResource attempts to discover the RFC 8707 resource parameter.
 // Returns the detected resource URL, or server URL as fallback, or empty string on failure.
 func autoDetectResource(serverConfig *config.ServerConfig, logger *zap.Logger) string {
+	// Use a client with timeout to avoid blocking on slow/unreachable servers
+	client := &http.Client{Timeout: 5 * time.Second}
+
 	// POST is the only method guaranteed by MCP spec for the main endpoint
-	resp, err := http.Post(serverConfig.URL, "application/json", strings.NewReader("{}"))
+	resp, err := client.Post(serverConfig.URL, "application/json", strings.NewReader("{}"))
 	if err != nil {
 		logger.Debug("Failed to make preflight request for resource detection",
 			zap.String("server", serverConfig.Name),
@@ -407,8 +410,9 @@ func autoDetectResource(serverConfig *config.ServerConfig, logger *zap.Logger) s
 		return serverConfig.URL
 	}
 
-	// Non-401 response - server might not require OAuth or is accessible
-	// Don't set resource parameter in this case
+	// Non-401 response means server doesn't require authentication at this endpoint.
+	// Return empty string to avoid adding unnecessary resource parameter to OAuth flows.
+	// This is correct behavior: resource parameter is only needed for OAuth-protected servers.
 	logger.Debug("Server did not return 401, skipping resource auto-detection",
 		zap.String("server", serverConfig.Name),
 		zap.Int("status_code", resp.StatusCode))

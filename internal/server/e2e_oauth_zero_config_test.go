@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,9 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
-
-// compile-time check to silence unused import warning
-var _ = zap.NewNop
 
 // TestE2E_ZeroConfigOAuth_ResourceParameterExtraction validates that the system
 // correctly extracts resource parameters from Protected Resource Metadata (RFC 9728)
@@ -213,11 +209,7 @@ func TestE2E_ProtectedResourceMetadataDiscovery(t *testing.T) {
 	}))
 	defer metadataServer.Close()
 
-	// Test direct metadata discovery
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Use the oauth package's discovery function
+	// Test direct metadata discovery using the oauth package's discovery function
 	metadata, err := oauth.DiscoverProtectedResourceMetadata(metadataServer.URL, 5*time.Second)
 
 	require.NoError(t, err, "Metadata discovery should succeed")
@@ -235,12 +227,4 @@ func TestE2E_ProtectedResourceMetadataDiscovery(t *testing.T) {
 	t.Logf("   Resource: %s", metadata.Resource)
 	t.Logf("   Scopes: %v", metadata.ScopesSupported)
 	t.Logf("   Auth Servers: %v", metadata.AuthorizationServers)
-
-	// Ensure context wasn't cancelled
-	select {
-	case <-ctx.Done():
-		t.Fatal("Context should not be cancelled")
-	default:
-		// Context is still active, good
-	}
 }
