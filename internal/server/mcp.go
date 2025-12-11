@@ -14,6 +14,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/experiments"
+	"mcpproxy-go/internal/health"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/jsruntime"
 	"mcpproxy-go/internal/logs"
@@ -1115,26 +1116,58 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 			"updated":     server.Updated,
 		}
 
-		// Add connection status information
+		// Add connection status information and calculate health
+		var connState string
+		var lastError string
+		var isConnected bool
+		var toolCount int
+		var userLoggedOut bool
+
 		if client, exists := p.upstreamManager.GetClient(server.Name); exists {
 			connInfo := client.GetConnectionInfo()
 			containerInfo := p.getDockerContainerInfo(client)
 
+			connState = connInfo.State.String()
+			if connInfo.LastError != nil {
+				lastError = connInfo.LastError.Error()
+			}
+			isConnected = connInfo.State.String() == "connected"
+			userLoggedOut = client.IsUserLoggedOut()
+			// Get tool count from client
+			if tools, err := client.ListTools(context.Background()); err == nil {
+				toolCount = len(tools)
+			}
+
 			serverMap["connection_status"] = map[string]interface{}{
-				"state":            connInfo.State.String(),
-				"last_error":       connInfo.LastError,
+				"state":            connState,
+				"last_error":       lastError,
 				"retry_count":      connInfo.RetryCount,
 				"last_retry_time":  connInfo.LastRetryTime.Format(time.RFC3339),
 				"container_id":     containerInfo["container_id"],
 				"container_status": containerInfo["status"],
 			}
 		} else {
+			connState = "disconnected"
 			serverMap["connection_status"] = map[string]interface{}{
 				"state":       "Not Started",
 				"last_error":  nil,
 				"retry_count": 0,
 			}
 		}
+
+		// Calculate unified health status
+		healthInput := health.HealthCalculatorInput{
+			Name:          server.Name,
+			Enabled:       server.Enabled,
+			Quarantined:   server.Quarantined,
+			State:         strings.ToLower(connState),
+			Connected:     isConnected,
+			LastError:     lastError,
+			OAuthRequired: server.OAuth != nil,
+			UserLoggedOut: userLoggedOut,
+			ToolCount:     toolCount,
+		}
+		serverMap["health"] = health.CalculateHealth(healthInput, health.DefaultHealthConfig())
 
 		// Add Docker isolation information
 		dockerInfo := map[string]interface{}{

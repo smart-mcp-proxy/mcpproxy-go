@@ -25,9 +25,9 @@
 
 **Purpose**: Create the health package and core types
 
-- [ ] T001 Create internal/health/ directory structure
-- [ ] T002 Add HealthStatus struct to internal/contracts/types.go
-- [ ] T003 [P] Create health level, admin state, and action constants in internal/health/constants.go
+- [X] T001 Create internal/health/ directory structure
+- [X] T002 Add HealthStatus struct to internal/contracts/types.go
+- [X] T003 [P] Create health level, admin state, and action constants in internal/health/constants.go
 
 ---
 
@@ -37,12 +37,12 @@
 
 **CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Create HealthCalculatorInput struct in internal/health/calculator.go
-- [ ] T005 Create HealthCalculatorConfig struct with ExpiryWarningDuration in internal/health/calculator.go
-- [ ] T006 Implement CalculateHealth() function in internal/health/calculator.go
-- [ ] T007 Add Health field to contracts.Server struct in internal/contracts/types.go
-- [ ] T008 Integrate CalculateHealth() into runtime.GetAllServers() in internal/runtime/runtime.go
-- [ ] T009 Add oauth_expiry_warning_hours config option to internal/config/config.go
+- [X] T004 Create HealthCalculatorInput struct in internal/health/calculator.go
+- [X] T005 Create HealthCalculatorConfig struct with ExpiryWarningDuration in internal/health/calculator.go
+- [X] T006 Implement CalculateHealth() function in internal/health/calculator.go
+- [X] T007 Add Health field to contracts.Server struct in internal/contracts/types.go
+- [X] T008 Integrate CalculateHealth() into runtime.GetAllServers() in internal/runtime/runtime.go
+- [X] T009 Add oauth_expiry_warning_hours config option to internal/config/config.go
 
 **Checkpoint**: Backend health calculation complete - all interfaces can now use server.Health field
 
@@ -56,8 +56,8 @@
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Update CLI upstream list display to use health.level for status emoji in cmd/mcpproxy/upstream_cmd.go
-- [ ] T011 [US1] Update CLI upstream list to show health.summary instead of calculating status in cmd/mcpproxy/upstream_cmd.go
+- [X] T010 [US1] Update CLI upstream list display to use health.level for status emoji in cmd/mcpproxy/upstream_cmd.go
+- [X] T011 [US1] Update CLI upstream list to show health.summary instead of calculating status in cmd/mcpproxy/upstream_cmd.go
 - [ ] T012 [P] [US1] Update tray server menu to use health.level for status indicator in cmd/mcpproxy-tray/
 - [ ] T013 [P] [US1] Update web UI ServerCard.vue to use health.level for badge color in frontend/src/components/ServerCard.vue
 - [ ] T014 [US1] Update web UI ServerCard.vue to display health.summary as status text in frontend/src/components/ServerCard.vue
@@ -74,8 +74,8 @@
 
 ### Implementation for User Story 2
 
-- [ ] T015 [US2] Add action hints column to CLI upstream list in cmd/mcpproxy/upstream_cmd.go
-- [ ] T016 [US2] Display CLI-appropriate action commands (e.g., "auth login --server=X") based on health.action in cmd/mcpproxy/upstream_cmd.go
+- [X] T015 [US2] Add action hints column to CLI upstream list in cmd/mcpproxy/upstream_cmd.go
+- [X] T016 [US2] Display CLI-appropriate action commands (e.g., "auth login --server=X") based on health.action in cmd/mcpproxy/upstream_cmd.go
 - [ ] T017 [P] [US2] Add clickable action buttons to tray menu based on health.action in cmd/mcpproxy-tray/
 - [ ] T018 [P] [US2] Add action button component to ServerCard.vue based on health.action in frontend/src/components/ServerCard.vue
 - [ ] T019 [US2] Implement action button handlers (login, restart, enable, approve) in frontend/src/components/ServerCard.vue
@@ -145,9 +145,9 @@
 
 ### Implementation for User Story 6
 
-- [ ] T034 [US6] Add health field to handleListUpstreams() response in internal/server/mcp.go
-- [ ] T035 [US6] Ensure health field uses same HealthStatus structure as REST API in internal/server/mcp.go
-- [ ] T036 [US6] Update MCP tool schema to document health field in response in internal/server/mcp.go
+- [X] T034 [US6] Add health field to handleListUpstreams() response in internal/server/mcp.go
+- [X] T035 [US6] Ensure health field uses same HealthStatus structure as REST API in internal/server/mcp.go
+- [X] T036 [US6] Update MCP tool schema to document health field in response in internal/server/mcp.go
 
 **Checkpoint**: LLMs can now get unified health status from MCP tools
 
@@ -157,13 +157,13 @@
 
 **Purpose**: Documentation, testing, and cleanup
 
-- [ ] T037 [P] Add HealthStatus schema to oas/swagger.yaml
+- [X] T037 [P] Add HealthStatus schema to oas/swagger.yaml
 - [ ] T038 [P] Update CLAUDE.md with new health fields documentation
-- [ ] T039 [P] Create unit tests for CalculateHealth() in internal/health/calculator_test.go
-- [ ] T039a [P] Add test case verifying FR-016: token with working auto-refresh returns healthy in internal/health/calculator_test.go
+- [X] T039 [P] Create unit tests for CalculateHealth() in internal/health/calculator_test.go
+- [X] T039a [P] Add test case verifying FR-016: token with working auto-refresh returns healthy in internal/health/calculator_test.go
 - [ ] T040 Run quickstart.md validation scenarios
 - [ ] T041 Run full test suite (./scripts/run-all-tests.sh)
-- [ ] T042 Run API E2E tests (./scripts/test-api-e2e.sh)
+- [X] T042 Run API E2E tests (./scripts/test-api-e2e.sh)
 - [ ] T043 [P] Verify OpenAPI endpoint coverage (./scripts/verify-oas-coverage.sh)
 
 ---
