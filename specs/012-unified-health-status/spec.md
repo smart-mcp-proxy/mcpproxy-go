@@ -8,29 +8,30 @@
 
 ## Problem Statement
 
-MCPProxy currently displays inconsistent server health status across its three interfaces:
+MCPProxy currently displays inconsistent server health status across its four interfaces:
 
 1. **CLI** reads `oauth_status` and shows "Token Expired"
 2. **Tray** only checks HTTP connectivity and shows "Healthy"
 3. **Web UI** may show different status based on its own interpretation
+4. **MCP Tools** (`upstream_servers list`) return raw connection state fields without unified health interpretation
 
-This leads to user confusion when the same server shows different states in different interfaces. Additionally, when servers have issues, users often don't know what action to take to resolve them.
+This leads to user confusion when the same server shows different states in different interfaces. LLMs interacting via MCP tools must interpret raw fields (`connection_status.state`, `enabled`, `quarantined`, `oauth_status`) and calculate health themselves, leading to inconsistent conclusions. Additionally, when servers have issues, users often don't know what action to take to resolve them.
 
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Consistent Status Across Interfaces (Priority: P1)
 
-As a user, I want to see the same health status for a server regardless of whether I'm using the CLI, tray, or web UI, so I can trust the information and not be confused by conflicting reports.
+As a user, I want to see the same health status for a server regardless of whether I'm using the CLI, tray, web UI, or MCP tools, so I can trust the information and not be confused by conflicting reports.
 
 **Why this priority**: This is the core problem - inconsistent status erodes trust and causes confusion. Without this, all other improvements are undermined.
 
-**Independent Test**: Can be tested by checking any server's status in all three interfaces and verifying they show identical health level and summary.
+**Independent Test**: Can be tested by checking any server's status in all four interfaces and verifying they show identical health level and summary.
 
 **Acceptance Scenarios**:
 
-1. **Given** a server with an expired OAuth token, **When** I check status in CLI, tray, and web UI, **Then** all three show "unhealthy" status with the same summary message.
-2. **Given** a healthy connected server, **When** I check status in CLI, tray, and web UI, **Then** all three show "healthy" status with matching tool counts.
-3. **Given** a disabled server, **When** I check status in all interfaces, **Then** all three show "disabled" admin state consistently.
+1. **Given** a server with an expired OAuth token, **When** I check status in CLI, tray, web UI, and MCP tools, **Then** all four show "unhealthy" status with the same summary message.
+2. **Given** a healthy connected server, **When** I check status in CLI, tray, web UI, and MCP tools, **Then** all four show "healthy" status with matching tool counts.
+3. **Given** a disabled server, **When** I check status in all interfaces, **Then** all four show "disabled" admin state consistently.
 
 ---
 
@@ -95,6 +96,22 @@ As a user, I want the web dashboard to highlight servers that need attention (de
 
 ---
 
+### User Story 6 - MCP Tools Return Unified Health Status (Priority: P2)
+
+As an LLM (Claude Code, Cursor, etc.) interacting with MCPProxy via MCP tools, I want the `upstream_servers list` operation to return a unified health status for each server, so I can understand server health without interpreting raw connection fields.
+
+**Why this priority**: LLMs are a primary consumer of MCPProxy. Without unified health in MCP tools, LLMs must interpret raw fields and may draw incorrect conclusions about server health.
+
+**Independent Test**: Can be tested by calling `upstream_servers` with `operation=list` via MCP protocol and verifying each server includes a `health` field with the unified status structure.
+
+**Acceptance Scenarios**:
+
+1. **Given** a server with an expired OAuth token, **When** an LLM calls `upstream_servers list` via MCP, **Then** the response includes `health.level: "unhealthy"` and `health.action: "login"`.
+2. **Given** a healthy connected server, **When** an LLM calls `upstream_servers list` via MCP, **Then** the response includes `health.level: "healthy"` with appropriate summary.
+3. **Given** a quarantined server, **When** an LLM calls `upstream_servers list` via MCP, **Then** the response includes `health.admin_state: "quarantined"` and `health.action: "approve"`.
+
+---
+
 ### Edge Cases
 
 - What happens when a server is both disabled AND has an expired token? Admin state takes precedence - show "Disabled".
@@ -122,6 +139,8 @@ As a user, I want the web dashboard to highlight servers that need attention (de
 - **FR-014**: OAuth token expiration MUST be considered unhealthy (not degraded)
 - **FR-015**: OAuth token expiring soon with no refresh token MUST be considered degraded
 - **FR-016**: OAuth token with working auto-refresh MUST be considered healthy regardless of expiration time
+- **FR-017**: MCP `upstream_servers` tool with `operation: list` MUST include a `health` field for each server using the same HealthStatus structure as other interfaces
+- **FR-018**: MCP tools MUST return the same health level, admin state, summary, and action as CLI, tray, and web UI for any given server
 
 ### Key Entities
 
@@ -140,18 +159,21 @@ As a user, I want the web dashboard to highlight servers that need attention (de
 
 ### Measurable Outcomes
 
-- **SC-001**: All three interfaces (CLI, tray, web) display identical health level for any given server
+- **SC-001**: All four interfaces (CLI, tray, web, MCP tools) display identical health level for any given server
 - **SC-002**: 100% of unhealthy/degraded states include an appropriate action suggestion
 - **SC-003**: Users can identify and fix server issues without consulting documentation
-- **SC-004**: OAuth token expiration is visible in tray and web UI (not just CLI)
+- **SC-004**: OAuth token expiration is visible in tray, web UI, and MCP tools (not just CLI)
 - **SC-005**: Admin state (disabled/quarantined) is visually distinct from health issues in all interfaces
+- **SC-006**: LLMs can determine server health and required actions from a single MCP tool call without interpreting raw fields
 
 ## Assumptions
 
-- All clients (CLI, tray, web) are deployed together, so no backward compatibility is needed
+- All clients (CLI, tray, web) and MCP tools are deployed together, so no backward compatibility is needed
 - The existing `/api/v1/servers` endpoint will be extended to include the health field
+- The existing `upstream_servers` MCP tool will be extended to include the health field in `operation: list` responses
 - Token expiration threshold for "expiring soon" warning is configurable (default: 1 hour)
 - Auto-refresh working means the system will handle token renewal automatically
+- MCP tool responses use the same HealthStatus structure as the REST API to ensure consistency
 
 ## Commit Message Conventions *(mandatory)*
 

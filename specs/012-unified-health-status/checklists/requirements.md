@@ -35,3 +35,4 @@
 - Design decisions were already made through brainstorming session
 - All edge cases have documented resolutions
 - No clarifications needed - design is complete
+- **2025-12-11 Update**: Added MCP tools coverage (User Story 6, FR-017/FR-018, SC-006) to address gap where `upstream_servers list` returns raw fields instead of unified health status

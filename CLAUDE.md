@@ -733,4 +733,6 @@ The runtime package (`internal/runtime/`) provides core non-HTTP lifecycle manag
 
 When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
 
-**Important**: Before running mcpproxy core, kill all existing mcpproxy instances as it locks the database.
+## Active Technologies
+- Go 1.24.0 + mcp-go (MCP protocol), zap (logging), chi (HTTP router), Vue 3/TypeScript (frontend) (012-unified-health-status)
+- BBolt embedded database (`~/.mcpproxy/config.db`) - existing, no schema changes (012-unified-health-status)
