@@ -282,40 +282,13 @@ GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray 
 - **Cross-platform** system tray integration
 - **Server management** via GUI menus
 
-#### Tray Application Architecture (Refactored)
+#### Tray Application Architecture
 
-The tray application uses a robust state machine architecture for reliable core management:
-
-**State Machine States**:
-- `StateInitializing` → `StateLaunchingCore` → `StateWaitingForCore` → `StateConnectingAPI` → `StateConnected`
-- Error states: `StateCoreErrorPortConflict`, `StateCoreErrorDBLocked`, `StateCoreErrorGeneral`, `StateCoreErrorConfig`
-- Recovery states: `StateReconnecting`, `StateFailed`, `StateShuttingDown`
-
-**Key Components**:
-- **Process Monitor** (`cmd/mcpproxy-tray/internal/monitor/process.go`): Monitors core subprocess lifecycle
-- **Health Monitor** (`cmd/mcpproxy-tray/internal/monitor/health.go`): Performs socket-aware HTTP health checks on core API (`/healthz`, `/readyz`)
-- **State Machine** (`cmd/mcpproxy-tray/internal/state/machine.go`): Manages state transitions and automatic retry logic
-
-**Error Classification**:
-Core process exit codes are mapped to specific state machine events:
-- Exit code 2 (port conflict) → `EventPortConflict`
-- Exit code 3 (database locked) → `EventDBLocked`
-- Exit code 4 (config error) → `EventConfigError`
-- Exit code 5 (permission error) → `EventPermissionError`
-- Other errors → `EventGeneralError`
-
-**Automatic Retry Logic**:
-Error states automatically retry core launch with exponential backoff:
-- `StateCoreErrorGeneral`: 2 retries with 3s delay (3 total attempts)
-- `StateCoreErrorPortConflict`: 2 retries with 10s delay
-- `StateCoreErrorDBLocked`: 3 retries with 5s delay
-- After max retries exceeded → transitions to `StateFailed`
-- Retry count and attempts logged for transparency
-
-**Development Environment Variables**:
-- `MCPPROXY_TRAY_SKIP_CORE=1` - Skip core launch (for development)
-- `MCPPROXY_CORE_URL=http://localhost:8085` - Custom core URL
-- `MCPPROXY_TRAY_PORT=8090` - Custom tray port
+The tray application uses a state machine architecture for reliable core management. See [docs/architecture.md](docs/architecture.md) for details on:
+- State machine states and transitions
+- Process and health monitoring
+- Error classification and retry logic
+- Development environment variables
 
 ## Architecture Overview
 
@@ -371,85 +344,11 @@ Error states automatically retry core launch with exponential backoff:
 
 ### Management Service Architecture
 
-The management service (`internal/management/`) provides a centralized business logic layer for upstream server management operations, eliminating code duplication across CLI, REST API, and MCP interfaces.
+The management service (`internal/management/`) provides a centralized business logic layer for upstream server management, eliminating code duplication across CLI, REST API, and MCP interfaces.
 
-**Architecture Diagram**:
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Client Interfaces                         │
-├───────────────┬─────────────────┬───────────────────────────┤
-│  CLI Commands │   REST API      │   MCP Protocol            │
-│  (upstream)   │   (/api/v1/*)   │   (upstream_servers tool) │
-└───────┬───────┴────────┬────────┴───────────┬───────────────┘
-        │                │                    │
-        └────────────────┼────────────────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │  Management Service │
-              │  (internal/mgmt/)   │
-              └──────────┬──────────┘
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-        ▼                ▼                ▼
-  ┌──────────┐    ┌──────────┐    ┌──────────┐
-  │ Runtime  │    │  Config  │    │  Events  │
-  │Operations│    │  Gates   │    │  Emitter │
-  └──────────┘    └──────────┘    └──────────┘
-```
+See [docs/architecture.md](docs/architecture.md) for the full architecture diagram, component details, and usage examples.
 
-**Key Components**:
-
-- **Service Interface** (`service.go:16-102`): Defines all management operations
-  - Single-server: `RestartServer()`, `EnableServer()`, `DisableServer()`
-  - Bulk operations: `RestartAll()`, `EnableAll()`, `DisableAll()`
-  - Diagnostics: `GetServerHealth()`, `RunDiagnostics()`
-  - Server CRUD: `AddServer()`, `RemoveServer()`, `QuarantineServer()`
-  - Tool operations: `GetServerTools()`, `TriggerOAuthLogin()` (added in spec 005)
-
-- **Configuration Gates**: All operations respect centralized configuration guards
-  - `disable_management`: Blocks all write operations when true
-  - `read_only_mode`: Blocks all configuration modifications
-
-- **Bulk Operations** (`service.go:243-388`): Efficient multi-server management
-  - Sequential execution with partial failure handling
-  - Returns `BulkOperationResult` with success/failure counts
-  - Collects per-server errors in results map
-  - Continues on individual failures, reports aggregate results
-
-- **Event Integration**: All operations emit events through event bus
-  - `servers.changed`: Notifies UI of server state changes
-  - Triggers SSE updates to web UI and tray application
-  - Enables real-time synchronization across interfaces
-
-**Benefits**:
-- **Code Deduplication**: 40%+ reduction in duplicate code across interfaces
-- **Consistent Behavior**: All interfaces use identical business logic
-- **Centralized Validation**: Configuration gates enforced in one place
-- **Easier Testing**: Unit tests cover all interfaces through service layer
-- **Future Extensibility**: New interfaces can reuse existing service methods
-
-**Usage Examples**:
-
-```go
-// CLI usage (cmd/mcpproxy/upstream_cmd.go:547-636)
-result, err := client.RestartAll(ctx)
-fmt.Printf("  Total servers:      %d\n", result.Total)
-fmt.Printf("  ✅ Successful:      %d\n", result.Successful)
-fmt.Printf("  ❌ Failed:          %d\n", result.Failed)
-
-// REST API usage (internal/httpapi/server.go:772-866)
-mgmtSvc := s.controller.GetManagementService().(ManagementService)
-result, err := mgmtSvc.RestartAll(r.Context())
-s.writeSuccess(w, result)
-
-// MCP protocol usage (future integration)
-result, err := mgmtService.RestartAll(ctx)
-return mcpResponse(result)
-```
-
-**OpenAPI Documentation**: All REST endpoints are documented with OpenAPI 3.1 annotations and auto-generated Swagger spec. See `oas/swagger.yaml` for complete API reference.
+**OpenAPI Documentation**: All REST endpoints are documented with OpenAPI 3.1 annotations. See `oas/swagger.yaml` for complete API reference.
 
 ### Tray-Core Communication (Unix Sockets / Named Pipes)
 
@@ -565,144 +464,12 @@ The `working_dir` field specifies the working directory for stdio MCP servers. U
 - If directory doesn't exist, server startup fails with detailed error
 - Compatible with Docker isolation (`isolation.working_dir` for container path)
 
-### Zero-Config OAuth with Resource Auto-Detection (RFC 8707/9728)
+### OAuth Configuration
 
-MCPProxy automatically detects and injects the RFC 8707 `resource` parameter for OAuth providers like Runlayer. This enables zero-configuration OAuth for servers advertising Protected Resource Metadata (RFC 9728).
+MCPProxy supports zero-config OAuth with RFC 8707/9728 resource auto-detection for providers like Runlayer. See [docs/oauth-resource-autodetect.md](docs/oauth-resource-autodetect.md) for details.
 
-**How it works**:
-1. MCPProxy sends a preflight HEAD request to the MCP server URL
-2. If server returns 401 with `WWW-Authenticate` header containing `resource_metadata` URL, MCPProxy fetches the Protected Resource Metadata
-3. The `resource` field from metadata is automatically injected into OAuth authorization URL and token requests
-4. If metadata doesn't contain `resource`, MCPProxy falls back to using the server URL
+For manual OAuth parameter configuration, see [docs/oauth-extra-params.md](docs/oauth-extra-params.md).
 
-**Zero-Config Example (Runlayer)**:
-```json
-{
-  "mcpServers": [
-    {
-      "name": "runlayer-slack",
-      "url": "https://oauth.runlayer.com/api/v1/proxy/abc123def/mcp",
-      "protocol": "http",
-      "enabled": true
-      // No OAuth config needed! Resource parameter auto-detected from metadata
-    }
-  ]
-}
-```
-
-**Priority Order for Resource Parameter**:
-1. Manual `extra_params.resource` in config (highest priority - preserves backward compatibility)
-2. Auto-detected resource from RFC 9728 Protected Resource Metadata
-3. Fallback to server URL if metadata unavailable or lacks resource field
-
-**Diagnostic Commands**:
-```bash
-# View auto-detected resource parameter
-mcpproxy auth status --server=runlayer-slack
-
-# Check for OAuth issues including resource detection
-mcpproxy doctor
-```
-
-### OAuth Extra Parameters Configuration
-
-MCPProxy also supports manual `extra_params` for OAuth providers requiring non-standard parameters. Manual params override auto-detected values.
-
-**Use Cases**:
-- **RFC 8707 Resource Indicators**: Override auto-detected resource for multi-tenant authorization
-- **Audience-Restricted Tokens**: Request tokens for specific API audiences
-- **Tenant Identification**: Pass tenant/organization identifiers for multi-tenant OAuth
-- **Custom Provider Extensions**: Support proprietary OAuth extensions from specific providers
-
-**Example 1: Runlayer MCP Server with Resource Parameter**
-```json
-{
-  "mcpServers": [
-    {
-      "name": "runlayer-slack",
-      "url": "https://oauth.runlayer.com/api/v1/proxy/abc123def/mcp",
-      "protocol": "http",
-      "enabled": true,
-      "oauth": {
-        "scopes": ["mcp"],
-        "pkce": true,
-        "extra_params": {
-          "resource": "https://oauth.runlayer.com/api/v1/proxy/abc123def/mcp"
-        }
-      }
-    }
-  ]
-}
-```
-
-**Example 2: Multi-Tenant OAuth with Multiple Parameters**
-```json
-{
-  "mcpServers": [
-    {
-      "name": "enterprise-mcp",
-      "url": "https://api.example.com/mcp",
-      "protocol": "http",
-      "enabled": true,
-      "oauth": {
-        "scopes": ["mcp:read", "mcp:write"],
-        "pkce": true,
-        "extra_params": {
-          "resource": "https://api.example.com/mcp",
-          "audience": "mcp-api",
-          "tenant": "org-456"
-        }
-      }
-    }
-  ]
-}
-```
-
-**Example 3: Azure AD with Resource Parameter**
-```json
-{
-  "mcpServers": [
-    {
-      "name": "azure-mcp",
-      "url": "https://mcp.azure.example.com/api",
-      "protocol": "http",
-      "enabled": true,
-      "oauth": {
-        "scopes": ["https://mcp.azure.example.com/.default"],
-        "pkce": true,
-        "authorization_url": "https://login.microsoftonline.com/tenant-id/oauth2/v2.0/authorize",
-        "token_url": "https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token",
-        "extra_params": {
-          "resource": "https://mcp.azure.example.com"
-        }
-      }
-    }
-  ]
-}
-```
-
-**Security & Validation**:
-- Reserved OAuth 2.0 parameters (`client_id`, `client_secret`, `redirect_uri`, `code`, `state`, `code_verifier`, `code_challenge`, `code_challenge_method`) are **rejected** at config load time
-- Extra parameters are injected into all OAuth 2.0 requests: authorization, token exchange, and token refresh
-- Parameter values containing secrets are automatically masked in logs (see `internal/oauth/masking.go`)
-
-**Debugging OAuth Extra Parameters**:
-```bash
-# View OAuth configuration including extra_params
-mcpproxy auth status --server=runlayer-slack
-
-# Test OAuth flow with debug logging
-mcpproxy auth login --server=runlayer-slack --log-level=debug
-
-# Check for OAuth-related issues
-mcpproxy doctor
-```
-
-**Implementation Details**:
-- Uses HTTP `RoundTripper` wrapper pattern (RFC 2616) for transparent request interception
-- Zero overhead for servers without `extra_params` configured
-- Thread-safe concurrent OAuth flows with parameter isolation
-- See `internal/oauth/transport_wrapper.go` for wrapper implementation
 
 ## MCP Protocol Implementation
 
@@ -915,53 +682,9 @@ mcpproxy auth login --server=Sentry --log-level=debug
 - File watcher triggers automatic config reloads
 - Validate configuration on load and provide sensible defaults
 
-## Runtime Architecture (Phase 1-3 Refactoring)
+## Runtime Architecture
 
-### Runtime Package (`internal/runtime/`)
-
-The runtime package provides the core non-HTTP lifecycle management, separating concerns from the HTTP server layer:
-
-- **Configuration Management**: Centralized config loading, validation, and hot-reload
-- **Background Services**: Connection management, tool indexing, and health monitoring
-- **State Management**: Thread-safe status tracking and upstream server state
-- **Event System**: Real-time event broadcasting for UI and SSE consumers
-
-### Event Bus System
-
-The event bus enables real-time communication between runtime and UI components:
-
-**Event Types**:
-- `servers.changed` - Server configuration or state changes
-- `config.reloaded` - Configuration file reloaded from disk
-
-**Event Flow**:
-1. Runtime operations trigger events via `emitServersChanged()` and `emitConfigReloaded()`
-2. Events are broadcast to subscribers through buffered channels
-3. Server forwards events to tray UI and SSE endpoints
-4. Tray menus refresh automatically without file watching
-5. Web UI receives live updates via `/events` SSE endpoint
-
-**SSE Integration**:
-- `/events` endpoint streams both status updates and runtime events
-- Automatic connection management with proper cleanup
-- JSON-formatted event payloads for easy consumption
-
-### Runtime Lifecycle
-
-**Initialization**:
-1. Runtime created with config, logger, and manager dependencies
-2. Background initialization starts server connections and tool indexing
-3. Status updates broadcast through event system
-
-**Background Services**:
-- **Connection Management**: Periodic reconnection attempts with exponential backoff
-- **Tool Indexing**: Automatic discovery and search index updates every 15 minutes
-- **Configuration Sync**: File-based config changes trigger runtime resync
-
-**Shutdown**:
-- Graceful context cancellation cascades to all background services
-- Upstream servers disconnected with proper Docker container cleanup
-- Resources closed in dependency order (upstream → cache → index → storage)
+The runtime package (`internal/runtime/`) provides core non-HTTP lifecycle management. See [docs/architecture.md](docs/architecture.md) for details on the event bus system, lifecycle management, and background services.
 
 ## Important Implementation Details
 
@@ -1009,26 +732,5 @@ The event bus enables real-time communication between runtime and UI components:
 - Double shutdown protection
 
 When making changes to this codebase, ensure you understand the modular architecture and maintain the clear separation between core protocol handling, state management, and user interface components.
-- remember before running mcpproxy core u need to kill all mcpproxy instances, because it locks DB
 
-## Active Technologies
-- Go 1.21+, TypeScript/Vue 3 (003-tool-annotations-webui)
-- BBolt (existing `server_{serverID}_tool_calls` buckets, new `sessions` bucket) (003-tool-annotations-webui)
-- Go 1.24.0 (004-management-health-refactor)
-- BBolt embedded database (`~/.mcpproxy/config.db`) for server configurations, quarantine status, and tool statistics (004-management-health-refactor)
-- BBolt embedded database (`~/.mcpproxy/config.db`) - used by existing runtime, no changes required (005-rest-management-integration)
-- N/A (documentation-only feature) (001-oas-endpoint-documentation)
-- BBolt embedded database (`~/.mcpproxy/config.db`) - used by existing runtime for server configurations and OAuth token persistence, no schema changes required (006-oauth-extra-params)
-- Go 1.24.0 (as per existing project) (007-oauth-e2e-testing)
-- BBolt (existing `internal/storage/`) for token persistence (007-oauth-e2e-testing)
-- Go 1.24.0 + mcp-go (OAuth transport), zap (logging), BBolt (token persistence), google/uuid (correlation IDs) (008-oauth-token-refresh)
-- BBolt embedded database (`~/.mcpproxy/config.db`) - `oauth_tokens` and `oauth_completion` buckets (008-oauth-token-refresh)
-- Go 1.24.0 + mcp-go (v0.43.1), zap (logging), chi (HTTP router), BBolt (storage), Vue 3 + TypeScript (frontend) (009-proactive-oauth-refresh)
-- BBolt embedded database (`~/.mcpproxy/config.db`) - `oauth_tokens` bucke (009-proactive-oauth-refresh)
-- Bash (GitHub Actions), Go 1.25 (existing project) + curl, jq, GitHub Actions, Anthropic Messages API (010-release-notes-generator)
-- N/A (ephemeral workflow artifacts only) (010-release-notes-generator)
-- Go 1.24.0 + mcp-go (OAuth transport), zap (logging), BBolt (storage) (011-resource-auto-detect)
-- BBolt embedded database (`~/.mcpproxy/config.db`) for OAuth tokens (011-resource-auto-detect)
-
-## Recent Changes
-- 003-tool-annotations-webui: Added Go 1.21+, TypeScript/Vue 3
+**Important**: Before running mcpproxy core, kill all existing mcpproxy instances as it locks the database.
