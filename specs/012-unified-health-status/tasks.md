@@ -113,7 +113,7 @@
 - [ ] T025 [US4] Add gray styling for disabled servers in frontend/src/components/ServerCard.vue
 - [ ] T026 [US4] Add purple styling for quarantined servers in frontend/src/components/ServerCard.vue
 - [ ] T027 [P] [US4] Display admin_state badge instead of level badge when server is disabled/quarantined in frontend/src/components/ServerCard.vue
-- [ ] T028 [P] [US4] Update CLI upstream list to show distinct indicators for disabled/quarantined in cmd/mcpproxy/upstream_cmd.go
+- [X] T028 [P] [US4] Update CLI upstream list to show distinct indicators for disabled/quarantined in cmd/mcpproxy/upstream_cmd.go
 - [ ] T029 [US4] Update tray to show distinct indicators for disabled/quarantined servers in cmd/mcpproxy-tray/
 
 **Checkpoint**: Admin states are visually distinct from health issues in all interfaces
