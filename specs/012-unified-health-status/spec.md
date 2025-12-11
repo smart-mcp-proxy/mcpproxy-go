@@ -128,11 +128,11 @@ As an LLM (Claude Code, Cursor, etc.) interacting with MCPProxy via MCP tools, I
 - **FR-003**: System MUST include admin state (enabled/disabled/quarantined) separate from health
 - **FR-004**: System MUST include a human-readable summary message in the status
 - **FR-005**: System MUST include an action type (login/restart/enable/approve/view_logs) when applicable
-- **FR-006**: CLI MUST display health status with appropriate emoji indicators
+- **FR-006**: CLI MUST display health status with emoji indicators: ✅ healthy, ⚠️ degraded, ❌ unhealthy, ⏸️ disabled, 🔒 quarantined
 - **FR-007**: CLI MUST display action as a command hint (e.g., "auth login --server=X")
-- **FR-008**: Tray MUST display health status with consistent emoji indicators matching CLI
+- **FR-008**: Tray MUST display health status with emoji indicators matching CLI: ✅ healthy, ⚠️ degraded, ❌ unhealthy, ⏸️ disabled, 🔒 quarantined
 - **FR-009**: Tray MUST provide clickable actions that resolve the issue (open web UI or trigger API)
-- **FR-010**: Web UI MUST display health status with colored badges
+- **FR-010**: Web UI MUST display health status with colored badges: green=healthy, yellow=degraded, red=unhealthy, gray=disabled, purple=quarantined
 - **FR-011**: Web UI MUST display action buttons appropriate to each issue type
 - **FR-012**: Dashboard MUST show count of servers needing attention
 - **FR-013**: Admin state MUST take precedence over health when server is not enabled
