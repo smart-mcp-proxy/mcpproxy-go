@@ -211,8 +211,9 @@ func (s *service) detectOAuthIssues(serversRaw []map[string]interface{}) []contr
 				Issue:         "OAuth provider parameter mismatch",
 				Error:         lastError,
 				MissingParams: []string{paramName},
-				Resolution: "This requires MCPProxy support for OAuth extra_params. " +
-					"Track progress: https://github.com/smart-mcp-proxy/mcpproxy-go/issues",
+				Resolution: "MCPProxy auto-detects RFC 8707 resource parameter from Protected Resource Metadata (RFC 9728). " +
+					"Check detected values: mcpproxy auth status --server=" + serverName + ". " +
+					"To override, add extra_params.resource to OAuth config.",
 				DocumentationURL: "https://www.rfc-editor.org/rfc/rfc8707.html",
 			})
 		}

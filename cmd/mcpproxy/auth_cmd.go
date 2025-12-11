@@ -322,22 +322,52 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 			}
 
 			// Handle both map[string]string (from runtime) and map[string]interface{} (from conversions)
+			var manualResource string
+			var otherParams []string
 			if extraParams, ok := oauth["extra_params"].(map[string]string); ok && len(extraParams) > 0 {
-				paramParts := make([]string, 0, len(extraParams))
 				for key, val := range extraParams {
-					paramParts = append(paramParts, fmt.Sprintf("%s=%v", key, val))
+					if key == "resource" {
+						manualResource = val
+					} else {
+						otherParams = append(otherParams, fmt.Sprintf("%s=%v", key, val))
+					}
 				}
-				fmt.Printf("  Extra Params: %s\n", strings.Join(paramParts, ", "))
 			} else if extraParams, ok := oauth["extra_params"].(map[string]interface{}); ok && len(extraParams) > 0 {
-				paramParts := make([]string, 0, len(extraParams))
 				for key, val := range extraParams {
-					paramParts = append(paramParts, fmt.Sprintf("%s=%v", key, val))
+					if key == "resource" {
+						manualResource = fmt.Sprintf("%v", val)
+					} else {
+						otherParams = append(otherParams, fmt.Sprintf("%s=%v", key, val))
+					}
 				}
-				fmt.Printf("  Extra Params: %s\n", strings.Join(paramParts, ", "))
+			}
+
+			// Show non-resource extra params
+			if len(otherParams) > 0 {
+				fmt.Printf("  Extra Params: %s\n", strings.Join(otherParams, ", "))
+			}
+
+			// Show RFC 8707 resource parameter with actual URL
+			serverURL, _ := srv["url"].(string)
+			if manualResource != "" {
+				fmt.Printf("  Resource: %s (manual)\n", manualResource)
+			} else if serverURL != "" {
+				// Resource will be auto-detected from RFC 9728 Protected Resource Metadata
+				// Show server URL as the expected value (fallback if metadata unavailable)
+				fmt.Printf("  Resource: Auto-detect → %s\n", serverURL)
+			} else {
+				fmt.Printf("  Resource: Auto-detect (RFC 9728)\n")
 			}
 		} else {
 			// Server requires OAuth but has no explicit config (discovery/DCR)
 			fmt.Printf("  OAuth: Discovered via Dynamic Client Registration\n")
+			// RFC 8707 resource will be auto-detected for zero-config OAuth servers
+			serverURL, _ := srv["url"].(string)
+			if serverURL != "" {
+				fmt.Printf("  Resource: Auto-detect → %s\n", serverURL)
+			} else {
+				fmt.Printf("  Resource: Auto-detect (RFC 9728)\n")
+			}
 		}
 
 		// Display token expiration if available

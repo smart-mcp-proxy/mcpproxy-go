@@ -56,8 +56,10 @@ func ExtractResourceMetadataURL(wwwAuthHeader string) string {
 	return parts[1][:endIdx]
 }
 
-// DiscoverScopesFromProtectedResource attempts to discover scopes from Protected Resource Metadata (RFC 9728)
-func DiscoverScopesFromProtectedResource(metadataURL string, timeout time.Duration) ([]string, error) {
+// DiscoverProtectedResourceMetadata fetches RFC 9728 Protected Resource Metadata
+// and returns the full metadata structure including the resource parameter.
+// This is the primary function for RFC 8707 resource auto-detection.
+func DiscoverProtectedResourceMetadata(metadataURL string, timeout time.Duration) (*ProtectedResourceMetadata, error) {
 	logger := zap.L().Named("oauth.discovery")
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -114,7 +116,27 @@ func DiscoverScopesFromProtectedResource(metadataURL string, timeout time.Durati
 		zap.Strings("authorization_servers", metadata.AuthorizationServers),
 		zap.Strings("bearer_methods_supported", metadata.BearerMethodsSupported))
 
+	// Log resource discovery for RFC 8707 auto-detection
+	if metadata.Resource != "" {
+		logger.Info("Protected Resource Metadata discovered",
+			zap.String("resource", metadata.Resource),
+			zap.Strings("scopes", metadata.ScopesSupported),
+			zap.Strings("auth_servers", metadata.AuthorizationServers))
+	}
+
+	return &metadata, nil
+}
+
+// DiscoverScopesFromProtectedResource attempts to discover scopes from Protected Resource Metadata (RFC 9728)
+// This is a convenience wrapper around DiscoverProtectedResourceMetadata for backward compatibility.
+func DiscoverScopesFromProtectedResource(metadataURL string, timeout time.Duration) ([]string, error) {
+	metadata, err := DiscoverProtectedResourceMetadata(metadataURL, timeout)
+	if err != nil {
+		return nil, err
+	}
+
 	if len(metadata.ScopesSupported) == 0 {
+		logger := zap.L().Named("oauth.discovery")
 		logger.Debug("Protected Resource Metadata returned empty scopes_supported",
 			zap.String("metadata_url", metadataURL))
 		return []string{}, nil
