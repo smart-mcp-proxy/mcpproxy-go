@@ -40,11 +40,15 @@ echo "🔍 Extracting implemented routes from Go handlers..."
 # Extract routes from server.go
 # Matches patterns like: r.Get("/config", s.handleGetConfig)
 # Captures HTTP method and path
+# Extract routes, excluding:
+# - /ui (web UI routes)
+# - /swagger (Swagger UI routes)
+# - /mcp (MCP protocol endpoints, unprotected by design)
 ROUTES=$(grep -E '\br\.(Get|Post|Put|Delete|Patch|Head)\(' "$SERVER_GO" "$CODE_EXEC_GO" 2>/dev/null | \
     sed -E 's/.*r\.(Get|Post|Put|Delete|Patch|Head)\("([^"]+)".*/\U\1 \2/' | \
-    grep -v '/ui' | \      # Exclude web UI routes
-    grep -v '/swagger' | \  # Exclude Swagger UI routes
-    grep -v '/mcp' | \      # Exclude MCP protocol endpoints (unprotected by design)
+    grep -v '/ui' | \
+    grep -v '/swagger' | \
+    grep -v '/mcp' | \
     sort -u)
 
 # Extract documented paths from OAS

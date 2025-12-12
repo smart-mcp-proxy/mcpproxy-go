@@ -1,0 +1,178 @@
+# OpenAPI 3.1 Additions for Unified Health Status
+# This file documents the new HealthStatus schema and its integration
+# into existing endpoints. Merge into oas/swagger.yaml during implementation.
+
+openapi: 3.1.0
+info:
+  title: MCPProxy Unified Health Status API Additions
+  version: 1.0.0
+  description: |
+    Schema definitions and endpoint changes for the unified health status feature.
+    This provides consistent health information across CLI, tray, web UI, and MCP tools.
+
+components:
+  schemas:
+    # New schema: HealthStatus
+    HealthStatus:
+      type: object
+      required:
+        - level
+        - admin_state
+        - summary
+      properties:
+        level:
+          type: string
+          enum:
+            - healthy
+            - degraded
+            - unhealthy
+          description: |
+            Health level indicating server readiness:
+            - healthy: Server is ready and functioning normally
+            - degraded: Server works but needs attention soon (e.g., token expiring)
+            - unhealthy: Server is broken and cannot be used until fixed
+          example: "healthy"
+
+        admin_state:
+          type: string
+          enum:
+            - enabled
+            - disabled
+            - quarantined
+          description: |
+            Administrative state of the server:
+            - enabled: Server is active and participating in tool discovery
+            - disabled: Server is intentionally turned off by the user
+            - quarantined: Server is pending security review before activation
+          example: "enabled"
+
+        summary:
+          type: string
+          maxLength: 100
+          description: |
+            Human-readable status message suitable for display in all interfaces.
+            Examples: "Connected (5 tools)", "Token expiring in 45m", "Connection refused"
+          example: "Connected (5 tools)"
+
+        detail:
+          type: string
+          description: |
+            Optional longer explanation providing additional context for debugging.
+            May include technical details not shown in the summary.
+          example: "Last error: connection refused at 10.0.0.1:3000"
+
+        action:
+          type: string
+          enum:
+            - ""
+            - login
+            - restart
+            - enable
+            - approve
+            - view_logs
+          description: |
+            Suggested action to resolve the issue:
+            - "" (empty): No action needed (healthy state)
+            - login: OAuth authentication required
+            - restart: Server needs to be restarted
+            - enable: Server is disabled and should be enabled
+            - approve: Server is quarantined and needs security approval
+            - view_logs: Check server logs for more details
+          example: ""
+
+    # Modified schema: Server (showing health field addition)
+    Server:
+      type: object
+      description: |
+        Upstream MCP server configuration and status.
+        Now includes a unified health field.
+      properties:
+        # ... existing properties (id, name, url, protocol, etc.) ...
+
+        health:
+          $ref: '#/components/schemas/HealthStatus'
+          description: |
+            Unified health status calculated by the backend.
+            Always populated for API responses; all interfaces should use this
+            for consistent status display instead of calculating from raw fields.
+
+# Endpoint changes documentation (for reference)
+paths:
+  /api/v1/servers:
+    get:
+      summary: List all upstream servers
+      description: |
+        Returns all configured upstream MCP servers with their current status.
+
+        **Change in this feature**: Each server in the response now includes a
+        `health` field containing the unified health status. Clients should use
+        this field for status display instead of interpreting raw connection fields.
+      responses:
+        '200':
+          description: List of servers with health status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Server'
+                  stats:
+                    type: object
+                    description: Aggregated server statistics
+              example:
+                servers:
+                  - id: "abc123"
+                    name: "github"
+                    protocol: "http"
+                    enabled: true
+                    connected: true
+                    tool_count: 5
+                    health:
+                      level: "healthy"
+                      admin_state: "enabled"
+                      summary: "Connected (5 tools)"
+                      action: ""
+                  - id: "def456"
+                    name: "slack"
+                    protocol: "http"
+                    enabled: true
+                    connected: true
+                    oauth_status: "expiring"
+                    tool_count: 10
+                    health:
+                      level: "degraded"
+                      admin_state: "enabled"
+                      summary: "Token expiring in 45m"
+                      action: "login"
+                  - id: "ghi789"
+                    name: "filesystem"
+                    protocol: "stdio"
+                    enabled: true
+                    connected: false
+                    last_error: "connection refused"
+                    health:
+                      level: "unhealthy"
+                      admin_state: "enabled"
+                      summary: "Connection refused"
+                      action: "restart"
+                  - id: "jkl012"
+                    name: "new-server"
+                    protocol: "http"
+                    enabled: true
+                    quarantined: true
+                    health:
+                      level: "healthy"
+                      admin_state: "quarantined"
+                      summary: "Quarantined for review"
+                      action: "approve"
+                stats:
+                  total_servers: 4
+                  connected_servers: 2
+                  quarantined_servers: 1
+
+# MCP Protocol Changes (documentation only - not OpenAPI)
+# The MCP upstream_servers tool with operation: list will include the same
+# health field structure in its response for LLM consumption.

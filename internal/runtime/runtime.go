@@ -19,6 +19,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/experiments"
+	"mcpproxy-go/internal/health"
 	"mcpproxy-go/internal/index"
 	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/registries"
@@ -1521,6 +1522,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		var authenticated bool
 		var oauthStatus string // OAuth status: "authenticated", "expired", "error", "none"
 		var tokenExpiresAt time.Time
+		var hasRefreshToken bool
 		if serverStatus.Config != nil {
 			created = serverStatus.Config.Created
 			url = serverStatus.Config.URL
@@ -1568,43 +1570,45 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					zap.Error(err))
 
 				if err == nil && token != nil {
-					authenticated = true
-					tokenExpiresAt = token.ExpiresAt
-					r.logger.Info("OAuth token found for server",
-						zap.String("server", serverStatus.Name),
-						zap.String("server_key", serverKey),
-						zap.Time("expires_at", token.ExpiresAt))
+				authenticated = true
+				tokenExpiresAt = token.ExpiresAt
+				hasRefreshToken = token.RefreshToken != ""
+				r.logger.Info("OAuth token found for server",
+					zap.String("server", serverStatus.Name),
+					zap.String("server_key", serverKey),
+					zap.Time("expires_at", token.ExpiresAt),
+					zap.Bool("has_refresh_token", hasRefreshToken))
 
-					// For autodiscovery servers (no explicit OAuth config), create minimal oauthConfig
-					if oauthConfig == nil {
-						oauthConfig = map[string]interface{}{
-							"autodiscovery": true,
-						}
-					}
-
-					// Add token expiration info to oauth config
-					if !token.ExpiresAt.IsZero() {
-						oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
-						// Check if token is expired
-						isValid := time.Now().Before(token.ExpiresAt)
-						oauthConfig["token_valid"] = isValid
-						if isValid {
-							oauthStatus = string(oauth.OAuthStatusAuthenticated)
-						} else {
-							oauthStatus = string(oauth.OAuthStatusExpired)
-						}
-					} else {
-						// No expiration means token is valid indefinitely
-						oauthConfig["token_valid"] = true
-						oauthStatus = string(oauth.OAuthStatusAuthenticated)
-					}
-				} else {
-					// No token found - check if OAuth config exists to determine status
-					if oauthConfig != nil {
-						oauthStatus = string(oauth.OAuthStatusNone)
+				// For autodiscovery servers (no explicit OAuth config), create minimal oauthConfig
+				if oauthConfig == nil {
+					oauthConfig = map[string]interface{}{
+						"autodiscovery": true,
 					}
 				}
+
+				// Add token expiration info to oauth config
+				if !token.ExpiresAt.IsZero() {
+					oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
+					// Check if token is expired
+					isValid := time.Now().Before(token.ExpiresAt)
+					oauthConfig["token_valid"] = isValid
+					if isValid {
+						oauthStatus = string(oauth.OAuthStatusAuthenticated)
+					} else {
+						oauthStatus = string(oauth.OAuthStatusExpired)
+					}
+				} else {
+					// No expiration means token is valid indefinitely
+					oauthConfig["token_valid"] = true
+					oauthStatus = string(oauth.OAuthStatusAuthenticated)
+				}
+			} else {
+				// No token found - check if OAuth config exists to determine status
+				if oauthConfig != nil {
+					oauthStatus = string(oauth.OAuthStatusNone)
+				}
 			}
+		}
 		}
 
 		// Check for OAuth error in last_error
@@ -1651,6 +1655,31 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			}
 		}
 		serverMap["user_logged_out"] = userLoggedOut
+
+		// Calculate unified health status
+		healthConfig := health.DefaultHealthConfig()
+		if r.cfg != nil && r.cfg.OAuthExpiryWarningHours > 0 {
+			healthConfig.ExpiryWarningDuration = time.Duration(r.cfg.OAuthExpiryWarningHours * float64(time.Hour))
+		}
+
+		healthInput := health.HealthCalculatorInput{
+			Name:            serverStatus.Name,
+			Enabled:         serverStatus.Enabled,
+			Quarantined:     serverStatus.Quarantined,
+			State:           serverStatus.State,
+			Connected:       connected,
+			LastError:       serverStatus.LastError,
+			OAuthRequired:   oauthConfig != nil,
+			OAuthStatus:     oauthStatus,
+			HasRefreshToken: hasRefreshToken,
+			UserLoggedOut:   userLoggedOut,
+			ToolCount:       serverStatus.ToolCount,
+		}
+		if !tokenExpiresAt.IsZero() {
+			healthInput.TokenExpiresAt = &tokenExpiresAt
+		}
+
+		serverMap["health"] = health.CalculateHealth(healthInput, healthConfig)
 
 		result = append(result, serverMap)
 	}

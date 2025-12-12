@@ -177,13 +177,35 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 	// Convert config servers to output format
 	servers := make([]map[string]interface{}, len(globalConfig.Servers))
 	for i, srv := range globalConfig.Servers {
+		// Create health status for config-only mode
+		healthLevel := "unknown"
+		healthAdminState := "enabled"
+		healthSummary := "Daemon not running"
+		healthAction := ""
+
+		if !srv.Enabled {
+			healthAdminState = "disabled"
+			healthSummary = "Disabled"
+			healthAction = "enable"
+		} else if srv.Quarantined {
+			healthAdminState = "quarantined"
+			healthSummary = "Quarantined for review"
+			healthAction = "approve"
+		}
+
 		servers[i] = map[string]interface{}{
 			"name":       srv.Name,
 			"enabled":    srv.Enabled,
 			"protocol":   srv.Protocol,
 			"connected":  false,
 			"tool_count": 0,
-			"status":     "unknown (daemon not running)",
+			"status":     healthSummary,
+			"health": map[string]interface{}{
+				"level":       healthLevel,
+				"admin_state": healthAdminState,
+				"summary":     healthSummary,
+				"action":      healthAction,
+			},
 		}
 	}
 
@@ -206,73 +228,65 @@ func outputServers(servers []map[string]interface{}) error {
 		}
 		fmt.Println(string(output))
 	case "table", "":
-		// Table format (default) with OAuth token validity column
-		fmt.Printf("%-25s %-10s %-10s %-12s %-10s %-20s %s\n",
-			"NAME", "ENABLED", "PROTOCOL", "CONNECTED", "TOOLS", "OAUTH TOKEN", "STATUS")
-		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		// Table format (default) with unified health status
+		fmt.Printf("%-4s %-25s %-10s %-10s %-30s %s\n",
+			"", "NAME", "PROTOCOL", "TOOLS", "STATUS", "ACTION")
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 		for _, srv := range servers {
 			name := getStringField(srv, "name")
-			enabled := getBoolField(srv, "enabled")
 			protocol := getStringField(srv, "protocol")
-			connected := getBoolField(srv, "connected")
 			toolCount := getIntField(srv, "tool_count")
-			status := getStringField(srv, "status")
 
-			enabledStr := "no"
-			if enabled {
-				enabledStr = "yes"
+			// Extract unified health status
+			healthData, _ := srv["health"].(map[string]interface{})
+			healthLevel := "unknown"
+			healthAdminState := "enabled"
+			healthSummary := getStringField(srv, "status") // fallback to old status
+			healthAction := ""
+
+			if healthData != nil {
+				healthLevel = getStringField(healthData, "level")
+				healthAdminState = getStringField(healthData, "admin_state")
+				healthSummary = getStringField(healthData, "summary")
+				healthAction = getStringField(healthData, "action")
 			}
 
-			connectedStr := "no"
-			if connected {
-				connectedStr = "yes"
-			}
-
-			// Extract OAuth token validity info
-			oauthStatus := "-"
-			oauth, _ := srv["oauth"].(map[string]interface{})
-			authenticated, _ := srv["authenticated"].(bool)
-			lastError, _ := srv["last_error"].(string)
-
-			// Check if this is an OAuth-related server
-			isOAuthServer := (oauth != nil) ||
-				containsIgnoreCase(lastError, "oauth") ||
-				authenticated
-
-			if isOAuthServer {
-				if oauth != nil {
-					if tokenExpiresAt, ok := oauth["token_expires_at"].(string); ok && tokenExpiresAt != "" {
-						if expiryTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
-							timeUntilExpiry := time.Until(expiryTime)
-							if timeUntilExpiry > 0 {
-								oauthStatus = formatDurationShort(timeUntilExpiry)
-							} else {
-								oauthStatus = "⚠️  EXPIRED"
-							}
-						}
-					} else if tokenValid, ok := oauth["token_valid"].(bool); ok {
-						if tokenValid {
-							oauthStatus = "✅ Valid"
-						} else {
-							oauthStatus = "⚠️  Invalid"
-						}
-					} else if authenticated {
-						oauthStatus = "✅ Active"
-					} else {
-						oauthStatus = "⏳ Pending"
-					}
-				} else if authenticated {
-					// OAuth server without config (DCR) but authenticated
-					oauthStatus = "✅ Active"
-				} else {
-					// OAuth required but not authenticated yet
-					oauthStatus = "⏳ Pending"
+			// Status emoji based on health level and admin state
+			statusEmoji := "⚪" // unknown
+			switch healthAdminState {
+			case "disabled":
+				statusEmoji = "⏸️ " // paused
+			case "quarantined":
+				statusEmoji = "🔒" // locked
+			default:
+				switch healthLevel {
+				case "healthy":
+					statusEmoji = "✅"
+				case "degraded":
+					statusEmoji = "⚠️ "
+				case "unhealthy":
+					statusEmoji = "❌"
 				}
 			}
 
-			fmt.Printf("%-25s %-10s %-10s %-12s %-10d %-20s %s\n",
-				name, enabledStr, protocol, connectedStr, toolCount, oauthStatus, status)
+			// Format action as CLI command hint
+			actionHint := "-"
+			switch healthAction {
+			case "login":
+				actionHint = fmt.Sprintf("auth login --server=%s", name)
+			case "restart":
+				actionHint = fmt.Sprintf("upstream restart %s", name)
+			case "enable":
+				actionHint = fmt.Sprintf("upstream enable %s", name)
+			case "approve":
+				actionHint = "Approve in Web UI"
+			case "view_logs":
+				actionHint = fmt.Sprintf("upstream logs %s", name)
+			}
+
+			fmt.Printf("%-4s %-25s %-10s %-10d %-30s %s\n",
+				statusEmoji, name, protocol, toolCount, healthSummary, actionHint)
 		}
 	default:
 		return fmt.Errorf("unknown output format: %s", upstreamOutputFormat)
@@ -685,25 +699,4 @@ func runUpstreamBulkAction(action string, force bool) error {
 	}
 
 	return nil
-}
-
-// formatDurationShort formats a duration into a short human-readable string for table display
-func formatDurationShort(d time.Duration) string {
-	if d < 0 {
-		return "expired"
-	}
-
-	days := int(d.Hours() / 24)
-	hours := int(d.Hours()) % 24
-
-	if days > 30 {
-		return fmt.Sprintf("%dd", days)
-	} else if days > 0 {
-		return fmt.Sprintf("%dd %dh", days, hours)
-	} else if hours > 0 {
-		return fmt.Sprintf("%dh", hours)
-	} else {
-		minutes := int(d.Minutes())
-		return fmt.Sprintf("%dm", minutes)
-	}
 }
