@@ -2,10 +2,12 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -76,9 +78,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize management service and set it on runtime
 	secretResolver := secret.NewResolver()
 	mgmtService := management.NewService(
-		rt,            // RuntimeOperations
-		cfg,           // Config
-		rt,            // EventEmitter
+		rt,             // RuntimeOperations
+		cfg,            // Config
+		rt,             // EventEmitter
 		secretResolver, // SecretResolver
 		logger.Sugar(),
 	)
@@ -1009,6 +1011,118 @@ func resolveDisplayAddress(actual, requested string) string {
 	return net.JoinHostPort(host, port)
 }
 
+// promptsShimHandler wraps an MCP handler to inject prompts capability support.
+// This is a workaround for Visual Studio which requires the "prompts" capability,
+// but the mcp-go library does not currently support it.
+// TODO: Remove this shim when mcp-go adds native prompts support.
+func (s *Server) promptsShimHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only intercept POST requests (JSON-RPC)
+		if r.Method != http.MethodPost {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Read the request body to inspect the JSON-RPC method
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			s.logger.Error("promptsShimHandler: failed to read request body", zap.Error(err))
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Restore the body for downstream handlers
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+		// Parse the JSON-RPC request to check the method
+		var rpcRequest struct {
+			JSONRPC string          `json:"jsonrpc"`
+			Method  string          `json:"method"`
+			ID      json.RawMessage `json:"id"`
+		}
+		if err := json.Unmarshal(bodyBytes, &rpcRequest); err != nil {
+			// Not valid JSON-RPC, pass through
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Handle prompts/list directly - return empty prompts list
+		if rpcRequest.Method == "prompts/list" {
+			s.logger.Debug("promptsShimHandler: handling prompts/list request")
+			w.Header().Set("Content-Type", "application/json")
+			response := fmt.Sprintf(`{"jsonrpc":"2.0","result":{"prompts":[]},"id":%s}`, rpcRequest.ID)
+			w.Write([]byte(response))
+			return
+		}
+
+		// For initialize requests, we need to intercept the response and inject prompts capability
+		if rpcRequest.Method == "initialize" {
+			s.logger.Debug("promptsShimHandler: intercepting initialize response to inject prompts capability")
+
+			// Create a response recorder to capture the response
+			recorder := &responseRecorder{
+				ResponseWriter: w,
+				body:           &bytes.Buffer{},
+				statusCode:     http.StatusOK,
+			}
+
+			// Call the next handler
+			next.ServeHTTP(recorder, r)
+
+			// Parse and modify the response to inject prompts capability
+			var rpcResponse map[string]interface{}
+			if err := json.Unmarshal(recorder.body.Bytes(), &rpcResponse); err != nil {
+				s.logger.Debug("promptsShimHandler: failed to parse initialize response, passing through", zap.Error(err))
+				// Write original response
+				w.WriteHeader(recorder.statusCode)
+				w.Write(recorder.body.Bytes())
+				return
+			}
+
+			// Inject prompts capability into the result
+			if result, ok := rpcResponse["result"].(map[string]interface{}); ok {
+				if capabilities, ok := result["capabilities"].(map[string]interface{}); ok {
+					capabilities["prompts"] = map[string]interface{}{
+						"listChanged": false,
+					}
+					s.logger.Debug("promptsShimHandler: injected prompts capability into initialize response")
+				}
+			}
+
+			// Write the modified response
+			modifiedResponse, err := json.Marshal(rpcResponse)
+			if err != nil {
+				s.logger.Error("promptsShimHandler: failed to marshal modified response", zap.Error(err))
+				w.WriteHeader(recorder.statusCode)
+				w.Write(recorder.body.Bytes())
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(recorder.statusCode)
+			w.Write(modifiedResponse)
+			return
+		}
+
+		// Pass through all other requests
+		next.ServeHTTP(w, r)
+	})
+}
+
+// responseRecorder captures HTTP response for modification
+type responseRecorder struct {
+	http.ResponseWriter
+	body       *bytes.Buffer
+	statusCode int
+}
+
+func (r *responseRecorder) WriteHeader(code int) {
+	r.statusCode = code
+}
+
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	return r.body.Write(b)
+}
+
 // withHSTS adds HTTP Strict Transport Security headers
 func withHSTS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1119,12 +1233,14 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	}
 
 	// Standard MCP endpoint according to the specification
-	mux.Handle("/mcp", loggingHandler(streamableServer))
-	mux.Handle("/mcp/", loggingHandler(streamableServer)) // Handle trailing slash
+	// Wrap with promptsShimHandler to inject prompts capability for Visual Studio compatibility
+	mcpHandler := s.promptsShimHandler(streamableServer)
+	mux.Handle("/mcp", loggingHandler(mcpHandler))
+	mux.Handle("/mcp/", loggingHandler(mcpHandler)) // Handle trailing slash
 
 	// Legacy endpoints for backward compatibility
-	mux.Handle("/v1/tool_code", loggingHandler(streamableServer))
-	mux.Handle("/v1/tool-code", loggingHandler(streamableServer)) // Alias for python client
+	mux.Handle("/v1/tool_code", loggingHandler(mcpHandler))
+	mux.Handle("/v1/tool-code", loggingHandler(mcpHandler)) // Alias for python client
 
 	// API v1 endpoints with chi router for REST API and SSE
 	// TODO: Add observability manager integration
