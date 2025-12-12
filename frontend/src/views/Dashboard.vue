@@ -32,6 +32,53 @@
       </button>
     </div>
 
+    <!-- Servers Needing Attention Banner (using unified health status) -->
+    <div
+      v-if="serversNeedingAttention.length > 0"
+      class="alert alert-warning"
+    >
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+      </svg>
+      <div class="flex-1">
+        <h3 class="font-bold">{{ serversNeedingAttention.length }} server{{ serversNeedingAttention.length !== 1 ? 's' : '' }} need{{ serversNeedingAttention.length === 1 ? 's' : '' }} attention</h3>
+        <div class="text-sm space-y-1 mt-1">
+          <div v-for="server in serversNeedingAttention.slice(0, 3)" :key="server.name" class="flex items-center gap-2">
+            <span :class="server.health?.level === 'unhealthy' ? 'text-error' : 'text-warning'">●</span>
+            <span class="font-medium">{{ server.name }}</span>
+            <span class="opacity-70">{{ server.health?.summary }}</span>
+            <button
+              v-if="server.health?.action === 'login'"
+              @click="triggerServerAction(server.name, 'oauth_login')"
+              class="btn btn-xs btn-primary"
+            >
+              Login
+            </button>
+            <button
+              v-if="server.health?.action === 'restart'"
+              @click="triggerServerAction(server.name, 'restart')"
+              class="btn btn-xs btn-primary"
+            >
+              Restart
+            </button>
+            <button
+              v-if="server.health?.action === 'enable'"
+              @click="triggerServerAction(server.name, 'enable')"
+              class="btn btn-xs btn-primary"
+            >
+              Enable
+            </button>
+          </div>
+          <div v-if="serversNeedingAttention.length > 3" class="text-xs opacity-60">
+            ... and {{ serversNeedingAttention.length - 3 }} more
+          </div>
+        </div>
+      </div>
+      <router-link to="/servers" class="btn btn-sm">
+        View All Servers
+      </router-link>
+    </div>
+
     <!-- Token Savings and Distribution -->
     <div v-if="tokenSavingsData" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <!-- Token Savings -->
@@ -412,6 +459,18 @@ const diagnosticsBadgeClass = computed(() => {
   return 'badge-info'
 })
 
+// Servers needing attention (unhealthy or degraded health level, excluding admin states)
+const serversNeedingAttention = computed(() => {
+  return serversStore.servers.filter(server => {
+    // Skip servers with admin states (disabled, quarantined)
+    if (server.health?.admin_state === 'disabled' || server.health?.admin_state === 'quarantined') {
+      return false
+    }
+    // Include servers with unhealthy or degraded health level
+    return server.health?.level === 'unhealthy' || server.health?.level === 'degraded'
+  })
+})
+
 const lastUpdateTime = computed(() => {
   if (!systemStore.status?.timestamp) return 'Never'
 
@@ -475,6 +534,51 @@ const triggerOAuthLogin = async (server: string) => {
       type: 'error',
       title: 'OAuth Login Failed',
       message: `Failed to initiate OAuth login: ${error instanceof Error ? error.message : 'Unknown error'}`
+    })
+  }
+}
+
+// Trigger server action based on health.action
+const triggerServerAction = async (serverName: string, action: string) => {
+  try {
+    switch (action) {
+      case 'oauth_login':
+        await serversStore.triggerOAuthLogin(serverName)
+        systemStore.addToast({
+          type: 'success',
+          title: 'OAuth Login',
+          message: `OAuth login initiated for ${serverName}`
+        })
+        break
+      case 'restart':
+        await serversStore.restartServer(serverName)
+        systemStore.addToast({
+          type: 'success',
+          title: 'Server Restarted',
+          message: `${serverName} is restarting`
+        })
+        break
+      case 'enable':
+        await serversStore.enableServer(serverName)
+        systemStore.addToast({
+          type: 'success',
+          title: 'Server Enabled',
+          message: `${serverName} has been enabled`
+        })
+        break
+      default:
+        console.warn(`Unknown action: ${action}`)
+    }
+    // Refresh after action
+    setTimeout(() => {
+      loadDiagnostics()
+      serversStore.fetchServers()
+    }, 1000)
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Action Failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
     })
   }
 }

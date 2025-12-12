@@ -10,16 +10,14 @@
           </p>
         </div>
 
-        <!-- Status indicator -->
+        <!-- Status indicator using unified health status -->
         <div
           :class="[
             'badge badge-sm flex-shrink-0',
-            server.connected ? 'badge-success' :
-            server.connecting ? 'badge-warning' :
-            'badge-error'
+            statusBadgeClass
           ]"
         >
-          {{ server.connected ? 'Connected' : server.connecting ? 'Connecting' : 'Disconnected' }}
+          {{ statusText }}
         </div>
       </div>
 
@@ -65,39 +63,58 @@
         <span class="text-xs">Server is quarantined</span>
       </div>
 
-      <!-- Actions -->
+      <!-- Actions - uses unified health.action when available -->
       <div class="card-actions justify-end space-x-2">
+        <!-- Primary action button based on health.action -->
         <button
-          v-if="server.quarantined"
+          v-if="healthAction === 'approve'"
           @click="unquarantine"
           :disabled="loading"
           class="btn btn-sm btn-warning"
         >
           <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-          Unquarantine
+          Approve
         </button>
 
-        <!-- Restart button only for stdio servers (HTTP servers use Login/Reconnect) -->
         <button
-          v-if="!server.connected && server.enabled && !isHttpProtocol"
-          @click="restart"
+          v-if="healthAction === 'enable'"
+          @click="enableServer"
           :disabled="loading"
-          class="btn btn-sm btn-outline"
+          class="btn btn-sm btn-primary"
         >
           <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-          Restart
+          Enable
         </button>
 
         <button
-          v-if="needsOAuth"
+          v-if="healthAction === 'login'"
           @click="triggerOAuth"
           :disabled="loading"
-          class="btn btn-sm btn-outline"
+          class="btn btn-sm btn-primary"
         >
           <span v-if="loading" class="loading loading-spinner loading-xs"></span>
           Login
         </button>
 
+        <button
+          v-if="healthAction === 'restart'"
+          @click="restart"
+          :disabled="loading"
+          class="btn btn-sm btn-primary"
+        >
+          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
+          Restart
+        </button>
+
+        <router-link
+          v-if="healthAction === 'view_logs'"
+          :to="`/servers/${server.name}?tab=logs`"
+          class="btn btn-sm btn-primary"
+        >
+          View Logs
+        </router-link>
+
+        <!-- Logout button (only when connected with OAuth) -->
         <button
           v-if="canLogout"
           @click="triggerLogout"
@@ -176,6 +193,52 @@ const showDeleteConfirmation = ref(false)
 
 const isHttpProtocol = computed(() => {
   return props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
+})
+
+// Unified health status computed properties
+const statusBadgeClass = computed(() => {
+  const health = props.server.health
+  if (health) {
+    // Use admin_state for disabled/quarantined, otherwise use health level
+    switch (health.admin_state) {
+      case 'disabled':
+        return 'badge-neutral' // gray
+      case 'quarantined':
+        return 'badge-secondary' // purple-ish
+      default:
+        // Use health level
+        switch (health.level) {
+          case 'healthy':
+            return 'badge-success'
+          case 'degraded':
+            return 'badge-warning'
+          case 'unhealthy':
+            return 'badge-error'
+          default:
+            return 'badge-ghost'
+        }
+    }
+  }
+  // Fallback to legacy logic
+  if (props.server.connected) return 'badge-success'
+  if (props.server.connecting) return 'badge-warning'
+  return 'badge-error'
+})
+
+const statusText = computed(() => {
+  const health = props.server.health
+  if (health) {
+    return health.summary || health.level
+  }
+  // Fallback to legacy logic
+  if (props.server.connected) return 'Connected'
+  if (props.server.connecting) return 'Connecting'
+  return 'Disconnected'
+})
+
+// Suggested action from health status
+const healthAction = computed(() => {
+  return props.server.health?.action || ''
 })
 
 const needsOAuth = computed(() => {
@@ -298,6 +361,26 @@ async function toggleEnabled() {
     systemStore.addToast({
       type: 'error',
       title: 'Operation Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } finally {
+    loading.value = false
+  }
+}
+
+async function enableServer() {
+  loading.value = true
+  try {
+    await serversStore.enableServer(props.server.name)
+    systemStore.addToast({
+      type: 'success',
+      title: 'Server Enabled',
+      message: `${props.server.name} has been enabled`,
+    })
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Enable Failed',
       message: error instanceof Error ? error.message : 'Unknown error',
     })
   } finally {

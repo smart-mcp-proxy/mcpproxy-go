@@ -272,6 +272,29 @@ components:
         total:
           type: integer
       type: object
+    contracts.HealthStatus:
+      description: Unified health status calculated by the backend
+      properties:
+        action:
+          description: 'Action is the suggested fix action: "login", "restart", "enable",
+            "approve", "view_logs", or "" (none)'
+          type: string
+        admin_state:
+          description: 'AdminState indicates the admin state: "enabled", "disabled",
+            or "quarantined"'
+          type: string
+        detail:
+          description: Detail is an optional longer explanation of the status
+          type: string
+        level:
+          description: 'Level indicates the health level: "healthy", "degraded", or
+            "unhealthy"'
+          type: string
+        summary:
+          description: Summary is a human-readable status message (e.g., "Connected
+            (5 tools)")
+          type: string
+      type: object
     contracts.IsolationConfig:
       properties:
         cpu_limit:
@@ -558,6 +581,8 @@ components:
           additionalProperties:
             type: string
           type: object
+        health:
+          $ref: '#/components/schemas/contracts.HealthStatus'
         id:
           type: string
         isolation:
@@ -604,46 +629,6 @@ components:
           type: boolean
         working_dir:
           type: string
-        health:
-          $ref: '#/components/schemas/contracts.HealthStatus'
-      type: object
-    contracts.HealthStatus:
-      description: Unified health status calculated by the backend
-      properties:
-        level:
-          description: 'Health level: "healthy", "degraded", or "unhealthy"'
-          type: string
-          enum:
-            - healthy
-            - degraded
-            - unhealthy
-        admin_state:
-          description: 'Admin state: "enabled", "disabled", or "quarantined"'
-          type: string
-          enum:
-            - enabled
-            - disabled
-            - quarantined
-        summary:
-          description: Human-readable status message (max 100 chars)
-          type: string
-        detail:
-          description: Optional longer explanation of the status
-          type: string
-        action:
-          description: 'Suggested fix action: "login", "restart", "enable", "approve", "view_logs", or "" (none)'
-          type: string
-          enum:
-            - ""
-            - login
-            - restart
-            - enable
-            - approve
-            - view_logs
-      required:
-        - level
-        - admin_state
-        - summary
       type: object
     contracts.ServerActionResponse:
       properties:

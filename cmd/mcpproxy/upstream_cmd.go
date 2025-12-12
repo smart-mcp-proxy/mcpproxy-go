@@ -700,24 +700,3 @@ func runUpstreamBulkAction(action string, force bool) error {
 
 	return nil
 }
-
-// formatDurationShort formats a duration into a short human-readable string for table display
-func formatDurationShort(d time.Duration) string {
-	if d < 0 {
-		return "expired"
-	}
-
-	days := int(d.Hours() / 24)
-	hours := int(d.Hours()) % 24
-
-	if days > 30 {
-		return fmt.Sprintf("%dd", days)
-	} else if days > 0 {
-		return fmt.Sprintf("%dd %dh", days, hours)
-	} else if hours > 0 {
-		return fmt.Sprintf("%dh", hours)
-	} else {
-		minutes := int(d.Minutes())
-		return fmt.Sprintf("%dm", minutes)
-	}
-}

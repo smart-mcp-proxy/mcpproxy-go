@@ -295,6 +295,7 @@ type MenuManager struct {
 	serverActionItems     map[string]*systray.MenuItem // server name -> enable/disable action menu item
 	serverQuarantineItems map[string]*systray.MenuItem // server name -> quarantine action menu item
 	serverOAuthItems      map[string]*systray.MenuItem // server name -> OAuth login menu item
+	serverRestartItems    map[string]*systray.MenuItem // server name -> restart action menu item
 	quarantineInfoEmpty   *systray.MenuItem            // "No servers" info item
 	quarantineInfoHelp    *systray.MenuItem            // "Click to unquarantine" help item
 
@@ -317,6 +318,7 @@ func NewMenuManager(upstreamMenu, quarantineMenu *systray.MenuItem, logger *zap.
 		serverActionItems:     make(map[string]*systray.MenuItem),
 		serverQuarantineItems: make(map[string]*systray.MenuItem),
 		serverOAuthItems:      make(map[string]*systray.MenuItem),
+		serverRestartItems:    make(map[string]*systray.MenuItem),
 	}
 }
 
@@ -396,6 +398,7 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 		m.serverActionItems = make(map[string]*systray.MenuItem)
 		m.serverQuarantineItems = make(map[string]*systray.MenuItem)
 		m.serverOAuthItems = make(map[string]*systray.MenuItem)
+		m.serverRestartItems = make(map[string]*systray.MenuItem)
 
 		// Create all servers in sorted order
 		for _, serverName := range currentServerNames {
@@ -625,14 +628,10 @@ func (m *MenuManager) ForceRefresh() {
 }
 
 // getServerStatusDisplay returns display text, tooltip, and icon data for a server
+// Uses the unified health status from the backend when available
 func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (displayText, tooltip string, iconData []byte) {
 	serverName, _ := server["name"].(string)
-	enabled, _ := server["enabled"].(bool)
-	connected, _ := server["connected"].(bool)
-	quarantined, _ := server["quarantined"].(bool)
-	toolCount, _ := server["tool_count"].(int)
 	lastError, _ := server["last_error"].(string)
-	statusValue, _ := server["status"].(string)
 	shouldRetry, _ := server["should_retry"].(bool)
 
 	var retryCount int
@@ -648,49 +647,98 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	var statusText string
 	var iconPath string
 
-	if quarantined {
-		statusIcon = "🔒"
-		statusText = "quarantined"
-		iconPath = iconLocked
-	} else if !enabled {
-		statusIcon = "⏸️"
-		statusText = "disabled"
-		iconPath = iconPaused
-	} else if st := strings.ToLower(statusValue); st != "" {
-		switch st {
-		case "ready", "connected":
-			statusIcon = "🟢"
-			statusText = fmt.Sprintf("connected (%d tools)", toolCount)
-			iconPath = iconConnected
-		case "connecting":
-			statusIcon = "🟠"
-			statusText = "connecting"
-			iconPath = iconDisconnected
-		case "pending auth":
-			statusIcon = "⏳"
-			statusText = "pending auth"
-			iconPath = iconDisconnected // Use disconnected icon for now since we don't have a specific auth icon
-		case "error", "disconnected":
-			statusIcon = "🔴"
-			statusText = "connection error"
-			iconPath = iconDisconnected
+	// Extract unified health status from server data
+	healthData, hasHealth := server["health"].(map[string]interface{})
+	if hasHealth {
+		// Use unified health status from backend
+		healthLevel, _ := healthData["level"].(string)
+		healthAdminState, _ := healthData["admin_state"].(string)
+		healthSummary, _ := healthData["summary"].(string)
+
+		// Determine status icon based on admin_state first, then health level
+		switch healthAdminState {
 		case "disabled":
+			statusIcon = "⏸️"
+			iconPath = iconPaused
+		case "quarantined":
+			statusIcon = "🔒"
+			iconPath = iconLocked
+		default:
+			// Use health level for enabled servers
+			switch healthLevel {
+			case "healthy":
+				statusIcon = "🟢"
+				iconPath = iconConnected
+			case "degraded":
+				statusIcon = "🟠"
+				iconPath = iconDisconnected
+			case "unhealthy":
+				statusIcon = "🔴"
+				iconPath = iconDisconnected
+			default:
+				statusIcon = "⚪"
+				iconPath = iconDisconnected
+			}
+		}
+
+		// Use health.summary for status text
+		if healthSummary != "" {
+			statusText = healthSummary
+		} else {
+			statusText = healthLevel
+		}
+	} else {
+		// Fallback to legacy logic if health field not present
+		enabled, _ := server["enabled"].(bool)
+		connected, _ := server["connected"].(bool)
+		quarantined, _ := server["quarantined"].(bool)
+		toolCount, _ := server["tool_count"].(int)
+		statusValue, _ := server["status"].(string)
+
+		if quarantined {
+			statusIcon = "🔒"
+			statusText = "quarantined"
+			iconPath = iconLocked
+		} else if !enabled {
 			statusIcon = "⏸️"
 			statusText = "disabled"
 			iconPath = iconPaused
-		default:
+		} else if st := strings.ToLower(statusValue); st != "" {
+			switch st {
+			case "ready", "connected":
+				statusIcon = "🟢"
+				statusText = fmt.Sprintf("connected (%d tools)", toolCount)
+				iconPath = iconConnected
+			case "connecting":
+				statusIcon = "🟠"
+				statusText = "connecting"
+				iconPath = iconDisconnected
+			case "pending auth":
+				statusIcon = "⏳"
+				statusText = "pending auth"
+				iconPath = iconDisconnected
+			case "error", "disconnected":
+				statusIcon = "🔴"
+				statusText = "connection error"
+				iconPath = iconDisconnected
+			case "disabled":
+				statusIcon = "⏸️"
+				statusText = "disabled"
+				iconPath = iconPaused
+			default:
+				statusIcon = "🔴"
+				statusText = st
+				iconPath = iconDisconnected
+			}
+		} else if connected {
+			statusIcon = "🟢"
+			statusText = fmt.Sprintf("connected (%d tools)", toolCount)
+			iconPath = iconConnected
+		} else {
 			statusIcon = "🔴"
-			statusText = st
+			statusText = "disconnected"
 			iconPath = iconDisconnected
 		}
-	} else if connected {
-		statusIcon = "🟢"
-		statusText = fmt.Sprintf("connected (%d tools)", toolCount)
-		iconPath = iconConnected
-	} else {
-		statusIcon = "🔴"
-		statusText = "disconnected"
-		iconPath = iconDisconnected
 	}
 
 	// On Windows, use icons instead of emoji for better visual appearance
@@ -705,8 +753,11 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	var tooltipLines []string
 	tooltipLines = append(tooltipLines, fmt.Sprintf("%s - %s", serverName, statusText))
 
-	if statusValue != "" && !strings.EqualFold(statusValue, statusText) {
-		tooltipLines = append(tooltipLines, fmt.Sprintf("Status: %s", statusValue))
+	// Add health detail if available
+	if hasHealth {
+		if detail, ok := healthData["detail"].(string); ok && detail != "" {
+			tooltipLines = append(tooltipLines, fmt.Sprintf("Detail: %s", detail))
+		}
 	}
 
 	if lastError != "" {
@@ -773,7 +824,8 @@ func (m *MenuManager) serverSupportsOAuth(server map[string]interface{}) bool {
 	return true
 }
 
-// createServerActionSubmenus creates action submenus for a server (enable/disable, quarantine, OAuth login)
+// createServerActionSubmenus creates action submenus for a server (enable/disable, quarantine, OAuth login, restart)
+// Uses health.action to determine which actions are most relevant
 func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuItem, server map[string]interface{}) {
 	serverName, _ := server["name"].(string)
 	if serverName == "" {
@@ -782,6 +834,12 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 
 	enabled, _ := server["enabled"].(bool)
 	quarantined, _ := server["quarantined"].(bool)
+
+	// Get health.action if available
+	healthAction := ""
+	if healthData, ok := server["health"].(map[string]interface{}); ok {
+		healthAction, _ = healthData["action"].(string)
+	}
 
 	// Enable/Disable action
 	var enableText string
@@ -793,9 +851,29 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
 	m.serverActionItems[serverName] = enableItem
 
+	// Restart action (for stdio servers when health.action is "restart" or server has errors)
+	if enabled && !quarantined {
+		restartItem := serverMenuItem.AddSubMenuItem("🔄 Restart", fmt.Sprintf("Restart server %s", serverName))
+		m.serverRestartItems[serverName] = restartItem
+
+		// Set up restart click handler
+		go func(name string, item *systray.MenuItem) {
+			for range item.ClickedCh {
+				if m.onServerAction != nil {
+					go m.onServerAction(name, "restart")
+				}
+			}
+		}(serverName, restartItem)
+	}
+
 	// OAuth Login action (only for servers that support OAuth)
 	if m.serverSupportsOAuth(server) && !quarantined {
-		oauthItem := serverMenuItem.AddSubMenuItem("🔐 OAuth Login", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+		// Highlight login if health.action suggests it
+		loginLabel := "🔐 OAuth Login"
+		if healthAction == "login" {
+			loginLabel = "⚠️ Login Required"
+		}
+		oauthItem := serverMenuItem.AddSubMenuItem(loginLabel, fmt.Sprintf("Authenticate with %s using OAuth", serverName))
 		m.serverOAuthItems[serverName] = oauthItem
 
 		// Set up OAuth login click handler

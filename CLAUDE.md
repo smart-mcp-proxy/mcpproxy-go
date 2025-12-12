@@ -522,6 +522,41 @@ open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
 - **REST API** requires authentication - API key is always enforced (auto-generated if not provided)
 - **Secure by default**: Empty or missing API keys trigger automatic generation and persistence to config
 
+### Unified Health Status
+
+All server responses include a `health` field that provides consistent status information across all interfaces (CLI, web UI, tray, MCP tools):
+
+```json
+{
+  "health": {
+    "level": "healthy|degraded|unhealthy",
+    "admin_state": "enabled|disabled|quarantined",
+    "summary": "Human-readable status summary",
+    "detail": "Additional context about the status",
+    "action": "login|restart|enable|approve|view_logs|"
+  }
+}
+```
+
+**Health Levels**:
+- `healthy`: Server is connected and functioning normally
+- `degraded`: Server has warnings (e.g., OAuth token expiring soon)
+- `unhealthy`: Server has errors or is not functioning
+
+**Admin States**:
+- `enabled`: Normal operation
+- `disabled`: User disabled the server
+- `quarantined`: Server pending security approval
+
+**Actions**: Suggested remediation action for the current state. Empty when no action is needed.
+
+**Configuration**: Token expiry warning threshold can be configured:
+```json
+{
+  "oauth_expiry_warning_hours": 24
+}
+```
+
 ## JavaScript Code Execution
 
 The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES5.1+).

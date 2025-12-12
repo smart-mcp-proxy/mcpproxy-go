@@ -58,9 +58,9 @@
 
 - [X] T010 [US1] Update CLI upstream list display to use health.level for status emoji in cmd/mcpproxy/upstream_cmd.go
 - [X] T011 [US1] Update CLI upstream list to show health.summary instead of calculating status in cmd/mcpproxy/upstream_cmd.go
-- [ ] T012 [P] [US1] Update tray server menu to use health.level for status indicator in cmd/mcpproxy-tray/
-- [ ] T013 [P] [US1] Update web UI ServerCard.vue to use health.level for badge color in frontend/src/components/ServerCard.vue
-- [ ] T014 [US1] Update web UI ServerCard.vue to display health.summary as status text in frontend/src/components/ServerCard.vue
+- [X] T012 [P] [US1] Update tray server menu to use health.level for status indicator in cmd/mcpproxy-tray/
+- [X] T013 [P] [US1] Update web UI ServerCard.vue to use health.level for badge color in frontend/src/components/ServerCard.vue
+- [X] T014 [US1] Update web UI ServerCard.vue to display health.summary as status text in frontend/src/components/ServerCard.vue
 
 **Checkpoint**: All four interfaces now display the same health level and summary for any given server
 
@@ -76,9 +76,9 @@
 
 - [X] T015 [US2] Add action hints column to CLI upstream list in cmd/mcpproxy/upstream_cmd.go
 - [X] T016 [US2] Display CLI-appropriate action commands (e.g., "auth login --server=X") based on health.action in cmd/mcpproxy/upstream_cmd.go
-- [ ] T017 [P] [US2] Add clickable action buttons to tray menu based on health.action in cmd/mcpproxy-tray/
-- [ ] T018 [P] [US2] Add action button component to ServerCard.vue based on health.action in frontend/src/components/ServerCard.vue
-- [ ] T019 [US2] Implement action button handlers (login, restart, enable, approve) in frontend/src/components/ServerCard.vue
+- [X] T017 [P] [US2] Add clickable action buttons to tray menu based on health.action in cmd/mcpproxy-tray/
+- [X] T018 [P] [US2] Add action button component to ServerCard.vue based on health.action in frontend/src/components/ServerCard.vue
+- [X] T019 [US2] Implement action button handlers (login, restart, enable, approve) in frontend/src/components/ServerCard.vue
 
 **Checkpoint**: All interfaces show appropriate actionable guidance when servers have issues
 
@@ -92,11 +92,11 @@
 
 ### Implementation for User Story 3
 
-- [ ] T020 [US3] Ensure tray displays degraded status (yellow indicator) for token expiring soon in cmd/mcpproxy-tray/
-- [ ] T021 [US3] Ensure tray displays unhealthy status (red indicator) for expired token in cmd/mcpproxy-tray/
-- [ ] T022 [P] [US3] Ensure web UI ServerCard shows degraded badge for expiring token in frontend/src/components/ServerCard.vue
-- [ ] T023 [P] [US3] Ensure web UI ServerCard shows unhealthy badge for expired token in frontend/src/components/ServerCard.vue
-- [ ] T024 [US3] Add "Token expiring" / "Token expired" message display in web UI in frontend/src/components/ServerCard.vue
+- [X] T020 [US3] Ensure tray displays degraded status (yellow indicator) for token expiring soon in cmd/mcpproxy-tray/
+- [X] T021 [US3] Ensure tray displays unhealthy status (red indicator) for expired token in cmd/mcpproxy-tray/
+- [X] T022 [P] [US3] Ensure web UI ServerCard shows degraded badge for expiring token in frontend/src/components/ServerCard.vue
+- [X] T023 [P] [US3] Ensure web UI ServerCard shows unhealthy badge for expired token in frontend/src/components/ServerCard.vue
+- [X] T024 [US3] Add "Token expiring" / "Token expired" message display in web UI in frontend/src/components/ServerCard.vue
 
 **Checkpoint**: OAuth token status now visible across all interfaces, not just CLI
 
@@ -110,11 +110,11 @@
 
 ### Implementation for User Story 4
 
-- [ ] T025 [US4] Add gray styling for disabled servers in frontend/src/components/ServerCard.vue
-- [ ] T026 [US4] Add purple styling for quarantined servers in frontend/src/components/ServerCard.vue
-- [ ] T027 [P] [US4] Display admin_state badge instead of level badge when server is disabled/quarantined in frontend/src/components/ServerCard.vue
+- [X] T025 [US4] Add gray styling for disabled servers in frontend/src/components/ServerCard.vue
+- [X] T026 [US4] Add purple styling for quarantined servers in frontend/src/components/ServerCard.vue
+- [X] T027 [P] [US4] Display admin_state badge instead of level badge when server is disabled/quarantined in frontend/src/components/ServerCard.vue
 - [X] T028 [P] [US4] Update CLI upstream list to show distinct indicators for disabled/quarantined in cmd/mcpproxy/upstream_cmd.go
-- [ ] T029 [US4] Update tray to show distinct indicators for disabled/quarantined servers in cmd/mcpproxy-tray/
+- [X] T029 [US4] Update tray to show distinct indicators for disabled/quarantined servers in cmd/mcpproxy-tray/
 
 **Checkpoint**: Admin states are visually distinct from health issues in all interfaces
 
@@ -128,10 +128,10 @@
 
 ### Implementation for User Story 5
 
-- [ ] T030 [US5] Add computed property to filter servers needing attention in frontend/src/views/Dashboard.vue
-- [ ] T031 [US5] Create "X servers need attention" banner component in frontend/src/views/Dashboard.vue
-- [ ] T032 [US5] Show quick-fix buttons for each server needing attention in frontend/src/views/Dashboard.vue
-- [ ] T033 [US5] Hide banner when all servers are healthy in frontend/src/views/Dashboard.vue
+- [X] T030 [US5] Add computed property to filter servers needing attention in frontend/src/views/Dashboard.vue
+- [X] T031 [US5] Create "X servers need attention" banner component in frontend/src/views/Dashboard.vue
+- [X] T032 [US5] Show quick-fix buttons for each server needing attention in frontend/src/views/Dashboard.vue
+- [X] T033 [US5] Hide banner when all servers are healthy in frontend/src/views/Dashboard.vue
 
 **Checkpoint**: Dashboard now shows servers needing attention with quick-fix actions
 
@@ -158,13 +158,13 @@
 **Purpose**: Documentation, testing, and cleanup
 
 - [X] T037 [P] Add HealthStatus schema to oas/swagger.yaml
-- [ ] T038 [P] Update CLAUDE.md with new health fields documentation
+- [X] T038 [P] Update CLAUDE.md with new health fields documentation
 - [X] T039 [P] Create unit tests for CalculateHealth() in internal/health/calculator_test.go
 - [X] T039a [P] Add test case verifying FR-016: token with working auto-refresh returns healthy in internal/health/calculator_test.go
-- [ ] T040 Run quickstart.md validation scenarios
-- [ ] T041 Run full test suite (./scripts/run-all-tests.sh)
+- [X] T040 Run quickstart.md validation scenarios
+- [X] T041 Run full test suite (./scripts/run-all-tests.sh) - Pre-existing Docker timeout failures unrelated to health status
 - [X] T042 Run API E2E tests (./scripts/test-api-e2e.sh)
-- [ ] T043 [P] Verify OpenAPI endpoint coverage (./scripts/verify-oas-coverage.sh)
+- [X] T043 [P] Verify OpenAPI endpoint coverage (./scripts/verify-oas-coverage.sh)
 
 ---
 
