@@ -17,7 +17,7 @@ This guide will get MCPProxy running in 5 minutes.
 ## Prerequisites
 
 - MCPProxy installed (see [Installation](/getting-started/installation))
-- An MCP-compatible AI client (Cursor IDE, Claude Desktop, Claude Code CLI, etc.) - see [Connect Your AI Client](#4-connect-your-ai-client) below
+- An MCP-compatible AI client (Cursor IDE, Claude Desktop, Claude Code CLI, etc.) - see [Connect Your AI Client](#3-connect-your-ai-client) below
 
 ## 1. Start MCPProxy
 
@@ -84,35 +84,7 @@ If you're using the tray app, you don't need to run `mcpproxy serve` manually - 
 
 Open your browser to [http://127.0.0.1:8080/ui/](http://127.0.0.1:8080/ui/) to access the management dashboard.
 
-## 3. Add Your First MCP Server
-
-You can add MCP servers in two ways:
-
-### Via Web UI
-
-1. Click "Add Server" in the Web UI
-2. Enter the server details
-3. Click "Save"
-
-### Via Configuration File
-
-Edit `~/.mcpproxy/mcp_config.json`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "filesystem",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/directory"],
-      "protocol": "stdio",
-      "enabled": true
-    }
-  ]
-}
-```
-
-## 4. Connect Your AI Client
+## 3. Connect Your AI Client
 
 MCPProxy exposes an MCP endpoint at `http://localhost:8080/mcp`. Connect your AI client using one of these methods:
 
@@ -183,9 +155,65 @@ claude mcp list
 You can connect multiple AI clients to the same MCPProxy instance simultaneously. All clients share the same upstream servers and configuration.
 :::
 
+## 4. Add Your First MCP Server
+
+Now that your AI client is connected to MCPProxy, you can add upstream MCP servers. Choose one of these methods:
+
+### Via Your AI Agent (Recommended)
+
+The easiest way to add servers is to simply ask your AI agent! MCPProxy provides an `upstream_servers` tool that lets AI agents manage server configuration directly.
+
+**Try it:** In your AI client, type:
+
+> *"Add an upstream server named **context7** with URL **https://mcp.context7.com/mcp** using HTTP protocol"*
+
+Your AI agent will use the `upstream_servers` tool to add the server to your MCPProxy configuration. You can also ask your agent to:
+
+- **Check server status:** *"Show me the status of all upstream servers"*
+- **Troubleshoot connections:** *"Why is the context7 server not connecting?"*
+- **Enable/disable servers:** *"Disable the filesystem server"*
+- **List available tools:** *"What tools are available from context7?"*
+
+:::tip Chat-Based Management
+You can manage your entire MCPProxy setup through natural conversation with your AI agent - no need to switch between different interfaces!
+:::
+
+### Via Web UI
+
+1. Open [http://127.0.0.1:8080/ui/](http://127.0.0.1:8080/ui/)
+2. Click **"Add Server"**
+3. Enter the server details
+4. Click **"Save"**
+
+### Via Configuration File
+
+Edit `~/.mcpproxy/mcp_config.json`:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "context7",
+      "url": "https://mcp.context7.com/mcp",
+      "protocol": "http",
+      "enabled": true
+    },
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/directory"],
+      "protocol": "stdio",
+      "enabled": true
+    }
+  ]
+}
+```
+
 ## 5. Verify Connection
 
 In your AI client, ask it to list available tools. You should see tools from all your configured MCP servers.
+
+**Example:** *"What tools do I have available?"*
 
 ## Next Steps
 
