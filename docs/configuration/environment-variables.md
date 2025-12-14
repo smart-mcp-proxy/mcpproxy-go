@@ -49,6 +49,28 @@ MCPProxy can be configured using environment variables, which take precedence ov
 | `MCPPROXY_TRAY_SKIP_CORE` | Skip core launch (development) | `false` |
 | `MCPPROXY_CORE_URL` | Custom core URL for tray | - |
 
+See [Tray Debug Documentation](../tray-debug.md) for additional tray-specific variables.
+
+## Auto-Update Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable automatic update checks | `false` |
+| `MCPPROXY_UPDATE_NOTIFY_ONLY` | Only notify about updates, don't auto-install | `false` |
+| `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates | `false` |
+| `MCPPROXY_UPDATE_APP_BUNDLE` | Enable app bundle updates (macOS) | `false` |
+
+## Browser Detection
+
+These variables control browser behavior for OAuth flows:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HEADLESS` | Disable browser launching | `false` |
+| `NO_BROWSER` | Prevent browser opening for OAuth | `false` |
+| `CI` | CI environment detection (disables browser) | - |
+| `BROWSER` | Custom browser executable for OAuth | System default |
+
 ## Usage Examples
 
 ### Start with Custom Port
