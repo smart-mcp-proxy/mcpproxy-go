@@ -44,21 +44,25 @@ OAuth authentication is used when connecting to MCP servers that require authori
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `client_id` | string | OAuth client identifier |
+| `client_id` | string | OAuth client identifier (uses Dynamic Client Registration if empty) |
+| `client_secret` | string | OAuth client secret (optional, can reference secure storage) |
+| `redirect_uri` | string | OAuth redirect URI (auto-generated if not provided) |
 | `scopes` | array | Requested OAuth scopes |
-| `authorization_url` | string | Override authorization endpoint |
-| `token_url` | string | Override token endpoint |
-| `extra_params` | object | Additional authorization parameters |
+| `pkce_enabled` | boolean | PKCE is always enabled for security; this flag is currently ignored |
+| `extra_params` | object | Additional authorization parameters (e.g., RFC 8707 resource) |
+
+**Note:** OAuth authorization and token endpoints are automatically discovered from the server's OAuth metadata (RFC 8414 `.well-known/oauth-authorization-server`), not configured manually.
 
 ### Advanced Configuration
+
+For OAuth providers that require additional parameters (like RFC 8707 resource indicators):
 
 ```json
 {
   "oauth": {
     "client_id": "your-client-id",
+    "client_secret": "your-client-secret",
     "scopes": ["read", "write"],
-    "authorization_url": "https://auth.example.com/authorize",
-    "token_url": "https://auth.example.com/token",
     "extra_params": {
       "audience": "https://api.example.com",
       "resource": "https://api.example.com"

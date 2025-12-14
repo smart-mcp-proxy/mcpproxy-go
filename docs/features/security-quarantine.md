@@ -147,8 +147,8 @@ MCPProxy checks for these suspicious patterns:
 
 ```json
 {
-  "security": {
-    "auto_quarantine": false
+  "features": {
+    "enable_quarantine": false
   }
 }
 ```
