@@ -24,16 +24,18 @@ MCPProxy can be configured using environment variables, which take precedence ov
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_TLS_ENABLED` | Enable TLS/HTTPS | `false` |
-| `MCPPROXY_TLS_CERT` | Path to TLS certificate | - |
-| `MCPPROXY_TLS_KEY` | Path to TLS private key | - |
+| `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | Enable mutual TLS (mTLS) | `false` |
+
+**Note:** TLS certificates are managed in `~/.mcpproxy/certs/` or via the `tls.certs_dir` config option. Use `mcpproxy trust-cert` to set up certificates.
 
 ## Debugging
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_DEBUG` | Enable debug mode | `false` |
-| `MCPPROXY_LOG_LEVEL` | Log level (debug, info, warn, error) | `info` |
 | `HEADLESS` | Run without browser launching | `false` |
+
+**Note:** Log level is configured via `--log-level` flag or `logging.level` in config file.
 
 ## OAuth Settings
 

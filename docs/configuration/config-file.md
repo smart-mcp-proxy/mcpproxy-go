@@ -27,7 +27,6 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "data_dir": "~/.mcpproxy",
   "api_key": "your-secret-api-key",
   "enable_socket": true,
-  "enable_web_ui": true,
   "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
@@ -35,6 +34,9 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
+  "features": {
+    "enable_web_ui": true
+  },
   "mcpServers": []
 }
 ```
@@ -49,7 +51,12 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `data_dir` | string | `~/.mcpproxy` | Directory for data storage |
 | `api_key` | string | auto-generated | API key for REST API authentication |
 | `enable_socket` | boolean | `true` | Enable Unix socket/named pipe for local communication |
-| `enable_web_ui` | boolean | `true` | Enable the web management interface |
+
+### Feature Flags
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `features.enable_web_ui` | boolean | `true` | Enable the web management interface |
 
 ### Tool Discovery Settings
 
