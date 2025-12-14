@@ -1160,3 +1160,65 @@ jobs:
             git push
             echo "Changes committed and pushed successfully"
           fi
+
+  # Deploy documentation to Cloudflare Pages
+  deploy-docs:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
+    # Non-blocking: docs failure doesn't block release
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Set version for docs
+        run: |
+          VERSION="${{ github.ref_name }}"
+          # Extract minor version: v0.11.2 → 0.11
+          MINOR_VERSION=$(echo "$VERSION" | sed 's/^v//' | cut -d. -f1,2)
+          echo "MCPPROXY_VERSION=$MINOR_VERSION" >> $GITHUB_ENV
+          echo "Documentation version: $MINOR_VERSION"
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Build docs with version
+        working-directory: website
+        run: |
+          # Inject version into config
+          sed -i "s/__VERSION__/$MCPPROXY_VERSION/g" docusaurus.config.js
+          npm run build
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy website/build --project-name=mcpproxy-docs
+
+  # Trigger marketing site to update download links
+  trigger-marketing-update:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
+    # Non-blocking: marketing update failure doesn't block release
+    continue-on-error: true
+
+    steps:
+      - name: Trigger marketing site update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
+          repository: smart-mcp-proxy/mcpproxy.app-website
+          event-type: update-version
+          client-payload: '{"version": "${{ github.ref_name }}"}'

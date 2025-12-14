@@ -1,0 +1,10 @@
+{
+  "label": "Development",
+  "position": 7,
+  "collapsible": true,
+  "collapsed": true,
+  "link": {
+    "type": "generated-index",
+    "description": "Internal documentation for MCPProxy developers and contributors."
+  }
+}

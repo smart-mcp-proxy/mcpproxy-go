@@ -1,0 +1,67 @@
+name: Documentation
+
+on:
+  # Build validation on PRs
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'website/**'
+      - '.github/workflows/docs.yml'
+
+  # Deploy on push to main
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'website/**'
+      - '.github/workflows/docs.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Build documentation
+        working-directory: website
+        run: npm run build
+
+      - name: Verify build output
+        run: |
+          if [ ! -f website/build/index.html ]; then
+            echo "::error::Documentation build failed - no index.html found"
+            exit 1
+          fi
+
+          if [ ! -f website/build/llms.txt ]; then
+            echo "::warning::llms.txt not generated"
+          fi
+
+          echo "Documentation build successful!"
+          echo "Build size: $(du -sh website/build | cut -f1)"
+          echo "Pages: $(find website/build -name '*.html' | wc -l)"
+
+      # Deploy to Cloudflare Pages on push to main (skipped for forks/PRs)
+      - name: Deploy to Cloudflare Pages
+        if: |
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          github.repository == 'smart-mcp-proxy/mcpproxy-go'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy website/build --project-name=mcpproxy-docs
+        continue-on-error: true
