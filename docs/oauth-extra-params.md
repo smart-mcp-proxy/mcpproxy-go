@@ -23,7 +23,7 @@ MCPProxy supports manual `extra_params` for OAuth providers requiring non-standa
       "enabled": true,
       "oauth": {
         "scopes": ["mcp"],
-        "pkce": true,
+        "pkce_enabled": true,
         "extra_params": {
           "resource": "https://oauth.runlayer.com/api/v1/proxy/abc123def/mcp"
         }
@@ -45,7 +45,7 @@ MCPProxy supports manual `extra_params` for OAuth providers requiring non-standa
       "enabled": true,
       "oauth": {
         "scopes": ["mcp:read", "mcp:write"],
-        "pkce": true,
+        "pkce_enabled": true,
         "extra_params": {
           "resource": "https://api.example.com/mcp",
           "audience": "mcp-api",
@@ -59,6 +59,8 @@ MCPProxy supports manual `extra_params` for OAuth providers requiring non-standa
 
 ### Example 3: Azure AD with Resource Parameter
 
+For Azure AD and other providers with custom OAuth endpoints, MCPProxy automatically discovers endpoints via the server's `.well-known/oauth-authorization-server` metadata (RFC 8414).
+
 ```json
 {
   "mcpServers": [
@@ -69,9 +71,7 @@ MCPProxy supports manual `extra_params` for OAuth providers requiring non-standa
       "enabled": true,
       "oauth": {
         "scopes": ["https://mcp.azure.example.com/.default"],
-        "pkce": true,
-        "authorization_url": "https://login.microsoftonline.com/tenant-id/oauth2/v2.0/authorize",
-        "token_url": "https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token",
+        "pkce_enabled": true,
         "extra_params": {
           "resource": "https://mcp.azure.example.com"
         }
@@ -80,6 +80,8 @@ MCPProxy supports manual `extra_params` for OAuth providers requiring non-standa
   ]
 }
 ```
+
+**Note:** OAuth authorization and token URLs are auto-discovered from the server's metadata. If the server doesn't provide discovery metadata, you may need to configure the MCP server itself to expose proper OAuth endpoints.
 
 ## Security & Validation
 

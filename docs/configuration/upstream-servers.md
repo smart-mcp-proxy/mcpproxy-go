@@ -84,13 +84,14 @@ For enhanced security, stdio servers can run in Docker containers:
   "args": ["-y", "some-mcp-server"],
   "protocol": "stdio",
   "isolation": {
-    "type": "docker",
+    "enabled": true,
     "image": "node:20",
-    "memory_limit": "512m",
-    "cpu_limit": "1.0"
+    "network_mode": "bridge"
   }
 }
 ```
+
+**Note:** Memory and CPU limits are configured at the global level in `docker_isolation`, not per-server.
 
 See [Docker Isolation](/features/docker-isolation) for complete documentation.
 
