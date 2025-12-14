@@ -177,10 +177,9 @@ func NewMCPProxyServer(
 	}
 
 	// Add prompts capability if enabled
-	// Note: prompts capability would be added here when mcp-go supports it
-	// if config.EnablePrompts {
-	//     capabilities = append(capabilities, mcpserver.WithPromptCapabilities(true))
-	// }
+	if config.EnablePrompts {
+		capabilities = append(capabilities, mcpserver.WithPromptCapabilities(true))
+	}
 
 	mcpServer := mcpserver.NewMCPServer(
 		"mcpproxy-go",
@@ -410,15 +409,124 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 // registerPrompts registers prompt templates for common tasks
 func (p *MCPProxyServer) registerPrompts() {
-	// Note: This is a placeholder for when mcp-go supports prompts
-	// For now, we document the prompts that would be available
-	p.logger.Info("Prompts capability enabled - ready to provide workflow guidance")
+	p.logger.Info("Registering prompts capability")
 
-	// Future prompts would include:
-	// - "find-tools-for-task" - Guide users to use retrieve_tools first
-	// - "debug-search" - Help debug search results
-	// - "setup-new-server" - Guided workflow for adding servers
-	// - "troubleshoot-connection" - Help with connection issues
+	// setup-new-mcp-server - Guided workflow for adding MCP servers
+	p.server.AddPrompt(
+		mcp.NewPrompt("setup-new-mcp-server",
+			mcp.WithPromptDescription("Add a new MCP server to mcpproxy. Guides you through configuration for stdio or HTTP servers."),
+			mcp.WithArgument("server_type",
+				mcp.ArgumentDescription("Server type: 'stdio' (local command) or 'http' (remote URL)"),
+			),
+		),
+		p.handleSetupServerPrompt,
+	)
+
+	// troubleshoot-mcp-server - Help with connection issues
+	p.server.AddPrompt(
+		mcp.NewPrompt("troubleshoot-mcp-server",
+			mcp.WithPromptDescription("Diagnose and fix connection issues with MCP servers."),
+			mcp.WithArgument("server_name",
+				mcp.ArgumentDescription("Name of the server experiencing issues"),
+			),
+		),
+		p.handleTroubleshootPrompt,
+	)
+
+	p.logger.Info("Prompts registered successfully", zap.Int("count", 2))
+}
+
+// handleSetupServerPrompt handles the setup-new-mcp-server prompt
+func (p *MCPProxyServer) handleSetupServerPrompt(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	serverType := request.Params.Arguments["server_type"]
+	if serverType == "" {
+		serverType = "stdio"
+	}
+
+	var instructions string
+	switch serverType {
+	case "http", "sse":
+		instructions = `Add an HTTP MCP server:
+
+upstream_servers(operation="add", name="server-name", url="https://example.com/mcp", protocol="http")
+
+OAuth authentication is handled automatically when required.`
+	default:
+		instructions = `Add a stdio MCP server (local command):
+
+upstream_servers(
+  operation="add",
+  name="server-name",
+  command="npx",
+  args_json="[\"-y\", \"@modelcontextprotocol/server-github\"]",
+  protocol="stdio"
+)
+
+Common launchers:
+- npx: Node.js packages (e.g., npx -y @modelcontextprotocol/server-github)
+- uvx: Python packages (e.g., uvx mcp-server-fetch)
+- docker: Docker containers
+
+Environment variables (for API keys, config):
+  env_json="{\"GITHUB_TOKEN\": \"your-token\"}"
+
+For sensitive values, use the secrets store instead:
+  mcpproxy secrets set github GITHUB_TOKEN
+Then reference in config with: "GITHUB_TOKEN": "secret:github:GITHUB_TOKEN"`
+	}
+
+	return &mcp.GetPromptResult{
+		Description: fmt.Sprintf("Setup guide for %s MCP server", serverType),
+		Messages: []mcp.PromptMessage{
+			{
+				Role: mcp.RoleUser,
+				Content: mcp.TextContent{
+					Type: "text",
+					Text: instructions + `
+
+New servers are quarantined by default. Use quarantine_security to review and approve.`,
+				},
+			},
+		},
+	}, nil
+}
+
+// handleTroubleshootPrompt handles the troubleshoot-connection prompt
+func (p *MCPProxyServer) handleTroubleshootPrompt(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	serverName := request.Params.Arguments["server_name"]
+
+	var serverInfo string
+	if serverName != "" {
+		serverInfo = fmt.Sprintf("server '%s'", serverName)
+	} else {
+		serverInfo = "MCP servers"
+	}
+
+	return &mcp.GetPromptResult{
+		Description: "Troubleshooting guide for " + serverInfo,
+		Messages: []mcp.PromptMessage{
+			{
+				Role: mcp.RoleUser,
+				Content: mcp.TextContent{
+					Type: "text",
+					Text: fmt.Sprintf(`Help me troubleshoot connection issues with %s.
+
+Steps to diagnose:
+1. First, list all servers: upstream_servers(operation="list")
+2. Check if the server is enabled and not quarantined
+3. Look at the connection status and any error messages
+4. For stdio servers, verify the command exists and is executable
+5. For HTTP servers, verify the URL is accessible
+
+Common issues:
+- Server quarantined: Use quarantine_security to approve
+- Command not found: Install the MCP server package (npm, pip, etc.)
+- Authentication required: Configure API keys in server environment
+- Network issues: Check URL accessibility and firewall settings`, serverInfo),
+				},
+			},
+		},
+	}, nil
 }
 
 // handleSearchServers implements the search_servers functionality
