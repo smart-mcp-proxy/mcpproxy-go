@@ -11,6 +11,15 @@ keywords: [environment, variables, env, configuration]
 
 MCPProxy can be configured using environment variables, which take precedence over config file settings.
 
+:::tip Recommended: Use Config File
+For the core server, prefer configuring `listen`, `api_key`, and other settings in `~/.mcpproxy/mcp_config.json`. See [Config File](./config-file.md) for details.
+
+Environment variables are primarily useful for:
+- **Tray application settings** (variables starting with `MCPPROXY_TRAY_*`)
+- **CI/CD environments** where config files aren't practical
+- **Temporary overrides** during development
+:::
+
 ## Server Configuration
 
 | Variable | Description | Example |
@@ -44,13 +53,17 @@ MCPProxy can be configured using environment variables, which take precedence ov
 
 ## Tray Application
 
+These variables configure the tray application behavior. They are the primary use case for environment variables since the tray doesn't use the config file directly.
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MCPPROXY_TRAY_SKIP_CORE` | Skip core launch (development) | `false` |
-| `MCPPROXY_CORE_URL` | Custom core URL for tray | - |
+| `MCPPROXY_TRAY_PORT` | Port for tray-launched core | `8080` |
+| `MCPPROXY_TRAY_LISTEN` | Listen address for core (e.g., `:8080`) | - |
+| `MCPPROXY_CORE_URL` | Full URL override (e.g., `http://127.0.0.1:30080`) | - |
 | `MCPPROXY_CORE_PATH` | Custom path to mcpproxy core binary | - |
-| `MCPPROXY_TRAY_LISTEN` | Override port for tray-launched core | - |
-| `MCPPROXY_TRAY_PORT` | Alternative to MCPPROXY_TRAY_LISTEN | - |
+| `MCPPROXY_TRAY_CONFIG_PATH` | Custom config file path for core | - |
+| `MCPPROXY_TRAY_EXTRA_ARGS` | Extra CLI arguments for core | - |
+| `MCPPROXY_TRAY_SKIP_CORE` | Skip core launch (for development) | `false` |
 | `MCPPROXY_TRAY_CORE_TIMEOUT` | Core startup timeout in seconds | `30` |
 | `MCPPROXY_TRAY_RETRY_DELAY` | Core connection retry delay (ms) | `1000` |
 | `MCPPROXY_TRAY_STATE_DEBUG` | Enable state machine debug logging | `false` |
@@ -101,34 +114,26 @@ HEADLESS=true mcpproxy serve
 MCPPROXY_API_KEY="my-secure-key" mcpproxy serve
 ```
 
-### Configure Tray App on macOS
+### Setting Tray Environment Variables on macOS
 
-When launching mcpproxy-tray from Launchpad or the Applications folder, environment variables must be set system-wide using `launchctl`:
+When launching mcpproxy-tray from Launchpad or the Applications folder, environment variables must be set system-wide using `launchctl`. This is an alternative to running the tray from terminal.
+
+:::note
+For core server settings like `listen`, `api_key`, and upstream servers, use the config file `~/.mcpproxy/mcp_config.json` instead. The tray will pass the config to the core automatically.
+:::
 
 ```bash
-# Set custom port (simplest option)
+# Set custom port for the core server
 launchctl setenv MCPPROXY_TRAY_PORT 30080
 
-# Or set full listen address
-launchctl setenv MCPPROXY_TRAY_LISTEN ":30080"
+# Or use a custom config file
+launchctl setenv MCPPROXY_TRAY_CONFIG_PATH "/path/to/custom-config.json"
 
-# Or set complete URL (overrides all other settings)
-launchctl setenv MCPPROXY_CORE_URL "http://127.0.0.1:30080"
-
-# Restart Dock for Launchpad apps to pick up the new environment
+# Restart Dock for apps to pick up the new environment
 killall Dock
 
 # Now launch mcpproxy-tray from Launchpad or Applications folder
 ```
-
-The tray app will automatically pass the `--listen` flag to the core server when launching it.
-
-**Priority order for port resolution:**
-1. `MCPPROXY_CORE_URL` (full URL, highest priority)
-2. Unix socket (default for local tray-core communication)
-3. `MCPPROXY_TRAY_LISTEN` (listen address)
-4. `MCPPROXY_TRAY_PORT` (port only)
-5. Default: `http://127.0.0.1:8080`
 
 **To clear environment variables:**
 
