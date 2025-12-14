@@ -1,6 +1,6 @@
 # MCPProxy Makefile
 
-.PHONY: help build swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup
+.PHONY: help build swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup docs-setup docs-dev docs-build docs-clean
 
 SWAGGER_BIN ?= $(HOME)/go/bin/swag
 SWAGGER_OUT ?= oas
@@ -22,6 +22,12 @@ help:
 	@echo "  make test-e2e-oauth  - Run OAuth E2E tests with Playwright"
 	@echo "  make lint            - Run linter"
 	@echo "  make dev-setup       - Install development dependencies (swag, frontend, Playwright)"
+	@echo ""
+	@echo "Documentation Commands:"
+	@echo "  make docs-setup      - Install documentation dependencies"
+	@echo "  make docs-dev        - Start docs dev server (http://localhost:3000)"
+	@echo "  make docs-build      - Build documentation site locally"
+	@echo "  make docs-clean      - Clean documentation build artifacts"
 
 # Generate OpenAPI specification
 swagger:
@@ -125,3 +131,26 @@ test-e2e-oauth:
 test-e2e: test-e2e-oauth
 	@echo "🧪 Running E2E tests..."
 	./scripts/test-api-e2e.sh
+
+# Documentation site commands
+docs-setup:
+	@echo "📦 Installing documentation dependencies..."
+	@if [ ! -d "website" ]; then echo "❌ website/ directory not found. Run after Phase 1 setup."; exit 1; fi
+	cd website && npm install
+	@echo "✅ Documentation setup complete"
+
+docs-dev:
+	@echo "📄 Starting documentation dev server..."
+	@if [ ! -d "website" ]; then echo "❌ website/ directory not found. Run after Phase 1 setup."; exit 1; fi
+	cd website && ./prepare-docs.sh && npm run start
+
+docs-build:
+	@echo "🔨 Building documentation site..."
+	@if [ ! -d "website" ]; then echo "❌ website/ directory not found. Run after Phase 1 setup."; exit 1; fi
+	cd website && ./prepare-docs.sh && npm run build
+	@echo "✅ Documentation built to website/build/"
+
+docs-clean:
+	@echo "🧹 Cleaning documentation artifacts..."
+	rm -rf website/build website/.docusaurus website/node_modules website/docs
+	@echo "✅ Documentation cleanup complete"

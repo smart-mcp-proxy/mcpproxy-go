@@ -124,3 +124,12 @@ internal_docs/
 
 # Git worktrees
 .worktrees/
+
+# Docusaurus documentation site
+website/build/
+website/.docusaurus/
+website/.cache-loader/
+website/node_modules/
+website/docs/
+website/npm-debug.log*
+website/yarn-error.log*

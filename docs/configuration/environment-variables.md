@@ -1,0 +1,84 @@
+---
+id: environment-variables
+title: Environment Variables
+sidebar_label: Environment Variables
+sidebar_position: 3
+description: Configure MCPProxy using environment variables
+keywords: [environment, variables, env, configuration]
+---
+
+# Environment Variables
+
+MCPProxy can be configured using environment variables, which take precedence over config file settings.
+
+## Server Configuration
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `MCPPROXY_LISTEN` | Override listen address | `127.0.0.1:8080` or `:8080` |
+| `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
+| `MCPPROXY_DATA_DIR` | Override data directory | `/var/lib/mcpproxy` |
+
+## Security Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_TLS_ENABLED` | Enable TLS/HTTPS | `false` |
+| `MCPPROXY_TLS_CERT` | Path to TLS certificate | - |
+| `MCPPROXY_TLS_KEY` | Path to TLS private key | - |
+
+## Debugging
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_DEBUG` | Enable debug mode | `false` |
+| `MCPPROXY_LOG_LEVEL` | Log level (debug, info, warn, error) | `info` |
+| `HEADLESS` | Run without browser launching | `false` |
+
+## OAuth Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_DISABLE_OAUTH` | Disable OAuth for testing | `false` |
+
+## Tray Application
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_TRAY_SKIP_CORE` | Skip core launch (development) | `false` |
+| `MCPPROXY_CORE_URL` | Custom core URL for tray | - |
+
+## Usage Examples
+
+### Start with Custom Port
+
+```bash
+MCPPROXY_LISTEN=":9000" mcpproxy serve
+```
+
+### Enable Debug Logging
+
+```bash
+MCPPROXY_DEBUG=true mcpproxy serve --log-level=debug
+```
+
+### Run in Headless Mode
+
+```bash
+HEADLESS=true mcpproxy serve
+```
+
+### Custom API Key
+
+```bash
+MCPPROXY_API_KEY="my-secure-key" mcpproxy serve
+```
+
+## Priority Order
+
+Configuration is applied in this order (later sources override earlier):
+
+1. Default values
+2. Configuration file (`~/.mcpproxy/mcp_config.json`)
+3. Environment variables
+4. Command-line flags
