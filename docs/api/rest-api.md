@@ -11,6 +11,10 @@ keywords: [api, rest, http, endpoints]
 
 MCPProxy provides a REST API for server management and monitoring.
 
+:::tip OpenAPI Specification
+Interactive API documentation is available at [http://127.0.0.1:8080/swagger/](http://127.0.0.1:8080/swagger/) when MCPProxy is running. The OpenAPI spec file is also available at `/swagger/doc.json`.
+:::
+
 ## Authentication
 
 All `/api/v1/*` endpoints require authentication via API key:
