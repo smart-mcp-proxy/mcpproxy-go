@@ -49,7 +49,7 @@ MCPProxy can be configured using environment variables, which take precedence ov
 | `MCPPROXY_TRAY_SKIP_CORE` | Skip core launch (development) | `false` |
 | `MCPPROXY_CORE_URL` | Custom core URL for tray | - |
 
-See [Tray Debug Documentation](../tray-debug.md) for additional tray-specific variables.
+See [Tray Debug Documentation](/tray-debug) for additional tray-specific variables.
 
 ## Auto-Update Settings
 
