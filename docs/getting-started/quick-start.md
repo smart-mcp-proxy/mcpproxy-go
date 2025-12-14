@@ -121,7 +121,7 @@ MCPProxy exposes an MCP endpoint at `http://localhost:8080/mcp`. Connect your AI
 
 **One-Click Install:**
 
-<a href="cursor://anysphere.cursor-deeplink/mcp/install?name=MCPProxy&config=eyJ0eXBlIjoiaHR0cCIsInVybCI6Imh0dHA6Ly9sb2NhbGhvc3Q6ODA4MC9tY3AvIn0=" class="button button--primary button--sm">Add to Cursor</a>
+<a href="cursor://anysphere.cursor-deeplink/mcp/install?name=MCPProxy&config=eyJ0eXBlIjoiaHR0cCIsInVybCI6Imh0dHA6Ly9sb2NhbGhvc3Q6ODA4MC9tY3AvIn0=" class="button button--primary">Add to Cursor</a>
 
 **Manual Setup:**
 
