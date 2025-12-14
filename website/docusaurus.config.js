@@ -38,7 +38,7 @@ const config = {
         docs: {
           routeBasePath: '/', // docs at root
           sidebarPath: './sidebars.js',
-          editUrl: 'https://github.com/smart-mcp-proxy/mcpproxy-go/edit/main/docs/',
+          editUrl: 'https://github.com/smart-mcp-proxy/mcpproxy-go/edit/main/',
           // Only include structured documentation pages
           include: [
             'getting-started/**/*.{md,mdx}',
