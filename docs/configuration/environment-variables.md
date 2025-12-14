@@ -48,8 +48,12 @@ MCPProxy can be configured using environment variables, which take precedence ov
 |----------|-------------|---------|
 | `MCPPROXY_TRAY_SKIP_CORE` | Skip core launch (development) | `false` |
 | `MCPPROXY_CORE_URL` | Custom core URL for tray | - |
-
-See [Tray Debug Documentation](/tray-debug) for additional tray-specific variables.
+| `MCPPROXY_CORE_PATH` | Custom path to mcpproxy core binary | - |
+| `MCPPROXY_TRAY_LISTEN` | Override port for tray-launched core | - |
+| `MCPPROXY_TRAY_PORT` | Alternative to MCPPROXY_TRAY_LISTEN | - |
+| `MCPPROXY_TRAY_CORE_TIMEOUT` | Core startup timeout in seconds | `30` |
+| `MCPPROXY_TRAY_RETRY_DELAY` | Core connection retry delay (ms) | `1000` |
+| `MCPPROXY_TRAY_STATE_DEBUG` | Enable state machine debug logging | `false` |
 
 ## Auto-Update Settings
 
