@@ -30,14 +30,18 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 |----------|-------------|---------|
 | `MCPPROXY_LISTEN` | Override listen address | `127.0.0.1:8080` or `:8080` |
 | `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
-| `MCPPROXY_DATA` | Override data directory | `/var/lib/mcpproxy` |
+| `MCPPROXY_DATA_DIR` | Override data directory | `/var/lib/mcpproxy` |
+| `MCPPROXY_DATA` | Override data directory (backward compatibility, prefer `MCPPROXY_DATA_DIR`) | `/var/lib/mcpproxy` |
 
 ### Security Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_TLS_ENABLED` | Enable TLS/HTTPS | `false` |
-| `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | Enable mutual TLS (mTLS) | `false` |
+| `MCPPROXY_TLS_CERT` | Path to TLS certificate | - |
+| `MCPPROXY_TLS_KEY` | Path to TLS private key | - |
+| `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | Require client certificates for mTLS | `false` |
+| `MCPPROXY_CERTS_DIR` | Custom directory for TLS certificates | - |
 
 **Note:** TLS certificates are managed in `~/.mcpproxy/certs/` or via the `tls.certs_dir` config option. Use `mcpproxy trust-cert` to set up certificates.
 
@@ -104,6 +108,8 @@ The tray application doesn't read the config file directly. It launches the core
 | `MCPPROXY_TRAY_CORE_TIMEOUT` | Core startup timeout in seconds | `30` |
 | `MCPPROXY_TRAY_RETRY_DELAY` | Core connection retry delay (ms) | `1000` |
 | `MCPPROXY_TRAY_STATE_DEBUG` | Enable state machine debug logging | `false` |
+| `MCPPROXY_TRAY_ENDPOINT` | Override tray-core communication endpoint (unix:///path/socket.sock or npipe:////./pipe/name) | Auto-detect |
+| `MCPPROXY_TRAY_INSPECT_ADDR` | Address for tray instrumentation/debug server | - |
 
 ### Auto-Update Settings (Tray)
 
