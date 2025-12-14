@@ -56,9 +56,11 @@ Display recent log entries from a specific server.
 **Usage:**
 ```bash
 mcpproxy upstream logs <server-name> [flags]
+mcpproxy upstream logs --server <server-name> [flags]
 ```
 
 **Flags:**
+- `--server, -s` - Server name (alternative to positional argument)
 - `--tail, -n` - Number of lines to show [default: 50]
 - `--follow, -f` - Follow log output (requires daemon)
 - `--log-level, -l` - Log level [default: warn]
@@ -66,8 +68,10 @@ mcpproxy upstream logs <server-name> [flags]
 
 **Examples:**
 ```bash
-# Show last 50 lines
+# Show last 50 lines (either form works)
 mcpproxy upstream logs github-server
+mcpproxy upstream logs --server github-server
+mcpproxy upstream logs -s github-server
 
 # Show last 200 lines
 mcpproxy upstream logs github-server --tail=200
@@ -90,10 +94,12 @@ Enable a disabled server or all disabled servers.
 **Usage:**
 ```bash
 mcpproxy upstream enable <server-name>
+mcpproxy upstream enable --server <server-name>
 mcpproxy upstream enable --all [--force]
 ```
 
 **Flags:**
+- `--server, -s` - Server name (alternative to positional argument)
 - `--all` - Enable all disabled servers
 - `--force` - Skip confirmation prompt (for automation)
 
@@ -102,8 +108,10 @@ mcpproxy upstream enable --all [--force]
 
 **Examples:**
 ```bash
-# Enable single server
+# Enable single server (either form works)
 mcpproxy upstream enable github-server
+mcpproxy upstream enable --server github-server
+mcpproxy upstream enable -s github-server
 
 # Enable all servers (interactive confirmation)
 mcpproxy upstream enable --all
@@ -133,10 +141,12 @@ Disable a server or all enabled servers.
 **Usage:**
 ```bash
 mcpproxy upstream disable <server-name>
+mcpproxy upstream disable --server <server-name>
 mcpproxy upstream disable --all [--force]
 ```
 
 **Flags:**
+- `--server, -s` - Server name (alternative to positional argument)
 - `--all` - Disable all enabled servers
 - `--force` - Skip confirmation prompt
 
@@ -145,8 +155,10 @@ mcpproxy upstream disable --all [--force]
 
 **Examples:**
 ```bash
-# Disable single server
+# Disable single server (either form works)
 mcpproxy upstream disable github-server
+mcpproxy upstream disable --server github-server
+mcpproxy upstream disable -s github-server
 
 # Disable all servers (interactive confirmation)
 mcpproxy upstream disable --all
@@ -164,10 +176,12 @@ Restart a server or all enabled servers.
 **Usage:**
 ```bash
 mcpproxy upstream restart <server-name>
+mcpproxy upstream restart --server <server-name>
 mcpproxy upstream restart --all
 ```
 
 **Flags:**
+- `--server, -s` - Server name (alternative to positional argument)
 - `--all` - Restart all enabled servers
 
 **Requirements:**
@@ -175,8 +189,10 @@ mcpproxy upstream restart --all
 
 **Examples:**
 ```bash
-# Restart single server
+# Restart single server (either form works)
 mcpproxy upstream restart github-server
+mcpproxy upstream restart --server github-server
+mcpproxy upstream restart -s github-server
 
 # Restart all servers (no confirmation needed)
 mcpproxy upstream restart --all
