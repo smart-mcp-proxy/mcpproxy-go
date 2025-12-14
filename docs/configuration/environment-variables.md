@@ -17,7 +17,7 @@ MCPProxy can be configured using environment variables, which take precedence ov
 |----------|-------------|---------|
 | `MCPPROXY_LISTEN` | Override listen address | `127.0.0.1:8080` or `:8080` |
 | `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
-| `MCPPROXY_DATA_DIR` | Override data directory | `/var/lib/mcpproxy` |
+| `MCPPROXY_DATA` | Override data directory | `/var/lib/mcpproxy` |
 
 ## Security Settings
 
@@ -32,10 +32,9 @@ MCPProxy can be configured using environment variables, which take precedence ov
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MCPPROXY_DEBUG` | Enable debug mode | `false` |
 | `HEADLESS` | Run without browser launching | `false` |
 
-**Note:** Log level is configured via `--log-level` flag or `logging.level` in config file.
+**Note:** Debug logging is enabled via `--log-level=debug` flag or `logging.level` in config file.
 
 ## OAuth Settings
 
@@ -61,7 +60,7 @@ MCPPROXY_LISTEN=":9000" mcpproxy serve
 ### Enable Debug Logging
 
 ```bash
-MCPPROXY_DEBUG=true mcpproxy serve --log-level=debug
+mcpproxy serve --log-level=debug
 ```
 
 ### Run in Headless Mode
