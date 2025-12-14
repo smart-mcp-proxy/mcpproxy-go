@@ -411,33 +411,21 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 func (p *MCPProxyServer) registerPrompts() {
 	p.logger.Info("Registering prompts capability")
 
-	// find-tools-for-task - Guide users to discover tools
+	// setup-new-mcp-server - Guided workflow for adding MCP servers
 	p.server.AddPrompt(
-		mcp.NewPrompt("find-tools-for-task",
-			mcp.WithPromptDescription("Guide to discovering relevant tools for a task. Use this when you need help finding the right MCP tools."),
-			mcp.WithArgument("task",
-				mcp.ArgumentDescription("Description of what you want to accomplish"),
-				mcp.RequiredArgument(),
-			),
-		),
-		p.handleFindToolsPrompt,
-	)
-
-	// setup-new-server - Guided workflow for adding servers
-	p.server.AddPrompt(
-		mcp.NewPrompt("setup-new-server",
-			mcp.WithPromptDescription("Guided workflow for adding a new MCP server to mcpproxy."),
+		mcp.NewPrompt("setup-new-mcp-server",
+			mcp.WithPromptDescription("Add a new MCP server to mcpproxy. Guides you through configuration for stdio or HTTP servers."),
 			mcp.WithArgument("server_type",
-				mcp.ArgumentDescription("Type of server: 'stdio' for local command, 'http' for remote HTTP, 'sse' for Server-Sent Events"),
+				mcp.ArgumentDescription("Server type: 'stdio' (local command) or 'http' (remote URL)"),
 			),
 		),
 		p.handleSetupServerPrompt,
 	)
 
-	// troubleshoot-connection - Help with connection issues
+	// troubleshoot-mcp-server - Help with connection issues
 	p.server.AddPrompt(
-		mcp.NewPrompt("troubleshoot-connection",
-			mcp.WithPromptDescription("Help diagnose and fix connection issues with MCP servers."),
+		mcp.NewPrompt("troubleshoot-mcp-server",
+			mcp.WithPromptDescription("Diagnose and fix connection issues with MCP servers."),
 			mcp.WithArgument("server_name",
 				mcp.ArgumentDescription("Name of the server experiencing issues"),
 			),
@@ -445,37 +433,10 @@ func (p *MCPProxyServer) registerPrompts() {
 		p.handleTroubleshootPrompt,
 	)
 
-	p.logger.Info("Prompts registered successfully", zap.Int("count", 3))
+	p.logger.Info("Prompts registered successfully", zap.Int("count", 2))
 }
 
-// handleFindToolsPrompt handles the find-tools-for-task prompt
-func (p *MCPProxyServer) handleFindToolsPrompt(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-	task := request.Params.Arguments["task"]
-	if task == "" {
-		task = "your task"
-	}
-
-	return &mcp.GetPromptResult{
-		Description: "Guide to finding tools for: " + task,
-		Messages: []mcp.PromptMessage{
-			{
-				Role: mcp.RoleUser,
-				Content: mcp.TextContent{
-					Type: "text",
-					Text: fmt.Sprintf(`I need to find MCP tools to help with: %s
-
-Please use the retrieve_tools function to search for relevant tools. Use natural language to describe what I need.
-
-Example: retrieve_tools(query="%s")
-
-After finding tools, I can use call_tool to execute them.`, task, task),
-				},
-			},
-		},
-	}, nil
-}
-
-// handleSetupServerPrompt handles the setup-new-server prompt
+// handleSetupServerPrompt handles the setup-new-mcp-server prompt
 func (p *MCPProxyServer) handleSetupServerPrompt(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 	serverType := request.Params.Arguments["server_type"]
 	if serverType == "" {
@@ -484,31 +445,34 @@ func (p *MCPProxyServer) handleSetupServerPrompt(ctx context.Context, request mc
 
 	var instructions string
 	switch serverType {
-	case "http":
-		instructions = `To add an HTTP MCP server, use upstream_servers with these parameters:
-- operation: "add"
-- name: "your-server-name"
-- url: "https://your-server-url/mcp"
-- protocol: "http"
-- enabled: true`
-	case "sse":
-		instructions = `To add an SSE MCP server, use upstream_servers with these parameters:
-- operation: "add"
-- name: "your-server-name"
-- url: "https://your-server-url/sse"
-- protocol: "sse"
-- enabled: true`
-	default:
-		instructions = `To add a stdio MCP server (local command), use upstream_servers with these parameters:
-- operation: "add"
-- name: "your-server-name"
-- command: "npx" (or uvx, docker, etc.)
-- args: ["-y", "@your/mcp-server"]
-- protocol: "stdio"
-- enabled: true
+	case "http", "sse":
+		instructions = `Add an HTTP MCP server:
 
-Example for a Node.js server:
-upstream_servers(operation="add", name="github", command="npx", args=["-y", "@modelcontextprotocol/server-github"], protocol="stdio")`
+upstream_servers(operation="add", name="server-name", url="https://example.com/mcp", protocol="http")
+
+OAuth authentication is handled automatically when required.`
+	default:
+		instructions = `Add a stdio MCP server (local command):
+
+upstream_servers(
+  operation="add",
+  name="server-name",
+  command="npx",
+  args_json="[\"-y\", \"@modelcontextprotocol/server-github\"]",
+  protocol="stdio"
+)
+
+Common launchers:
+- npx: Node.js packages (e.g., npx -y @modelcontextprotocol/server-github)
+- uvx: Python packages (e.g., uvx mcp-server-fetch)
+- docker: Docker containers
+
+Environment variables (for API keys, config):
+  env_json="{\"GITHUB_TOKEN\": \"your-token\"}"
+
+For sensitive values, use the secrets store instead:
+  mcpproxy secrets set github GITHUB_TOKEN
+Then reference in config with: "GITHUB_TOKEN": "secret:github:GITHUB_TOKEN"`
 	}
 
 	return &mcp.GetPromptResult{
@@ -520,7 +484,7 @@ upstream_servers(operation="add", name="github", command="npx", args=["-y", "@mo
 					Type: "text",
 					Text: instructions + `
 
-Note: New servers are quarantined by default for security. After adding, use quarantine_security to review and approve them.`,
+New servers are quarantined by default. Use quarantine_security to review and approve.`,
 				},
 			},
 		},
