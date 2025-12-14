@@ -101,6 +101,42 @@ HEADLESS=true mcpproxy serve
 MCPPROXY_API_KEY="my-secure-key" mcpproxy serve
 ```
 
+### Configure Tray App on macOS
+
+When launching mcpproxy-tray from Launchpad or the Applications folder, environment variables must be set system-wide using `launchctl`:
+
+```bash
+# Set custom port (simplest option)
+launchctl setenv MCPPROXY_TRAY_PORT 30080
+
+# Or set full listen address
+launchctl setenv MCPPROXY_TRAY_LISTEN ":30080"
+
+# Or set complete URL (overrides all other settings)
+launchctl setenv MCPPROXY_CORE_URL "http://127.0.0.1:30080"
+
+# Restart Dock for Launchpad apps to pick up the new environment
+killall Dock
+
+# Now launch mcpproxy-tray from Launchpad or Applications folder
+```
+
+The tray app will automatically pass the `--listen` flag to the core server when launching it.
+
+**Priority order for port resolution:**
+1. `MCPPROXY_CORE_URL` (full URL, highest priority)
+2. Unix socket (default for local tray-core communication)
+3. `MCPPROXY_TRAY_LISTEN` (listen address)
+4. `MCPPROXY_TRAY_PORT` (port only)
+5. Default: `http://127.0.0.1:8080`
+
+**To clear environment variables:**
+
+```bash
+launchctl unsetenv MCPPROXY_TRAY_PORT
+killall Dock
+```
+
 ## Priority Order
 
 Configuration is applied in this order (later sources override earlier):
