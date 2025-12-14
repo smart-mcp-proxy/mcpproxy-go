@@ -24,6 +24,92 @@ These flags are available for all commands:
 | `--log-dir` | Custom log directory path (overrides standard OS location) |
 | `--help` | Show help for command |
 
+## Execution Modes
+
+CLI commands like `tools list`, `call tool`, `code exec`, and `auth login` support two execution modes:
+
+### Daemon Mode (Default)
+
+When `mcpproxy serve` is running, CLI commands automatically connect to it via Unix socket (macOS/Linux) or named pipe (Windows). This provides:
+
+- **Fast execution** - Daemon is already loaded with connections established
+- **Shared state** - OAuth tokens, server connections, and search indices are shared
+- **Real-time sync** - Changes made via CLI reflect immediately in daemon
+
+**Detection**: CLI checks for socket at `~/.mcpproxy/mcpproxy.sock` (Unix) or `\\.\pipe\mcpproxy-<username>` (Windows).
+
+```bash
+# Start daemon
+mcpproxy serve &
+
+# These commands use daemon mode automatically
+mcpproxy tools list --server=github-server    # Fast - uses daemon
+mcpproxy auth login --server=oauth-server     # OAuth tokens shared with daemon
+mcpproxy call tool --tool-name=github:search  # Uses daemon's connection pool
+```
+
+### Standalone Mode (Direct Connection)
+
+When no daemon is detected, CLI commands create direct connections to upstream MCP servers. This is useful for:
+
+- **Debugging** - Full control over connection with verbose logging
+- **Isolated testing** - Independent of daemon state
+- **Single-use operations** - No need to run persistent daemon
+
+```bash
+# Stop daemon to use standalone mode
+pkill -f "mcpproxy serve"
+
+# Now commands connect directly to upstream servers
+mcpproxy tools list --server=github-server --log-level=debug
+mcpproxy tools list --server=github-server --trace-transport  # Full HTTP/SSE tracing
+```
+
+:::tip Forcing Standalone Mode
+To debug a specific server connection without stopping the daemon:
+
+```bash
+# Use a different data directory (creates isolated socket path)
+mcpproxy tools list --server=github-server --data-dir=/tmp/debug-session
+
+# Or set empty endpoint to skip socket detection
+MCPPROXY_TRAY_ENDPOINT="" mcpproxy tools list --server=github-server
+```
+:::
+
+### Mode Comparison
+
+| Aspect | Daemon Mode | Standalone Mode |
+|--------|-------------|-----------------|
+| **Startup** | Fast (< 1s) | Slower (2-5s, initializes components) |
+| **OAuth Tokens** | Shared globally | Isolated per command |
+| **Server State** | Persistent | Ephemeral |
+| **Debugging** | Limited visibility | Full component tracing |
+| **Use Case** | Production / Normal use | Debugging / Testing |
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `MCPPROXY_TRAY_ENDPOINT` | Override socket path. Set to empty string `""` to force standalone mode |
+
+**Examples:**
+```bash
+# Custom socket endpoint
+MCPPROXY_TRAY_ENDPOINT="unix:///tmp/custom.sock" mcpproxy tools list --server=myserver
+
+# Force standalone mode (skip daemon)
+MCPPROXY_TRAY_ENDPOINT="" mcpproxy tools list --server=myserver --log-level=trace
+```
+
+:::note auth status requires daemon
+The `auth status` command requires a running daemon since it queries the daemon's OAuth state:
+```bash
+mcpproxy auth status --server=oauth-server
+# Error: auth status requires running daemon. Start with: mcpproxy serve
+```
+:::
+
 ## Server Commands
 
 ### serve
