@@ -17,7 +17,7 @@ This guide will get MCPProxy running in 5 minutes.
 ## Prerequisites
 
 - MCPProxy installed (see [Installation](/getting-started/installation))
-- An MCP-compatible AI client (Claude Desktop, etc.)
+- An MCP-compatible AI client (Cursor IDE, Claude Desktop, Claude Code CLI, etc.) - see [Connect Your AI Client](#4-connect-your-ai-client) below
 
 ## 1. Start MCPProxy
 
@@ -114,21 +114,78 @@ Edit `~/.mcpproxy/mcp_config.json`:
 
 ## 4. Connect Your AI Client
 
-Configure your AI client to connect to MCPProxy:
+MCPProxy exposes an MCP endpoint at `http://localhost:8080/mcp`. Connect your AI client using one of these methods:
 
-**MCP Endpoint:** `http://127.0.0.1:8080/mcp`
+<Tabs>
+<TabItem value="cursor" label="Cursor IDE">
 
-For Claude Desktop, add to your configuration:
+**One-Click Install:**
+
+<a href="cursor://anysphere.cursor-deeplink/mcp/install?name=MCPProxy&config=eyJ0eXBlIjoiaHR0cCIsInVybCI6Imh0dHA6Ly9sb2NhbGhvc3Q6ODA4MC9tY3AvIn0=" class="button button--primary button--lg">
+  Add MCPProxy to Cursor
+</a>
+
+Click the button above to automatically add MCPProxy to Cursor IDE.
+
+**Manual Setup:**
+
+1. Open Cursor Settings (Cmd/Ctrl + ,)
+2. Go to **Features** → **MCP**
+3. Click **Add Server**
+4. Enter:
+   - Name: `MCPProxy`
+   - URL: `http://localhost:8080/mcp`
+
+</TabItem>
+<TabItem value="claude-desktop" label="Claude Desktop">
+
+Add MCPProxy to your Claude Desktop configuration file:
+
+**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
     "mcpproxy": {
-      "url": "http://127.0.0.1:8080/mcp"
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://localhost:8080/mcp"
+      ]
     }
   }
 }
 ```
+
+After saving, restart Claude Desktop to apply the changes.
+
+:::info Why mcp-remote?
+Claude Desktop doesn't natively support HTTP MCP servers yet. The `mcp-remote` package bridges this gap by proxying the HTTP connection through stdio.
+:::
+
+</TabItem>
+<TabItem value="claude-code" label="Claude Code CLI">
+
+Add MCPProxy with a single command:
+
+```bash
+claude mcp add --transport http mcpproxy http://localhost:8080/mcp
+```
+
+Verify it was added:
+
+```bash
+claude mcp list
+```
+
+</TabItem>
+</Tabs>
+
+:::tip Multiple Clients
+You can connect multiple AI clients to the same MCPProxy instance simultaneously. All clients share the same upstream servers and configuration.
+:::
 
 ## 5. Verify Connection
 
