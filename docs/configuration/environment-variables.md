@@ -9,18 +9,22 @@ keywords: [environment, variables, env, configuration]
 
 # Environment Variables
 
-MCPProxy can be configured using environment variables, which take precedence over config file settings.
+MCPProxy consists of two components that can be configured via environment variables:
+
+- **mcpproxy** (core server) - The main proxy server that handles MCP connections
+- **mcpproxy-tray** (tray application) - Optional GUI for user convenience
+
+## Core Server (mcpproxy)
+
+The core server is the main MCPProxy application. It handles all MCP proxy functionality, upstream server management, and API endpoints.
 
 :::tip Recommended: Use Config File
-For the core server, prefer configuring `listen`, `api_key`, and other settings in `~/.mcpproxy/mcp_config.json`. See [Config File](./config-file.md) for details.
+For the core server, prefer configuring settings in `~/.mcpproxy/mcp_config.json`. See [Config File](./config-file.md) for details.
 
-Environment variables are primarily useful for:
-- **Tray application settings** (variables starting with `MCPPROXY_TRAY_*`)
-- **CI/CD environments** where config files aren't practical
-- **Temporary overrides** during development
+Environment variables are useful for CI/CD environments or temporary overrides during development.
 :::
 
-## Server Configuration
+### Server Configuration
 
 | Variable | Description | Example |
 |----------|-------------|---------|
@@ -28,7 +32,7 @@ Environment variables are primarily useful for:
 | `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
 | `MCPPROXY_DATA` | Override data directory | `/var/lib/mcpproxy` |
 
-## Security Settings
+### Security Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -37,23 +41,56 @@ Environment variables are primarily useful for:
 
 **Note:** TLS certificates are managed in `~/.mcpproxy/certs/` or via the `tls.certs_dir` config option. Use `mcpproxy trust-cert` to set up certificates.
 
-## Debugging
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `HEADLESS` | Run without browser launching | `false` |
-
-**Note:** Debug logging is enabled via `--log-level=debug` flag or `logging.level` in config file.
-
-## OAuth Settings
+### OAuth Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_DISABLE_OAUTH` | Disable OAuth for testing | `false` |
 
-## Tray Application
+### Browser Detection
 
-These variables configure the tray application behavior. They are the primary use case for environment variables since the tray doesn't use the config file directly.
+These variables control browser behavior for OAuth flows:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HEADLESS` | Disable browser launching | `false` |
+| `NO_BROWSER` | Prevent browser opening for OAuth | `false` |
+| `CI` | CI environment detection (disables browser) | - |
+| `BROWSER` | Custom browser executable for OAuth | System default |
+
+### Core Server Examples
+
+```bash
+# Start with custom port
+MCPPROXY_LISTEN=":9000" mcpproxy serve
+
+# Enable debug logging
+mcpproxy serve --log-level=debug
+
+# Run in headless mode (no browser for OAuth)
+HEADLESS=true mcpproxy serve
+
+# Custom API key
+MCPPROXY_API_KEY="my-secure-key" mcpproxy serve
+```
+
+---
+
+## Tray Application (mcpproxy-tray)
+
+The tray application is an **optional** GUI component that provides user convenience features like system tray icon, menu access, and automatic core server management. The core server works independently without the tray.
+
+**How tray connects to core:**
+- **macOS/Linux**: Unix socket at `~/.mcpproxy/mcpproxy.sock`
+- **Windows**: Named pipe at `\\.\pipe\mcpproxy-<username>`
+
+Socket/pipe connections are trusted and don't require API key authentication.
+
+:::note
+The tray application doesn't read the config file directly. It launches the core server which reads `~/.mcpproxy/mcp_config.json`. Use tray environment variables only for tray-specific behavior.
+:::
+
+### Tray Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -68,7 +105,7 @@ These variables configure the tray application behavior. They are the primary us
 | `MCPPROXY_TRAY_RETRY_DELAY` | Core connection retry delay (ms) | `1000` |
 | `MCPPROXY_TRAY_STATE_DEBUG` | Enable state machine debug logging | `false` |
 
-## Auto-Update Settings
+### Auto-Update Settings (Tray)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -77,50 +114,9 @@ These variables configure the tray application behavior. They are the primary us
 | `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates | `false` |
 | `MCPPROXY_UPDATE_APP_BUNDLE` | Enable app bundle updates (macOS) | `false` |
 
-## Browser Detection
+### Setting Tray Variables on macOS
 
-These variables control browser behavior for OAuth flows:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `HEADLESS` | Disable browser launching | `false` |
-| `NO_BROWSER` | Prevent browser opening for OAuth | `false` |
-| `CI` | CI environment detection (disables browser) | - |
-| `BROWSER` | Custom browser executable for OAuth | System default |
-
-## Usage Examples
-
-### Start with Custom Port
-
-```bash
-MCPPROXY_LISTEN=":9000" mcpproxy serve
-```
-
-### Enable Debug Logging
-
-```bash
-mcpproxy serve --log-level=debug
-```
-
-### Run in Headless Mode
-
-```bash
-HEADLESS=true mcpproxy serve
-```
-
-### Custom API Key
-
-```bash
-MCPPROXY_API_KEY="my-secure-key" mcpproxy serve
-```
-
-### Setting Tray Environment Variables on macOS
-
-When launching mcpproxy-tray from Launchpad or the Applications folder, environment variables must be set system-wide using `launchctl`. This is an alternative to running the tray from terminal.
-
-:::note
-For core server settings like `listen`, `api_key`, and upstream servers, use the config file `~/.mcpproxy/mcp_config.json` instead. The tray will pass the config to the core automatically.
-:::
+When launching mcpproxy-tray from Launchpad or the Applications folder, environment variables must be set system-wide using `launchctl`:
 
 ```bash
 # Set custom port for the core server
@@ -141,6 +137,8 @@ killall Dock
 launchctl unsetenv MCPPROXY_TRAY_PORT
 killall Dock
 ```
+
+---
 
 ## Priority Order
 
