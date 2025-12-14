@@ -56,7 +56,7 @@ If you installed MCPProxy using the **DMG installer** (macOS) or **Windows insta
 Right-click (or click on macOS) the tray icon to access:
 - **Open Web UI** - Launch the management dashboard
 - **View Logs** - See server activity
-- **Restart Core** - Restart the proxy server
+- **Upstream Servers** - View status of all MCP servers, enable/disable individual servers
 - **Quit** - Stop MCPProxy completely
 :::
 
