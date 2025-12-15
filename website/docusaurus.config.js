@@ -22,7 +22,7 @@ const config = {
   onBrokenMarkdownLinks: 'warn',
 
   markdown: {
-    format: 'md',
+    format: 'detect',
   },
 
   i18n: {
