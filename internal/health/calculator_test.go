@@ -374,3 +374,38 @@ func TestDefaultHealthConfig(t *testing.T) {
 	assert.NotNil(t, cfg)
 	assert.Equal(t, time.Hour, cfg.ExpiryWarningDuration)
 }
+
+// I-002: Test FR-004 - All health status responses must include non-empty summary
+func TestCalculateHealth_AlwaysIncludesSummary(t *testing.T) {
+	expiresAt := time.Now().Add(30 * time.Minute)
+
+	testCases := []struct {
+		name  string
+		input HealthCalculatorInput
+	}{
+		{"disabled server", HealthCalculatorInput{Name: "test", Enabled: false}},
+		{"quarantined server", HealthCalculatorInput{Name: "test", Enabled: true, Quarantined: true}},
+		{"error state", HealthCalculatorInput{Name: "test", Enabled: true, State: "error", LastError: "connection refused"}},
+		{"error state no message", HealthCalculatorInput{Name: "test", Enabled: true, State: "error", LastError: ""}},
+		{"disconnected state", HealthCalculatorInput{Name: "test", Enabled: true, State: "disconnected"}},
+		{"connecting state", HealthCalculatorInput{Name: "test", Enabled: true, State: "connecting"}},
+		{"idle state", HealthCalculatorInput{Name: "test", Enabled: true, State: "idle"}},
+		{"connected healthy", HealthCalculatorInput{Name: "test", Enabled: true, State: "connected", Connected: true, ToolCount: 5}},
+		{"connected no tools", HealthCalculatorInput{Name: "test", Enabled: true, State: "connected", Connected: true, ToolCount: 0}},
+		{"oauth expired", HealthCalculatorInput{Name: "test", Enabled: true, State: "connected", Connected: true, OAuthRequired: true, OAuthStatus: "expired"}},
+		{"oauth none", HealthCalculatorInput{Name: "test", Enabled: true, State: "connected", Connected: true, OAuthRequired: true, OAuthStatus: "none"}},
+		{"oauth error", HealthCalculatorInput{Name: "test", Enabled: true, State: "connected", Connected: true, OAuthRequired: true, OAuthStatus: "error"}},
+		{"user logged out", HealthCalculatorInput{Name: "test", Enabled: true, State: "connected", OAuthRequired: true, OAuthStatus: "authenticated", UserLoggedOut: true}},
+		{"token expiring no refresh", HealthCalculatorInput{Name: "test", Enabled: true, State: "connected", Connected: true, OAuthRequired: true, OAuthStatus: "authenticated", TokenExpiresAt: &expiresAt, HasRefreshToken: false}},
+		{"token expiring with refresh", HealthCalculatorInput{Name: "test", Enabled: true, State: "connected", Connected: true, OAuthRequired: true, OAuthStatus: "authenticated", TokenExpiresAt: &expiresAt, HasRefreshToken: true, ToolCount: 5}},
+		{"unknown state", HealthCalculatorInput{Name: "test", Enabled: true, State: "unknown"}},
+		{"empty state", HealthCalculatorInput{Name: "test", Enabled: true, State: ""}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := CalculateHealth(tc.input, nil)
+			assert.NotEmpty(t, result.Summary, "FR-004: Summary should never be empty for %s", tc.name)
+		})
+	}
+}

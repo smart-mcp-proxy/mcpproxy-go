@@ -1679,7 +1679,16 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			healthInput.TokenExpiresAt = &tokenExpiresAt
 		}
 
-		serverMap["health"] = health.CalculateHealth(healthInput, healthConfig)
+		healthStatus := health.CalculateHealth(healthInput, healthConfig)
+		serverMap["health"] = healthStatus
+
+		// M-005: Log health status for debugging
+		r.logger.Debug("Server health calculated",
+			zap.String("server", serverStatus.Name),
+			zap.String("level", healthStatus.Level),
+			zap.String("admin_state", healthStatus.AdminState),
+			zap.String("summary", healthStatus.Summary),
+		)
 
 		result = append(result, serverMap)
 	}

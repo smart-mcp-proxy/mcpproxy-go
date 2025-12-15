@@ -154,10 +154,12 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 					}
 				}
 				// No refresh token - user needs to re-authenticate soon
+				// M-002: Include exact expiration time in Detail field
 				return &contracts.HealthStatus{
 					Level:      LevelDegraded,
 					AdminState: StateEnabled,
 					Summary:    formatExpiringTokenSummary(timeUntilExpiry),
+					Detail:     fmt.Sprintf("Token expires at %s", input.TokenExpiresAt.Format(time.RFC3339)),
 					Action:     ActionLogin,
 				}
 			}

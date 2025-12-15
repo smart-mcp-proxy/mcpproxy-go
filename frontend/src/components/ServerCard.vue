@@ -11,11 +11,14 @@
         </div>
 
         <!-- Status indicator using unified health status -->
+        <!-- M-004: Add tooltip showing health.detail if present -->
         <div
           :class="[
             'badge badge-sm flex-shrink-0',
-            statusBadgeClass
+            statusBadgeClass,
+            statusTooltip ? 'tooltip tooltip-left' : ''
           ]"
+          :data-tip="statusTooltip"
         >
           {{ statusText }}
         </div>
@@ -234,6 +237,15 @@ const statusText = computed(() => {
   if (props.server.connected) return 'Connected'
   if (props.server.connecting) return 'Connecting'
   return 'Disconnected'
+})
+
+// M-004: Tooltip showing health.detail if present (for additional context)
+const statusTooltip = computed(() => {
+  const health = props.server.health
+  if (health?.detail) {
+    return health.detail
+  }
+  return ''
 })
 
 // Suggested action from health status

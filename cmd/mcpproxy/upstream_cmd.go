@@ -18,6 +18,7 @@ import (
 
 	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/health"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/reqcontext"
 	"mcpproxy-go/internal/socket"
@@ -177,20 +178,21 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 	// Convert config servers to output format
 	servers := make([]map[string]interface{}, len(globalConfig.Servers))
 	for i, srv := range globalConfig.Servers {
-		// Create health status for config-only mode
-		healthLevel := "unknown"
-		healthAdminState := "enabled"
-		healthSummary := "Daemon not running"
-		healthAction := ""
+		// I-003: Use health.CalculateHealth() instead of inline logic for DRY principle
+		healthInput := health.HealthCalculatorInput{
+			Name:        srv.Name,
+			Enabled:     srv.Enabled,
+			Quarantined: srv.Quarantined,
+			State:       "disconnected", // Daemon not running
+			Connected:   false,
+			ToolCount:   0,
+		}
+		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())
 
-		if !srv.Enabled {
-			healthAdminState = "disabled"
-			healthSummary = "Disabled"
-			healthAction = "enable"
-		} else if srv.Quarantined {
-			healthAdminState = "quarantined"
-			healthSummary = "Quarantined for review"
-			healthAction = "approve"
+		// Override summary for config-only mode to indicate daemon status
+		summary := healthStatus.Summary
+		if healthStatus.AdminState == health.StateEnabled {
+			summary = "Daemon not running"
 		}
 
 		servers[i] = map[string]interface{}{
@@ -199,12 +201,13 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 			"protocol":   srv.Protocol,
 			"connected":  false,
 			"tool_count": 0,
-			"status":     healthSummary,
+			"status":     summary,
 			"health": map[string]interface{}{
-				"level":       healthLevel,
-				"admin_state": healthAdminState,
-				"summary":     healthSummary,
-				"action":      healthAction,
+				"level":       healthStatus.Level,
+				"admin_state": healthStatus.AdminState,
+				"summary":     summary,
+				"detail":      healthStatus.Detail,
+				"action":      healthStatus.Action,
 			},
 		}
 	}

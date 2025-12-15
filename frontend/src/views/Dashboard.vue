@@ -462,12 +462,17 @@ const diagnosticsBadgeClass = computed(() => {
 // Servers needing attention (unhealthy or degraded health level, excluding admin states)
 const serversNeedingAttention = computed(() => {
   return serversStore.servers.filter(server => {
+    // I-004: Defensive null check for backward compatibility
+    if (!server.health) {
+      console.warn(`Server ${server.name} missing health field`)
+      return false
+    }
     // Skip servers with admin states (disabled, quarantined)
-    if (server.health?.admin_state === 'disabled' || server.health?.admin_state === 'quarantined') {
+    if (server.health.admin_state === 'disabled' || server.health.admin_state === 'quarantined') {
       return false
     }
     // Include servers with unhealthy or degraded health level
-    return server.health?.level === 'unhealthy' || server.health?.level === 'degraded'
+    return server.health.level === 'unhealthy' || server.health.level === 'degraded'
   })
 })
 

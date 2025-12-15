@@ -141,6 +141,25 @@ func TestMCPProtocolWithBinary(t *testing.T) {
 		assert.Equal(t, "memory", serverMap["name"])
 		assert.Equal(t, "stdio", serverMap["protocol"])
 		assert.Equal(t, true, serverMap["enabled"])
+
+		// I-001: Verify health field is present with expected structure (FR-017, FR-018)
+		healthMap, ok := serverMap["health"].(map[string]interface{})
+		require.True(t, ok, "Server should have health field")
+		assert.NotEmpty(t, healthMap["level"], "Health level should be present")
+		assert.NotEmpty(t, healthMap["admin_state"], "Admin state should be present")
+		assert.NotEmpty(t, healthMap["summary"], "Summary should be present")
+
+		// Verify health level is one of the valid values
+		level, ok := healthMap["level"].(string)
+		require.True(t, ok, "Health level should be a string")
+		validLevels := []string{"healthy", "degraded", "unhealthy"}
+		assert.Contains(t, validLevels, level, "Health level should be valid")
+
+		// Verify admin state is one of the valid values
+		adminState, ok := healthMap["admin_state"].(string)
+		require.True(t, ok, "Admin state should be a string")
+		validStates := []string{"enabled", "disabled", "quarantined"}
+		assert.Contains(t, validStates, adminState, "Admin state should be valid")
 	})
 }
 
