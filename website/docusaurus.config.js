@@ -22,7 +22,7 @@ const config = {
   onBrokenMarkdownLinks: 'warn',
 
   markdown: {
-    format: 'md',
+    format: 'detect',
   },
 
   i18n: {
@@ -41,6 +41,7 @@ const config = {
           editUrl: 'https://github.com/smart-mcp-proxy/mcpproxy-go/edit/main/',
           // Only include structured documentation pages
           include: [
+            'intro.md',
             'getting-started/**/*.{md,mdx}',
             'configuration/**/*.{md,mdx}',
             'cli/**/*.{md,mdx}',
@@ -103,7 +104,7 @@ const config = {
         logo: {
           alt: 'MCPProxy Logo',
           src: 'img/logo.svg',
-          href: '/getting-started/installation',
+          href: '/',
         },
         items: [
           {
