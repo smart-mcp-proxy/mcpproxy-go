@@ -289,6 +289,11 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.Updated = updated
 		}
 
+		// Extract unified health status
+		if health, ok := srvRaw["health"].(*contracts.HealthStatus); ok {
+			srv.Health = health
+		}
+
 		servers = append(servers, srv)
 
 		// Update stats

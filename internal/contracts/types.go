@@ -45,6 +45,7 @@ type Server struct {
 	RetryCount        int               `json:"retry_count,omitempty"`
 	LastRetryTime     *time.Time        `json:"last_retry_time,omitempty"`
 	UserLoggedOut     bool              `json:"user_logged_out,omitempty"` // True if user explicitly logged out (prevents auto-reconnection)
+	Health            *HealthStatus     `json:"health,omitempty"`          // Unified health status calculated by the backend
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -560,6 +561,25 @@ type SuccessResponse struct {
 type ErrorResponse struct {
 	Success bool   `json:"success"`
 	Error   string `json:"error"`
+}
+
+// HealthStatus represents the unified health status of an upstream MCP server.
+// Calculated once in the backend and rendered identically by all interfaces.
+type HealthStatus struct {
+	// Level indicates the health level: "healthy", "degraded", or "unhealthy"
+	Level string `json:"level"`
+
+	// AdminState indicates the admin state: "enabled", "disabled", or "quarantined"
+	AdminState string `json:"admin_state"`
+
+	// Summary is a human-readable status message (e.g., "Connected (5 tools)")
+	Summary string `json:"summary"`
+
+	// Detail is an optional longer explanation of the status
+	Detail string `json:"detail,omitempty"`
+
+	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", or "" (none)
+	Action string `json:"action,omitempty"`
 }
 
 // UpdateInfo represents version update check information

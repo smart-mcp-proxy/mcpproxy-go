@@ -228,10 +228,7 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		name, _ := srv["name"].(string)
 		oauth, _ := srv["oauth"].(map[string]interface{})
 		authenticated, _ := srv["authenticated"].(bool)
-		connected, _ := srv["connected"].(bool)
 		lastError, _ := srv["last_error"].(string)
-		enabled, _ := srv["enabled"].(bool)
-		userLoggedOut, _ := srv["user_logged_out"].(bool)
 
 		// Check if this is an OAuth server by:
 		// 1. Has oauth config OR
@@ -247,50 +244,56 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 
 		hasOAuthServers = true
 
-		// Determine status emoji and text using oauth_status for accurate state
-		oauthStatus, _ := srv["oauth_status"].(string)
-		var status string
+		// Use unified health status from backend (FR-006, FR-007)
+		var healthLevel, adminState, healthSummary, healthAction string
+		if health, ok := srv["health"].(map[string]interface{}); ok && health != nil {
+			healthLevel, _ = health["level"].(string)
+			adminState, _ = health["admin_state"].(string)
+			healthSummary, _ = health["summary"].(string)
+			healthAction, _ = health["action"].(string)
+		}
 
-		// Check priority states first
-		if !enabled {
-			// Server is disabled - no reconnection attempts
-			status = "⏸️  Disabled"
-		} else if userLoggedOut {
-			// User explicitly logged out - no auto-reconnection
-			status = "🚪 Logged Out (Login Required)"
-		} else if connected {
-			// Connected states
-			if authenticated {
-				status = "✅ Authenticated & Connected"
-			} else {
-				status = "⚠️  Connected (No OAuth Token)"
-			}
-		} else {
-			// Disconnected states - use oauth_status for clarity
-			switch oauthStatus {
-			case "authenticated":
-				// Token valid but not connected - likely reconnecting
-				status = "⏳ Reconnecting (Token Valid)"
-			case "expired":
-				// Token expired - needs re-authentication
-				status = "⚠️  Token Expired (Login Required)"
-			case "error":
-				status = "❌ Authentication Error"
+		// Determine status emoji based on admin_state first, then health level
+		var statusEmoji string
+		switch adminState {
+		case "disabled":
+			statusEmoji = "⏸️"
+		case "quarantined":
+			statusEmoji = "🔒"
+		default:
+			// Use health level for enabled servers
+			switch healthLevel {
+			case "healthy":
+				statusEmoji = "✅"
+			case "degraded":
+				statusEmoji = "⚠️"
+			case "unhealthy":
+				statusEmoji = "❌"
 			default:
-				// No token or oauth_status not set
-				if lastError != "" {
-					status = "❌ Authentication Failed"
-				} else if authenticated {
-					// Fallback: has token but no oauth_status
-					status = "⏳ Reconnecting"
-				} else {
-					status = "⏳ Pending Authentication"
-				}
+				statusEmoji = "❓"
 			}
 		}
 
 		fmt.Printf("Server: %s\n", name)
-		fmt.Printf("  Status: %s\n", status)
+		fmt.Printf("  Health: %s %s\n", statusEmoji, healthSummary)
+		if adminState != "" && adminState != "enabled" {
+			fmt.Printf("  Admin State: %s\n", adminState)
+		}
+		// Show action as command hint (FR-007)
+		if healthAction != "" {
+			switch healthAction {
+			case "login":
+				fmt.Printf("  Action: mcpproxy auth login --server=%s\n", name)
+			case "restart":
+				fmt.Printf("  Action: mcpproxy upstream restart %s\n", name)
+			case "enable":
+				fmt.Printf("  Action: mcpproxy upstream enable %s\n", name)
+			case "approve":
+				fmt.Printf("  Action: Approve via Web UI or tray menu\n")
+			case "view_logs":
+				fmt.Printf("  Action: mcpproxy upstream logs %s\n", name)
+			}
+		}
 
 		// Display OAuth configuration details (if available)
 		// Check if this is an autodiscovery server (no explicit OAuth config, but has token)

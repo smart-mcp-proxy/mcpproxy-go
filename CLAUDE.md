@@ -159,7 +159,97 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 
 **Authentication**: Use `X-API-Key` header or `?apikey=` query parameter.
 
+**Real-time Updates**:
+- `GET /events` - Server-Sent Events (SSE) stream for live updates
+- Streams both status changes and runtime events (`servers.changed`, `config.reloaded`)
+- Used by web UI and tray for real-time synchronization
+
+**API Authentication Examples**:
+```bash
+# Using X-API-Key header (recommended for curl)
+curl -H "X-API-Key: your-api-key" http://127.0.0.1:8080/api/v1/servers
+
+# Using query parameter (for browser/SSE)
+curl "http://127.0.0.1:8080/api/v1/servers?apikey=your-api-key"
+
+# SSE with API key
+curl "http://127.0.0.1:8080/events?apikey=your-api-key"
+
+# Open Web UI with API key (tray app does this automatically)
+open "http://127.0.0.1:8080/ui/?apikey=your-api-key"
+```
+
+**Security Notes**:
+- **MCP endpoints (`/mcp`, `/mcp/`)** remain **unprotected** for client compatibility
+- **REST API** requires authentication - API key is always enforced (auto-generated if not provided)
+- **Secure by default**: Empty or missing API keys trigger automatic generation and persistence to config
+
 See [docs/api/rest-api.md](docs/api/rest-api.md) and `oas/swagger.yaml` for API reference.
+
+### Unified Health Status
+
+All server responses include a `health` field that provides consistent status information across all interfaces (CLI, web UI, tray, MCP tools):
+
+```json
+{
+  "health": {
+    "level": "healthy|degraded|unhealthy",
+    "admin_state": "enabled|disabled|quarantined",
+    "summary": "Human-readable status summary",
+    "detail": "Additional context about the status",
+    "action": "login|restart|enable|approve|view_logs|"
+  }
+}
+```
+
+**Health Levels**:
+- `healthy`: Server is connected and functioning normally
+- `degraded`: Server has warnings (e.g., OAuth token expiring soon)
+- `unhealthy`: Server has errors or is not functioning
+
+**Admin States**:
+- `enabled`: Normal operation
+- `disabled`: User disabled the server
+- `quarantined`: Server pending security approval
+
+**Actions**: Suggested remediation action for the current state. Empty when no action is needed.
+
+**Configuration**: Token expiry warning threshold can be configured:
+```json
+{
+  "oauth_expiry_warning_hours": 24
+}
+```
+
+## JavaScript Code Execution
+
+The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES5.1+).
+
+### Configuration
+
+```json
+{
+  "enable_code_execution": true,
+  "code_execution_timeout_ms": 120000,
+  "code_execution_max_tool_calls": 0,
+  "code_execution_pool_size": 10
+}
+```
+
+### CLI Usage
+
+```bash
+mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}'
+mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user})" --input='{"user":"octocat"}'
+```
+
+### Documentation
+
+See `docs/code_execution/` for complete guides:
+- `overview.md` - Architecture and best practices
+- `examples.md` - 13 working code samples
+- `api-reference.md` - Complete schema documentation
+- `troubleshooting.md` - Common issues and solutions
 
 ## Security Model
 

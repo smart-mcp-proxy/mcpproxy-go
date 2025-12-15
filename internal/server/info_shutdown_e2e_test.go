@@ -36,6 +36,15 @@ func TestInfoEndpoint(t *testing.T) {
 	err := os.Chmod(tempDir, 0700)
 	require.NoError(t, err, "Failed to set secure permissions on temp directory")
 
+	// Create a minimal config file to avoid loading user's real config
+	configPath := filepath.Join(tempDir, "mcp_config.json")
+	minimalConfig := `{
+		"listen": "127.0.0.1:0",
+		"mcpServers": [],
+		"docker_isolation": {"enabled": false}
+	}`
+	require.NoError(t, os.WriteFile(configPath, []byte(minimalConfig), 0600))
+
 	// Find available port
 	ln, err := net.Listen("tcp", ":0")
 	require.NoError(t, err)
@@ -49,6 +58,7 @@ func TestInfoEndpoint(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binaryPath, "serve",
+		"--config", configPath,
 		"--data-dir", tempDir,
 		"--listen", listenAddr)
 
@@ -150,6 +160,15 @@ func TestGracefulShutdownNoPanic(t *testing.T) {
 	err := os.Chmod(tempDir, 0700)
 	require.NoError(t, err, "Failed to set secure permissions on temp directory")
 
+	// Create a minimal config file to avoid loading user's real config
+	configPath := filepath.Join(tempDir, "mcp_config.json")
+	minimalConfig := `{
+		"listen": "127.0.0.1:0",
+		"mcpServers": [],
+		"docker_isolation": {"enabled": false}
+	}`
+	require.NoError(t, os.WriteFile(configPath, []byte(minimalConfig), 0600))
+
 	// Find available port
 	ln, err := net.Listen("tcp", ":0")
 	require.NoError(t, err)
@@ -163,6 +182,7 @@ func TestGracefulShutdownNoPanic(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binaryPath, "serve",
+		"--config", configPath,
 		"--data-dir", tempDir,
 		"--listen", listenAddr,
 		"--log-level", "debug")
@@ -244,6 +264,15 @@ func TestSocketInfoEndpoint(t *testing.T) {
 	err := os.Chmod(tempDir, 0700)
 	require.NoError(t, err, "Failed to set secure permissions on temp directory")
 
+	// Create a minimal config file to avoid loading user's real config
+	configPath := filepath.Join(tempDir, "mcp_config.json")
+	minimalConfig := `{
+		"listen": "127.0.0.1:0",
+		"mcpServers": [],
+		"docker_isolation": {"enabled": false}
+	}`
+	require.NoError(t, os.WriteFile(configPath, []byte(minimalConfig), 0600))
+
 	socketPath := filepath.Join(tempDir, "mcpproxy.sock")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -251,6 +280,7 @@ func TestSocketInfoEndpoint(t *testing.T) {
 
 	// Start server with socket enabled
 	cmd := exec.CommandContext(ctx, binaryPath, "serve",
+		"--config", configPath,
 		"--data-dir", tempDir,
 		"--listen", "127.0.0.1:0", // Random port for HTTP
 		"--enable-socket", "true")

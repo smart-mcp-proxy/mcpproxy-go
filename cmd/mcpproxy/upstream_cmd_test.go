@@ -49,24 +49,21 @@ func TestOutputServers_TableFormat(t *testing.T) {
 		t.Errorf("outputServers() returned error: %v", err)
 	}
 
-	// Verify table headers
+	// Verify table headers (new unified health status format)
 	if !strings.Contains(output, "NAME") {
 		t.Error("Table output missing NAME header")
 	}
-	if !strings.Contains(output, "ENABLED") {
-		t.Error("Table output missing ENABLED header")
-	}
 	if !strings.Contains(output, "PROTOCOL") {
 		t.Error("Table output missing PROTOCOL header")
-	}
-	if !strings.Contains(output, "CONNECTED") {
-		t.Error("Table output missing CONNECTED header")
 	}
 	if !strings.Contains(output, "TOOLS") {
 		t.Error("Table output missing TOOLS header")
 	}
 	if !strings.Contains(output, "STATUS") {
 		t.Error("Table output missing STATUS header")
+	}
+	if !strings.Contains(output, "ACTION") {
+		t.Error("Table output missing ACTION header")
 	}
 
 	// Verify server data
@@ -360,15 +357,17 @@ func TestCreateUpstreamLogger(t *testing.T) {
 }
 
 func TestOutputServers_BooleanFields(t *testing.T) {
+	// Test that unified health status is displayed correctly based on server state
 	tests := []struct {
-		name      string
-		enabled   bool
-		connected bool
+		name           string
+		healthLevel    string
+		adminState     string
+		expectedEmoji  string
 	}{
-		{"both true", true, true},
-		{"both false", false, false},
-		{"enabled only", true, false},
-		{"connected only", false, true},
+		{"healthy enabled", "healthy", "enabled", "✅"},
+		{"disabled", "healthy", "disabled", "⏸️"},
+		{"quarantined", "healthy", "quarantined", "🔒"},
+		{"unhealthy", "unhealthy", "enabled", "❌"},
 	}
 
 	for _, tt := range tests {
@@ -376,11 +375,14 @@ func TestOutputServers_BooleanFields(t *testing.T) {
 			servers := []map[string]interface{}{
 				{
 					"name":       "test-server",
-					"enabled":    tt.enabled,
 					"protocol":   "stdio",
-					"connected":  tt.connected,
 					"tool_count": 0,
-					"status":     "test",
+					"health": map[string]interface{}{
+						"level":       tt.healthLevel,
+						"admin_state": tt.adminState,
+						"summary":     "Test status",
+						"action":      "",
+					},
 				},
 			}
 
@@ -402,11 +404,9 @@ func TestOutputServers_BooleanFields(t *testing.T) {
 				t.Errorf("outputServers() returned error: %v", err)
 			}
 
-			// Verify boolean conversion
-			if tt.enabled {
-				if !strings.Contains(output, "yes") {
-					t.Error("Expected 'yes' for enabled=true")
-				}
+			// Verify health status emoji is displayed
+			if !strings.Contains(output, tt.expectedEmoji) {
+				t.Errorf("Expected emoji '%s' for %s, output: %s", tt.expectedEmoji, tt.name, output)
 			}
 		})
 	}

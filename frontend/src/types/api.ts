@@ -5,6 +5,15 @@ export interface APIResponse<T = any> {
   error?: string
 }
 
+// Health Status types (unified across all interfaces)
+export interface HealthStatus {
+  level: 'healthy' | 'degraded' | 'unhealthy'
+  admin_state: 'enabled' | 'disabled' | 'quarantined'
+  summary: string
+  detail?: string
+  action?: 'login' | 'restart' | 'enable' | 'approve' | 'view_logs' | ''
+}
+
 // Server types
 export interface Server {
   name: string
@@ -27,6 +36,7 @@ export interface Server {
   oauth_status?: 'authenticated' | 'expired' | 'error' | 'none'
   token_expires_at?: string
   user_logged_out?: boolean // True if user explicitly logged out (prevents auto-reconnection)
+  health?: HealthStatus // Unified health status calculated by the backend
 }
 
 // Tool Annotation types

@@ -102,6 +102,9 @@ type Config struct {
 	CodeExecutionTimeoutMs       int  `json:"code_execution_timeout_ms,omitempty" mapstructure:"code-execution-timeout-ms"`   // Timeout in milliseconds (default: 120000, max: 600000)
 	CodeExecutionMaxToolCalls    int  `json:"code_execution_max_tool_calls,omitempty" mapstructure:"code-execution-max-tool-calls"` // Max tool calls per execution (0 = unlimited, default: 0)
 	CodeExecutionPoolSize        int  `json:"code_execution_pool_size,omitempty" mapstructure:"code-execution-pool-size"`     // JavaScript runtime pool size (default: 10)
+
+	// Health status settings
+	OAuthExpiryWarningHours float64 `json:"oauth_expiry_warning_hours,omitempty" mapstructure:"oauth-expiry-warning-hours"` // Hours before token expiry to show degraded status (default: 1.0)
 }
 
 // TLSConfig represents TLS configuration

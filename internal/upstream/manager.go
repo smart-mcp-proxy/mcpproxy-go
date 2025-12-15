@@ -616,16 +616,19 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 
 // ForceCleanupAllContainers is a public wrapper for emergency container cleanup
 // This is called when graceful shutdown fails and containers must be force-removed
+// Only removes containers owned by THIS instance (matching instance ID)
 func (m *Manager) ForceCleanupAllContainers() {
-	m.logger.Warn("Force cleanup requested - removing all managed containers immediately")
+	m.logger.Warn("Force cleanup requested - removing all managed containers for this instance")
 
 	// Create a short-lived context for force cleanup (30 seconds max)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Find all containers with our management label
+	// Find all containers with our management label AND our instance ID
+	instanceID := core.GetInstanceID()
 	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
 		"--filter", "label=com.mcpproxy.managed=true",
+		"--filter", fmt.Sprintf("label=com.mcpproxy.instance=%s", instanceID),
 		"--format", "{{.ID}}\t{{.Names}}")
 
 	output, err := listCmd.Output()
@@ -1141,14 +1144,16 @@ func (m *Manager) DisconnectAll() error {
 	return nil
 }
 
-// HasDockerContainers checks if any Docker containers are actually running
+// HasDockerContainers checks if any Docker containers owned by THIS instance are actually running
 func (m *Manager) HasDockerContainers() bool {
-	// Check if any containers with our labels are actually running
+	// Check if any containers with our labels AND our instance ID are running
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
+	instanceID := core.GetInstanceID()
 	listCmd := exec.CommandContext(ctx, "docker", "ps", "-q",
-		"--filter", "label=com.mcpproxy.managed=true")
+		"--filter", "label=com.mcpproxy.managed=true",
+		"--filter", fmt.Sprintf("label=com.mcpproxy.instance=%s", instanceID))
 
 	output, err := listCmd.Output()
 	if err != nil {
