@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -472,6 +472,11 @@ class APIService {
     }
 
     return this.callTool('upstream_servers', args)
+  }
+
+  // Info endpoint (version and update information)
+  async getInfo(): Promise<APIResponse<InfoResponse>> {
+    return this.request<InfoResponse>('/api/v1/info')
   }
 
   // Utility methods

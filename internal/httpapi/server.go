@@ -23,6 +23,7 @@ import (
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
+	"mcpproxy-go/internal/updatecheck"
 )
 
 const (
@@ -96,6 +97,9 @@ type ServerController interface {
 	// Registry browsing (Phase 7)
 	ListRegistries() ([]interface{}, error)
 	SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error)
+
+	// Version and updates
+	GetVersionInfo() *updatecheck.VersionInfo
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -511,13 +515,13 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 
 // handleGetInfo godoc
 // @Summary Get server information
-// @Description Get essential server metadata including version, web UI URL, and endpoint addresses
-// @Description This endpoint is designed for tray-core communication
+// @Description Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
+// @Description This endpoint is designed for tray-core communication and version checking
 // @Tags status
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.SuccessResponse "Server information"
+// @Success 200 {object} contracts.APIResponse{data=contracts.InfoResponse} "Server information with optional update info"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/info [get]
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
@@ -527,7 +531,7 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	webUIURL := s.buildWebUIURLWithAPIKey(listenAddr, r)
 
 	// Get version from build info or environment
-	version := getBuildVersion()
+	version := GetBuildVersion()
 
 	response := map[string]interface{}{
 		"version":     version,
@@ -537,6 +541,11 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 			"http":   listenAddr,
 			"socket": getSocketPath(), // Returns socket path if enabled, empty otherwise
 		},
+	}
+
+	// Add update information if available
+	if versionInfo := s.controller.GetVersionInfo(); versionInfo != nil {
+		response["update"] = versionInfo.ToAPIResponse()
 	}
 
 	s.writeSuccess(w, response)
@@ -579,11 +588,12 @@ func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) str
 	return baseURL
 }
 
-// getBuildVersion returns the build version from build-time variables
-// This should be set during build using -ldflags
+// buildVersion is set during build using -ldflags
 var buildVersion = "development"
 
-func getBuildVersion() string {
+// GetBuildVersion returns the build version from build-time variables.
+// This should be set during build using -ldflags.
+func GetBuildVersion() string {
 	return buildVersion
 }
 

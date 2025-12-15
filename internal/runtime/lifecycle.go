@@ -17,6 +17,12 @@ const connectAttemptTimeout = 45 * time.Second
 
 // StartBackgroundInitialization kicks off configuration sync and background loops.
 func (r *Runtime) StartBackgroundInitialization() {
+	// Start update checker for background version checking
+	if r.updateChecker != nil {
+		go r.updateChecker.Start(r.appCtx)
+		r.logger.Info("Update checker background process started")
+	}
+
 	// Start proactive OAuth token refresh manager
 	if r.refreshManager != nil {
 		r.refreshManager.SetRuntime(r)

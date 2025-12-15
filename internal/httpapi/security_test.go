@@ -14,6 +14,7 @@ import (
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
+	"mcpproxy-go/internal/updatecheck"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -299,3 +300,4 @@ func (m *baseController) GetRecentSessions(limit int) ([]*contracts.MCPSession, 
 func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
 	return nil, 0, nil
 }
+func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo { return nil }
