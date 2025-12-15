@@ -64,23 +64,57 @@ Get server status and statistics.
 
 #### GET /api/v1/servers
 
-List all upstream servers.
+List all upstream servers with unified health status.
 
 **Response:**
 ```json
 {
-  "servers": [
-    {
-      "name": "github-server",
-      "protocol": "http",
-      "enabled": true,
-      "connected": true,
-      "quarantined": false,
-      "tools_count": 15
-    }
-  ]
+  "success": true,
+  "data": {
+    "servers": [
+      {
+        "name": "github-server",
+        "protocol": "http",
+        "enabled": true,
+        "connected": true,
+        "quarantined": false,
+        "tool_count": 15,
+        "health": {
+          "level": "healthy",
+          "admin_state": "enabled",
+          "summary": "Connected (15 tools)",
+          "action": ""
+        }
+      },
+      {
+        "name": "oauth-server",
+        "protocol": "http",
+        "enabled": true,
+        "connected": false,
+        "quarantined": false,
+        "tool_count": 0,
+        "health": {
+          "level": "unhealthy",
+          "admin_state": "enabled",
+          "summary": "Token expired",
+          "detail": "OAuth access token has expired",
+          "action": "login"
+        }
+      }
+    ]
+  }
 }
 ```
+
+**Health Object Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `level` | string | Health level: `healthy`, `degraded`, or `unhealthy` |
+| `admin_state` | string | Admin state: `enabled`, `disabled`, or `quarantined` |
+| `summary` | string | Human-readable status message |
+| `detail` | string | Optional additional context about the status |
+| `action` | string | Suggested remediation: `login`, `restart`, `enable`, `approve`, `view_logs`, or empty |
 
 #### POST /api/v1/servers/{name}/enable
 
