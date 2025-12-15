@@ -303,6 +303,8 @@ components:
         summary:
           description: Summary is a human-readable status message (e.g., "Connected
             (5 tools)")
+          type: string
+      type: object
     contracts.InfoEndpoints:
       description: Available API endpoints
       properties:

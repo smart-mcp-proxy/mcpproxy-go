@@ -580,6 +580,8 @@ type HealthStatus struct {
 
 	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", or "" (none)
 	Action string `json:"action,omitempty"`
+}
+
 // UpdateInfo represents version update check information
 type UpdateInfo struct {
 	Available     bool       `json:"available"`                // Whether an update is available
