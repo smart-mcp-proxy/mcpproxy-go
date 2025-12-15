@@ -127,6 +127,13 @@ type App struct {
 	autostartManager *AutostartManager
 	autostartItem    *systray.MenuItem
 
+	// Update notification menu item (hidden until update is available)
+	updateMenuItem     *systray.MenuItem
+	updateAvailable    bool
+	latestVersion      string
+	latestReleaseURL   string
+	updateCheckMu      sync.RWMutex
+
 	// Config path for opening from menu
 	configPath string
 
@@ -497,6 +504,12 @@ func (a *App) onReady() {
 
 	// --- Initialize Menu Items ---
 	a.logger.Debug("Initializing tray menu items")
+
+	// Version display at the top of the menu (always visible, non-clickable)
+	versionItem := systray.AddMenuItem(fmt.Sprintf("MCPProxy %s", a.version), "Current version")
+	versionItem.Disable() // Disabled as it's just for display
+	systray.AddSeparator()
+
 	a.statusItem = systray.AddMenuItem("Status: Initializing...", "Proxy server status")
 	a.statusItem.Disable() // Initially disabled as it's just for display
 	// Note: startStopItem removed - tray doesn't directly control core lifecycle
@@ -552,7 +565,10 @@ func (a *App) onReady() {
 	a.menuManager.SetActionCallback(a.handleServerAction)
 
 	// --- Other Menu Items ---
-	updateItem := systray.AddMenuItem("Check for Updates...", "Check for a new version of the proxy")
+	// Update notification menu item (hidden until update is available)
+	a.updateMenuItem = systray.AddMenuItem("Update available", "A new version is available")
+	a.updateMenuItem.Hide() // Hidden by default, shown when update is detected
+
 	openConfigItem := systray.AddMenuItem("Open config dir", "Open the configuration directory")
 	openLogsItem := systray.AddMenuItem("Open logs dir", "Open the logs directory")
 
@@ -641,19 +657,23 @@ func (a *App) onReady() {
 		}()
 	}
 
-	if updateItem != nil {
-		updateCh := updateItem.ClickedCh
+	// Update menu item click handler - opens the GitHub releases page
+	if a.updateMenuItem != nil {
+		updateCh := a.updateMenuItem.ClickedCh
 		go func() {
 			for {
 				select {
 				case <-updateCh:
-					go a.checkForUpdates()
+					a.openUpdateReleasePage()
 				case <-a.ctx.Done():
 					return
 				}
 			}
 		}()
 	}
+
+	// Start background update checker
+	go a.startUpdateChecker()
 
 	if openConfigItem != nil {
 		openConfigCh := openConfigItem.ClickedCh
@@ -1745,5 +1765,174 @@ func (a *App) handleOpenWebUI() {
 		a.logger.Error("Failed to open web control panel", zap.Error(err))
 	} else {
 		a.logger.Info("Successfully opened web control panel")
+	}
+}
+
+// startUpdateChecker starts a background goroutine that periodically checks for updates
+// by querying the core's /api/v1/info endpoint
+func (a *App) startUpdateChecker() {
+	// Wait for connection to be established before checking
+	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds initially
+	defer ticker.Stop()
+
+	// Do an initial check after a short delay
+	time.Sleep(5 * time.Second)
+	a.checkUpdateFromAPI()
+
+	// Then check periodically (less frequently after initial check)
+	for {
+		select {
+		case <-ticker.C:
+			a.checkUpdateFromAPI()
+			// After first successful check, slow down to every 5 minutes
+			ticker.Reset(5 * time.Minute)
+		case <-a.ctx.Done():
+			return
+		}
+	}
+}
+
+// checkUpdateFromAPI queries the core's /api/v1/info endpoint for update information
+func (a *App) checkUpdateFromAPI() {
+	// Only check when connected
+	if a.getConnectionState() != ConnectionStateConnected {
+		return
+	}
+
+	// Build URL to core's API
+	listenAddr := ""
+	if a.server != nil {
+		listenAddr = a.server.GetListenAddress()
+	}
+	if listenAddr == "" {
+		listenAddr = ":8080"
+	}
+
+	// Build base URL
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		a.logger.Debug("Failed to parse listen address for update check", zap.Error(err))
+		return
+	}
+	if host == "" || host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
+
+	apiURL := fmt.Sprintf("http://%s:%s/api/v1/info", host, port)
+
+	// Make HTTP request with timeout
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		a.logger.Debug("Failed to fetch update info from core", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		a.logger.Debug("Unexpected status from core info endpoint", zap.Int("status", resp.StatusCode))
+		return
+	}
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Version string `json:"version"`
+			Update  *struct {
+				Available     bool   `json:"available"`
+				LatestVersion string `json:"latest_version"`
+				ReleaseURL    string `json:"release_url"`
+				IsPrerelease  bool   `json:"is_prerelease"`
+			} `json:"update"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		a.logger.Debug("Failed to parse update info from core", zap.Error(err))
+		return
+	}
+
+	if !response.Success || response.Data.Update == nil {
+		return
+	}
+
+	// Update internal state
+	a.updateCheckMu.Lock()
+	wasAvailable := a.updateAvailable
+	a.updateAvailable = response.Data.Update.Available
+	a.latestVersion = response.Data.Update.LatestVersion
+	a.latestReleaseURL = response.Data.Update.ReleaseURL
+	a.updateCheckMu.Unlock()
+
+	// Update menu visibility
+	if response.Data.Update.Available {
+		if !wasAvailable {
+			a.logger.Info("Update available",
+				zap.String("current", a.version),
+				zap.String("latest", response.Data.Update.LatestVersion))
+		}
+		a.showUpdateMenuItem(response.Data.Update.LatestVersion, response.Data.Update.IsPrerelease)
+	} else {
+		a.hideUpdateMenuItem()
+	}
+}
+
+// showUpdateMenuItem shows the update menu item with the new version
+func (a *App) showUpdateMenuItem(version string, isPrerelease bool) {
+	if a.updateMenuItem == nil {
+		return
+	}
+
+	title := fmt.Sprintf("New version available (%s)", version)
+	if isPrerelease {
+		title = fmt.Sprintf("New prerelease available (%s)", version)
+	}
+
+	// Check if this is a Homebrew installation
+	if a.isHomebrewInstallation() {
+		title = fmt.Sprintf("Update available: %s (use brew upgrade)", version)
+	}
+
+	a.updateMenuItem.SetTitle(title)
+	a.updateMenuItem.SetTooltip("Click to open the download page")
+	a.updateMenuItem.Show()
+}
+
+// hideUpdateMenuItem hides the update menu item
+func (a *App) hideUpdateMenuItem() {
+	if a.updateMenuItem == nil {
+		return
+	}
+	a.updateMenuItem.Hide()
+}
+
+// openUpdateReleasePage opens the GitHub releases page in the default browser
+func (a *App) openUpdateReleasePage() {
+	a.updateCheckMu.RLock()
+	releaseURL := a.latestReleaseURL
+	a.updateCheckMu.RUnlock()
+
+	if releaseURL == "" {
+		// Fallback to main releases page
+		releaseURL = fmt.Sprintf("https://github.com/%s/releases", repo)
+	}
+
+	a.logger.Info("Opening release page", zap.String("url", releaseURL))
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case osDarwin:
+		cmd = exec.Command("open", releaseURL)
+	case osLinux:
+		cmd = exec.Command("xdg-open", releaseURL)
+	case osWindows:
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", releaseURL)
+	default:
+		a.logger.Warn("Unsupported OS for opening URL", zap.String("os", runtime.GOOS))
+		return
+	}
+
+	if err := cmd.Run(); err != nil {
+		a.logger.Error("Failed to open release page", zap.Error(err))
 	}
 }

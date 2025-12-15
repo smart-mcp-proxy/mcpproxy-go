@@ -331,5 +331,8 @@ See `docs/github-actions-windows-wix-research.md` for CI setup.
 See `docs/prerelease-builds.md` for download instructions.
 
 ## Active Technologies
-- Go 1.24.0 + mcp-go (MCP protocol), zap (logging), chi (HTTP router), Vue 3/TypeScript (frontend) (012-unified-health-status)
-- BBolt embedded database (`~/.mcpproxy/config.db`) - existing, no schema changes (012-unified-health-status)
+- Go 1.24 (toolchain go1.24.10) (001-update-version-display)
+- In-memory only for version cache (no persistence per clarification) (001-update-version-display)
+
+## Recent Changes
+- 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

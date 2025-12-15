@@ -14,6 +14,7 @@
 /** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
 const sidebars = {
   docs: [
+    'intro',
     {
       type: 'category',
       label: 'Getting Started',
@@ -64,6 +65,7 @@ const sidebars = {
         'features/code-execution',
         'features/security-quarantine',
         'features/search-discovery',
+        'features/version-updates',
       ],
     },
     {

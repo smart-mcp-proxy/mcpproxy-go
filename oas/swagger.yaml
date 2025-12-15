@@ -97,6 +97,16 @@ components:
           description: Working directory for stdio servers
           type: string
       type: object
+    contracts.APIResponse:
+      allOf:
+      - $ref: '#/components/schemas/data'
+      properties:
+        data: {}
+        error:
+          type: string
+        success:
+          type: boolean
+      type: object
     contracts.ConfigApplyResult:
       properties:
         applied_immediately:
@@ -293,6 +303,30 @@ components:
         summary:
           description: Summary is a human-readable status message (e.g., "Connected
             (5 tools)")
+    contracts.InfoEndpoints:
+      description: Available API endpoints
+      properties:
+        http:
+          description: HTTP endpoint address (e.g., "127.0.0.1:8080")
+          type: string
+        socket:
+          description: Unix socket path (empty if disabled)
+          type: string
+      type: object
+    contracts.InfoResponse:
+      properties:
+        endpoints:
+          $ref: '#/components/schemas/contracts.InfoEndpoints'
+        listen_addr:
+          description: Listen address (e.g., "127.0.0.1:8080")
+          type: string
+        update:
+          $ref: '#/components/schemas/contracts.UpdateInfo'
+        version:
+          description: Current MCPProxy version
+          type: string
+        web_ui_url:
+          description: URL to access the web control panel
           type: string
       type: object
     contracts.IsolationConfig:
@@ -798,6 +832,28 @@ components:
           description: Tool name (without server prefix)
           type: string
       type: object
+    contracts.UpdateInfo:
+      description: Update information (if available)
+      properties:
+        available:
+          description: Whether an update is available
+          type: boolean
+        check_error:
+          description: Error message if update check failed
+          type: string
+        checked_at:
+          description: When the update check was performed
+          type: string
+        is_prerelease:
+          description: Whether the latest version is a prerelease
+          type: boolean
+        latest_version:
+          description: Latest version available (e.g., "v1.2.3")
+          type: string
+        release_url:
+          description: URL to the release page
+          type: string
+      type: object
     contracts.UpstreamError:
       properties:
         error_message:
@@ -823,6 +879,11 @@ components:
           type: string
         message:
           type: string
+      type: object
+    data:
+      properties:
+        data:
+          $ref: '#/components/schemas/contracts.InfoResponse'
       type: object
     management.BulkOperationResult:
       properties:
@@ -1134,15 +1195,23 @@ paths:
   /api/v1/info:
     get:
       description: |-
-        Get essential server metadata including version, web UI URL, and endpoint addresses
-        This endpoint is designed for tray-core communication
+        Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
+        This endpoint is designed for tray-core communication and version checking
       responses:
         "200":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.SuccessResponse'
-          description: Server information
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data: {}
+                  error:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Server information with optional update info
         "500":
           content:
             application/json:

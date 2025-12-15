@@ -25,6 +25,16 @@
         </ul>
       </nav>
 
+      <!-- Version Display -->
+      <div v-if="systemStore.version" class="px-4 py-2 border-t border-base-300">
+        <div class="text-xs text-base-content/60">
+          <span>{{ systemStore.version }}</span>
+          <span v-if="systemStore.updateAvailable" class="ml-1 badge badge-xs badge-primary">
+            update available
+          </span>
+        </div>
+      </div>
+
       <!-- Theme Selector at Bottom -->
       <div class="p-4 border-t border-base-300">
         <div class="dropdown dropdown-top dropdown-end w-full">

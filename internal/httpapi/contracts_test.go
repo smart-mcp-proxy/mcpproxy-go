@@ -19,6 +19,7 @@ import (
 	internalRuntime "mcpproxy-go/internal/runtime"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/updatecheck"
 )
 
 // MockServerController implements ServerController for testing
@@ -279,6 +280,11 @@ func (m *MockServerController) SearchRegistryServers(_, _, _ string, _ int) ([]i
 	return []interface{}{}, nil
 }
 
+// Version and updates
+func (m *MockServerController) GetVersionInfo() *updatecheck.VersionInfo {
+	return nil
+}
+
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()
@@ -484,6 +490,97 @@ func TestEndpointResponseTypes(t *testing.T) {
 			assert.Contains(t, data, "success")
 			assert.Equal(t, tt.action, data["action"])
 		})
+	}
+}
+
+// Test /api/v1/info endpoint returns version information
+func TestInfoEndpointReturnsVersion(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	controller := &MockServerController{}
+	server := NewServer(controller, logger, nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "Expected 200 OK")
+
+	var response contracts.APIResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err, "Response should be valid JSON")
+
+	// Verify it's a success response
+	assert.True(t, response.Success, "Response should indicate success")
+
+	// Validate InfoResponse structure
+	data, ok := response.Data.(map[string]interface{})
+	require.True(t, ok, "Response data should be a map")
+
+	// Check required fields
+	assert.Contains(t, data, "version", "InfoResponse should have version field")
+	assert.Contains(t, data, "listen_addr", "InfoResponse should have listen_addr field")
+	assert.Contains(t, data, "web_ui_url", "InfoResponse should have web_ui_url field")
+	assert.Contains(t, data, "endpoints", "InfoResponse should have endpoints field")
+
+	// Version should be a non-empty string
+	version, ok := data["version"].(string)
+	assert.True(t, ok, "version should be a string")
+	assert.NotEmpty(t, version, "version should not be empty")
+
+	// Verify endpoints structure
+	endpoints, ok := data["endpoints"].(map[string]interface{})
+	assert.True(t, ok, "endpoints should be a map")
+	assert.Contains(t, endpoints, "http", "endpoints should have http field")
+	assert.Contains(t, endpoints, "socket", "endpoints should have socket field")
+}
+
+// Test /api/v1/info endpoint includes update info when available
+func TestInfoEndpointIncludesUpdateInfo(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+
+	// Create a mock controller with update info
+	controller := &MockControllerWithUpdateInfo{}
+	server := NewServer(controller, logger, nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "Expected 200 OK")
+
+	var response contracts.APIResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err, "Response should be valid JSON")
+
+	assert.True(t, response.Success, "Response should indicate success")
+
+	data, ok := response.Data.(map[string]interface{})
+	require.True(t, ok, "Response data should be a map")
+
+	// Check that update field is present when version info is available
+	assert.Contains(t, data, "update", "InfoResponse should have update field when version info is available")
+
+	updateInfo, ok := data["update"].(map[string]interface{})
+	assert.True(t, ok, "update should be a map")
+
+	// Verify update info structure
+	assert.Contains(t, updateInfo, "available", "update info should have available field")
+	assert.Contains(t, updateInfo, "latest_version", "update info should have latest_version field")
+}
+
+// MockControllerWithUpdateInfo extends MockServerController with update info
+type MockControllerWithUpdateInfo struct {
+	MockServerController
+}
+
+func (m *MockControllerWithUpdateInfo) GetVersionInfo() *updatecheck.VersionInfo {
+	return &updatecheck.VersionInfo{
+		CurrentVersion: "v1.0.0",
+		LatestVersion:  "v1.1.0",
+		UpdateAvailable: true,
+		ReleaseURL:     "https://github.com/user/mcpproxy-go/releases/tag/v1.1.0",
 	}
 }
 

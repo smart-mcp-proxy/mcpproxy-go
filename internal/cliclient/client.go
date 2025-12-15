@@ -431,6 +431,46 @@ func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, er
 	return apiResp.Data, nil
 }
 
+// GetInfo retrieves server info including version and update status.
+func (c *Client) GetInfo(ctx context.Context) (map[string]interface{}, error) {
+	url := c.baseURL + "/api/v1/info"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call info API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+		Error   string                 `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data, nil
+}
+
 // BulkOperationResult holds the results of a bulk operation across multiple servers.
 type BulkOperationResult struct {
 	Total      int               `json:"total"`

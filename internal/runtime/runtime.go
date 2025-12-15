@@ -29,6 +29,7 @@ import (
 	"mcpproxy-go/internal/server/tokens"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
+	"mcpproxy-go/internal/updatecheck"
 	"mcpproxy-go/internal/upstream"
 )
 
@@ -70,8 +71,9 @@ type Runtime struct {
 	truncator         *truncate.Truncator
 	secretResolver    *secret.Resolver
 	tokenizer         tokens.Tokenizer
-	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
-	managementService interface{}           // Initialized later to avoid import cycle
+	refreshManager    *oauth.RefreshManager    // Proactive OAuth token refresh
+	updateChecker     *updatecheck.Checker     // Background version checking
+	managementService interface{}              // Initialized later to avoid import cycle
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
@@ -1863,4 +1865,25 @@ func (r *Runtime) RefreshOAuthToken(serverName string) error {
 	}
 
 	return nil
+}
+
+// SetVersion initializes the update checker with the given version.
+// This should be called once during server startup with the build version.
+func (r *Runtime) SetVersion(version string) {
+	if r.updateChecker != nil {
+		// Already initialized
+		return
+	}
+
+	r.updateChecker = updatecheck.New(r.logger, version)
+	r.logger.Info("Update checker initialized", zap.String("version", version))
+}
+
+// GetVersionInfo returns the current version information from the update checker.
+// Returns nil if the update checker has not been initialized.
+func (r *Runtime) GetVersionInfo() *updatecheck.VersionInfo {
+	if r.updateChecker == nil {
+		return nil
+	}
+	return r.updateChecker.GetVersionInfo()
 }

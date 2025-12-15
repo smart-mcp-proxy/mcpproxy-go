@@ -263,3 +263,24 @@ export function isAPIError(response: APIResponse): response is APIError {
 export function isAPISuccess<T>(response: APIResponse<T>): response is APISuccess<T> {
   return response.success;
 }
+
+// Update check types (from internal/updatecheck/types.go)
+export interface UpdateInfo {
+  available: boolean;
+  latest_version?: string;
+  release_url?: string;
+  checked_at?: string; // ISO date string
+  is_prerelease?: boolean;
+  check_error?: string;
+}
+
+export interface InfoResponse {
+  version: string;
+  web_ui_url: string;
+  listen_addr: string;
+  endpoints: {
+    http: string;
+    socket: string;
+  };
+  update?: UpdateInfo;
+}
