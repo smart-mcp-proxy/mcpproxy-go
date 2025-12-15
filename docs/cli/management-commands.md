@@ -43,12 +43,19 @@ mcpproxy upstream restart failing-srv
 mcpproxy upstream list
 ```
 
-Output shows:
-- Server name
-- Connection status
-- Protocol type
-- Enabled/disabled state
+Output shows unified health status:
+- Server name and protocol type
 - Tool count
+- Health status with emoji indicator (✅ healthy, ⚠️ degraded, ❌ unhealthy, ⏸️ disabled, 🔒 quarantined)
+- Suggested action command when applicable
+
+Example output:
+```
+NAME                      PROTOCOL   TOOLS      STATUS                         ACTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅    github-server           http       15         Connected (15 tools)           -
+❌    oauth-server            http       0          Token expired                  auth login --server=oauth-server
+```
 
 ### View Logs
 

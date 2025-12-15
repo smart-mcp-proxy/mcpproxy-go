@@ -41,11 +41,26 @@ mcpproxy upstream list --log-level=debug
 
 **Output Fields:**
 - NAME - Server name
-- ENABLED - Whether server is enabled
-- PROTOCOL - Transport protocol (stdio, http, sse)
-- CONNECTED - Connection status
+- PROTOCOL - Transport protocol (stdio, http, sse, streamable-http)
 - TOOLS - Number of available tools
-- STATUS - Current status or error message
+- STATUS - Unified health status with emoji indicator and summary
+- ACTION - Suggested remediation command (if applicable)
+
+**Status Indicators:**
+- ✅ Healthy - Server connected and working
+- ⚠️ Degraded - Server has warnings (e.g., token expiring soon)
+- ❌ Unhealthy - Server has errors or not functioning
+- ⏸️ Disabled - Server manually disabled by user
+- 🔒 Quarantined - Server pending security approval
+
+**Example Output:**
+```
+NAME                      PROTOCOL   TOOLS      STATUS                         ACTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅    github-server           http       15         Connected (15 tools)           -
+❌    oauth-server            http       0          Token expired                  auth login --server=oauth-server
+⏸️    disabled-server         stdio      0          Disabled by user               upstream enable disabled-server
+```
 
 ---
 
