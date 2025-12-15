@@ -777,12 +777,16 @@ func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand 
 		zap.String("shell", shell),
 		zap.String("wrapped_command", commandString))
 
-	// Return shell with appropriate flags for the OS
-	if runtime.GOOS == osWindows {
+	// Return shell with appropriate flags
+	// Check if the shell is bash (even on Windows with Git Bash)
+	isBash := strings.Contains(strings.ToLower(shell), "bash") ||
+	          strings.Contains(strings.ToLower(shell), "sh")
+
+	if runtime.GOOS == osWindows && !isBash {
 		// Windows cmd.exe uses /c flag to execute command string
 		return shell, []string{"/c", commandString}
 	}
-	// Unix shells use -l (login) flag to load user's full environment
+	// Unix shells (and Git Bash on Windows) use -l (login) flag to load user's full environment
 	// The -c flag executes the command string
 	return shell, []string{"-l", "-c", commandString}
 }

@@ -705,6 +705,7 @@ See [Code Execution Documentation](code_execution/overview.md) for complete deta
 | `servers_url` | string | API endpoint for server listings |
 | `tags` | array | Registry tags (e.g., `["verified"]`) |
 | `protocol` | string | Registry protocol type |
+| `count` | number/string | Number of servers in registry (auto-populated) |
 
 **Default Registries:**
 - Pulse MCP

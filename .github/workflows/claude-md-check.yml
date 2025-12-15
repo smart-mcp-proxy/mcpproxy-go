@@ -1,0 +1,37 @@
+name: CLAUDE.md Size Check
+
+on:
+  pull_request:
+    paths:
+      - 'CLAUDE.md'
+
+jobs:
+  check-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check CLAUDE.md size
+        run: |
+          SIZE=$(wc -c < CLAUDE.md)
+          echo "CLAUDE.md size: $SIZE characters"
+          echo ""
+
+          if [ $SIZE -gt 40000 ]; then
+            echo "::error file=CLAUDE.md::CLAUDE.md exceeds 40,000 character limit ($SIZE chars)."
+            echo ""
+            echo "To fix this issue:"
+            echo "  1. Move detailed content to docs/ folder"
+            echo "  2. Add a link like: See [docs/topic.md](docs/topic.md) for details"
+            echo "  3. Keep CLAUDE.md focused on essential context only"
+            echo ""
+            echo "Target size: <25,000 characters for optimal AI agent performance"
+            exit 1
+          elif [ $SIZE -gt 38000 ]; then
+            echo "::warning file=CLAUDE.md::CLAUDE.md approaching limit: $SIZE/40,000 characters."
+            echo ""
+            echo "Consider moving detailed content to docs/ folder to stay under the limit."
+            echo "Target size: <25,000 characters for optimal AI agent performance"
+          else
+            echo "CLAUDE.md size OK: $SIZE/40,000 characters"
+          fi

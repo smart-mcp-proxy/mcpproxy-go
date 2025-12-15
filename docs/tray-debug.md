@@ -124,10 +124,14 @@ Adjust the inner menu titles if you localise the app; the defaults above match t
 The tray launches `mcpproxy serve` when it detects that no core is running. You can steer that subprocess with the following environment variables before starting the tray:
 
 - `MCPPROXY_CORE_URL` – full base URL the tray should connect to (e.g. `http://localhost:8085`). This also controls the health checks.
+- `MCPPROXY_CORE_PATH` – custom path to the mcpproxy core binary (defaults to bundled binary or PATH lookup).
 - `MCPPROXY_TRAY_LISTEN` / `MCPPROXY_TRAY_PORT` – override the port passed to `--listen` when the tray launches the core (formats accepted: `:8085` or `8085`).
 - `MCPPROXY_TRAY_CONFIG_PATH` – absolute path to the `mcp_config.json` the tray should hand to the core via `--config`.
 - `MCPPROXY_TRAY_EXTRA_ARGS` – optional additional CLI arguments (whitespace separated) appended after `serve`.
 - `MCPPROXY_TRAY_SKIP_CORE` – set to `1` to prevent the tray from launching the core automatically (useful when attaching to an external instance).
+- `MCPPROXY_TRAY_CORE_TIMEOUT` – timeout in seconds for core server startup (default: 30).
+- `MCPPROXY_TRAY_RETRY_DELAY` – retry delay in milliseconds for core server connection (default: 1000).
+- `MCPPROXY_TRAY_STATE_DEBUG` – set to `1` to enable state machine debug logging.
 
 The tray’s status tooltip reflects the active listen address; when you change any of the variables above, restart the tray so it relaunches the core with the new settings.
 
