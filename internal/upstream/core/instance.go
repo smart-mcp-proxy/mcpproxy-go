@@ -32,6 +32,11 @@ func getInstanceID() string {
 	return instanceID
 }
 
+// GetInstanceID returns the unique identifier for this mcpproxy instance (exported for use by manager)
+func GetInstanceID() string {
+	return getInstanceID()
+}
+
 // loadInstanceID attempts to load the instance ID from disk
 func loadInstanceID() (string, error) {
 	instanceFile := filepath.Join(os.TempDir(), "mcpproxy-instance-id")
