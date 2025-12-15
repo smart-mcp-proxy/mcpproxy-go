@@ -104,7 +104,13 @@ data/
 .cursor/
 assets/mcpproxy.icns
 build-info.json
-.claude/
+# Claude Code local settings (keep commands/ and rules/ tracked)
+.claude/settings.local.json
+.claude/settings.json
+
+# Claude Code local memory (branch-specific volatile notes)
+CLAUDE.local.md
+**/CLAUDE.local.md
 config.db.backup.*
 node_modules/
 certs/

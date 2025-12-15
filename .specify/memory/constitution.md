@@ -242,7 +242,7 @@ This constitution supersedes all other development practices and guidelines. Any
 2. Increment `CONSTITUTION_VERSION` following semantic versioning
 3. Update `LAST_AMENDED_DATE` to the merge date
 4. Propagate changes to dependent templates (`plan-template.md`, `spec-template.md`, `tasks-template.md`)
-5. Update `CLAUDE.md` if architectural principles change
+5. Update documentation per the routing table in `CLAUDE.md` (architecture → constitution, features → per-directory CLAUDE.md, cross-cutting → `.claude/rules/`)
 
 **Compliance Review**:
 - All Pull Requests MUST verify compliance with this constitution
