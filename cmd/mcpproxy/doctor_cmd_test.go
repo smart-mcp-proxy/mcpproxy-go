@@ -30,7 +30,7 @@ func TestOutputDiagnostics_JSONFormat(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "json"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -47,9 +47,13 @@ func TestOutputDiagnostics_JSONFormat(t *testing.T) {
 		t.Errorf("JSON output is invalid: %v", err)
 	}
 
-	// Verify data preserved
-	if getIntField(parsed, "total_issues") != 2 {
-		t.Errorf("Expected total_issues=2, got %v", parsed["total_issues"])
+	// Verify data preserved (now nested under "diagnostics")
+	diagData, ok := parsed["diagnostics"].(map[string]interface{})
+	if !ok {
+		t.Errorf("Expected diagnostics object in JSON output")
+	}
+	if getIntField(diagData, "total_issues") != 2 {
+		t.Errorf("Expected total_issues=2, got %v", diagData["total_issues"])
 	}
 }
 
@@ -65,7 +69,7 @@ func TestOutputDiagnostics_PrettyFormat_NoIssues(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -107,7 +111,7 @@ func TestOutputDiagnostics_PrettyFormat_WithUpstreamErrors(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -154,7 +158,7 @@ func TestOutputDiagnostics_PrettyFormat_WithOAuthRequired(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -201,7 +205,7 @@ func TestOutputDiagnostics_PrettyFormat_WithMissingSecrets(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -246,7 +250,7 @@ func TestOutputDiagnostics_PrettyFormat_WithRuntimeWarnings(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -300,7 +304,7 @@ func TestOutputDiagnostics_PrettyFormat_MultipleIssueTypes(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -347,7 +351,7 @@ func TestOutputDiagnostics_PrettyFormat_SingleIssue(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -377,7 +381,7 @@ func TestOutputDiagnostics_EmptyFormat(t *testing.T) {
 
 	// Empty string should default to pretty format
 	doctorOutput = ""
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -542,7 +546,7 @@ func TestOutputDiagnostics_WarningWithoutTitle(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -577,7 +581,7 @@ func TestOutputDiagnostics_HighSeverityWarning(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -615,7 +619,7 @@ func TestOutputDiagnostics_SecretWithoutOptionalFields(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag)
+	err := outputDiagnostics(diag, nil)
 
 	w.Close()
 	var buf bytes.Buffer
