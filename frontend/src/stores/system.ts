@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { StatusUpdate, Theme, Toast } from '@/types'
+import type { StatusUpdate, Theme, Toast, InfoResponse } from '@/types'
 import api from '@/services/api'
 
 export const useSystemStore = defineStore('system', () => {
@@ -10,6 +10,7 @@ export const useSystemStore = defineStore('system', () => {
   const connected = ref(false)
   const currentTheme = ref<string>('corporate')
   const toasts = ref<Toast[]>([])
+  const info = ref<InfoResponse | null>(null)
 
   // Available themes
   const themes: Theme[] = [
@@ -52,6 +53,11 @@ export const useSystemStore = defineStore('system', () => {
   const currentThemeConfig = computed(() =>
     themes.find(t => t.name === currentTheme.value) || themes[0]
   )
+
+  // Version information
+  const version = computed(() => info.value?.version ?? '')
+  const updateAvailable = computed(() => info.value?.update?.available ?? false)
+  const latestVersion = computed(() => info.value?.update?.latest_version ?? '')
 
   // Actions
   function connectEventSource() {
@@ -233,6 +239,17 @@ export const useSystemStore = defineStore('system', () => {
     toasts.value = []
   }
 
+  async function fetchInfo() {
+    try {
+      const response = await api.getInfo()
+      if (response.success && response.data) {
+        info.value = response.data
+      }
+    } catch (error) {
+      console.error('Failed to fetch info:', error)
+    }
+  }
+
   // Initialize theme on store creation
   loadTheme()
 
@@ -243,12 +260,16 @@ export const useSystemStore = defineStore('system', () => {
     currentTheme,
     toasts,
     themes,
+    info,
 
     // Computed
     isRunning,
     listenAddr,
     upstreamStats,
     currentThemeConfig,
+    version,
+    updateAvailable,
+    latestVersion,
 
     // Actions
     connectEventSource,
@@ -258,5 +279,6 @@ export const useSystemStore = defineStore('system', () => {
     addToast,
     removeToast,
     clearToasts,
+    fetchInfo,
   }
 })

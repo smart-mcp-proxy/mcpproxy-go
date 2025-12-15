@@ -64,6 +64,7 @@ const sidebars = {
         'features/code-execution',
         'features/security-quarantine',
         'features/search-discovery',
+        'features/version-updates',
       ],
     },
     {

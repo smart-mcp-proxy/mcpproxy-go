@@ -102,6 +102,9 @@ onMounted(() => {
 
   // Initial data load
   serversStore.fetchServers()
+
+  // Fetch version info
+  systemStore.fetchInfo()
 })
 
 onUnmounted(() => {

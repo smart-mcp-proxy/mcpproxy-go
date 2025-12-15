@@ -239,3 +239,10 @@ See `docs/github-actions-windows-wix-research.md` for CI setup.
 - macOS DMG installers are signed and notarized
 
 See `docs/prerelease-builds.md` for download instructions.
+
+## Active Technologies
+- Go 1.24 (toolchain go1.24.10) (001-update-version-display)
+- In-memory only for version cache (no persistence per clarification) (001-update-version-display)
+
+## Recent Changes
+- 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

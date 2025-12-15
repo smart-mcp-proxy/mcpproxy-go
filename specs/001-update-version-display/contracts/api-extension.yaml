@@ -1,0 +1,197 @@
+# OpenAPI Extension for Version/Update Info
+# This extends the existing /api/v1/info endpoint
+# To be merged into oas/swagger.yaml
+
+openapi: 3.0.3
+info:
+  title: MCPProxy API - Version Update Extension
+  version: 0.12.0
+
+paths:
+  /api/v1/info:
+    get:
+      summary: Get server information including update status
+      description: |
+        Get essential server metadata including version, web UI URL, endpoint addresses,
+        and update availability. This endpoint is designed for tray-core communication
+        and dashboard displays.
+      tags:
+        - status
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      responses:
+        '200':
+          description: Server information with update status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfoResponse'
+              examples:
+                up-to-date:
+                  summary: Running latest version
+                  value:
+                    success: true
+                    data:
+                      version: "v0.12.0"
+                      web_ui_url: "http://127.0.0.1:8080"
+                      listen_addr: "127.0.0.1:8080"
+                      endpoints:
+                        http: "127.0.0.1:8080"
+                        socket: "/Users/user/.mcpproxy/mcpproxy.sock"
+                      update:
+                        available: false
+                        latest_version: "v0.12.0"
+                        release_url: "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.12.0"
+                        checked_at: "2025-12-15T10:30:00Z"
+                        is_prerelease: false
+                update-available:
+                  summary: Update available
+                  value:
+                    success: true
+                    data:
+                      version: "v0.11.0"
+                      web_ui_url: "http://127.0.0.1:8080"
+                      listen_addr: "127.0.0.1:8080"
+                      endpoints:
+                        http: "127.0.0.1:8080"
+                        socket: "/Users/user/.mcpproxy/mcpproxy.sock"
+                      update:
+                        available: true
+                        latest_version: "v0.12.0"
+                        release_url: "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.12.0"
+                        checked_at: "2025-12-15T10:30:00Z"
+                        is_prerelease: false
+                not-checked-yet:
+                  summary: Update check not completed
+                  value:
+                    success: true
+                    data:
+                      version: "v0.11.0"
+                      web_ui_url: "http://127.0.0.1:8080"
+                      listen_addr: "127.0.0.1:8080"
+                      endpoints:
+                        http: "127.0.0.1:8080"
+                        socket: ""
+                      update: null
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    InfoResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/InfoData'
+      required:
+        - success
+        - data
+
+    InfoData:
+      type: object
+      properties:
+        version:
+          type: string
+          description: Current MCPProxy version
+          example: "v0.11.0"
+        web_ui_url:
+          type: string
+          description: URL to access the Web Control Panel
+          example: "http://127.0.0.1:8080"
+        listen_addr:
+          type: string
+          description: HTTP listen address
+          example: "127.0.0.1:8080"
+        endpoints:
+          $ref: '#/components/schemas/Endpoints'
+        update:
+          $ref: '#/components/schemas/UpdateInfo'
+          nullable: true
+          description: Update information, null if check not completed yet
+      required:
+        - version
+        - web_ui_url
+        - listen_addr
+        - endpoints
+
+    Endpoints:
+      type: object
+      properties:
+        http:
+          type: string
+          description: HTTP endpoint address
+          example: "127.0.0.1:8080"
+        socket:
+          type: string
+          description: Unix socket path (empty if disabled)
+          example: "/Users/user/.mcpproxy/mcpproxy.sock"
+      required:
+        - http
+        - socket
+
+    UpdateInfo:
+      type: object
+      description: Version update information from GitHub releases
+      properties:
+        available:
+          type: boolean
+          description: True if a newer version is available
+          example: true
+        latest_version:
+          type: string
+          nullable: true
+          description: Latest version available on GitHub
+          example: "v0.12.0"
+        release_url:
+          type: string
+          nullable: true
+          description: URL to the GitHub release page
+          example: "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.12.0"
+        checked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp of last successful update check
+          example: "2025-12-15T10:30:00Z"
+        is_prerelease:
+          type: boolean
+          description: Whether the latest version is a prerelease
+          example: false
+        check_error:
+          type: string
+          nullable: true
+          description: Error message if last check failed
+          example: null
+      required:
+        - available
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "Internal server error"
+      required:
+        - success
+        - error
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    ApiKeyQuery:
+      type: apiKey
+      in: query
+      name: apikey

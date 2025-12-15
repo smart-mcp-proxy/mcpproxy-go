@@ -91,19 +91,33 @@ func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger
 	socketPath := socket.DetectSocketPath(dataDir)
 	client := cliclient.NewClient(socketPath, logger.Sugar())
 
+	// Call GET /api/v1/info for version and update info
+	info, err := client.GetInfo(ctx)
+	if err != nil {
+		logger.Debug("Failed to get info from daemon", zap.Error(err))
+		// Non-fatal: continue with diagnostics even if info fails
+	}
+
 	// Call GET /api/v1/diagnostics
 	diag, err := client.GetDiagnostics(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get diagnostics from daemon: %w", err)
 	}
 
-	return outputDiagnostics(diag)
+	return outputDiagnostics(diag, info)
 }
 
-func outputDiagnostics(diag map[string]interface{}) error {
+func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}) error {
 	switch doctorOutput {
 	case "json":
-		output, err := json.MarshalIndent(diag, "", "  ")
+		// Combine diagnostics with info for JSON output
+		combined := map[string]interface{}{
+			"diagnostics": diag,
+		}
+		if info != nil {
+			combined["info"] = info
+		}
+		output, err := json.MarshalIndent(combined, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to format output: %w", err)
 		}
@@ -115,6 +129,30 @@ func outputDiagnostics(diag map[string]interface{}) error {
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("🔍 MCPProxy Health Check")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+		// Display version information
+		if info != nil {
+			version := getStringField(info, "version")
+			if version != "" {
+				// Check for update info
+				if updateInfo, ok := info["update"].(map[string]interface{}); ok {
+					updateAvailable := getBoolField(updateInfo, "available")
+					latestVersion := getStringField(updateInfo, "latest_version")
+					releaseURL := getStringField(updateInfo, "release_url")
+
+					if updateAvailable && latestVersion != "" {
+						fmt.Printf("Version: %s (update available: %s)\n", version, latestVersion)
+						if releaseURL != "" {
+							fmt.Printf("Download: %s\n", releaseURL)
+						}
+					} else {
+						fmt.Printf("Version: %s (latest)\n", version)
+					}
+				} else {
+					fmt.Printf("Version: %s\n", version)
+				}
+			}
+		}
 		fmt.Println()
 
 		if totalIssues == 0 {

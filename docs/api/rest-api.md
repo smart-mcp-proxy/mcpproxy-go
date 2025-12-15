@@ -188,7 +188,51 @@ Run health checks (same as `mcpproxy doctor` CLI).
 
 #### GET /api/v1/info
 
-Get application info and version.
+Get application info, version, and update availability.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "version": "v1.2.3",
+    "web_ui_url": "http://127.0.0.1:8080/?apikey=xxx",
+    "listen_addr": "127.0.0.1:8080",
+    "endpoints": {
+      "http": "127.0.0.1:8080",
+      "socket": "/Users/user/.mcpproxy/mcpproxy.sock"
+    },
+    "update": {
+      "available": true,
+      "latest_version": "v1.3.0",
+      "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0",
+      "checked_at": "2025-01-15T10:30:00Z",
+      "is_prerelease": false
+    }
+  }
+}
+```
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Current MCPProxy version |
+| `web_ui_url` | string | URL to access the web control panel |
+| `listen_addr` | string | Server listen address |
+| `endpoints.http` | string | HTTP API endpoint address |
+| `endpoints.socket` | string | Unix socket path (empty if disabled) |
+| `update` | object | Update information (may be null if not checked yet) |
+| `update.available` | boolean | Whether a newer version is available |
+| `update.latest_version` | string | Latest version available on GitHub |
+| `update.release_url` | string | URL to the GitHub release page |
+| `update.checked_at` | string | ISO 8601 timestamp of last update check |
+| `update.is_prerelease` | boolean | Whether the latest version is a prerelease |
+| `update.check_error` | string | Error message if update check failed |
+
+:::tip Update Checking
+MCPProxy automatically checks for updates every 4 hours. The update information is exposed via this endpoint and used by the tray application and web UI to show update notifications.
+:::
 
 ### Docker
 

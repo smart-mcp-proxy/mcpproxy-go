@@ -442,6 +442,10 @@ echo ""
 echo -e "${YELLOW}Running API tests...${NC}"
 echo ""
 
+# Test 0: Get info (version and update information)
+test_api "GET /api/v1/info" "GET" "${API_BASE}/info" "200" "" \
+    "jq -e '.success == true and .data.version != null and .data.version != \"\" and .data.listen_addr != null and .data.endpoints.http != null and .data.endpoints.socket != null' < '$TEST_RESULTS_FILE' >/dev/null"
+
 # Test 1: Get servers list
 test_api "GET /api/v1/servers" "GET" "${API_BASE}/servers" "200" "" \
     "jq -e '.success == true and (.data.servers | length) > 0' < '$TEST_RESULTS_FILE' >/dev/null"

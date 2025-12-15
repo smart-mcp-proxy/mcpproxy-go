@@ -27,6 +27,7 @@ import (
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/tlslocal"
+	"mcpproxy-go/internal/updatecheck"
 	"mcpproxy-go/internal/upstream/types"
 	"mcpproxy-go/web"
 )
@@ -72,6 +73,10 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	if err != nil {
 		return nil, err
 	}
+
+	// Initialize update checker with build version
+	// This must happen before StartBackgroundInitialization is called
+	rt.SetVersion(httpapi.GetBuildVersion())
 
 	// Initialize management service and set it on runtime
 	secretResolver := secret.NewResolver()
@@ -1746,4 +1751,9 @@ func (s *Server) ListRegistries() ([]interface{}, error) {
 // SearchRegistryServers searches for servers in a specific registry (Phase 7)
 func (s *Server) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
 	return s.runtime.SearchRegistryServers(registryID, tag, query, limit)
+}
+
+// GetVersionInfo returns the current version information from the update checker.
+func (s *Server) GetVersionInfo() *updatecheck.VersionInfo {
+	return s.runtime.GetVersionInfo()
 }
