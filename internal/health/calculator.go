@@ -204,25 +204,33 @@ func formatErrorSummary(lastError string) string {
 		return "Connection error"
 	}
 
-	// Common error patterns to friendly messages
-	errorMappings := map[string]string{
-		"connection refused":     "Connection refused",
-		"no such host":           "Host not found",
-		"connection reset":       "Connection reset",
-		"timeout":                "Connection timeout",
-		"EOF":                    "Connection closed",
-		"authentication failed":  "Authentication failed",
-		"unauthorized":           "Unauthorized",
-		"forbidden":              "Access forbidden",
-		"oauth":                  "OAuth error",
-		"certificate":            "Certificate error",
-		"dial tcp":               "Cannot connect",
+	// Common error patterns to friendly messages.
+	// Order matters: more specific patterns must come before generic ones.
+	// For example, "no such host" must be checked before "dial tcp" since
+	// DNS errors often appear as "dial tcp: no such host".
+	errorMappings := []struct {
+		pattern  string
+		friendly string
+	}{
+		// Specific patterns first
+		{"no such host", "Host not found"},
+		{"connection refused", "Connection refused"},
+		{"connection reset", "Connection reset"},
+		{"timeout", "Connection timeout"},
+		{"EOF", "Connection closed"},
+		{"authentication failed", "Authentication failed"},
+		{"unauthorized", "Unauthorized"},
+		{"forbidden", "Access forbidden"},
+		{"oauth", "OAuth error"},
+		{"certificate", "Certificate error"},
+		// Generic patterns last
+		{"dial tcp", "Cannot connect"},
 	}
 
-	// Check for known patterns
-	for pattern, friendly := range errorMappings {
-		if containsIgnoreCase(lastError, pattern) {
-			return friendly
+	// Check for known patterns (in order)
+	for _, mapping := range errorMappings {
+		if containsIgnoreCase(lastError, mapping.pattern) {
+			return mapping.friendly
 		}
 	}
 
