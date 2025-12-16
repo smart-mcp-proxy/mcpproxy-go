@@ -91,6 +91,10 @@ As a developer, I want to see ONE consolidated health display on the Dashboard.
 - **FR-010**: Dashboard MUST display ONE consolidated health section
 - **FR-011**: Fix/action buttons MUST navigate to relevant pages, not show CLI hints
 
+### CLI
+
+- **FR-012**: `upstream list` MUST handle new Health actions with appropriate CLI hints
+
 ## Success Criteria
 
 - **SC-001**: Users see exactly ONE health section on Dashboard
@@ -112,17 +116,17 @@ As a developer, I want to see ONE consolidated health display on the Dashboard.
 
 ### Actions (Updated)
 
-| Scenario | Level | Action | Detail | Navigation |
-|----------|-------|--------|--------|------------|
-| Healthy | `healthy` | `""` | - | - |
-| Connecting | `degraded` | `""` | - | - |
-| Token expiring | `degraded` | `login` | expiry time | OAuth flow |
-| Connection error | `unhealthy` | `restart` | error message | Restarts server |
-| OAuth needed | `unhealthy` | `login` | - | OAuth flow |
-| Missing secret | `unhealthy` | `set_secret` | secret name | `/ui/secrets` |
-| OAuth config issue | `unhealthy` | `configure` | error/param | Server config tab |
-| Disabled | `healthy` | `enable` | - | Enables server |
-| Quarantined | `healthy` | `approve` | - | Approves server |
+| Scenario | Level | Action | Detail | Web UI | CLI Hint |
+|----------|-------|--------|--------|--------|----------|
+| Healthy | `healthy` | `""` | - | - | `-` |
+| Connecting | `degraded` | `""` | - | - | `-` |
+| Token expiring | `degraded` | `login` | expiry time | OAuth flow | `auth login --server=X` |
+| Connection error | `unhealthy` | `restart` | error message | Restarts server | `upstream restart X` |
+| OAuth needed | `unhealthy` | `login` | - | OAuth flow | `auth login --server=X` |
+| Missing secret | `unhealthy` | `set_secret` | secret name | `/ui/secrets` | `Set SECRET_NAME` |
+| OAuth config issue | `unhealthy` | `configure` | error/param | Server config tab | `Edit config` |
+| Disabled | `healthy` | `enable` | - | Enables server | `upstream enable X` |
+| Quarantined | `healthy` | `approve` | - | Approves server | `Approve in Web UI` |
 
 ## Out of Scope
 

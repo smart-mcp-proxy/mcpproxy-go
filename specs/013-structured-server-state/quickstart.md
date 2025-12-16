@@ -187,6 +187,32 @@ case 'configure':
 
 Remove "System Diagnostics" banner (lines 3-33). The "Servers Needing Attention" banner handles all issues.
 
+### 8. CLI Updates (cmd/mcpproxy/upstream_cmd.go)
+
+Add handlers for new actions in `outputServers()`:
+
+```go
+// Format action as CLI command hint
+actionHint := "-"
+switch healthAction {
+case "login":
+    actionHint = fmt.Sprintf("auth login --server=%s", name)
+case "restart":
+    actionHint = fmt.Sprintf("upstream restart %s", name)
+case "enable":
+    actionHint = fmt.Sprintf("upstream enable %s", name)
+case "approve":
+    actionHint = "Approve in Web UI"
+case "view_logs":
+    actionHint = fmt.Sprintf("upstream logs %s", name)
+// New actions
+case "set_secret":
+    actionHint = fmt.Sprintf("Set %s", healthDetail)
+case "configure":
+    actionHint = "Edit config"
+}
+```
+
 ## Verification
 
 ```bash
@@ -209,5 +235,6 @@ cd frontend && npm run build
 | `internal/health/calculator.go` | Add missing secret/OAuth config checks |
 | `internal/upstream/manager.go` | Populate new input fields |
 | `internal/management/diagnostics.go` | Aggregate from Health |
+| `cmd/mcpproxy/upstream_cmd.go` | Add CLI hints for new actions |
 | `frontend/src/components/ServerCard.vue` | Handle new actions |
 | `frontend/src/views/Dashboard.vue` | Remove duplicate banner |
