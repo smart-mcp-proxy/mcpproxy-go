@@ -5,86 +5,113 @@
 
 ## Summary
 
-Add structured state objects (`OAuthState`, `ConnectionState`) to Server, refactor `Doctor()` to aggregate from `server.Health`, and consolidate Dashboard UI to remove duplicate diagnostics section.
+Make Health the single source of truth for per-server issues. Extend Health with new actions (`set_secret`, `configure`). Refactor Doctor() to aggregate from Health. Update UI to navigate to fix locations instead of showing CLI hints.
 
 ## Technical Context
 
 **Language/Version**: Go 1.24.0
-**Primary Dependencies**: mcp-go (MCP protocol), zap (logging), chi (HTTP router), Vue 3/TypeScript (frontend)
+**Primary Dependencies**: mcp-go, zap, chi, Vue 3/TypeScript
 **Testing**: go test, ./scripts/test-api-e2e.sh
-**Constraints**: Backwards compatibility with existing flat fields
 
 ## Constitution Check
 
 | Principle | Status | Notes |
 |-----------|--------|-------|
-| I. Performance at Scale | PASS | State objects populated on request; no new queries |
-| II. Actor-Based Concurrency | PASS | Uses existing state from ConnectionInfo |
-| III. Configuration-Driven | PASS | No new configuration required |
-| V. Test-Driven Development | PASS | Unit tests for new types; E2E for backwards compat |
+| I. Performance at Scale | PASS | Health already calculated; Diagnostics aggregates existing data |
+| II. Actor-Based Concurrency | PASS | No new goroutines; uses existing state |
+| V. Test-Driven Development | PASS | Update existing tests for new actions |
 
 **Gate Result**: PASS
 
-## Project Structure
-
-### Documentation
-
-```text
-specs/013-structured-server-state/
-├── plan.md              # This file
-├── spec.md              # Feature specification
-├── research.md          # Research findings
-├── data-model.md        # Type definitions
-└── contracts/           # API changes
-```
-
-### Source Code Changes
+## Source Code Changes
 
 ```text
 # Backend (Go)
 internal/
-├── contracts/
-│   └── types.go          # Add OAuthState, ConnectionState types
+├── health/
+│   ├── constants.go       # Add ActionSetSecret, ActionConfigure
+│   └── calculator.go      # Add missing secret/OAuth config detection
 ├── management/
-│   └── diagnostics.go    # Refactor Doctor() to use Health
+│   └── diagnostics.go     # Refactor Doctor() to aggregate from Health
 └── upstream/
-    └── manager.go        # Populate structured state objects
+    └── manager.go         # Populate MissingSecret, OAuthConfigErr in input
 
 # Frontend (Vue)
 frontend/src/
-├── types/api.ts          # Add OAuthState, ConnectionState interfaces
+├── components/
+│   └── ServerCard.vue     # Add set_secret, configure action handlers
 └── views/
-    └── Dashboard.vue     # Remove duplicate diagnostics section
+    └── Dashboard.vue      # Remove duplicate banner, add navigation
 
 # Tests
 internal/
+├── health/calculator_test.go      # Add tests for new actions
 └── management/diagnostics_test.go # Update for aggregation
 ```
 
 ## Implementation Phases
 
-### Phase 1: Structured State Types
+### Phase 1: Health Actions (Backend)
 
-1. Add `OAuthState` type to `internal/contracts/types.go`
-2. Add `ConnectionState` type to `internal/contracts/types.go`
-3. Add fields to `Server` struct with `omitempty` tags
-4. Add TypeScript interfaces to `frontend/src/types/api.ts`
+1. Add constants to `internal/health/constants.go`:
+   ```go
+   ActionSetSecret = "set_secret"
+   ActionConfigure = "configure"
+   ```
 
-### Phase 2: State Population
+2. Add fields to `HealthCalculatorInput`:
+   ```go
+   MissingSecret  string  // Secret name if unresolved
+   OAuthConfigErr string  // OAuth config error message
+   ```
 
-1. Update `GetAllServersWithStatus()` in `internal/upstream/manager.go`
-2. Populate `ConnectionState` from `ConnectionInfo`
-3. Populate `OAuthState` from storage token data + ConnectionInfo OAuth fields
+3. Update `CalculateHealth()` priority:
+   - After admin state checks
+   - Before connection state checks
+   - Check `MissingSecret` → return `set_secret` action
+   - Check `OAuthConfigErr` → return `configure` action
 
-### Phase 3: Doctor() Refactoring
+4. Update `internal/upstream/manager.go` to populate new input fields
 
-1. Refactor `Doctor()` in `internal/management/diagnostics.go`
-2. Iterate servers, read `server.Health.Action`
-3. Map to existing categories: login→OAuthRequired, restart→UpstreamErrors
-4. Update tests in `diagnostics_test.go`
+### Phase 2: Doctor() Refactoring (Backend)
 
-### Phase 4: UI Consolidation
+1. Remove independent detection logic from `Doctor()`
+2. Iterate servers, switch on `Health.Action`:
+   ```go
+   case "restart":  → diag.UpstreamErrors
+   case "login":    → diag.OAuthRequired
+   case "configure": → diag.OAuthIssues
+   case "set_secret": → aggregate by secret name
+   ```
+3. Keep system-level checks (Docker status)
+4. Update tests
 
-1. Remove diagnostics section from `Dashboard.vue`
-2. Enhance "Servers Needing Attention" banner with aggregated counts
-3. Remove unused `loadDiagnostics()` and related computed properties
+### Phase 3: Frontend Updates
+
+1. Add action handlers in `ServerCard.vue`:
+   ```typescript
+   case 'set_secret':
+       router.push('/secrets')
+   case 'configure':
+       router.push(`/servers/${server.name}?tab=config`)
+   ```
+
+2. Update `Dashboard.vue`:
+   - Remove "System Diagnostics" banner (lines 3-33)
+   - Add action handlers to "Servers Needing Attention" for new actions
+
+3. Update TypeScript types if needed (add new action values)
+
+## Verification
+
+```bash
+# Unit tests
+go test ./internal/health/... -v
+go test ./internal/management/... -v
+
+# E2E tests
+./scripts/test-api-e2e.sh
+
+# Frontend
+cd frontend && npm run build && npm run test
+```

@@ -3,196 +3,185 @@
 **Feature**: 013-structured-server-state
 **Date**: 2025-12-16
 
-## Entity Overview
+## Overview
+
+Health is the single source of truth for per-server issues. Diagnostics aggregates from Health.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                          Server                                  │
+│                    Health (per-server)                          │
+│                    Source of Truth                              │
 ├─────────────────────────────────────────────────────────────────┤
-│ // NEW: Structured state objects                                 │
-│ oauth_state: OAuthState?          ←── Only if OAuth configured   │
-│ connection_state: ConnectionState ←── Always present             │
-│                                                                  │
-│ // EXISTING: Flat fields (kept for backwards compat)             │
-│ authenticated: bool                                              │
-│ oauth_status: string                                             │
-│ connected: bool                                                  │
-│ last_error: string                                               │
-│ ...                                                              │
-│                                                                  │
-│ // EXISTING: Calculated health (implemented in #192)             │
-│ health: HealthStatus                                             │
+│ level: healthy | degraded | unhealthy                           │
+│ admin_state: enabled | disabled | quarantined                   │
+│ summary: "Connected (12 tools)" | "Missing secret" | etc.       │
+│ detail: error message, secret name, expiry time                 │
+│ action: login | restart | set_secret | configure | ...          │
 └─────────────────────────────────────────────────────────────────┘
-
+                              │
+                              │ aggregate by action
+                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      OAuthState                                  │
+│                  Diagnostics (system-wide)                      │
+│                  Derived from Health                            │
 ├─────────────────────────────────────────────────────────────────┤
-│ status: string          // authenticated|expired|error|none      │
-│ token_expires_at: time? // ISO 8601 timestamp                    │
-│ last_attempt: time?     // Last OAuth attempt timestamp          │
-│ retry_count: int        // Number of OAuth retry attempts        │
-│ user_logged_out: bool   // User explicitly logged out            │
-│ has_refresh_token: bool // Can auto-refresh token                │
-│ error: string?          // Last OAuth error message              │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│                    ConnectionState                               │
-├─────────────────────────────────────────────────────────────────┤
-│ status: string          // disconnected|connecting|ready|error   │
-│ connected_at: time?     // When connection established           │
-│ last_error: string?     // Last connection error                 │
-│ retry_count: int        // Number of retry attempts              │
-│ last_retry_at: time?    // Last retry timestamp                  │
-│ should_retry: bool      // Whether retry is pending              │
+│ upstream_errors: servers where action == "restart"              │
+│ oauth_required: servers where action == "login"                 │
+│ oauth_issues: servers where action == "configure"               │
+│ missing_secrets: grouped by secret name (cross-cutting)         │
+│ docker_status: system-level check                               │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## New Types (Go)
+## Health Actions
 
-### OAuthState
+### Existing Actions (no change)
 
-```go
-// OAuthState represents the OAuth authentication state for a server.
-// Present only on servers with OAuth configured.
-type OAuthState struct {
-    // Status indicates the OAuth state: "authenticated", "expired", "error", "none"
-    Status string `json:"status"`
+| Action | Scenario | Detail Contains |
+|--------|----------|-----------------|
+| `""` | Healthy, connecting | - |
+| `login` | OAuth needed/expired | expiry time (if expiring) |
+| `restart` | Connection error | error message |
+| `enable` | Server disabled | - |
+| `approve` | Server quarantined | - |
+| `view_logs` | Needs log inspection | - |
 
-    // TokenExpiresAt is when the access token expires (ISO 8601)
-    TokenExpiresAt *time.Time `json:"token_expires_at,omitempty"`
+### New Actions
 
-    // LastAttempt is when the last OAuth flow was attempted
-    LastAttempt *time.Time `json:"last_attempt,omitempty"`
+| Action | Scenario | Detail Contains |
+|--------|----------|-----------------|
+| `set_secret` | Missing secret | secret name (e.g., `GITHUB_TOKEN`) |
+| `configure` | OAuth config issue | error message or missing param |
 
-    // RetryCount is the number of OAuth retry attempts
-    RetryCount int `json:"retry_count"`
-
-    // UserLoggedOut is true if the user explicitly logged out
-    UserLoggedOut bool `json:"user_logged_out"`
-
-    // HasRefreshToken indicates whether auto-refresh is possible
-    HasRefreshToken bool `json:"has_refresh_token"`
-
-    // Error is the last OAuth error message (if any)
-    Error string `json:"error,omitempty"`
-}
-```
-
-### ConnectionState
+## Health Constants (Go)
 
 ```go
-// ConnectionState represents the connection state for a server.
-// Present on all servers.
-type ConnectionState struct {
-    // Status indicates connection state: "disconnected", "connecting", "ready", "error"
-    Status string `json:"status"`
+// internal/health/constants.go
 
-    // ConnectedAt is when the connection was established
-    ConnectedAt *time.Time `json:"connected_at,omitempty"`
+const (
+    // Existing
+    ActionNone     = ""
+    ActionLogin    = "login"
+    ActionRestart  = "restart"
+    ActionEnable   = "enable"
+    ActionApprove  = "approve"
+    ActionViewLogs = "view_logs"
 
-    // LastError is the last connection error message
-    LastError string `json:"last_error,omitempty"`
-
-    // RetryCount is the number of connection retry attempts
-    RetryCount int `json:"retry_count"`
-
-    // LastRetryAt is when the last retry was attempted
-    LastRetryAt *time.Time `json:"last_retry_at,omitempty"`
-
-    // ShouldRetry indicates whether a retry is pending
-    ShouldRetry bool `json:"should_retry"`
-}
+    // New
+    ActionSetSecret = "set_secret"
+    ActionConfigure = "configure"
+)
 ```
 
-## New Types (TypeScript)
+## Health Calculator Input
 
-### OAuthState
-
-```typescript
-export interface OAuthState {
-    status: 'authenticated' | 'expired' | 'error' | 'none';
-    token_expires_at?: string;  // ISO 8601
-    last_attempt?: string;      // ISO 8601
-    retry_count: number;
-    user_logged_out: boolean;
-    has_refresh_token: boolean;
-    error?: string;
-}
-```
-
-### ConnectionState
-
-```typescript
-export interface ConnectionState {
-    status: 'disconnected' | 'connecting' | 'ready' | 'error';
-    connected_at?: string;      // ISO 8601
-    last_error?: string;
-    retry_count: number;
-    last_retry_at?: string;     // ISO 8601
-    should_retry: boolean;
-}
-```
-
-## Updated Server Type
-
-### Go Addition
+The calculator needs additional input to detect new scenarios:
 
 ```go
-type Server struct {
-    // ... existing fields ...
+type HealthCalculatorInput struct {
+    // Existing fields
+    Name            string
+    Enabled         bool
+    Quarantined     bool
+    State           string  // disconnected, connecting, ready, error
+    LastError       string
+    OAuthRequired   bool
+    OAuthStatus     string
+    TokenExpiresAt  *time.Time
+    HasRefreshToken bool
+    UserLoggedOut   bool
+    ToolCount       int
 
-    // NEW: Structured state objects
-    OAuthState      *OAuthState      `json:"oauth_state,omitempty"`
-    ConnectionState *ConnectionState `json:"connection_state,omitempty"`
+    // New fields for secret/config detection
+    MissingSecret   string  // Secret name if unresolved (e.g., "GITHUB_TOKEN")
+    OAuthConfigErr  string  // OAuth config error (e.g., "requires 'resource' parameter")
 }
 ```
 
-### TypeScript Addition
+## Health Calculation Priority
+
+Updated priority order:
+
+```
+1. Admin state (disabled → enable, quarantined → approve)
+2. Missing secret (→ set_secret)
+3. OAuth config issue (→ configure)
+4. Connection state (error/disconnected → restart, connecting → wait)
+5. OAuth state (expired/needed → login, expiring → login)
+6. Healthy
+```
+
+## Diagnostics Aggregation
+
+### Current (Independent Detection)
+
+```go
+// BAD: Duplicates health detection logic
+for _, srv := range servers {
+    if srv.last_error != "" {
+        diag.UpstreamErrors = append(...)
+    }
+    if srv.oauth != nil && !srv.authenticated {
+        diag.OAuthRequired = append(...)
+    }
+}
+```
+
+### New (Derived from Health)
+
+```go
+// GOOD: Single source of truth
+for _, srv := range servers {
+    switch srv.Health.Action {
+    case "restart":
+        diag.UpstreamErrors = append(diag.UpstreamErrors, UpstreamError{
+            ServerName:   srv.Name,
+            ErrorMessage: srv.Health.Detail,
+        })
+    case "login":
+        diag.OAuthRequired = append(diag.OAuthRequired, OAuthRequirement{
+            ServerName: srv.Name,
+            State:      "unauthenticated",
+        })
+    case "set_secret":
+        secretName := srv.Health.Detail
+        diag.MissingSecrets[secretName] = append(diag.MissingSecrets[secretName], srv.Name)
+    case "configure":
+        diag.OAuthIssues = append(diag.OAuthIssues, OAuthIssue{
+            ServerName: srv.Name,
+            Error:      srv.Health.Detail,
+        })
+    }
+}
+```
+
+## Frontend Action Handlers
 
 ```typescript
-export interface Server {
-    // ... existing fields ...
-
-    // NEW: Structured state objects
-    oauth_state?: OAuthState;
-    connection_state?: ConnectionState;
+// Map action to navigation/behavior
+function handleHealthAction(server: Server) {
+    switch (server.health?.action) {
+        case 'login':
+            triggerOAuthFlow(server.name)
+            break
+        case 'restart':
+            restartServer(server.name)
+            break
+        case 'enable':
+            enableServer(server.name)
+            break
+        case 'approve':
+            approveServer(server.name)
+            break
+        case 'set_secret':
+            router.push('/secrets')  // Navigate to secrets page
+            break
+        case 'configure':
+            router.push(`/servers/${server.name}?tab=config`)
+            break
+        case 'view_logs':
+            router.push(`/servers/${server.name}?tab=logs`)
+            break
+    }
 }
 ```
-
-## State Transitions
-
-### OAuthState.Status
-
-```
-none ──→ authenticated ──→ expired ──→ error
-  │            │              │          │
-  │            └──────────────┴──────────┘
-  │                     │
-  └─────────────────────┘ (retry/re-auth)
-```
-
-### ConnectionState.Status
-
-```
-disconnected ──→ connecting ──→ ready
-      │              │           │
-      │              ▼           │
-      └──────────  error  ◀──────┘
-                    │
-                    └──→ disconnected (on disable/shutdown)
-```
-
-## Validation Rules
-
-| Field | Rule |
-|-------|------|
-| OAuthState.Status | Must be one of: authenticated, expired, error, none |
-| OAuthState.RetryCount | Must be >= 0 |
-| ConnectionState.Status | Must be one of: disconnected, connecting, ready, error |
-| ConnectionState.RetryCount | Must be >= 0 |
-
-## Relationships
-
-- **Server → OAuthState**: Optional (1:0..1) - only present if OAuth configured
-- **Server → ConnectionState**: Required (1:1) - always present
