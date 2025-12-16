@@ -1,16 +1,7 @@
 # Data Model: Structured Server State
 
 **Feature**: 013-structured-server-state
-**Date**: 2025-12-13
-**Updated**: 2025-12-16
-
-## Implementation Status
-
-| Entity | Status | Location |
-|--------|--------|----------|
-| `HealthStatus` | ✅ DONE | `internal/contracts/types.go:568-583` |
-| `OAuthState` | ❌ TODO | Proposed in this doc |
-| `ConnectionState` | ❌ TODO | Proposed in this doc |
+**Date**: 2025-12-16
 
 ## Entity Overview
 
@@ -18,24 +9,19 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                          Server                                  │
 ├─────────────────────────────────────────────────────────────────┤
-│ id: string                                                       │
-│ name: string                                                     │
-│ enabled: bool                                                    │
-│ quarantined: bool                                                │
-│                                                                  │
 │ // NEW: Structured state objects                                 │
-│ oauth_state: OAuthState?          ←───────────────────┐         │
-│ connection_state: ConnectionState ←───────────────┐   │         │
-│                                                    │   │         │
-│ // KEEP: Flat fields (backwards compat)           │   │         │
-│ authenticated: bool                               │   │         │
-│ oauth_status: string                              │   │         │
-│ connected: bool                                   │   │         │
-│ last_error: string                                │   │         │
-│ ...                                               │   │         │
-│                                                   │   │         │
-│ // Calculated                                     │   │         │
-│ health: HealthStatus ←────────────────────────────┴───┘         │
+│ oauth_state: OAuthState?          ←── Only if OAuth configured   │
+│ connection_state: ConnectionState ←── Always present             │
+│                                                                  │
+│ // EXISTING: Flat fields (kept for backwards compat)             │
+│ authenticated: bool                                              │
+│ oauth_status: string                                             │
+│ connected: bool                                                  │
+│ last_error: string                                               │
+│ ...                                                              │
+│                                                                  │
+│ // EXISTING: Calculated health (implemented in #192)             │
+│ health: HealthStatus                                             │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -59,16 +45,6 @@
 │ retry_count: int        // Number of retry attempts              │
 │ last_retry_at: time?    // Last retry timestamp                  │
 │ should_retry: bool      // Whether retry is pending              │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│                     HealthStatus  ✅ IMPLEMENTED                 │
-├─────────────────────────────────────────────────────────────────┤
-│ level: string           // healthy|degraded|unhealthy            │
-│ admin_state: string     // enabled|disabled|quarantined          │
-│ summary: string         // Human-readable status                 │
-│ detail: string?         // Extended explanation                  │
-│ action: string?         // login|restart|enable|approve|view_logs│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -169,11 +145,6 @@ type Server struct {
     // NEW: Structured state objects
     OAuthState      *OAuthState      `json:"oauth_state,omitempty"`
     ConnectionState *ConnectionState `json:"connection_state,omitempty"`
-
-    // KEEP: Existing flat fields for backwards compatibility
-    Authenticated  bool       `json:"authenticated"`
-    OAuthStatus    string     `json:"oauth_status,omitempty"`
-    // ... etc
 }
 ```
 
@@ -186,11 +157,6 @@ export interface Server {
     // NEW: Structured state objects
     oauth_state?: OAuthState;
     connection_state?: ConnectionState;
-
-    // KEEP: Existing flat fields
-    authenticated: boolean;
-    oauth_status?: string;
-    // ... etc
 }
 ```
 
@@ -225,13 +191,8 @@ disconnected ──→ connecting ──→ ready
 | OAuthState.RetryCount | Must be >= 0 |
 | ConnectionState.Status | Must be one of: disconnected, connecting, ready, error |
 | ConnectionState.RetryCount | Must be >= 0 |
-| Health.Level | Must be one of: healthy, degraded, unhealthy |
-| Health.AdminState | Must be one of: enabled, disabled, quarantined |
-| Health.Action | Must be one of: "", login, restart, enable, approve, view_logs |
 
 ## Relationships
 
 - **Server → OAuthState**: Optional (1:0..1) - only present if OAuth configured
 - **Server → ConnectionState**: Required (1:1) - always present
-- **Server → HealthStatus**: Required (1:1) - always calculated
-- **OAuthState + ConnectionState → HealthStatus**: Input for calculation

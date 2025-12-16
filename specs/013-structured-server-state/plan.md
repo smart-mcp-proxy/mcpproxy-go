@@ -1,114 +1,90 @@
 # Implementation Plan: Structured Server State
 
-**Branch**: `013-structured-server-state` | **Date**: 2025-12-13 | **Updated**: 2025-12-16 | **Spec**: [spec.md](./spec.md)
-**Input**: Feature specification from `/specs/013-structured-server-state/spec.md`
+**Branch**: `013-structured-server-state` | **Date**: 2025-12-16 | **Spec**: [spec.md](./spec.md)
+**Depends On**: #192 (Unified Health Status) - merged to main
 
 ## Summary
 
-**Prior Work Completed** (merged via #192):
-- ✅ `HealthStatus` struct and `health.CalculateHealth()` function
-- ✅ `Health` field on `contracts.Server`
-- ✅ Frontend health status integration in ServerCard.vue and Dashboard.vue
-- ✅ Action buttons (Login, Restart, Enable, Approve) working
-
-**Remaining Work**:
-1. Add structured state objects (`OAuthState`, `ConnectionState`) to Server for richer state info
-2. Refactor `Doctor()` to aggregate from `server.Health` instead of raw field access
-3. Consolidate Dashboard UI to remove duplicate diagnostics section
+Add structured state objects (`OAuthState`, `ConnectionState`) to Server, refactor `Doctor()` to aggregate from `server.Health`, and consolidate Dashboard UI to remove duplicate diagnostics section.
 
 ## Technical Context
 
 **Language/Version**: Go 1.24.0
 **Primary Dependencies**: mcp-go (MCP protocol), zap (logging), chi (HTTP router), Vue 3/TypeScript (frontend)
-**Storage**: BBolt embedded database (`~/.mcpproxy/config.db`) - no schema changes
-**Testing**: go test, ./scripts/test-api-e2e.sh, ./scripts/run-all-tests.sh
-**Target Platform**: macOS, Linux, Windows (desktop)
-**Project Type**: Web application (Go backend + Vue frontend)
-**Performance Goals**: Health calculation <10ms per server (SC-006)
-**Constraints**: Backwards compatibility with existing flat fields (FR-003)
-**Scale/Scope**: Up to 1,000 servers (from constitution)
+**Testing**: go test, ./scripts/test-api-e2e.sh
+**Constraints**: Backwards compatibility with existing flat fields
 
 ## Constitution Check
 
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
-
 | Principle | Status | Notes |
 |-----------|--------|-------|
-| I. Performance at Scale | PASS | Health calculation <10ms per server; no blocking operations |
-| II. Actor-Based Concurrency | PASS | Health calculated on request from existing state; no new goroutines needed |
-| III. Configuration-Driven | PASS | No new configuration required; uses existing server state |
-| IV. Security by Default | N/A | Internal refactor; no new security surface |
-| V. Test-Driven Development | PASS | Unit tests for new types; E2E tests for API backwards compat |
-| VI. Documentation Hygiene | PASS | Update CLAUDE.md with new types; update API docs |
+| I. Performance at Scale | PASS | State objects populated on request; no new queries |
+| II. Actor-Based Concurrency | PASS | Uses existing state from ConnectionInfo |
+| III. Configuration-Driven | PASS | No new configuration required |
+| V. Test-Driven Development | PASS | Unit tests for new types; E2E for backwards compat |
 
-| Architecture Constraint | Status | Notes |
-|------------------------|--------|-------|
-| Core + Tray Split | PASS | Changes in core only; tray consumes via existing API |
-| Event-Driven Updates | PASS | Health changes propagate via existing SSE events |
-| DDD Layering | PASS | New types in contracts; health logic in health package |
-| Upstream Client Modularity | PASS | No changes to 3-layer client design |
-
-**Gate Result**: PASS - No violations requiring justification
+**Gate Result**: PASS
 
 ## Project Structure
 
-### Documentation (this feature)
+### Documentation
 
 ```text
 specs/013-structured-server-state/
 ├── plan.md              # This file
-├── research.md          # Phase 0 output
-├── data-model.md        # Phase 1 output
-├── quickstart.md        # Phase 1 output
-├── contracts/           # Phase 1 output
-└── tasks.md             # Phase 2 output (/speckit.tasks)
+├── spec.md              # Feature specification
+├── research.md          # Research findings
+├── data-model.md        # Type definitions
+└── contracts/           # API changes
 ```
 
-### Source Code (repository root)
+### Source Code Changes
 
 ```text
-# Backend (Go) - DONE
+# Backend (Go)
 internal/
 ├── contracts/
-│   └── types.go          # ✅ HealthStatus struct exists
-├── health/
-│   ├── calculator.go     # ✅ CalculateHealth() implemented
-│   └── constants.go      # ✅ Level/AdminState/Action constants
-
-# Backend (Go) - REMAINING
-internal/
-├── contracts/
-│   └── types.go          # TODO: Add OAuthState, ConnectionState types
+│   └── types.go          # Add OAuthState, ConnectionState types
 ├── management/
-│   └── diagnostics.go    # TODO: Refactor Doctor() to use Health
-├── upstream/
-│   ├── manager.go        # TODO: Populate structured state objects
-│   └── types/types.go    # ConnectionInfo already has most data (source)
-└── httpapi/
-    └── server.go         # TODO: Serialize new fields in server responses
+│   └── diagnostics.go    # Refactor Doctor() to use Health
+└── upstream/
+    └── manager.go        # Populate structured state objects
 
-# Frontend (Vue) - DONE
+# Frontend (Vue)
 frontend/src/
-├── types/api.ts          # ✅ HealthStatus interface exists
-├── components/
-│   └── ServerCard.vue    # ✅ Uses health.action for buttons
+├── types/api.ts          # Add OAuthState, ConnectionState interfaces
 └── views/
-    └── Dashboard.vue     # ✅ "Servers Needing Attention" banner works
-
-# Frontend (Vue) - REMAINING
-frontend/src/
-├── types/api.ts          # TODO: Add OAuthState, ConnectionState interfaces
-└── views/
-    └── Dashboard.vue     # TODO: Remove duplicate diagnostics section
+    └── Dashboard.vue     # Remove duplicate diagnostics section
 
 # Tests
 internal/
-├── health/calculator_test.go      # ✅ Tests exist
-└── management/diagnostics_test.go # TODO: Update for aggregation
+└── management/diagnostics_test.go # Update for aggregation
 ```
 
-**Structure Decision**: Web application structure - Go backend with Vue frontend. Health calculation is complete; remaining work is state objects and UI consolidation.
+## Implementation Phases
 
-## Complexity Tracking
+### Phase 1: Structured State Types
 
-No constitution violations - section not required.
+1. Add `OAuthState` type to `internal/contracts/types.go`
+2. Add `ConnectionState` type to `internal/contracts/types.go`
+3. Add fields to `Server` struct with `omitempty` tags
+4. Add TypeScript interfaces to `frontend/src/types/api.ts`
+
+### Phase 2: State Population
+
+1. Update `GetAllServersWithStatus()` in `internal/upstream/manager.go`
+2. Populate `ConnectionState` from `ConnectionInfo`
+3. Populate `OAuthState` from storage token data + ConnectionInfo OAuth fields
+
+### Phase 3: Doctor() Refactoring
+
+1. Refactor `Doctor()` in `internal/management/diagnostics.go`
+2. Iterate servers, read `server.Health.Action`
+3. Map to existing categories: login→OAuthRequired, restart→UpstreamErrors
+4. Update tests in `diagnostics_test.go`
+
+### Phase 4: UI Consolidation
+
+1. Remove diagnostics section from `Dashboard.vue`
+2. Enhance "Servers Needing Attention" banner with aggregated counts
+3. Remove unused `loadDiagnostics()` and related computed properties

@@ -1,34 +1,27 @@
 # Quickstart: Structured Server State
 
 **Feature**: 013-structured-server-state
-**Date**: 2025-12-13
+**Date**: 2025-12-16
 
 ## Overview
 
-This guide provides quick instructions for implementing the structured server state feature.
+Quick implementation guide for adding structured state objects and consolidating UI.
 
-## Prerequisites
-
-- Go 1.24.0+
-- Node.js 18+ (for frontend)
-- MCPProxy development environment set up
+**Prerequisite**: #192 (Unified Health Status) is already merged - `HealthStatus` and `CalculateHealth()` exist.
 
 ## Implementation Order
 
-1. **Backend Types** → Add new Go types
+1. **Backend Types** → Add OAuthState, ConnectionState to contracts
 2. **Populate State** → Fill structured objects from existing data
-3. **Update Health Calculator** → Use structured state as input
-4. **Refactor Doctor()** → Aggregate from Health
-5. **Frontend Types** → Add TypeScript interfaces
-6. **UI Consolidation** → Remove duplicate banner
+3. **Refactor Doctor()** → Aggregate from Health instead of raw fields
+4. **Frontend Types** → Add TypeScript interfaces
+5. **UI Consolidation** → Remove duplicate diagnostics banner
 
 ## Step-by-Step
 
 ### 1. Add Go Types (internal/contracts/types.go)
 
 ```go
-// Add after existing type definitions
-
 type OAuthState struct {
     Status          string     `json:"status"`
     TokenExpiresAt  *time.Time `json:"token_expires_at,omitempty"`
@@ -58,68 +51,41 @@ type Server struct {
 
 ### 2. Populate State (internal/upstream/manager.go)
 
-In `GetAllServersWithStatus()` or equivalent, add:
+In `GetAllServersWithStatus()` or equivalent:
 
 ```go
-func buildOAuthState(client *Client) *contracts.OAuthState {
-    if !client.HasOAuth() {
-        return nil
-    }
-    info := client.GetConnectionInfo()
-    return &contracts.OAuthState{
-        Status:          client.GetOAuthStatus(),
-        TokenExpiresAt:  client.GetTokenExpiresAt(),
-        LastAttempt:     &info.LastOAuthAttempt,
-        RetryCount:      info.OAuthRetryCount,
-        UserLoggedOut:   client.StateManager.IsUserLoggedOut(),
-        HasRefreshToken: client.HasRefreshToken(),
-        Error:           getOAuthError(info),
-    }
-}
-
-func buildConnectionState(client *Client) *contracts.ConnectionState {
-    info := client.GetConnectionInfo()
+func buildConnectionState(info *types.ConnectionInfo) *contracts.ConnectionState {
     return &contracts.ConnectionState{
         Status:      info.State.String(),
-        ConnectedAt: client.GetConnectedAt(),
+        ConnectedAt: info.ConnectedAt,
         LastError:   getErrorString(info.LastError),
         RetryCount:  info.RetryCount,
         LastRetryAt: &info.LastRetryTime,
-        ShouldRetry: client.ShouldRetry(),
+        ShouldRetry: info.ShouldRetry,
+    }
+}
+
+func buildOAuthState(info *types.ConnectionInfo, token *storage.OAuthToken) *contracts.OAuthState {
+    if token == nil {
+        return nil
+    }
+    return &contracts.OAuthState{
+        Status:          getOAuthStatus(token),
+        TokenExpiresAt:  token.ExpiresAt,
+        LastAttempt:     &info.LastOAuthAttempt,
+        RetryCount:      info.OAuthRetryCount,
+        UserLoggedOut:   info.UserLoggedOut,
+        HasRefreshToken: token.RefreshToken != "",
+        Error:           getOAuthError(info),
     }
 }
 ```
 
-### 3. Update Health Calculator (internal/health/calculator.go)
-
-Update `HealthCalculatorInput` to accept structured state:
-
-```go
-type HealthCalculatorInput struct {
-    Name        string
-    Enabled     bool
-    Quarantined bool
-
-    // Use structured state
-    OAuth      *contracts.OAuthState
-    Connection *contracts.ConnectionState
-}
-
-func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *contracts.HealthStatus {
-    // Extract needed fields from structured state
-    state := "disconnected"
-    if input.Connection != nil {
-        state = input.Connection.Status
-    }
-    // ... rest of calculation uses structured fields
-}
-```
-
-### 4. Refactor Doctor() (internal/management/diagnostics.go)
+### 3. Refactor Doctor() (internal/management/diagnostics.go)
 
 ```go
 func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
-    servers, _ := s.runtime.GetAllServers() // Already includes Health
+    servers, _ := s.runtime.GetAllServersWithHealth()
 
     diag := &contracts.Diagnostics{Timestamp: time.Now()}
 
@@ -138,13 +104,13 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
         case "restart":
             diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
                 ServerName:   srv.Name,
-                ErrorMessage: srv.ConnectionState.LastError,
+                ErrorMessage: srv.Health.Detail,
                 Timestamp:    time.Now(),
             })
         }
     }
 
-    // System-level checks
+    // Keep system-level checks (Docker)
     if s.config.DockerIsolation != nil && s.config.DockerIsolation.Enabled {
         diag.DockerStatus = s.checkDockerDaemon()
     }
@@ -154,7 +120,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 }
 ```
 
-### 5. Add TypeScript Types (frontend/src/types/api.ts)
+### 4. Add TypeScript Types (frontend/src/types/api.ts)
 
 ```typescript
 export interface OAuthState {
@@ -184,34 +150,25 @@ export interface Server {
 }
 ```
 
-### 6. UI Consolidation (frontend/src/views/Dashboard.vue)
+### 5. UI Consolidation (frontend/src/views/Dashboard.vue)
 
-Remove the System Diagnostics banner (lines 3-33) and enhance the existing Servers Needing Attention banner to show aggregated counts.
+Remove the System Diagnostics section. The existing "Servers Needing Attention" banner (using `server.health`) handles all server health display.
 
 ## Verification
 
 ```bash
-# Run unit tests
-go test ./internal/health/... -v
 go test ./internal/management/... -v
-
-# Run E2E tests (verify backwards compat)
 ./scripts/test-api-e2e.sh
-
-# Run full suite
 ./scripts/run-all-tests.sh
-
-# Build and test frontend
-cd frontend && npm run build && npm run test
+cd frontend && npm run build
 ```
 
-## Key Files Changed
+## Key Files
 
 | File | Change |
 |------|--------|
-| `internal/contracts/types.go` | Add OAuthState, ConnectionState types |
-| `internal/upstream/manager.go` | Populate structured state objects |
-| `internal/health/calculator.go` | Update input to use structured state |
-| `internal/management/diagnostics.go` | Refactor Doctor() to aggregate from Health |
+| `internal/contracts/types.go` | Add OAuthState, ConnectionState |
+| `internal/upstream/manager.go` | Populate structured state |
+| `internal/management/diagnostics.go` | Refactor Doctor() |
 | `frontend/src/types/api.ts` | Add TypeScript interfaces |
-| `frontend/src/views/Dashboard.vue` | Remove duplicate banner |
+| `frontend/src/views/Dashboard.vue` | Remove diagnostics section |
