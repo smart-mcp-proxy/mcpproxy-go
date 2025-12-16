@@ -1,29 +1,18 @@
 # API Contract Changes: Structured Server State
 
 **Feature**: 013-structured-server-state
-**Date**: 2025-12-13
-**Updated**: 2025-12-16
-
-## Implementation Status
-
-| Change | Status | Notes |
-|--------|--------|-------|
-| `health` field on Server | ✅ DONE | Merged in #192 |
-| `oauth_state` field on Server | ❌ TODO | Proposed in this doc |
-| `connection_state` field on Server | ❌ TODO | Proposed in this doc |
-| Diagnostics aggregation from Health | ❌ TODO | Doctor() still uses raw fields |
+**Date**: 2025-12-16
 
 ## Overview
 
-This document describes the API changes for the structured server state feature. All changes are **additive** - existing fields remain unchanged for backwards compatibility.
+This document describes API changes for adding structured state objects. All changes are **additive** - existing fields remain unchanged for backwards compatibility.
 
 ## Affected Endpoints
 
 | Endpoint | Change Type | Description |
 |----------|-------------|-------------|
 | `GET /api/v1/servers` | Additive | Add `oauth_state`, `connection_state` to each server |
-| `GET /api/v1/diagnostics` | Modified | Aggregate from `server.Health` instead of separate logic |
-| `GET /events` (SSE) | No change | Existing `servers.changed` events include updated data |
+| `GET /api/v1/diagnostics` | Modified | Aggregate from `server.Health` instead of raw fields |
 
 ## Schema Changes
 
@@ -129,10 +118,8 @@ ConnectionState:
   "data": {
     "servers": [
       {
-        "id": "abc123",
         "name": "github-server",
         "enabled": true,
-        "quarantined": false,
 
         "oauth_state": {
           "status": "authenticated",
@@ -140,89 +127,47 @@ ConnectionState:
           "last_attempt": "2025-12-13T10:00:00Z",
           "retry_count": 0,
           "user_logged_out": false,
-          "has_refresh_token": true,
-          "error": null
+          "has_refresh_token": true
         },
 
         "connection_state": {
           "status": "ready",
           "connected_at": "2025-12-13T10:01:00Z",
-          "last_error": null,
           "retry_count": 0,
-          "last_retry_at": null,
           "should_retry": false
         },
 
         "health": {
           "level": "healthy",
           "admin_state": "enabled",
-          "summary": "Connected (5 tools)",
-          "detail": null,
-          "action": ""
+          "summary": "Connected (5 tools)"
         },
 
         "authenticated": true,
-        "oauth_status": "authenticated",
         "connected": true,
-        "last_error": "",
         "tool_count": 5
       }
-    ],
-    "stats": { ... }
-  }
-}
-```
-
-### GET /api/v1/diagnostics
-
-**Response structure unchanged** - Diagnostics is populated by aggregating `server.Health`:
-
-```json
-{
-  "success": true,
-  "data": {
-    "total_issues": 2,
-    "upstream_errors": [
-      {
-        "server_name": "failing-server",
-        "error_message": "Connection refused",
-        "timestamp": "2025-12-13T11:00:00Z"
-      }
-    ],
-    "oauth_required": [
-      {
-        "server_name": "oauth-server",
-        "state": "expired",
-        "message": "Run: mcpproxy auth login --server=oauth-server"
-      }
-    ],
-    "oauth_issues": [],
-    "missing_secrets": [],
-    "runtime_warnings": [],
-    "docker_status": {
-      "available": true,
-      "version": "24.0.5"
-    },
-    "timestamp": "2025-12-13T11:30:00Z"
+    ]
   }
 }
 ```
 
 ## Backwards Compatibility
 
-| Existing Field | Status | Notes |
-|----------------|--------|-------|
-| `authenticated` | ✅ KEPT | Returns same value as `oauth_state.status == "authenticated"` |
-| `oauth_status` | ✅ KEPT | Returns same value as `oauth_state.status` |
-| `connected` | ✅ KEPT | Returns same value as `connection_state.status == "ready"` |
-| `connecting` | ✅ KEPT | Returns same value as `connection_state.status == "connecting"` |
-| `last_error` | ✅ KEPT | Returns same value as `connection_state.last_error` |
-| `reconnect_count` | ✅ KEPT | Returns same value as `connection_state.retry_count` |
-| `should_retry` | ✅ KEPT | Returns same value as `connection_state.should_retry` |
-| `health` | ✅ IMPLEMENTED | Added in #192, fully functional |
+All existing flat fields remain unchanged:
+
+| Field | Consistent With |
+|-------|-----------------|
+| `authenticated` | `oauth_state.status == "authenticated"` |
+| `oauth_status` | `oauth_state.status` |
+| `connected` | `connection_state.status == "ready"` |
+| `connecting` | `connection_state.status == "connecting"` |
+| `last_error` | `connection_state.last_error` |
+| `reconnect_count` | `connection_state.retry_count` |
+| `should_retry` | `connection_state.should_retry` |
 
 ## Migration Path
 
-1. **Phase 1**: Add new fields alongside existing (this feature)
+1. **Phase 1** (this feature): Add new fields alongside existing
 2. **Phase 2** (future): Deprecation warnings in API docs
 3. **Phase 3** (future): Remove flat fields in major version bump
