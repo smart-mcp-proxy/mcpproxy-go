@@ -36,6 +36,10 @@ internal/
 └── upstream/
     └── manager.go         # Populate MissingSecret, OAuthConfigErr in input
 
+# CLI (Go)
+cmd/mcpproxy/
+└── upstream_cmd.go        # Add set_secret, configure action hints
+
 # Frontend (Vue)
 frontend/src/
 ├── components/
@@ -101,6 +105,16 @@ internal/
    - Add action handlers to "Servers Needing Attention" for new actions
 
 3. Update TypeScript types if needed (add new action values)
+
+### Phase 4: CLI Updates
+
+1. Update `cmd/mcpproxy/upstream_cmd.go` `outputServers()`:
+   ```go
+   case "set_secret":
+       actionHint = fmt.Sprintf("Set %s", health.Detail)
+   case "configure":
+       actionHint = "Edit config"
+   ```
 
 ## Verification
 
