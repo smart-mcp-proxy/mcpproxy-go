@@ -5,86 +5,107 @@
 
 ## Overview
 
-Research findings for implementing structured server state objects. Health calculation is already implemented (#192); this research focuses on remaining work.
+Research findings for making Health the single source of truth and having Diagnostics aggregate from it.
+
+## Key Insight
+
+Users care about fixing **servers**, not categories of errors. Health should contain all per-server details; Diagnostics aggregates for system-wide views.
 
 ## Research Tasks
 
-### 1. State Data Sources
+### 1. Health Calculator Extension
 
-**Question**: Where does connection and OAuth state data come from?
-
-**Findings**:
-- `internal/upstream/types/types.go` defines `ConnectionInfo` with: State, LastError, RetryCount, LastRetryTime, ServerName, ServerVersion, LastOAuthAttempt, OAuthRetryCount, IsOAuthError
-- `StateManager` provides thread-safe state transitions with callbacks
-- OAuth token data is in storage via `Manager.GetOAuthToken()`
-
-**Decision**: Use existing `ConnectionInfo` as source for `ConnectionState`. Build `OAuthState` from storage token data + `ConnectionInfo` OAuth fields.
-
-**Rationale**: Minimizes duplication; `ConnectionInfo` already has rich retry and timing data.
-
----
-
-### 2. API Serialization
-
-**Question**: How to add structured state to server responses?
+**Question**: How to detect missing secrets and OAuth config issues in Health?
 
 **Findings**:
-- `internal/contracts/types.go` defines `Server` struct with JSON tags
-- `internal/upstream/manager.go:GetAllServersWithStatus()` builds server maps
-- `Health *HealthStatus` field exists (line 48) - follows same pattern
+- Missing secrets are detected during server startup when resolving `${env:X}` refs
+- OAuth config issues surface as errors like "requires 'resource' parameter"
+- Current `HealthCalculatorInput` doesn't have fields for these
 
-**Decision**: Add `OAuthState` and `ConnectionState` fields to `contracts.Server` with `omitempty` JSON tags.
+**Decision**: Add `MissingSecret` and `OAuthConfigErr` fields to `HealthCalculatorInput`. Update priority to check these before connection errors.
 
 **Key Files**:
-- `internal/contracts/types.go` - Add new types
-- `internal/upstream/manager.go` - Populate fields in `GetAllServersWithStatus()`
+- `internal/health/calculator.go` - Add new checks
+- `internal/health/constants.go` - Add `ActionSetSecret`, `ActionConfigure`
+- `internal/upstream/manager.go` - Populate new input fields
 
 ---
 
-### 3. Doctor() Refactoring
+### 2. Doctor() Refactoring
 
 **Question**: How should Doctor() aggregate from Health?
 
 **Findings**:
-- Current `Doctor()` in `internal/management/diagnostics.go` iterates servers and checks raw fields (lastError, authenticated)
-- Returns `contracts.Diagnostics` with UpstreamErrors, OAuthRequired, etc.
-- Categories map to Health.Action: login→OAuthRequired, restart→UpstreamErrors
+- Current Doctor() in `internal/management/diagnostics.go` has independent detection logic
+- Duplicates what Health already knows (connection errors, OAuth state)
+- Returns categories: UpstreamErrors, OAuthRequired, OAuthIssues, MissingSecrets
 
-**Decision**: Doctor() should iterate servers, read `server.Health.Action`, and categorize:
-- `action == "login"` → OAuthRequired
+**Decision**: Replace independent detection with Health aggregation:
 - `action == "restart"` → UpstreamErrors
-- `level == "degraded"` → RuntimeWarnings
+- `action == "login"` → OAuthRequired
+- `action == "configure"` → OAuthIssues
+- `action == "set_secret"` → MissingSecrets (grouped by secret name)
 
-**Rationale**: Single source of truth; no duplicate detection logic.
-
----
-
-### 4. Frontend Types
-
-**Question**: How to add TypeScript interfaces?
-
-**Findings**:
-- `frontend/src/types/api.ts` defines interfaces matching Go structs
-- `HealthStatus` interface exists (lines 9-15) - follows same pattern
-- `Server` interface includes `health?: HealthStatus` (line 39)
-
-**Decision**: Add `OAuthState` and `ConnectionState` interfaces matching Go structs exactly.
-
-**Key File**: `frontend/src/types/api.ts`
+**Key File**: `internal/management/diagnostics.go`
 
 ---
 
-### 5. Dashboard UI Consolidation
+### 3. Missing Secrets Cross-Cutting
 
-**Question**: How to remove duplicate diagnostics display?
+**Question**: How to handle secrets that affect multiple servers?
 
 **Findings**:
-- `frontend/src/views/Dashboard.vue` has two displays:
-  1. "Servers Needing Attention" banner (lines ~35-70) - uses `server.health`
-  2. Diagnostics section - uses separate `/api/v1/diagnostics` endpoint
-- Action buttons already work in the health banner
+- A single secret (e.g., `GITHUB_TOKEN`) can be used by multiple servers
+- Current `MissingSecretInfo` has `UsedBy []string` field
+- Health is per-server, so multiple servers will have `action: "set_secret"` with same secret name
 
-**Decision**: Remove diagnostics section entirely. Enhance "Servers Needing Attention" banner to show aggregated counts.
+**Decision**: Diagnostics aggregates by secret name:
+```go
+secretsMap := make(map[string][]string)  // secret → servers
+for _, srv := range servers {
+    if srv.Health.Action == "set_secret" {
+        secretsMap[srv.Health.Detail] = append(secretsMap[srv.Health.Detail], srv.Name)
+    }
+}
+```
+
+---
+
+### 4. Frontend Navigation
+
+**Question**: How should action buttons navigate?
+
+**Findings**:
+- Current buttons trigger in-place actions (restart, login) or are missing
+- New actions need navigation: `set_secret` → `/ui/secrets`, `configure` → server config tab
+- `ServerCard.vue` already switches on `health.action`
+
+**Decision**: Extend switch statement with new cases:
+```typescript
+case 'set_secret':
+    router.push('/secrets')
+    break
+case 'configure':
+    router.push(`/servers/${server.name}?tab=config`)
+    break
+```
+
+**Key Files**:
+- `frontend/src/components/ServerCard.vue`
+- `frontend/src/views/Dashboard.vue`
+
+---
+
+### 5. Dashboard Consolidation
+
+**Question**: How to remove duplicate banners?
+
+**Findings**:
+- Dashboard has two banners: "System Diagnostics" and "Servers Needing Attention"
+- Both show same issues (connection errors, OAuth needed)
+- "Servers Needing Attention" uses Health - keep this one
+
+**Decision**: Remove "System Diagnostics" banner (lines 3-33). Enhance "Servers Needing Attention" with aggregated counts if needed.
 
 **Key File**: `frontend/src/views/Dashboard.vue`
 
@@ -94,8 +115,8 @@ Research findings for implementing structured server state objects. Health calcu
 
 | Area | Action | Key File(s) |
 |------|--------|-------------|
-| State Types | Add OAuthState, ConnectionState | `internal/contracts/types.go` |
-| State Population | Populate from ConnectionInfo + storage | `internal/upstream/manager.go` |
-| Doctor Refactor | Map Health.Action to categories | `internal/management/diagnostics.go` |
-| Frontend Types | Add matching interfaces | `frontend/src/types/api.ts` |
-| UI Consolidation | Remove diagnostics section | `frontend/src/views/Dashboard.vue` |
+| Health Calculator | Add `set_secret`, `configure` actions | `internal/health/calculator.go` |
+| Health Constants | Add new action constants | `internal/health/constants.go` |
+| Doctor Refactor | Aggregate from Health.Action | `internal/management/diagnostics.go` |
+| Frontend Actions | Navigate to secrets/config pages | `frontend/src/components/ServerCard.vue` |
+| Dashboard | Remove duplicate banner | `frontend/src/views/Dashboard.vue` |

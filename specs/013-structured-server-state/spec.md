@@ -8,90 +8,126 @@
 
 ## Problem Statement
 
-The Dashboard currently has **two overlapping mechanisms** for displaying server health:
+The system has two separate data sources for server health:
 
-1. **"Servers Needing Attention" banner** - Uses unified `server.Health` with working action buttons
-2. **System Diagnostics section** - Separate `/api/v1/diagnostics` endpoint with duplicate information
+1. **Health Status** (`server.health`) - Per-server health with action buttons
+2. **Diagnostics** (`/api/v1/diagnostics`) - System-wide aggregation with CLI hints
 
-These systems:
-- Display the same issues through different UI components
-- Use different data sources (`server.Health` vs `Doctor()` raw field access)
-- Create user confusion with redundant displays
+These systems detect the same issues independently, leading to:
+- Duplicate banners on the Dashboard showing identical information
+- Inconsistent data between CLI (`mcpproxy doctor`) and Web UI
+- "Fix" buttons that show CLI hints instead of navigating to relevant pages
 
-Additionally, server state uses flat fields rather than structured objects, making it harder to:
-- Understand related state at a glance
-- Extend with new fields without cluttering the struct
-- Provide rich state information (retry counts, timestamps) to consumers
+**Goal**: Health becomes the single source of truth for per-server issues. Diagnostics aggregates from Health for system-wide views.
 
 ## User Scenarios & Testing
 
-### User Story 1 - Single Consolidated Health Display (Priority: P1)
+### User Story 1 - Fix Server Issues via Web UI (Priority: P1)
 
-As a developer using MCPProxy, I want to see a single, consistent view of server health issues across CLI and Web UI.
-
-**Acceptance Scenarios**:
-
-1. **Given** a server with an expired OAuth token, **When** I view the Dashboard, **Then** I see ONE health banner (not two)
-2. **Given** a server with a connection error, **When** I run `mcpproxy doctor`, **Then** I see the same error information as displayed in the Web UI
-3. **Given** multiple servers with different issues, **When** I view the Dashboard, **Then** issues are shown with aggregated counts (X errors, Y warnings)
-
----
-
-### User Story 2 - Rich Server State Information (Priority: P2)
-
-As an API consumer, I want server state organized into logical groups (OAuth, Connection) for building rich displays.
+As a developer, when I see a server health issue, I want the "Fix" button to navigate me to the right place to fix it.
 
 **Acceptance Scenarios**:
 
-1. **Given** a server with OAuth configured, **When** I fetch server details, **Then** I receive an `oauth_state` object with status, expiry, retry count, and last attempt time
-2. **Given** a server in error state, **When** I fetch server details, **Then** I receive a `connection_state` object with status, error details, retry info, and connected duration
-3. **Given** an existing API consumer using flat fields, **When** I fetch server details, **Then** flat fields are still present and accurate
+1. **Given** a server with a missing secret, **When** I click Fix, **Then** I navigate to `/ui/secrets`
+2. **Given** a server with OAuth config issue, **When** I click Fix, **Then** I navigate to server config tab
+3. **Given** a server with connection error, **When** I click Restart, **Then** the server restarts
 
 ---
 
-### Edge Cases
+### User Story 2 - Consistent CLI and Web UI (Priority: P1)
 
-- What if a server has no OAuth configured? `oauth_state` should be null/omitted, not empty object
-- How are flat fields and structured objects kept consistent? Derived from same source
+As a developer, I want `mcpproxy doctor` and the Web UI to show the same issues.
+
+**Acceptance Scenarios**:
+
+1. **Given** a missing secret, **When** I run `mcpproxy doctor`, **Then** I see the same servers affected as in the Web UI
+2. **Given** an OAuth issue, **When** I view Dashboard, **Then** I see the same information as `mcpproxy doctor --json`
+
+---
+
+### User Story 3 - Single Health Banner (Priority: P2)
+
+As a developer, I want to see ONE consolidated health display on the Dashboard.
+
+**Acceptance Scenarios**:
+
+1. **Given** servers with issues, **When** I view Dashboard, **Then** I see one "Servers Needing Attention" section (not two separate banners)
+
+---
 
 ## Requirements
 
-### Structured State Objects
+### Health as Source of Truth
 
-- **FR-001**: System MUST provide an `OAuthState` object on servers with OAuth configured, containing: status, token_expires_at, last_attempt, retry_count, user_logged_out, has_refresh_token, error
-- **FR-002**: System MUST provide a `ConnectionState` object on all servers, containing: status, connected_at, last_error, retry_count, last_retry_at, should_retry
-- **FR-003**: Flat fields and structured objects MUST contain consistent data (derived from same source)
+- **FR-001**: Health MUST detect missing secrets and set `action: "set_secret"` with secret name in `detail`
+- **FR-002**: Health MUST detect OAuth config issues and set `action: "configure"` with error in `detail`
+- **FR-003**: Health MUST be the single source of truth for all per-server issues
 
-### Doctor Aggregation
+### Health Actions
 
-- **FR-004**: `Doctor()` MUST aggregate health issues from individual server Health objects (single source of truth)
-- **FR-005**: `Doctor()` MUST NOT duplicate health detection logic that exists in Health calculation
-- **FR-006**: `Doctor()` output MUST be consistent with what individual servers show in their Health
+- **FR-004**: Health actions MUST include: `login`, `restart`, `enable`, `approve`, `set_secret`, `configure`, `view_logs`, `""`
+- **FR-005**: Each action MUST map to a UI navigation target or in-place action
 
-### Web UI Consolidation
+| Action | UI Behavior |
+|--------|-------------|
+| `login` | Trigger OAuth flow |
+| `restart` | Restart the server |
+| `enable` | Enable the server |
+| `approve` | Unquarantine the server |
+| `set_secret` | Navigate to `/ui/secrets` |
+| `configure` | Navigate to server config tab |
+| `view_logs` | Navigate to server logs tab |
+| `""` | No action needed |
 
-- **FR-007**: Dashboard MUST display ONE consolidated health banner (remove duplicate System Diagnostics section)
-- **FR-008**: Health banner MUST show aggregated counts (X errors, Y warnings) with ability to see details
+### Diagnostics Aggregation
 
-### Key Entities
+- **FR-006**: Diagnostics MUST aggregate from individual server Health objects
+- **FR-007**: Diagnostics MUST NOT have independent detection logic for issues that Health already detects
+- **FR-008**: Diagnostics MUST group `set_secret` issues by secret name (cross-cutting: one secret affects multiple servers)
+- **FR-009**: Diagnostics MUST include system-level checks (Docker status) that aren't per-server
 
-- **OAuthState**: OAuth authentication state - status, token expiry, retry attempts, user logout flag
-- **ConnectionState**: Connection state - connected/connecting/error status, uptime, error details, retry information
+### Web UI
+
+- **FR-010**: Dashboard MUST display ONE consolidated health section
+- **FR-011**: Fix/action buttons MUST navigate to relevant pages, not show CLI hints
 
 ## Success Criteria
 
-- **SC-001**: Users see exactly ONE health/diagnostics banner on Dashboard (down from two)
-- **SC-002**: `mcpproxy doctor` output matches Web UI health information for same servers
-- **SC-003**: Structured state objects provide: OAuth retry count, last attempt time, connection uptime, retry backoff status
+- **SC-001**: Users see exactly ONE health section on Dashboard
+- **SC-002**: `mcpproxy doctor` output is derived from same data as Web UI
+- **SC-003**: All action buttons navigate to appropriate fix locations
+- **SC-004**: Missing secrets show which servers are affected (aggregated by secret name)
 
-## Assumptions
+## Health Status Reference
 
-- Missing secrets detection can remain in Doctor() or be moved to per-server Health in a future iteration
+### Levels
+- `healthy` - No issues
+- `degraded` - Minor issues (connecting, token expiring)
+- `unhealthy` - Needs attention
+
+### Admin States
+- `enabled` - Normal operation
+- `disabled` - User disabled
+- `quarantined` - Pending approval
+
+### Actions (Updated)
+
+| Scenario | Level | Action | Detail | Navigation |
+|----------|-------|--------|--------|------------|
+| Healthy | `healthy` | `""` | - | - |
+| Connecting | `degraded` | `""` | - | - |
+| Token expiring | `degraded` | `login` | expiry time | OAuth flow |
+| Connection error | `unhealthy` | `restart` | error message | Restarts server |
+| OAuth needed | `unhealthy` | `login` | - | OAuth flow |
+| Missing secret | `unhealthy` | `set_secret` | secret name | `/ui/secrets` |
+| OAuth config issue | `unhealthy` | `configure` | error/param | Server config tab |
+| Disabled | `healthy` | `enable` | - | Enables server |
+| Quarantined | `healthy` | `approve` | - | Approves server |
 
 ## Out of Scope
 
 - Adding new health checks (disk space, index health, latency metrics)
-- Removing deprecated flat fields
+- Removing deprecated flat fields on Server struct
 - Changes to the MCP protocol tool responses
 
 ## Commit Message Conventions
@@ -102,14 +138,3 @@ As an API consumer, I want server state organized into logical groups (OAuth, Co
 
 ### Co-Authorship
 - Do NOT include AI attribution in commits
-
-### Example Commit Message
-```
-feat(health): add structured OAuthState to server response
-
-Related #[issue-number]
-
-Add OAuthState object to Server struct containing status, expiry,
-retry count, and last attempt time. Flat fields maintained for
-backwards compatibility.
-```

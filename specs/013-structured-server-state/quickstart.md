@@ -5,89 +5,122 @@
 
 ## Overview
 
-Quick implementation guide for adding structured state objects and consolidating UI.
+Make Health the single source of truth. Add new actions (`set_secret`, `configure`). Refactor Doctor() to aggregate from Health. Update UI to navigate to fix locations.
 
-**Prerequisite**: #192 (Unified Health Status) is already merged - `HealthStatus` and `CalculateHealth()` exist.
+**Prerequisite**: #192 (Unified Health Status) is merged - `HealthStatus` and `CalculateHealth()` exist.
 
 ## Implementation Order
 
-1. **Backend Types** → Add OAuthState, ConnectionState to contracts
-2. **Populate State** → Fill structured objects from existing data
-3. **Refactor Doctor()** → Aggregate from Health instead of raw fields
-4. **Frontend Types** → Add TypeScript interfaces
-5. **UI Consolidation** → Remove duplicate diagnostics banner
+1. **Health Constants** → Add new action constants
+2. **Health Calculator** → Detect missing secrets and OAuth config issues
+3. **Doctor() Refactor** → Aggregate from Health instead of independent detection
+4. **Frontend Actions** → Navigate to fix locations
 
 ## Step-by-Step
 
-### 1. Add Go Types (internal/contracts/types.go)
+### 1. Add Constants (internal/health/constants.go)
 
 ```go
-type OAuthState struct {
-    Status          string     `json:"status"`
-    TokenExpiresAt  *time.Time `json:"token_expires_at,omitempty"`
-    LastAttempt     *time.Time `json:"last_attempt,omitempty"`
-    RetryCount      int        `json:"retry_count"`
-    UserLoggedOut   bool       `json:"user_logged_out"`
-    HasRefreshToken bool       `json:"has_refresh_token"`
-    Error           string     `json:"error,omitempty"`
-}
+const (
+    // Existing
+    ActionNone     = ""
+    ActionLogin    = "login"
+    ActionRestart  = "restart"
+    ActionEnable   = "enable"
+    ActionApprove  = "approve"
+    ActionViewLogs = "view_logs"
 
-type ConnectionState struct {
-    Status      string     `json:"status"`
-    ConnectedAt *time.Time `json:"connected_at,omitempty"`
-    LastError   string     `json:"last_error,omitempty"`
-    RetryCount  int        `json:"retry_count"`
-    LastRetryAt *time.Time `json:"last_retry_at,omitempty"`
-    ShouldRetry bool       `json:"should_retry"`
-}
+    // New
+    ActionSetSecret = "set_secret"
+    ActionConfigure = "configure"
+)
+```
 
-// Add to Server struct
-type Server struct {
+### 2. Extend HealthCalculatorInput (internal/health/calculator.go)
+
+```go
+type HealthCalculatorInput struct {
+    // Existing fields...
+    Name            string
+    Enabled         bool
+    Quarantined     bool
+    State           string
+    LastError       string
+    OAuthRequired   bool
+    OAuthStatus     string
+    // ...
+
+    // New fields
+    MissingSecret   string  // Secret name if unresolved (e.g., "GITHUB_TOKEN")
+    OAuthConfigErr  string  // OAuth config error (e.g., "requires 'resource' parameter")
+}
+```
+
+### 3. Update CalculateHealth() (internal/health/calculator.go)
+
+Add checks after admin state, before connection state:
+
+```go
+func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *contracts.HealthStatus {
+    // 1. Admin state checks (existing)
+    if !input.Enabled { ... }
+    if input.Quarantined { ... }
+
+    // 2. NEW: Missing secret check
+    if input.MissingSecret != "" {
+        return &contracts.HealthStatus{
+            Level:      LevelUnhealthy,
+            AdminState: StateEnabled,
+            Summary:    "Missing secret",
+            Detail:     input.MissingSecret,
+            Action:     ActionSetSecret,
+        }
+    }
+
+    // 3. NEW: OAuth config error check
+    if input.OAuthConfigErr != "" {
+        return &contracts.HealthStatus{
+            Level:      LevelUnhealthy,
+            AdminState: StateEnabled,
+            Summary:    "OAuth configuration error",
+            Detail:     input.OAuthConfigErr,
+            Action:     ActionConfigure,
+        }
+    }
+
+    // 4. Connection state checks (existing)
+    // 5. OAuth state checks (existing)
+    // 6. Healthy (existing)
+}
+```
+
+### 4. Populate New Input Fields (internal/upstream/manager.go)
+
+When building `HealthCalculatorInput`, detect and populate:
+
+```go
+input := health.HealthCalculatorInput{
     // ... existing fields ...
-    OAuthState      *OAuthState      `json:"oauth_state,omitempty"`
-    ConnectionState *ConnectionState `json:"connection_state,omitempty"`
+
+    // Detect missing secrets from connection error
+    MissingSecret: extractMissingSecret(connInfo.LastError),
+
+    // Detect OAuth config issues from error message
+    OAuthConfigErr: extractOAuthConfigError(connInfo.LastError),
 }
 ```
 
-### 2. Populate State (internal/upstream/manager.go)
+### 5. Refactor Doctor() (internal/management/diagnostics.go)
 
-In `GetAllServersWithStatus()` or equivalent:
-
-```go
-func buildConnectionState(info *types.ConnectionInfo) *contracts.ConnectionState {
-    return &contracts.ConnectionState{
-        Status:      info.State.String(),
-        ConnectedAt: info.ConnectedAt,
-        LastError:   getErrorString(info.LastError),
-        RetryCount:  info.RetryCount,
-        LastRetryAt: &info.LastRetryTime,
-        ShouldRetry: info.ShouldRetry,
-    }
-}
-
-func buildOAuthState(info *types.ConnectionInfo, token *storage.OAuthToken) *contracts.OAuthState {
-    if token == nil {
-        return nil
-    }
-    return &contracts.OAuthState{
-        Status:          getOAuthStatus(token),
-        TokenExpiresAt:  token.ExpiresAt,
-        LastAttempt:     &info.LastOAuthAttempt,
-        RetryCount:      info.OAuthRetryCount,
-        UserLoggedOut:   info.UserLoggedOut,
-        HasRefreshToken: token.RefreshToken != "",
-        Error:           getOAuthError(info),
-    }
-}
-```
-
-### 3. Refactor Doctor() (internal/management/diagnostics.go)
+Replace independent detection with Health aggregation:
 
 ```go
 func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
-    servers, _ := s.runtime.GetAllServersWithHealth()
-
+    servers, _ := s.runtime.GetAllServers()
     diag := &contracts.Diagnostics{Timestamp: time.Now()}
+
+    // Aggregate missing secrets by name
+    secretsMap := make(map[string][]string)
 
     for _, srv := range servers {
         if srv.Health == nil {
@@ -95,71 +128,76 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
         }
 
         switch srv.Health.Action {
-        case "login":
-            diag.OAuthRequired = append(diag.OAuthRequired, contracts.OAuthRequirement{
-                ServerName: srv.Name,
-                State:      srv.OAuthState.Status,
-                Message:    fmt.Sprintf("Run: mcpproxy auth login --server=%s", srv.Name),
-            })
-        case "restart":
+        case health.ActionRestart:
             diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
                 ServerName:   srv.Name,
                 ErrorMessage: srv.Health.Detail,
                 Timestamp:    time.Now(),
             })
+        case health.ActionLogin:
+            diag.OAuthRequired = append(diag.OAuthRequired, contracts.OAuthRequirement{
+                ServerName: srv.Name,
+                State:      "unauthenticated",
+            })
+        case health.ActionConfigure:
+            diag.OAuthIssues = append(diag.OAuthIssues, contracts.OAuthIssue{
+                ServerName: srv.Name,
+                Error:      srv.Health.Detail,
+            })
+        case health.ActionSetSecret:
+            secretName := srv.Health.Detail
+            secretsMap[secretName] = append(secretsMap[secretName], srv.Name)
         }
     }
 
-    // Keep system-level checks (Docker)
+    // Convert secrets map to slice
+    for secretName, servers := range secretsMap {
+        diag.MissingSecrets = append(diag.MissingSecrets, contracts.MissingSecretInfo{
+            SecretName: secretName,
+            UsedBy:     servers,
+        })
+    }
+
+    // Keep system-level checks
     if s.config.DockerIsolation != nil && s.config.DockerIsolation.Enabled {
         diag.DockerStatus = s.checkDockerDaemon()
     }
 
-    diag.TotalIssues = len(diag.UpstreamErrors) + len(diag.OAuthRequired)
+    diag.TotalIssues = len(diag.UpstreamErrors) + len(diag.OAuthRequired) +
+        len(diag.OAuthIssues) + len(diag.MissingSecrets)
     return diag, nil
 }
 ```
 
-### 4. Add TypeScript Types (frontend/src/types/api.ts)
+### 6. Frontend Actions (frontend/src/components/ServerCard.vue)
+
+Add handlers for new actions:
 
 ```typescript
-export interface OAuthState {
-    status: 'authenticated' | 'expired' | 'error' | 'none';
-    token_expires_at?: string;
-    last_attempt?: string;
-    retry_count: number;
-    user_logged_out: boolean;
-    has_refresh_token: boolean;
-    error?: string;
-}
-
-export interface ConnectionState {
-    status: 'disconnected' | 'connecting' | 'ready' | 'error';
-    connected_at?: string;
-    last_error?: string;
-    retry_count: number;
-    last_retry_at?: string;
-    should_retry: boolean;
-}
-
-// Add to Server interface
-export interface Server {
-    // ... existing fields ...
-    oauth_state?: OAuthState;
-    connection_state?: ConnectionState;
-}
+// In healthAction computed or handler function
+case 'set_secret':
+    router.push('/secrets')
+    break
+case 'configure':
+    router.push(`/servers/${server.name}?tab=config`)
+    break
 ```
 
-### 5. UI Consolidation (frontend/src/views/Dashboard.vue)
+### 7. Dashboard Consolidation (frontend/src/views/Dashboard.vue)
 
-Remove the System Diagnostics section. The existing "Servers Needing Attention" banner (using `server.health`) handles all server health display.
+Remove "System Diagnostics" banner (lines 3-33). The "Servers Needing Attention" banner handles all issues.
 
 ## Verification
 
 ```bash
+# Unit tests
+go test ./internal/health/... -v
 go test ./internal/management/... -v
+
+# E2E tests
 ./scripts/test-api-e2e.sh
-./scripts/run-all-tests.sh
+
+# Frontend
 cd frontend && npm run build
 ```
 
@@ -167,8 +205,9 @@ cd frontend && npm run build
 
 | File | Change |
 |------|--------|
-| `internal/contracts/types.go` | Add OAuthState, ConnectionState |
-| `internal/upstream/manager.go` | Populate structured state |
-| `internal/management/diagnostics.go` | Refactor Doctor() |
-| `frontend/src/types/api.ts` | Add TypeScript interfaces |
-| `frontend/src/views/Dashboard.vue` | Remove diagnostics section |
+| `internal/health/constants.go` | Add ActionSetSecret, ActionConfigure |
+| `internal/health/calculator.go` | Add missing secret/OAuth config checks |
+| `internal/upstream/manager.go` | Populate new input fields |
+| `internal/management/diagnostics.go` | Aggregate from Health |
+| `frontend/src/components/ServerCard.vue` | Handle new actions |
+| `frontend/src/views/Dashboard.vue` | Remove duplicate banner |

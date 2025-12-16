@@ -5,169 +5,106 @@
 
 ## Overview
 
-This document describes API changes for adding structured state objects. All changes are **additive** - existing fields remain unchanged for backwards compatibility.
+This document describes API changes for making Health the single source of truth. Changes are minimal - only extending the `action` enum in HealthStatus.
 
 ## Affected Endpoints
 
 | Endpoint | Change Type | Description |
 |----------|-------------|-------------|
-| `GET /api/v1/servers` | Additive | Add `oauth_state`, `connection_state` to each server |
-| `GET /api/v1/diagnostics` | Modified | Aggregate from `server.Health` instead of raw fields |
+| `GET /api/v1/servers` | Extended | Health.action has new values |
+| `GET /api/v1/diagnostics` | Internal | Now aggregates from Health (no schema change) |
 
 ## Schema Changes
 
-### Server Object (Additive)
+### HealthStatus.action (Extended)
 
-**New Fields**:
+**Current values**: `login`, `restart`, `enable`, `approve`, `view_logs`, `""`
 
-```yaml
-Server:
-  type: object
-  properties:
-    # ... existing properties unchanged ...
-
-    oauth_state:
-      $ref: '#/components/schemas/OAuthState'
-      description: OAuth authentication state (only present if OAuth configured)
-      nullable: true
-
-    connection_state:
-      $ref: '#/components/schemas/ConnectionState'
-      description: Connection state (always present)
-```
-
-### New Schema: OAuthState
+**New values**: `set_secret`, `configure`
 
 ```yaml
-OAuthState:
+HealthStatus:
   type: object
-  required:
-    - status
-    - retry_count
-    - user_logged_out
-    - has_refresh_token
   properties:
-    status:
+    action:
       type: string
-      enum: [authenticated, expired, error, none]
-      description: Current OAuth authentication status
-    token_expires_at:
-      type: string
-      format: date-time
-      description: When the access token expires (ISO 8601)
-    last_attempt:
-      type: string
-      format: date-time
-      description: When the last OAuth flow was attempted
-    retry_count:
-      type: integer
-      minimum: 0
-      description: Number of OAuth retry attempts
-    user_logged_out:
-      type: boolean
-      description: True if the user explicitly logged out
-    has_refresh_token:
-      type: boolean
-      description: True if auto-refresh is possible
-    error:
-      type: string
-      description: Last OAuth error message (if any)
+      enum: [login, restart, enable, approve, view_logs, set_secret, configure, ""]
+      description: |
+        Suggested action to fix the issue:
+        - login: Trigger OAuth authentication
+        - restart: Restart the server
+        - enable: Enable the disabled server
+        - approve: Approve the quarantined server
+        - view_logs: View server logs for details
+        - set_secret: Navigate to secrets page to set missing secret
+        - configure: Navigate to server config to fix configuration
+        - "": No action needed (healthy)
 ```
 
-### New Schema: ConnectionState
+## New Action Examples
 
-```yaml
-ConnectionState:
-  type: object
-  required:
-    - status
-    - retry_count
-    - should_retry
-  properties:
-    status:
-      type: string
-      enum: [disconnected, connecting, ready, error]
-      description: Current connection status
-    connected_at:
-      type: string
-      format: date-time
-      description: When the connection was established
-    last_error:
-      type: string
-      description: Last connection error message
-    retry_count:
-      type: integer
-      minimum: 0
-      description: Number of connection retry attempts
-    last_retry_at:
-      type: string
-      format: date-time
-      description: When the last retry was attempted
-    should_retry:
-      type: boolean
-      description: True if a retry is pending based on backoff
-```
-
-## Example Response
-
-### GET /api/v1/servers
+### Missing Secret
 
 ```json
 {
-  "success": true,
-  "data": {
-    "servers": [
-      {
-        "name": "github-server",
-        "enabled": true,
-
-        "oauth_state": {
-          "status": "authenticated",
-          "token_expires_at": "2025-12-14T12:00:00Z",
-          "last_attempt": "2025-12-13T10:00:00Z",
-          "retry_count": 0,
-          "user_logged_out": false,
-          "has_refresh_token": true
-        },
-
-        "connection_state": {
-          "status": "ready",
-          "connected_at": "2025-12-13T10:01:00Z",
-          "retry_count": 0,
-          "should_retry": false
-        },
-
-        "health": {
-          "level": "healthy",
-          "admin_state": "enabled",
-          "summary": "Connected (5 tools)"
-        },
-
-        "authenticated": true,
-        "connected": true,
-        "tool_count": 5
-      }
-    ]
+  "health": {
+    "level": "unhealthy",
+    "admin_state": "enabled",
+    "summary": "Missing secret",
+    "detail": "GITHUB_TOKEN",
+    "action": "set_secret"
   }
 }
 ```
 
+### OAuth Config Issue
+
+```json
+{
+  "health": {
+    "level": "unhealthy",
+    "admin_state": "enabled",
+    "summary": "OAuth configuration error",
+    "detail": "requires 'resource' parameter",
+    "action": "configure"
+  }
+}
+```
+
+## Diagnostics Changes
+
+### Before (Independent Detection)
+
+Doctor() independently detected issues by checking raw server fields.
+
+### After (Aggregated from Health)
+
+Doctor() iterates servers and groups by `Health.Action`:
+
+| Health.Action | Diagnostics Field |
+|---------------|-------------------|
+| `restart` | `upstream_errors` |
+| `login` | `oauth_required` |
+| `configure` | `oauth_issues` |
+| `set_secret` | `missing_secrets` (grouped by secret name) |
+
+**No schema change** - Diagnostics response structure remains the same. Only the internal implementation changes.
+
 ## Backwards Compatibility
 
-All existing flat fields remain unchanged:
+- All existing `action` values unchanged
+- New `action` values are additive
+- Clients that don't handle `set_secret` or `configure` will see them as unknown actions (graceful degradation)
+- Diagnostics response schema unchanged
 
-| Field | Consistent With |
-|-------|-----------------|
-| `authenticated` | `oauth_state.status == "authenticated"` |
-| `oauth_status` | `oauth_state.status` |
-| `connected` | `connection_state.status == "ready"` |
-| `connecting` | `connection_state.status == "connecting"` |
-| `last_error` | `connection_state.last_error` |
-| `reconnect_count` | `connection_state.retry_count` |
-| `should_retry` | `connection_state.should_retry` |
+## Frontend Action Mapping
 
-## Migration Path
-
-1. **Phase 1** (this feature): Add new fields alongside existing
-2. **Phase 2** (future): Deprecation warnings in API docs
-3. **Phase 3** (future): Remove flat fields in major version bump
+| Action | Button Text | Behavior |
+|--------|-------------|----------|
+| `login` | Login | Trigger OAuth flow |
+| `restart` | Restart | Restart server |
+| `enable` | Enable | Enable server |
+| `approve` | Approve | Unquarantine server |
+| `view_logs` | View Logs | Navigate to `/servers/{name}?tab=logs` |
+| `set_secret` | Set Secret | Navigate to `/secrets` |
+| `configure` | Configure | Navigate to `/servers/{name}?tab=config` |
