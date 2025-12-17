@@ -409,3 +409,149 @@ func TestCalculateHealth_AlwaysIncludesSummary(t *testing.T) {
 		})
 	}
 }
+
+// T008: Test set_secret action
+func TestCalculateHealth_MissingSecret(t *testing.T) {
+	t.Run("missing secret returns set_secret action", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:          "test-server",
+			Enabled:       true,
+			State:         "error",
+			LastError:     "environment variable API_KEY not found or empty",
+			MissingSecret: "API_KEY",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, LevelUnhealthy, result.Level)
+		assert.Equal(t, StateEnabled, result.AdminState)
+		assert.Equal(t, "Missing secret", result.Summary)
+		assert.Equal(t, "API_KEY", result.Detail)
+		assert.Equal(t, ActionSetSecret, result.Action)
+	})
+
+	t.Run("missing secret takes priority over connection error", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:          "test-server",
+			Enabled:       true,
+			State:         "error",
+			LastError:     "connection refused",
+			MissingSecret: "GITHUB_TOKEN",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		// Missing secret should take priority over connection error
+		assert.Equal(t, ActionSetSecret, result.Action)
+		assert.Equal(t, "GITHUB_TOKEN", result.Detail)
+	})
+
+	t.Run("disabled server with missing secret still returns enable action", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:          "test-server",
+			Enabled:       false,
+			MissingSecret: "API_KEY",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		// Admin state (disabled) takes priority over missing secret
+		assert.Equal(t, ActionEnable, result.Action)
+	})
+}
+
+// T009: Test configure action
+func TestCalculateHealth_OAuthConfigError(t *testing.T) {
+	t.Run("OAuth config error returns configure action", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:           "test-server",
+			Enabled:        true,
+			State:          "error",
+			LastError:      "requires 'resource' parameter",
+			OAuthConfigErr: "requires 'resource' parameter",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, LevelUnhealthy, result.Level)
+		assert.Equal(t, StateEnabled, result.AdminState)
+		assert.Equal(t, "OAuth configuration error", result.Summary)
+		assert.Equal(t, "requires 'resource' parameter", result.Detail)
+		assert.Equal(t, ActionConfigure, result.Action)
+	})
+
+	t.Run("missing secret takes priority over OAuth config error", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:           "test-server",
+			Enabled:        true,
+			State:          "error",
+			MissingSecret:  "CLIENT_SECRET",
+			OAuthConfigErr: "requires 'resource' parameter",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		// Missing secret should take priority over OAuth config error
+		assert.Equal(t, ActionSetSecret, result.Action)
+	})
+
+	t.Run("quarantined server with OAuth config error still returns approve action", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:           "test-server",
+			Enabled:        true,
+			Quarantined:    true,
+			OAuthConfigErr: "invalid oauth configuration",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		// Admin state (quarantined) takes priority
+		assert.Equal(t, ActionApprove, result.Action)
+	})
+}
+
+// Test ExtractMissingSecret helper
+func TestExtractMissingSecret(t *testing.T) {
+	tests := []struct {
+		name      string
+		lastError string
+		expected  string
+	}{
+		{"empty error", "", ""},
+		{"unrelated error", "connection refused", ""},
+		{"missing env var format", "environment variable API_KEY not found or empty", "API_KEY"},
+		{"missing env var with prefix", "failed to start: environment variable GITHUB_TOKEN not found or empty", "GITHUB_TOKEN"},
+		{"env ref format", "${env:MY_SECRET} unresolved", "MY_SECRET"},
+		{"complex env ref", "failed to resolve ${env:DATABASE_URL}", "DATABASE_URL"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ExtractMissingSecret(tt.lastError)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// Test ExtractOAuthConfigError helper
+func TestExtractOAuthConfigError(t *testing.T) {
+	tests := []struct {
+		name      string
+		lastError string
+		expected  string
+	}{
+		{"empty error", "", ""},
+		{"unrelated error", "connection refused", ""},
+		{"resource parameter error", "requires 'resource' parameter", "requires 'resource' parameter"},
+		{"missing client_id", "missing client_id in oauth config", "missing client_id in oauth config"},
+		{"validation failed", "oauth config validation failed: missing required fields", "oauth config validation failed: missing required fields"},
+		{"invalid config", "invalid oauth configuration for server", "invalid oauth configuration for server"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ExtractOAuthConfigError(tt.lastError)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

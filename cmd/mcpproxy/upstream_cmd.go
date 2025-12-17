@@ -247,12 +247,14 @@ func outputServers(servers []map[string]interface{}) error {
 			healthAdminState := "enabled"
 			healthSummary := getStringField(srv, "status") // fallback to old status
 			healthAction := ""
+			healthDetail := ""
 
 			if healthData != nil {
 				healthLevel = getStringField(healthData, "level")
 				healthAdminState = getStringField(healthData, "admin_state")
 				healthSummary = getStringField(healthData, "summary")
 				healthAction = getStringField(healthData, "action")
+				healthDetail = getStringField(healthData, "detail")
 			}
 
 			// Status emoji based on health level and admin state
@@ -286,6 +288,14 @@ func outputServers(servers []map[string]interface{}) error {
 				actionHint = "Approve in Web UI"
 			case "view_logs":
 				actionHint = fmt.Sprintf("upstream logs %s", name)
+			case health.ActionSetSecret:
+				if healthDetail != "" {
+					actionHint = fmt.Sprintf("Set %s", healthDetail)
+				} else {
+					actionHint = "Set secret in config"
+				}
+			case health.ActionConfigure:
+				actionHint = "Edit config"
 			}
 
 			fmt.Printf("%-4s %-25s %-10s %-10d %-30s %s\n",

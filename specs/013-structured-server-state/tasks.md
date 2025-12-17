@@ -24,10 +24,10 @@
 
 **Purpose**: Add new health action constants and extend calculator input
 
-- [ ] T001 [P] Add ActionSetSecret and ActionConfigure constants in internal/health/constants.go
-- [ ] T002 [P] Add MissingSecret and OAuthConfigErr fields to HealthCalculatorInput in internal/health/calculator.go
+- [x] T001 [P] Add ActionSetSecret and ActionConfigure constants in internal/health/constants.go
+- [x] T002 [P] Add MissingSecret and OAuthConfigErr fields to HealthCalculatorInput in internal/health/calculator.go
 
-**Checkpoint**: Constants and types ready for implementation
+**Checkpoint**: Constants and types ready for implementation ✅
 
 ---
 
@@ -37,15 +37,15 @@
 
 **CRITICAL**: No UI/CLI changes make sense until Health correctly detects issues
 
-- [ ] T003 Add missing secret detection check to CalculateHealth() in internal/health/calculator.go
-- [ ] T004 Add OAuth config error detection check to CalculateHealth() in internal/health/calculator.go
-- [ ] T005 Add helper functions to extract MissingSecret from connection errors in internal/upstream/manager.go
-- [ ] T006 Add helper functions to extract OAuthConfigErr from connection errors in internal/upstream/manager.go
-- [ ] T007 Populate MissingSecret and OAuthConfigErr in HealthCalculatorInput within internal/upstream/manager.go
-- [ ] T008 [P] Add unit tests for set_secret action in internal/health/calculator_test.go
-- [ ] T009 [P] Add unit tests for configure action in internal/health/calculator_test.go
+- [x] T003 Add missing secret detection check to CalculateHealth() in internal/health/calculator.go
+- [x] T004 Add OAuth config error detection check to CalculateHealth() in internal/health/calculator.go
+- [x] T005 Add helper functions to extract MissingSecret from connection errors in internal/health/calculator.go
+- [x] T006 Add helper functions to extract OAuthConfigErr from connection errors in internal/health/calculator.go
+- [x] T007 Populate MissingSecret and OAuthConfigErr in HealthCalculatorInput within internal/runtime/runtime.go and internal/server/mcp.go
+- [x] T008 [P] Add unit tests for set_secret action in internal/health/calculator_test.go
+- [x] T009 [P] Add unit tests for configure action in internal/health/calculator_test.go
 
-**Checkpoint**: Health correctly detects and reports new action types
+**Checkpoint**: Health correctly detects and reports new action types ✅
 
 ---
 
@@ -60,12 +60,12 @@
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Add set_secret action handler in frontend/src/components/ServerCard.vue
-- [ ] T011 [US1] Add configure action handler in frontend/src/components/ServerCard.vue
-- [ ] T012 [US1] Add button labels for new actions (set_secret, configure) in frontend/src/components/ServerCard.vue
-- [ ] T013 [US1] Update TypeScript Server/Health types to include new action values in frontend/src/types/ if needed
+- [x] T010 [US1] Add set_secret action handler in frontend/src/components/ServerCard.vue
+- [x] T011 [US1] Add configure action handler in frontend/src/components/ServerCard.vue
+- [x] T012 [US1] Add button labels for new actions (set_secret, configure) in frontend/src/components/ServerCard.vue
+- [x] T013 [US1] Update TypeScript Server/Health types to include new action values in frontend/src/types/api.ts
 
-**Checkpoint**: User Story 1 complete - Fix buttons navigate to correct pages
+**Checkpoint**: User Story 1 complete - Fix buttons navigate to correct pages ✅
 
 ---
 
@@ -81,13 +81,13 @@
 
 ### Implementation for User Story 2
 
-- [ ] T014 [US2] Add set_secret action hint formatting in cmd/mcpproxy/upstream_cmd.go outputServers()
-- [ ] T015 [US2] Add configure action hint formatting in cmd/mcpproxy/upstream_cmd.go outputServers()
-- [ ] T016 [US2] Refactor Doctor() to aggregate from Health.Action instead of independent detection in internal/management/diagnostics.go
-- [ ] T017 [US2] Implement set_secret aggregation by secret name (cross-cutting) in internal/management/diagnostics.go
-- [ ] T018 [US2] Update diagnostics_test.go to verify aggregation from Health in internal/management/diagnostics_test.go
+- [x] T014 [US2] Add set_secret action hint formatting in cmd/mcpproxy/upstream_cmd.go outputServers()
+- [x] T015 [US2] Add configure action hint formatting in cmd/mcpproxy/upstream_cmd.go outputServers()
+- [x] T016 [US2] Refactor Doctor() to aggregate from Health.Action instead of independent detection in internal/management/diagnostics.go
+- [x] T017 [US2] Implement set_secret aggregation by secret name (cross-cutting) in internal/management/diagnostics.go
+- [x] T018 [US2] Update diagnostics_test.go to verify aggregation from Health in internal/management/diagnostics_test.go
 
-**Checkpoint**: User Story 2 complete - CLI and Web UI show identical issues
+**Checkpoint**: User Story 2 complete - CLI and Web UI show identical issues ✅
 
 ---
 
@@ -102,11 +102,11 @@
 
 ### Implementation for User Story 3
 
-- [ ] T019 [US3] Remove "System Diagnostics" banner from frontend/src/views/Dashboard.vue
-- [ ] T020 [US3] Ensure "Servers Needing Attention" section handles all action types in frontend/src/views/Dashboard.vue
-- [ ] T021 [US3] Verify action buttons display correctly for set_secret and configure in Dashboard
+- [x] T019 [US3] Remove "System Diagnostics" banner from frontend/src/views/Dashboard.vue
+- [x] T020 [US3] Ensure "Servers Needing Attention" section handles all action types in frontend/src/views/Dashboard.vue
+- [x] T021 [US3] Verify action buttons display correctly for set_secret and configure in Dashboard
 
-**Checkpoint**: User Story 3 complete - Single consolidated health display
+**Checkpoint**: User Story 3 complete - Single consolidated health display ✅
 
 ---
 
@@ -114,11 +114,13 @@
 
 **Purpose**: Verification and documentation
 
-- [ ] T022 Run go test ./internal/health/... -v to verify all health tests pass
-- [ ] T023 Run go test ./internal/management/... -v to verify diagnostics tests pass
-- [ ] T024 Run ./scripts/test-api-e2e.sh for E2E verification
-- [ ] T025 Run frontend build (cd frontend && npm run build) to verify no TypeScript errors
-- [ ] T026 Update oas/swagger.yaml to document new action enum values (set_secret, configure)
+- [x] T022 Run go test ./internal/health/... -v to verify all health tests pass
+- [x] T023 Run go test ./internal/management/... -v to verify diagnostics tests pass
+- [x] T024 Run ./scripts/test-api-e2e.sh for E2E verification
+- [x] T025 Run frontend build (cd frontend && npm run build) to verify no TypeScript errors
+- [x] T026 Update oas/swagger.yaml to document new action enum values (set_secret, configure)
+
+**Checkpoint**: All verification passed ✅
 
 ---
 
