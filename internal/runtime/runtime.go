@@ -1692,6 +1692,8 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			HasRefreshToken: hasRefreshToken,
 			UserLoggedOut:   userLoggedOut,
 			ToolCount:       serverStatus.ToolCount,
+			MissingSecret:   health.ExtractMissingSecret(serverStatus.LastError),
+			OAuthConfigErr:  health.ExtractOAuthConfigError(serverStatus.LastError),
 		}
 		if !tokenExpiresAt.IsZero() {
 			healthInput.TokenExpiresAt = &tokenExpiresAt

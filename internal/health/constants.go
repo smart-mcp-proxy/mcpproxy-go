@@ -17,10 +17,12 @@ const (
 
 // Actions - suggested remediation for health issues
 const (
-	ActionNone     = ""
-	ActionLogin    = "login"
-	ActionRestart  = "restart"
-	ActionEnable   = "enable"
-	ActionApprove  = "approve"
-	ActionViewLogs = "view_logs"
+	ActionNone      = ""
+	ActionLogin     = "login"
+	ActionRestart   = "restart"
+	ActionEnable    = "enable"
+	ActionApprove   = "approve"
+	ActionViewLogs  = "view_logs"
+	ActionSetSecret = "set_secret"
+	ActionConfigure = "configure"
 )

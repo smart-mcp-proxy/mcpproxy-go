@@ -11,7 +11,7 @@ export interface HealthStatus {
   admin_state: 'enabled' | 'disabled' | 'quarantined'
   summary: string
   detail?: string
-  action?: 'login' | 'restart' | 'enable' | 'approve' | 'view_logs' | ''
+  action?: 'login' | 'restart' | 'enable' | 'approve' | 'view_logs' | 'set_secret' | 'configure' | ''
 }
 
 // Server types

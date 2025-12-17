@@ -30,6 +30,10 @@ type HealthCalculatorInput struct {
 	HasRefreshToken bool       // True if refresh token exists
 	UserLoggedOut   bool       // True if user explicitly logged out
 
+	// Secret/config detection
+	MissingSecret  string // Secret name if unresolved (e.g., "GITHUB_TOKEN")
+	OAuthConfigErr string // OAuth config error (e.g., "requires 'resource' parameter")
+
 	// Tool info
 	ToolCount int
 }
@@ -75,7 +79,29 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		}
 	}
 
-	// 2. Connection state checks
+	// 2. Missing secret check
+	if input.MissingSecret != "" {
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    "Missing secret",
+			Detail:     input.MissingSecret,
+			Action:     ActionSetSecret,
+		}
+	}
+
+	// 3. OAuth config error check
+	if input.OAuthConfigErr != "" {
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    "OAuth configuration error",
+			Detail:     input.OAuthConfigErr,
+			Action:     ActionConfigure,
+		}
+	}
+
+	// 4. Connection state checks
 	// Normalize state to lowercase for consistent matching
 	// (ConnectionState.String() returns "Error", "Disconnected", etc.)
 	state := toLower(input.State)
@@ -122,7 +148,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		}
 	}
 
-	// 3. OAuth state checks (only for servers that require OAuth)
+	// 5. OAuth state checks (only for servers that require OAuth)
 	if input.OAuthRequired {
 		// User explicitly logged out - needs re-authentication
 		if input.UserLoggedOut {
@@ -193,7 +219,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		}
 	}
 
-	// 4. Healthy state - connected with valid authentication (if required)
+	// 6. Healthy state - connected with valid authentication (if required)
 	return &contracts.HealthStatus{
 		Level:      LevelHealthy,
 		AdminState: StateEnabled,
@@ -328,4 +354,78 @@ func isOAuthRelatedError(err string) bool {
 		}
 	}
 	return false
+}
+
+// ExtractMissingSecret extracts the secret name from an error message if the error
+// indicates a missing secret reference (e.g., unresolved environment variable).
+// Returns the secret name or empty string if the error is not about missing secrets.
+func ExtractMissingSecret(lastError string) string {
+	if lastError == "" {
+		return ""
+	}
+
+	// Pattern: "environment variable VARNAME not found or empty"
+	const prefix = "environment variable "
+	const suffix = " not found or empty"
+	if idx := findSubstring(lastError, prefix); idx >= 0 {
+		start := idx + len(prefix)
+		if endIdx := findSubstring(lastError[start:], suffix); endIdx > 0 {
+			return lastError[start : start+endIdx]
+		}
+	}
+
+	// Pattern: "${env:VARNAME}" unresolved
+	const envPrefix = "${env:"
+	if idx := findSubstring(lastError, envPrefix); idx >= 0 {
+		start := idx + len(envPrefix)
+		if endIdx := findChar(lastError[start:], '}'); endIdx > 0 {
+			return lastError[start : start+endIdx]
+		}
+	}
+
+	return ""
+}
+
+// ExtractOAuthConfigError extracts an OAuth configuration error from the error message.
+// Returns the config error description or empty string if not an OAuth config issue.
+func ExtractOAuthConfigError(lastError string) string {
+	if lastError == "" {
+		return ""
+	}
+
+	// OAuth config issues typically mention "resource" parameter or config validation
+	configPatterns := []string{
+		"requires 'resource' parameter",
+		"missing client_id",
+		"oauth config validation failed",
+		"invalid oauth configuration",
+	}
+
+	for _, pattern := range configPatterns {
+		if containsIgnoreCase(lastError, pattern) {
+			return lastError
+		}
+	}
+
+	return ""
+}
+
+// findSubstring returns the index of substr in s, or -1 if not found.
+func findSubstring(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
+// findChar returns the index of ch in s, or -1 if not found.
+func findChar(s string, ch byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ch {
+			return i
+		}
+	}
+	return -1
 }

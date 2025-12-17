@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/contracts"
+	"mcpproxy-go/internal/health"
 	"mcpproxy-go/internal/secret"
 )
 
 // Doctor aggregates health diagnostics from all system components.
 // This implements FR-009 through FR-013: comprehensive health diagnostics.
+// Refactored to aggregate from Health.Action (single source of truth).
 func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	// Get all servers from runtime
 	serversRaw, err := s.runtime.GetAllServers()
@@ -31,45 +33,91 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		RuntimeWarnings: []string{},
 	}
 
-	// Collect upstream connection errors and OAuth requirements
+	// Aggregate by secret name for cross-cutting view
+	secretsMap := make(map[string][]string) // secret name -> list of servers using it
+
+	// Aggregate diagnostics from Health.Action (single source of truth)
 	for _, srvRaw := range serversRaw {
-		// Extract server fields
 		serverName := getStringFromMap(srvRaw, "name")
 		lastError := getStringFromMap(srvRaw, "last_error")
-		authenticated := getBoolFromMap(srvRaw, "authenticated")
-		hasOAuth := srvRaw["oauth"] != nil
 
-		// Check for connection errors
-		if lastError != "" {
+		// Extract health status from server
+		healthData, _ := srvRaw["health"].(map[string]interface{})
+		healthAction := ""
+		healthDetail := ""
+		if healthData != nil {
+			healthAction = getStringFromMap(healthData, "action")
+			healthDetail = getStringFromMap(healthData, "detail")
+		}
+
+		// Aggregate based on Health.Action
+		switch healthAction {
+		case health.ActionRestart:
 			errorTime := time.Now()
 			if errorTimeStr := getStringFromMap(srvRaw, "error_time"); errorTimeStr != "" {
 				if parsed, err := time.Parse(time.RFC3339, errorTimeStr); err == nil {
 					errorTime = parsed
 				}
 			}
+			diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
+				ServerName:   serverName,
+				ErrorMessage: healthDetail,
+				Timestamp:    errorTime,
+			})
 
+		case health.ActionLogin:
+			diag.OAuthRequired = append(diag.OAuthRequired, contracts.OAuthRequirement{
+				ServerName: serverName,
+				State:      "unauthenticated",
+				Message:    fmt.Sprintf("Run: mcpproxy auth login --server=%s", serverName),
+			})
+
+		case health.ActionConfigure:
+			// Extract parameter name from error
+			paramName := extractParameterName(healthDetail)
+			diag.OAuthIssues = append(diag.OAuthIssues, contracts.OAuthIssue{
+				ServerName:    serverName,
+				Issue:         "OAuth provider parameter mismatch",
+				Error:         healthDetail,
+				MissingParams: []string{paramName},
+				Resolution: "MCPProxy auto-detects RFC 8707 resource parameter from Protected Resource Metadata (RFC 9728). " +
+					"Check detected values: mcpproxy auth status --server=" + serverName + ". " +
+					"To override, add extra_params.resource to OAuth config.",
+				DocumentationURL: "https://www.rfc-editor.org/rfc/rfc8707.html",
+			})
+
+		case health.ActionSetSecret:
+			// Group by secret name for cross-cutting view
+			secretName := healthDetail
+			if secretName != "" {
+				secretsMap[secretName] = append(secretsMap[secretName], serverName)
+			}
+		}
+
+		// Fallback: check for errors without health action for backward compatibility
+		// Only add to UpstreamErrors if not already handled by health action
+		if healthAction == "" && lastError != "" {
+			errorTime := time.Now()
+			if errorTimeStr := getStringFromMap(srvRaw, "error_time"); errorTimeStr != "" {
+				if parsed, err := time.Parse(time.RFC3339, errorTimeStr); err == nil {
+					errorTime = parsed
+				}
+			}
 			diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
 				ServerName:   serverName,
 				ErrorMessage: lastError,
 				Timestamp:    errorTime,
 			})
 		}
-
-		// Check for OAuth requirements
-		if hasOAuth && !authenticated {
-			diag.OAuthRequired = append(diag.OAuthRequired, contracts.OAuthRequirement{
-				ServerName: serverName,
-				State:      "unauthenticated",
-				Message:    fmt.Sprintf("Run: mcpproxy auth login --server=%s", serverName),
-			})
-		}
 	}
 
-	// Check for OAuth issues (parameter mismatches)
-	diag.OAuthIssues = s.detectOAuthIssues(serversRaw)
-
-	// Check for missing secrets
-	diag.MissingSecrets = s.findMissingSecrets(ctx, serversRaw)
+	// Convert secrets map to slice
+	for secretName, servers := range secretsMap {
+		diag.MissingSecrets = append(diag.MissingSecrets, contracts.MissingSecretInfo{
+			SecretName: secretName,
+			UsedBy:     servers,
+		})
+	}
 
 	// Check Docker status if isolation is enabled
 	if s.config.DockerIsolation != nil && s.config.DockerIsolation.Enabled {
@@ -84,6 +132,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		"total_issues", diag.TotalIssues,
 		"upstream_errors", len(diag.UpstreamErrors),
 		"oauth_required", len(diag.OAuthRequired),
+		"oauth_issues", len(diag.OAuthIssues),
 		"missing_secrets", len(diag.MissingSecrets))
 
 	return diag, nil

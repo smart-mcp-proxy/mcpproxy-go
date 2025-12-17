@@ -117,6 +117,22 @@
           View Logs
         </router-link>
 
+        <router-link
+          v-if="healthAction === 'set_secret'"
+          to="/secrets"
+          class="btn btn-sm btn-primary"
+        >
+          Set Secret
+        </router-link>
+
+        <router-link
+          v-if="healthAction === 'configure'"
+          :to="`/servers/${server.name}?tab=config`"
+          class="btn btn-sm btn-primary"
+        >
+          Configure
+        </router-link>
+
         <!-- Logout button (only when connected with OAuth) -->
         <button
           v-if="canLogout"
