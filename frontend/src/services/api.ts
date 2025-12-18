@@ -243,6 +243,12 @@ class APIService {
     })
   }
 
+  async discoverServerTools(serverName: string): Promise<APIResponse> {
+    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/discover-tools`, {
+      method: 'POST',
+    })
+  }
+
   async deleteServer(serverName: string): Promise<APIResponse> {
     return this.callTool('upstream_servers', {
       operation: 'remove',
