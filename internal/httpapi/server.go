@@ -53,6 +53,7 @@ type ServerController interface {
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
 	GetManagementService() interface{} // Returns the management service for unified operations
+	DiscoverServerTools(ctx context.Context, serverName string) error
 
 	// Tools and search
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
@@ -335,6 +336,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/logout", s.handleServerLogout)
 			r.Post("/quarantine", s.handleQuarantineServer)
 			r.Post("/unquarantine", s.handleUnquarantineServer)
+			r.Post("/discover-tools", s.handleDiscoverServerTools)
 			r.Get("/tools", s.handleGetServerTools)
 			r.Get("/logs", s.handleGetServerLogs)
 			r.Get("/tool-calls", s.handleGetServerToolCalls)
@@ -1051,6 +1053,49 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 		Async:   false,
 	}
 
+	s.writeSuccess(w, response)
+}
+
+// handleDiscoverServerTools godoc
+// @Summary Discover tools for a specific server
+// @Description Manually trigger tool discovery and indexing for a specific upstream MCP server. This forces an immediate refresh of the server's tool cache.
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Tool discovery triggered successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Failed to discover tools"
+// @Router /api/v1/servers/{id}/discover-tools [post]
+func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	s.logger.Info("Manual tool discovery triggered via API", "server", serverID)
+
+	if err := s.controller.DiscoverServerTools(r.Context(), serverID); err != nil {
+		s.logger.Error("Failed to discover tools for server", "server", serverID, "error", err)
+		
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			return
+		}
+		
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to discover tools: %v", err))
+		return
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "discover_tools",
+		Success: true,
+		Async:   false,
+	}
 	s.writeSuccess(w, response)
 }
 

@@ -86,6 +86,12 @@
                   OAuth Login
                 </button>
               </li>
+              <li v-if="server.enabled && server.connected">
+                <button @click="discoverTools" :disabled="actionLoading">
+                  <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+                  Discover Tools
+                </button>
+              </li>
               <li>
                 <button @click="server.quarantined ? unquarantineServer() : quarantineServer()" :disabled="actionLoading">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
@@ -683,6 +689,43 @@ async function unquarantineServer() {
 
 async function refreshData() {
   await loadServerDetails()
+}
+
+async function discoverTools() {
+  if (!server.value) return
+
+  actionLoading.value = true
+  try {
+    const response = await api.discoverServerTools(server.value.name)
+
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to discover tools')
+    }
+
+    systemStore.addToast({
+      type: 'success',
+      title: 'Tool Discovery Started',
+      message: `Discovering tools for ${server.value.name}...`,
+    })
+
+    // Refresh server details after a short delay to show updated tool count
+    setTimeout(async () => {
+      await loadServerDetails()
+      systemStore.addToast({
+        type: 'info',
+        title: 'Tools Updated',
+        message: `Tool cache refreshed for ${server.value?.name}`,
+      })
+    }, 2000)
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Tool Discovery Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } finally {
+    actionLoading.value = false
+  }
 }
 
 function viewToolSchema(tool: Tool) {

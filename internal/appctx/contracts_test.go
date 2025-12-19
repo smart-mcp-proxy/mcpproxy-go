@@ -179,6 +179,11 @@ func TestIndexManagerContract(t *testing.T) {
 			in:   []reflect.Type{},
 			out:  []reflect.Type{reflect.TypeOf((*error)(nil)).Elem()},
 		},
+		"GetToolsByServer": {
+			name: "GetToolsByServer",
+			in:   []reflect.Type{reflect.TypeOf("")},
+			out:  []reflect.Type{reflect.TypeOf([]*config.ToolMetadata{}), reflect.TypeOf((*error)(nil)).Elem()},
+		},
 	}
 
 	verifyInterfaceContract(t, interfaceType, expectedMethods)

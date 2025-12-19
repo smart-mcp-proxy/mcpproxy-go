@@ -339,6 +339,44 @@ func (b *BleveIndex) RebuildIndex() error {
 	return nil
 }
 
+// GetToolsByServer retrieves all tools from a specific server
+func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata, error) {
+	// Create a term query for the server name
+	query := bleve.NewTermQuery(serverName)
+	query.SetField("server_name")
+
+	// Create search request with high limit to get all tools
+	searchReq := bleve.NewSearchRequest(query)
+	searchReq.Size = 10000 // Maximum tools per server
+	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "hash"}
+
+	b.logger.Debug("Querying tools by server", zap.String("server", serverName))
+
+	searchResult, err := b.index.Search(searchReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tools by server: %w", err)
+	}
+
+	// Convert results to ToolMetadata
+	var tools []*config.ToolMetadata
+	for _, hit := range searchResult.Hits {
+		toolMeta := &config.ToolMetadata{
+			Name:        getStringField(hit.Fields, "full_tool_name"),
+			ServerName:  getStringField(hit.Fields, "server_name"),
+			Description: getStringField(hit.Fields, "description"),
+			ParamsJSON:  getStringField(hit.Fields, "params_json"),
+			Hash:        getStringField(hit.Fields, "hash"),
+		}
+		tools = append(tools, toolMeta)
+	}
+
+	b.logger.Debug("Found tools for server",
+		zap.String("server", serverName),
+		zap.Int("count", len(tools)))
+
+	return tools, nil
+}
+
 // Helper function to get string field from search results
 func getStringField(fields map[string]interface{}, fieldName string) string {
 	if val, ok := fields[fieldName]; ok {

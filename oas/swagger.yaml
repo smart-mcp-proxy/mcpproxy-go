@@ -1481,6 +1481,48 @@ paths:
       summary: Disable an upstream server
       tags:
       - servers
+  /api/v1/servers/{id}/discover-tools:
+    post:
+      description: Manually trigger tool discovery and indexing for a specific upstream
+        MCP server. This forces an immediate refresh of the server's tool cache.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
+          description: Tool discovery triggered successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request (missing server ID)
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to discover tools
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Discover tools for a specific server
+      tags:
+      - servers
   /api/v1/servers/{id}/enable:
     post:
       description: Enable a specific upstream MCP server
