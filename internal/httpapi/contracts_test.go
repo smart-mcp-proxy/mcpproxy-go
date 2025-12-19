@@ -285,6 +285,11 @@ func (m *MockServerController) GetVersionInfo() *updatecheck.VersionInfo {
 	return nil
 }
 
+// Tool discovery
+func (m *MockServerController) DiscoverServerTools(_ context.Context, _ string) error {
+	return nil
+}
+
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()

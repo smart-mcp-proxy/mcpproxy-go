@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -169,7 +170,7 @@ func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(15 * time.Minute)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -233,9 +234,22 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 		return nil
 	}
 
-	if err := r.indexManager.BatchIndexTools(tools); err != nil {
-		return fmt.Errorf("failed to index tools: %w", err)
+	// Group tools by server name for differential updates
+	toolsByServer := make(map[string][]*config.ToolMetadata)
+	for _, tool := range tools {
+		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
 	}
+
+	// Apply differential update for each server
+	for serverName, serverTools := range toolsByServer {
+		if err := r.applyDifferentialToolUpdate(ctx, serverName, serverTools); err != nil {
+			r.logger.Error("Failed to apply differential update for server",
+				zap.String("server", serverName),
+				zap.Error(err))
+			// Continue with other servers instead of failing completely
+		}
+	}
+
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
@@ -320,9 +334,9 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 		return nil
 	}
 
-	// Index the tools
-	if err := r.indexManager.BatchIndexTools(tools); err != nil {
-		return fmt.Errorf("failed to index tools for server %s: %w", serverName, err)
+	// Apply differential update: compare new tools with existing indexed tools
+	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
+		return fmt.Errorf("failed to apply differential tool update for server %s: %w", serverName, err)
 	}
 
 	// Invalidate tool count caches since tools may have changed
@@ -345,6 +359,149 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 		zap.String("server", serverName),
 		zap.Int("count", len(tools)))
 	return nil
+}
+
+// applyDifferentialToolUpdate performs differential update of tools for a server.
+// It compares new tools with existing indexed tools and applies only the changes:
+// - Removed tools are deleted from the index
+// - Added tools are indexed
+// - Modified tools (different hash) are re-indexed
+func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName string, newTools []*config.ToolMetadata) error {
+	// Query existing tools from the index
+	existingTools, err := r.indexManager.GetToolsByServer(serverName)
+	if err != nil {
+		r.logger.Warn("Failed to query existing tools, performing full re-index",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Fall back to full batch index
+		return r.indexManager.BatchIndexTools(newTools)
+	}
+
+	// Build maps for efficient lookup
+	// Extract tool name without server prefix for comparison
+	oldToolsMap := make(map[string]*config.ToolMetadata)
+	for _, tool := range existingTools {
+		toolName := tool.Name
+		// Remove server prefix if present (format: "server:tool")
+		if idx := strings.Index(tool.Name, ":"); idx != -1 {
+			toolName = tool.Name[idx+1:]
+		}
+		oldToolsMap[toolName] = tool
+	}
+
+	newToolsMap := make(map[string]*config.ToolMetadata)
+	for _, tool := range newTools {
+		toolName := tool.Name
+		// Remove server prefix if present
+		if idx := strings.Index(tool.Name, ":"); idx != -1 {
+			toolName = tool.Name[idx+1:]
+		}
+		newToolsMap[toolName] = tool
+	}
+
+	// Detect changes
+	var addedTools []*config.ToolMetadata
+	var modifiedTools []*config.ToolMetadata
+	var removedTools []string
+
+	// Find added and modified tools
+	for toolName, newTool := range newToolsMap {
+		oldTool, exists := oldToolsMap[toolName]
+		if !exists {
+			// Tool is new
+			addedTools = append(addedTools, newTool)
+		} else if oldTool.Hash != newTool.Hash {
+			// Tool exists but has changed (different hash)
+			modifiedTools = append(modifiedTools, newTool)
+		}
+		// else: tool unchanged, no action needed
+	}
+
+	// Find removed tools
+	for toolName := range oldToolsMap {
+		if _, exists := newToolsMap[toolName]; !exists {
+			removedTools = append(removedTools, toolName)
+		}
+	}
+
+	// Log the changes
+	if len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 {
+		r.logger.Info("Tool changes detected for server",
+			zap.String("server", serverName),
+			zap.Int("added", len(addedTools)),
+			zap.Int("modified", len(modifiedTools)),
+			zap.Int("removed", len(removedTools)))
+	} else {
+		r.logger.Debug("No tool changes detected for server",
+			zap.String("server", serverName),
+			zap.Int("tool_count", len(newTools)))
+	}
+
+	// Apply changes
+
+	// 1. Delete removed tools
+	for _, toolName := range removedTools {
+		r.logger.Info("Removing tool from index",
+			zap.String("server", serverName),
+			zap.String("tool", toolName))
+
+		if err := r.indexManager.DeleteTool(serverName, toolName); err != nil {
+			r.logger.Error("Failed to delete tool from index",
+				zap.String("server", serverName),
+				zap.String("tool", toolName),
+				zap.Error(err))
+		}
+
+		// Clean up hash storage
+		fullToolName := fmt.Sprintf("%s:%s", serverName, toolName)
+		if r.storageManager != nil {
+			if err := r.storageManager.DeleteToolHash(fullToolName); err != nil {
+				r.logger.Debug("Failed to delete tool hash",
+					zap.String("tool", fullToolName),
+					zap.Error(err))
+			}
+		}
+	}
+
+	// 2. Index added tools
+	if len(addedTools) > 0 {
+		r.logger.Info("Indexing new tools",
+			zap.String("server", serverName),
+			zap.Int("count", len(addedTools)))
+
+		if err := r.indexManager.BatchIndexTools(addedTools); err != nil {
+			return fmt.Errorf("failed to index added tools: %w", err)
+		}
+	}
+
+	// 3. Re-index modified tools
+	if len(modifiedTools) > 0 {
+		r.logger.Info("Re-indexing modified tools",
+			zap.String("server", serverName),
+			zap.Int("count", len(modifiedTools)))
+
+		for _, tool := range modifiedTools {
+			r.logger.Debug("Tool schema changed",
+				zap.String("server", serverName),
+				zap.String("tool", tool.Name),
+				zap.String("old_hash", oldToolsMap[extractToolName(tool.Name)].Hash),
+				zap.String("new_hash", tool.Hash))
+		}
+
+		if err := r.indexManager.BatchIndexTools(modifiedTools); err != nil {
+			return fmt.Errorf("failed to re-index modified tools: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// extractToolName removes the server prefix from a tool name if present
+func extractToolName(fullName string) string {
+	if idx := strings.Index(fullName, ":"); idx != -1 {
+		return fullName[idx+1:]
+	}
+	return fullName
 }
 
 // LoadConfiguredServers synchronizes storage and upstream manager from the given or current config.

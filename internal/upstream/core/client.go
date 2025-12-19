@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/hash"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/secureenv"
@@ -330,6 +331,10 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 				OpenWorldHint:   tool.Annotations.OpenWorldHint,
 			}
 		}
+
+		// Compute hash for tool change detection
+		// Hash is based on serverName + toolName + inputSchema
+		toolMeta.Hash = hash.ComputeToolHash(c.config.Name, tool.Name, tool.InputSchema)
 
 		tools = append(tools, toolMeta)
 	}

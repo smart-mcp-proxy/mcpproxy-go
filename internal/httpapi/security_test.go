@@ -301,3 +301,6 @@ func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset i
 	return nil, 0, nil
 }
 func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo { return nil }
+func (m *baseController) DiscoverServerTools(_ context.Context, _ string) error {
+	return nil
+}
