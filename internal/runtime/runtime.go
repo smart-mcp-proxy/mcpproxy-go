@@ -1887,3 +1887,12 @@ func (r *Runtime) GetVersionInfo() *updatecheck.VersionInfo {
 	}
 	return r.updateChecker.GetVersionInfo()
 }
+
+// RefreshVersionInfo performs an immediate update check and returns the result.
+// Returns nil if the update checker has not been initialized.
+func (r *Runtime) RefreshVersionInfo() *updatecheck.VersionInfo {
+	if r.updateChecker == nil {
+		return nil
+	}
+	return r.updateChecker.CheckNow()
+}
