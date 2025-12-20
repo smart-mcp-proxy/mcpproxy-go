@@ -91,8 +91,8 @@ func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger
 	socketPath := socket.DetectSocketPath(dataDir)
 	client := cliclient.NewClient(socketPath, logger.Sugar())
 
-	// Call GET /api/v1/info for version and update info
-	info, err := client.GetInfo(ctx)
+	// Call GET /api/v1/info with refresh=true to get fresh update info
+	info, err := client.GetInfoWithRefresh(ctx, true)
 	if err != nil {
 		logger.Debug("Failed to get info from daemon", zap.Error(err))
 		// Non-fatal: continue with diagnostics even if info fails

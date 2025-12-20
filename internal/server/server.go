@@ -1763,3 +1763,8 @@ func (s *Server) SearchRegistryServers(registryID, tag, query string, limit int)
 func (s *Server) GetVersionInfo() *updatecheck.VersionInfo {
 	return s.runtime.GetVersionInfo()
 }
+
+// RefreshVersionInfo performs an immediate update check and returns the result.
+func (s *Server) RefreshVersionInfo() *updatecheck.VersionInfo {
+	return s.runtime.RefreshVersionInfo()
+}

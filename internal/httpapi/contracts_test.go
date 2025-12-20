@@ -285,6 +285,10 @@ func (m *MockServerController) GetVersionInfo() *updatecheck.VersionInfo {
 	return nil
 }
 
+func (m *MockServerController) RefreshVersionInfo() *updatecheck.VersionInfo {
+	return nil
+}
+
 // Tool discovery
 func (m *MockServerController) DiscoverServerTools(_ context.Context, _ string) error {
 	return nil
@@ -582,11 +586,15 @@ type MockControllerWithUpdateInfo struct {
 
 func (m *MockControllerWithUpdateInfo) GetVersionInfo() *updatecheck.VersionInfo {
 	return &updatecheck.VersionInfo{
-		CurrentVersion: "v1.0.0",
-		LatestVersion:  "v1.1.0",
+		CurrentVersion:  "v1.0.0",
+		LatestVersion:   "v1.1.0",
 		UpdateAvailable: true,
-		ReleaseURL:     "https://github.com/user/mcpproxy-go/releases/tag/v1.1.0",
+		ReleaseURL:      "https://github.com/user/mcpproxy-go/releases/tag/v1.1.0",
 	}
+}
+
+func (m *MockControllerWithUpdateInfo) RefreshVersionInfo() *updatecheck.VersionInfo {
+	return m.GetVersionInfo()
 }
 
 // Benchmark API response marshaling

@@ -433,7 +433,16 @@ func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, er
 
 // GetInfo retrieves server info including version and update status.
 func (c *Client) GetInfo(ctx context.Context) (map[string]interface{}, error) {
+	return c.GetInfoWithRefresh(ctx, false)
+}
+
+// GetInfoWithRefresh retrieves server info with optional update check refresh.
+// When refresh is true, forces an immediate update check against GitHub.
+func (c *Client) GetInfoWithRefresh(ctx context.Context, refresh bool) (map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/info"
+	if refresh {
+		url += "?refresh=true"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
