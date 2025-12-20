@@ -1199,6 +1199,13 @@ paths:
       description: |-
         Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
         This endpoint is designed for tray-core communication and version checking
+        Use refresh=true query parameter to force an immediate update check against GitHub
+      parameters:
+      - description: Force immediate update check against GitHub
+        in: query
+        name: refresh
+        schema:
+          type: boolean
       responses:
         "200":
           content:

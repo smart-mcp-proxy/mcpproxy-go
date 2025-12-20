@@ -300,7 +300,8 @@ func (m *baseController) GetRecentSessions(limit int) ([]*contracts.MCPSession, 
 func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
 	return nil, 0, nil
 }
-func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo { return nil }
+func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo    { return nil }
+func (m *baseController) RefreshVersionInfo() *updatecheck.VersionInfo { return nil }
 func (m *baseController) DiscoverServerTools(_ context.Context, _ string) error {
 	return nil
 }

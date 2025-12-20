@@ -101,6 +101,7 @@ type ServerController interface {
 
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
+	RefreshVersionInfo() *updatecheck.VersionInfo
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -519,8 +520,10 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 // @Summary Get server information
 // @Description Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
 // @Description This endpoint is designed for tray-core communication and version checking
+// @Description Use refresh=true query parameter to force an immediate update check against GitHub
 // @Tags status
 // @Produce json
+// @Param refresh query boolean false "Force immediate update check against GitHub"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.APIResponse{data=contracts.InfoResponse} "Server information with optional update info"
@@ -545,8 +548,15 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// Add update information if available
-	if versionInfo := s.controller.GetVersionInfo(); versionInfo != nil {
+	// Add update information - refresh if requested
+	refresh := r.URL.Query().Get("refresh") == "true"
+	var versionInfo *updatecheck.VersionInfo
+	if refresh {
+		versionInfo = s.controller.RefreshVersionInfo()
+	} else {
+		versionInfo = s.controller.GetVersionInfo()
+	}
+	if versionInfo != nil {
 		response["update"] = versionInfo.ToAPIResponse()
 	}
 

@@ -206,3 +206,12 @@ func (c *Checker) SetCheckInterval(interval time.Duration) {
 func (c *Checker) SetCheckFunc(fn func() (*GitHubRelease, error)) {
 	c.checkFunc = fn
 }
+
+// CheckNow performs an immediate update check against GitHub.
+// This bypasses the periodic check interval and updates the cached version info.
+// Returns the updated VersionInfo after the check completes.
+func (c *Checker) CheckNow() *VersionInfo {
+	c.logger.Debug("Performing immediate update check")
+	c.check()
+	return c.GetVersionInfo()
+}
