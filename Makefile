@@ -46,11 +46,17 @@ swagger-verify: swagger
 	fi
 	@echo "✅ OpenAPI artifacts are up to date."
 
+# Version detection for builds
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0-dev")
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE) -X mcpproxy-go/internal/httpapi.buildVersion=$(VERSION) -s -w
+
 # Build complete project
 build: swagger frontend-build
-	@echo "🔨 Building Go binary with embedded frontend..."
-	go build -o mcpproxy ./cmd/mcpproxy
-	go build -o mcpproxy-tray ./cmd/mcpproxy-tray
+	@echo "🔨 Building Go binary with embedded frontend (version: $(VERSION))..."
+	go build -ldflags "$(LDFLAGS)" -o mcpproxy ./cmd/mcpproxy
+	go build -ldflags "$(LDFLAGS)" -o mcpproxy-tray ./cmd/mcpproxy-tray
 	@echo "✅ Build completed! Run: ./mcpproxy serve"
 	@echo "🌐 Web UI: http://localhost:8080/ui/"
 	@echo "📚 API Docs: http://localhost:8080/swagger/"
@@ -74,8 +80,8 @@ frontend-dev:
 
 # Build backend with dev flag (for development with frontend hot reload)
 backend-dev:
-	@echo "🔨 Building backend in development mode..."
-	go build -tags dev -o mcpproxy-dev ./cmd/mcpproxy
+	@echo "🔨 Building backend in development mode (version: $(VERSION))..."
+	go build -tags dev -ldflags "$(LDFLAGS)" -o mcpproxy-dev ./cmd/mcpproxy
 	@echo "✅ Development backend ready!"
 	@echo "🚀 Run: ./mcpproxy-dev serve"
 	@echo "🌐 In dev mode, make sure frontend dev server is running on port 3000"

@@ -368,7 +368,7 @@ jobs:
           CGO_LDFLAGS: "-mmacosx-version-min=12.0"
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION}"
+          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION} -X mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
 
           # Determine clean binary name
           if [ "${{ matrix.goos }}" = "windows" ]; then
@@ -1137,7 +1137,7 @@ jobs:
           mkdir -p Formula
 
           # Create formula file
-          printf 'class Mcpproxy < Formula\n  desc "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers"\n  homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"\n  url "https://github.com/smart-mcp-proxy/mcpproxy-go/archive/refs/tags/v%s.tar.gz"\n  sha256 "%s"\n  license "MIT"\n  head "https://github.com/smart-mcp-proxy/mcpproxy-go.git"\n\n  depends_on "go" => :build\n\n  def install\n    system "go", "build", "-ldflags", "-s -w -X mcpproxy-go/cmd/mcpproxy.version=v%s -X main.version=v%s", "-o", "mcpproxy", "./cmd/mcpproxy"\n    bin.install "mcpproxy"\n  end\n\n  test do\n    assert_match version.to_s, shell_output("#{bin}/mcpproxy --version")\n  end\nend\n' "${VERSION}" "${SOURCE_SHA}" "${VERSION}" "${VERSION}" > Formula/mcpproxy.rb
+          printf 'class Mcpproxy < Formula\n  desc "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers"\n  homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"\n  url "https://github.com/smart-mcp-proxy/mcpproxy-go/archive/refs/tags/v%s.tar.gz"\n  sha256 "%s"\n  license "MIT"\n  head "https://github.com/smart-mcp-proxy/mcpproxy-go.git"\n\n  depends_on "go" => :build\n\n  def install\n    system "go", "build", "-ldflags", "-s -w -X mcpproxy-go/cmd/mcpproxy.version=v%s -X main.version=v%s -X mcpproxy-go/internal/httpapi.buildVersion=v%s", "-o", "mcpproxy", "./cmd/mcpproxy"\n    bin.install "mcpproxy"\n  end\n\n  test do\n    assert_match version.to_s, shell_output("#{bin}/mcpproxy --version")\n  end\nend\n' "${VERSION}" "${SOURCE_SHA}" "${VERSION}" "${VERSION}" "${VERSION}" > Formula/mcpproxy.rb
 
                     echo "Formula created successfully"
           cat Formula/mcpproxy.rb
