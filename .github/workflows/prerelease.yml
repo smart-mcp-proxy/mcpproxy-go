@@ -202,7 +202,7 @@ jobs:
           fi
 
           echo "Building version: ${VERSION}"
-          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION}"
+          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION} -X mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
 
           # Determine clean binary name
           if [ "${{ matrix.goos }}" = "windows" ]; then
