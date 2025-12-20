@@ -74,6 +74,26 @@ func (r *Runtime) StartBackgroundInitialization() {
 		go r.supervisorEventForwarder()
 	}
 
+	// Set up tool discovery callback on upstream manager for notifications/tools/list_changed
+	// This enables reactive tool re-indexing when upstream servers change their available tools
+	if r.upstreamManager != nil {
+		r.upstreamManager.SetToolDiscoveryCallback(func(ctx context.Context, serverName string) error {
+			// Deduplication: Check if discovery is already in progress for this server
+			if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
+				r.logger.Debug("Tool discovery already in progress for server (notification), skipping duplicate",
+					zap.String("server", serverName))
+				return nil
+			}
+
+			// Ensure we clean up the in-progress marker
+			defer r.discoveryInProgress.Delete(serverName)
+
+			r.logger.Info("Tool discovery triggered by notification", zap.String("server", serverName))
+			return r.DiscoverAndIndexToolsForServer(ctx, serverName)
+		})
+		r.logger.Info("Tool discovery callback registered on upstream manager")
+	}
+
 	go r.backgroundInitialization()
 }
 

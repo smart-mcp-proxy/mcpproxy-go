@@ -86,6 +86,9 @@ type Client struct {
 	containerID     string
 	containerName   string // Store container name for cleanup via docker container commands
 	isDockerCommand bool
+
+	// Notification callback for tools/list_changed
+	onToolsChanged func(serverName string)
 }
 
 // NewClient creates a new core MCP client
@@ -499,6 +502,14 @@ func (c *Client) GetStderr() io.Reader {
 // GetEnvManager returns the environment manager for testing purposes
 func (c *Client) GetEnvManager() interface{} {
 	return c.envManager
+}
+
+// SetOnToolsChangedCallback sets the callback invoked when a notifications/tools/list_changed
+// notification is received from the upstream MCP server. This enables reactive tool re-indexing.
+func (c *Client) SetOnToolsChangedCallback(callback func(serverName string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onToolsChanged = callback
 }
 
 // Helper methods

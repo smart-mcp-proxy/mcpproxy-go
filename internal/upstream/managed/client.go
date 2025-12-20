@@ -51,6 +51,9 @@ type Client struct {
 	toolCountMu   sync.RWMutex
 	toolCount     int
 	toolCountTime time.Time
+
+	// Tool discovery callback for notifications/tools/list_changed handling
+	toolDiscoveryCallback func(ctx context.Context, serverName string) error
 }
 
 // NewClient creates a new managed client with state management
@@ -76,6 +79,37 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 
 	// Set up state change callback
 	mc.StateManager.SetStateChangeCallback(mc.onStateChange)
+
+	// Wire up core notification callback to forward to discovery callback
+	coreClient.SetOnToolsChangedCallback(func(serverName string) {
+		mc.mu.RLock()
+		callback := mc.toolDiscoveryCallback
+		mc.mu.RUnlock()
+
+		if callback == nil {
+			mc.logger.Debug("No tool discovery callback set - notification ignored",
+				zap.String("server", serverName))
+			return
+		}
+
+		// Run discovery in a goroutine with timeout to avoid blocking the notification handler
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			mc.logger.Debug("Triggering tool discovery from notification",
+				zap.String("server", serverName))
+
+			if err := callback(ctx, serverName); err != nil {
+				mc.logger.Error("Tool discovery triggered by notification failed",
+					zap.String("server", serverName),
+					zap.Error(err))
+			} else {
+				mc.logger.Debug("Tool discovery from notification completed successfully",
+					zap.String("server", serverName))
+			}
+		}()
+	})
 
 	return mc, nil
 }
@@ -310,6 +344,14 @@ func (mc *Client) IsUserLoggedOut() bool {
 // SetStateChangeCallback sets a callback for state changes
 func (mc *Client) SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo)) {
 	mc.StateManager.SetStateChangeCallback(callback)
+}
+
+// SetToolDiscoveryCallback sets the callback for triggering tool re-indexing when
+// a notifications/tools/list_changed notification is received from the upstream server.
+func (mc *Client) SetToolDiscoveryCallback(callback func(ctx context.Context, serverName string) error) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.toolDiscoveryCallback = callback
 }
 
 func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Duration) (context.Context, func() bool, bool) {
