@@ -608,6 +608,9 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		go c.readContainerIDWithContext(c.stderrMonitoringCtx, cidFile)
 	}
 
+	// Register notification handler for tools/list_changed
+	c.registerNotificationHandler()
+
 	return nil
 }
 
@@ -908,6 +911,10 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 		c.logger.Info("✅ Authentication successful",
 			zap.Int("strategy_index", i),
 			zap.String("strategy", strategyName))
+
+		// Register notification handler for tools/list_changed
+		c.registerNotificationHandler()
+
 		return nil
 	}
 
@@ -956,6 +963,10 @@ func (c *Client) connectSSE(ctx context.Context) error {
 		c.logger.Info("✅ SSE Authentication successful",
 			zap.Int("strategy_index", i),
 			zap.String("strategy", strategyName))
+
+		// Register notification handler for tools/list_changed
+		c.registerNotificationHandler()
+
 		return nil
 	}
 
@@ -1891,6 +1902,57 @@ func (c *Client) initialize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// registerNotificationHandler registers a handler for MCP notifications.
+// This should be called after client.Start() and initialize() succeed.
+// It handles notifications/tools/list_changed to trigger reactive tool discovery.
+func (c *Client) registerNotificationHandler() {
+	if c.client == nil {
+		c.logger.Debug("Skipping notification handler registration - client is nil",
+			zap.String("server", c.config.Name))
+		return
+	}
+
+	c.client.OnNotification(func(notification mcp.JSONRPCNotification) {
+		// Filter for tools/list_changed notifications only
+		if notification.Method != string(mcp.MethodNotificationToolsListChanged) {
+			return
+		}
+
+		c.logger.Info("Received tools/list_changed notification from upstream server",
+			zap.String("server", c.config.Name))
+
+		// Log capability status for debugging
+		if c.serverInfo != nil && c.serverInfo.Capabilities.Tools != nil && c.serverInfo.Capabilities.Tools.ListChanged {
+			c.logger.Debug("Server advertised tools.listChanged capability",
+				zap.String("server", c.config.Name))
+		} else {
+			c.logger.Warn("Received tools notification from server that did not advertise listChanged capability",
+				zap.String("server", c.config.Name))
+		}
+
+		// Invoke the callback if set
+		c.mu.RLock()
+		callback := c.onToolsChanged
+		c.mu.RUnlock()
+
+		if callback != nil {
+			callback(c.config.Name)
+		} else {
+			c.logger.Debug("No onToolsChanged callback set - notification ignored",
+				zap.String("server", c.config.Name))
+		}
+	})
+
+	// Log capability status after registration
+	if c.serverInfo != nil && c.serverInfo.Capabilities.Tools != nil && c.serverInfo.Capabilities.Tools.ListChanged {
+		c.logger.Debug("Server supports tool change notifications - registered handler",
+			zap.String("server", c.config.Name))
+	} else {
+		c.logger.Debug("Server does not advertise tool change notifications support",
+			zap.String("server", c.config.Name))
+	}
 }
 
 // Disconnect closes the connection

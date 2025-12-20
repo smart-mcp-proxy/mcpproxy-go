@@ -129,6 +129,41 @@ Upstream servers can be in these states:
 | Ready | Connected and operational |
 | Error | Connection failed |
 
+## Tool Change Notifications
+
+MCPProxy subscribes to the MCP `notifications/tools/list_changed` notification from upstream servers. This enables automatic tool re-indexing when servers add, remove, or modify their available tools.
+
+### How It Works
+
+1. **Server Capability**: Servers that support tool change notifications advertise `capabilities.tools.listChanged: true` during initialization
+2. **Notification Handler**: MCPProxy registers a notification handler after connecting to each server
+3. **Automatic Re-indexing**: When a notification is received, MCPProxy triggers `DiscoverAndIndexToolsForServer()` within seconds
+4. **Fallback Behavior**: Servers without notification support continue to use the 5-minute background polling cycle
+
+### Supported Connection Types
+
+Tool change notifications are supported across all connection types:
+- **stdio**: Local process servers
+- **HTTP/SSE**: Remote HTTP-based servers
+- **Streamable HTTP**: Modern HTTP transport
+
+### Resilience Features
+
+- **Deduplication**: Rapid successive notifications are deduplicated to prevent redundant discovery
+- **Timeout Protection**: Discovery operations have a 30-second timeout
+- **Graceful Degradation**: Errors during discovery are logged but don't crash the proxy
+
+### Logs
+
+When notifications are received, MCPProxy logs:
+
+| Level | Message |
+|-------|---------|
+| INFO | "Received tools/list_changed notification from upstream server" |
+| DEBUG | "Server supports tool change notifications - registered handler" |
+| DEBUG | "Tool discovery triggered by notification" |
+| WARN | "Received tools notification from server that did not advertise listChanged capability" |
+
 ## Error Handling
 
 MCP errors follow the JSON-RPC 2.0 error format:

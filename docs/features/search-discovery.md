@@ -147,6 +147,29 @@ mcpproxy doctor
 # Shows indexed tool count
 ```
 
+## Automatic Tool Discovery
+
+### Real-Time Updates via Notifications
+
+MCPProxy supports the MCP `notifications/tools/list_changed` notification protocol. When an upstream MCP server updates its available tools (adds, removes, or modifies), it can send a notification to trigger automatic re-indexing:
+
+1. **Server Support**: Servers that advertise `capabilities.tools.listChanged: true` send notifications when their tools change
+2. **Automatic Re-indexing**: MCPProxy receives the notification and triggers `DiscoverAndIndexToolsForServer()` within seconds
+3. **No Polling Delay**: Tools are updated immediately instead of waiting for the 5-minute background refresh cycle
+
+### Fallback Behavior
+
+For servers that don't support tool change notifications:
+- MCPProxy continues to poll every 5 minutes
+- Manual refresh available via Web UI or `mcpproxy upstream restart`
+
+### Logs
+
+When notifications are received:
+- `INFO`: "Received tools/list_changed notification from server: {name}"
+- `DEBUG`: "Server supports tool change notifications - registered handler"
+- `DEBUG`: "Tool discovery triggered by notification"
+
 ## Performance
 
 ### Index Updates
@@ -154,6 +177,7 @@ mcpproxy doctor
 - **Incremental**: Only changed tools are re-indexed
 - **Hash-based**: Tool content hash determines changes
 - **Non-blocking**: Indexing runs in background
+- **Reactive**: Servers with notification support trigger immediate updates
 
 ### Search Speed
 

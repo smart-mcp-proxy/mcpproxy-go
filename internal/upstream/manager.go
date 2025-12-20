@@ -78,6 +78,9 @@ type Manager struct {
 	dockerRecoveryState  *storage.DockerRecoveryState
 	dockerRecoveryCancel context.CancelFunc
 	storageMgr           *storage.Manager // Reference to storage manager for Docker state persistence
+
+	// Tool discovery callback for notifications/tools/list_changed handling
+	toolDiscoveryCallback func(ctx context.Context, serverName string) error
 }
 
 func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
@@ -211,6 +214,16 @@ func (m *Manager) AddNotificationHandler(handler NotificationHandler) {
 	m.notificationMgr.AddHandler(handler)
 }
 
+// SetToolDiscoveryCallback sets the callback for triggering tool re-indexing when
+// upstream servers send notifications/tools/list_changed notifications.
+// This callback will be passed to all new clients created by the manager.
+func (m *Manager) SetToolDiscoveryCallback(callback func(ctx context.Context, serverName string) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.toolDiscoveryCallback = callback
+	m.logger.Debug("Tool discovery callback set on manager")
+}
+
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
@@ -279,6 +292,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			// Then call notification callback
 			notifierCallback(oldState, newState, info)
 		})
+	}
+
+	// Set up tool discovery callback for notifications/tools/list_changed handling
+	if m.toolDiscoveryCallback != nil {
+		client.SetToolDiscoveryCallback(m.toolDiscoveryCallback)
 	}
 
 	m.clients[id] = client
