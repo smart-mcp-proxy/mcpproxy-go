@@ -67,45 +67,67 @@ func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
 		zap.String("server", serverName),
 		zap.Int("pgid", pgid))
 
-	// Step 1: Send SIGTERM to the entire process group
+	// Step 1: Check if process group is already dead
+	if err := syscall.Kill(-pgid, 0); err != nil {
+		logger.Debug("Process group already terminated",
+			zap.String("server", serverName),
+			zap.Int("pgid", pgid))
+		return nil
+	}
+
+	// Step 2: Send SIGTERM to the entire process group
 	err := syscall.Kill(-pgid, syscall.SIGTERM)
 	if err != nil {
 		logger.Warn("Failed to send SIGTERM to process group",
 			zap.String("server", serverName),
 			zap.Int("pgid", pgid),
 			zap.Error(err))
-	} else {
-		logger.Debug("SIGTERM sent to process group",
-			zap.String("server", serverName),
-			zap.Int("pgid", pgid))
+		// Process might have exited between check and kill, that's ok
+		return nil
 	}
 
-	// Step 2: Wait a bit for graceful termination
-	time.Sleep(2 * time.Second)
+	logger.Debug("SIGTERM sent to process group",
+		zap.String("server", serverName),
+		zap.Int("pgid", pgid))
 
-	// Step 3: Check if processes are still running and send SIGKILL if needed
-	if err := syscall.Kill(-pgid, 0); err == nil {
-		// Processes still exist, force kill them
-		logger.Warn("Process group still running after SIGTERM, sending SIGKILL",
-			zap.String("server", serverName),
-			zap.Int("pgid", pgid))
-
-		if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil {
-			logger.Error("Failed to send SIGKILL to process group",
+	// Step 3: Poll for graceful termination (up to processGracefulTimeout)
+	// This allows fast exit if process terminates quickly
+	deadline := time.Now().Add(processGracefulTimeout)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); err != nil {
+			// Process group is dead
+			logger.Info("Process group terminated gracefully after SIGTERM",
 				zap.String("server", serverName),
-				zap.Int("pgid", pgid),
-				zap.Error(killErr))
-			return killErr
+				zap.Int("pgid", pgid))
+			return nil
 		}
-
-		logger.Info("SIGKILL sent to process group",
-			zap.String("server", serverName),
-			zap.Int("pgid", pgid))
-	} else {
-		logger.Info("Process group terminated successfully",
-			zap.String("server", serverName),
-			zap.Int("pgid", pgid))
+		time.Sleep(processTerminationPollInterval)
 	}
+
+	// Step 4: Process still running, send SIGKILL
+	logger.Warn("Process group still running after SIGTERM timeout, sending SIGKILL",
+		zap.String("server", serverName),
+		zap.Int("pgid", pgid),
+		zap.Duration("timeout", processGracefulTimeout))
+
+	if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil {
+		// Check if it died between our check and kill
+		if syscall.Kill(-pgid, 0) != nil {
+			logger.Debug("Process group exited just before SIGKILL",
+				zap.String("server", serverName),
+				zap.Int("pgid", pgid))
+			return nil
+		}
+		logger.Error("Failed to send SIGKILL to process group",
+			zap.String("server", serverName),
+			zap.Int("pgid", pgid),
+			zap.Error(killErr))
+		return killErr
+	}
+
+	logger.Info("SIGKILL sent to process group",
+		zap.String("server", serverName),
+		zap.Int("pgid", pgid))
 
 	return nil
 }
