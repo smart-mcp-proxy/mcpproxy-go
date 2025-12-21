@@ -226,6 +226,39 @@ docker stats
 - Check container logs for specific error messages
 - Verify network access for package repositories
 
+## Container Lifecycle
+
+### Startup
+
+When a Docker-isolated server starts:
+1. MCPProxy detects runtime type (npm, uvx, python, etc.)
+2. Selects appropriate Docker image
+3. Runs container with stdio transport (`docker run -i`)
+4. Establishes MCP connection via stdin/stdout
+
+### Shutdown
+
+When MCPProxy stops, containers are cleaned up with a 30-second timeout:
+
+1. **Graceful Stop**: `docker stop` (sends SIGTERM to container)
+2. **Force Kill**: `docker kill` if container doesn't stop gracefully
+
+Containers are labeled with `mcpproxy.managed=true` for identification.
+
+### Manual Cleanup
+
+If containers remain after MCPProxy stops:
+
+```bash
+# List MCPProxy-managed containers
+docker ps --filter "label=mcpproxy.managed=true"
+
+# Remove all MCPProxy containers
+docker rm -f $(docker ps -q --filter "label=mcpproxy.managed=true")
+```
+
+See [Shutdown Behavior](/operations/shutdown-behavior) for detailed subprocess lifecycle documentation.
+
 ## Security Considerations
 
 Docker isolation provides strong security boundaries but consider:
