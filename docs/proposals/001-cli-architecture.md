@@ -221,25 +221,35 @@ mcpproxy
 │   │
 │   └── events                        # Watch all SSE events
 │
-├── history                           # [NEW] Tool call history
-│   ├── list                          # List recent tool calls
+├── activity                          # [NEW] Activity log & audit trail (RFC-003)
+│   ├── list                          # List recent activity
+│   │   ├── --type <type>             # Filter: tool_call, policy_decision, quarantine
 │   │   ├── --server <name>           # Filter by server
 │   │   ├── --session <id>            # Filter by session
+│   │   ├── --status <status>         # Filter: success, error, blocked
 │   │   ├── --risk <level>            # Filter: low, medium, high, critical
-│   │   ├── --has-pii                 # Only calls with PII detected
-│   │   └── --limit <n>               # Max results (default: 50)
+│   │   ├── --has-pii                 # Only entries with PII detected
+│   │   ├── --start-time <RFC3339>    # After this time
+│   │   ├── --end-time <RFC3339>      # Before this time
+│   │   └── --limit <n>               # Max results (default: 100)
 │   │
-│   ├── show <id>                     # Show tool call details
-│   │   └── --include-response        # Include full response
+│   ├── watch                         # Stream live activity (like tail -f)
+│   │   ├── --type <type>             # Filter by activity type
+│   │   └── --server <name>           # Filter by server
 │   │
-│   ├── summary                       # Risk/activity summary
+│   ├── show <id>                     # Show activity details
+│   │   └── --include-response        # Include full request/response
 │   │
-│   └── export                        # Export for audit
+│   ├── summary                       # Risk/activity summary dashboard
+│   │   ├── --period <duration>       # Time period: 1h, 24h, 7d (default: 24h)
+│   │   └── --by <group>              # Group by: server, tool, status
+│   │
+│   └── export                        # Export for compliance/audit
 │       ├── --output <path>           # Output file
 │       ├── --format <fmt>            # json, csv
-│       ├── --from <date>             # Start date (RFC3339)
-│       ├── --to <date>               # End date (RFC3339)
-│       └── --include-audit-trail     # Include access logs
+│       ├── --start-time <RFC3339>    # Start time
+│       ├── --end-time <RFC3339>      # End time
+│       └── --include-bodies          # Include request/response bodies
 │
 └── integrate                         # [NEW] MCP client integration
     ├── import <client>               # Import servers from client config
