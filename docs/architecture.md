@@ -129,8 +129,20 @@ The event bus enables real-time communication between runtime and UI components:
 
 **Shutdown**:
 - Graceful context cancellation cascades to all background services
-- Upstream servers disconnected with proper Docker container cleanup
+- Upstream servers disconnected with proper subprocess and Docker container cleanup
 - Resources closed in dependency order (upstream → cache → index → storage)
+
+**Subprocess Shutdown Flow**:
+1. **Graceful Close** (10s timeout): Close MCP client connection, wait for subprocess to exit cleanly
+2. **Force Kill** (9s timeout): If graceful close fails, send SIGTERM to process group, poll for exit, then SIGKILL
+
+| Timeout | Value | Purpose |
+|---------|-------|---------|
+| MCP Client Close | 10s | Wait for graceful stdin/stdout close |
+| SIGTERM → SIGKILL | 9s | Time between graceful and force kill |
+| Docker Cleanup | 30s | Container stop/kill timeout |
+
+See [Shutdown Behavior](/operations/shutdown-behavior) for detailed documentation.
 
 ## Tray Application Architecture
 

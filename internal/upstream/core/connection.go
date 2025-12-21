@@ -28,6 +28,15 @@ const (
 
 	dockerCleanupTimeout = 30 * time.Second
 
+	// Subprocess shutdown timeouts
+	// mcpClientCloseTimeout is the max time to wait for graceful MCP client close
+	mcpClientCloseTimeout = 10 * time.Second
+	// processGracefulTimeout is the max time to wait after SIGTERM before SIGKILL
+	// Must be less than mcpClientCloseTimeout to complete within the close timeout
+	processGracefulTimeout = 9 * time.Second
+	// processTerminationPollInterval is how often to check if process exited
+	processTerminationPollInterval = 100 * time.Millisecond
+
 	// Transport types
 	transportHTTP           = "http"
 	transportHTTPStreamable = "streamable-http"
@@ -1962,137 +1971,116 @@ func (c *Client) Disconnect() error {
 
 // DisconnectWithContext closes the connection with context timeout
 func (c *Client) DisconnectWithContext(_ context.Context) error {
+	// Step 1: Read state under lock, then release for I/O operations
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// CRITICAL FIX: Always perform cleanup, even if not fully connected
-	// Servers in "Connecting" state may have Docker containers running
 	wasConnected := c.connected
+	mcpClient := c.client
+	isDocker := c.isDockerCommand
+	containerID := c.containerID
+	containerName := c.containerName
+	pgid := c.processGroupID
+	processCmd := c.processCmd
+	serverName := c.config.Name
+	c.mu.Unlock()
 
 	c.logger.Info("Disconnecting from upstream MCP server",
 		zap.Bool("was_connected", wasConnected))
 
-	// Log disconnection to server-specific log
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Disconnecting from server",
 			zap.Bool("was_connected", wasConnected))
 	}
 
-	// Stop stderr monitoring before closing client
+	// Step 2: Stop monitoring (these have their own locks)
 	c.StopStderrMonitoring()
-
-	// Stop process monitoring before closing client
 	c.StopProcessMonitoring()
 
-	// For Docker containers, kill the container before closing the client
-	// IMPORTANT: Do this even if not fully connected, as containers may be running
-	if c.isDockerCommand {
+	// Step 3: For Docker containers, use Docker-specific cleanup
+	if isDocker {
 		c.logger.Debug("Disconnecting Docker command, attempting container cleanup",
-			zap.String("server", c.config.Name),
-			zap.Bool("has_container_id", c.containerID != ""))
+			zap.String("server", serverName),
+			zap.Bool("has_container_id", containerID != ""))
 
-		// Create a fresh context for Docker cleanup with its own timeout
-		// This ensures cleanup can complete even if the main context expires
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 		defer cleanupCancel()
 
-		if c.containerID != "" {
+		if containerID != "" {
 			c.logger.Debug("Cleaning up Docker container by ID",
-				zap.String("server", c.config.Name),
-				zap.String("container_id", c.containerID))
+				zap.String("server", serverName),
+				zap.String("container_id", containerID))
 			c.killDockerContainerWithContext(cleanupCtx)
-			c.logger.Debug("Docker container cleanup by ID completed",
-				zap.String("server", c.config.Name))
-		} else if c.containerName != "" {
+		} else if containerName != "" {
 			c.logger.Debug("Cleaning up Docker container by name",
-				zap.String("server", c.config.Name),
-				zap.String("container_name", c.containerName))
-			c.killDockerContainerByNameWithContext(cleanupCtx, c.containerName)
-			c.logger.Debug("Docker container cleanup by name completed",
-				zap.String("server", c.config.Name))
+				zap.String("server", serverName),
+				zap.String("container_name", containerName))
+			c.killDockerContainerByNameWithContext(cleanupCtx, containerName)
 		} else {
-			c.logger.Debug("No container ID or name available, using pattern-based cleanup method",
-				zap.String("server", c.config.Name))
-			// Fallback: try to find and kill any containers started by this command
+			c.logger.Debug("No container ID or name, using pattern-based cleanup",
+				zap.String("server", serverName))
 			c.killDockerContainerByCommandWithContext(cleanupCtx)
-			c.logger.Debug("Docker fallback cleanup completed",
-				zap.String("server", c.config.Name))
 		}
-	} else {
-		c.logger.Debug("Non-Docker command disconnecting, no container cleanup needed",
-			zap.String("server", c.config.Name))
 	}
 
-	// CRITICAL FIX: Clean up process group to prevent zombie processes
-	if c.processGroupID > 0 {
-		c.logger.Info("Cleaning up process group to prevent zombie processes",
-			zap.String("server", c.config.Name),
-			zap.Int("pgid", c.processGroupID))
-
-		if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
-			c.logger.Error("Failed to clean up process group",
-				zap.String("server", c.config.Name),
-				zap.Int("pgid", c.processGroupID),
-				zap.Error(err))
-		} else {
-			c.logger.Info("Process group cleanup completed successfully",
-				zap.String("server", c.config.Name),
-				zap.Int("pgid", c.processGroupID))
-		}
-
-		// Reset process group ID after cleanup
-		c.processGroupID = 0
-	}
-
-	// Close MCP client if it exists
-	if c.client != nil {
-		c.logger.Debug("Closing MCP client connection",
-			zap.String("server", c.config.Name))
+	// Step 4: Try graceful close via MCP client FIRST
+	// This gives the subprocess a chance to exit cleanly via stdin/stdout close
+	gracefulCloseSucceeded := false
+	if mcpClient != nil {
+		c.logger.Debug("Attempting graceful MCP client close",
+			zap.String("server", serverName))
 
 		closeDone := make(chan struct{})
 		go func() {
-			c.client.Close()
+			mcpClient.Close()
 			close(closeDone)
 		}()
 
 		select {
 		case <-closeDone:
-			c.logger.Debug("MCP client connection closed",
-				zap.String("server", c.config.Name))
-		case <-time.After(2 * time.Second):
-			c.logger.Warn("MCP client close timed out, forcing shutdown",
-				zap.String("server", c.config.Name))
-
-			// Attempt process group cleanup if available
-			if c.processGroupID > 0 {
-				_ = killProcessGroup(c.processGroupID, c.logger, c.config.Name)
-			}
-
-			if c.processCmd != nil && c.processCmd.Process != nil {
-				if err := c.processCmd.Process.Kill(); err != nil {
-					c.logger.Warn("Failed to kill stdio process after close timeout",
-						zap.String("server", c.config.Name),
-						zap.Error(err))
-				} else {
-					c.logger.Info("Killed stdio process after close timeout",
-						zap.String("server", c.config.Name))
-				}
-			}
+			c.logger.Debug("MCP client closed gracefully",
+				zap.String("server", serverName))
+			gracefulCloseSucceeded = true
+		case <-time.After(mcpClientCloseTimeout):
+			c.logger.Warn("MCP client close timed out",
+				zap.String("server", serverName),
+				zap.Duration("timeout", mcpClientCloseTimeout))
 		}
-	} else {
-		c.logger.Debug("No MCP client to close (may be in connecting state)",
-			zap.String("server", c.config.Name))
 	}
 
+	// Step 5: Force kill process group only if graceful close failed
+	// For non-Docker stdio processes that didn't exit gracefully
+	if !gracefulCloseSucceeded && !isDocker && pgid > 0 {
+		c.logger.Info("Graceful close failed, force killing process group",
+			zap.String("server", serverName),
+			zap.Int("pgid", pgid))
+
+		if err := killProcessGroup(pgid, c.logger, serverName); err != nil {
+			c.logger.Error("Failed to kill process group",
+				zap.String("server", serverName),
+				zap.Int("pgid", pgid),
+				zap.Error(err))
+		}
+
+		// Also try direct process kill as last resort
+		if processCmd != nil && processCmd.Process != nil {
+			if err := processCmd.Process.Kill(); err != nil {
+				c.logger.Debug("Direct process kill failed (may already be dead)",
+					zap.String("server", serverName),
+					zap.Error(err))
+			}
+		}
+	}
+
+	// Step 6: Update state under lock
+	c.mu.Lock()
 	c.client = nil
 	c.serverInfo = nil
 	c.connected = false
-
-	// Clear cached tools on disconnect
 	c.cachedTools = nil
+	c.processGroupID = 0
+	c.mu.Unlock()
 
 	c.logger.Debug("Disconnect completed successfully",
-		zap.String("server", c.config.Name))
+		zap.String("server", serverName))
 	return nil
 }
 
