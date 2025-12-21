@@ -70,6 +70,13 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: 'Operations',
+      items: [
+        'operations/shutdown-behavior',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Development',
       collapsed: true,
       items: [

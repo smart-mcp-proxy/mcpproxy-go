@@ -227,6 +227,6 @@ docker rm -f $(docker ps -q --filter "label=mcpproxy.managed=true")
 
 ## Related Documentation
 
-- [Architecture](/architecture) - Runtime and lifecycle overview
+- [Architecture](/development/architecture) - Runtime and lifecycle overview
 - [Docker Isolation](/features/docker-isolation) - Container management
 - [Upstream Servers](/configuration/upstream-servers) - Server configuration

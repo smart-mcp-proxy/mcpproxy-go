@@ -86,4 +86,19 @@ Disconnected → Connecting → Authenticating → Ready
                     (on error)
 ```
 
+## Subprocess Shutdown
+
+When MCPProxy stops, subprocesses are terminated using a two-phase approach:
+
+1. **Graceful Close** (10s): Close MCP connection, wait for process to exit
+2. **Force Kill** (9s): If still running, SIGTERM → poll → SIGKILL
+
+| Timeout | Value | Purpose |
+|---------|-------|---------|
+| MCP Client Close | 10s | Wait for graceful stdin/stdout close |
+| SIGTERM → SIGKILL | 9s | Time between graceful and force kill |
+| Docker Cleanup | 30s | Container stop/kill timeout |
+
+See [Shutdown Behavior](/operations/shutdown-behavior) for detailed documentation.
+
 For complete architecture details, see [docs/architecture.md](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/architecture.md) in the repository.
