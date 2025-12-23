@@ -103,7 +103,8 @@ jobs:
           Requirements:
           - Maximum 400 words
           - Use markdown format
-          - Start with a brief 1-2 sentence summary of this release
+          - DO NOT include a title or header like 'MCPProxy vX.X.X Release Notes' - GitHub already shows the version
+          - Start directly with a brief 1-2 sentence summary of this release
           - Group changes into sections (use only sections that have content):
             - **New Features** - New functionality (feat: commits)
             - **Bug Fixes** - Fixed issues (fix: commits)
@@ -987,66 +988,69 @@ jobs:
 
             ---
 
-            ## mcpproxy ${{ github.ref_name }}
+            ## Download Installers
 
-            Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.
+            | Platform | Download | Notes |
+            |----------|----------|-------|
+            | **macOS (Apple Silicon)** | [**Download DMG**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64-installer.dmg) | Signed & Notarized - Recommended for M1/M2/M3/M4 |
+            | **macOS (Intel)** | [**Download DMG**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64-installer.dmg) | Signed & Notarized |
+            | **Windows (64-bit)** | [**Download Setup**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-setup-${{ github.ref_name }}-amd64.exe) | Setup wizard |
+            | **Windows (ARM64)** | [**Download Setup**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-setup-${{ github.ref_name }}-arm64.exe) | For ARM Windows devices |
+            | **Linux (AMD64)** | [**Download tar.gz**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz) | Binary package |
+            | **Linux (ARM64)** | [**Download tar.gz**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-arm64.tar.gz) | For ARM Linux |
 
-            ### Download Links
+            **Homebrew (macOS/Linux):**
+            ```bash
+            brew install smart-mcp-proxy/mcpproxy/mcpproxy
+            ```
 
-            **Latest Version (auto-updates):**
-            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) 
-            - [Linux ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
-            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.zip)
-            - [Windows ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-arm64.zip)
-            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz)
-            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
+            <details>
+            <summary>Other download options (auto-update URLs, archives)</summary>
 
-            **Windows Installer:**
-            - [Setup (AMD64)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-setup-${{ github.ref_name }}-amd64.exe)
-            - [Setup (ARM64)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-setup-${{ github.ref_name }}-arm64.exe)
+            **Auto-update URLs** (always points to latest):
+            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) | [Linux ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
+            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-amd64.zip) | [Windows ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-windows-arm64.zip)
+            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz) | [macOS ARM64](https://github.com/${{ github.repository }}/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
-            **macOS Installer:**
-            - [Signed DMG (Apple Silicon)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64-installer.dmg)
-            - [Signed DMG (Intel)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64-installer.dmg)
+            **Binary archives (this version):**
+            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.tar.gz) | [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.tar.gz)
+            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-amd64.zip) | [Windows ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-arm64.zip)
 
-            **This Version (${{ github.ref_name }}):**
-            - [Linux AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz)
-            - [Linux ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-arm64.tar.gz)
-            - [Windows AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-amd64.zip)
-            - [Windows ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-windows-arm64.zip)
-            - [macOS AMD64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64.tar.gz)
-            - [macOS ARM64](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64.tar.gz)
+            </details>
 
-            ### Installation
+            ---
 
-            **Windows:**
-            1. Download the installer for your architecture (AMD64 or ARM64)
+            <details>
+            <summary>Installation Instructions</summary>
+
+            ### Windows
+            1. Download the installer for your architecture
             2. Run `mcpproxy-setup-*.exe`
             3. Follow the installation wizard (requires Administrator privileges)
-            4. MCPProxy will be added to Start Menu and system PATH
-            5. Launch "MCPProxy" from Start Menu to start the tray app
-            6. The app will appear in your system tray
+            4. Launch "MCPProxy" from Start Menu
 
-            **macOS:**
-            1. Download the signed installer DMG for your Mac (Apple Silicon or Intel)
+            ### macOS
+            1. Download the signed DMG for your Mac
             2. Double-click the DMG to mount it
             3. Double-click the PKG installer inside
             4. Follow the installation wizard
-            5. CLI tool `mcpproxy` will be available in Terminal
-            6. Launch mcpproxy.app from Applications folder
-            7. The app will appear in your system tray
+            5. Launch mcpproxy.app from Applications folder
 
-            **Manual Installation (All Platforms):**
-            1. Download the appropriate archive for your platform using the links above
-            2. Extract the archive: `tar -xzf mcpproxy-*.tar.gz` (Linux/macOS) or unzip (Windows)
-            3. Make it executable: `chmod +x mcpproxy` (Linux/macOS)
-            4. Run `./mcpproxy` to start
+            ### Linux / Manual Installation
+            1. Download the appropriate archive
+            2. Extract: `tar -xzf mcpproxy-*.tar.gz`
+            3. Make executable: `chmod +x mcpproxy`
+            4. Run: `./mcpproxy serve`
+
+            </details>
+
+            <details>
+            <summary>Platform Support & Usage</summary>
 
             ### Platform Support
-
             - **macOS**: Full system tray support with menu and icons
-            - **Windows**: Full system tray support with menu and icons  
-            - **Linux**: Headless mode only (no system tray due to compatibility)
+            - **Windows**: Full system tray support with menu and icons
+            - **Linux**: Headless mode only (CLI)
 
             ### Usage
 
@@ -1055,10 +1059,13 @@ jobs:
             - Manages server via system tray menu
 
             **CLI:**
-            - Start core server: `mcpproxy serve`
-            - Custom port: `mcpproxy serve --listen 127.0.0.1:8081`
-            - Set API key: `export MCPPROXY_API_KEY=your-secret-key`
-            - Start tray separately: `mcpproxy-tray` (if core already running)
+            ```bash
+            mcpproxy serve                           # Start server
+            mcpproxy serve --listen 127.0.0.1:8081  # Custom port
+            export MCPPROXY_API_KEY=your-secret-key  # Set API key
+            ```
+
+            </details>
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
