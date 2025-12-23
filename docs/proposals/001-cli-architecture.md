@@ -440,7 +440,7 @@ rootCmd.AddCommand(&cobra.Command{
 |----------|----------|
 | **P0** | Universal `--json`, `--help-json`, non-interactive mode, completion, upstream/tools/call/code/auth, doctor |
 | **P1** | `--jq` filtering, structured errors |
-| **P2** | config commands, run scripts, history commands, integrate commands |
+| **P2** | config commands, run scripts, activity commands (RFC-003), integrate commands |
 | **P3** | watch commands, registry operations |
 | **WIP** | project management, profile management *(design TBD)* |
 
@@ -452,7 +452,7 @@ rootCmd.AddCommand(&cobra.Command{
 
 2. **Profile vs Project**: Are these distinct concepts or should we merge them? Current proposal: Projects are directory-based, Profiles are named server groups.
 
-3. **Tool call history**: How much audit/security detail should be exposed via CLI? See separate RFC for history feature.
+3. **Activity log & security**: How much audit/security detail should be exposed via CLI? See RFC-003 (Activity Log) and RFC-004 (Security & Attack Detection).
 
 4. **Integration commands**: Which MCP clients should we prioritize for import/export? (Claude, Cursor, Goose, etc.)
 
