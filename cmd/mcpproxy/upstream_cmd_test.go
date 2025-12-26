@@ -13,6 +13,12 @@ import (
 	"mcpproxy-go/internal/socket"
 )
 
+// jsonEscapePath escapes a path for embedding in JSON strings.
+// On Windows, backslashes must be escaped as \\, or use forward slashes.
+func jsonEscapePath(p string) string {
+	return filepath.ToSlash(p)
+}
+
 func TestOutputServers_TableFormat(t *testing.T) {
 	servers := []map[string]interface{}{
 		{
@@ -615,7 +621,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		// Create initial config
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": []
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -688,7 +694,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		// Create initial config
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": []
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -751,7 +757,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		// Create config with existing server
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": [{"name": "existing", "url": "https://example.com"}]
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -788,7 +794,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		// Create config with existing server
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": [{"name": "existing", "url": "https://example.com"}]
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -847,7 +853,7 @@ func TestAddStdioServerConfigMode(t *testing.T) {
 
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": []
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -919,7 +925,7 @@ func TestAddStdioServerConfigMode(t *testing.T) {
 
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": []
 		}`
 		err = os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -993,7 +999,7 @@ func TestRemoveServerConfigMode(t *testing.T) {
 		// Create config with server
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": [
 				{"name": "github", "url": "https://api.github.com/mcp"},
 				{"name": "notion", "url": "https://mcp.notion.com/sse"}
@@ -1054,7 +1060,7 @@ func TestRemoveServerConfigMode(t *testing.T) {
 
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": [{"name": "existing", "url": "https://example.com"}]
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -1085,7 +1091,7 @@ func TestRemoveServerConfigMode(t *testing.T) {
 
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": [{"name": "existing", "url": "https://example.com"}]
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -1138,7 +1144,7 @@ func TestAddJSONParsing(t *testing.T) {
 
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": []
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
@@ -1309,7 +1315,7 @@ func TestNewServerQuarantineDefault(t *testing.T) {
 
 		initialConfig := `{
 			"listen": "127.0.0.1:8080",
-			"data_dir": "` + tmpDir + `",
+			"data_dir": "` + jsonEscapePath(tmpDir) + `",
 			"mcpServers": []
 		}`
 		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
