@@ -109,14 +109,14 @@ mcpproxy
 │   │   ├── --env KEY=value           # Environment variable (repeatable)
 │   │   ├── --header "Name: value"    # HTTP header (repeatable, http only)
 │   │   ├── --working-dir <path>      # Working directory (stdio only)
-│   │   ├── --scope <scope>           # Scope: global, project (default: global)
+│   │   ├── --scope <scope>           # [FUTURE] Scope: global, project (default: global)
 │   │   └── --if-not-exists           # No error if server exists
 │   │
 │   ├── add-json <name> '<json>'      # Add server from JSON config
-│   │   └── --scope <scope>           # Scope: global, project
+│   │   └── --scope <scope>           # [FUTURE] Scope: global, project
 │   │
 │   ├── remove <name>                 # Remove server
-│   │   ├── --scope <scope>           # Scope: global, project
+│   │   ├── --scope <scope>           # [FUTURE] Scope: global, project
 │   │   ├── --if-exists               # No error if server missing
 │   │   └── --yes                     # Skip confirmation
 │   │
@@ -452,7 +452,9 @@ mcpproxy upstream add-json db-tools '{
 }'
 ```
 
-### Project-Scoped Servers
+### Project-Scoped Servers (Future)
+
+> **Note**: The `--scope` flag is planned for future implementation. Currently all servers are added to the global config.
 
 Use `--scope project` to add servers to `.mcpproxy/config.json` in the current project:
 
@@ -494,7 +496,7 @@ mcpproxy upstream remove github --yes
 | With env vars | `--env KEY=value` (repeatable) |
 | With headers | `--header "Name: value"` (repeatable) |
 | Working dir | `--working-dir /path` |
-| Project scope | `--scope project` |
+| Project scope | `--scope project` *(future)* |
 | From JSON | `mcpproxy upstream add-json <name> '<json>'` |
 
 ---
