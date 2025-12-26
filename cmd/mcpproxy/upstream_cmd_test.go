@@ -37,7 +37,9 @@ func TestOutputServers_TableFormat(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	upstreamOutputFormat = "table"
+	// Use global output format (default is "table")
+	globalOutputFormat = "table"
+	globalJSONOutput = false
 	err := outputServers(servers)
 
 	w.Close()
@@ -93,7 +95,9 @@ func TestOutputServers_JSONFormat(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	upstreamOutputFormat = "json"
+	// Use global output format for JSON
+	globalOutputFormat = "json"
+	globalJSONOutput = false
 	err := outputServers(servers)
 
 	w.Close()
@@ -125,7 +129,9 @@ func TestOutputServers_InvalidFormat(t *testing.T) {
 		{"name": "test"},
 	}
 
-	upstreamOutputFormat = "invalid-format"
+	// Use global output format for invalid format test
+	globalOutputFormat = "invalid-format"
+	globalJSONOutput = false
 	err := outputServers(servers)
 
 	if err == nil {
@@ -149,7 +155,9 @@ func TestOutputServers_Sorting(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	upstreamOutputFormat = "json"
+	// Use global output format for JSON
+	globalOutputFormat = "json"
+	globalJSONOutput = false
 	err := outputServers(servers)
 
 	w.Close()
@@ -191,7 +199,9 @@ func TestOutputServers_EmptyList(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	upstreamOutputFormat = "table"
+	// Use global output format (default is "table")
+	globalOutputFormat = "table"
+	globalJSONOutput = false
 	err := outputServers(servers)
 
 	w.Close()
@@ -203,9 +213,9 @@ func TestOutputServers_EmptyList(t *testing.T) {
 		t.Errorf("outputServers() returned error: %v", err)
 	}
 
-	// Should still show headers
-	if !strings.Contains(output, "NAME") {
-		t.Error("Empty table should still show headers")
+	// With new unified formatter, empty tables show "No results found" message
+	if !strings.Contains(output, "No results found") {
+		t.Error("Empty table should show 'No results found' message")
 	}
 }
 
@@ -392,7 +402,9 @@ func TestOutputServers_BooleanFields(t *testing.T) {
 			os.Stdout = w
 			defer func() { os.Stdout = oldStdout }()
 
-			upstreamOutputFormat = "table"
+			// Use global output format for table
+			globalOutputFormat = "table"
+			globalJSONOutput = false
 			err := outputServers(servers)
 
 			w.Close()
@@ -438,7 +450,9 @@ func TestOutputServers_IntegerFields(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	upstreamOutputFormat = "table"
+	// Use global output format (default is "table")
+	globalOutputFormat = "table"
+	globalJSONOutput = false
 	err := outputServers(servers)
 
 	w.Close()
@@ -485,7 +499,9 @@ func TestOutputServers_StatusMessages(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	upstreamOutputFormat = "table"
+	// Use global output format (default is "table")
+	globalOutputFormat = "table"
+	globalJSONOutput = false
 	err := outputServers(servers)
 
 	w.Close()
