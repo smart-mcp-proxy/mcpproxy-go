@@ -85,6 +85,7 @@ func TestDoctor(t *testing.T) {
 }
 
 // T035: Unit test for OAuth requirements detection
+// Updated to test aggregation from Health.Action
 func TestDoctorOAuthDetection(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()
 
@@ -100,6 +101,13 @@ func TestDoctorOAuthDetection(t *testing.T) {
 				"connected":     false,
 				"authenticated": false,
 				"oauth":         map[string]interface{}{"enabled": true},
+				// Health status with login action triggers OAuthRequired aggregation
+				"health": map[string]interface{}{
+					"level":       "unhealthy",
+					"admin_state": "enabled",
+					"summary":     "Authentication required",
+					"action":      "login",
+				},
 			},
 		}
 
@@ -126,6 +134,13 @@ func TestDoctorOAuthDetection(t *testing.T) {
 				"connected":     true,
 				"authenticated": true,
 				"oauth":         map[string]interface{}{"enabled": true},
+				// Healthy server has no action
+				"health": map[string]interface{}{
+					"level":       "healthy",
+					"admin_state": "enabled",
+					"summary":     "Connected",
+					"action":      "",
+				},
 			},
 		}
 
@@ -139,6 +154,7 @@ func TestDoctorOAuthDetection(t *testing.T) {
 }
 
 // T036: Unit test for missing secrets detection
+// Updated to test aggregation from Health.Action
 func TestDoctorMissingSecrets(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()
 
@@ -152,6 +168,14 @@ func TestDoctorMissingSecrets(t *testing.T) {
 				"name": "server-with-secret",
 				"env": map[string]interface{}{
 					"API_KEY": "${env:MISSING_API_KEY}",
+				},
+				// Health status with set_secret action triggers MissingSecrets aggregation
+				"health": map[string]interface{}{
+					"level":       "unhealthy",
+					"admin_state": "enabled",
+					"summary":     "Missing secret",
+					"detail":      "MISSING_API_KEY",
+					"action":      "set_secret",
 				},
 			},
 		}
@@ -176,6 +200,13 @@ func TestDoctorMissingSecrets(t *testing.T) {
 				"name": "server-ok",
 				"env": map[string]interface{}{
 					"API_KEY": "direct-value",
+				},
+				// Healthy server has no action
+				"health": map[string]interface{}{
+					"level":       "healthy",
+					"admin_state": "enabled",
+					"summary":     "Connected",
+					"action":      "",
 				},
 			},
 		}
