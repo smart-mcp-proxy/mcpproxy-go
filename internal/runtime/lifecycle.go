@@ -895,6 +895,8 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 }
 
 // QuarantineServer updates the quarantine state and persists the change.
+// Security: When quarantining a server, all its tools are removed from the index
+// to prevent Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
@@ -903,6 +905,20 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	if err := r.storageManager.QuarantineUpstreamServer(serverName, quarantined); err != nil {
 		r.logger.Error("Failed to update server quarantine state in storage", zap.Error(err))
 		return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)
+	}
+
+	// Security: When quarantining a server, immediately remove its tools from the index
+	// to prevent TPA exposure through search results
+	if quarantined && r.indexManager != nil {
+		if err := r.indexManager.DeleteServerTools(serverName); err != nil {
+			r.logger.Warn("Failed to remove quarantined server tools from index",
+				zap.String("server", serverName),
+				zap.Error(err))
+			// Continue even if deletion fails - the server is still quarantined
+		} else {
+			r.logger.Info("Removed quarantined server tools from index",
+				zap.String("server", serverName))
+		}
 	}
 
 	// Save configuration synchronously to ensure changes are persisted before returning

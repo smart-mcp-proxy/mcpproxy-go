@@ -763,27 +763,33 @@ func (m *Manager) GetAllServerNames() []string {
 	return names
 }
 
-// DiscoverTools discovers all tools from all connected upstream servers
+// DiscoverTools discovers all tools from all connected upstream servers.
+// Security: Tools from quarantined servers are NOT discovered to prevent
+// Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	type clientSnapshot struct {
-		id      string
-		name    string
-		enabled bool
-		client  *managed.Client
+		id          string
+		name        string
+		enabled     bool
+		quarantined bool
+		client      *managed.Client
 	}
 
 	m.mu.RLock()
 	snapshots := make([]clientSnapshot, 0, len(m.clients))
 	for id, client := range m.clients {
 		name := ""
+		quarantined := false
 		if client != nil && client.Config != nil {
 			name = client.Config.Name
+			quarantined = client.Config.Quarantined
 		}
 		snapshots = append(snapshots, clientSnapshot{
-			id:      id,
-			name:    name,
-			enabled: client != nil && client.Config != nil && client.Config.Enabled,
-			client:  client,
+			id:          id,
+			name:        name,
+			enabled:     client != nil && client.Config != nil && client.Config.Enabled,
+			quarantined: quarantined,
+			client:      client,
 		})
 	}
 	m.mu.RUnlock()
@@ -800,6 +806,15 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 		if !snapshot.enabled {
 			continue
 		}
+
+		// Security: Skip quarantined servers to prevent TPA exposure
+		if snapshot.quarantined {
+			m.logger.Debug("Skipping quarantined client for tool discovery",
+				zap.String("id", snapshot.id),
+				zap.String("server", snapshot.name))
+			continue
+		}
+
 		if !client.IsConnected() {
 			m.logger.Debug("Skipping disconnected client",
 				zap.String("id", snapshot.id),
