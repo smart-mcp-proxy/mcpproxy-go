@@ -426,9 +426,25 @@ func outputError(err error, code string) error {
 
 func loadUpstreamConfig() (*config.Config, error) {
 	if upstreamConfigPath != "" {
-		return config.LoadFromFile(upstreamConfigPath)
+		cfg, err := config.LoadFromFile(upstreamConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		// Respect global --data-dir flag
+		if dataDir != "" {
+			cfg.DataDir = dataDir
+		}
+		return cfg, nil
 	}
-	return config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	// Respect global --data-dir flag
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+	return cfg, nil
 }
 
 func createUpstreamLogger(level string) (*zap.Logger, error) {
