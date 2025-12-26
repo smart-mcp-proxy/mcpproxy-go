@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mcpproxy-go/internal/cache"
+	"mcpproxy-go/internal/cli/output"
 	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/index"
@@ -25,6 +26,8 @@ import (
 	"go.uber.org/zap"
 )
 
+// Call command output format constants (kept for backward compatibility)
+// Note: "pretty" is the default for call command (different from global "table" default)
 const (
 	outputFormatJSON   = "json"
 	outputFormatPretty = "pretty"
@@ -208,13 +211,14 @@ func loadCallConfig() (*config.Config, error) {
 	return globalConfig, nil
 }
 
-// outputCallResultAsJSON outputs the result in JSON format
+// outputCallResultAsJSON outputs the result in JSON format using unified formatter
 func outputCallResultAsJSON(result interface{}) error {
-	output, err := json.MarshalIndent(result, "", "  ")
+	formatter := &output.JSONFormatter{Indent: true}
+	formatted, err := formatter.Format(result)
 	if err != nil {
 		return fmt.Errorf("failed to format result as JSON: %w", err)
 	}
-	fmt.Println(string(output))
+	fmt.Println(formatted)
 	return nil
 }
 

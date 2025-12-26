@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"mcpproxy-go/internal/cli/output"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/secret"
@@ -185,10 +185,7 @@ func getSecretsDeleteCommand() *cobra.Command {
 
 // getSecretsListCommand returns the secrets list command
 func getSecretsListCommand() *cobra.Command {
-	var (
-		jsonOutput bool
-		allTypes   bool
-	)
+	var allTypes bool
 
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -199,26 +196,24 @@ func getSecretsListCommand() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
+			// Get output format from global flags
+			outputFormat := ResolveOutputFormat()
+			formatter, err := GetOutputFormatter()
+			if err != nil {
+				return output.NewStructuredError(output.ErrCodeInvalidOutputFormat, err.Error()).
+					WithGuidance("Use -o table, -o json, or -o yaml")
+			}
+
+			var refs []secret.Ref
+			var providerName string
+
 			if allTypes {
 				// List from all available providers
-				refs, err := resolver.ListAll(ctx)
+				refs, err = resolver.ListAll(ctx)
 				if err != nil {
 					return fmt.Errorf("failed to list secrets: %w", err)
 				}
-
-				if jsonOutput {
-					return json.NewEncoder(os.Stdout).Encode(refs)
-				}
-
-				if len(refs) == 0 {
-					fmt.Println("No secrets found")
-					return nil
-				}
-
-				fmt.Printf("Found %d secrets:\n", len(refs))
-				for _, ref := range refs {
-					fmt.Printf("  %s (%s)\n", ref.Name, ref.Type)
-				}
+				providerName = "all providers"
 			} else {
 				// List from keyring only
 				keyringProvider := secret.NewKeyringProvider()
@@ -226,31 +221,45 @@ func getSecretsListCommand() *cobra.Command {
 					return fmt.Errorf("keyring is not available on this system")
 				}
 
-				refs, err := keyringProvider.List(ctx)
+				refs, err = keyringProvider.List(ctx)
 				if err != nil {
 					return fmt.Errorf("failed to list keyring secrets: %w", err)
 				}
-
-				if jsonOutput {
-					return json.NewEncoder(os.Stdout).Encode(refs)
-				}
-
-				if len(refs) == 0 {
-					fmt.Println("No secrets found in keyring")
-					return nil
-				}
-
-				fmt.Printf("Found %d secrets in keyring:\n", len(refs))
-				for _, ref := range refs {
-					fmt.Printf("  %s\n", ref.Name)
-				}
+				providerName = "keyring"
 			}
 
+			// Handle JSON/YAML output
+			if outputFormat == "json" || outputFormat == "yaml" {
+				result, fmtErr := formatter.Format(refs)
+				if fmtErr != nil {
+					return fmt.Errorf("failed to format output: %w", fmtErr)
+				}
+				fmt.Println(result)
+				return nil
+			}
+
+			// Table output
+			if len(refs) == 0 {
+				fmt.Printf("No secrets found in %s\n", providerName)
+				return nil
+			}
+
+			headers := []string{"NAME", "TYPE"}
+			var rows [][]string
+			for _, ref := range refs {
+				rows = append(rows, []string{ref.Name, ref.Type})
+			}
+
+			result, fmtErr := formatter.FormatTable(headers, rows)
+			if fmtErr != nil {
+				return fmt.Errorf("failed to format table: %w", fmtErr)
+			}
+			fmt.Print(result)
 			return nil
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	// Note: --json flag removed, use global -o json instead
 	cmd.Flags().BoolVar(&allTypes, "all", false, "List secrets from all available providers")
 
 	return cmd

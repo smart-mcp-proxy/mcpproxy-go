@@ -38,6 +38,7 @@ import (
 	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/cli/output"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/logs"
@@ -65,6 +66,10 @@ var (
 	allowServerAdd    bool
 	allowServerRemove bool
 	enablePrompts     bool
+
+	// Output formatting flags (global)
+	globalOutputFormat string
+	globalJSONOutput   bool
 
 	version = "v0.1.0" // This will be injected by -ldflags during build
 )
@@ -97,6 +102,11 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "Log level (trace, debug, info, warn, error) - defaults: server=info, other commands=warn")
 	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", false, "Enable logging to file in standard OS location (default: console only)")
 	rootCmd.PersistentFlags().StringVar(&logDir, "log-dir", "", "Custom log directory path (overrides standard OS location)")
+
+	// Output formatting flags (global)
+	rootCmd.PersistentFlags().StringVarP(&globalOutputFormat, "output", "o", "", "Output format: table, json, yaml")
+	rootCmd.PersistentFlags().BoolVar(&globalJSONOutput, "json", false, "Shorthand for -o json")
+	rootCmd.MarkFlagsMutuallyExclusive("output", "json")
 
 	// Add server command
 	serverCmd := &cobra.Command{
@@ -156,6 +166,10 @@ func main() {
 	rootCmd.AddCommand(trustCertCmd)
 	rootCmd.AddCommand(upstreamCmd)
 	rootCmd.AddCommand(doctorCmd)
+
+	// Setup --help-json for machine-readable help discovery
+	// This must be called AFTER all commands are added
+	output.SetupHelpJSON(rootCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
@@ -632,4 +646,15 @@ func classifyError(err error) int {
 
 	// Default to general error
 	return ExitCodeGeneralError
+}
+
+// ResolveOutputFormat determines the output format from global flags and environment.
+// Priority: --json alias > -o flag > MCPPROXY_OUTPUT env var > default (table)
+func ResolveOutputFormat() string {
+	return output.ResolveFormat(globalOutputFormat, globalJSONOutput)
+}
+
+// GetOutputFormatter creates a formatter for the resolved output format.
+func GetOutputFormatter() (output.OutputFormatter, error) {
+	return output.NewFormatter(ResolveOutputFormat())
 }

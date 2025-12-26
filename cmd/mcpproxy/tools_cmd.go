@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"mcpproxy-go/internal/cli/output"
 	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/logs"
@@ -47,7 +47,6 @@ Examples:
 	toolsLogLevel  string
 	configPath     string
 	timeout        time.Duration
-	outputFormat   string
 	traceTransport bool // Enable HTTP/SSE frame-by-frame tracing
 )
 
@@ -65,7 +64,7 @@ func init() {
 	toolsListCmd.Flags().StringVarP(&toolsLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
 	toolsListCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	toolsListCmd.Flags().DurationVarP(&timeout, "timeout", "t", 30*time.Second, "Connection timeout")
-	toolsListCmd.Flags().StringVarP(&outputFormat, "output", "o", "table", "Output format (table, json, yaml)")
+	// Note: -o/--output flag is inherited from root command via globalOutputFormat
 	toolsListCmd.Flags().BoolVar(&traceTransport, "trace-transport", false, "Enable detailed HTTP/SSE frame-by-frame tracing (useful for debugging SSE connection issues)")
 
 	// Mark required flags
@@ -164,45 +163,52 @@ func getAvailableServerNames(globalConfig *config.Config) []string {
 	return names
 }
 
-// displayToolsTable displays tools in a formatted table
-func displayToolsTable(tools []*config.ToolMetadata, serverName string) {
-	fmt.Printf("📚 Discovered Tools (%d):\n", len(tools))
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-
+// outputToolsFromMetadata formats and displays tools from ToolMetadata (standalone mode) using unified formatters.
+func outputToolsFromMetadata(tools []*config.ToolMetadata, serverName string) error {
+	// Convert to map format for unified output
+	toolMaps := make([]map[string]interface{}, len(tools))
 	for i, tool := range tools {
-		fmt.Printf("%d. %s\n", i+1, tool.Name)
-		if tool.Description != "" {
-			fmt.Printf("   📝 %s\n", tool.Description)
+		toolMaps[i] = map[string]interface{}{
+			"name":        tool.Name,
+			"description": tool.Description,
+			"server":      serverName,
+			"full_name":   fmt.Sprintf("%s:%s", serverName, tool.Name),
 		}
-
-		// Show schema in debug/trace mode
-		if toolsLogLevel == "debug" || toolsLogLevel == "trace" {
-			if tool.ParamsJSON != "" {
-				fmt.Printf("   🔧 Schema: %s\n", tool.ParamsJSON)
-			}
-		}
-
-		fmt.Printf("   🏷️  Format: %s:%s\n", serverName, tool.Name)
-
-		if i < len(tools)-1 {
-			fmt.Println()
+		// Include schema in debug/trace mode
+		if (toolsLogLevel == "debug" || toolsLogLevel == "trace") && tool.ParamsJSON != "" {
+			toolMaps[i]["schema"] = tool.ParamsJSON
 		}
 	}
 
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-}
+	outputFormat := ResolveOutputFormat()
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return output.NewStructuredError(output.ErrCodeInvalidOutputFormat, err.Error()).
+			WithGuidance("Use -o table, -o json, or -o yaml")
+	}
 
-// outputToolsAsJSON outputs tools in JSON format
-func outputToolsAsJSON(_ []*config.ToolMetadata) error {
-	// This would use encoding/json to output tools
-	fmt.Printf("📄 JSON output not yet implemented\n")
-	return nil
-}
+	// For JSON/YAML, format directly
+	if outputFormat == "json" || outputFormat == "yaml" {
+		result, fmtErr := formatter.Format(toolMaps)
+		if fmtErr != nil {
+			return fmt.Errorf("failed to format output: %w", fmtErr)
+		}
+		fmt.Println(result)
+		return nil
+	}
 
-// outputToolsAsYAML outputs tools in YAML format
-func outputToolsAsYAML(_ []*config.ToolMetadata) error {
-	// This would use gopkg.in/yaml.v3 to output tools
-	fmt.Printf("📄 YAML output not yet implemented\n")
+	// Table format: show name and description
+	headers := []string{"NAME", "DESCRIPTION"}
+	var rows [][]string
+	for _, tool := range tools {
+		rows = append(rows, []string{tool.Name, tool.Description})
+	}
+
+	result, fmtErr := formatter.FormatTable(headers, rows)
+	if fmtErr != nil {
+		return fmt.Errorf("failed to format table: %w", fmtErr)
+	}
+	fmt.Print(result)
 	return nil
 }
 
@@ -241,40 +247,42 @@ func runToolsListClientMode(ctx context.Context, dataDir, serverName string, log
 	}
 
 	// Output results
-	return outputTools(tools, outputFormat, logger)
+	return outputTools(tools, logger)
 }
 
-// outputTools formats and displays tools based on output format.
-func outputTools(tools []map[string]interface{}, format string, logger *zap.Logger) error {
-	switch format {
-	case "json":
-		output, err := json.MarshalIndent(tools, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to format tools as JSON: %w", err)
-		}
-		fmt.Println(string(output))
-	case "yaml":
-		// YAML output implementation (if needed)
-		return fmt.Errorf("YAML output not yet implemented, use json or table")
-	case "table":
-		fallthrough
-	default:
-		// Table output
-		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-		fmt.Printf("🔧 Tools Available (%d total)\n", len(tools))
-		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-
-		for _, tool := range tools {
-			name, _ := tool["name"].(string)
-			desc, _ := tool["description"].(string)
-
-			fmt.Printf("📌 %s\n", name)
-			if desc != "" {
-				fmt.Printf("   %s\n", desc)
-			}
-			fmt.Println()
-		}
+// outputTools formats and displays tools based on output format using unified formatters.
+func outputTools(tools []map[string]interface{}, _ *zap.Logger) error {
+	outputFormat := ResolveOutputFormat()
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return output.NewStructuredError(output.ErrCodeInvalidOutputFormat, err.Error()).
+			WithGuidance("Use -o table, -o json, or -o yaml")
 	}
+
+	// For JSON/YAML, format directly
+	if outputFormat == "json" || outputFormat == "yaml" {
+		result, fmtErr := formatter.Format(tools)
+		if fmtErr != nil {
+			return fmt.Errorf("failed to format output: %w", fmtErr)
+		}
+		fmt.Println(result)
+		return nil
+	}
+
+	// Table format: show name and description
+	headers := []string{"NAME", "DESCRIPTION"}
+	var rows [][]string
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		desc, _ := tool["description"].(string)
+		rows = append(rows, []string{name, desc})
+	}
+
+	result, fmtErr := formatter.FormatTable(headers, rows)
+	if fmtErr != nil {
+		return fmt.Errorf("failed to format table: %w", fmtErr)
+	}
+	fmt.Print(result)
 	return nil
 }
 
@@ -347,28 +355,19 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 		return fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	// Output results based on format
-	switch outputFormat {
-	case "json":
-		return outputToolsAsJSON(tools)
-	case "yaml":
-		return outputToolsAsYAML(tools)
-	default:
-		// Table format (default)
-		fmt.Printf("✅ Tool discovery completed successfully!\n\n")
-
-		if len(tools) == 0 {
+	// Output results using unified formatter
+	if len(tools) == 0 {
+		outputFormat := ResolveOutputFormat()
+		if outputFormat == "table" {
 			fmt.Printf("⚠️  No tools found on server '%s'\n", serverName)
 			fmt.Printf("💡 This could indicate:\n")
 			fmt.Printf("   • Server doesn't support tools\n")
 			fmt.Printf("   • Server is not properly configured\n")
 			fmt.Printf("   • Connection issues during tool discovery\n")
-		} else {
-			fmt.Printf("🎉 Found %d tool(s) on server '%s'\n\n", len(tools), serverName)
-			displayToolsTable(tools, serverName)
-			fmt.Printf("\n💡 Use these tools with: mcpproxy call_tool --tool=%s:<tool_name>\n", serverName)
+			return nil
 		}
+		// For JSON/YAML, output empty array
 	}
 
-	return nil
+	return outputToolsFromMetadata(tools, serverName)
 }

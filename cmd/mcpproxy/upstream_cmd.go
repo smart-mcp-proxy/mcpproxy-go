@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/cli/output"
 	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/health"
@@ -78,8 +78,7 @@ Examples:
 	}
 
 	// Command flags
-	upstreamOutputFormat string
-	upstreamLogLevel     string
+	upstreamLogLevel string
 	upstreamConfigPath   string
 	upstreamLogsTail     int
 	upstreamLogsFollow   bool
@@ -103,8 +102,7 @@ func init() {
 	upstreamCmd.AddCommand(upstreamDisableCmd)
 	upstreamCmd.AddCommand(upstreamRestartCmd)
 
-	// Define flags
-	upstreamListCmd.Flags().StringVarP(&upstreamOutputFormat, "output", "o", "table", "Output format (table, json)")
+	// Define flags (note: output format handled by global --output/-o flag from root command)
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
 	upstreamListCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to MCP configuration file")
 
@@ -134,15 +132,15 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 	// Load configuration
 	globalConfig, err := loadUpstreamConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
-		return err
+		return outputError(output.NewStructuredError(output.ErrCodeConfigNotFound, err.Error()).
+			WithGuidance("Check that your config file exists and is valid").
+			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
 	}
 
 	// Create logger
 	logger, err := createUpstreamLogger(upstreamLogLevel)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating logger: %v\n", err)
-		return err
+		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
 	// Check if daemon is running
@@ -168,7 +166,9 @@ func runUpstreamListClientMode(ctx context.Context, dataDir string, logger *zap.
 	// Call GET /api/v1/servers
 	servers, err := client.GetServers(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get servers from daemon: %w", err)
+		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed, err.Error()).
+			WithGuidance("Ensure the mcpproxy daemon is running").
+			WithRecoveryCommand("mcpproxy serve"), output.ErrCodeConnectionFailed)
 	}
 
 	return outputServers(servers)
@@ -223,79 +223,135 @@ func outputServers(servers []map[string]interface{}) error {
 		return nameI < nameJ
 	})
 
-	switch upstreamOutputFormat {
-	case "json":
-		output, err := json.MarshalIndent(servers, "", "  ")
+	// Get the output formatter based on global flags
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return output.NewStructuredError(output.ErrCodeInvalidOutputFormat, err.Error()).
+			WithGuidance("Use -o table, -o json, or -o yaml")
+	}
+
+	outputFormat := ResolveOutputFormat()
+
+	// For structured formats (json, yaml), output raw data
+	if outputFormat == "json" || outputFormat == "yaml" {
+		result, err := formatter.Format(servers)
 		if err != nil {
 			return fmt.Errorf("failed to format output: %w", err)
 		}
-		fmt.Println(string(output))
-	case "table", "":
-		// Table format (default) with unified health status
-		fmt.Printf("%-4s %-25s %-10s %-10s %-30s %s\n",
-			"", "NAME", "PROTOCOL", "TOOLS", "STATUS", "ACTION")
-		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-
-		for _, srv := range servers {
-			name := getStringField(srv, "name")
-			protocol := getStringField(srv, "protocol")
-			toolCount := getIntField(srv, "tool_count")
-
-			// Extract unified health status
-			healthData, _ := srv["health"].(map[string]interface{})
-			healthLevel := "unknown"
-			healthAdminState := "enabled"
-			healthSummary := getStringField(srv, "status") // fallback to old status
-			healthAction := ""
-
-			if healthData != nil {
-				healthLevel = getStringField(healthData, "level")
-				healthAdminState = getStringField(healthData, "admin_state")
-				healthSummary = getStringField(healthData, "summary")
-				healthAction = getStringField(healthData, "action")
-			}
-
-			// Status emoji based on health level and admin state
-			statusEmoji := "⚪" // unknown
-			switch healthAdminState {
-			case "disabled":
-				statusEmoji = "⏸️ " // paused
-			case "quarantined":
-				statusEmoji = "🔒" // locked
-			default:
-				switch healthLevel {
-				case "healthy":
-					statusEmoji = "✅"
-				case "degraded":
-					statusEmoji = "⚠️ "
-				case "unhealthy":
-					statusEmoji = "❌"
-				}
-			}
-
-			// Format action as CLI command hint
-			actionHint := "-"
-			switch healthAction {
-			case "login":
-				actionHint = fmt.Sprintf("auth login --server=%s", name)
-			case "restart":
-				actionHint = fmt.Sprintf("upstream restart %s", name)
-			case "enable":
-				actionHint = fmt.Sprintf("upstream enable %s", name)
-			case "approve":
-				actionHint = "Approve in Web UI"
-			case "view_logs":
-				actionHint = fmt.Sprintf("upstream logs %s", name)
-			}
-
-			fmt.Printf("%-4s %-25s %-10s %-10d %-30s %s\n",
-				statusEmoji, name, protocol, toolCount, healthSummary, actionHint)
-		}
-	default:
-		return fmt.Errorf("unknown output format: %s", upstreamOutputFormat)
+		fmt.Println(result)
+		return nil
 	}
 
+	// For table format, build headers and rows with formatted data
+	headers := []string{"", "NAME", "PROTOCOL", "TOOLS", "STATUS", "ACTION"}
+	rows := make([][]string, 0, len(servers))
+
+	for _, srv := range servers {
+		name := getStringField(srv, "name")
+		protocol := getStringField(srv, "protocol")
+		toolCount := getIntField(srv, "tool_count")
+
+		// Extract unified health status
+		healthData, _ := srv["health"].(map[string]interface{})
+		healthLevel := "unknown"
+		healthAdminState := "enabled"
+		healthSummary := getStringField(srv, "status") // fallback to old status
+		healthAction := ""
+
+		if healthData != nil {
+			healthLevel = getStringField(healthData, "level")
+			healthAdminState = getStringField(healthData, "admin_state")
+			healthSummary = getStringField(healthData, "summary")
+			healthAction = getStringField(healthData, "action")
+		}
+
+		// Status emoji based on health level and admin state
+		statusEmoji := "⚪" // unknown
+		switch healthAdminState {
+		case "disabled":
+			statusEmoji = "⏸️ " // paused
+		case "quarantined":
+			statusEmoji = "🔒" // locked
+		default:
+			switch healthLevel {
+			case "healthy":
+				statusEmoji = "✅"
+			case "degraded":
+				statusEmoji = "⚠️ "
+			case "unhealthy":
+				statusEmoji = "❌"
+			}
+		}
+
+		// Format action as CLI command hint
+		actionHint := "-"
+		switch healthAction {
+		case "login":
+			actionHint = fmt.Sprintf("auth login --server=%s", name)
+		case "restart":
+			actionHint = fmt.Sprintf("upstream restart %s", name)
+		case "enable":
+			actionHint = fmt.Sprintf("upstream enable %s", name)
+		case "approve":
+			actionHint = "Approve in Web UI"
+		case "view_logs":
+			actionHint = fmt.Sprintf("upstream logs %s", name)
+		}
+
+		rows = append(rows, []string{
+			statusEmoji,
+			name,
+			protocol,
+			fmt.Sprintf("%d", toolCount),
+			healthSummary,
+			actionHint,
+		})
+	}
+
+	result, err := formatter.FormatTable(headers, rows)
+	if err != nil {
+		return fmt.Errorf("failed to format table: %w", err)
+	}
+	fmt.Print(result)
 	return nil
+}
+
+// outputError formats and outputs an error based on the current output format.
+// For structured formats (json, yaml), it outputs a StructuredError.
+// For table format, it outputs a human-readable error message to stderr.
+func outputError(err error, code string) error {
+	outputFormat := ResolveOutputFormat()
+
+	// Convert to StructuredError if not already
+	var structErr output.StructuredError
+	if se, ok := err.(output.StructuredError); ok {
+		structErr = se
+	} else {
+		structErr = output.NewStructuredError(code, err.Error())
+	}
+
+	// For structured formats, output JSON/YAML error to stdout
+	if outputFormat == "json" || outputFormat == "yaml" {
+		formatter, fmtErr := GetOutputFormatter()
+		if fmtErr != nil {
+			// Fallback to plain error if formatter fails
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return err
+		}
+
+		result, formatErr := formatter.FormatError(structErr)
+		if formatErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return err
+		}
+
+		fmt.Println(result)
+		return structErr
+	}
+
+	// For table format, output human-readable error to stderr
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	return err
 }
 
 func loadUpstreamConfig() (*config.Config, error) {

@@ -1,0 +1,192 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MCPProxy CLI Output Schemas",
+  "description": "JSON schemas for mcpproxy CLI command outputs",
+  "definitions": {
+    "StructuredError": {
+      "type": "object",
+      "description": "Machine-readable error output when -o json is used",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "description": "Machine-readable error code",
+          "examples": ["CONFIG_NOT_FOUND", "SERVER_NOT_FOUND", "AUTH_REQUIRED"]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable error message"
+        },
+        "guidance": {
+          "type": "string",
+          "description": "Additional context explaining why this error occurred"
+        },
+        "recovery_command": {
+          "type": "string",
+          "description": "Suggested mcpproxy command to fix the issue"
+        },
+        "context": {
+          "type": "object",
+          "description": "Additional structured data about the error",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "HelpInfo": {
+      "type": "object",
+      "description": "Machine-readable command help for --help-json",
+      "required": ["name", "description", "usage"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Command name"
+        },
+        "description": {
+          "type": "string",
+          "description": "Short description of the command"
+        },
+        "usage": {
+          "type": "string",
+          "description": "Command syntax/usage pattern"
+        },
+        "examples": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Usage examples"
+        },
+        "subcommands": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/CommandInfo"},
+          "description": "Child commands (for parent commands)"
+        },
+        "flags": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/FlagInfo"},
+          "description": "Available flags"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CommandInfo": {
+      "type": "object",
+      "required": ["name", "description"],
+      "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "FlagInfo": {
+      "type": "object",
+      "required": ["name", "type", "description"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Long flag name (e.g., 'output')"
+        },
+        "shorthand": {
+          "type": "string",
+          "maxLength": 1,
+          "description": "Single-letter alias (e.g., 'o')"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["string", "bool", "int", "duration", "stringArray"],
+          "description": "Flag value type"
+        },
+        "description": {
+          "type": "string",
+          "description": "What the flag does"
+        },
+        "default": {
+          "type": "string",
+          "description": "Default value as string"
+        },
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the flag is mandatory"
+        },
+        "choices": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Valid values for enum-like flags"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServerListOutput": {
+      "type": "array",
+      "description": "Output of 'mcpproxy upstream list -o json'",
+      "items": {
+        "type": "object",
+        "required": ["name", "protocol", "enabled"],
+        "properties": {
+          "name": {"type": "string"},
+          "protocol": {"type": "string", "enum": ["http", "stdio"]},
+          "enabled": {"type": "boolean"},
+          "quarantined": {"type": "boolean"},
+          "tool_count": {"type": "integer", "minimum": 0},
+          "health": {
+            "type": "object",
+            "properties": {
+              "level": {"type": "string", "enum": ["healthy", "degraded", "unhealthy"]},
+              "admin_state": {"type": "string", "enum": ["enabled", "disabled", "quarantined"]},
+              "summary": {"type": "string"},
+              "detail": {"type": "string"},
+              "action": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "ToolListOutput": {
+      "type": "array",
+      "description": "Output of 'mcpproxy tools list -o json'",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "server": {"type": "string"},
+          "input_schema": {"type": "object"}
+        }
+      }
+    },
+    "DiagnosticsOutput": {
+      "type": "object",
+      "description": "Output of 'mcpproxy doctor -o json'",
+      "properties": {
+        "diagnostics": {
+          "type": "object",
+          "properties": {
+            "total_issues": {"type": "integer"},
+            "upstream_errors": {"type": "array"},
+            "oauth_required": {"type": "array", "items": {"type": "string"}},
+            "oauth_issues": {"type": "array"},
+            "missing_secrets": {"type": "array"},
+            "runtime_warnings": {"type": "array"}
+          }
+        },
+        "info": {
+          "type": "object",
+          "properties": {
+            "version": {"type": "string"},
+            "update": {
+              "type": "object",
+              "properties": {
+                "available": {"type": "boolean"},
+                "latest_version": {"type": "string"},
+                "release_url": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

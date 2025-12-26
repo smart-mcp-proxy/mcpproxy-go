@@ -61,6 +61,19 @@ mcpproxy doctor                     # Run health checks
 
 See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
 
+### CLI Output Formatting
+```bash
+mcpproxy upstream list -o json      # JSON output for scripting
+mcpproxy upstream list -o yaml      # YAML output
+mcpproxy upstream list --json       # Shorthand for -o json
+mcpproxy --help-json                # Machine-readable help for AI agents
+```
+
+**Formats**: `table` (default), `json`, `yaml`
+**Environment**: `MCPPROXY_OUTPUT=json` sets default format
+
+See [docs/cli-output-formatting.md](docs/cli-output-formatting.md) for complete reference.
+
 ## Architecture Overview
 
 ### Core Components
@@ -69,6 +82,7 @@ See [docs/cli-management-commands.md](docs/cli-management-commands.md) for compl
 |-----------|---------|
 | `cmd/mcpproxy/` | CLI entry point, Cobra commands |
 | `cmd/mcpproxy-tray/` | System tray application with state machine |
+| `internal/cli/output/` | CLI output formatters (table, JSON, YAML) |
 | `internal/runtime/` | Lifecycle, event bus, background services |
 | `internal/server/` | HTTP server, MCP proxy |
 | `internal/httpapi/` | REST API endpoints (`/api/v1`) |
@@ -333,6 +347,8 @@ See `docs/prerelease-builds.md` for download instructions.
 ## Active Technologies
 - Go 1.24 (toolchain go1.24.10) (001-update-version-display)
 - In-memory only for version cache (no persistence per clarification) (001-update-version-display)
+- Go 1.24 (toolchain go1.24.10) + Cobra CLI framework, encoding/json, gopkg.in/yaml.v3 (014-cli-output-formatting)
+- N/A (CLI output only) (014-cli-output-formatting)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
