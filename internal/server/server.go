@@ -746,6 +746,94 @@ func (s *Server) UnquarantineServer(serverName string) error {
 	return s.QuarantineServer(serverName, false)
 }
 
+// AddServer adds a new upstream server to the configuration.
+// New servers are quarantined by default for security.
+func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfig) error {
+	s.logger.Info("Adding upstream server",
+		zap.String("name", serverConfig.Name),
+		zap.String("protocol", serverConfig.Protocol),
+		zap.Bool("enabled", serverConfig.Enabled),
+		zap.Bool("quarantined", serverConfig.Quarantined))
+
+	// Check if server already exists
+	storageManager := s.runtime.StorageManager()
+	existing, err := storageManager.GetUpstreamServer(serverConfig.Name)
+	if err == nil && existing != nil {
+		return fmt.Errorf("server '%s' already exists", serverConfig.Name)
+	}
+
+	// Set creation timestamp
+	serverConfig.Created = time.Now()
+
+	// Save to storage
+	if err := storageManager.SaveUpstreamServer(serverConfig); err != nil {
+		return fmt.Errorf("failed to save server to storage: %w", err)
+	}
+
+	// Update runtime config
+	currentConfig := s.runtime.Config()
+	if currentConfig != nil {
+		currentConfig.Servers = append(currentConfig.Servers, serverConfig)
+		s.runtime.UpdateConfig(currentConfig, "")
+	}
+
+	// Save configuration to file
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Warn("Failed to save configuration after adding server",
+			zap.Error(err))
+	}
+
+	// Notify about upstream server change
+	s.OnUpstreamServerChange()
+
+	s.logger.Info("Server added successfully",
+		zap.String("name", serverConfig.Name))
+
+	return nil
+}
+
+// RemoveServer removes an upstream server from the configuration.
+// This stops the server if running and removes it from storage.
+func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
+	s.logger.Info("Removing upstream server", zap.String("name", serverName))
+
+	// Check if server exists
+	storageManager := s.runtime.StorageManager()
+	existing, err := storageManager.GetUpstreamServer(serverName)
+	if err != nil || existing == nil {
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	// Remove from upstream manager (stops the server)
+	s.runtime.UpstreamManager().RemoveServer(serverName)
+
+	// Remove from storage
+	if err := storageManager.RemoveUpstream(serverName); err != nil {
+		return fmt.Errorf("failed to remove server from storage: %w", err)
+	}
+
+	// Remove from search index
+	if err := s.runtime.IndexManager().DeleteServerTools(serverName); err != nil {
+		s.logger.Warn("Failed to remove server tools from index",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
+
+	// Save configuration to file
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Warn("Failed to save configuration after removing server",
+			zap.Error(err))
+	}
+
+	// Notify about upstream server change
+	s.OnUpstreamServerChange()
+
+	s.logger.Info("Server removed successfully",
+		zap.String("name", serverName))
+
+	return nil
+}
+
 // EnableServer enables/disables a server and ensures all state is synchronized.
 // It acts as the entry point for changes originating from the UI or API.
 func (s *Server) EnableServer(serverName string, enabled bool) error {

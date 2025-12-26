@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -77,14 +78,66 @@ Examples:
 		RunE:  runUpstreamRestart,
 	}
 
+	upstreamAddCmd = &cobra.Command{
+		Use:   "add <name> [url] [-- command args...]",
+		Short: "Add an upstream MCP server",
+		Long: `Add a new upstream MCP server to the configuration.
+
+For HTTP-based servers:
+  mcpproxy upstream add notion https://mcp.notion.com/sse
+  mcpproxy upstream add weather https://api.weather.com/mcp --header "Authorization: Bearer token"
+
+For stdio-based servers (use -- to separate command):
+  mcpproxy upstream add fs -- npx -y @anthropic/mcp-server-filesystem /path/to/dir
+  mcpproxy upstream add sqlite -- uvx mcp-server-sqlite --db mydb.db
+
+New servers are quarantined by default for security. Use the web UI to approve them.`,
+		RunE: runUpstreamAdd,
+	}
+
+	upstreamRemoveCmd = &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove an upstream MCP server",
+		Long: `Remove an upstream MCP server from the configuration.
+
+Examples:
+  mcpproxy upstream remove notion
+  mcpproxy upstream remove fs --yes  # Skip confirmation`,
+		Args: cobra.ExactArgs(1),
+		RunE: runUpstreamRemove,
+	}
+
+	upstreamAddJSONCmd = &cobra.Command{
+		Use:   "add-json <name> <json>",
+		Short: "Add an upstream server using JSON configuration",
+		Long: `Add a new upstream MCP server using a JSON configuration object.
+
+Examples:
+  mcpproxy upstream add-json weather '{"url":"https://api.weather.com/mcp","headers":{"Authorization":"Bearer token"}}'
+  mcpproxy upstream add-json sqlite '{"command":"uvx","args":["mcp-server-sqlite","--db","mydb.db"]}'`,
+		Args: cobra.ExactArgs(2),
+		RunE: runUpstreamAddJSON,
+	}
+
 	// Command flags
-	upstreamLogLevel string
-	upstreamConfigPath   string
-	upstreamLogsTail     int
-	upstreamLogsFollow   bool
-	upstreamAll          bool
-	upstreamForce        bool
-	upstreamServerName   string
+	upstreamLogLevel   string
+	upstreamConfigPath string
+	upstreamLogsTail   int
+	upstreamLogsFollow bool
+	upstreamAll        bool
+	upstreamForce      bool
+	upstreamServerName string
+
+	// Add command flags
+	upstreamAddHeaders     []string
+	upstreamAddEnvs        []string
+	upstreamAddWorkingDir  string
+	upstreamAddTransport   string
+	upstreamAddIfNotExists bool
+
+	// Remove command flags
+	upstreamRemoveYes      bool
+	upstreamRemoveIfExists bool
 )
 
 // GetUpstreamCommand returns the upstream command for adding to the root command.
@@ -101,6 +154,9 @@ func init() {
 	upstreamCmd.AddCommand(upstreamEnableCmd)
 	upstreamCmd.AddCommand(upstreamDisableCmd)
 	upstreamCmd.AddCommand(upstreamRestartCmd)
+	upstreamCmd.AddCommand(upstreamAddCmd)
+	upstreamCmd.AddCommand(upstreamRemoveCmd)
+	upstreamCmd.AddCommand(upstreamAddJSONCmd)
 
 	// Define flags (note: output format handled by global --output/-o flag from root command)
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
@@ -123,6 +179,18 @@ func init() {
 
 	upstreamRestartCmd.Flags().BoolVar(&upstreamAll, "all", false, "Restart all servers")
 	upstreamRestartCmd.Flags().StringVarP(&upstreamServerName, "server", "s", "", "Name of the upstream server (required unless --all)")
+
+	// Add command flags
+	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddHeaders, "header", nil, "HTTP header in 'Name: value' format (repeatable)")
+	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddEnvs, "env", nil, "Environment variable in KEY=value format (repeatable)")
+	upstreamAddCmd.Flags().StringVar(&upstreamAddWorkingDir, "working-dir", "", "Working directory for stdio commands")
+	upstreamAddCmd.Flags().StringVar(&upstreamAddTransport, "transport", "", "Transport type: http or stdio (auto-detected if not specified)")
+	upstreamAddCmd.Flags().BoolVar(&upstreamAddIfNotExists, "if-not-exists", false, "Don't error if server already exists")
+
+	// Remove command flags
+	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
+	upstreamRemoveCmd.Flags().BoolVarP(&upstreamRemoveYes, "y", "y", false, "Skip confirmation prompt (short form)")
+	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveIfExists, "if-exists", false, "Don't error if server doesn't exist")
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
@@ -758,4 +826,403 @@ func runUpstreamBulkAction(action string, force bool) error {
 	}
 
 	return nil
+}
+
+// runUpstreamAdd handles the 'upstream add' command
+func runUpstreamAdd(cmd *cobra.Command, args []string) error {
+	// Parse command-line arguments
+	// Usage: add <name> [url] [-- command args...]
+	if len(args) < 1 {
+		return fmt.Errorf("server name is required")
+	}
+
+	serverName := args[0]
+
+	// Validate server name (alphanumeric, hyphens, underscores, 1-64 chars)
+	if err := validateServerName(serverName); err != nil {
+		return err
+	}
+
+	// Check for -- separator to detect stdio mode
+	var url string
+	var stdioCmd []string
+	dashDashIndex := cmd.ArgsLenAtDash()
+
+	if dashDashIndex >= 0 {
+		// Stdio mode: args before -- are name (and optionally url), args after are command
+		preArgs := args[:dashDashIndex]
+		stdioCmd = args[dashDashIndex:]
+
+		if len(preArgs) > 1 {
+			url = preArgs[1] // URL provided before --
+		}
+		if len(stdioCmd) == 0 {
+			return fmt.Errorf("command required after '--'")
+		}
+	} else {
+		// HTTP mode or auto-detect
+		if len(args) > 1 {
+			url = args[1]
+		}
+	}
+
+	// Determine transport type
+	transport := upstreamAddTransport
+	if transport == "" {
+		if len(stdioCmd) > 0 {
+			transport = "stdio"
+		} else if url != "" {
+			transport = "streamable-http"
+		}
+	}
+
+	// Validate based on transport
+	if transport == "stdio" && len(stdioCmd) == 0 {
+		return fmt.Errorf("command required for stdio transport (use -- to separate)")
+	}
+	if (transport == "http" || transport == "streamable-http") && url == "" {
+		return fmt.Errorf("URL required for http transport")
+	}
+
+	// Parse headers (for HTTP)
+	headers := make(map[string]string)
+	for _, h := range upstreamAddHeaders {
+		parts := strings.SplitN(h, ":", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid header format: %s (expected 'Name: value')", h)
+		}
+		headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+
+	// Parse environment variables (for stdio)
+	env := make(map[string]string)
+	for _, e := range upstreamAddEnvs {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid env format: %s (expected 'KEY=value')", e)
+		}
+		env[parts[0]] = parts[1]
+	}
+
+	// Build the request
+	req := &cliclient.AddServerRequest{
+		Name:       serverName,
+		URL:        url,
+		Headers:    headers,
+		Env:        env,
+		WorkingDir: upstreamAddWorkingDir,
+		Protocol:   transport,
+	}
+
+	// For stdio, extract command and args
+	if len(stdioCmd) > 0 {
+		req.Command = stdioCmd[0]
+		if len(stdioCmd) > 1 {
+			req.Args = stdioCmd[1:]
+		}
+	}
+
+	// Create context
+	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Load configuration to get data dir
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		return outputError(output.NewStructuredError(output.ErrCodeConfigNotFound, err.Error()).
+			WithGuidance("Check that your config file exists and is valid").
+			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
+	}
+
+	// Check if daemon is running
+	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return runUpstreamAddDaemonMode(ctx, globalConfig.DataDir, req)
+	}
+
+	// Direct config file mode
+	return runUpstreamAddConfigMode(req, globalConfig)
+}
+
+func runUpstreamAddDaemonMode(ctx context.Context, dataDir string, req *cliclient.AddServerRequest) error {
+	socketPath := socket.DetectSocketPath(dataDir)
+	client := cliclient.NewClient(socketPath, nil)
+
+	result, err := client.AddServer(ctx, req)
+	if err != nil {
+		// Check if it's "already exists" error and --if-not-exists is set
+		if upstreamAddIfNotExists && strings.Contains(err.Error(), "already exists") {
+			fmt.Printf("Server '%s' already exists (skipped)\n", req.Name)
+			return nil
+		}
+		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
+			WithGuidance("Check the server name and configuration"), output.ErrCodeOperationFailed)
+	}
+
+	// Output success
+	outputFormat := ResolveOutputFormat()
+	if outputFormat == "json" || outputFormat == "yaml" {
+		formatter, _ := GetOutputFormatter()
+		output, _ := formatter.Format(result)
+		fmt.Println(output)
+	} else {
+		fmt.Printf("✅ Added server '%s'\n", req.Name)
+		if result != nil && result.Quarantined {
+			fmt.Println("   ⚠️  New servers are quarantined by default. Approve in the web UI.")
+		}
+	}
+
+	return nil
+}
+
+func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *config.Config) error {
+	// Check if server already exists
+	for _, srv := range globalConfig.Servers {
+		if srv.Name == req.Name {
+			if upstreamAddIfNotExists {
+				fmt.Printf("Server '%s' already exists (skipped)\n", req.Name)
+				return nil
+			}
+			return fmt.Errorf("server '%s' already exists", req.Name)
+		}
+	}
+
+	// Create new server config
+	newServer := &config.ServerConfig{
+		Name:        req.Name,
+		URL:         req.URL,
+		Command:     req.Command,
+		Args:        req.Args,
+		Env:         req.Env,
+		Headers:     req.Headers,
+		WorkingDir:  req.WorkingDir,
+		Protocol:    req.Protocol,
+		Enabled:     true,
+		Quarantined: true, // New servers are quarantined by default
+	}
+
+	// Add to config
+	globalConfig.Servers = append(globalConfig.Servers, newServer)
+
+	// Save config
+	configPath := config.GetConfigPath(globalConfig.DataDir)
+	if err := config.SaveConfig(globalConfig, configPath); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	// Output success
+	fmt.Printf("✅ Added server '%s' to config\n", req.Name)
+	fmt.Println("   ⚠️  New servers are quarantined by default. Start the daemon and approve in the web UI.")
+
+	return nil
+}
+
+// runUpstreamRemove handles the 'upstream remove' command
+func runUpstreamRemove(cmd *cobra.Command, args []string) error {
+	serverName := args[0]
+
+	// Create context
+	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Load configuration
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		return outputError(output.NewStructuredError(output.ErrCodeConfigNotFound, err.Error()).
+			WithGuidance("Check that your config file exists and is valid").
+			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
+	}
+
+	// Prompt for confirmation if not --yes
+	if !upstreamRemoveYes {
+		confirmed, err := promptConfirmation(fmt.Sprintf("Remove server '%s'?", serverName))
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Println("Operation cancelled")
+			return nil
+		}
+	}
+
+	// Check if daemon is running
+	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return runUpstreamRemoveDaemonMode(ctx, globalConfig.DataDir, serverName)
+	}
+
+	// Direct config file mode
+	return runUpstreamRemoveConfigMode(serverName, globalConfig)
+}
+
+func runUpstreamRemoveDaemonMode(ctx context.Context, dataDir, serverName string) error {
+	socketPath := socket.DetectSocketPath(dataDir)
+	client := cliclient.NewClient(socketPath, nil)
+
+	err := client.RemoveServer(ctx, serverName)
+	if err != nil {
+		// Check if it's "not found" error and --if-exists is set
+		if upstreamRemoveIfExists && strings.Contains(err.Error(), "not found") {
+			fmt.Printf("Server '%s' not found (skipped)\n", serverName)
+			return nil
+		}
+		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
+			WithGuidance("Check the server name"), output.ErrCodeOperationFailed)
+	}
+
+	// Output success
+	outputFormat := ResolveOutputFormat()
+	if outputFormat == "json" || outputFormat == "yaml" {
+		formatter, _ := GetOutputFormatter()
+		output, _ := formatter.Format(map[string]interface{}{
+			"name":    serverName,
+			"removed": true,
+		})
+		fmt.Println(output)
+	} else {
+		fmt.Printf("✅ Removed server '%s'\n", serverName)
+	}
+
+	return nil
+}
+
+func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config) error {
+	// Find and remove server
+	found := false
+	newServers := make([]*config.ServerConfig, 0, len(globalConfig.Servers))
+	for _, srv := range globalConfig.Servers {
+		if srv.Name == serverName {
+			found = true
+			continue
+		}
+		newServers = append(newServers, srv)
+	}
+
+	if !found {
+		if upstreamRemoveIfExists {
+			fmt.Printf("Server '%s' not found (skipped)\n", serverName)
+			return nil
+		}
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	// Update config
+	globalConfig.Servers = newServers
+
+	// Save config
+	configPath := config.GetConfigPath(globalConfig.DataDir)
+	if err := config.SaveConfig(globalConfig, configPath); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Printf("✅ Removed server '%s' from config\n", serverName)
+	return nil
+}
+
+// runUpstreamAddJSON handles the 'upstream add-json' command
+func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
+	serverName := args[0]
+	jsonStr := args[1]
+
+	// Validate server name
+	if err := validateServerName(serverName); err != nil {
+		return err
+	}
+
+	// Parse JSON
+	var jsonConfig struct {
+		URL        string            `json:"url"`
+		Command    string            `json:"command"`
+		Args       []string          `json:"args"`
+		Env        map[string]string `json:"env"`
+		Headers    map[string]string `json:"headers"`
+		WorkingDir string            `json:"working_dir"`
+		Protocol   string            `json:"protocol"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonStr), &jsonConfig); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	// Auto-detect protocol
+	protocol := jsonConfig.Protocol
+	if protocol == "" {
+		if jsonConfig.Command != "" {
+			protocol = "stdio"
+		} else if jsonConfig.URL != "" {
+			protocol = "streamable-http"
+		}
+	}
+
+	// Validate
+	if jsonConfig.URL == "" && jsonConfig.Command == "" {
+		return fmt.Errorf("JSON must contain either 'url' or 'command'")
+	}
+
+	// Build the request
+	req := &cliclient.AddServerRequest{
+		Name:       serverName,
+		URL:        jsonConfig.URL,
+		Command:    jsonConfig.Command,
+		Args:       jsonConfig.Args,
+		Headers:    jsonConfig.Headers,
+		Env:        jsonConfig.Env,
+		WorkingDir: jsonConfig.WorkingDir,
+		Protocol:   protocol,
+	}
+
+	// Create context
+	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Load configuration
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		return outputError(output.NewStructuredError(output.ErrCodeConfigNotFound, err.Error()).
+			WithGuidance("Check that your config file exists and is valid").
+			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
+	}
+
+	// Check if daemon is running
+	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return runUpstreamAddDaemonMode(ctx, globalConfig.DataDir, req)
+	}
+
+	// Direct config file mode
+	return runUpstreamAddConfigMode(req, globalConfig)
+}
+
+// validateServerName validates server name format (alphanumeric, hyphens, underscores, 1-64 chars)
+func validateServerName(name string) error {
+	if len(name) == 0 {
+		return fmt.Errorf("server name cannot be empty")
+	}
+	if len(name) > 64 {
+		return fmt.Errorf("server name too long (max 64 characters)")
+	}
+
+	for i, c := range name {
+		isAlphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		isAllowed := c == '-' || c == '_'
+		if !isAlphaNum && !isAllowed {
+			return fmt.Errorf("invalid character '%c' at position %d in server name (allowed: a-z, A-Z, 0-9, -, _)", c, i)
+		}
+	}
+
+	return nil
+}
+
+// promptConfirmation prompts the user for yes/no confirmation
+func promptConfirmation(message string) (bool, error) {
+	fmt.Printf("%s [y/N]: ", message)
+	var response string
+	_, err := fmt.Scanln(&response)
+	if err != nil {
+		// If EOF or empty, treat as "no"
+		return false, nil
+	}
+
+	response = strings.ToLower(strings.TrimSpace(response))
+	return response == "y" || response == "yes", nil
 }

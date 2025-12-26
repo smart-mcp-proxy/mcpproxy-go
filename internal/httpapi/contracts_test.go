@@ -294,6 +294,14 @@ func (m *MockServerController) DiscoverServerTools(_ context.Context, _ string) 
 	return nil
 }
 
+// Server management
+func (m *MockServerController) AddServer(_ context.Context, _ *config.ServerConfig) error {
+	return nil
+}
+func (m *MockServerController) RemoveServer(_ context.Context, _ string) error {
+	return nil
+}
+
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {
 	logger := zaptest.NewLogger(t).Sugar()
