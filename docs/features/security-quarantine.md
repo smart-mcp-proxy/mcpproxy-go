@@ -30,6 +30,32 @@ When a new server is added via an AI client (using the `upstream_servers` tool):
 2. Tool calls to quarantined servers return a **security analysis** instead of executing
 3. Server remains quarantined until **manually approved**
 
+### Tool Discovery and Search Isolation
+
+**Quarantined servers are completely isolated from the tool discovery and search system:**
+
+| Feature | Quarantined Server | Approved Server |
+|---------|-------------------|-----------------|
+| Tools indexed | ❌ No | ✅ Yes |
+| Tools searchable via `retrieve_tools` | ❌ No | ✅ Yes |
+| Tools appear in HTTP API search | ❌ No | ✅ Yes |
+| Tool calls allowed | ❌ No (returns security analysis) | ✅ Yes |
+
+This isolation prevents Tool Poisoning Attacks from:
+- **Injecting malicious descriptions** into search results that AI agents might read and follow
+- **Appearing in tool recommendations** where they could be mistakenly selected
+- **Influencing AI agent behavior** through carefully crafted tool metadata
+
+When a server is quarantined:
+1. Its tools are **immediately removed** from the search index
+2. `retrieve_tools` queries will **never return** tools from that server
+3. The server remains visible in the server list (marked as quarantined) for management
+
+When a server is unquarantined (approved):
+1. The server connects to discover its tools
+2. Tools are **indexed and become searchable**
+3. Tool calls are allowed to execute normally
+
 ### Security Analysis
 
 When a quarantined server's tool is called, MCPProxy returns:
