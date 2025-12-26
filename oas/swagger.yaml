@@ -887,6 +887,36 @@ components:
         data:
           $ref: '#/components/schemas/contracts.InfoResponse'
       type: object
+    httpapi.AddServerRequest:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        command:
+          type: string
+        enabled:
+          type: boolean
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        headers:
+          additionalProperties:
+            type: string
+          type: object
+        name:
+          type: string
+        protocol:
+          type: string
+        quarantined:
+          type: boolean
+        url:
+          type: string
+        working_dir:
+          type: string
+      type: object
     management.BulkOperationResult:
       properties:
         errors:
@@ -1445,6 +1475,89 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: List all upstream MCP servers
+      tags:
+      - servers
+    post:
+      description: Add a new MCP upstream server to the configuration. New servers
+        are quarantined by default for security.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.AddServerRequest'
+        description: Server configuration
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
+          description: Server added successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request - invalid configuration
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Conflict - server with this name already exists
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Add a new upstream server
+      tags:
+      - servers
+  /api/v1/servers/{id}:
+    delete:
+      description: Remove an MCP upstream server from the configuration. This stops
+        the server if running and removes it from config.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
+          description: Server removed successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Remove an upstream server
       tags:
       - servers
   /api/v1/servers/{id}/disable:
