@@ -6,7 +6,7 @@ This document describes the CLI commands for managing MCPProxy upstream servers 
 
 MCPProxy provides two command groups:
 
-1. **`mcpproxy upstream`** - Server management (list, logs, enable, disable, restart)
+1. **`mcpproxy upstream`** - Server management (add, remove, list, logs, enable, disable, restart)
 2. **`mcpproxy doctor`** - Health checks and diagnostics
 
 All commands support both **daemon mode** (fast, via socket) and **standalone mode** (direct connection).
@@ -61,6 +61,143 @@ NAME                      PROTOCOL   TOOLS      STATUS                         A
 ❌    oauth-server            http       0          Token expired                  auth login --server=oauth-server
 ⏸️    disabled-server         stdio      0          Disabled by user               upstream enable disabled-server
 ```
+
+---
+
+### `mcpproxy upstream add`
+
+Add a new upstream MCP server to the configuration.
+
+**Usage:**
+```bash
+# HTTP server
+mcpproxy upstream add <name> <url> [flags]
+
+# Stdio server (use -- to separate command)
+mcpproxy upstream add <name> -- <command> [args...] [flags]
+```
+
+**Flags:**
+- `--header` - HTTP header in 'Name: value' format (repeatable)
+- `--env` - Environment variable in KEY=value format (repeatable)
+- `--working-dir` - Working directory for stdio commands
+- `--transport` - Transport type: http or stdio (auto-detected if not specified)
+- `--if-not-exists` - Don't error if server already exists
+- `--no-quarantine` - Don't quarantine the new server (use with caution)
+
+**Examples:**
+```bash
+# Add HTTP-based server
+mcpproxy upstream add notion https://mcp.notion.com/sse
+
+# Add with authentication header
+mcpproxy upstream add weather https://api.weather.com/mcp \
+  --header "Authorization: Bearer my-token"
+
+# Add stdio-based server using -- separator
+mcpproxy upstream add fs -- npx -y @anthropic/mcp-server-filesystem /path/to/dir
+
+# Add with environment variables and working directory
+mcpproxy upstream add sqlite -- uvx mcp-server-sqlite --db mydb.db \
+  --env "DEBUG=true" \
+  --working-dir /home/user/projects
+
+# Idempotent add (for scripts)
+mcpproxy upstream add notion https://mcp.notion.com/sse --if-not-exists
+```
+
+**Behavior:**
+- New servers are **quarantined by default** for security
+- Works in both daemon mode (via API) and standalone mode (direct config file)
+- Transport is auto-detected: URL → http, -- separator → stdio
+
+**Output:**
+```bash
+✅ Added server 'notion'
+   ⚠️  New servers are quarantined by default. Approve in the web UI.
+```
+
+---
+
+### `mcpproxy upstream remove`
+
+Remove an upstream MCP server from the configuration.
+
+**Usage:**
+```bash
+mcpproxy upstream remove <name> [flags]
+```
+
+**Flags:**
+- `--yes, -y` - Skip confirmation prompt
+- `--if-exists` - Don't error if server doesn't exist
+
+**Examples:**
+```bash
+# Remove with confirmation prompt
+mcpproxy upstream remove notion
+
+# Skip confirmation (for scripts)
+mcpproxy upstream remove notion --yes
+mcpproxy upstream remove notion -y
+
+# Idempotent remove (for scripts)
+mcpproxy upstream remove notion --yes --if-exists
+```
+
+**Interactive Confirmation:**
+```bash
+$ mcpproxy upstream remove notion
+Remove server 'notion'? [y/N]: y
+✅ Removed server 'notion'
+```
+
+**Behavior:**
+- Works in both daemon mode (via API) and standalone mode (direct config file)
+- Removes server from running daemon and config file
+- Clears server's tool index entries
+
+---
+
+### `mcpproxy upstream add-json`
+
+Add an upstream server using a JSON configuration object.
+
+**Usage:**
+```bash
+mcpproxy upstream add-json <name> '<json>'
+```
+
+**JSON Fields:**
+- `url` - Server URL (for HTTP transport)
+- `command` - Command to run (for stdio transport)
+- `args` - Command arguments (array)
+- `headers` - HTTP headers (object)
+- `env` - Environment variables (object)
+- `working_dir` - Working directory (for stdio)
+- `protocol` - Transport type (auto-detected if not specified)
+
+**Examples:**
+```bash
+# Add HTTP server with headers
+mcpproxy upstream add-json weather '{"url":"https://api.weather.com/mcp","headers":{"Authorization":"Bearer token"}}'
+
+# Add stdio server with environment
+mcpproxy upstream add-json sqlite '{"command":"uvx","args":["mcp-server-sqlite","--db","mydb.db"],"env":{"DEBUG":"1"}}'
+
+# Complex configuration
+mcpproxy upstream add-json complex-server '{
+  "command": "node",
+  "args": ["./server.js"],
+  "env": {"NODE_ENV": "production", "PORT": "3000"},
+  "working_dir": "/opt/mcp-server"
+}'
+```
+
+**Behavior:**
+- Useful for complex configurations or when copying from JSON config files
+- Protocol is auto-detected from `url` (→ http) or `command` (→ stdio)
+- New servers are quarantined by default
 
 ---
 
@@ -328,6 +465,9 @@ mcpproxy upstream list
 
 | Command | Daemon Mode | Standalone Mode | Notes |
 |---------|-------------|-----------------|-------|
+| `upstream add` | ✅ Via API | ✅ Config file | Both modes supported |
+| `upstream remove` | ✅ Via API | ✅ Config file | Both modes supported |
+| `upstream add-json` | ✅ Via API | ✅ Config file | Both modes supported |
 | `upstream list` | ✅ Full status | ✅ Config only | Standalone shows "unknown" |
 | `upstream logs` | ✅ Via API | ✅ File read | Follow requires daemon |
 | `upstream enable` | ✅ | ❌ | Requires daemon |
@@ -338,6 +478,30 @@ mcpproxy upstream list
 ---
 
 ## Safety Considerations
+
+### Security Quarantine for New Servers
+
+All servers added via `upstream add` or `upstream add-json` are **quarantined by default**:
+
+- Quarantined servers are visible but not connected
+- No tool calls are proxied to quarantined servers
+- Approve servers via the web UI to unquarantine
+- This protects against Tool Poisoning Attacks (TPA)
+
+```bash
+# Add server (automatically quarantined)
+mcpproxy upstream add notion https://mcp.notion.com/sse
+
+# View quarantine status
+mcpproxy upstream list
+# 🔒 notion  http  0  Pending approval  Approve in Web UI
+
+# Approve in web UI or via API:
+curl -X POST "http://localhost:8080/api/v1/servers/notion/quarantine" \
+  -H "X-API-Key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"quarantined": false}'
+```
 
 ### Bulk Operations Warning
 

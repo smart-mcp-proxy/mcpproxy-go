@@ -777,6 +777,123 @@ else
     echo "Response: $RESPONSE"
 fi
 
+# ============================================================================
+# CLI E2E Tests: upstream add / upstream remove commands
+# ============================================================================
+echo ""
+echo -e "${YELLOW}Testing CLI upstream add/remove commands...${NC}"
+echo ""
+
+# Test 41: Add HTTP server via CLI
+log_test "CLI: upstream add HTTP server"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream add cli-http-test "https://example.com/mcp" 2>&1)
+if echo "$RESPONSE" | grep -qi "Added server\|success\|cli-http-test\|quarantined"; then
+    log_pass "CLI: upstream add HTTP server"
+else
+    log_fail "CLI: upstream add HTTP server"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 42: Verify added HTTP server appears in list
+log_test "CLI: upstream list shows added HTTP server"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream list -o json 2>&1)
+if echo "$RESPONSE" | grep -q "cli-http-test"; then
+    log_pass "CLI: upstream list shows added HTTP server"
+else
+    log_fail "CLI: upstream list shows added HTTP server"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 43: Add stdio server via CLI
+log_test "CLI: upstream add stdio server"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream add cli-stdio-test -- echo hello 2>&1)
+if echo "$RESPONSE" | grep -qi "Added server\|success\|cli-stdio-test\|quarantined"; then
+    log_pass "CLI: upstream add stdio server"
+else
+    log_fail "CLI: upstream add stdio server"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 44: Add server with HTTP headers
+log_test "CLI: upstream add with --header"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream add cli-header-test "https://example.com/mcp2" --header "Authorization: Bearer test123" 2>&1)
+if echo "$RESPONSE" | grep -qi "Added server\|success\|quarantined"; then
+    log_pass "CLI: upstream add with --header"
+else
+    log_fail "CLI: upstream add with --header"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 45: Add duplicate server should fail
+log_test "CLI: upstream add duplicate server fails"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream add cli-http-test "https://example.com/duplicate" 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ] || echo "$RESPONSE" | grep -qi "already exists\|duplicate\|error"; then
+    log_pass "CLI: upstream add duplicate server fails"
+else
+    log_fail "CLI: upstream add duplicate server fails - Expected error"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 46: Add duplicate with --if-not-exists succeeds silently
+log_test "CLI: upstream add --if-not-exists skips duplicate"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream add cli-http-test "https://example.com/duplicate" --if-not-exists 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ]; then
+    log_pass "CLI: upstream add --if-not-exists skips duplicate"
+else
+    log_fail "CLI: upstream add --if-not-exists skips duplicate"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 47: Remove server via CLI
+log_test "CLI: upstream remove server"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream remove cli-http-test --yes 2>&1)
+if echo "$RESPONSE" | grep -qi "Removed server\|success\|deleted\|removed"; then
+    log_pass "CLI: upstream remove server"
+else
+    log_fail "CLI: upstream remove server"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 48: Verify removed server no longer in list
+log_test "CLI: upstream list confirms server removed"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream list -o json 2>&1)
+if ! echo "$RESPONSE" | grep -q '"name":"cli-http-test"'; then
+    log_pass "CLI: upstream list confirms server removed"
+else
+    log_fail "CLI: upstream list confirms server removed - Server still present"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 49: Remove non-existent server should fail
+log_test "CLI: upstream remove non-existent server fails"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream remove nonexistent-server-xyz --yes 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ] || echo "$RESPONSE" | grep -qi "not found\|does not exist\|error"; then
+    log_pass "CLI: upstream remove non-existent server fails"
+else
+    log_fail "CLI: upstream remove non-existent server fails - Expected error"
+    echo "Response: $RESPONSE"
+fi
+
+# Test 50: Remove non-existent with --if-exists succeeds silently
+log_test "CLI: upstream remove --if-exists skips non-existent"
+RESPONSE=$($MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream remove nonexistent-server-xyz --yes --if-exists 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ]; then
+    log_pass "CLI: upstream remove --if-exists skips non-existent"
+else
+    log_fail "CLI: upstream remove --if-exists skips non-existent"
+    echo "Response: $RESPONSE"
+fi
+
+# Cleanup CLI test servers
+echo ""
+echo -e "${YELLOW}Cleaning up CLI test servers...${NC}"
+$MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream remove cli-stdio-test --yes --if-exists > /dev/null 2>&1 || true
+$MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream remove cli-header-test --yes --if-exists > /dev/null 2>&1 || true
+
 # Cleanup test servers
 echo ""
 echo -e "${YELLOW}Cleaning up test servers...${NC}"
