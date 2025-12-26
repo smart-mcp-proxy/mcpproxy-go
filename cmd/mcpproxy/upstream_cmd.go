@@ -129,11 +129,12 @@ Examples:
 	upstreamServerName string
 
 	// Add command flags
-	upstreamAddHeaders     []string
-	upstreamAddEnvs        []string
-	upstreamAddWorkingDir  string
-	upstreamAddTransport   string
-	upstreamAddIfNotExists bool
+	upstreamAddHeaders      []string
+	upstreamAddEnvs         []string
+	upstreamAddWorkingDir   string
+	upstreamAddTransport    string
+	upstreamAddIfNotExists  bool
+	upstreamAddNoQuarantine bool
 
 	// Remove command flags
 	upstreamRemoveYes      bool
@@ -186,6 +187,7 @@ func init() {
 	upstreamAddCmd.Flags().StringVar(&upstreamAddWorkingDir, "working-dir", "", "Working directory for stdio commands")
 	upstreamAddCmd.Flags().StringVar(&upstreamAddTransport, "transport", "", "Transport type: http or stdio (auto-detected if not specified)")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddIfNotExists, "if-not-exists", false, "Don't error if server already exists")
+	upstreamAddCmd.Flags().BoolVar(&upstreamAddNoQuarantine, "no-quarantine", false, "Don't quarantine the new server (use with caution)")
 
 	// Remove command flags
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
@@ -914,6 +916,12 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 		Protocol:   transport,
 	}
 
+	// Set quarantine based on --no-quarantine flag
+	if upstreamAddNoQuarantine {
+		quarantined := false
+		req.Quarantined = &quarantined
+	}
+
 	// For stdio, extract command and args
 	if len(stdioCmd) > 0 {
 		req.Command = stdioCmd[0]
@@ -987,6 +995,12 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		}
 	}
 
+	// Determine quarantine status
+	quarantined := true // Default: quarantine new servers
+	if req.Quarantined != nil {
+		quarantined = *req.Quarantined
+	}
+
 	// Create new server config
 	newServer := &config.ServerConfig{
 		Name:        req.Name,
@@ -998,7 +1012,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		WorkingDir:  req.WorkingDir,
 		Protocol:    req.Protocol,
 		Enabled:     true,
-		Quarantined: true, // New servers are quarantined by default
+		Quarantined: quarantined,
 	}
 
 	// Add to config
@@ -1012,7 +1026,9 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 
 	// Output success
 	fmt.Printf("✅ Added server '%s' to config\n", req.Name)
-	fmt.Println("   ⚠️  New servers are quarantined by default. Start the daemon and approve in the web UI.")
+	if quarantined {
+		fmt.Println("   ⚠️  New servers are quarantined by default. Start the daemon and approve in the web UI.")
+	}
 
 	return nil
 }

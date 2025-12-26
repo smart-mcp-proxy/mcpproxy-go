@@ -83,6 +83,7 @@ mcpproxy upstream add <name> -- <command> [args...] [flags]
 - `--working-dir` - Working directory for stdio commands
 - `--transport` - Transport type: http or stdio (auto-detected if not specified)
 - `--if-not-exists` - Don't error if server already exists
+- `--no-quarantine` - Don't quarantine the new server (use with caution)
 
 **Examples:**
 ```bash
