@@ -45,6 +45,8 @@ type ServerController interface {
 
 	// Server management
 	GetAllServers() ([]map[string]interface{}, error)
+	AddServer(ctx context.Context, serverConfig *config.ServerConfig) error    // T001: Add server
+	RemoveServer(ctx context.Context, serverName string) error                  // T002: Remove server
 	EnableServer(serverName string, enabled bool) error
 	RestartServer(serverName string) error
 	ForceReconnectAllServers(reason string) error
@@ -324,12 +326,14 @@ func (s *Server) setupRoutes() {
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
+		r.Post("/servers", s.handleAddServer)          // T001: Add server
 		r.Post("/servers/reconnect", s.handleForceReconnectServers)
 		// T076-T077: Bulk operation routes
 		r.Post("/servers/restart_all", s.handleRestartAll)
 		r.Post("/servers/enable_all", s.handleEnableAll)
 		r.Post("/servers/disable_all", s.handleDisableAll)
 		r.Route("/servers/{id}", func(r chi.Router) {
+			r.Delete("/", s.handleRemoveServer)        // T002: Remove server
 			r.Post("/enable", s.handleEnableServer)
 			r.Post("/disable", s.handleDisableServer)
 			r.Post("/restart", s.handleRestartServer)
@@ -680,6 +684,146 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// AddServerRequest represents a request to add a new server
+type AddServerRequest struct {
+	Name        string            `json:"name"`
+	URL         string            `json:"url,omitempty"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	WorkingDir  string            `json:"working_dir,omitempty"`
+	Protocol    string            `json:"protocol,omitempty"`
+	Enabled     *bool             `json:"enabled,omitempty"`
+	Quarantined *bool             `json:"quarantined,omitempty"`
+}
+
+// handleAddServer godoc
+// @Summary Add a new upstream server
+// @Description Add a new MCP upstream server to the configuration. New servers are quarantined by default for security.
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param server body AddServerRequest true "Server configuration"
+// @Success 200 {object} contracts.ServerActionResponse "Server added successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request - invalid configuration"
+// @Failure 409 {object} contracts.ErrorResponse "Conflict - server with this name already exists"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /api/v1/servers [post]
+func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
+	var req AddServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	// Validate required fields
+	if req.Name == "" {
+		s.writeError(w, http.StatusBadRequest, "Server name is required")
+		return
+	}
+
+	// Must have either URL or command
+	if req.URL == "" && req.Command == "" {
+		s.writeError(w, http.StatusBadRequest, "Either 'url' or 'command' is required")
+		return
+	}
+
+	// Auto-detect protocol if not specified
+	protocol := req.Protocol
+	if protocol == "" {
+		if req.Command != "" {
+			protocol = "stdio"
+		} else if req.URL != "" {
+			protocol = "streamable-http"
+		}
+	}
+
+	// Default to enabled=true and quarantined=true for security
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	quarantined := true
+	if req.Quarantined != nil {
+		quarantined = *req.Quarantined
+	}
+
+	serverConfig := &config.ServerConfig{
+		Name:        req.Name,
+		URL:         req.URL,
+		Command:     req.Command,
+		Args:        req.Args,
+		Env:         req.Env,
+		Headers:     req.Headers,
+		WorkingDir:  req.WorkingDir,
+		Protocol:    protocol,
+		Enabled:     enabled,
+		Quarantined: quarantined,
+	}
+
+	// Add server via controller
+	if err := s.controller.AddServer(r.Context(), serverConfig); err != nil {
+		// Check if it's a duplicate name error
+		if strings.Contains(err.Error(), "already exists") {
+			s.writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		s.logger.Error("Failed to add server", "server", req.Name, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to add server: %v", err))
+		return
+	}
+
+	s.logger.Info("Server added successfully", "server", req.Name, "quarantined", quarantined)
+	s.writeSuccess(w, contracts.ServerActionResponse{
+		Server:  req.Name,
+		Action:  "add",
+		Success: true,
+	})
+}
+
+// handleRemoveServer godoc
+// @Summary Remove an upstream server
+// @Description Remove an MCP upstream server from the configuration. This stops the server if running and removes it from config.
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Server removed successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /api/v1/servers/{id} [delete]
+func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	// Remove server via controller
+	if err := s.controller.RemoveServer(r.Context(), serverID); err != nil {
+		// Check if it's a not found error
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		s.logger.Error("Failed to remove server", "server", serverID, "error", err)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to remove server: %v", err))
+		return
+	}
+
+	s.logger.Info("Server removed successfully", "server", serverID)
+	s.writeSuccess(w, contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "remove",
+		Success: true,
+	})
 }
 
 // handleEnableServer godoc

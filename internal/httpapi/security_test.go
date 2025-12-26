@@ -39,6 +39,8 @@ func TestAPIKeyProtection_EmptyKeyRejected(t *testing.T) {
 		{"GET", "/api/v1/status"},
 		{"GET", "/api/v1/info"},
 		{"GET", "/api/v1/servers"},
+		{"POST", "/api/v1/servers"},
+		{"DELETE", "/api/v1/servers/test-server"},
 		{"GET", "/api/v1/config"},
 		{"GET", "/api/v1/doctor"},
 		{"POST", "/api/v1/servers/restart_all"},
@@ -303,5 +305,11 @@ func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset i
 func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo    { return nil }
 func (m *baseController) RefreshVersionInfo() *updatecheck.VersionInfo { return nil }
 func (m *baseController) DiscoverServerTools(_ context.Context, _ string) error {
+	return nil
+}
+func (m *baseController) AddServer(_ context.Context, _ *config.ServerConfig) error {
+	return nil
+}
+func (m *baseController) RemoveServer(_ context.Context, _ string) error {
 	return nil
 }

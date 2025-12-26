@@ -746,3 +746,125 @@ func (c *Client) TriggerOAuthLogout(ctx context.Context, serverName string) erro
 
 	return nil
 }
+
+// AddServerRequest represents the request body for adding a server.
+type AddServerRequest struct {
+	Name        string            `json:"name"`
+	URL         string            `json:"url,omitempty"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	WorkingDir  string            `json:"working_dir,omitempty"`
+	Protocol    string            `json:"protocol,omitempty"`
+	Enabled     *bool             `json:"enabled,omitempty"`
+	Quarantined *bool             `json:"quarantined,omitempty"`
+}
+
+// AddServerResult represents the result of adding a server.
+type AddServerResult struct {
+	Name        string `json:"name"`
+	ID          int    `json:"id"`
+	Quarantined bool   `json:"quarantined"`
+}
+
+// AddServer adds a new upstream server via the daemon API.
+func (c *Client) AddServer(ctx context.Context, req *AddServerRequest) (*AddServerResult, error) {
+	bodyBytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := c.baseURL + "/api/v1/servers"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Add correlation ID from context
+	c.addCorrelationIDToRequest(ctx, httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call add server API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Handle conflict (server already exists)
+	if resp.StatusCode == http.StatusConflict {
+		return nil, fmt.Errorf("server '%s' already exists", req.Name)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var apiResp struct {
+		Success bool             `json:"success"`
+		Data    *AddServerResult `json:"data"`
+		Error   string           `json:"error"`
+	}
+
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("add server failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data, nil
+}
+
+// RemoveServer removes an upstream server via the daemon API.
+func (c *Client) RemoveServer(ctx context.Context, serverName string) error {
+	url := fmt.Sprintf("%s/api/v1/servers/%s", c.baseURL, serverName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add correlation ID from context
+	c.addCorrelationIDToRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to call remove server API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Handle not found
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var apiResp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return fmt.Errorf("remove server failed: %s", apiResp.Error)
+	}
+
+	return nil
+}
