@@ -67,7 +67,7 @@ mcpproxy upstream add --help-json
 
 | Aspect | Human Mode (default) | Agent Mode (flags/env) |
 |--------|---------------------|------------------------|
-| Output | Formatted tables | `--json` |
+| Output | Formatted tables | `-o json` or `--json` |
 | Help | Prose descriptions | `--help-json` |
 | Prompts | Interactive | `--yes` / `MCPPROXY_NO_PROMPT=1` |
 | Colors | Yes | `--no-color` / detect TTY |
@@ -78,7 +78,7 @@ mcpproxy upstream add --help-json
 
 ## Complete Command Tree (v1.0)
 
-> **Note on common flags**: Most commands support `--json` for machine-readable output. These are omitted from the tree below for brevity. See [Global Flags](#global-flags-all-commands) section.
+> **Note on common flags**: Most commands support `-o/--output` for format selection (table, json, yaml, csv). The `--json` flag is a convenient alias for `-o json`. These are omitted from the tree below for brevity. See [Global Flags](#global-flags-all-commands) section.
 
 ```
 mcpproxy
@@ -102,16 +102,21 @@ mcpproxy
 │   │   ├── --jq <expr>               # JQ filter expression
 │   │   └── --names-only              # Just server names (newline-delimited)
 │   │
-│   ├── add                           # Add server
-│   │   ├── --name <name>             # Server name (required)
-│   │   ├── --url <url>               # Server URL (for http protocol)
-│   │   ├── --command <cmd>           # Command (for stdio protocol)
-│   │   ├── --args <args>             # Command arguments (comma-separated)
-│   │   ├── --protocol <proto>        # Protocol: http, stdio (default: http)
-│   │   ├── --working-dir <path>      # Working directory for stdio servers
+│   ├── add                           # Add server (Claude-style notation)
+│   │   │                             # HTTP:  mcpproxy upstream add <name> <url>
+│   │   │                             # Stdio: mcpproxy upstream add <name> -- <cmd> [args...]
+│   │   ├── --transport <type>        # Transport: http, stdio (default: infer from args)
+│   │   ├── --env KEY=value           # Environment variable (repeatable)
+│   │   ├── --header "Name: value"    # HTTP header (repeatable, http only)
+│   │   ├── --working-dir <path>      # Working directory (stdio only)
+│   │   ├── --scope <scope>           # [FUTURE] Scope: global, project (default: global)
 │   │   └── --if-not-exists           # No error if server exists
 │   │
+│   ├── add-json <name> '<json>'      # Add server from JSON config
+│   │   └── --scope <scope>           # [FUTURE] Scope: global, project
+│   │
 │   ├── remove <name>                 # Remove server
+│   │   ├── --scope <scope>           # [FUTURE] Scope: global, project
 │   │   ├── --if-exists               # No error if server missing
 │   │   └── --yes                     # Skip confirmation
 │   │
@@ -266,7 +271,8 @@ mcpproxy
 
 | Flag | Short | Description | Environment Variable |
 |------|-------|-------------|---------------------|
-| `--json` | | JSON output | `MCPPROXY_JSON=1` |
+| `--output <format>` | `-o` | Output format: table, json, yaml, csv | `MCPPROXY_OUTPUT` |
+| `--json` | | Shorthand for `-o json` | `MCPPROXY_JSON=1` |
 | `--help-json` | | Machine-readable help | |
 | `--jq <expr>` | | Filter JSON output | |
 | `--quiet` | `-q` | Minimal output | `MCPPROXY_QUIET=1` |
@@ -275,6 +281,35 @@ mcpproxy
 | `--config <path>` | `-c` | Config file path | `MCPPROXY_CONFIG` |
 | `--project <path>` | `-p` | Project context *(WIP)* | `MCPPROXY_PROJECT` |
 | `--profile <name>` | | Use specific profile *(WIP)* | `MCPPROXY_PROFILE` |
+
+### Output Format Design Rationale
+
+The `-o/--output` flag follows the **kubectl/AWS CLI pattern** for extensibility, while `--json` provides a convenient alias following the **gh CLI pattern**:
+
+| Pattern | Tools Using It | Pros | Cons |
+|---------|---------------|------|------|
+| `-o <format>` | kubectl, AWS, Azure, gcloud, Helm | Extensible, one flag for all formats | Slightly more typing |
+| `--json` | gh, Terraform | Ergonomic for common case | Poor extensibility (need `--yaml`, `--csv`, etc.) |
+
+**Hybrid approach**: Use `-o` as primary for extensibility, `--json` as alias for ergonomics.
+
+```go
+// Implementation pattern
+cmd.Flags().StringVarP(&outputFormat, "output", "o", "table",
+    "Output format: table, json, yaml, csv")
+cmd.Flags().BoolVar(&jsonOutput, "json", false,
+    "Shorthand for -o json")
+cmd.MarkFlagsMutuallyExclusive("output", "json")
+```
+
+This allows future format additions without new flags:
+```bash
+mcpproxy activity list -o json      # Primary pattern
+mcpproxy activity list --json       # Convenience alias
+mcpproxy activity list -o csv       # Export format
+mcpproxy activity list -o jsonl     # Streaming format
+mcpproxy activity list -o yaml      # Config-friendly format
+```
 
 ---
 
@@ -325,7 +360,7 @@ MCPPROXY_LOG_LEVEL=debug                # Log level
 
 ## Structured Error Output
 
-When `--json` is used, errors include recovery hints:
+When `-o json` or `--json` is used, errors include recovery hints:
 
 ```json
 {
@@ -346,13 +381,133 @@ When `--json` is used, errors include recovery hints:
 
 ---
 
+## Server Management (Claude-Style Notation)
+
+The `upstream add` command follows the [Claude Code MCP CLI](https://docs.anthropic.com/en/docs/claude-code/mcp) notation for consistency across the MCP ecosystem.
+
+### Adding HTTP/SSE Servers
+
+```bash
+# Basic HTTP server
+mcpproxy upstream add notion https://mcp.notion.com/sse
+
+# With custom headers (repeatable)
+mcpproxy upstream add github https://api.github.com/mcp \
+  --header "Authorization: Bearer $GITHUB_TOKEN" \
+  --header "X-Custom-Header: value"
+
+# Explicit transport type
+mcpproxy upstream add --transport http myapi https://api.example.com/mcp
+```
+
+### Adding Stdio Servers
+
+The `--` separator divides mcpproxy flags from the server command:
+
+```bash
+# Basic stdio server
+mcpproxy upstream add filesystem -- npx -y @anthropic/mcp-server-filesystem
+
+# With environment variables (repeatable)
+mcpproxy upstream add github-mcp \
+  --env GITHUB_TOKEN=ghp_xxx \
+  --env GITHUB_ORG=myorg \
+  -- npx -y @anthropic/mcp-server-github
+
+# With working directory
+mcpproxy upstream add project-tools \
+  --working-dir /path/to/project \
+  -- node ./tools/mcp-server.js
+
+# Complex command with arguments
+mcpproxy upstream add postgres \
+  --env DATABASE_URL=postgres://user:pass@localhost/db \
+  -- npx -y @anthropic/mcp-server-postgres --readonly
+```
+
+### Adding from JSON
+
+For complex configurations, use `add-json`:
+
+```bash
+# HTTP server with full config
+mcpproxy upstream add-json weather-api '{
+  "url": "https://api.weather.com/mcp",
+  "protocol": "http",
+  "headers": {
+    "Authorization": "Bearer token",
+    "X-API-Version": "2"
+  }
+}'
+
+# Stdio server with full config
+mcpproxy upstream add-json db-tools '{
+  "command": "npx",
+  "args": ["-y", "@anthropic/mcp-server-postgres"],
+  "protocol": "stdio",
+  "env": {
+    "DATABASE_URL": "postgres://localhost/mydb"
+  },
+  "working_dir": "/app"
+}'
+```
+
+### Project-Scoped Servers (Future)
+
+> **Note**: The `--scope` flag is planned for future implementation. Currently all servers are added to the global config.
+
+Use `--scope project` to add servers to `.mcpproxy/config.json` in the current project:
+
+```bash
+# Add to project config (committed to git, shared with team)
+mcpproxy upstream add project-db \
+  --scope project \
+  --env DATABASE_URL=\${DATABASE_URL} \
+  -- npx -y @anthropic/mcp-server-postgres
+
+# Add to global config (default, user-specific)
+mcpproxy upstream add personal-api \
+  --scope global \
+  -- node ~/tools/my-mcp-server.js
+```
+
+### Removing Servers
+
+```bash
+# Remove from global config (default)
+mcpproxy upstream remove github
+
+# Remove from project config
+mcpproxy upstream remove project-db --scope project
+
+# Idempotent remove (no error if missing)
+mcpproxy upstream remove old-server --if-exists
+
+# Skip confirmation prompt
+mcpproxy upstream remove github --yes
+```
+
+### Command Notation Summary
+
+| Pattern | Example |
+|---------|---------|
+| HTTP server | `mcpproxy upstream add <name> <url>` |
+| Stdio server | `mcpproxy upstream add <name> -- <cmd> [args...]` |
+| With env vars | `--env KEY=value` (repeatable) |
+| With headers | `--header "Name: value"` (repeatable) |
+| Working dir | `--working-dir /path` |
+| Project scope | `--scope project` *(future)* |
+| From JSON | `mcpproxy upstream add-json <name> '<json>'` |
+
+---
+
 ## Idempotent Operations
 
 Commands should be safe to run multiple times:
 
 ```bash
-mcpproxy upstream add github --if-not-exists   # No error if exists
-mcpproxy upstream remove github --if-exists    # No error if missing
+mcpproxy upstream add github https://api.github.com/mcp --if-not-exists
+mcpproxy upstream remove github --if-exists
 mcpproxy upstream enable github                # No-op if already enabled
 ```
 
@@ -361,14 +516,18 @@ mcpproxy upstream enable github                # No-op if already enabled
 ## Output Formatting Options
 
 ```bash
-# JSON output (machine-readable)
-mcpproxy upstream list --json
+# JSON output (machine-readable) - two equivalent ways
+mcpproxy upstream list -o json       # Primary (kubectl/AWS style)
+mcpproxy upstream list --json        # Alias (gh style)
 
-# JSON with field selection (reduces tokens for agents)
-mcpproxy upstream list --json name,health.level,health.action
+# Other formats (extensible)
+mcpproxy upstream list -o table      # Default human-readable
+mcpproxy upstream list -o yaml       # Config-friendly
+mcpproxy activity export -o csv      # Spreadsheet export
+mcpproxy activity list -o jsonl      # Streaming/line-delimited JSON
 
 # JQ filtering (built-in, no external jq needed)
-mcpproxy upstream list --jq '.[] | select(.health.level == "unhealthy")'
+mcpproxy upstream list -o json --jq '.[] | select(.health.level == "unhealthy")'
 
 # Names only (minimal output)
 mcpproxy upstream list --names-only
@@ -438,8 +597,8 @@ rootCmd.AddCommand(&cobra.Command{
 
 | Priority | Features |
 |----------|----------|
-| **P0** | Universal `--json`, `--help-json`, non-interactive mode, completion, upstream/tools/call/code/auth, doctor |
-| **P1** | `--jq` filtering, structured errors |
+| **P0** | Universal `-o/--output` with `--json` alias, `--help-json`, non-interactive mode, completion, upstream/tools/call/code/auth, doctor |
+| **P1** | `--jq` filtering, structured errors, yaml/csv output formats |
 | **P2** | config commands, run scripts, activity commands (RFC-003), integrate commands |
 | **P3** | watch commands, registry operations |
 | **WIP** | project management, profile management *(design TBD)* |
@@ -460,8 +619,12 @@ rootCmd.AddCommand(&cobra.Command{
 
 ## References
 
+- [Claude Code MCP CLI](https://docs.anthropic.com/en/docs/claude-code/mcp) - Server management notation
 - [GitHub CLI Patterns](https://cli.github.com/manual/)
 - [Cobra CLI Framework](https://cobra.dev/)
 - [12 Factor CLI Apps](https://medium.com/@jdxcode/12-factor-cli-apps-dd3c227a0e46)
+- [kubectl Output Formatting](https://kubernetes.io/docs/reference/kubectl/#output-options)
+- [AWS CLI Output Format](https://docs.aws.amazon.com/cli/latest/userguide/cli-usage-output-format.html)
+- [Command Line Interface Guidelines](https://clig.dev/)
 - Issue #55: Projects/Profiles Support
 - Issue #136: Code Execution with MCP
