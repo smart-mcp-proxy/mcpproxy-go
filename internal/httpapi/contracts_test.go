@@ -238,6 +238,19 @@ func (m *MockServerController) ReplayToolCall(_ string, _ map[string]interface{}
 	}, nil
 }
 
+// Activity logging methods
+func (m *MockServerController) ListActivities(_ storage.ActivityFilter) ([]*storage.ActivityRecord, int, error) {
+	return []*storage.ActivityRecord{}, 0, nil
+}
+func (m *MockServerController) GetActivity(_ string) (*storage.ActivityRecord, error) {
+	return nil, nil
+}
+func (m *MockServerController) StreamActivities(_ storage.ActivityFilter) <-chan *storage.ActivityRecord {
+	ch := make(chan *storage.ActivityRecord)
+	close(ch)
+	return ch
+}
+
 // Configuration management methods
 func (m *MockServerController) ValidateConfig(_ *config.Config) ([]config.ValidationError, error) {
 	return []config.ValidationError{}, nil

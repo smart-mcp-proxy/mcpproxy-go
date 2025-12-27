@@ -1,0 +1,332 @@
+openapi: 3.0.3
+info:
+  title: MCPProxy Activity Log API
+  description: REST API for querying and exporting activity logs
+  version: 1.0.0
+
+paths:
+  /api/v1/activity:
+    get:
+      summary: List activity records
+      description: |
+        Returns paginated list of activity records with optional filtering.
+        Records are returned in reverse chronological order (newest first).
+      operationId: listActivity
+      tags:
+        - Activity
+      security:
+        - ApiKeyHeader: []
+        - ApiKeyQuery: []
+      parameters:
+        - name: type
+          in: query
+          description: Filter by activity type
+          schema:
+            type: string
+            enum: [tool_call, policy_decision, quarantine_change, server_change]
+        - name: server
+          in: query
+          description: Filter by server name
+          schema:
+            type: string
+        - name: tool
+          in: query
+          description: Filter by tool name
+          schema:
+            type: string
+        - name: session_id
+          in: query
+          description: Filter by MCP session ID
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+            enum: [success, error, blocked]
+        - name: start_time
+          in: query
+          description: Filter activities after this time (RFC3339)
+          schema:
+            type: string
+            format: date-time
+        - name: end_time
+          in: query
+          description: Filter activities before this time (RFC3339)
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: Maximum records to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          description: Pagination offset
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: List of activity records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityListResponse'
+        '400':
+          description: Invalid filter parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid or missing API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/activity/{id}:
+    get:
+      summary: Get activity record details
+      description: Returns full details for a single activity record
+      operationId: getActivityDetail
+      tags:
+        - Activity
+      security:
+        - ApiKeyHeader: []
+        - ApiKeyQuery: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Activity record ID (ULID)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Activity record details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityDetailResponse'
+        '404':
+          description: Activity record not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid or missing API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/activity/export:
+    get:
+      summary: Export activity records
+      description: |
+        Export activity records in bulk for compliance/audit.
+        Supports JSON Lines and CSV formats.
+        Uses streaming to handle large exports efficiently.
+      operationId: exportActivity
+      tags:
+        - Activity
+      security:
+        - ApiKeyHeader: []
+        - ApiKeyQuery: []
+      parameters:
+        - name: format
+          in: query
+          description: Export format
+          required: true
+          schema:
+            type: string
+            enum: [json, csv]
+        - name: type
+          in: query
+          description: Filter by activity type
+          schema:
+            type: string
+            enum: [tool_call, policy_decision, quarantine_change, server_change]
+        - name: server
+          in: query
+          description: Filter by server name
+          schema:
+            type: string
+        - name: start_time
+          in: query
+          description: Filter activities after this time (RFC3339)
+          schema:
+            type: string
+            format: date-time
+        - name: end_time
+          in: query
+          description: Filter activities before this time (RFC3339)
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Exported activity records
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                description: JSON Lines format (one JSON object per line)
+            text/csv:
+              schema:
+                type: string
+                description: CSV format with header row
+        '400':
+          description: Invalid format parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid or missing API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    ApiKeyQuery:
+      type: apiKey
+      in: query
+      name: apikey
+
+  schemas:
+    ActivityRecord:
+      type: object
+      required:
+        - id
+        - type
+        - status
+        - timestamp
+      properties:
+        id:
+          type: string
+          description: Unique identifier (ULID format)
+          example: "01HQWX1Y2Z3A4B5C6D7E8F9G0H"
+        type:
+          type: string
+          enum: [tool_call, policy_decision, quarantine_change, server_change]
+          description: Type of activity
+        server_name:
+          type: string
+          description: Name of upstream MCP server
+          example: "github"
+        tool_name:
+          type: string
+          description: Name of tool called
+          example: "create_issue"
+        arguments:
+          type: object
+          additionalProperties: true
+          description: Tool call arguments
+        response:
+          type: string
+          description: Tool response (may be truncated)
+        response_truncated:
+          type: boolean
+          description: True if response was truncated
+          default: false
+        status:
+          type: string
+          enum: [success, error, blocked]
+          description: Result status
+        error_message:
+          type: string
+          description: Error details if status is error
+        duration_ms:
+          type: integer
+          format: int64
+          description: Execution duration in milliseconds
+        timestamp:
+          type: string
+          format: date-time
+          description: When activity occurred
+        session_id:
+          type: string
+          description: MCP session ID for correlation
+        request_id:
+          type: string
+          description: HTTP request ID for correlation
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Additional context-specific data
+
+    ActivityListResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          required:
+            - activities
+            - total
+            - limit
+            - offset
+          properties:
+            activities:
+              type: array
+              items:
+                $ref: '#/components/schemas/ActivityRecord'
+            total:
+              type: integer
+              description: Total matching records
+            limit:
+              type: integer
+              description: Page size used
+            offset:
+              type: integer
+              description: Current offset
+
+    ActivityDetailResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/ActivityRecord'
+
+    ErrorResponse:
+      type: object
+      required:
+        - success
+        - error
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          description: Error message
+
+tags:
+  - name: Activity
+    description: Activity log operations

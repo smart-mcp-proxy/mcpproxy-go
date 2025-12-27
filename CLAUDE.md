@@ -169,6 +169,9 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `POST /api/v1/servers/{name}/enable` | Enable/disable server |
 | `POST /api/v1/servers/{name}/quarantine` | Quarantine/unquarantine server |
 | `GET /api/v1/tools` | Search tools across servers |
+| `GET /api/v1/activity` | List activity records with filtering |
+| `GET /api/v1/activity/{id}` | Get activity record details |
+| `GET /api/v1/activity/export` | Export activity records (JSON/CSV) |
 | `GET /events` | SSE stream for live updates |
 
 **Authentication**: Use `X-API-Key` header or `?apikey=` query parameter.
@@ -349,6 +352,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - In-memory only for version cache (no persistence per clarification) (001-update-version-display)
 - Go 1.24 (toolchain go1.24.10) + Cobra CLI framework, encoding/json, gopkg.in/yaml.v3 (014-cli-output-formatting)
 - N/A (CLI output only) (014-cli-output-formatting)
+- Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), existing event bus (016-activity-log-backend)
+- BBolt database (existing `~/.mcpproxy/config.db`) (016-activity-log-backend)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

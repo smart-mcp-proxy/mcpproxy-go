@@ -180,6 +180,9 @@ Events include:
 - `servers.changed` - Server status changed
 - `config.reloaded` - Configuration reloaded
 - `tools.indexed` - Tool index updated
+- `activity.tool_call.started` - Tool call initiated
+- `activity.tool_call.completed` - Tool call finished
+- `activity.policy_decision` - Tool call blocked by policy
 
 ## Error Responses
 
@@ -293,6 +296,75 @@ List active MCP sessions.
 #### GET /api/v1/sessions/{id}
 
 Get session details.
+
+### Activity
+
+Track and audit AI agent tool calls. See [Activity Log](../features/activity-log.md) for detailed documentation.
+
+#### GET /api/v1/activity
+
+List activity records with filtering and pagination.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `type` | string | Filter by type: `tool_call`, `policy_decision`, `quarantine_change`, `server_change` |
+| `server` | string | Filter by server name |
+| `tool` | string | Filter by tool name |
+| `session_id` | string | Filter by MCP session ID |
+| `status` | string | Filter by status: `success`, `error`, `blocked` |
+| `start_time` | string | Filter after this time (RFC3339) |
+| `end_time` | string | Filter before this time (RFC3339) |
+| `limit` | integer | Max records (1-100, default: 50) |
+| `offset` | integer | Pagination offset (default: 0) |
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "activities": [
+      {
+        "id": "01JFXYZ123ABC",
+        "type": "tool_call",
+        "server_name": "github-server",
+        "tool_name": "create_issue",
+        "status": "success",
+        "duration_ms": 245,
+        "timestamp": "2025-01-15T10:30:00Z"
+      }
+    ],
+    "total": 150,
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
+#### GET /api/v1/activity/{id}
+
+Get full activity record details including request arguments and response data.
+
+#### GET /api/v1/activity/export
+
+Export activity records for compliance and auditing.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `format` | string | Export format: `json` (JSON Lines) or `csv` |
+| *(filters)* | | Same filters as list endpoint |
+
+**Example:**
+```bash
+# Export as JSON Lines
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity/export?format=json"
+
+# Export as CSV
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity/export?format=csv"
+```
 
 ### Bulk Operations
 

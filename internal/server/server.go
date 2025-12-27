@@ -1856,3 +1856,20 @@ func (s *Server) GetVersionInfo() *updatecheck.VersionInfo {
 func (s *Server) RefreshVersionInfo() *updatecheck.VersionInfo {
 	return s.runtime.RefreshVersionInfo()
 }
+
+// Activity logging methods (RFC-003)
+
+// ListActivities returns activity records matching the filter.
+func (s *Server) ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error) {
+	return s.runtime.ListActivities(filter)
+}
+
+// GetActivity returns a single activity record by ID.
+func (s *Server) GetActivity(id string) (*storage.ActivityRecord, error) {
+	return s.runtime.GetActivity(id)
+}
+
+// StreamActivities returns a channel that yields activity records matching the filter.
+func (s *Server) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+	return s.runtime.StreamActivities(filter)
+}
