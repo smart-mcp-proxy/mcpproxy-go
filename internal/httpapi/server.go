@@ -104,6 +104,11 @@ type ServerController interface {
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
 	RefreshVersionInfo() *updatecheck.VersionInfo
+
+	// Activity logging (RFC-003)
+	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
+	GetActivity(id string) (*storage.ActivityRecord, error)
+	StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -392,6 +397,11 @@ func (s *Server) setupRoutes() {
 		// Registry browsing (Phase 7)
 		r.Get("/registries", s.handleListRegistries)
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
+
+		// Activity logging (RFC-003)
+		r.Get("/activity", s.handleListActivity)
+		r.Get("/activity/export", s.handleExportActivity)
+		r.Get("/activity/{id}", s.handleGetActivityDetail)
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD

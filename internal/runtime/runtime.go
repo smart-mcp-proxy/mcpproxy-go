@@ -74,6 +74,7 @@ type Runtime struct {
 	refreshManager    *oauth.RefreshManager    // Proactive OAuth token refresh
 	updateChecker     *updatecheck.Checker     // Background version checking
 	managementService interface{}              // Initialized later to avoid import cycle
+	activityService   *ActivityService         // Activity logging service
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
@@ -160,6 +161,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		logger,
 	)
 
+	// Initialize activity service for logging tool calls and events
+	activityService := NewActivityService(storageManager, logger)
+
 	rt := &Runtime{
 		cfg:             cfg,
 		cfgPath:         cfgPath,
@@ -173,6 +177,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		secretResolver:  secretResolver,
 		tokenizer:       tokenizer,
 		refreshManager:  refreshManager,
+		activityService: activityService,
 		supervisor:      supervisorInstance,
 		appCtx:          appCtx,
 		appCancel:       appCancel,
@@ -1895,4 +1900,32 @@ func (r *Runtime) RefreshVersionInfo() *updatecheck.VersionInfo {
 		return nil
 	}
 	return r.updateChecker.CheckNow()
+}
+
+// Activity logging methods (RFC-003)
+
+// ListActivities returns activity records matching the filter.
+func (r *Runtime) ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error) {
+	if r.storageManager == nil {
+		return nil, 0, nil
+	}
+	return r.storageManager.ListActivities(filter)
+}
+
+// GetActivity returns a single activity record by ID.
+func (r *Runtime) GetActivity(id string) (*storage.ActivityRecord, error) {
+	if r.storageManager == nil {
+		return nil, nil
+	}
+	return r.storageManager.GetActivity(id)
+}
+
+// StreamActivities returns a channel that yields activity records matching the filter.
+func (r *Runtime) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+	if r.storageManager == nil {
+		ch := make(chan *storage.ActivityRecord)
+		close(ch)
+		return ch
+	}
+	return r.storageManager.StreamActivities(filter)
 }

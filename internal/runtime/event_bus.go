@@ -83,3 +83,55 @@ func (r *Runtime) EmitOAuthRefreshFailed(serverName string, errorMsg string) {
 	}
 	r.publishEvent(newEvent(EventTypeOAuthRefreshFailed, payload))
 }
+
+// EmitActivityToolCallStarted emits an event when a tool execution begins.
+// This is used to track activity for observability and debugging.
+func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, requestID string, args map[string]any) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"tool_name":   toolName,
+		"session_id":  sessionID,
+		"request_id":  requestID,
+		"arguments":   args,
+	}
+	r.publishEvent(newEvent(EventTypeActivityToolCallStarted, payload))
+}
+
+// EmitActivityToolCallCompleted emits an event when a tool execution finishes.
+// This is used to track activity for observability and debugging.
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
+	payload := map[string]any{
+		"server_name":        serverName,
+		"tool_name":          toolName,
+		"session_id":         sessionID,
+		"request_id":         requestID,
+		"status":             status,
+		"error_message":      errorMsg,
+		"duration_ms":        durationMs,
+		"response":           response,
+		"response_truncated": responseTruncated,
+	}
+	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
+}
+
+// EmitActivityPolicyDecision emits an event when a policy blocks a tool call.
+func (r *Runtime) EmitActivityPolicyDecision(serverName, toolName, sessionID, decision, reason string) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"tool_name":   toolName,
+		"session_id":  sessionID,
+		"decision":    decision,
+		"reason":      reason,
+	}
+	r.publishEvent(newEvent(EventTypeActivityPolicyDecision, payload))
+}
+
+// EmitActivityQuarantineChange emits an event when a server's quarantine state changes.
+func (r *Runtime) EmitActivityQuarantineChange(serverName string, quarantined bool, reason string) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"quarantined": quarantined,
+		"reason":      reason,
+	}
+	r.publishEvent(newEvent(EventTypeActivityQuarantineChange, payload))
+}

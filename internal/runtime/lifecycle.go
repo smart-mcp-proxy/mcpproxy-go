@@ -18,6 +18,12 @@ const connectAttemptTimeout = 45 * time.Second
 
 // StartBackgroundInitialization kicks off configuration sync and background loops.
 func (r *Runtime) StartBackgroundInitialization() {
+	// Start activity service for persisting tool call events
+	if r.activityService != nil {
+		go r.activityService.Start(r.appCtx, r)
+		r.logger.Info("Activity service started for event logging")
+	}
+
 	// Start update checker for background version checking
 	if r.updateChecker != nil {
 		go r.updateChecker.Start(r.appCtx)
@@ -937,6 +943,13 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		"server":      serverName,
 		"quarantined": quarantined,
 	})
+
+	// Emit activity event for quarantine state change
+	reason := "Server unquarantined by administrator"
+	if quarantined {
+		reason = "Server quarantined for security review"
+	}
+	r.EmitActivityQuarantineChange(serverName, quarantined, reason)
 
 	r.HandleUpstreamServerChange(r.AppContext())
 

@@ -18,6 +18,16 @@ const (
 	EventTypeOAuthTokenRefreshed EventType = "oauth.token_refreshed"
 	// EventTypeOAuthRefreshFailed is emitted when proactive token refresh fails after retries.
 	EventTypeOAuthRefreshFailed EventType = "oauth.refresh_failed"
+
+	// Activity logging events (RFC-003)
+	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.
+	EventTypeActivityToolCallStarted EventType = "activity.tool_call.started"
+	// EventTypeActivityToolCallCompleted is emitted when a tool execution finishes.
+	EventTypeActivityToolCallCompleted EventType = "activity.tool_call.completed"
+	// EventTypeActivityPolicyDecision is emitted when a policy blocks a tool call.
+	EventTypeActivityPolicyDecision EventType = "activity.policy_decision"
+	// EventTypeActivityQuarantineChange is emitted when a server's quarantine state changes.
+	EventTypeActivityQuarantineChange EventType = "activity.quarantine_change"
 )
 
 // Event is a typed notification published by the runtime event bus.
