@@ -237,6 +237,25 @@ func (p *MCPProxyServer) Close() error {
 	return nil
 }
 
+// emitActivityEvent safely emits an activity event if runtime is available
+func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessionID, requestID string, args map[string]any) {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		p.mainServer.runtime.EmitActivityToolCallStarted(serverName, toolName, sessionID, requestID, args)
+	}
+}
+
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, status, errorMsg, durationMs, response, responseTruncated)
+	}
+}
+
+func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessionID, decision, reason string) {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		p.mainServer.runtime.EmitActivityPolicyDecision(serverName, toolName, sessionID, decision, reason)
+	}
+}
+
 // registerTools registers all proxy tools with the MCP server
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
@@ -823,6 +842,16 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	if err == nil && serverConfig.Quarantined {
 		p.logger.Debug("handleCallTool: server is quarantined",
 			zap.String("server_name", serverName))
+
+		// Extract session ID for activity logging
+		var quarantineSessionID string
+		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+			quarantineSessionID = sess.SessionID()
+		}
+
+		// Emit policy decision event for quarantine block
+		p.emitActivityPolicyDecision(serverName, actualToolName, quarantineSessionID, "blocked", "Server is quarantined for security review")
+
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
 	}
@@ -853,6 +882,22 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	p.logger.Debug("handleCallTool: calling upstream manager",
 		zap.String("tool_name", toolName),
 		zap.String("server_name", serverName))
+
+	// Extract session information from context (needed for activity events)
+	var sessionID, clientName, clientVersion string
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+		if sessInfo := p.sessionStore.GetSession(sessionID); sessInfo != nil {
+			clientName = sessInfo.ClientName
+			clientVersion = sessInfo.ClientVersion
+		}
+	}
+
+	// Generate requestID for activity tracking
+	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+
+	// Emit activity started event
+	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, args)
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
@@ -891,16 +936,6 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 	}
 
-	// Extract session information from context
-	var sessionID, clientName, clientVersion string
-	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
-		sessionID = sess.SessionID()
-		if sessInfo := p.sessionStore.GetSession(sessionID); sessInfo != nil {
-			clientName = sessInfo.ClientName
-			clientVersion = sessInfo.ClientVersion
-		}
-	}
-
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
 		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
@@ -911,7 +946,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		Duration:         int64(duration),
 		Timestamp:        startTime,
 		ConfigPath:       p.mainServer.GetConfigPath(),
-		RequestID:        "", // TODO: Extract from context if available
+		RequestID:        requestID,
 		Metrics:          tokenMetrics,
 		ExecutionType:    "direct",
 		MCPSessionID:     sessionID,
@@ -963,6 +998,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		if sessionID != "" && tokenMetrics != nil {
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
+
+		// Emit activity completed event for error
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, "error", err.Error(), duration.Milliseconds(), "", false)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -1055,6 +1093,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	if sessionID != "" && tokenMetrics != nil {
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
+
+	// Emit activity completed event for success
+	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, "success", "", duration.Milliseconds(), response, responseTruncated)
 
 	return mcp.NewToolResultText(response), nil
 }

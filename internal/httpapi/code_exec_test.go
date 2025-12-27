@@ -90,6 +90,26 @@ func (m *mockController) ListRegistries() ([]interface{}, error) { return nil, n
 func (m *mockController) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
 	return nil, nil
 }
+func (m *mockController) GetManagementService() interface{}       { return nil }
+func (m *mockController) GetRuntime() interface{}                 { return nil }
+func (m *mockController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
+func (m *mockController) GetSessionByID(id string) (interface{}, error) { return nil, nil }
+func (m *mockController) GetRecentSessions(limit int) (interface{}, int, error) { return nil, 0, nil }
+func (m *mockController) GetToolCallsBySession(sessionID string, limit, offset int) (interface{}, int, error) {
+	return nil, 0, nil
+}
+func (m *mockController) GetVersionInfo() interface{}            { return nil }
+func (m *mockController) RefreshVersionInfo() interface{}        { return nil }
+func (m *mockController) DiscoverServerTools(_ context.Context, _ string) error { return nil }
+func (m *mockController) AddServer(_ context.Context, _ interface{}) error { return nil }
+func (m *mockController) RemoveServer(_ context.Context, _ string) error { return nil }
+func (m *mockController) ListActivities(_ interface{}) (interface{}, int, error) { return nil, 0, nil }
+func (m *mockController) GetActivity(_ string) (interface{}, error) { return nil, nil }
+func (m *mockController) StreamActivities(_ interface{}) <-chan interface{} {
+	ch := make(chan interface{})
+	close(ch)
+	return ch
+}
 
 func TestCodeExecHandler_Success(t *testing.T) {
 	// Given: Valid code execution request

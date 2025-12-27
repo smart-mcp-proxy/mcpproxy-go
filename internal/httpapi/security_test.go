@@ -313,3 +313,14 @@ func (m *baseController) AddServer(_ context.Context, _ *config.ServerConfig) er
 func (m *baseController) RemoveServer(_ context.Context, _ string) error {
 	return nil
 }
+func (m *baseController) ListActivities(_ storage.ActivityFilter) ([]*storage.ActivityRecord, int, error) {
+	return nil, 0, nil
+}
+func (m *baseController) GetActivity(_ string) (*storage.ActivityRecord, error) {
+	return nil, nil
+}
+func (m *baseController) StreamActivities(_ storage.ActivityFilter) <-chan *storage.ActivityRecord {
+	ch := make(chan *storage.ActivityRecord)
+	close(ch)
+	return ch
+}

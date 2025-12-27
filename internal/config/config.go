@@ -105,6 +105,12 @@ type Config struct {
 
 	// Health status settings
 	OAuthExpiryWarningHours float64 `json:"oauth_expiry_warning_hours,omitempty" mapstructure:"oauth-expiry-warning-hours"` // Hours before token expiry to show degraded status (default: 1.0)
+
+	// Activity logging settings (RFC-003)
+	ActivityRetentionDays      int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"`             // Max age before pruning (default: 90)
+	ActivityMaxRecords         int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`                   // Max records before pruning (default: 100000)
+	ActivityMaxResponseSize    int `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
+	ActivityCleanupIntervalMin int `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
 }
 
 // TLSConfig represents TLS configuration
@@ -557,6 +563,12 @@ func DefaultConfig() *Config {
 		CodeExecutionTimeoutMs:    120000, // 2 minutes (120,000ms)
 		CodeExecutionMaxToolCalls: 0,      // Unlimited by default (0 = no limit)
 		CodeExecutionPoolSize:     10,     // 10 JavaScript runtime instances
+
+		// Activity logging defaults (RFC-003)
+		ActivityRetentionDays:      90,     // 90 days retention
+		ActivityMaxRecords:         100000, // 100K records max
+		ActivityMaxResponseSize:    65536,  // 64KB response truncation
+		ActivityCleanupIntervalMin: 60,     // 1 hour cleanup interval
 	}
 }
 
