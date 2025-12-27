@@ -242,6 +242,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
 		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Then use call_tool with the discovered tool names. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers."),
+		mcp.WithTitleAnnotation("Retrieve Tools"),
+		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("query",
 			mcp.Required(),
 			mcp.Description("Natural language description of what you want to accomplish. Be specific about your task (e.g., 'create a new GitHub repository', 'get weather for London', 'query SQLite database for users'). The search will find the most relevant tools across all connected servers."),
@@ -264,6 +266,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// call_tool - Execute discovered tools
 	callToolTool := mcp.NewTool("call_tool",
 		mcp.WithDescription("Execute a tool discovered via retrieve_tools. Use the exact tool name from retrieve_tools results (format: 'server:tool'). Call retrieve_tools first if you haven't discovered tools yet."),
+		mcp.WithTitleAnnotation("Call Tool"),
+		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("name",
 			mcp.Required(),
 			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_repository'). Get this from retrieve_tools results."),
@@ -277,6 +281,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// read_cache - Access paginated data when responses are truncated
 	readCacheTool := mcp.NewTool("read_cache",
 		mcp.WithDescription("Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages to access the complete dataset with pagination."),
+		mcp.WithTitleAnnotation("Read Cache"),
+		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("key",
 			mcp.Required(),
 			mcp.Description("Cache key provided by mcpproxy when a response was truncated (e.g. 'Use read_cache tool: key=\"abc123def...\"')"),
@@ -294,6 +300,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	if p.config.EnableCodeExecution {
 		codeExecutionTool := mcp.NewTool("code_execution",
 			mcp.WithDescription("Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request. Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations that would require multiple round-trips otherwise.\n\n**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n**Available in JavaScript**:\n- `input` global: Your input data passed via the 'input' parameter\n- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n- Standard ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
+			mcp.WithTitleAnnotation("Code Execution"),
+			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("code",
 				mcp.Required(),
 				mcp.Description("JavaScript source code (ES5.1+) to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. Return value must be JSON-serializable. Example: `const res = call_tool('github', 'get_user', {username: input.username}); if (!res.ok) throw new Error(res.error.message); ({user: res.result, timestamp: Date.now()})`"),
@@ -312,6 +320,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
 		upstreamServersTool := mcp.NewTool("upstream_servers",
 			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Configure per-server Docker images, CPU/memory limits, and network isolation. Use 'isolation_enabled', 'isolation_image', 'isolation_memory_limit', 'isolation_cpu_limit' parameters for custom settings.\n\nUpdate/Patch Behavior: Both 'update' and 'patch' operations use FULL REPLACEMENT for env_json, args_json, and headers_json fields. The provided value completely replaces the existing value. To delete all env vars, provide empty object '{}'. To keep some keys while removing others, provide only the keys you want to keep."),
+			mcp.WithTitleAnnotation("Upstream Servers"),
+			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("operation",
 				mcp.Required(),
 				mcp.Description("Operation: list, add, remove, update, patch, tail_log. 'update' and 'patch' both use full replacement for env/args/headers fields. For quarantine operations, use the 'quarantine_security' tool."),
@@ -370,6 +380,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		// quarantine_security - Security quarantine management
 		quarantineSecurityTool := mcp.NewTool("quarantine_security",
 			mcp.WithDescription("Security quarantine management for MCP servers. Review and manage quarantined servers to prevent Tool Poisoning Attacks (TPAs). This tool handles security analysis and quarantine state management. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
+			mcp.WithTitleAnnotation("Quarantine Security"),
+			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("operation",
 				mcp.Required(),
 				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server"),
@@ -384,6 +396,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		// search_servers - Registry search and discovery
 		searchServersTool := mcp.NewTool("search_servers",
 			mcp.WithDescription("🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command."),
+			mcp.WithTitleAnnotation("Search Servers"),
+			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("registry",
 				mcp.Required(),
 				mcp.Description("Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries."),
@@ -403,6 +417,8 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		// list_registries - Explicit registry discovery tool
 		listRegistriesTool := mcp.NewTool("list_registries",
 			mcp.WithDescription("📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams."),
+			mcp.WithTitleAnnotation("List Registries"),
+			mcp.WithReadOnlyHintAnnotation(true),
 		)
 		p.server.AddTool(listRegistriesTool, p.handleListRegistries)
 	}
