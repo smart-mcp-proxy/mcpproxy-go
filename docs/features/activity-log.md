@@ -43,7 +43,7 @@ Each tool call record includes:
 
 ## CLI Commands
 
-MCPProxy provides dedicated CLI commands for activity log access. See the full [Activity Commands Reference](/docs/cli/activity-commands) for details.
+MCPProxy provides dedicated CLI commands for activity log access. See the full [Activity Commands Reference](/cli/activity-commands) for details.
 
 ### Quick Examples
 
