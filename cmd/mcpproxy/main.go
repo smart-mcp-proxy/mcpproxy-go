@@ -155,6 +155,9 @@ func main() {
 	// Add doctor command
 	doctorCmd := GetDoctorCommand()
 
+	// Add activity command
+	activityCmd := GetActivityCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
@@ -166,6 +169,7 @@ func main() {
 	rootCmd.AddCommand(trustCertCmd)
 	rootCmd.AddCommand(upstreamCmd)
 	rootCmd.AddCommand(doctorCmd)
+	rootCmd.AddCommand(activityCmd)
 
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added

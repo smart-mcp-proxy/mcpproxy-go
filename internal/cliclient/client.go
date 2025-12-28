@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"mcpproxy-go/internal/contracts"
@@ -19,6 +20,7 @@ import (
 // Client provides HTTP API access for CLI commands.
 type Client struct {
 	baseURL    string
+	apiKey     string
 	httpClient *http.Client
 	logger     *zap.SugaredLogger
 }
@@ -40,6 +42,12 @@ type CodeExecError struct {
 // NewClient creates a new CLI HTTP client.
 // If endpoint is a socket path, creates a client with socket dialer.
 func NewClient(endpoint string, logger *zap.SugaredLogger) *Client {
+	return NewClientWithAPIKey(endpoint, "", logger)
+}
+
+// NewClientWithAPIKey creates a new CLI HTTP client with API key authentication.
+// If endpoint is a socket path, creates a client with socket dialer.
+func NewClientWithAPIKey(endpoint, apiKey string, logger *zap.SugaredLogger) *Client {
 	// Create custom transport with socket support
 	transport := &http.Transport{}
 
@@ -66,6 +74,7 @@ func NewClient(endpoint string, logger *zap.SugaredLogger) *Client {
 
 	return &Client{
 		baseURL: baseURL,
+		apiKey:  apiKey,
 		httpClient: &http.Client{
 			Timeout:   5 * time.Minute, // Generous timeout for long operations
 			Transport: transport,
@@ -74,10 +83,13 @@ func NewClient(endpoint string, logger *zap.SugaredLogger) *Client {
 	}
 }
 
-// addCorrelationIDToRequest extracts correlation ID from context and adds it to HTTP request headers
-func (c *Client) addCorrelationIDToRequest(ctx context.Context, req *http.Request) {
+// prepareRequest adds common headers to a request (correlation ID, API key, etc.)
+func (c *Client) prepareRequest(ctx context.Context, req *http.Request) {
 	if correlationID := reqcontext.GetCorrelationID(ctx); correlationID != "" {
 		req.Header.Set("X-Correlation-ID", correlationID)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
 	}
 }
 
@@ -497,7 +509,7 @@ func (c *Client) RestartAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	// Add correlation ID from context to request headers
-	c.addCorrelationIDToRequest(ctx, req)
+	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -540,7 +552,7 @@ func (c *Client) EnableAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	// Add correlation ID from context to request headers
-	c.addCorrelationIDToRequest(ctx, req)
+	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -583,7 +595,7 @@ func (c *Client) DisableAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	// Add correlation ID from context to request headers
-	c.addCorrelationIDToRequest(ctx, req)
+	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -783,7 +795,7 @@ func (c *Client) AddServer(ctx context.Context, req *AddServerRequest) (*AddServ
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Add correlation ID from context
-	c.addCorrelationIDToRequest(ctx, httpReq)
+	c.prepareRequest(ctx, httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -831,7 +843,7 @@ func (c *Client) RemoveServer(ctx context.Context, serverName string) error {
 	}
 
 	// Add correlation ID from context
-	c.addCorrelationIDToRequest(ctx, req)
+	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -867,4 +879,153 @@ func (c *Client) RemoveServer(ctx context.Context, serverName string) error {
 	}
 
 	return nil
+}
+
+// ActivityFilterParams contains options for filtering activity records.
+type ActivityFilterParams interface {
+	ToQueryParams() url.Values
+}
+
+// ListActivities retrieves activity records with filtering.
+func (c *Client) ListActivities(ctx context.Context, filter ActivityFilterParams) ([]map[string]interface{}, int, error) {
+	apiURL := c.baseURL + "/api/v1/activity"
+	if filter != nil {
+		params := filter.ToQueryParams()
+		if encoded := params.Encode(); encoded != "" {
+			apiURL += "?" + encoded
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to call activity API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Activities []map[string]interface{} `json:"activities"`
+			Total      int                      `json:"total"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, 0, fmt.Errorf("API call failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data.Activities, apiResp.Data.Total, nil
+}
+
+// GetActivityDetail retrieves details for a specific activity record.
+func (c *Client) GetActivityDetail(ctx context.Context, activityID string) (map[string]interface{}, error) {
+	url := fmt.Sprintf("%s/api/v1/activity/%s", c.baseURL, activityID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call activity detail API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("activity not found: %s", activityID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+		Error   string                 `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data, nil
+}
+
+// GetActivitySummary retrieves activity summary statistics.
+func (c *Client) GetActivitySummary(ctx context.Context, period, groupBy string) (map[string]interface{}, error) {
+	url := c.baseURL + "/api/v1/activity/summary?period=" + period
+	if groupBy != "" {
+		url += "&group_by=" + groupBy
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call activity summary API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+		Error   string                 `json:"error"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+	}
+
+	return apiResp.Data, nil
 }
