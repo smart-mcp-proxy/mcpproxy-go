@@ -160,6 +160,8 @@ components:
         session_id:
           description: MCP session ID for correlation
           type: string
+        source:
+          $ref: '#/components/schemas/contracts.ActivitySource'
         status:
           description: 'Result status: "success", "error", "blocked"'
           type: string
@@ -172,6 +174,13 @@ components:
         type:
           $ref: '#/components/schemas/contracts.ActivityType'
       type: object
+    contracts.ActivitySource:
+      description: 'How activity was triggered: "mcp", "cli", "api"'
+      type: string
+      x-enum-varnames:
+      - ActivitySourceMCP
+      - ActivitySourceCLI
+      - ActivitySourceAPI
     contracts.ActivitySummaryResponse:
       properties:
         blocked_count:

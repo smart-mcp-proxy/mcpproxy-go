@@ -86,12 +86,14 @@ func (r *Runtime) EmitOAuthRefreshFailed(serverName string, errorMsg string) {
 
 // EmitActivityToolCallStarted emits an event when a tool execution begins.
 // This is used to track activity for observability and debugging.
-func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, requestID string, args map[string]any) {
+// source indicates how the call was triggered: "mcp", "cli", or "api"
+func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, requestID, source string, args map[string]any) {
 	payload := map[string]any{
 		"server_name": serverName,
 		"tool_name":   toolName,
 		"session_id":  sessionID,
 		"request_id":  requestID,
+		"source":      source,
 		"arguments":   args,
 	}
 	r.publishEvent(newEvent(EventTypeActivityToolCallStarted, payload))
@@ -99,12 +101,14 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 
 // EmitActivityToolCallCompleted emits an event when a tool execution finishes.
 // This is used to track activity for observability and debugging.
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
+// source indicates how the call was triggered: "mcp", "cli", or "api"
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
 	payload := map[string]any{
 		"server_name":        serverName,
 		"tool_name":          toolName,
 		"session_id":         sessionID,
 		"request_id":         requestID,
+		"source":             source,
 		"status":             status,
 		"error_message":      errorMsg,
 		"duration_ms":        durationMs,

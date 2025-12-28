@@ -167,6 +167,7 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 	return contracts.ActivityRecord{
 		ID:                a.ID,
 		Type:              contracts.ActivityType(a.Type),
+		Source:            contracts.ActivitySource(a.Source),
 		ServerName:        a.ServerName,
 		ToolName:          a.ToolName,
 		Arguments:         a.Arguments,
@@ -188,6 +189,7 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 	record := contracts.ActivityRecord{
 		ID:                a.ID,
 		Type:              contracts.ActivityType(a.Type),
+		Source:            contracts.ActivitySource(a.Source),
 		ServerName:        a.ServerName,
 		ToolName:          a.ToolName,
 		ResponseTruncated: a.ResponseTruncated,
@@ -266,7 +268,7 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 
 	// Write CSV header if format is CSV
 	if format == "csv" {
-		csvHeader := "id,type,server_name,tool_name,status,error_message,duration_ms,timestamp,session_id,request_id,response_truncated\n"
+		csvHeader := "id,type,source,server_name,tool_name,status,error_message,duration_ms,timestamp,session_id,request_id,response_truncated\n"
 		if _, err := w.Write([]byte(csvHeader)); err != nil {
 			s.logger.Errorw("Failed to write CSV header", "error", err)
 			return
@@ -329,6 +331,7 @@ func activityToCSVRow(a *storage.ActivityRecord) string {
 	return strings.Join([]string{
 		escapeCSV(a.ID),
 		escapeCSV(string(a.Type)),
+		escapeCSV(string(a.Source)),
 		escapeCSV(a.ServerName),
 		escapeCSV(a.ToolName),
 		escapeCSV(a.Status),
