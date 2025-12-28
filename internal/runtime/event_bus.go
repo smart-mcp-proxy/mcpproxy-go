@@ -102,7 +102,9 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // EmitActivityToolCallCompleted emits an event when a tool execution finishes.
 // This is used to track activity for observability and debugging.
 // source indicates how the call was triggered: "mcp", "cli", or "api"
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
+// toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
+// intent is the intent declaration metadata - optional
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
 	payload := map[string]any{
 		"server_name":        serverName,
 		"tool_name":          toolName,
@@ -114,6 +116,13 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 		"duration_ms":        durationMs,
 		"response":           response,
 		"response_truncated": responseTruncated,
+	}
+	// Add intent metadata if provided (Spec 018)
+	if toolVariant != "" {
+		payload["tool_variant"] = toolVariant
+	}
+	if intent != nil {
+		payload["intent"] = intent
 	}
 	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
 }

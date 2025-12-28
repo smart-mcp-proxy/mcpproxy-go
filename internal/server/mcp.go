@@ -248,9 +248,11 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 
 // emitActivityToolCallCompleted safely emits a tool call completion event if runtime is available
 // source indicates how the call was triggered: "mcp", "cli", or "api"
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
+// toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
+// intent is the intent declaration metadata - optional
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, response, responseTruncated)
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, response, responseTruncated, toolVariant, intent)
 	}
 }
 
@@ -1057,8 +1059,12 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
-		// Emit activity completed event for error
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false)
+		// Emit activity completed event for error (with intent metadata for Spec 018)
+		var intentMap map[string]interface{}
+		if intent != nil {
+			intentMap = intent.ToMap()
+		}
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false, toolVariant, intentMap)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -1152,9 +1158,13 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
-	// Emit activity completed event for success
+	// Emit activity completed event for success (with intent metadata for Spec 018)
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated)
+	var intentMap map[string]interface{}
+	if intent != nil {
+		intentMap = intent.ToMap()
+	}
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated, toolVariant, intentMap)
 
 	return mcp.NewToolResultText(response), nil
 }
@@ -1433,8 +1443,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
-		// Emit activity completed event for error with determined source
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false)
+		// Emit activity completed event for error with determined source (legacy - no intent)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false, "", nil)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -1528,9 +1538,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
-	// Emit activity completed event for success with determined source
+	// Emit activity completed event for success with determined source (legacy - no intent)
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated, "", nil)
 
 	return mcp.NewToolResultText(response), nil
 }
@@ -3231,6 +3241,13 @@ func (p *MCPProxyServer) CallBuiltInTool(ctx context.Context, toolName string, a
 		return p.handleListRegistries(ctx, request)
 	case operationSearchServers:
 		return p.handleSearchServers(ctx, request)
+	// Intent-based tool variants (Spec 018)
+	case contracts.ToolVariantRead:
+		return p.handleCallToolRead(ctx, request)
+	case contracts.ToolVariantWrite:
+		return p.handleCallToolWrite(ctx, request)
+	case contracts.ToolVariantDestructive:
+		return p.handleCallToolDestructive(ctx, request)
 	default:
 		return nil, fmt.Errorf("unknown built-in tool: %s", toolName)
 	}

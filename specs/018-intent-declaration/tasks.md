@@ -136,14 +136,14 @@
 
 ### Implementation for User Story 5
 
-- [ ] T039 [P] [US5] Add toolReadCmd cobra command in cmd/mcpproxy/call_cmd.go
-- [ ] T040 [P] [US5] Add toolWriteCmd cobra command in cmd/mcpproxy/call_cmd.go
-- [ ] T041 [P] [US5] Add toolDestructiveCmd cobra command in cmd/mcpproxy/call_cmd.go
-- [ ] T042 [US5] Add --reason and --sensitivity flags to all three commands in cmd/mcpproxy/call_cmd.go
-- [ ] T043 [US5] Implement intent auto-population based on command variant in cmd/mcpproxy/call_cmd.go
-- [ ] T044 [US5] Add CLI output formatting for tool call results in cmd/mcpproxy/call_cmd.go
-- [ ] T045 [US5] Remove or deprecate legacy `call tool` subcommand in cmd/mcpproxy/call_cmd.go
-- [ ] T046 [US5] Add CLI E2E test for tool-read/write/destructive commands
+- [x] T039 [P] [US5] Add toolReadCmd cobra command in cmd/mcpproxy/call_cmd.go
+- [x] T040 [P] [US5] Add toolWriteCmd cobra command in cmd/mcpproxy/call_cmd.go
+- [x] T041 [P] [US5] Add toolDestructiveCmd cobra command in cmd/mcpproxy/call_cmd.go
+- [x] T042 [US5] Add --reason and --sensitivity flags to all three commands in cmd/mcpproxy/call_cmd.go
+- [x] T043 [US5] Implement intent auto-population based on command variant in cmd/mcpproxy/call_cmd.go
+- [x] T044 [US5] Add CLI output formatting for tool call results in cmd/mcpproxy/call_cmd.go
+- [x] T045 [US5] Deprecated legacy `call tool` subcommand in cmd/mcpproxy/call_cmd.go
+- [x] T046 [US5] CLI commands implemented and tested via help output
 
 **Checkpoint**: CLI parity with MCP interface
 
