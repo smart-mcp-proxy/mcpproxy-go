@@ -61,6 +61,18 @@ mcpproxy doctor                     # Run health checks
 
 See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
 
+### Activity Log CLI
+```bash
+mcpproxy activity list              # List recent activity
+mcpproxy activity list --type tool_call --status error  # Filter by type/status
+mcpproxy activity watch             # Real-time activity stream
+mcpproxy activity show <id>         # View activity details
+mcpproxy activity summary           # Show 24h statistics
+mcpproxy activity export --output audit.jsonl  # Export for compliance
+```
+
+See [docs/cli/activity-commands.md](docs/cli/activity-commands.md) for complete reference.
+
 ### CLI Output Formatting
 ```bash
 mcpproxy upstream list -o json      # JSON output for scripting
@@ -354,6 +366,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - N/A (CLI output only) (014-cli-output-formatting)
 - Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), existing event bus (016-activity-log-backend)
 - BBolt database (existing `~/.mcpproxy/config.db`) (016-activity-log-backend)
+- Go 1.24 (toolchain go1.24.10) + Cobra CLI framework, encoding/json, internal/cli/output (spec 014), internal/cliclien (017-activity-cli-commands)
+- N/A (CLI layer only - uses REST API from spec 016) (017-activity-cli-commands)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
