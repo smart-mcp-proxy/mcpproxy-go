@@ -66,3 +66,29 @@ type ActivitySSEEvent struct {
 	Timestamp  int64                  `json:"timestamp"`   // Unix timestamp
 	Payload    map[string]interface{} `json:"payload"`     // Event-specific data
 }
+
+// ActivitySummaryResponse is the response for GET /api/v1/activity/summary
+type ActivitySummaryResponse struct {
+	Period       string              `json:"period"`                  // Time period (1h, 24h, 7d, 30d)
+	TotalCount   int                 `json:"total_count"`             // Total activity count
+	SuccessCount int                 `json:"success_count"`           // Count of successful activities
+	ErrorCount   int                 `json:"error_count"`             // Count of error activities
+	BlockedCount int                 `json:"blocked_count"`           // Count of blocked activities
+	TopServers   []ActivityTopServer `json:"top_servers,omitempty"`   // Top servers by activity count
+	TopTools     []ActivityTopTool   `json:"top_tools,omitempty"`     // Top tools by activity count
+	StartTime    string              `json:"start_time"`              // Start of the period (RFC3339)
+	EndTime      string              `json:"end_time"`                // End of the period (RFC3339)
+}
+
+// ActivityTopServer represents a server's activity count in the summary
+type ActivityTopServer struct {
+	Name  string `json:"name"`  // Server name
+	Count int    `json:"count"` // Activity count
+}
+
+// ActivityTopTool represents a tool's activity count in the summary
+type ActivityTopTool struct {
+	Server string `json:"server"` // Server name
+	Tool   string `json:"tool"`   // Tool name
+	Count  int    `json:"count"`  // Activity count
+}
