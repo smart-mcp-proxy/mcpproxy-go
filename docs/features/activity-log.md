@@ -41,6 +41,46 @@ Each tool call record includes:
 }
 ```
 
+## CLI Commands
+
+MCPProxy provides dedicated CLI commands for activity log access. See the full [Activity Commands Reference](/docs/cli/activity-commands) for details.
+
+### Quick Examples
+
+```bash
+# List recent activity
+mcpproxy activity list
+
+# List last 10 tool call errors
+mcpproxy activity list --type tool_call --status error --limit 10
+
+# Watch activity in real-time
+mcpproxy activity watch
+
+# Show activity statistics
+mcpproxy activity summary --period 24h
+
+# View specific activity details
+mcpproxy activity show 01JFXYZ123ABC
+
+# Export for compliance
+mcpproxy activity export --output audit.jsonl
+```
+
+### Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `activity list` | List activity records with filtering and pagination |
+| `activity watch` | Watch real-time activity stream via SSE |
+| `activity show <id>` | Show full details of a specific activity |
+| `activity summary` | Show aggregated statistics for a time period |
+| `activity export` | Export activity records to file (JSON/CSV) |
+
+All commands support `--output json`, `--output yaml`, or `--json` for machine-readable output.
+
+---
+
 ## REST API
 
 ### List Activity

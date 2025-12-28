@@ -888,6 +888,192 @@ else
     echo "Response: $RESPONSE"
 fi
 
+# ===========================================
+# Activity Log API Tests (Spec 016/017)
+# ===========================================
+echo ""
+echo -e "${YELLOW}Testing Activity Log API endpoints...${NC}"
+echo ""
+
+# Test: List activity records
+test_api "GET /api/v1/activity" "GET" "${API_BASE}/activity" "200" "" \
+    "jq -e '.success == true and .data.activities != null' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Test: List activity with type filter
+test_api "GET /api/v1/activity?type=tool_call" "GET" "${API_BASE}/activity?type=tool_call&limit=10" "200" "" \
+    "jq -e '.success == true and .data.activities != null' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Test: List activity with server filter
+test_api "GET /api/v1/activity?server=everything" "GET" "${API_BASE}/activity?server=everything&limit=10" "200" "" \
+    "jq -e '.success == true and .data.activities != null' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Test: List activity with status filter
+test_api "GET /api/v1/activity?status=success" "GET" "${API_BASE}/activity?status=success&limit=10" "200" "" \
+    "jq -e '.success == true and .data.activities != null' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Test: List activity with pagination
+test_api "GET /api/v1/activity with pagination" "GET" "${API_BASE}/activity?limit=5&offset=0" "200" "" \
+    "jq -e '.success == true and .data.limit == 5 and .data.offset == 0' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Test: List activity with limit capping (max 100)
+test_api "GET /api/v1/activity limit capped at 100" "GET" "${API_BASE}/activity?limit=500" "200" "" \
+    "jq -e '.success == true and .data.limit <= 100' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Test: List activity with multiple filters
+test_api "GET /api/v1/activity with multiple filters" "GET" "${API_BASE}/activity?type=tool_call&status=success&limit=5" "200" "" \
+    "jq -e '.success == true and .data.activities != null' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Test: Activity export as JSON
+test_api "GET /api/v1/activity/export?format=json" "GET" "${API_BASE}/activity/export?format=json&limit=5" "200" ""
+
+# Test: Activity export as CSV
+test_api "GET /api/v1/activity/export?format=csv" "GET" "${API_BASE}/activity/export?format=csv&limit=5" "200" ""
+
+# Test: Get activity detail for non-existent ID
+test_api "GET /api/v1/activity/{id} not found" "GET" "${API_BASE}/activity/nonexistent-activity-id" "404" ""
+
+# Extract an activity ID for detail test if available
+ACTIVITY_ID=""
+RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/activity?limit=1")
+echo "$RESPONSE" > "$TEST_RESULTS_FILE"
+ACTIVITY_ID=$(jq -r '.data.activities[0].id // empty' < "$TEST_RESULTS_FILE" 2>/dev/null)
+
+if [ ! -z "$ACTIVITY_ID" ]; then
+    echo -e "${YELLOW}Testing activity detail with ID: $ACTIVITY_ID${NC}"
+    test_api "GET /api/v1/activity/{id}" "GET" "${API_BASE}/activity/${ACTIVITY_ID}" "200" "" \
+        "jq -e '.success == true and .data.id != null' < '$TEST_RESULTS_FILE' >/dev/null"
+else
+    echo -e "${YELLOW}Skipping activity detail test - no activity records available${NC}"
+fi
+
+# ===========================================
+# Activity CLI Commands Tests (Spec 017)
+# ===========================================
+echo ""
+echo -e "${YELLOW}Testing Activity CLI commands...${NC}"
+echo ""
+
+# Activity commands need to use -c (config) to connect to the running server
+# instead of -d (data dir) since they need the correct listen address and API key
+
+# Test: activity list command
+log_test "CLI: activity list"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity list --limit 5 2>&1)
+if echo "$RESPONSE" | grep -qE "(ID|TYPE|SERVER|No activities found)"; then
+    log_pass "CLI: activity list"
+else
+    log_fail "CLI: activity list"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity list with JSON output
+log_test "CLI: activity list --json"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity list --limit 5 --json 2>&1)
+if echo "$RESPONSE" | jq -e '.activities != null or .error != null' >/dev/null 2>&1; then
+    log_pass "CLI: activity list --json"
+else
+    log_fail "CLI: activity list --json"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity list with type filter
+log_test "CLI: activity list --type tool_call"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity list --type tool_call --limit 5 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ]; then
+    log_pass "CLI: activity list --type tool_call"
+else
+    log_fail "CLI: activity list --type tool_call"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity list with invalid type should fail
+log_test "CLI: activity list --type invalid fails"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity list --type invalid_type 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ] || echo "$RESPONSE" | grep -qi "invalid\|error"; then
+    log_pass "CLI: activity list --type invalid fails"
+else
+    log_fail "CLI: activity list --type invalid fails - Expected error"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity summary command
+log_test "CLI: activity summary"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity summary 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ] || echo "$RESPONSE" | grep -qi "Activity Summary\|total\|error"; then
+    log_pass "CLI: activity summary"
+else
+    log_fail "CLI: activity summary"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity summary with period
+log_test "CLI: activity summary --period 7d"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity summary --period 7d 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ] || echo "$RESPONSE" | grep -qi "Activity Summary\|7d\|error"; then
+    log_pass "CLI: activity summary --period 7d"
+else
+    log_fail "CLI: activity summary --period 7d"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity summary with invalid period should fail
+log_test "CLI: activity summary --period invalid fails"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity summary --period 12h 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ] || echo "$RESPONSE" | grep -qi "invalid\|error"; then
+    log_pass "CLI: activity summary --period invalid fails"
+else
+    log_fail "CLI: activity summary --period invalid fails - Expected error"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity show with invalid ID
+log_test "CLI: activity show nonexistent fails"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity show nonexistent-id 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ] || echo "$RESPONSE" | grep -qi "not found\|error"; then
+    log_pass "CLI: activity show nonexistent fails"
+else
+    log_fail "CLI: activity show nonexistent fails - Expected error"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity export to stdout
+log_test "CLI: activity export"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity export --format json 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ]; then
+    log_pass "CLI: activity export"
+else
+    log_fail "CLI: activity export"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity export with CSV format
+log_test "CLI: activity export --format csv"
+RESPONSE=$($MCPPROXY_BINARY -c "$CONFIG_FILE" activity export --format csv 2>&1)
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ]; then
+    log_pass "CLI: activity export --format csv"
+else
+    log_fail "CLI: activity export --format csv"
+    echo "Response: $RESPONSE"
+fi
+
+# Test: activity help
+log_test "CLI: activity --help"
+RESPONSE=$($MCPPROXY_BINARY activity --help 2>&1)
+if echo "$RESPONSE" | grep -q "list\|watch\|show\|summary\|export"; then
+    log_pass "CLI: activity --help"
+else
+    log_fail "CLI: activity --help"
+    echo "Response: $RESPONSE"
+fi
+
 # Cleanup CLI test servers
 echo ""
 echo -e "${YELLOW}Cleaning up CLI test servers...${NC}"

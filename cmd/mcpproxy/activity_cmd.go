@@ -1,0 +1,1016 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/cli/output"
+	"mcpproxy-go/internal/cliclient"
+	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/logs"
+	"mcpproxy-go/internal/socket"
+)
+
+// Activity command flags
+var (
+	// Shared filter flags
+	activityType      string
+	activityServer    string
+	activityTool      string
+	activityStatus    string
+	activitySessionID string
+	activityStartTime string
+	activityEndTime   string
+	activityLimit     int
+	activityOffset    int
+
+	// Show command flags
+	activityIncludeResponse bool
+
+	// Summary command flags
+	activityPeriod  string
+	activityGroupBy string
+
+	// Export command flags
+	activityExportOutput  string
+	activityExportFormat  string
+	activityIncludeBodies bool
+)
+
+// ActivityFilter contains options for filtering activity records
+type ActivityFilter struct {
+	Type      string
+	Server    string
+	Tool      string
+	Status    string
+	SessionID string
+	StartTime string
+	EndTime   string
+	Limit     int
+	Offset    int
+}
+
+// Validate validates the filter options
+func (f *ActivityFilter) Validate() error {
+	// Validate type
+	if f.Type != "" {
+		validTypes := []string{"tool_call", "policy_decision", "quarantine_change", "server_change"}
+		valid := false
+		for _, t := range validTypes {
+			if f.Type == t {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid type '%s': must be one of %v", f.Type, validTypes)
+		}
+	}
+
+	// Validate status
+	if f.Status != "" {
+		validStatuses := []string{"success", "error", "blocked"}
+		valid := false
+		for _, s := range validStatuses {
+			if f.Status == s {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid status '%s': must be one of %v", f.Status, validStatuses)
+		}
+	}
+
+	// Validate time formats
+	if f.StartTime != "" {
+		if _, err := time.Parse(time.RFC3339, f.StartTime); err != nil {
+			return fmt.Errorf("invalid start-time format: must be RFC3339 (e.g., 2025-01-01T00:00:00Z)")
+		}
+	}
+	if f.EndTime != "" {
+		if _, err := time.Parse(time.RFC3339, f.EndTime); err != nil {
+			return fmt.Errorf("invalid end-time format: must be RFC3339 (e.g., 2025-01-01T00:00:00Z)")
+		}
+	}
+
+	// Clamp limit
+	if f.Limit < 1 {
+		f.Limit = 50
+	} else if f.Limit > 100 {
+		f.Limit = 100
+	}
+
+	return nil
+}
+
+// ToQueryParams converts filter to URL query parameters
+func (f *ActivityFilter) ToQueryParams() url.Values {
+	q := url.Values{}
+	if f.Type != "" {
+		q.Set("type", f.Type)
+	}
+	if f.Server != "" {
+		q.Set("server", f.Server)
+	}
+	if f.Tool != "" {
+		q.Set("tool", f.Tool)
+	}
+	if f.Status != "" {
+		q.Set("status", f.Status)
+	}
+	if f.SessionID != "" {
+		q.Set("session_id", f.SessionID)
+	}
+	if f.StartTime != "" {
+		q.Set("start_time", f.StartTime)
+	}
+	if f.EndTime != "" {
+		q.Set("end_time", f.EndTime)
+	}
+	if f.Limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", f.Limit))
+	}
+	if f.Offset > 0 {
+		q.Set("offset", fmt.Sprintf("%d", f.Offset))
+	}
+	return q
+}
+
+// formatRelativeTime formats a timestamp as relative time for recent events
+func formatRelativeTime(t time.Time) string {
+	now := time.Now()
+	diff := now.Sub(t)
+
+	switch {
+	case diff < time.Minute:
+		return "just now"
+	case diff < time.Hour:
+		mins := int(diff.Minutes())
+		if mins == 1 {
+			return "1 minute ago"
+		}
+		return fmt.Sprintf("%d minutes ago", mins)
+	case diff < 24*time.Hour:
+		hours := int(diff.Hours())
+		if hours == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", hours)
+	case diff < 7*24*time.Hour:
+		days := int(diff.Hours() / 24)
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	case t.Year() == now.Year():
+		return t.Format("Jan 02")
+	default:
+		return t.Format("Jan 02, 2006")
+	}
+}
+
+// formatActivityDuration formats duration in milliseconds to human-readable
+func formatActivityDuration(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000)
+}
+
+// outputActivityError outputs an error in the appropriate format
+func outputActivityError(err error, code string) error {
+	outputFormat := ResolveOutputFormat()
+	formatter, fmtErr := GetOutputFormatter()
+	if fmtErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return err
+	}
+
+	if outputFormat == "json" || outputFormat == "yaml" {
+		structErr := output.NewStructuredError(code, err.Error()).
+			WithGuidance("Use 'mcpproxy activity list' to view recent activities").
+			WithRecoveryCommand("mcpproxy activity list --limit 10")
+		result, _ := formatter.FormatError(structErr)
+		fmt.Println(result)
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Hint: Use 'mcpproxy activity list' to view recent activities\n")
+	}
+	return err
+}
+
+// Activity command definitions
+var (
+	activityCmd = &cobra.Command{
+		Use:   "activity",
+		Short: "Query and monitor activity logs",
+		Long:  "Commands for listing, watching, and exporting activity logs from the MCPProxy daemon",
+	}
+
+	activityListCmd = &cobra.Command{
+		Use:   "list",
+		Short: "List activity records with filtering",
+		Long: `List activity records with optional filtering and pagination.
+
+Examples:
+  # List recent activity
+  mcpproxy activity list
+
+  # List last 10 tool calls
+  mcpproxy activity list --type tool_call --limit 10
+
+  # List errors from github server
+  mcpproxy activity list --server github --status error
+
+  # List activity as JSON
+  mcpproxy activity list -o json`,
+		RunE: runActivityList,
+	}
+
+	activityWatchCmd = &cobra.Command{
+		Use:   "watch",
+		Short: "Watch activity stream in real-time",
+		Long: `Watch activity events in real-time via SSE stream.
+
+Examples:
+  # Watch all activity
+  mcpproxy activity watch
+
+  # Watch only tool calls from github
+  mcpproxy activity watch --type tool_call --server github
+
+  # Watch with JSON output
+  mcpproxy activity watch -o json`,
+		RunE: runActivityWatch,
+	}
+
+	activityShowCmd = &cobra.Command{
+		Use:   "show <id>",
+		Short: "Show activity details",
+		Long: `Show full details of a specific activity record.
+
+Examples:
+  # Show activity details
+  mcpproxy activity show 01JFXYZ123ABC
+
+  # Show with full response body
+  mcpproxy activity show 01JFXYZ123ABC --include-response`,
+		Args: cobra.ExactArgs(1),
+		RunE: runActivityShow,
+	}
+
+	activitySummaryCmd = &cobra.Command{
+		Use:   "summary",
+		Short: "Show activity statistics",
+		Long: `Show aggregated activity statistics for a time period.
+
+Examples:
+  # Show 24-hour summary
+  mcpproxy activity summary
+
+  # Show weekly summary
+  mcpproxy activity summary --period 7d
+
+  # Show summary grouped by server
+  mcpproxy activity summary --by server`,
+		RunE: runActivitySummary,
+	}
+
+	activityExportCmd = &cobra.Command{
+		Use:   "export",
+		Short: "Export activity records",
+		Long: `Export activity records for compliance and auditing.
+
+Examples:
+  # Export all activity as JSON Lines to file
+  mcpproxy activity export --output activity.jsonl
+
+  # Export as CSV
+  mcpproxy activity export --format csv --output activity.csv
+
+  # Export to stdout for piping
+  mcpproxy activity export --format csv | gzip > activity.csv.gz`,
+		RunE: runActivityExport,
+	}
+)
+
+// GetActivityCommand returns the activity command for registration
+func GetActivityCommand() *cobra.Command {
+	return activityCmd
+}
+
+func init() {
+	// Add subcommands
+	activityCmd.AddCommand(activityListCmd)
+	activityCmd.AddCommand(activityWatchCmd)
+	activityCmd.AddCommand(activityShowCmd)
+	activityCmd.AddCommand(activitySummaryCmd)
+	activityCmd.AddCommand(activityExportCmd)
+
+	// List command flags
+	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision, quarantine_change, server_change")
+	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
+	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
+	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked")
+	activityListCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by MCP session ID")
+	activityListCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter records after this time (RFC3339)")
+	activityListCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter records before this time (RFC3339)")
+	activityListCmd.Flags().IntVarP(&activityLimit, "limit", "n", 50, "Max records to return (1-100)")
+	activityListCmd.Flags().IntVar(&activityOffset, "offset", 0, "Pagination offset")
+
+	// Watch command flags
+	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision")
+	activityWatchCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
+
+	// Show command flags
+	activityShowCmd.Flags().BoolVar(&activityIncludeResponse, "include-response", false, "Show full response (may be large)")
+
+	// Summary command flags
+	activitySummaryCmd.Flags().StringVarP(&activityPeriod, "period", "p", "24h", "Time period: 1h, 24h, 7d, 30d")
+	activitySummaryCmd.Flags().StringVar(&activityGroupBy, "by", "", "Group by: server, tool, status")
+
+	// Export command flags
+	activityExportCmd.Flags().StringVar(&activityExportOutput, "output", "", "Output file path (stdout if not specified)")
+	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export format: json, csv")
+	activityExportCmd.Flags().BoolVar(&activityIncludeBodies, "include-bodies", false, "Include full request/response bodies")
+	// Reuse list filter flags for export
+	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type")
+	activityExportCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
+	activityExportCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
+	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status")
+	activityExportCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session ID")
+	activityExportCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter after this time (RFC3339)")
+	activityExportCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter before this time (RFC3339)")
+}
+
+// getActivityClient creates an HTTP client for the daemon
+func getActivityClient(logger *zap.SugaredLogger) (*cliclient.Client, error) {
+	// Load config - use explicit config file if provided via -c flag
+	var cfg *config.Config
+	var err error
+	if configFile != "" {
+		cfg, err = config.LoadFromFile(configFile)
+	} else {
+		cfg, err = config.Load()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Try socket first, then HTTP
+	endpoint := socket.GetDefaultSocketPath(cfg.DataDir)
+	if cfg.Listen != "" {
+		// Check if socket exists
+		if _, err := os.Stat(endpoint); os.IsNotExist(err) {
+			// Handle listen addresses like ":8080" (no host)
+			listen := cfg.Listen
+			if strings.HasPrefix(listen, ":") {
+				listen = "127.0.0.1" + listen
+			}
+			endpoint = "http://" + listen
+		}
+	}
+
+	return cliclient.NewClientWithAPIKey(endpoint, cfg.APIKey, logger), nil
+}
+
+// runActivityList implements the activity list command
+func runActivityList(cmd *cobra.Command, _ []string) error {
+	// Setup logger
+	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
+	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
+	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
+
+	logger, err := logs.SetupCommandLogger(false, cmdLogLevel, cmdLogToFile, cmdLogDir)
+	if err != nil {
+		return fmt.Errorf("failed to setup logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	// Build filter
+	filter := &ActivityFilter{
+		Type:      activityType,
+		Server:    activityServer,
+		Tool:      activityTool,
+		Status:    activityStatus,
+		SessionID: activitySessionID,
+		StartTime: activityStartTime,
+		EndTime:   activityEndTime,
+		Limit:     activityLimit,
+		Offset:    activityOffset,
+	}
+
+	if err := filter.Validate(); err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+
+	// Create client
+	client, err := getActivityClient(logger.Sugar())
+	if err != nil {
+		return outputActivityError(err, "CONNECTION_ERROR")
+	}
+
+	// Fetch activities
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	activities, total, err := client.ListActivities(ctx, filter)
+	if err != nil {
+		return outputActivityError(err, "FETCH_ERROR")
+	}
+
+	// Format output
+	outputFormat := ResolveOutputFormat()
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return err
+	}
+
+	if outputFormat == "json" || outputFormat == "yaml" {
+		data := map[string]interface{}{
+			"activities": activities,
+			"total":      total,
+			"limit":      filter.Limit,
+			"offset":     filter.Offset,
+		}
+		result, err := formatter.Format(data)
+		if err != nil {
+			return err
+		}
+		fmt.Println(result)
+		return nil
+	}
+
+	// Table output
+	if len(activities) == 0 {
+		fmt.Println("No activities found")
+		return nil
+	}
+
+	headers := []string{"ID", "TYPE", "SERVER", "TOOL", "STATUS", "DURATION", "TIME"}
+	rows := make([][]string, 0, len(activities))
+
+	for _, act := range activities {
+		id := getStringField(act, "id")
+		actType := getStringField(act, "type")
+		server := getStringField(act, "server_name")
+		tool := getStringField(act, "tool_name")
+		status := getStringField(act, "status")
+		durationMs := getIntField(act, "duration_ms")
+		timestamp := getStringField(act, "timestamp")
+
+		// Parse and format timestamp
+		timeStr := timestamp
+		if t, err := time.Parse(time.RFC3339, timestamp); err == nil {
+			timeStr = formatRelativeTime(t)
+		}
+
+		// Truncate ID for display
+		if len(id) > 13 {
+			id = id[:13]
+		}
+
+		// Truncate type
+		if len(actType) > 12 {
+			actType = actType[:12]
+		}
+
+		rows = append(rows, []string{
+			id,
+			actType,
+			server,
+			tool,
+			status,
+			formatActivityDuration(int64(durationMs)),
+			timeStr,
+		})
+	}
+
+	result, err := formatter.FormatTable(headers, rows)
+	if err != nil {
+		return err
+	}
+	fmt.Print(result)
+
+	// Show pagination info
+	fmt.Printf("\nShowing %d of %d records", len(activities), total)
+	if filter.Offset > 0 || total > filter.Limit {
+		page := (filter.Offset / filter.Limit) + 1
+		fmt.Printf(" (page %d)", page)
+	}
+	fmt.Println()
+
+	return nil
+}
+
+// runActivityWatch implements the activity watch command
+func runActivityWatch(cmd *cobra.Command, _ []string) error {
+	// Setup logger
+	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
+	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
+	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
+
+	logger, err := logs.SetupCommandLogger(false, cmdLogLevel, cmdLogToFile, cmdLogDir)
+	if err != nil {
+		return fmt.Errorf("failed to setup logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	// Load config to get endpoint
+	cfg, err := config.Load()
+	if err != nil {
+		return outputActivityError(err, "CONFIG_ERROR")
+	}
+
+	// Build SSE URL
+	baseURL := "http://" + cfg.Listen
+	sseURL := baseURL + "/events"
+	if cfg.APIKey != "" {
+		sseURL += "?apikey=" + cfg.APIKey
+	}
+
+	// Setup context with signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Fprintln(os.Stderr, "\nReceived interrupt, stopping...")
+		cancel()
+	}()
+
+	outputFormat := ResolveOutputFormat()
+
+	// Watch with reconnection
+	return watchWithReconnect(ctx, sseURL, outputFormat, logger.Sugar())
+}
+
+// watchWithReconnect watches the SSE stream with automatic reconnection
+func watchWithReconnect(ctx context.Context, sseURL string, outputFormat string, logger *zap.SugaredLogger) error {
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		err := watchActivityStream(ctx, sseURL, outputFormat, logger)
+
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Connection lost: %v. Reconnecting in %v...\n", err, backoff)
+			time.Sleep(backoff)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		backoff = 1 * time.Second
+	}
+}
+
+// watchActivityStream connects to SSE and streams events
+func watchActivityStream(ctx context.Context, sseURL string, outputFormat string, _ *zap.SugaredLogger) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	client := &http.Client{Timeout: 0} // No timeout for SSE
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	var eventType, eventData string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			eventType = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			eventData = strings.TrimPrefix(line, "data: ")
+		case line == "":
+			// Empty line = event complete
+			if strings.HasPrefix(eventType, "activity.") {
+				displayActivityEvent(eventType, eventData, outputFormat)
+			}
+			eventType, eventData = "", ""
+		}
+	}
+
+	return scanner.Err()
+}
+
+// displayActivityEvent formats and displays an SSE activity event
+func displayActivityEvent(eventType, eventData, outputFormat string) {
+	if outputFormat == "json" {
+		// NDJSON output
+		fmt.Println(eventData)
+		return
+	}
+
+	// Parse event data
+	var event map[string]interface{}
+	if err := json.Unmarshal([]byte(eventData), &event); err != nil {
+		return
+	}
+
+	// Apply client-side filters
+	if activityServer != "" {
+		if server := getStringField(event, "server"); server != activityServer {
+			return
+		}
+	}
+	if activityType != "" {
+		// Event type is like "activity.tool_call.completed", extract the middle part
+		parts := strings.Split(eventType, ".")
+		if len(parts) >= 2 && parts[1] != activityType {
+			return
+		}
+	}
+
+	// Format for table output: [HH:MM:SS] server:tool status duration
+	timestamp := time.Now().Format("15:04:05")
+	server := getStringField(event, "server")
+	tool := getStringField(event, "tool")
+	status := getStringField(event, "status")
+	durationMs := getIntField(event, "duration_ms")
+	errMsg := getStringField(event, "error")
+
+	// Status indicator
+	statusIcon := "?"
+	switch status {
+	case "success":
+		statusIcon = "\u2713" // checkmark
+	case "error":
+		statusIcon = "\u2717" // X
+	case "blocked":
+		statusIcon = "\u2298" // circle with slash
+	}
+
+	line := fmt.Sprintf("[%s] %s:%s %s %s", timestamp, server, tool, statusIcon, formatActivityDuration(int64(durationMs)))
+	if errMsg != "" {
+		line += " " + errMsg
+	}
+	if status == "blocked" {
+		line += " BLOCKED"
+	}
+
+	fmt.Println(line)
+}
+
+// runActivityShow implements the activity show command
+func runActivityShow(cmd *cobra.Command, args []string) error {
+	activityID := args[0]
+
+	// Setup logger
+	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
+	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
+	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
+
+	logger, err := logs.SetupCommandLogger(false, cmdLogLevel, cmdLogToFile, cmdLogDir)
+	if err != nil {
+		return fmt.Errorf("failed to setup logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	// Create client
+	client, err := getActivityClient(logger.Sugar())
+	if err != nil {
+		return outputActivityError(err, "CONNECTION_ERROR")
+	}
+
+	// Fetch activity detail
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	activity, err := client.GetActivityDetail(ctx, activityID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return outputActivityError(fmt.Errorf("activity not found: %s", activityID), "ACTIVITY_NOT_FOUND")
+		}
+		return outputActivityError(err, "FETCH_ERROR")
+	}
+
+	// Format output
+	outputFormat := ResolveOutputFormat()
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return err
+	}
+
+	if outputFormat == "json" || outputFormat == "yaml" {
+		result, err := formatter.Format(activity)
+		if err != nil {
+			return err
+		}
+		fmt.Println(result)
+		return nil
+	}
+
+	// Table output - key-value pairs
+	fmt.Println("Activity Details")
+	fmt.Println("================")
+	fmt.Println()
+
+	fmt.Printf("ID:           %s\n", getStringField(activity, "id"))
+	fmt.Printf("Type:         %s\n", getStringField(activity, "type"))
+	fmt.Printf("Server:       %s\n", getStringField(activity, "server_name"))
+	fmt.Printf("Tool:         %s\n", getStringField(activity, "tool_name"))
+	fmt.Printf("Status:       %s\n", getStringField(activity, "status"))
+	fmt.Printf("Duration:     %s\n", formatActivityDuration(int64(getIntField(activity, "duration_ms"))))
+	fmt.Printf("Timestamp:    %s\n", getStringField(activity, "timestamp"))
+
+	if sessionID := getStringField(activity, "session_id"); sessionID != "" {
+		fmt.Printf("Session ID:   %s\n", sessionID)
+	}
+
+	if errMsg := getStringField(activity, "error_message"); errMsg != "" {
+		fmt.Printf("Error:        %s\n", errMsg)
+	}
+
+	// Arguments
+	if args, ok := activity["arguments"].(map[string]interface{}); ok && len(args) > 0 {
+		fmt.Println()
+		fmt.Println("Arguments:")
+		argsJSON, _ := json.MarshalIndent(args, "  ", "  ")
+		fmt.Printf("  %s\n", string(argsJSON))
+	}
+
+	// Response (if included)
+	if activityIncludeResponse {
+		if response := getStringField(activity, "response"); response != "" {
+			fmt.Println()
+			fmt.Println("Response:")
+			fmt.Printf("  %s\n", response)
+
+			if truncated, ok := activity["response_truncated"].(bool); ok && truncated {
+				fmt.Println("  (response was truncated)")
+			}
+		}
+	}
+
+	return nil
+}
+
+// runActivitySummary implements the activity summary command
+func runActivitySummary(cmd *cobra.Command, _ []string) error {
+	// Setup logger
+	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
+	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
+	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
+
+	logger, err := logs.SetupCommandLogger(false, cmdLogLevel, cmdLogToFile, cmdLogDir)
+	if err != nil {
+		return fmt.Errorf("failed to setup logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	// Validate period
+	validPeriods := []string{"1h", "24h", "7d", "30d"}
+	valid := false
+	for _, p := range validPeriods {
+		if activityPeriod == p {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return outputActivityError(fmt.Errorf("invalid period '%s': must be one of %v", activityPeriod, validPeriods), "INVALID_PERIOD")
+	}
+
+	// Create client
+	client, err := getActivityClient(logger.Sugar())
+	if err != nil {
+		return outputActivityError(err, "CONNECTION_ERROR")
+	}
+
+	// Fetch summary
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	summary, err := client.GetActivitySummary(ctx, activityPeriod, activityGroupBy)
+	if err != nil {
+		return outputActivityError(err, "FETCH_ERROR")
+	}
+
+	// Format output
+	outputFormat := ResolveOutputFormat()
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return err
+	}
+
+	if outputFormat == "json" || outputFormat == "yaml" {
+		result, err := formatter.Format(summary)
+		if err != nil {
+			return err
+		}
+		fmt.Println(result)
+		return nil
+	}
+
+	// Table output
+	period := getStringField(summary, "period")
+	totalCount := getIntField(summary, "total_count")
+	successCount := getIntField(summary, "success_count")
+	errorCount := getIntField(summary, "error_count")
+	blockedCount := getIntField(summary, "blocked_count")
+
+	fmt.Printf("Activity Summary (last %s)\n", period)
+	fmt.Println("===========================")
+	fmt.Println()
+
+	// Calculate percentages
+	successPct := float64(0)
+	errorPct := float64(0)
+	blockedPct := float64(0)
+	if totalCount > 0 {
+		successPct = float64(successCount) / float64(totalCount) * 100
+		errorPct = float64(errorCount) / float64(totalCount) * 100
+		blockedPct = float64(blockedCount) / float64(totalCount) * 100
+	}
+
+	fmt.Printf("%-15s %s\n", "METRIC", "VALUE")
+	fmt.Printf("%-15s %s\n", strings.Repeat("-", 15), strings.Repeat("-", 20))
+	fmt.Printf("%-15s %d\n", "Total Calls", totalCount)
+	fmt.Printf("%-15s %d (%.1f%%)\n", "Successful", successCount, successPct)
+	fmt.Printf("%-15s %d (%.1f%%)\n", "Errors", errorCount, errorPct)
+	fmt.Printf("%-15s %d (%.1f%%)\n", "Blocked", blockedCount, blockedPct)
+
+	// Top servers
+	if topServers, ok := summary["top_servers"].([]interface{}); ok && len(topServers) > 0 {
+		fmt.Println()
+		fmt.Println("TOP SERVERS")
+		fmt.Println(strings.Repeat("-", 30))
+		for _, s := range topServers {
+			if srv, ok := s.(map[string]interface{}); ok {
+				name := getStringField(srv, "name")
+				count := getIntField(srv, "count")
+				fmt.Printf("%-20s %d calls\n", name, count)
+			}
+		}
+	}
+
+	// Top tools
+	if topTools, ok := summary["top_tools"].([]interface{}); ok && len(topTools) > 0 {
+		fmt.Println()
+		fmt.Println("TOP TOOLS")
+		fmt.Println(strings.Repeat("-", 40))
+		for _, t := range topTools {
+			if tool, ok := t.(map[string]interface{}); ok {
+				server := getStringField(tool, "server")
+				toolName := getStringField(tool, "tool")
+				count := getIntField(tool, "count")
+				fmt.Printf("%-30s %d calls\n", server+":"+toolName, count)
+			}
+		}
+	}
+
+	return nil
+}
+
+// runActivityExport implements the activity export command
+func runActivityExport(cmd *cobra.Command, _ []string) error {
+	// Setup logger
+	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
+	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
+	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
+
+	logger, err := logs.SetupCommandLogger(false, cmdLogLevel, cmdLogToFile, cmdLogDir)
+	if err != nil {
+		return fmt.Errorf("failed to setup logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	// Validate format
+	if activityExportFormat != "json" && activityExportFormat != "csv" {
+		return outputActivityError(fmt.Errorf("invalid format '%s': must be 'json' or 'csv'", activityExportFormat), "INVALID_FORMAT")
+	}
+
+	// Load config - use explicit config file if provided via -c flag
+	var cfg *config.Config
+	if configFile != "" {
+		cfg, err = config.LoadFromFile(configFile)
+	} else {
+		cfg, err = config.Load()
+	}
+	if err != nil {
+		return outputActivityError(err, "CONFIG_ERROR")
+	}
+
+	// Build export URL
+	listen := cfg.Listen
+	if strings.HasPrefix(listen, ":") {
+		listen = "127.0.0.1" + listen
+	}
+	baseURL := "http://" + listen
+	exportURL := baseURL + "/api/v1/activity/export"
+
+	q := url.Values{}
+	q.Set("format", activityExportFormat)
+	if activityType != "" {
+		q.Set("type", activityType)
+	}
+	if activityServer != "" {
+		q.Set("server", activityServer)
+	}
+	if activityTool != "" {
+		q.Set("tool", activityTool)
+	}
+	if activityStatus != "" {
+		q.Set("status", activityStatus)
+	}
+	if activitySessionID != "" {
+		q.Set("session_id", activitySessionID)
+	}
+	if activityStartTime != "" {
+		q.Set("start_time", activityStartTime)
+	}
+	if activityEndTime != "" {
+		q.Set("end_time", activityEndTime)
+	}
+	if activityIncludeBodies {
+		q.Set("include_bodies", "true")
+	}
+
+	exportURL += "?" + q.Encode()
+
+	// Create HTTP request
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, exportURL, nil)
+	if err != nil {
+		return outputActivityError(err, "REQUEST_ERROR")
+	}
+
+	// Add API key header
+	if cfg.APIKey != "" {
+		req.Header.Set("X-API-Key", cfg.APIKey)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return outputActivityError(err, "CONNECTION_ERROR")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return outputActivityError(fmt.Errorf("server returned %d: %s", resp.StatusCode, string(body)), "EXPORT_ERROR")
+	}
+
+	// Determine output destination
+	var w io.Writer = os.Stdout
+	if activityExportOutput != "" {
+		f, err := os.Create(activityExportOutput)
+		if err != nil {
+			return outputActivityError(fmt.Errorf("failed to create output file: %w", err), "FILE_ERROR")
+		}
+		defer f.Close()
+		w = f
+	}
+
+	// Stream response to output
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		return outputActivityError(fmt.Errorf("failed to write output: %w", err), "WRITE_ERROR")
+	}
+
+	// Report success for file output
+	if activityExportOutput != "" {
+		fmt.Fprintf(os.Stderr, "Exported to %s\n", activityExportOutput)
+	}
+
+	return nil
+}
