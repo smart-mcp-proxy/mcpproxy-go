@@ -176,14 +176,22 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	toolName := getStringPayload(evt.Payload, "tool_name")
 	sessionID := getStringPayload(evt.Payload, "session_id")
 	requestID := getStringPayload(evt.Payload, "request_id")
+	source := getStringPayload(evt.Payload, "source")
 	status := getStringPayload(evt.Payload, "status")
 	errorMsg := getStringPayload(evt.Payload, "error_message")
 	response := getStringPayload(evt.Payload, "response")
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
 	durationMs := getInt64Payload(evt.Payload, "duration_ms")
 
+	// Default source to "mcp" if not specified (backwards compatibility)
+	activitySource := storage.ActivitySourceMCP
+	if source != "" {
+		activitySource = storage.ActivitySource(source)
+	}
+
 	record := &storage.ActivityRecord{
 		Type:              storage.ActivityTypeToolCall,
+		Source:            activitySource,
 		ServerName:        serverName,
 		ToolName:          toolName,
 		Response:          response,

@@ -18,10 +18,23 @@ const (
 	ActivityTypeServerChange ActivityType = "server_change"
 )
 
+// ActivitySource indicates how the activity was triggered
+type ActivitySource string
+
+const (
+	// ActivitySourceMCP indicates the activity was triggered via MCP protocol (AI agent)
+	ActivitySourceMCP ActivitySource = "mcp"
+	// ActivitySourceCLI indicates the activity was triggered via CLI command
+	ActivitySourceCLI ActivitySource = "cli"
+	// ActivitySourceAPI indicates the activity was triggered via REST API
+	ActivitySourceAPI ActivitySource = "api"
+)
+
 // ActivityRecord represents an activity record in API responses
 type ActivityRecord struct {
 	ID                string                 `json:"id"`                           // Unique identifier (ULID format)
 	Type              ActivityType           `json:"type"`                         // Type of activity
+	Source            ActivitySource         `json:"source,omitempty"`             // How activity was triggered: "mcp", "cli", "api"
 	ServerName        string                 `json:"server_name,omitempty"`        // Name of upstream MCP server
 	ToolName          string                 `json:"tool_name,omitempty"`          // Name of tool called
 	Arguments         map[string]interface{} `json:"arguments,omitempty"`          // Tool call arguments
