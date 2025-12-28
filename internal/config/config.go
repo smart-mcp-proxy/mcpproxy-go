@@ -111,6 +111,9 @@ type Config struct {
 	ActivityMaxRecords         int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`                   // Max records before pruning (default: 100000)
 	ActivityMaxResponseSize    int `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
 	ActivityCleanupIntervalMin int `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
+
+	// Intent declaration settings (Spec 018)
+	IntentDeclaration *IntentDeclarationConfig `json:"intent_declaration,omitempty" mapstructure:"intent-declaration"`
 }
 
 // TLSConfig represents TLS configuration
@@ -364,6 +367,29 @@ type ToolAnnotations struct {
 	OpenWorldHint   *bool  `json:"openWorldHint,omitempty"`
 }
 
+// IntentDeclarationConfig controls intent validation behavior for tool calls
+type IntentDeclarationConfig struct {
+	// StrictServerValidation controls whether server annotation mismatches
+	// cause rejection (true) or just warnings (false).
+	// Default: true (reject mismatches)
+	StrictServerValidation bool `json:"strict_server_validation" mapstructure:"strict-server-validation"`
+}
+
+// DefaultIntentDeclarationConfig returns the default intent declaration configuration
+func DefaultIntentDeclarationConfig() *IntentDeclarationConfig {
+	return &IntentDeclarationConfig{
+		StrictServerValidation: true, // Security by default
+	}
+}
+
+// IsStrictServerValidation returns whether strict server validation is enabled
+func (c *IntentDeclarationConfig) IsStrictServerValidation() bool {
+	if c == nil {
+		return true // Default to strict for security
+	}
+	return c.StrictServerValidation
+}
+
 // ToolRegistration represents a tool registration
 type ToolRegistration struct {
 	Name         string                 `json:"name"`
@@ -569,6 +595,9 @@ func DefaultConfig() *Config {
 		ActivityMaxRecords:         100000, // 100K records max
 		ActivityMaxResponseSize:    65536,  // 64KB response truncation
 		ActivityCleanupIntervalMin: 60,     // 1 hour cleanup interval
+
+		// Intent declaration defaults (Spec 018) - strict validation by default for security
+		IntentDeclaration: DefaultIntentDeclarationConfig(),
 	}
 }
 
@@ -896,6 +925,11 @@ func (c *Config) Validate() error {
 			DefaultModel: "gpt-4",       // Default to GPT-4 tokenization
 			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
 		}
+	}
+
+	// Ensure IntentDeclaration config is not nil
+	if c.IntentDeclaration == nil {
+		c.IntentDeclaration = DefaultIntentDeclarationConfig()
 	}
 
 	return nil

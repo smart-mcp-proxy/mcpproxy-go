@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/contracts"
 )
 
 // TestEnvironment holds all test dependencies
@@ -504,13 +505,16 @@ func TestE2E_ToolCalling(t *testing.T) {
 	// Wait for tools to be discovered and indexed
 	time.Sleep(3 * time.Second)
 
-	// Call tool through proxy
+	// Call tool through proxy using call_tool_write with required intent
 	callRequest := mcp.CallToolRequest{}
-	callRequest.Params.Name = "call_tool"
+	callRequest.Params.Name = "call_tool_write"
 	callRequest.Params.Arguments = map[string]interface{}{
 		"name": "echoserver:echo_tool",
 		"args": map[string]interface{}{
 			"message": "Hello from e2e test!",
+		},
+		"intent": map[string]interface{}{
+			"operation_type": "write",
 		},
 	}
 
@@ -628,12 +632,15 @@ func TestE2E_ErrorHandling(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Test calling non-existent tool
+	// Test calling non-existent tool using call_tool_write with required intent
 	callRequest := mcp.CallToolRequest{}
-	callRequest.Params.Name = "call_tool"
+	callRequest.Params.Name = "call_tool_write"
 	callRequest.Params.Arguments = map[string]interface{}{
 		"name": "nonexistent:tool",
 		"args": map[string]interface{}{},
+		"intent": map[string]interface{}{
+			"operation_type": "write",
+		},
 	}
 
 	callResult, err := mcpClient.CallTool(ctx, callRequest)
@@ -1393,4 +1400,224 @@ func TestE2E_ClearEnvWithEmptyJson(t *testing.T) {
 	assert.False(t, deleteResult.IsError, "Delete operation should succeed")
 
 	t.Log("✅ Test passed: Clear env with empty JSON works correctly")
+}
+
+// Test: Intent Declaration Tool Variants (Spec 018)
+// Tests that the three tool variants (call_tool_read, call_tool_write, call_tool_destructive) work correctly
+func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	// Create mock upstream server
+	mockTools := []mcp.Tool{
+		{
+			Name:        "read_data",
+			Description: "Reads data without modification",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Data ID to read",
+					},
+				},
+			},
+		},
+		{
+			Name:        "write_data",
+			Description: "Writes data to storage",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Data ID",
+					},
+					"value": map[string]interface{}{
+						"type":        "string",
+						"description": "Value to write",
+					},
+				},
+			},
+		},
+		{
+			Name:        "delete_data",
+			Description: "Permanently deletes data",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Data ID to delete",
+					},
+				},
+			},
+		},
+	}
+
+	mockServer := env.CreateMockUpstreamServer("dataserver", mockTools)
+
+	// Connect client and add upstream server
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Add upstream server
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "dataserver",
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	_, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+
+	// Unquarantine the server for testing
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("dataserver")
+	require.NoError(t, err)
+	serverConfig.Quarantined = false
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
+	require.NoError(t, err)
+
+	// Reload configuration
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	require.NoError(t, err)
+
+	// Wait for supervisor to reconcile and client to connect
+	time.Sleep(3 * time.Second)
+
+	// Trigger tool discovery and indexing
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
+	time.Sleep(3 * time.Second)
+
+	// Test 1: call_tool_read with matching intent
+	t.Run("call_tool_read with matching intent succeeds", func(t *testing.T) {
+		readRequest := mcp.CallToolRequest{}
+		readRequest.Params.Name = contracts.ToolVariantRead
+		readRequest.Params.Arguments = map[string]interface{}{
+			"name": "dataserver:read_data",
+			"args": map[string]interface{}{
+				"id": "test-123",
+			},
+			"intent": map[string]interface{}{
+				"operation_type": contracts.OperationTypeRead,
+				"reason":         "Reading test data for verification",
+			},
+		}
+
+		result, err := mcpClient.CallTool(ctx, readRequest)
+		require.NoError(t, err)
+		assert.False(t, result.IsError, "call_tool_read with matching intent should succeed")
+		t.Log("✅ call_tool_read with matching intent succeeded")
+	})
+
+	// Test 2: call_tool_write with matching intent
+	t.Run("call_tool_write with matching intent succeeds", func(t *testing.T) {
+		writeRequest := mcp.CallToolRequest{}
+		writeRequest.Params.Name = contracts.ToolVariantWrite
+		writeRequest.Params.Arguments = map[string]interface{}{
+			"name": "dataserver:write_data",
+			"args": map[string]interface{}{
+				"id":    "test-456",
+				"value": "new value",
+			},
+			"intent": map[string]interface{}{
+				"operation_type":   contracts.OperationTypeWrite,
+				"data_sensitivity": contracts.DataSensitivityInternal,
+				"reason":           "Updating test data",
+			},
+		}
+
+		result, err := mcpClient.CallTool(ctx, writeRequest)
+		require.NoError(t, err)
+		assert.False(t, result.IsError, "call_tool_write with matching intent should succeed")
+		t.Log("✅ call_tool_write with matching intent succeeded")
+	})
+
+	// Test 3: call_tool_destructive with matching intent
+	t.Run("call_tool_destructive with matching intent succeeds", func(t *testing.T) {
+		destructiveRequest := mcp.CallToolRequest{}
+		destructiveRequest.Params.Name = contracts.ToolVariantDestructive
+		destructiveRequest.Params.Arguments = map[string]interface{}{
+			"name": "dataserver:delete_data",
+			"args": map[string]interface{}{
+				"id": "test-789",
+			},
+			"intent": map[string]interface{}{
+				"operation_type":   contracts.OperationTypeDestructive,
+				"data_sensitivity": contracts.DataSensitivityPrivate,
+				"reason":           "User requested deletion",
+			},
+		}
+
+		result, err := mcpClient.CallTool(ctx, destructiveRequest)
+		require.NoError(t, err)
+		assert.False(t, result.IsError, "call_tool_destructive with matching intent should succeed")
+		t.Log("✅ call_tool_destructive with matching intent succeeded")
+	})
+
+	// Test 4: Intent mismatch should fail (call_tool_read with write intent)
+	t.Run("call_tool_read with write intent fails", func(t *testing.T) {
+		mismatchRequest := mcp.CallToolRequest{}
+		mismatchRequest.Params.Name = contracts.ToolVariantRead
+		mismatchRequest.Params.Arguments = map[string]interface{}{
+			"name": "dataserver:read_data",
+			"args": map[string]interface{}{
+				"id": "test-123",
+			},
+			"intent": map[string]interface{}{
+				"operation_type": contracts.OperationTypeWrite, // Mismatch!
+			},
+		}
+
+		result, err := mcpClient.CallTool(ctx, mismatchRequest)
+		require.NoError(t, err)
+		assert.True(t, result.IsError, "call_tool_read with write intent should fail")
+
+		// Verify error message mentions mismatch
+		if len(result.Content) > 0 {
+			contentBytes, _ := json.Marshal(result.Content[0])
+			contentStr := string(contentBytes)
+			assert.Contains(t, strings.ToLower(contentStr), "mismatch", "Error should mention intent mismatch")
+		}
+		t.Log("✅ call_tool_read with write intent correctly rejected")
+	})
+
+	// Test 5: Missing intent should fail
+	t.Run("call_tool_write without intent fails", func(t *testing.T) {
+		noIntentRequest := mcp.CallToolRequest{}
+		noIntentRequest.Params.Name = contracts.ToolVariantWrite
+		noIntentRequest.Params.Arguments = map[string]interface{}{
+			"name": "dataserver:write_data",
+			"args": map[string]interface{}{
+				"id":    "test-456",
+				"value": "new value",
+			},
+			// No intent provided
+		}
+
+		result, err := mcpClient.CallTool(ctx, noIntentRequest)
+		require.NoError(t, err)
+		assert.True(t, result.IsError, "call_tool_write without intent should fail")
+
+		// Verify error message mentions missing intent
+		if len(result.Content) > 0 {
+			contentBytes, _ := json.Marshal(result.Content[0])
+			contentStr := string(contentBytes)
+			assert.Contains(t, strings.ToLower(contentStr), "intent", "Error should mention intent requirement")
+		}
+		t.Log("✅ call_tool_write without intent correctly rejected")
+	})
+
+	t.Log("✅ All Intent Declaration tool variant tests passed")
 }
