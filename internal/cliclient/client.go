@@ -968,9 +968,11 @@ func (c *Client) GetActivityDetail(ctx context.Context, activityID string) (map[
 	}
 
 	var apiResp struct {
-		Success bool                   `json:"success"`
-		Data    map[string]interface{} `json:"data"`
-		Error   string                 `json:"error"`
+		Success bool `json:"success"`
+		Data    struct {
+			Activity map[string]interface{} `json:"activity"`
+		} `json:"data"`
+		Error string `json:"error"`
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -981,7 +983,7 @@ func (c *Client) GetActivityDetail(ctx context.Context, activityID string) (map[
 		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
 	}
 
-	return apiResp.Data, nil
+	return apiResp.Data.Activity, nil
 }
 
 // GetActivitySummary retrieves activity summary statistics.

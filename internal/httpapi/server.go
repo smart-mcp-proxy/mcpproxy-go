@@ -400,6 +400,7 @@ func (s *Server) setupRoutes() {
 
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
+		r.Get("/activity/summary", s.handleActivitySummary)
 		r.Get("/activity/export", s.handleExportActivity)
 		r.Get("/activity/{id}", s.handleGetActivityDetail)
 	})
