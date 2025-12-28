@@ -172,6 +172,63 @@ components:
         type:
           $ref: '#/components/schemas/contracts.ActivityType'
       type: object
+    contracts.ActivitySummaryResponse:
+      properties:
+        blocked_count:
+          description: Count of blocked activities
+          type: integer
+        end_time:
+          description: End of the period (RFC3339)
+          type: string
+        error_count:
+          description: Count of error activities
+          type: integer
+        period:
+          description: Time period (1h, 24h, 7d, 30d)
+          type: string
+        start_time:
+          description: Start of the period (RFC3339)
+          type: string
+        success_count:
+          description: Count of successful activities
+          type: integer
+        top_servers:
+          description: Top servers by activity count
+          items:
+            $ref: '#/components/schemas/contracts.ActivityTopServer'
+          type: array
+          uniqueItems: false
+        top_tools:
+          description: Top tools by activity count
+          items:
+            $ref: '#/components/schemas/contracts.ActivityTopTool'
+          type: array
+          uniqueItems: false
+        total_count:
+          description: Total activity count
+          type: integer
+      type: object
+    contracts.ActivityTopServer:
+      properties:
+        count:
+          description: Activity count
+          type: integer
+        name:
+          description: Server name
+          type: string
+      type: object
+    contracts.ActivityTopTool:
+      properties:
+        count:
+          description: Activity count
+          type: integer
+        server:
+          description: Server name
+          type: string
+        tool:
+          description: Tool name
+          type: string
+      type: object
     contracts.ActivityType:
       description: Type of activity
       type: string
@@ -1304,6 +1361,64 @@ paths:
       - ApiKeyHeader: []
       - ApiKeyQuery: []
       summary: Export activity records
+      tags:
+      - Activity
+  /api/v1/activity/summary:
+    get:
+      description: Returns aggregated activity statistics for a time period
+      parameters:
+      - description: 'Time period: 1h, 24h (default), 7d, 30d'
+        in: query
+        name: period
+        schema:
+          type: string
+      - description: 'Group by: server, tool (optional)'
+        in: query
+        name: group_by
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data: {}
+                  error:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Unauthorized
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Internal Server Error
+      security:
+      - ApiKeyHeader: []
+      - ApiKeyQuery: []
+      summary: Get activity summary statistics
       tags:
       - Activity
   /api/v1/config:
