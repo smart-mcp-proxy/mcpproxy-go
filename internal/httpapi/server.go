@@ -2602,8 +2602,12 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set request source to CLI for REST API tool calls (typically from CLI)
+	// This allows activity logging to distinguish between MCP protocol and CLI calls
+	ctx := reqcontext.WithRequestSource(r.Context(), reqcontext.SourceCLI)
+
 	// Call tool via controller
-	result, err := s.controller.CallTool(r.Context(), request.ToolName, request.Arguments)
+	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)
 	if err != nil {
 		s.logger.Error("Failed to call tool", "tool", request.ToolName, "error", err)
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to call tool: %v", err))

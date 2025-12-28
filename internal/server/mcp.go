@@ -19,6 +19,7 @@ import (
 	"mcpproxy-go/internal/jsruntime"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/registries"
+	"mcpproxy-go/internal/reqcontext"
 	"mcpproxy-go/internal/server/tokens"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
@@ -238,15 +239,18 @@ func (p *MCPProxyServer) Close() error {
 }
 
 // emitActivityEvent safely emits an activity event if runtime is available
-func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessionID, requestID string, args map[string]any) {
+// source indicates how the call was triggered: "mcp", "cli", or "api"
+func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, source string, args map[string]any) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallStarted(serverName, toolName, sessionID, requestID, args)
+		p.mainServer.runtime.EmitActivityToolCallStarted(serverName, toolName, sessionID, requestID, source, args)
 	}
 }
 
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
+// emitActivityToolCallCompleted safely emits a tool call completion event if runtime is available
+// source indicates how the call was triggered: "mcp", "cli", or "api"
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, status, errorMsg, durationMs, response, responseTruncated)
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, response, responseTruncated)
 	}
 }
 
@@ -909,11 +913,24 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 	}
 
+	// Determine activity source from context (CLI/API calls set this, MCP calls have session)
+	activitySource := "mcp"
+	if reqSource := reqcontext.GetRequestSource(ctx); reqSource != reqcontext.SourceUnknown {
+		switch reqSource {
+		case reqcontext.SourceCLI:
+			activitySource = "cli"
+		case reqcontext.SourceRESTAPI:
+			activitySource = "api"
+		default:
+			activitySource = "mcp"
+		}
+	}
+
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
 
-	// Emit activity started event
-	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, args)
+	// Emit activity started event with determined source
+	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
@@ -1015,8 +1032,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
-		// Emit activity completed event for error
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, "error", err.Error(), duration.Milliseconds(), "", false)
+		// Emit activity completed event for error with determined source
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -1110,9 +1127,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
-	// Emit activity completed event for success
+	// Emit activity completed event for success with determined source
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, "success", "", duration.Milliseconds(), response, responseTruncated)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated)
 
 	return mcp.NewToolResultText(response), nil
 }
