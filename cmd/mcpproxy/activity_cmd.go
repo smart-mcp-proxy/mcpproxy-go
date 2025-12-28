@@ -219,6 +219,111 @@ func formatSourceDescription(source string) string {
 	}
 }
 
+// formatIntentIndicator extracts intent from activity metadata and returns visual indicator
+// Returns emoji indicators: 📖 read, ✏️ write, ⚠️ destructive, or "-" if no intent
+func formatIntentIndicator(activity map[string]interface{}) string {
+	// Extract metadata from activity
+	metadata := getMapField(activity, "metadata")
+	if metadata == nil {
+		return "-"
+	}
+
+	// Extract intent from metadata
+	intent := getMapField(metadata, "intent")
+	if intent == nil {
+		// Check for tool_variant as fallback
+		if toolVariant := getStringField(metadata, "tool_variant"); toolVariant != "" {
+			return formatOperationIcon(toolVariantToOperationType(toolVariant))
+		}
+		return "-"
+	}
+
+	// Get operation_type from intent
+	opType := getStringField(intent, "operation_type")
+	if opType == "" {
+		return "-"
+	}
+
+	return formatOperationIcon(opType)
+}
+
+// formatOperationIcon returns the visual indicator for an operation type
+func formatOperationIcon(opType string) string {
+	switch opType {
+	case "read":
+		return "📖" // Read operation
+	case "write":
+		return "✏️" // Write operation
+	case "destructive":
+		return "⚠️" // Destructive operation
+	default:
+		return "-"
+	}
+}
+
+// toolVariantToOperationType converts tool variant name to operation type
+func toolVariantToOperationType(variant string) string {
+	switch variant {
+	case "call_tool_read":
+		return "read"
+	case "call_tool_write":
+		return "write"
+	case "call_tool_destructive":
+		return "destructive"
+	default:
+		return ""
+	}
+}
+
+// displayIntentSection displays intent information for activity show command
+func displayIntentSection(activity map[string]interface{}) {
+	// Extract metadata from activity
+	metadata := getMapField(activity, "metadata")
+	if metadata == nil {
+		return
+	}
+
+	// Check if there's any intent-related data
+	toolVariant := getStringField(metadata, "tool_variant")
+	intent := getMapField(metadata, "intent")
+
+	if toolVariant == "" && intent == nil {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("Intent Declaration:")
+
+	// Display tool variant if present
+	if toolVariant != "" {
+		opType := toolVariantToOperationType(toolVariant)
+		fmt.Printf("  Tool Variant:      %s\n", toolVariant)
+		if opType != "" {
+			fmt.Printf("  Operation Type:    %s %s\n", formatOperationIcon(opType), opType)
+		}
+	}
+
+	// Display intent details if present
+	if intent != nil {
+		if opType := getStringField(intent, "operation_type"); opType != "" && toolVariant == "" {
+			fmt.Printf("  Operation Type:    %s %s\n", formatOperationIcon(opType), opType)
+		}
+		if sensitivity := getStringField(intent, "data_sensitivity"); sensitivity != "" {
+			fmt.Printf("  Data Sensitivity:  %s\n", sensitivity)
+		}
+		if reason := getStringField(intent, "reason"); reason != "" {
+			fmt.Printf("  Reason:            %s\n", reason)
+		}
+		if reversible, ok := intent["reversible"].(bool); ok {
+			reversibleStr := "no"
+			if reversible {
+				reversibleStr = "yes"
+			}
+			fmt.Printf("  Reversible:        %s\n", reversibleStr)
+		}
+	}
+}
+
 // outputActivityError outputs an error in the appropriate format
 func outputActivityError(err error, code string) error {
 	outputFormat := ResolveOutputFormat()
@@ -489,7 +594,7 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "STATUS", "DURATION", "TIME"}
+	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "INTENT", "STATUS", "DURATION", "TIME"}
 	rows := make([][]string, 0, len(activities))
 
 	for _, act := range activities {
@@ -501,6 +606,9 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		status := getStringField(act, "status")
 		durationMs := getIntField(act, "duration_ms")
 		timestamp := getStringField(act, "timestamp")
+
+		// Extract intent from metadata (Spec 018)
+		intentStr := formatIntentIndicator(act)
 
 		// Parse and format timestamp
 		timeStr := timestamp
@@ -522,6 +630,7 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			actType,
 			server,
 			tool,
+			intentStr,
 			status,
 			formatActivityDuration(int64(durationMs)),
 			timeStr,
@@ -793,6 +902,9 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 	if errMsg := getStringField(activity, "error_message"); errMsg != "" {
 		fmt.Printf("Error:        %s\n", errMsg)
 	}
+
+	// Intent information (Spec 018)
+	displayIntentSection(activity)
 
 	// Arguments
 	if args, ok := activity["arguments"].(map[string]interface{}); ok && len(args) > 0 {

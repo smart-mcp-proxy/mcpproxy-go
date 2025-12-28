@@ -54,3 +54,12 @@ func getStringArrayField(m map[string]interface{}, key string) []string {
 	}
 	return nil
 }
+
+func getMapField(m map[string]interface{}, key string) map[string]interface{} {
+	if v, ok := m[key]; ok && v != nil {
+		if mm, ok := v.(map[string]interface{}); ok {
+			return mm
+		}
+	}
+	return nil
+}

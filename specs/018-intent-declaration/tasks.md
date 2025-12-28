@@ -157,12 +157,12 @@
 
 ### Implementation for User Story 6
 
-- [ ] T047 [US6] Store intent in ActivityRecord.Metadata during tool calls in internal/server/mcp.go
-- [ ] T048 [US6] Store tool_variant in ActivityRecord.Metadata during tool calls in internal/server/mcp.go
-- [ ] T049 [US6] Add Intent column to activity list table output in cmd/mcpproxy/activity_cmd.go
-- [ ] T050 [US6] Add visual indicators for operation types (read/write/destruct) in cmd/mcpproxy/activity_cmd.go
-- [ ] T051 [US6] Ensure JSON/YAML output includes complete intent object in cmd/mcpproxy/activity_cmd.go
-- [ ] T052 [US6] Update activity show to display intent section in cmd/mcpproxy/activity_cmd.go
+- [x] T047 [US6] Store intent in ActivityRecord.Metadata during tool calls in internal/server/mcp.go
+- [x] T048 [US6] Store tool_variant in ActivityRecord.Metadata during tool calls in internal/server/mcp.go
+- [x] T049 [US6] Add Intent column to activity list table output in cmd/mcpproxy/activity_cmd.go
+- [x] T050 [US6] Add visual indicators for operation types (read/write/destruct) in cmd/mcpproxy/activity_cmd.go
+- [x] T051 [US6] Ensure JSON/YAML output includes complete intent object in cmd/mcpproxy/activity_cmd.go
+- [x] T052 [US6] Update activity show to display intent section in cmd/mcpproxy/activity_cmd.go
 
 **Checkpoint**: Users can see intent in activity output
 
