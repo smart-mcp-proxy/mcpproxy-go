@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -181,6 +182,33 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 	}
 }
 
+// storageToContractActivityForExport converts a storage ActivityRecord to a contracts ActivityRecord
+// with optional inclusion of request/response bodies for export.
+func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies bool) contracts.ActivityRecord {
+	record := contracts.ActivityRecord{
+		ID:                a.ID,
+		Type:              contracts.ActivityType(a.Type),
+		ServerName:        a.ServerName,
+		ToolName:          a.ToolName,
+		ResponseTruncated: a.ResponseTruncated,
+		Status:            a.Status,
+		ErrorMessage:      a.ErrorMessage,
+		DurationMs:        a.DurationMs,
+		Timestamp:         a.Timestamp,
+		SessionID:         a.SessionID,
+		RequestID:         a.RequestID,
+		Metadata:          a.Metadata,
+	}
+
+	// Only include request/response bodies when explicitly requested
+	if includeBodies {
+		record.Arguments = a.Arguments
+		record.Response = a.Response
+	}
+
+	return record
+}
+
 // handleExportActivity handles GET /api/v1/activity/export
 // @Summary Export activity records
 // @Description Exports activity records in JSON Lines or CSV format for compliance
@@ -211,6 +239,9 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = "json"
 	}
+
+	// Check if request/response bodies should be included
+	includeBodies := r.URL.Query().Get("include_bodies") == "true"
 
 	// Validate format
 	if format != "json" && format != "csv" {
@@ -254,7 +285,7 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 			line = activityToCSVRow(activity)
 		} else {
 			// JSON Lines format - one JSON object per line
-			contractActivity := storageToContractActivity(activity)
+			contractActivity := storageToContractActivityForExport(activity, includeBodies)
 			jsonBytes, err := json.Marshal(contractActivity)
 			if err != nil {
 				s.logger.Errorw("Failed to marshal activity for export", "error", err, "id", activity.ID)
@@ -308,4 +339,192 @@ func activityToCSVRow(a *storage.ActivityRecord) string {
 		escapeCSV(a.RequestID),
 		strconv.FormatBool(a.ResponseTruncated),
 	}, ",") + "\n"
+}
+
+// parsePeriodDuration converts a period string to a time.Duration.
+func parsePeriodDuration(period string) (time.Duration, error) {
+	switch period {
+	case "1h":
+		return time.Hour, nil
+	case "24h":
+		return 24 * time.Hour, nil
+	case "7d":
+		return 7 * 24 * time.Hour, nil
+	case "30d":
+		return 30 * 24 * time.Hour, nil
+	default:
+		return 0, fmt.Errorf("invalid period: %s", period)
+	}
+}
+
+// handleActivitySummary handles GET /api/v1/activity/summary
+// @Summary Get activity summary statistics
+// @Description Returns aggregated activity statistics for a time period
+// @Tags Activity
+// @Accept json
+// @Produce json
+// @Param period query string false "Time period: 1h, 24h (default), 7d, 30d"
+// @Param group_by query string false "Group by: server, tool (optional)"
+// @Success 200 {object} contracts.APIResponse{data=contracts.ActivitySummaryResponse}
+// @Failure 400 {object} contracts.APIResponse
+// @Failure 401 {object} contracts.APIResponse
+// @Failure 500 {object} contracts.APIResponse
+// @Security ApiKeyHeader
+// @Security ApiKeyQuery
+// @Router /api/v1/activity/summary [get]
+func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
+	// Parse period parameter
+	period := r.URL.Query().Get("period")
+	if period == "" {
+		period = "24h"
+	}
+
+	duration, err := parsePeriodDuration(period)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Calculate time range
+	endTime := time.Now().UTC()
+	startTime := endTime.Add(-duration)
+
+	// Build filter for the time range
+	filter := storage.DefaultActivityFilter()
+	filter.StartTime = startTime
+	filter.EndTime = endTime
+	filter.Limit = 0 // Get all records
+
+	// Get all activities in the time range
+	activities, _, err := s.controller.ListActivities(filter)
+	if err != nil {
+		s.logger.Errorw("Failed to list activities for summary", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to get activity summary")
+		return
+	}
+
+	// Calculate summary statistics
+	var totalCount, successCount, errorCount, blockedCount int
+	serverCounts := make(map[string]int)
+	toolCounts := make(map[string]int)
+
+	for _, a := range activities {
+		totalCount++
+		switch a.Status {
+		case "success":
+			successCount++
+		case "error":
+			errorCount++
+		case "blocked":
+			blockedCount++
+		}
+
+		// Count by server
+		if a.ServerName != "" {
+			serverCounts[a.ServerName]++
+		}
+
+		// Count by tool (server:tool)
+		if a.ServerName != "" && a.ToolName != "" {
+			key := a.ServerName + ":" + a.ToolName
+			toolCounts[key]++
+		}
+	}
+
+	// Build top servers list (top 5)
+	topServers := buildTopServers(serverCounts, 5)
+
+	// Build top tools list (top 5)
+	topTools := buildTopTools(toolCounts, 5)
+
+	response := contracts.ActivitySummaryResponse{
+		Period:       period,
+		TotalCount:   totalCount,
+		SuccessCount: successCount,
+		ErrorCount:   errorCount,
+		BlockedCount: blockedCount,
+		TopServers:   topServers,
+		TopTools:     topTools,
+		StartTime:    startTime.Format(time.RFC3339),
+		EndTime:      endTime.Format(time.RFC3339),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// buildTopServers returns top N servers by activity count.
+func buildTopServers(counts map[string]int, limit int) []contracts.ActivityTopServer {
+	// Convert map to slice for sorting
+	type serverCount struct {
+		name  string
+		count int
+	}
+	var servers []serverCount
+	for name, count := range counts {
+		servers = append(servers, serverCount{name, count})
+	}
+
+	// Sort by count descending
+	for i := 0; i < len(servers)-1; i++ {
+		for j := i + 1; j < len(servers); j++ {
+			if servers[j].count > servers[i].count {
+				servers[i], servers[j] = servers[j], servers[i]
+			}
+		}
+	}
+
+	// Take top N
+	if len(servers) > limit {
+		servers = servers[:limit]
+	}
+
+	result := make([]contracts.ActivityTopServer, len(servers))
+	for i, s := range servers {
+		result[i] = contracts.ActivityTopServer{
+			Name:  s.name,
+			Count: s.count,
+		}
+	}
+	return result
+}
+
+// buildTopTools returns top N tools by activity count.
+func buildTopTools(counts map[string]int, limit int) []contracts.ActivityTopTool {
+	// Convert map to slice for sorting
+	type toolCount struct {
+		key   string
+		count int
+	}
+	var tools []toolCount
+	for key, count := range counts {
+		tools = append(tools, toolCount{key, count})
+	}
+
+	// Sort by count descending
+	for i := 0; i < len(tools)-1; i++ {
+		for j := i + 1; j < len(tools); j++ {
+			if tools[j].count > tools[i].count {
+				tools[i], tools[j] = tools[j], tools[i]
+			}
+		}
+	}
+
+	// Take top N
+	if len(tools) > limit {
+		tools = tools[:limit]
+	}
+
+	result := make([]contracts.ActivityTopTool, len(tools))
+	for i, t := range tools {
+		// Split server:tool key
+		parts := strings.SplitN(t.key, ":", 2)
+		if len(parts) == 2 {
+			result[i] = contracts.ActivityTopTool{
+				Server: parts[0],
+				Tool:   parts[1],
+				Count:  t.count,
+			}
+		}
+	}
+	return result
 }

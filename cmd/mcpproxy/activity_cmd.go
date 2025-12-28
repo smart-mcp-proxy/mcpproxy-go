@@ -479,18 +479,13 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			timeStr = formatRelativeTime(t)
 		}
 
-		// Truncate ID for display
-		if len(id) > 13 {
-			id = id[:13]
-		}
-
-		// Truncate type
+		// Truncate type for display
 		if len(actType) > 12 {
 			actType = actType[:12]
 		}
 
 		rows = append(rows, []string{
-			id,
+			id, // Show full ID so it can be used with 'activity show'
 			actType,
 			server,
 			tool,
