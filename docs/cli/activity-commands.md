@@ -89,13 +89,18 @@ mcpproxy activity list --limit 20 --offset 40
 ### Output (Table)
 
 ```
-ID               TYPE         SERVER      TOOL           STATUS   DURATION   TIME
-01JFXYZ123ABC    tool_call    github      create_issue   success  245ms      2 min ago
-01JFXYZ123ABD    tool_call    filesystem  read_file      error    125ms      5 min ago
-01JFXYZ123ABE    policy       private     get_secret     blocked  0ms        10 min ago
+ID               SRC  TYPE         SERVER      TOOL           STATUS   DURATION   TIME
+01JFXYZ123ABC    MCP  tool_call    github      create_issue   success  245ms      2 min ago
+01JFXYZ123ABD    CLI  tool_call    filesystem  read_file      error    125ms      5 min ago
+01JFXYZ123ABE    MCP  policy       private     get_secret     blocked  0ms        10 min ago
 
 Showing 3 of 150 records (page 1)
 ```
+
+**Source Indicators:**
+- `MCP` - AI agent call via MCP protocol
+- `CLI` - Direct CLI command (`mcpproxy call tool`)
+- `API` - REST API call
 
 ### Output (JSON)
 
@@ -105,6 +110,7 @@ Showing 3 of 150 records (page 1)
     {
       "id": "01JFXYZ123ABC",
       "type": "tool_call",
+      "source": "mcp",
       "server_name": "github",
       "tool_name": "create_issue",
       "status": "success",
@@ -163,18 +169,20 @@ mcpproxy activity watch -o json
 ### Output (Table - Streaming)
 
 ```
-[10:30:45] github:create_issue ✓ 245ms
-[10:30:46] filesystem:write_file ✗ 125ms permission denied
-[10:30:47] private:get_data ⊘ BLOCKED policy:no-external
+[10:30:45] [MCP] github:create_issue ✓ 245ms
+[10:30:46] [CLI] filesystem:write_file ✗ 125ms permission denied
+[10:30:47] [MCP] private:get_data ⊘ BLOCKED policy:no-external
 ^C
 Received interrupt, stopping...
 ```
 
+Source indicators (`[MCP]`, `[CLI]`, `[API]`) show how the tool call was triggered.
+
 ### Output (JSON - NDJSON)
 
 ```json
-{"type":"activity.tool_call.completed","id":"01JFXYZ123ABC","server":"github","tool":"create_issue","status":"success","duration_ms":245}
-{"type":"activity.tool_call.completed","id":"01JFXYZ123ABD","server":"filesystem","tool":"write_file","status":"error","error":"permission denied"}
+{"type":"activity.tool_call.completed","id":"01JFXYZ123ABC","source":"mcp","server":"github","tool":"create_issue","status":"success","duration_ms":245}
+{"type":"activity.tool_call.completed","id":"01JFXYZ123ABD","source":"cli","server":"filesystem","tool":"write_file","status":"error","error":"permission denied"}
 ```
 
 ### Behavior
@@ -235,6 +243,7 @@ Activity Details
 
 ID:           01JFXYZ123ABC
 Type:         tool_call
+Source:       MCP (AI agent via MCP protocol)
 Server:       github
 Tool:         create_issue
 Status:       success
@@ -253,6 +262,11 @@ Response:
   Issue #123 created successfully
   URL: https://github.com/owner/repo/issues/123
 ```
+
+**Source Values:**
+- `MCP (AI agent via MCP protocol)` - Tool called by AI agent
+- `CLI (CLI command)` - Tool called via `mcpproxy call tool` CLI command
+- `API (REST API)` - Tool called via REST API directly
 
 ### Exit Codes
 
@@ -401,16 +415,16 @@ mcpproxy activity export --status error --output errors.jsonl
 ### Output (JSON - JSON Lines)
 
 ```json
-{"id":"01JFXYZ123ABC","type":"tool_call","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245,"timestamp":"2025-01-15T10:30:00Z"}
-{"id":"01JFXYZ123ABD","type":"tool_call","server_name":"filesystem","tool_name":"read_file","status":"error","duration_ms":125,"timestamp":"2025-01-15T10:30:01Z"}
+{"id":"01JFXYZ123ABC","type":"tool_call","source":"mcp","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245,"timestamp":"2025-01-15T10:30:00Z"}
+{"id":"01JFXYZ123ABD","type":"tool_call","source":"cli","server_name":"filesystem","tool_name":"read_file","status":"error","duration_ms":125,"timestamp":"2025-01-15T10:30:01Z"}
 ```
 
 ### Output (CSV)
 
 ```csv
-id,type,server_name,tool_name,status,duration_ms,timestamp,error_message
-01JFXYZ123ABC,tool_call,github,create_issue,success,245,2025-01-15T10:30:00Z,
-01JFXYZ123ABD,tool_call,filesystem,read_file,error,125,2025-01-15T10:30:01Z,permission denied
+id,type,source,server_name,tool_name,status,duration_ms,timestamp,error_message
+01JFXYZ123ABC,tool_call,mcp,github,create_issue,success,245,2025-01-15T10:30:00Z,
+01JFXYZ123ABD,tool_call,cli,filesystem,read_file,error,125,2025-01-15T10:30:01Z,permission denied
 ```
 
 ### Exit Codes

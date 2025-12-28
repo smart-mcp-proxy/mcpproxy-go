@@ -191,6 +191,34 @@ func formatActivityDuration(ms int64) string {
 	return fmt.Sprintf("%.1fs", float64(ms)/1000)
 }
 
+// formatSourceIndicator returns an icon/abbreviation for the activity source
+func formatSourceIndicator(source string) string {
+	switch source {
+	case "mcp":
+		return "MCP" // AI agent via MCP protocol
+	case "cli":
+		return "CLI" // Direct CLI command
+	case "api":
+		return "API" // REST API call
+	default:
+		return "MCP" // Default to MCP for backwards compatibility
+	}
+}
+
+// formatSourceDescription returns a human-readable description for the activity source
+func formatSourceDescription(source string) string {
+	switch source {
+	case "mcp":
+		return "AI agent via MCP protocol"
+	case "cli":
+		return "CLI command"
+	case "api":
+		return "REST API"
+	default:
+		return "AI agent via MCP protocol"
+	}
+}
+
 // outputActivityError outputs an error in the appropriate format
 func outputActivityError(err error, code string) error {
 	outputFormat := ResolveOutputFormat()
@@ -461,11 +489,12 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	headers := []string{"ID", "TYPE", "SERVER", "TOOL", "STATUS", "DURATION", "TIME"}
+	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "STATUS", "DURATION", "TIME"}
 	rows := make([][]string, 0, len(activities))
 
 	for _, act := range activities {
 		id := getStringField(act, "id")
+		source := getStringField(act, "source")
 		actType := getStringField(act, "type")
 		server := getStringField(act, "server_name")
 		tool := getStringField(act, "tool_name")
@@ -484,8 +513,12 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			actType = actType[:12]
 		}
 
+		// Format source indicator
+		sourceIcon := formatSourceIndicator(source)
+
 		rows = append(rows, []string{
 			id, // Show full ID so it can be used with 'activity show'
+			sourceIcon,
 			actType,
 			server,
 			tool,
@@ -652,13 +685,17 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		}
 	}
 
-	// Format for table output: [HH:MM:SS] server:tool status duration
+	// Format for table output: [HH:MM:SS] [SRC] server:tool status duration
 	timestamp := time.Now().Format("15:04:05")
+	source := getStringField(event, "source")
 	server := getStringField(event, "server")
 	tool := getStringField(event, "tool")
 	status := getStringField(event, "status")
 	durationMs := getIntField(event, "duration_ms")
 	errMsg := getStringField(event, "error")
+
+	// Source indicator
+	sourceIcon := formatSourceIndicator(source)
 
 	// Status indicator
 	statusIcon := "?"
@@ -671,7 +708,7 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		statusIcon = "\u2298" // circle with slash
 	}
 
-	line := fmt.Sprintf("[%s] %s:%s %s %s", timestamp, server, tool, statusIcon, formatActivityDuration(int64(durationMs)))
+	line := fmt.Sprintf("[%s] [%s] %s:%s %s %s", timestamp, sourceIcon, server, tool, statusIcon, formatActivityDuration(int64(durationMs)))
 	if errMsg != "" {
 		line += " " + errMsg
 	}
@@ -738,6 +775,11 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("ID:           %s\n", getStringField(activity, "id"))
 	fmt.Printf("Type:         %s\n", getStringField(activity, "type"))
+	source := getStringField(activity, "source")
+	if source == "" {
+		source = "mcp" // Default for backwards compatibility
+	}
+	fmt.Printf("Source:       %s (%s)\n", formatSourceIndicator(source), formatSourceDescription(source))
 	fmt.Printf("Server:       %s\n", getStringField(activity, "server_name"))
 	fmt.Printf("Tool:         %s\n", getStringField(activity, "tool_name"))
 	fmt.Printf("Status:       %s\n", getStringField(activity, "status"))
