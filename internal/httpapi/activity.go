@@ -70,6 +70,11 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		}
 	}
 
+	// Intent type filter (Spec 018)
+	if intentType := q.Get("intent_type"); intentType != "" {
+		filter.IntentType = intentType
+	}
+
 	filter.Validate()
 	return filter
 }
@@ -85,6 +90,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param tool query string false "Filter by tool name"
 // @Param session_id query string false "Filter by MCP session ID"
 // @Param status query string false "Filter by status" Enums(success, error, blocked)
+// @Param intent_type query string false "Filter by intent operation type (Spec 018)" Enums(read, write, destructive)
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"

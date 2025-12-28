@@ -1174,6 +1174,15 @@ paths:
           - error
           - blocked
           type: string
+      - description: Filter by intent operation type (Spec 018)
+        in: query
+        name: intent_type
+        schema:
+          enum:
+          - read
+          - write
+          - destructive
+          type: string
       - description: Filter activities after this time (RFC3339)
         in: query
         name: start_time

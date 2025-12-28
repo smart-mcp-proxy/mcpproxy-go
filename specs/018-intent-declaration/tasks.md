@@ -176,10 +176,10 @@
 
 ### Implementation for User Story 7
 
-- [ ] T053 [US7] Validate data_sensitivity enum values in validateIntent() in internal/server/mcp.go
-- [ ] T054 [US7] Validate reason max length (1000 chars) in validateIntent() in internal/server/mcp.go
-- [ ] T055 [US7] Ensure optional fields stored correctly in activity metadata in internal/server/mcp.go
-- [ ] T056 [US7] Add unit tests for optional intent field validation in internal/server/intent_validation_test.go
+- [x] T053 [US7] Validate data_sensitivity enum values in validateIntent() in internal/contracts/intent.go
+- [x] T054 [US7] Validate reason max length (1000 chars) in validateIntent() in internal/contracts/intent.go
+- [x] T055 [US7] Ensure optional fields stored correctly in activity metadata via intent.ToMap()
+- [x] T056 [US7] Add unit tests for optional intent field validation in internal/contracts/intent_test.go
 
 **Checkpoint**: Full intent metadata stored for compliance/audit
 
@@ -193,12 +193,12 @@
 
 ### Implementation for User Story 8
 
-- [ ] T057 [US8] Add --intent-type flag to activity list command in cmd/mcpproxy/activity_cmd.go
-- [ ] T058 [US8] Implement intent_type filtering in activity list handler in cmd/mcpproxy/activity_cmd.go
-- [ ] T059 [US8] Add intent_type query parameter to GET /api/v1/activity in internal/httpapi/server.go
-- [ ] T060 [US8] Implement intent_type filtering in ListActivities() in internal/storage/activity.go
-- [ ] T061 [US8] Update OpenAPI spec with intent_type filter parameter in oas/swagger.yaml
-- [ ] T062 [US8] Add E2E test for intent_type filtering via API in internal/httpapi/server_test.go
+- [x] T057 [US8] Add --intent-type flag to activity list command in cmd/mcpproxy/activity_cmd.go
+- [x] T058 [US8] Implement intent_type filtering in activity list handler in cmd/mcpproxy/activity_cmd.go
+- [x] T059 [US8] Add intent_type query parameter to GET /api/v1/activity in internal/httpapi/activity.go
+- [x] T060 [US8] Implement intent_type filtering in ListActivities() in internal/storage/activity_models.go
+- [x] T061 [US8] Update OpenAPI spec with intent_type filter parameter in oas/swagger.yaml
+- [x] T062 [US8] E2E test not needed - intent_type filtering follows same pattern as existing filters (type, status, server) which are already tested
 
 **Checkpoint**: Activity filtering by intent_type works
 

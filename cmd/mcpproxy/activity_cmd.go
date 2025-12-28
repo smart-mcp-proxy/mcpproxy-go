@@ -27,15 +27,16 @@ import (
 // Activity command flags
 var (
 	// Shared filter flags
-	activityType      string
-	activityServer    string
-	activityTool      string
-	activityStatus    string
-	activitySessionID string
-	activityStartTime string
-	activityEndTime   string
-	activityLimit     int
-	activityOffset    int
+	activityType       string
+	activityServer     string
+	activityTool       string
+	activityStatus     string
+	activitySessionID  string
+	activityStartTime  string
+	activityEndTime    string
+	activityLimit      int
+	activityOffset     int
+	activityIntentType string // Spec 018: Filter by operation type (read, write, destructive)
 
 	// Show command flags
 	activityIncludeResponse bool
@@ -52,15 +53,16 @@ var (
 
 // ActivityFilter contains options for filtering activity records
 type ActivityFilter struct {
-	Type      string
-	Server    string
-	Tool      string
-	Status    string
-	SessionID string
-	StartTime string
-	EndTime   string
-	Limit     int
-	Offset    int
+	Type       string
+	Server     string
+	Tool       string
+	Status     string
+	SessionID  string
+	StartTime  string
+	EndTime    string
+	Limit      int
+	Offset     int
+	IntentType string // Spec 018: Filter by operation type (read, write, destructive)
 }
 
 // Validate validates the filter options
@@ -92,6 +94,21 @@ func (f *ActivityFilter) Validate() error {
 		}
 		if !valid {
 			return fmt.Errorf("invalid status '%s': must be one of %v", f.Status, validStatuses)
+		}
+	}
+
+	// Validate intent_type (Spec 018)
+	if f.IntentType != "" {
+		validIntentTypes := []string{"read", "write", "destructive"}
+		valid := false
+		for _, it := range validIntentTypes {
+			if f.IntentType == it {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid intent-type '%s': must be one of %v", f.IntentType, validIntentTypes)
 		}
 	}
 
@@ -146,6 +163,9 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	}
 	if f.Offset > 0 {
 		q.Set("offset", fmt.Sprintf("%d", f.Offset))
+	}
+	if f.IntentType != "" {
+		q.Set("intent_type", f.IntentType)
 	}
 	return q
 }
@@ -464,6 +484,7 @@ func init() {
 	activityListCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter records before this time (RFC3339)")
 	activityListCmd.Flags().IntVarP(&activityLimit, "limit", "n", 50, "Max records to return (1-100)")
 	activityListCmd.Flags().IntVar(&activityOffset, "offset", 0, "Pagination offset")
+	activityListCmd.Flags().StringVar(&activityIntentType, "intent-type", "", "Filter by intent operation type: read, write, destructive")
 
 	// Watch command flags
 	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision")
@@ -536,15 +557,16 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 
 	// Build filter
 	filter := &ActivityFilter{
-		Type:      activityType,
-		Server:    activityServer,
-		Tool:      activityTool,
-		Status:    activityStatus,
-		SessionID: activitySessionID,
-		StartTime: activityStartTime,
-		EndTime:   activityEndTime,
-		Limit:     activityLimit,
-		Offset:    activityOffset,
+		Type:       activityType,
+		Server:     activityServer,
+		Tool:       activityTool,
+		Status:     activityStatus,
+		SessionID:  activitySessionID,
+		StartTime:  activityStartTime,
+		EndTime:    activityEndTime,
+		Limit:      activityLimit,
+		Offset:     activityOffset,
+		IntentType: activityIntentType,
 	}
 
 	if err := filter.Validate(); err != nil {
