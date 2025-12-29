@@ -32,21 +32,21 @@ const (
 
 // ActivityRecord represents an activity record in API responses
 type ActivityRecord struct {
-	ID                string                 `json:"id"`                           // Unique identifier (ULID format)
-	Type              ActivityType           `json:"type"`                         // Type of activity
-	Source            ActivitySource         `json:"source,omitempty"`             // How activity was triggered: "mcp", "cli", "api"
-	ServerName        string                 `json:"server_name,omitempty"`        // Name of upstream MCP server
-	ToolName          string                 `json:"tool_name,omitempty"`          // Name of tool called
-	Arguments         map[string]interface{} `json:"arguments,omitempty"`          // Tool call arguments
-	Response          string                 `json:"response,omitempty"`           // Tool response (potentially truncated)
-	ResponseTruncated bool                   `json:"response_truncated,omitempty"` // True if response was truncated
-	Status            string                 `json:"status"`                       // Result status: "success", "error", "blocked"
-	ErrorMessage      string                 `json:"error_message,omitempty"`      // Error details if status is "error"
-	DurationMs        int64                  `json:"duration_ms,omitempty"`        // Execution duration in milliseconds
-	Timestamp         time.Time              `json:"timestamp"`                    // When activity occurred
-	SessionID         string                 `json:"session_id,omitempty"`         // MCP session ID for correlation
-	RequestID         string                 `json:"request_id,omitempty"`         // HTTP request ID for correlation
-	Metadata          map[string]interface{} `json:"metadata,omitempty"`           // Additional context-specific data
+	ID                string                 `json:"id"`                                              // Unique identifier (ULID format)
+	Type              ActivityType           `json:"type"`                                            // Type of activity
+	Source            ActivitySource         `json:"source,omitempty"`                                // How activity was triggered: "mcp", "cli", "api"
+	ServerName        string                 `json:"server_name,omitempty"`                           // Name of upstream MCP server
+	ToolName          string                 `json:"tool_name,omitempty"`                             // Name of tool called
+	Arguments         map[string]interface{} `json:"arguments,omitempty" swaggertype:"object"`        // Tool call arguments
+	Response          string                 `json:"response,omitempty"`                              // Tool response (potentially truncated)
+	ResponseTruncated bool                   `json:"response_truncated,omitempty"`                    // True if response was truncated
+	Status            string                 `json:"status"`                                          // Result status: "success", "error", "blocked"
+	ErrorMessage      string                 `json:"error_message,omitempty"`                         // Error details if status is "error"
+	DurationMs        int64                  `json:"duration_ms,omitempty"`                           // Execution duration in milliseconds
+	Timestamp         time.Time              `json:"timestamp"`                                       // When activity occurred
+	SessionID         string                 `json:"session_id,omitempty"`                            // MCP session ID for correlation
+	RequestID         string                 `json:"request_id,omitempty"`                            // HTTP request ID for correlation
+	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`         // Additional context-specific data
 }
 
 // ActivityListResponse is the response for GET /api/v1/activity
@@ -74,10 +74,10 @@ const (
 
 // ActivitySSEEvent represents an activity event for SSE streaming
 type ActivitySSEEvent struct {
-	EventType  string                 `json:"event_type"`  // SSE event name
-	ActivityID string                 `json:"activity_id"` // Reference to ActivityRecord
-	Timestamp  int64                  `json:"timestamp"`   // Unix timestamp
-	Payload    map[string]interface{} `json:"payload"`     // Event-specific data
+	EventType  string                 `json:"event_type"`                    // SSE event name
+	ActivityID string                 `json:"activity_id"`                   // Reference to ActivityRecord
+	Timestamp  int64                  `json:"timestamp"`                     // Unix timestamp
+	Payload    map[string]interface{} `json:"payload" swaggertype:"object"`  // Event-specific data
 }
 
 // ActivitySummaryResponse is the response for GET /api/v1/activity/summary

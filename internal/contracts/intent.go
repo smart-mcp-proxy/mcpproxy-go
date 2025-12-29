@@ -74,9 +74,9 @@ type IntentDeclaration struct {
 
 // IntentValidationError represents intent validation failures
 type IntentValidationError struct {
-	Code    string                 `json:"code"`    // Error code for programmatic handling
-	Message string                 `json:"message"` // Human-readable error message
-	Details map[string]interface{} `json:"details"` // Additional context
+	Code    string                 `json:"code"`                          // Error code for programmatic handling
+	Message string                 `json:"message"`                       // Human-readable error message
+	Details map[string]interface{} `json:"details" swaggertype:"object"`  // Additional context
 }
 
 // Error codes for intent validation

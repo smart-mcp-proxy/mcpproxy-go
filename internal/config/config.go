@@ -14,7 +14,9 @@ const (
 	defaultPort = "127.0.0.1:8080" // Localhost-only binding by default for security
 )
 
-// Duration is a wrapper around time.Duration that can be marshaled to/from JSON
+// Duration is a wrapper around time.Duration that can be marshaled to/from JSON.
+// When serialized to JSON, it is represented as a string (e.g., "30s", "5m").
+// @swaggertype string
 type Duration time.Duration
 
 // MarshalJSON implements json.Marshaler interface
@@ -55,7 +57,7 @@ type Config struct {
 	TopK              int             `json:"top_k" mapstructure:"top-k"`
 	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
 	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
-	CallToolTimeout   Duration        `json:"call_tool_timeout" mapstructure:"call-tool-timeout"`
+	CallToolTimeout   Duration        `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -181,7 +183,7 @@ type DockerIsolationConfig struct {
 	NetworkMode   string            `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Docker network mode (default: bridge)
 	MemoryLimit   string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"`   // Memory limit for containers
 	CPULimit      string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`         // CPU limit for containers
-	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout"`             // Container startup timeout
+	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout" swaggertype:"string"`             // Container startup timeout
 	ExtraArgs     []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments
 	LogDriver     string            `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver (default: json-file)
 	LogMaxSize    string            `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files (default: 100m)
@@ -203,7 +205,7 @@ type IsolationConfig struct {
 // DockerRecoveryConfig represents Docker recovery settings for the tray application
 type DockerRecoveryConfig struct {
 	Enabled          bool       `json:"enabled" mapstructure:"enabled"`                       // Enable Docker recovery monitoring (default: true)
-	CheckIntervals   []Duration `json:"check_intervals,omitempty" mapstructure:"intervals"`   // Custom health check intervals (exponential backoff)
+	CheckIntervals   []Duration `json:"check_intervals,omitempty" mapstructure:"intervals" swaggerignore:"true"`  // Custom health check intervals (exponential backoff)
 	MaxRetries       int        `json:"max_retries,omitempty" mapstructure:"max_retries"`     // Maximum retry attempts (0 = unlimited)
 	NotifyOnStart    bool       `json:"notify_on_start" mapstructure:"notify_on_start"`       // Show notification when recovery starts (default: true)
 	NotifyOnSuccess  bool       `json:"notify_on_success" mapstructure:"notify_on_success"`   // Show notification on successful recovery (default: true)
@@ -301,7 +303,7 @@ type RegistryEntry struct {
 	ServersURL  string      `json:"servers_url,omitempty"`
 	Tags        []string    `json:"tags,omitempty"`
 	Protocol    string      `json:"protocol,omitempty"`
-	Count       interface{} `json:"count,omitempty"` // number or string
+	Count       interface{} `json:"count,omitempty" swaggertype:"primitive,string"` // number or string
 }
 
 // CursorMCPConfig represents the structure for Cursor IDE MCP configuration

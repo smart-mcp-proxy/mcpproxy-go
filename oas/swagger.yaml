@@ -1,6 +1,221 @@
 components:
   schemas:
     config.Config:
+      properties:
+        activity_cleanup_interval_min:
+          description: 'Background cleanup interval in minutes (default: 60)'
+          type: integer
+        activity_max_records:
+          description: 'Max records before pruning (default: 100000)'
+          type: integer
+        activity_max_response_size:
+          description: 'Response truncation limit in bytes (default: 65536)'
+          type: integer
+        activity_retention_days:
+          description: Activity logging settings (RFC-003)
+          type: integer
+        allow_server_add:
+          type: boolean
+        allow_server_remove:
+          type: boolean
+        api_key:
+          description: Security settings
+          type: string
+        call_tool_timeout:
+          type: string
+        check_server_repo:
+          description: Repository detection settings
+          type: boolean
+        code_execution_max_tool_calls:
+          description: 'Max tool calls per execution (0 = unlimited, default: 0)'
+          type: integer
+        code_execution_pool_size:
+          description: 'JavaScript runtime pool size (default: 10)'
+          type: integer
+        code_execution_timeout_ms:
+          description: 'Timeout in milliseconds (default: 120000, max: 600000)'
+          type: integer
+        data_dir:
+          type: string
+        debug_search:
+          type: boolean
+        disable_management:
+          type: boolean
+        docker_isolation:
+          $ref: '#/components/schemas/config.DockerIsolationConfig'
+        docker_recovery:
+          $ref: '#/components/schemas/config.DockerRecoveryConfig'
+        enable_code_execution:
+          description: Code execution settings
+          type: boolean
+        enable_prompts:
+          description: Prompts settings
+          type: boolean
+        enable_socket:
+          description: 'Enable Unix socket/named pipe for local IPC (default: true)'
+          type: boolean
+        enable_tray:
+          type: boolean
+        environment:
+          $ref: '#/components/schemas/secureenv.EnvConfig'
+        features:
+          $ref: '#/components/schemas/config.FeatureFlags'
+        intent_declaration:
+          $ref: '#/components/schemas/config.IntentDeclarationConfig'
+        listen:
+          type: string
+        logging:
+          $ref: '#/components/schemas/config.LogConfig'
+        mcpServers:
+          items:
+            $ref: '#/components/schemas/config.ServerConfig'
+          type: array
+          uniqueItems: false
+        oauth_expiry_warning_hours:
+          description: Health status settings
+          type: number
+        read_only_mode:
+          type: boolean
+        registries:
+          description: Registries configuration for MCP server discovery
+          items:
+            $ref: '#/components/schemas/config.RegistryEntry'
+          type: array
+          uniqueItems: false
+        tls:
+          $ref: '#/components/schemas/config.TLSConfig'
+        tokenizer:
+          $ref: '#/components/schemas/config.TokenizerConfig'
+        tool_response_limit:
+          type: integer
+        tools_limit:
+          type: integer
+        top_k:
+          type: integer
+        tray_endpoint:
+          description: Tray endpoint override (unix:// or npipe://)
+          type: string
+      type: object
+    config.DockerIsolationConfig:
+      description: Docker isolation settings
+      properties:
+        cpu_limit:
+          description: CPU limit for containers
+          type: string
+        default_images:
+          additionalProperties:
+            type: string
+          description: Map of runtime type to Docker image
+          type: object
+        enabled:
+          description: Global enable/disable for Docker isolation
+          type: boolean
+        extra_args:
+          description: Additional docker run arguments
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        log_driver:
+          description: 'Docker log driver (default: json-file)'
+          type: string
+        log_max_files:
+          description: 'Maximum number of log files (default: 3)'
+          type: string
+        log_max_size:
+          description: 'Maximum size of log files (default: 100m)'
+          type: string
+        memory_limit:
+          description: Memory limit for containers
+          type: string
+        network_mode:
+          description: 'Docker network mode (default: bridge)'
+          type: string
+        registry:
+          description: Custom registry (defaults to docker.io)
+          type: string
+        timeout:
+          description: Container startup timeout
+          type: string
+      type: object
+    config.DockerRecoveryConfig:
+      description: Docker recovery settings
+      properties:
+        enabled:
+          description: 'Enable Docker recovery monitoring (default: true)'
+          type: boolean
+        max_retries:
+          description: Maximum retry attempts (0 = unlimited)
+          type: integer
+        notify_on_failure:
+          description: 'Show notification on recovery failure (default: true)'
+          type: boolean
+        notify_on_retry:
+          description: 'Show notification on each retry (default: false)'
+          type: boolean
+        notify_on_start:
+          description: 'Show notification when recovery starts (default: true)'
+          type: boolean
+        notify_on_success:
+          description: 'Show notification on successful recovery (default: true)'
+          type: boolean
+        persistent_state:
+          description: 'Save recovery state across restarts (default: true)'
+          type: boolean
+      type: object
+    config.FeatureFlags:
+      description: Feature flags for modular functionality
+      properties:
+        enable_async_storage:
+          type: boolean
+        enable_caching:
+          type: boolean
+        enable_contract_tests:
+          type: boolean
+        enable_debug_logging:
+          description: Development features
+          type: boolean
+        enable_docker_isolation:
+          type: boolean
+        enable_event_bus:
+          type: boolean
+        enable_health_checks:
+          type: boolean
+        enable_metrics:
+          type: boolean
+        enable_oauth:
+          description: Security features
+          type: boolean
+        enable_observability:
+          description: Observability features
+          type: boolean
+        enable_quarantine:
+          type: boolean
+        enable_runtime:
+          description: Runtime features
+          type: boolean
+        enable_search:
+          description: Storage features
+          type: boolean
+        enable_sse:
+          type: boolean
+        enable_tracing:
+          type: boolean
+        enable_tray:
+          type: boolean
+        enable_web_ui:
+          description: UI features
+          type: boolean
+      type: object
+    config.IntentDeclarationConfig:
+      description: Intent declaration settings (Spec 018)
+      properties:
+        strict_server_validation:
+          description: |-
+            StrictServerValidation controls whether server annotation mismatches
+            cause rejection (true) or just warnings (false).
+            Default: true (reject mismatches)
+          type: boolean
       type: object
     config.IsolationConfig:
       description: Per-server isolation settings
@@ -33,6 +248,34 @@ components:
           description: Custom working directory in container
           type: string
       type: object
+    config.LogConfig:
+      description: Logging configuration
+      properties:
+        compress:
+          type: boolean
+        enable_console:
+          type: boolean
+        enable_file:
+          type: boolean
+        filename:
+          type: string
+        json_format:
+          type: boolean
+        level:
+          type: string
+        log_dir:
+          description: Custom log directory
+          type: string
+        max_age:
+          description: days
+          type: integer
+        max_backups:
+          description: number of backup files
+          type: integer
+        max_size:
+          description: MB
+          type: integer
+      type: object
     config.OAuthConfig:
       description: OAuth configuration (keep even when empty to signal OAuth requirement)
       properties:
@@ -54,6 +297,29 @@ components:
             type: string
           type: array
           uniqueItems: false
+      type: object
+    config.RegistryEntry:
+      properties:
+        count:
+          description: number or string
+          type: string
+        description:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        protocol:
+          type: string
+        servers_url:
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        url:
+          type: string
       type: object
     config.ServerConfig:
       properties:
@@ -97,11 +363,41 @@ components:
           description: Working directory for stdio servers
           type: string
       type: object
+    config.TLSConfig:
+      description: TLS configuration
+      properties:
+        certs_dir:
+          description: Directory for certificates
+          type: string
+        enabled:
+          description: Enable HTTPS
+          type: boolean
+        hsts:
+          description: Enable HTTP Strict Transport Security
+          type: boolean
+        require_client_cert:
+          description: Enable mTLS
+          type: boolean
+      type: object
+    config.TokenizerConfig:
+      description: Tokenizer configuration for token counting
+      properties:
+        default_model:
+          description: Default model for tokenization (e.g., "gpt-4")
+          type: string
+        enabled:
+          description: Enable token counting
+          type: boolean
+        encoding:
+          description: Default encoding (e.g., "cl100k_base")
+          type: string
+      type: object
     contracts.APIResponse:
       allOf:
       - $ref: '#/components/schemas/data'
       properties:
-        data: {}
+        data:
+          type: object
         error:
           type: string
         success:
@@ -129,7 +425,6 @@ components:
     contracts.ActivityRecord:
       properties:
         arguments:
-          additionalProperties: {}
           description: Tool call arguments
           type: object
         duration_ms:
@@ -142,7 +437,6 @@ components:
           description: Unique identifier (ULID format)
           type: string
         metadata:
-          additionalProperties: {}
           description: Additional context-specific data
           type: object
         request_id:
@@ -323,6 +617,7 @@ components:
       properties:
         config:
           description: The configuration object
+          type: object
         config_path:
           description: Path to config file
           type: string
@@ -488,7 +783,6 @@ components:
     contracts.LogEntry:
       properties:
         fields:
-          additionalProperties: {}
           type: object
         level:
           type: string
@@ -608,6 +902,7 @@ components:
       properties:
         count:
           description: number or string
+          type: string
         description:
           type: string
         id:
@@ -629,7 +924,6 @@ components:
     contracts.ReplayToolCallRequest:
       properties:
         arguments:
-          additionalProperties: {}
           description: Modified arguments for replay
           type: object
       type: object
@@ -853,7 +1147,8 @@ components:
       type: object
     contracts.SuccessResponse:
       properties:
-        data: {}
+        data:
+          type: object
         success:
           type: boolean
       type: object
@@ -896,7 +1191,6 @@ components:
         name:
           type: string
         schema:
-          additionalProperties: {}
           type: object
         server_name:
           type: string
@@ -923,7 +1217,6 @@ components:
         annotations:
           $ref: '#/components/schemas/contracts.ToolAnnotation'
         arguments:
-          additionalProperties: {}
           description: Tool arguments
           type: object
         config_path:
@@ -960,6 +1253,7 @@ components:
           type: string
         response:
           description: Tool response (success only)
+          type: object
         server_id:
           description: Server identity hash
           type: string
@@ -1111,6 +1405,24 @@ components:
         timestamp:
           type: string
       type: object
+    secureenv.EnvConfig:
+      description: Environment configuration for secure variable filtering
+      properties:
+        allowed_system_vars:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        custom_vars:
+          additionalProperties:
+            type: string
+          type: object
+        enhance_path:
+          description: Enable PATH enhancement for Launchd scenarios
+          type: boolean
+        inherit_system_safe:
+          type: boolean
+      type: object
   securitySchemes:
     ApiKeyAuth:
       description: API key authentication via query parameter. Use ?apikey=your-key
@@ -1216,7 +1528,8 @@ paths:
                 allOf:
                 - $ref: '#/components/schemas/data'
                 properties:
-                  data: {}
+                  data:
+                    type: object
                   error:
                     type: string
                   success:
@@ -1270,7 +1583,8 @@ paths:
                 allOf:
                 - $ref: '#/components/schemas/data'
                 properties:
-                  data: {}
+                  data:
+                    type: object
                   error:
                     type: string
                   success:
@@ -1408,7 +1722,8 @@ paths:
                 allOf:
                 - $ref: '#/components/schemas/data'
                 properties:
-                  data: {}
+                  data:
+                    type: object
                   error:
                     type: string
                   success:
@@ -1686,7 +2001,8 @@ paths:
                 allOf:
                 - $ref: '#/components/schemas/data'
                 properties:
-                  data: {}
+                  data:
+                    type: object
                   error:
                     type: string
                   success:
