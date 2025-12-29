@@ -1,1609 +1,1125 @@
-definitions:
-  internal_httpapi.AddServerRequest:
-    properties:
-      args:
-        items:
+components:
+  schemas:
+    config.Config:
+      type: object
+    config.IsolationConfig:
+      description: Per-server isolation settings
+      properties:
+        enabled:
+          description: Enable Docker isolation for this server
+          type: boolean
+        extra_args:
+          description: Additional docker run arguments for this server
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        image:
+          description: Custom Docker image (overrides default)
           type: string
-        type: array
-      command:
-        type: string
-      enabled:
-        type: boolean
-      env:
-        additionalProperties:
+        log_driver:
+          description: Docker log driver override for this server
           type: string
-        type: object
-      headers:
-        additionalProperties:
+        log_max_files:
+          description: Maximum number of log files override
           type: string
-        type: object
-      name:
-        type: string
-      protocol:
-        type: string
-      quarantined:
-        type: boolean
-      url:
-        type: string
-      working_dir:
-        type: string
-    type: object
-  main.Diagnostics:
-    properties:
-      docker_status:
-        $ref: '#/definitions/main.DockerStatus'
-      missing_secrets:
-        items:
-          $ref: '#/definitions/main.MissingSecret'
-        type: array
-      oauth_required:
-        items:
-          $ref: '#/definitions/main.OAuthRequirement'
-        type: array
-      runtime_warnings:
-        items:
+        log_max_size:
+          description: Maximum size of log files override
           type: string
-        type: array
-      timestamp:
-        example: "2025-11-23T10:35:12Z"
-        type: string
-      total_issues:
-        example: 3
-        type: integer
-      upstream_errors:
-        items:
-          $ref: '#/definitions/main.UpstreamError'
-        type: array
-    type: object
-  main.DockerStatus:
-    properties:
-      available:
-        example: true
-        type: boolean
-      error:
-        example: ""
-        type: string
-      version:
-        example: 24.0.7
-        type: string
-    type: object
-  main.ErrorResponse:
-    properties:
-      code:
-        example: MGMT_DISABLED
-        type: string
-      details:
-        example: Set disable_management=false in config
-        type: string
-      error:
-        example: management operations disabled
-        type: string
-    type: object
-  main.LogEntry:
-    properties:
-      level:
-        example: INFO
-        type: string
-      message:
-        example: 'Tool call: create_issue'
-        type: string
-      server:
-        example: github-server
-        type: string
-      timestamp:
-        example: "2025-11-23T10:30:00Z"
-        type: string
-    type: object
-  main.MissingSecret:
-    properties:
-      secret_name:
-        example: GITHUB_TOKEN
-        type: string
-      used_by:
-        example:
-        - '["github-server"'
-        - '"gh-issues"]'
-        items:
+        network_mode:
+          description: Custom network mode for this server
           type: string
-        type: array
-    type: object
-  main.OAuthRequirement:
-    properties:
-      expires_at:
-        example: "2025-11-22T18:00:00Z"
-        type: string
-      message:
-        example: 'Run: mcpproxy auth login --server=github-server'
-        type: string
-      server_name:
-        example: github-server
-        type: string
-      state:
-        example: expired
-        type: string
-    type: object
-  main.RestartAllResponse:
-    properties:
-      errors:
-        example:
-        - '["server-1: connection timeout"]'
-        items:
+        working_dir:
+          description: Custom working directory in container
           type: string
-        type: array
-      failed_count:
-        example: 1
-        type: integer
-      success_count:
-        example: 9
-        type: integer
-    type: object
-  main.Server:
-    properties:
-      connected:
-        example: true
-        type: boolean
-      enabled:
-        example: true
-        type: boolean
-      error:
-        example: ""
-        type: string
-      name:
-        example: github-server
-        type: string
-      quarantined:
-        example: false
-        type: boolean
-      tool_count:
-        example: 25
-        type: integer
-    type: object
-  main.ServerStats:
-    properties:
-      connected:
-        example: 7
-        type: integer
-      disabled:
-        example: 2
-        type: integer
-      enabled:
-        example: 8
-        type: integer
-      errors:
-        example: 1
-        type: integer
-      quarantined:
-        example: 1
-        type: integer
-      total:
-        example: 10
-        type: integer
-    type: object
-  main.ServersResponse:
-    properties:
-      servers:
-        items:
-          $ref: '#/definitions/main.Server'
-        type: array
-      stats:
-        $ref: '#/definitions/main.ServerStats'
-    type: object
-  main.UpstreamError:
-    properties:
-      error_message:
-        example: connection refused
-        type: string
-      server_name:
-        example: weather-api
-        type: string
-      timestamp:
-        example: "2025-11-23T09:15:30Z"
-        type: string
-    type: object
-  mcpproxy-go_internal_config.Config:
-    properties:
-      activity_cleanup_interval_min:
-        description: 'Background cleanup interval in minutes (default: 60)'
-        type: integer
-      activity_max_records:
-        description: 'Max records before pruning (default: 100000)'
-        type: integer
-      activity_max_response_size:
-        description: 'Response truncation limit in bytes (default: 65536)'
-        type: integer
-      activity_retention_days:
-        description: Activity logging settings (RFC-003)
-        type: integer
-      allow_server_add:
-        type: boolean
-      allow_server_remove:
-        type: boolean
-      api_key:
-        description: Security settings
-        type: string
-      call_tool_timeout:
-        $ref: '#/definitions/mcpproxy-go_internal_config.Duration'
-      check_server_repo:
-        description: Repository detection settings
-        type: boolean
-      code_execution_max_tool_calls:
-        description: 'Max tool calls per execution (0 = unlimited, default: 0)'
-        type: integer
-      code_execution_pool_size:
-        description: 'JavaScript runtime pool size (default: 10)'
-        type: integer
-      code_execution_timeout_ms:
-        description: 'Timeout in milliseconds (default: 120000, max: 600000)'
-        type: integer
-      data_dir:
-        type: string
-      debug_search:
-        type: boolean
-      disable_management:
-        type: boolean
-      docker_isolation:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.DockerIsolationConfig'
-        description: Docker isolation settings
-      docker_recovery:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.DockerRecoveryConfig'
-        description: Docker recovery settings
-      enable_code_execution:
-        description: Code execution settings
-        type: boolean
-      enable_prompts:
-        description: Prompts settings
-        type: boolean
-      enable_socket:
-        description: 'Enable Unix socket/named pipe for local IPC (default: true)'
-        type: boolean
-      enable_tray:
-        type: boolean
-      environment:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_secureenv.EnvConfig'
-        description: Environment configuration for secure variable filtering
-      features:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.FeatureFlags'
-        description: Feature flags for modular functionality
-      intent_declaration:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.IntentDeclarationConfig'
-        description: Intent declaration settings (Spec 018)
-      listen:
-        type: string
-      logging:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.LogConfig'
-        description: Logging configuration
-      mcpServers:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_config.ServerConfig'
-        type: array
-      oauth_expiry_warning_hours:
-        description: Health status settings
-        type: number
-      read_only_mode:
-        type: boolean
-      registries:
-        description: Registries configuration for MCP server discovery
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_config.RegistryEntry'
-        type: array
-      tls:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.TLSConfig'
-        description: TLS configuration
-      tokenizer:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.TokenizerConfig'
-        description: Tokenizer configuration for token counting
-      tool_response_limit:
-        type: integer
-      tools_limit:
-        type: integer
-      top_k:
-        type: integer
-      tray_endpoint:
-        description: Tray endpoint override (unix:// or npipe://)
-        type: string
-    type: object
-  mcpproxy-go_internal_config.DockerIsolationConfig:
-    properties:
-      cpu_limit:
-        description: CPU limit for containers
-        type: string
-      default_images:
-        additionalProperties:
+      type: object
+    config.OAuthConfig:
+      description: OAuth configuration (keep even when empty to signal OAuth requirement)
+      properties:
+        client_id:
           type: string
-        description: Map of runtime type to Docker image
-        type: object
-      enabled:
-        description: Global enable/disable for Docker isolation
-        type: boolean
-      extra_args:
-        description: Additional docker run arguments
-        items:
+        client_secret:
           type: string
-        type: array
-      log_driver:
-        description: 'Docker log driver (default: json-file)'
-        type: string
-      log_max_files:
-        description: 'Maximum number of log files (default: 3)'
-        type: string
-      log_max_size:
-        description: 'Maximum size of log files (default: 100m)'
-        type: string
-      memory_limit:
-        description: Memory limit for containers
-        type: string
-      network_mode:
-        description: 'Docker network mode (default: bridge)'
-        type: string
-      registry:
-        description: Custom registry (defaults to docker.io)
-        type: string
-      timeout:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.Duration'
-        description: Container startup timeout
-    type: object
-  mcpproxy-go_internal_config.DockerRecoveryConfig:
-    properties:
-      check_intervals:
-        description: Custom health check intervals (exponential backoff)
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_config.Duration'
-        type: array
-      enabled:
-        description: 'Enable Docker recovery monitoring (default: true)'
-        type: boolean
-      max_retries:
-        description: Maximum retry attempts (0 = unlimited)
-        type: integer
-      notify_on_failure:
-        description: 'Show notification on recovery failure (default: true)'
-        type: boolean
-      notify_on_retry:
-        description: 'Show notification on each retry (default: false)'
-        type: boolean
-      notify_on_start:
-        description: 'Show notification when recovery starts (default: true)'
-        type: boolean
-      notify_on_success:
-        description: 'Show notification on successful recovery (default: true)'
-        type: boolean
-      persistent_state:
-        description: 'Save recovery state across restarts (default: true)'
-        type: boolean
-    type: object
-  mcpproxy-go_internal_config.Duration:
-    enum:
-    - -9223372036854775808
-    - 9223372036854775807
-    - 1
-    - 1000
-    - 1000000
-    - 1000000000
-    - 60000000000
-    - 3600000000000
-    type: integer
-    x-enum-varnames:
-    - minDuration
-    - maxDuration
-    - Nanosecond
-    - Microsecond
-    - Millisecond
-    - Second
-    - Minute
-    - Hour
-  mcpproxy-go_internal_config.FeatureFlags:
-    properties:
-      enable_async_storage:
-        type: boolean
-      enable_caching:
-        type: boolean
-      enable_contract_tests:
-        type: boolean
-      enable_debug_logging:
-        description: Development features
-        type: boolean
-      enable_docker_isolation:
-        type: boolean
-      enable_event_bus:
-        type: boolean
-      enable_health_checks:
-        type: boolean
-      enable_metrics:
-        type: boolean
-      enable_oauth:
-        description: Security features
-        type: boolean
-      enable_observability:
-        description: Observability features
-        type: boolean
-      enable_quarantine:
-        type: boolean
-      enable_runtime:
-        description: Runtime features
-        type: boolean
-      enable_search:
-        description: Storage features
-        type: boolean
-      enable_sse:
-        type: boolean
-      enable_tracing:
-        type: boolean
-      enable_tray:
-        type: boolean
-      enable_web_ui:
-        description: UI features
-        type: boolean
-    type: object
-  mcpproxy-go_internal_config.IntentDeclarationConfig:
-    properties:
-      strict_server_validation:
-        description: |-
-          StrictServerValidation controls whether server annotation mismatches
-          cause rejection (true) or just warnings (false).
-          Default: true (reject mismatches)
-        type: boolean
-    type: object
-  mcpproxy-go_internal_config.IsolationConfig:
-    properties:
-      enabled:
-        description: Enable Docker isolation for this server
-        type: boolean
-      extra_args:
-        description: Additional docker run arguments for this server
-        items:
+        extra_params:
+          additionalProperties:
+            type: string
+          description: Additional OAuth parameters (e.g., RFC 8707 resource)
+          type: object
+        pkce_enabled:
+          type: boolean
+        redirect_uri:
           type: string
-        type: array
-      image:
-        description: Custom Docker image (overrides default)
-        type: string
-      log_driver:
-        description: Docker log driver override for this server
-        type: string
-      log_max_files:
-        description: Maximum number of log files override
-        type: string
-      log_max_size:
-        description: Maximum size of log files override
-        type: string
-      network_mode:
-        description: Custom network mode for this server
-        type: string
-      working_dir:
-        description: Custom working directory in container
-        type: string
-    type: object
-  mcpproxy-go_internal_config.LogConfig:
-    properties:
-      compress:
-        type: boolean
-      enable_console:
-        type: boolean
-      enable_file:
-        type: boolean
-      filename:
-        type: string
-      json_format:
-        type: boolean
-      level:
-        type: string
-      log_dir:
-        description: Custom log directory
-        type: string
-      max_age:
-        description: days
-        type: integer
-      max_backups:
-        description: number of backup files
-        type: integer
-      max_size:
-        description: MB
-        type: integer
-    type: object
-  mcpproxy-go_internal_config.OAuthConfig:
-    properties:
-      client_id:
-        type: string
-      client_secret:
-        type: string
-      extra_params:
-        additionalProperties:
+        scopes:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    config.ServerConfig:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        command:
           type: string
-        description: Additional OAuth parameters (e.g., RFC 8707 resource)
-        type: object
-      pkce_enabled:
-        type: boolean
-      redirect_uri:
-        type: string
-      scopes:
-        items:
+        created:
           type: string
-        type: array
-    type: object
-  mcpproxy-go_internal_config.RegistryEntry:
-    properties:
-      count:
-        description: number or string
-      description:
-        type: string
-      id:
-        type: string
-      name:
-        type: string
-      protocol:
-        type: string
-      servers_url:
-        type: string
-      tags:
-        items:
+        enabled:
+          type: boolean
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        headers:
+          additionalProperties:
+            type: string
+          description: For HTTP servers
+          type: object
+        isolation:
+          $ref: '#/components/schemas/config.IsolationConfig'
+        name:
           type: string
-        type: array
-      url:
-        type: string
-    type: object
-  mcpproxy-go_internal_config.ServerConfig:
-    properties:
-      args:
-        items:
+        oauth:
+          $ref: '#/components/schemas/config.OAuthConfig'
+        protocol:
+          description: stdio, http, sse, streamable-http, auto
           type: string
-        type: array
-      command:
-        type: string
-      created:
-        type: string
-      enabled:
-        type: boolean
-      env:
-        additionalProperties:
+        quarantined:
+          description: Security quarantine status
+          type: boolean
+        updated:
           type: string
-        type: object
-      headers:
-        additionalProperties:
+        url:
           type: string
-        description: For HTTP servers
-        type: object
-      isolation:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.IsolationConfig'
-        description: Per-server isolation settings
-      name:
-        type: string
-      oauth:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_config.OAuthConfig'
-        description: OAuth configuration (keep even when empty to signal OAuth requirement)
-      protocol:
-        description: stdio, http, sse, streamable-http, auto
-        type: string
-      quarantined:
-        description: Security quarantine status
-        type: boolean
-      updated:
-        type: string
-      url:
-        type: string
-      working_dir:
-        description: Working directory for stdio servers
-        type: string
-    type: object
-  mcpproxy-go_internal_config.TLSConfig:
-    properties:
-      certs_dir:
-        description: Directory for certificates
-        type: string
-      enabled:
-        description: Enable HTTPS
-        type: boolean
-      hsts:
-        description: Enable HTTP Strict Transport Security
-        type: boolean
-      require_client_cert:
-        description: Enable mTLS
-        type: boolean
-    type: object
-  mcpproxy-go_internal_config.TokenizerConfig:
-    properties:
-      default_model:
-        description: Default model for tokenization (e.g., "gpt-4")
-        type: string
-      enabled:
-        description: Enable token counting
-        type: boolean
-      encoding:
-        description: Default encoding (e.g., "cl100k_base")
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.APIResponse:
-    properties:
-      data: {}
-      error:
-        type: string
-      success:
-        type: boolean
-    type: object
-  mcpproxy-go_internal_contracts.ActivityDetailResponse:
-    properties:
-      activity:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivityRecord'
-    type: object
-  mcpproxy-go_internal_contracts.ActivityListResponse:
-    properties:
-      activities:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivityRecord'
-        type: array
-      limit:
-        type: integer
-      offset:
-        type: integer
-      total:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.ActivityRecord:
-    properties:
-      arguments:
-        additionalProperties: true
-        description: Tool call arguments
-        type: object
-      duration_ms:
-        description: Execution duration in milliseconds
-        type: integer
-      error_message:
-        description: Error details if status is "error"
-        type: string
-      id:
-        description: Unique identifier (ULID format)
-        type: string
-      metadata:
-        additionalProperties: true
-        description: Additional context-specific data
-        type: object
-      request_id:
-        description: HTTP request ID for correlation
-        type: string
-      response:
-        description: Tool response (potentially truncated)
-        type: string
-      response_truncated:
-        description: True if response was truncated
-        type: boolean
-      server_name:
-        description: Name of upstream MCP server
-        type: string
-      session_id:
-        description: MCP session ID for correlation
-        type: string
-      source:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivitySource'
-        description: 'How activity was triggered: "mcp", "cli", "api"'
-      status:
-        description: 'Result status: "success", "error", "blocked"'
-        type: string
-      timestamp:
-        description: When activity occurred
-        type: string
-      tool_name:
-        description: Name of tool called
-        type: string
-      type:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivityType'
-        description: Type of activity
-    type: object
-  mcpproxy-go_internal_contracts.ActivitySource:
-    enum:
-    - mcp
-    - cli
-    - api
-    type: string
-    x-enum-varnames:
-    - ActivitySourceMCP
-    - ActivitySourceCLI
-    - ActivitySourceAPI
-  mcpproxy-go_internal_contracts.ActivitySummaryResponse:
-    properties:
-      blocked_count:
-        description: Count of blocked activities
-        type: integer
-      end_time:
-        description: End of the period (RFC3339)
-        type: string
-      error_count:
-        description: Count of error activities
-        type: integer
-      period:
-        description: Time period (1h, 24h, 7d, 30d)
-        type: string
-      start_time:
-        description: Start of the period (RFC3339)
-        type: string
-      success_count:
-        description: Count of successful activities
-        type: integer
-      top_servers:
-        description: Top servers by activity count
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivityTopServer'
-        type: array
-      top_tools:
-        description: Top tools by activity count
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivityTopTool'
-        type: array
-      total_count:
-        description: Total activity count
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.ActivityTopServer:
-    properties:
-      count:
-        description: Activity count
-        type: integer
-      name:
-        description: Server name
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.ActivityTopTool:
-    properties:
-      count:
-        description: Activity count
-        type: integer
-      server:
-        description: Server name
-        type: string
-      tool:
-        description: Tool name
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.ActivityType:
-    enum:
-    - tool_call
-    - policy_decision
-    - quarantine_change
-    - server_change
-    type: string
-    x-enum-varnames:
-    - ActivityTypeToolCall
-    - ActivityTypePolicyDecision
-    - ActivityTypeQuarantineChange
-    - ActivityTypeServerChange
-  mcpproxy-go_internal_contracts.ConfigApplyResult:
-    properties:
-      applied_immediately:
-        type: boolean
-      changed_fields:
-        items:
+        working_dir:
+          description: Working directory for stdio servers
           type: string
-        type: array
-      requires_restart:
-        type: boolean
-      restart_reason:
-        type: string
-      success:
-        type: boolean
-      validation_errors:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.ValidationError'
-        type: array
-    type: object
-  mcpproxy-go_internal_contracts.Diagnostics:
-    properties:
-      docker_status:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.DockerStatus'
-      missing_secrets:
-        description: Renamed to avoid conflict
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.MissingSecretInfo'
-        type: array
-      oauth_issues:
-        description: OAuth parameter mismatches
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.OAuthIssue'
-        type: array
-      oauth_required:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.OAuthRequirement'
-        type: array
-      runtime_warnings:
-        items:
+      type: object
+    contracts.APIResponse:
+      allOf:
+      - $ref: '#/components/schemas/data'
+      properties:
+        data: {}
+        error:
           type: string
-        type: array
-      timestamp:
-        type: string
-      total_issues:
-        type: integer
-      upstream_errors:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.UpstreamError'
-        type: array
-    type: object
-  mcpproxy-go_internal_contracts.DockerStatus:
-    properties:
-      available:
-        type: boolean
-      error:
-        type: string
-      version:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.ErrorResponse:
-    properties:
-      error:
-        type: string
-      success:
-        type: boolean
-    type: object
-  mcpproxy-go_internal_contracts.GetConfigResponse:
-    properties:
-      config:
-        description: The configuration object
-      config_path:
-        description: Path to config file
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.GetRegistriesResponse:
-    properties:
-      registries:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.Registry'
-        type: array
-      total:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.GetServerLogsResponse:
-    properties:
-      count:
-        type: integer
-      logs:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.LogEntry'
-        type: array
-      server_name:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.GetServerToolCallsResponse:
-    properties:
-      server_name:
-        type: string
-      tool_calls:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.ToolCallRecord'
-        type: array
-      total:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.GetServerToolsResponse:
-    properties:
-      count:
-        type: integer
-      server_name:
-        type: string
-      tools:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.Tool'
-        type: array
-    type: object
-  mcpproxy-go_internal_contracts.GetServersResponse:
-    properties:
-      servers:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.Server'
-        type: array
-      stats:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerStats'
-    type: object
-  mcpproxy-go_internal_contracts.GetSessionDetailResponse:
-    properties:
-      session:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.MCPSession'
-    type: object
-  mcpproxy-go_internal_contracts.GetSessionsResponse:
-    properties:
-      limit:
-        type: integer
-      offset:
-        type: integer
-      sessions:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.MCPSession'
-        type: array
-      total:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.GetToolCallDetailResponse:
-    properties:
-      tool_call:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.ToolCallRecord'
-    type: object
-  mcpproxy-go_internal_contracts.GetToolCallsResponse:
-    properties:
-      limit:
-        type: integer
-      offset:
-        type: integer
-      tool_calls:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.ToolCallRecord'
-        type: array
-      total:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.HealthStatus:
-    properties:
-      action:
-        description: 'Action is the suggested fix action: "login", "restart", "enable",
-          "approve", "view_logs", or "" (none)'
-        type: string
-      admin_state:
-        description: 'AdminState indicates the admin state: "enabled", "disabled",
-          or "quarantined"'
-        type: string
-      detail:
-        description: Detail is an optional longer explanation of the status
-        type: string
-      level:
-        description: 'Level indicates the health level: "healthy", "degraded", or
-          "unhealthy"'
-        type: string
-      summary:
-        description: Summary is a human-readable status message (e.g., "Connected
-          (5 tools)")
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.InfoEndpoints:
-    properties:
-      http:
-        description: HTTP endpoint address (e.g., "127.0.0.1:8080")
-        type: string
-      socket:
-        description: Unix socket path (empty if disabled)
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.InfoResponse:
-    properties:
-      endpoints:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.InfoEndpoints'
-        description: Available API endpoints
-      listen_addr:
-        description: Listen address (e.g., "127.0.0.1:8080")
-        type: string
-      update:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.UpdateInfo'
-        description: Update information (if available)
-      version:
-        description: Current MCPProxy version
-        type: string
-      web_ui_url:
-        description: URL to access the web control panel
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.IsolationConfig:
-    properties:
-      cpu_limit:
-        type: string
-      enabled:
-        type: boolean
-      image:
-        type: string
-      memory_limit:
-        type: string
-      timeout:
-        type: string
-      working_dir:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.LogEntry:
-    properties:
-      fields:
-        additionalProperties: true
-        type: object
-      level:
-        type: string
-      message:
-        type: string
-      server:
-        type: string
-      timestamp:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.MCPSession:
-    properties:
-      client_name:
-        type: string
-      client_version:
-        type: string
-      end_time:
-        type: string
-      experimental:
-        items:
-          type: string
-        type: array
-      has_roots:
-        description: MCP Client Capabilities
-        type: boolean
-      has_sampling:
-        type: boolean
-      id:
-        type: string
-      last_activity:
-        type: string
-      start_time:
-        type: string
-      status:
-        type: string
-      tool_call_count:
-        type: integer
-      total_tokens:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.MissingSecretInfo:
-    properties:
-      secret_name:
-        type: string
-      used_by:
-        items:
-          type: string
-        type: array
-    type: object
-  mcpproxy-go_internal_contracts.NPMPackageInfo:
-    properties:
-      exists:
-        type: boolean
-      install_cmd:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.OAuthConfig:
-    properties:
-      auth_url:
-        type: string
-      client_id:
-        type: string
-      extra_params:
-        additionalProperties:
-          type: string
-        type: object
-      pkce_enabled:
-        type: boolean
-      redirect_port:
-        type: integer
-      scopes:
-        items:
-          type: string
-        type: array
-      token_expires_at:
-        description: When the OAuth token expires
-        type: string
-      token_url:
-        type: string
-      token_valid:
-        description: Whether token is currently valid
-        type: boolean
-    type: object
-  mcpproxy-go_internal_contracts.OAuthIssue:
-    properties:
-      documentation_url:
-        type: string
-      error:
-        type: string
-      issue:
-        type: string
-      missing_params:
-        items:
-          type: string
-        type: array
-      resolution:
-        type: string
-      server_name:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.OAuthRequirement:
-    properties:
-      expires_at:
-        type: string
-      message:
-        type: string
-      server_name:
-        type: string
-      state:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.Registry:
-    properties:
-      count:
-        description: number or string
-      description:
-        type: string
-      id:
-        type: string
-      name:
-        type: string
-      protocol:
-        type: string
-      servers_url:
-        type: string
-      tags:
-        items:
-          type: string
-        type: array
-      url:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.ReplayToolCallRequest:
-    properties:
-      arguments:
-        additionalProperties: true
-        description: Modified arguments for replay
-        type: object
-    type: object
-  mcpproxy-go_internal_contracts.ReplayToolCallResponse:
-    properties:
-      error:
-        description: Error if replay failed
-        type: string
-      new_call_id:
-        description: ID of the newly created call
-        type: string
-      new_tool_call:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.ToolCallRecord'
-        description: The new tool call record
-      replayed_from:
-        description: Original call ID
-        type: string
-      success:
-        type: boolean
-    type: object
-  mcpproxy-go_internal_contracts.RepositoryInfo:
-    properties:
-      npm:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.NPMPackageInfo'
-    type: object
-  mcpproxy-go_internal_contracts.RepositoryServer:
-    properties:
-      connect_url:
-        description: Alternative connection URL
-        type: string
-      created_at:
-        type: string
-      description:
-        type: string
-      id:
-        type: string
-      install_cmd:
-        description: Installation command
-        type: string
-      name:
-        type: string
-      registry:
-        description: Which registry this came from
-        type: string
-      repository_info:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.RepositoryInfo'
-        description: Detected package info
-      source_code_url:
-        description: Source repository URL
-        type: string
-      updated_at:
-        type: string
-      url:
-        description: MCP endpoint for remote servers only
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.SearchRegistryServersResponse:
-    properties:
-      query:
-        type: string
-      registry_id:
-        type: string
-      servers:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.RepositoryServer'
-        type: array
-      tag:
-        type: string
-      total:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.SearchResult:
-    properties:
-      matches:
-        type: integer
-      score:
-        type: number
-      snippet:
-        type: string
-      tool:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.Tool'
-    type: object
-  mcpproxy-go_internal_contracts.SearchToolsResponse:
-    properties:
-      query:
-        type: string
-      results:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.SearchResult'
-        type: array
-      took:
-        type: string
-      total:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.Server:
-    properties:
-      args:
-        items:
-          type: string
-        type: array
-      authenticated:
-        description: OAuth authentication status
-        type: boolean
-      command:
-        type: string
-      connected:
-        type: boolean
-      connected_at:
-        type: string
-      connecting:
-        type: boolean
-      created:
-        type: string
-      enabled:
-        type: boolean
-      env:
-        additionalProperties:
-          type: string
-        type: object
-      headers:
-        additionalProperties:
-          type: string
-        type: object
-      health:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.HealthStatus'
-        description: Unified health status calculated by the backend
-      id:
-        type: string
-      isolation:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.IsolationConfig'
-      last_error:
-        type: string
-      last_reconnect_at:
-        type: string
-      last_retry_time:
-        type: string
-      name:
-        type: string
-      oauth:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.OAuthConfig'
-      oauth_status:
-        description: 'OAuth status: "authenticated", "expired", "error", "none"'
-        type: string
-      protocol:
-        type: string
-      quarantined:
-        type: boolean
-      reconnect_count:
-        type: integer
-      retry_count:
-        type: integer
-      should_retry:
-        type: boolean
-      status:
-        type: string
-      token_expires_at:
-        description: When the OAuth token expires (ISO 8601)
-        type: string
-      tool_count:
-        type: integer
-      tool_list_token_size:
-        description: Token size for this server's tools
-        type: integer
-      updated:
-        type: string
-      url:
-        type: string
-      user_logged_out:
-        description: True if user explicitly logged out (prevents auto-reconnection)
-        type: boolean
-      working_dir:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.ServerActionResponse:
-    properties:
-      action:
-        type: string
-      async:
-        type: boolean
-      server:
-        type: string
-      success:
-        type: boolean
-    type: object
-  mcpproxy-go_internal_contracts.ServerStats:
-    properties:
-      connected_servers:
-        type: integer
-      docker_containers:
-        type: integer
-      quarantined_servers:
-        type: integer
-      token_metrics:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerTokenMetrics'
-      total_servers:
-        type: integer
-      total_tools:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.ServerTokenMetrics:
-    properties:
-      average_query_result_size:
-        description: Typical retrieve_tools output (tokens)
-        type: integer
-      per_server_tool_list_sizes:
-        additionalProperties:
+        success:
+          type: boolean
+      type: object
+    contracts.ActivityDetailResponse:
+      properties:
+        activity:
+          $ref: '#/components/schemas/contracts.ActivityRecord'
+      type: object
+    contracts.ActivityListResponse:
+      properties:
+        activities:
+          items:
+            $ref: '#/components/schemas/contracts.ActivityRecord'
+          type: array
+          uniqueItems: false
+        limit:
           type: integer
-        description: Token size per server
-        type: object
-      saved_tokens:
-        description: Difference
-        type: integer
-      saved_tokens_percentage:
-        description: Percentage saved
-        type: number
-      total_server_tool_list_size:
-        description: All upstream tools combined (tokens)
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.SuccessResponse:
-    properties:
-      data: {}
-      success:
-        type: boolean
-    type: object
-  mcpproxy-go_internal_contracts.TokenMetrics:
-    properties:
-      encoding:
-        description: Encoding used (e.g., cl100k_base)
-        type: string
-      estimated_cost:
-        description: Optional cost estimate
-        type: number
-      input_tokens:
-        description: Tokens in the request
-        type: integer
-      model:
-        description: Model used for tokenization
-        type: string
-      output_tokens:
-        description: Tokens in the response
-        type: integer
-      total_tokens:
-        description: Total tokens (input + output)
-        type: integer
-      truncated_tokens:
-        description: Tokens removed by truncation
-        type: integer
-      was_truncated:
-        description: Whether response was truncated
-        type: boolean
-    type: object
-  mcpproxy-go_internal_contracts.Tool:
-    properties:
-      annotations:
-        $ref: '#/definitions/mcpproxy-go_internal_contracts.ToolAnnotation'
-      description:
-        type: string
-      last_used:
-        type: string
-      name:
-        type: string
-      schema:
-        additionalProperties: true
-        type: object
-      server_name:
-        type: string
-      usage:
-        type: integer
-    type: object
-  mcpproxy-go_internal_contracts.ToolAnnotation:
-    properties:
-      destructiveHint:
-        type: boolean
-      idempotentHint:
-        type: boolean
-      openWorldHint:
-        type: boolean
-      readOnlyHint:
-        type: boolean
-      title:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.ToolCallRecord:
-    properties:
-      annotations:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.ToolAnnotation'
-        description: Tool behavior hints snapshot
-      arguments:
-        additionalProperties: true
-        description: Tool arguments
-        type: object
-      config_path:
-        description: Active config file path
-        type: string
-      duration:
-        description: Duration in nanoseconds
-        type: integer
-      error:
-        description: Error message (failure only)
-        type: string
-      execution_type:
-        description: '"direct" or "code_execution"'
-        type: string
-      id:
-        description: Unique identifier
-        type: string
-      mcp_client_name:
-        description: MCP client name from InitializeRequest
-        type: string
-      mcp_client_version:
-        description: MCP client version
-        type: string
-      mcp_session_id:
-        description: MCP session identifier
-        type: string
-      metrics:
-        allOf:
-        - $ref: '#/definitions/mcpproxy-go_internal_contracts.TokenMetrics'
-        description: Token usage metrics (nil for older records)
-      parent_call_id:
-        description: Links nested calls to parent code_execution
-        type: string
-      request_id:
-        description: Request correlation ID
-        type: string
-      response:
-        description: Tool response (success only)
-      server_id:
-        description: Server identity hash
-        type: string
-      server_name:
-        description: Human-readable server name
-        type: string
-      timestamp:
-        description: When the call was made
-        type: string
-      tool_name:
-        description: Tool name (without server prefix)
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.UpdateInfo:
-    properties:
-      available:
-        description: Whether an update is available
-        type: boolean
-      check_error:
-        description: Error message if update check failed
-        type: string
-      checked_at:
-        description: When the update check was performed
-        type: string
-      is_prerelease:
-        description: Whether the latest version is a prerelease
-        type: boolean
-      latest_version:
-        description: Latest version available (e.g., "v1.2.3")
-        type: string
-      release_url:
-        description: URL to the release page
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.UpstreamError:
-    properties:
-      error_message:
-        type: string
-      server_name:
-        type: string
-      timestamp:
-        type: string
-    type: object
-  mcpproxy-go_internal_contracts.ValidateConfigResponse:
-    properties:
-      errors:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.ValidationError'
-        type: array
-      valid:
-        type: boolean
-    type: object
-  mcpproxy-go_internal_contracts.ValidationError:
-    properties:
-      field:
-        type: string
-      message:
-        type: string
-    type: object
-  mcpproxy-go_internal_management.BulkOperationResult:
-    properties:
-      errors:
-        additionalProperties:
+        offset:
+          type: integer
+        total:
+          type: integer
+      type: object
+    contracts.ActivityRecord:
+      properties:
+        arguments:
+          additionalProperties: {}
+          description: Tool call arguments
+          type: object
+        duration_ms:
+          description: Execution duration in milliseconds
+          type: integer
+        error_message:
+          description: Error details if status is "error"
           type: string
-        description: Map of server name to error message
-        type: object
-      failed:
-        description: Number of failed operations
-        type: integer
-      successful:
-        description: Number of successful operations
-        type: integer
-      total:
-        description: Total servers processed
-        type: integer
-    type: object
-  mcpproxy-go_internal_observability.HealthResponse:
-    properties:
-      components:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_observability.HealthStatus'
-        type: array
-      status:
-        description: '"healthy" or "unhealthy"'
-        type: string
-      timestamp:
-        type: string
-    type: object
-  mcpproxy-go_internal_observability.HealthStatus:
-    properties:
-      error:
-        type: string
-      latency:
-        type: string
-      name:
-        type: string
-      status:
-        description: '"healthy" or "unhealthy"'
-        type: string
-    type: object
-  mcpproxy-go_internal_observability.ReadinessResponse:
-    properties:
-      components:
-        items:
-          $ref: '#/definitions/mcpproxy-go_internal_observability.HealthStatus'
-        type: array
-      status:
-        description: '"ready" or "not_ready"'
-        type: string
-      timestamp:
-        type: string
-    type: object
-  mcpproxy-go_internal_secureenv.EnvConfig:
-    properties:
-      allowed_system_vars:
-        items:
+        id:
+          description: Unique identifier (ULID format)
           type: string
-        type: array
-      custom_vars:
-        additionalProperties:
+        metadata:
+          additionalProperties: {}
+          description: Additional context-specific data
+          type: object
+        request_id:
+          description: HTTP request ID for correlation
           type: string
-        type: object
-      enhance_path:
-        description: Enable PATH enhancement for Launchd scenarios
-        type: boolean
-      inherit_system_safe:
-        type: boolean
-    type: object
+        response:
+          description: Tool response (potentially truncated)
+          type: string
+        response_truncated:
+          description: True if response was truncated
+          type: boolean
+        server_name:
+          description: Name of upstream MCP server
+          type: string
+        session_id:
+          description: MCP session ID for correlation
+          type: string
+        source:
+          $ref: '#/components/schemas/contracts.ActivitySource'
+        status:
+          description: 'Result status: "success", "error", "blocked"'
+          type: string
+        timestamp:
+          description: When activity occurred
+          type: string
+        tool_name:
+          description: Name of tool called
+          type: string
+        type:
+          $ref: '#/components/schemas/contracts.ActivityType'
+      type: object
+    contracts.ActivitySource:
+      description: 'How activity was triggered: "mcp", "cli", "api"'
+      type: string
+      x-enum-varnames:
+      - ActivitySourceMCP
+      - ActivitySourceCLI
+      - ActivitySourceAPI
+    contracts.ActivitySummaryResponse:
+      properties:
+        blocked_count:
+          description: Count of blocked activities
+          type: integer
+        end_time:
+          description: End of the period (RFC3339)
+          type: string
+        error_count:
+          description: Count of error activities
+          type: integer
+        period:
+          description: Time period (1h, 24h, 7d, 30d)
+          type: string
+        start_time:
+          description: Start of the period (RFC3339)
+          type: string
+        success_count:
+          description: Count of successful activities
+          type: integer
+        top_servers:
+          description: Top servers by activity count
+          items:
+            $ref: '#/components/schemas/contracts.ActivityTopServer'
+          type: array
+          uniqueItems: false
+        top_tools:
+          description: Top tools by activity count
+          items:
+            $ref: '#/components/schemas/contracts.ActivityTopTool'
+          type: array
+          uniqueItems: false
+        total_count:
+          description: Total activity count
+          type: integer
+      type: object
+    contracts.ActivityTopServer:
+      properties:
+        count:
+          description: Activity count
+          type: integer
+        name:
+          description: Server name
+          type: string
+      type: object
+    contracts.ActivityTopTool:
+      properties:
+        count:
+          description: Activity count
+          type: integer
+        server:
+          description: Server name
+          type: string
+        tool:
+          description: Tool name
+          type: string
+      type: object
+    contracts.ActivityType:
+      description: Type of activity
+      type: string
+      x-enum-varnames:
+      - ActivityTypeToolCall
+      - ActivityTypePolicyDecision
+      - ActivityTypeQuarantineChange
+      - ActivityTypeServerChange
+    contracts.ConfigApplyResult:
+      properties:
+        applied_immediately:
+          type: boolean
+        changed_fields:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        requires_restart:
+          type: boolean
+        restart_reason:
+          type: string
+        success:
+          type: boolean
+        validation_errors:
+          items:
+            $ref: '#/components/schemas/contracts.ValidationError'
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.Diagnostics:
+      properties:
+        docker_status:
+          $ref: '#/components/schemas/contracts.DockerStatus'
+        missing_secrets:
+          description: Renamed to avoid conflict
+          items:
+            $ref: '#/components/schemas/contracts.MissingSecretInfo'
+          type: array
+          uniqueItems: false
+        oauth_issues:
+          description: OAuth parameter mismatches
+          items:
+            $ref: '#/components/schemas/contracts.OAuthIssue'
+          type: array
+          uniqueItems: false
+        oauth_required:
+          items:
+            $ref: '#/components/schemas/contracts.OAuthRequirement'
+          type: array
+          uniqueItems: false
+        runtime_warnings:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        timestamp:
+          type: string
+        total_issues:
+          type: integer
+        upstream_errors:
+          items:
+            $ref: '#/components/schemas/contracts.UpstreamError'
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.DockerStatus:
+      properties:
+        available:
+          type: boolean
+        error:
+          type: string
+        version:
+          type: string
+      type: object
+    contracts.ErrorResponse:
+      properties:
+        error:
+          type: string
+        success:
+          type: boolean
+      type: object
+    contracts.GetConfigResponse:
+      properties:
+        config:
+          description: The configuration object
+        config_path:
+          description: Path to config file
+          type: string
+      type: object
+    contracts.GetRegistriesResponse:
+      properties:
+        registries:
+          items:
+            $ref: '#/components/schemas/contracts.Registry'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
+      type: object
+    contracts.GetServerLogsResponse:
+      properties:
+        count:
+          type: integer
+        logs:
+          items:
+            $ref: '#/components/schemas/contracts.LogEntry'
+          type: array
+          uniqueItems: false
+        server_name:
+          type: string
+      type: object
+    contracts.GetServerToolCallsResponse:
+      properties:
+        server_name:
+          type: string
+        tool_calls:
+          items:
+            $ref: '#/components/schemas/contracts.ToolCallRecord'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
+      type: object
+    contracts.GetServerToolsResponse:
+      properties:
+        count:
+          type: integer
+        server_name:
+          type: string
+        tools:
+          items:
+            $ref: '#/components/schemas/contracts.Tool'
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.GetServersResponse:
+      properties:
+        servers:
+          items:
+            $ref: '#/components/schemas/contracts.Server'
+          type: array
+          uniqueItems: false
+        stats:
+          $ref: '#/components/schemas/contracts.ServerStats'
+      type: object
+    contracts.GetSessionDetailResponse:
+      properties:
+        session:
+          $ref: '#/components/schemas/contracts.MCPSession'
+      type: object
+    contracts.GetSessionsResponse:
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        sessions:
+          items:
+            $ref: '#/components/schemas/contracts.MCPSession'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
+      type: object
+    contracts.GetToolCallDetailResponse:
+      properties:
+        tool_call:
+          $ref: '#/components/schemas/contracts.ToolCallRecord'
+      type: object
+    contracts.GetToolCallsResponse:
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        tool_calls:
+          items:
+            $ref: '#/components/schemas/contracts.ToolCallRecord'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
+      type: object
+    contracts.HealthStatus:
+      description: Unified health status calculated by the backend
+      properties:
+        action:
+          description: 'Action is the suggested fix action: "login", "restart", "enable",
+            "approve", "view_logs", or "" (none)'
+          type: string
+        admin_state:
+          description: 'AdminState indicates the admin state: "enabled", "disabled",
+            or "quarantined"'
+          type: string
+        detail:
+          description: Detail is an optional longer explanation of the status
+          type: string
+        level:
+          description: 'Level indicates the health level: "healthy", "degraded", or
+            "unhealthy"'
+          type: string
+        summary:
+          description: Summary is a human-readable status message (e.g., "Connected
+            (5 tools)")
+          type: string
+      type: object
+    contracts.InfoEndpoints:
+      description: Available API endpoints
+      properties:
+        http:
+          description: HTTP endpoint address (e.g., "127.0.0.1:8080")
+          type: string
+        socket:
+          description: Unix socket path (empty if disabled)
+          type: string
+      type: object
+    contracts.InfoResponse:
+      properties:
+        endpoints:
+          $ref: '#/components/schemas/contracts.InfoEndpoints'
+        listen_addr:
+          description: Listen address (e.g., "127.0.0.1:8080")
+          type: string
+        update:
+          $ref: '#/components/schemas/contracts.UpdateInfo'
+        version:
+          description: Current MCPProxy version
+          type: string
+        web_ui_url:
+          description: URL to access the web control panel
+          type: string
+      type: object
+    contracts.IsolationConfig:
+      properties:
+        cpu_limit:
+          type: string
+        enabled:
+          type: boolean
+        image:
+          type: string
+        memory_limit:
+          type: string
+        timeout:
+          type: string
+        working_dir:
+          type: string
+      type: object
+    contracts.LogEntry:
+      properties:
+        fields:
+          additionalProperties: {}
+          type: object
+        level:
+          type: string
+        message:
+          type: string
+        server:
+          type: string
+        timestamp:
+          type: string
+      type: object
+    contracts.MCPSession:
+      properties:
+        client_name:
+          type: string
+        client_version:
+          type: string
+        end_time:
+          type: string
+        experimental:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        has_roots:
+          description: MCP Client Capabilities
+          type: boolean
+        has_sampling:
+          type: boolean
+        id:
+          type: string
+        last_activity:
+          type: string
+        start_time:
+          type: string
+        status:
+          type: string
+        tool_call_count:
+          type: integer
+        total_tokens:
+          type: integer
+      type: object
+    contracts.MissingSecretInfo:
+      properties:
+        secret_name:
+          type: string
+        used_by:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.NPMPackageInfo:
+      properties:
+        exists:
+          type: boolean
+        install_cmd:
+          type: string
+      type: object
+    contracts.OAuthConfig:
+      properties:
+        auth_url:
+          type: string
+        client_id:
+          type: string
+        extra_params:
+          additionalProperties:
+            type: string
+          type: object
+        pkce_enabled:
+          type: boolean
+        redirect_port:
+          type: integer
+        scopes:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        token_expires_at:
+          description: When the OAuth token expires
+          type: string
+        token_url:
+          type: string
+        token_valid:
+          description: Whether token is currently valid
+          type: boolean
+      type: object
+    contracts.OAuthIssue:
+      properties:
+        documentation_url:
+          type: string
+        error:
+          type: string
+        issue:
+          type: string
+        missing_params:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        resolution:
+          type: string
+        server_name:
+          type: string
+      type: object
+    contracts.OAuthRequirement:
+      properties:
+        expires_at:
+          type: string
+        message:
+          type: string
+        server_name:
+          type: string
+        state:
+          type: string
+      type: object
+    contracts.Registry:
+      properties:
+        count:
+          description: number or string
+        description:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        protocol:
+          type: string
+        servers_url:
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        url:
+          type: string
+      type: object
+    contracts.ReplayToolCallRequest:
+      properties:
+        arguments:
+          additionalProperties: {}
+          description: Modified arguments for replay
+          type: object
+      type: object
+    contracts.ReplayToolCallResponse:
+      properties:
+        error:
+          description: Error if replay failed
+          type: string
+        new_call_id:
+          description: ID of the newly created call
+          type: string
+        new_tool_call:
+          $ref: '#/components/schemas/contracts.ToolCallRecord'
+        replayed_from:
+          description: Original call ID
+          type: string
+        success:
+          type: boolean
+      type: object
+    contracts.RepositoryInfo:
+      description: Detected package info
+      properties:
+        npm:
+          $ref: '#/components/schemas/contracts.NPMPackageInfo'
+      type: object
+    contracts.RepositoryServer:
+      properties:
+        connect_url:
+          description: Alternative connection URL
+          type: string
+        created_at:
+          type: string
+        description:
+          type: string
+        id:
+          type: string
+        install_cmd:
+          description: Installation command
+          type: string
+        name:
+          type: string
+        registry:
+          description: Which registry this came from
+          type: string
+        repository_info:
+          $ref: '#/components/schemas/contracts.RepositoryInfo'
+        source_code_url:
+          description: Source repository URL
+          type: string
+        updated_at:
+          type: string
+        url:
+          description: MCP endpoint for remote servers only
+          type: string
+      type: object
+    contracts.SearchRegistryServersResponse:
+      properties:
+        query:
+          type: string
+        registry_id:
+          type: string
+        servers:
+          items:
+            $ref: '#/components/schemas/contracts.RepositoryServer'
+          type: array
+          uniqueItems: false
+        tag:
+          type: string
+        total:
+          type: integer
+      type: object
+    contracts.SearchResult:
+      properties:
+        matches:
+          type: integer
+        score:
+          type: number
+        snippet:
+          type: string
+        tool:
+          $ref: '#/components/schemas/contracts.Tool'
+      type: object
+    contracts.SearchToolsResponse:
+      properties:
+        query:
+          type: string
+        results:
+          items:
+            $ref: '#/components/schemas/contracts.SearchResult'
+          type: array
+          uniqueItems: false
+        took:
+          type: string
+        total:
+          type: integer
+      type: object
+    contracts.Server:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        authenticated:
+          description: OAuth authentication status
+          type: boolean
+        command:
+          type: string
+        connected:
+          type: boolean
+        connected_at:
+          type: string
+        connecting:
+          type: boolean
+        created:
+          type: string
+        enabled:
+          type: boolean
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        headers:
+          additionalProperties:
+            type: string
+          type: object
+        health:
+          $ref: '#/components/schemas/contracts.HealthStatus'
+        id:
+          type: string
+        isolation:
+          $ref: '#/components/schemas/contracts.IsolationConfig'
+        last_error:
+          type: string
+        last_reconnect_at:
+          type: string
+        last_retry_time:
+          type: string
+        name:
+          type: string
+        oauth:
+          $ref: '#/components/schemas/contracts.OAuthConfig'
+        oauth_status:
+          description: 'OAuth status: "authenticated", "expired", "error", "none"'
+          type: string
+        protocol:
+          type: string
+        quarantined:
+          type: boolean
+        reconnect_count:
+          type: integer
+        retry_count:
+          type: integer
+        should_retry:
+          type: boolean
+        status:
+          type: string
+        token_expires_at:
+          description: When the OAuth token expires (ISO 8601)
+          type: string
+        tool_count:
+          type: integer
+        tool_list_token_size:
+          description: Token size for this server's tools
+          type: integer
+        updated:
+          type: string
+        url:
+          type: string
+        user_logged_out:
+          description: True if user explicitly logged out (prevents auto-reconnection)
+          type: boolean
+        working_dir:
+          type: string
+      type: object
+    contracts.ServerActionResponse:
+      properties:
+        action:
+          type: string
+        async:
+          type: boolean
+        server:
+          type: string
+        success:
+          type: boolean
+      type: object
+    contracts.ServerStats:
+      properties:
+        connected_servers:
+          type: integer
+        docker_containers:
+          type: integer
+        quarantined_servers:
+          type: integer
+        token_metrics:
+          $ref: '#/components/schemas/contracts.ServerTokenMetrics'
+        total_servers:
+          type: integer
+        total_tools:
+          type: integer
+      type: object
+    contracts.ServerTokenMetrics:
+      properties:
+        average_query_result_size:
+          description: Typical retrieve_tools output (tokens)
+          type: integer
+        per_server_tool_list_sizes:
+          additionalProperties:
+            type: integer
+          description: Token size per server
+          type: object
+        saved_tokens:
+          description: Difference
+          type: integer
+        saved_tokens_percentage:
+          description: Percentage saved
+          type: number
+        total_server_tool_list_size:
+          description: All upstream tools combined (tokens)
+          type: integer
+      type: object
+    contracts.SuccessResponse:
+      properties:
+        data: {}
+        success:
+          type: boolean
+      type: object
+    contracts.TokenMetrics:
+      description: Token usage metrics (nil for older records)
+      properties:
+        encoding:
+          description: Encoding used (e.g., cl100k_base)
+          type: string
+        estimated_cost:
+          description: Optional cost estimate
+          type: number
+        input_tokens:
+          description: Tokens in the request
+          type: integer
+        model:
+          description: Model used for tokenization
+          type: string
+        output_tokens:
+          description: Tokens in the response
+          type: integer
+        total_tokens:
+          description: Total tokens (input + output)
+          type: integer
+        truncated_tokens:
+          description: Tokens removed by truncation
+          type: integer
+        was_truncated:
+          description: Whether response was truncated
+          type: boolean
+      type: object
+    contracts.Tool:
+      properties:
+        annotations:
+          $ref: '#/components/schemas/contracts.ToolAnnotation'
+        description:
+          type: string
+        last_used:
+          type: string
+        name:
+          type: string
+        schema:
+          additionalProperties: {}
+          type: object
+        server_name:
+          type: string
+        usage:
+          type: integer
+      type: object
+    contracts.ToolAnnotation:
+      description: Tool behavior hints snapshot
+      properties:
+        destructiveHint:
+          type: boolean
+        idempotentHint:
+          type: boolean
+        openWorldHint:
+          type: boolean
+        readOnlyHint:
+          type: boolean
+        title:
+          type: string
+      type: object
+    contracts.ToolCallRecord:
+      description: The new tool call record
+      properties:
+        annotations:
+          $ref: '#/components/schemas/contracts.ToolAnnotation'
+        arguments:
+          additionalProperties: {}
+          description: Tool arguments
+          type: object
+        config_path:
+          description: Active config file path
+          type: string
+        duration:
+          description: Duration in nanoseconds
+          type: integer
+        error:
+          description: Error message (failure only)
+          type: string
+        execution_type:
+          description: '"direct" or "code_execution"'
+          type: string
+        id:
+          description: Unique identifier
+          type: string
+        mcp_client_name:
+          description: MCP client name from InitializeRequest
+          type: string
+        mcp_client_version:
+          description: MCP client version
+          type: string
+        mcp_session_id:
+          description: MCP session identifier
+          type: string
+        metrics:
+          $ref: '#/components/schemas/contracts.TokenMetrics'
+        parent_call_id:
+          description: Links nested calls to parent code_execution
+          type: string
+        request_id:
+          description: Request correlation ID
+          type: string
+        response:
+          description: Tool response (success only)
+        server_id:
+          description: Server identity hash
+          type: string
+        server_name:
+          description: Human-readable server name
+          type: string
+        timestamp:
+          description: When the call was made
+          type: string
+        tool_name:
+          description: Tool name (without server prefix)
+          type: string
+      type: object
+    contracts.UpdateInfo:
+      description: Update information (if available)
+      properties:
+        available:
+          description: Whether an update is available
+          type: boolean
+        check_error:
+          description: Error message if update check failed
+          type: string
+        checked_at:
+          description: When the update check was performed
+          type: string
+        is_prerelease:
+          description: Whether the latest version is a prerelease
+          type: boolean
+        latest_version:
+          description: Latest version available (e.g., "v1.2.3")
+          type: string
+        release_url:
+          description: URL to the release page
+          type: string
+      type: object
+    contracts.UpstreamError:
+      properties:
+        error_message:
+          type: string
+        server_name:
+          type: string
+        timestamp:
+          type: string
+      type: object
+    contracts.ValidateConfigResponse:
+      properties:
+        errors:
+          items:
+            $ref: '#/components/schemas/contracts.ValidationError'
+          type: array
+          uniqueItems: false
+        valid:
+          type: boolean
+      type: object
+    contracts.ValidationError:
+      properties:
+        field:
+          type: string
+        message:
+          type: string
+      type: object
+    data:
+      properties:
+        data:
+          $ref: '#/components/schemas/contracts.InfoResponse'
+      type: object
+    httpapi.AddServerRequest:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        command:
+          type: string
+        enabled:
+          type: boolean
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        headers:
+          additionalProperties:
+            type: string
+          type: object
+        name:
+          type: string
+        protocol:
+          type: string
+        quarantined:
+          type: boolean
+        url:
+          type: string
+        working_dir:
+          type: string
+      type: object
+    management.BulkOperationResult:
+      properties:
+        errors:
+          additionalProperties:
+            type: string
+          description: Map of server name to error message
+          type: object
+        failed:
+          description: Number of failed operations
+          type: integer
+        successful:
+          description: Number of successful operations
+          type: integer
+        total:
+          description: Total servers processed
+          type: integer
+      type: object
+    observability.HealthResponse:
+      properties:
+        components:
+          items:
+            $ref: '#/components/schemas/observability.HealthStatus'
+          type: array
+          uniqueItems: false
+        status:
+          description: '"healthy" or "unhealthy"'
+          type: string
+        timestamp:
+          type: string
+      type: object
+    observability.HealthStatus:
+      properties:
+        error:
+          type: string
+        latency:
+          type: string
+        name:
+          type: string
+        status:
+          description: '"healthy" or "unhealthy"'
+          type: string
+      type: object
+    observability.ReadinessResponse:
+      properties:
+        components:
+          items:
+            $ref: '#/components/schemas/observability.HealthStatus'
+          type: array
+          uniqueItems: false
+        status:
+          description: '"ready" or "not_ready"'
+          type: string
+        timestamp:
+          type: string
+      type: object
+  securitySchemes:
+    ApiKeyAuth:
+      description: API key authentication via query parameter. Use ?apikey=your-key
+      in: query
+      name: apikey
+      type: apiKey
+externalDocs:
+  description: ""
+  url: ""
 info:
   contact:
     name: MCPProxy Support
@@ -1618,90 +1134,113 @@ info:
     url: https://opensource.org/licenses/MIT
   title: MCPProxy API
   version: "1.0"
+openapi: 3.1.0
 paths:
   /api/v1/activity:
     get:
-      consumes:
-      - application/json
       description: Returns paginated list of activity records with optional filtering
       parameters:
       - description: Filter by activity type
-        enum:
-        - tool_call
-        - policy_decision
-        - quarantine_change
-        - server_change
         in: query
         name: type
-        type: string
+        schema:
+          enum:
+          - tool_call
+          - policy_decision
+          - quarantine_change
+          - server_change
+          type: string
       - description: Filter by server name
         in: query
         name: server
-        type: string
+        schema:
+          type: string
       - description: Filter by tool name
         in: query
         name: tool
-        type: string
+        schema:
+          type: string
       - description: Filter by MCP session ID
         in: query
         name: session_id
-        type: string
+        schema:
+          type: string
       - description: Filter by status
-        enum:
-        - success
-        - error
-        - blocked
         in: query
         name: status
-        type: string
+        schema:
+          enum:
+          - success
+          - error
+          - blocked
+          type: string
       - description: Filter by intent operation type (Spec 018)
-        enum:
-        - read
-        - write
-        - destructive
         in: query
         name: intent_type
-        type: string
+        schema:
+          enum:
+          - read
+          - write
+          - destructive
+          type: string
       - description: Filter activities after this time (RFC3339)
         in: query
         name: start_time
-        type: string
+        schema:
+          type: string
       - description: Filter activities before this time (RFC3339)
         in: query
         name: end_time
-        type: string
+        schema:
+          type: string
       - description: Maximum records to return (1-100, default 50)
         in: query
         name: limit
-        type: integer
+        schema:
+          type: integer
       - description: Pagination offset (default 0)
         in: query
         name: offset
-        type: integer
-      produces:
-      - application/json
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data: {}
+                  error:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: OK
-          schema:
-            allOf:
-            - $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
-            - properties:
-                data:
-                  $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivityListResponse'
-              type: object
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Bad Request
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Unauthorized
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Internal Server Error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
       security:
       - ApiKeyHeader: []
       - ApiKeyQuery: []
@@ -1710,39 +1249,52 @@ paths:
       - Activity
   /api/v1/activity/{id}:
     get:
-      consumes:
-      - application/json
       description: Returns full details for a single activity record
       parameters:
       - description: Activity record ID (ULID)
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data: {}
+                  error:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: OK
-          schema:
-            allOf:
-            - $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
-            - properties:
-                data:
-                  $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivityDetailResponse'
-              type: object
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Unauthorized
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Not Found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Internal Server Error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
       security:
       - ApiKeyHeader: []
       - ApiKeyQuery: []
@@ -1751,58 +1303,78 @@ paths:
       - Activity
   /api/v1/activity/export:
     get:
-      consumes:
-      - application/json
       description: Exports activity records in JSON Lines or CSV format for compliance
       parameters:
       - description: 'Export format: json (default) or csv'
         in: query
         name: format
-        type: string
+        schema:
+          type: string
       - description: Filter by activity type
         in: query
         name: type
-        type: string
+        schema:
+          type: string
       - description: Filter by server name
         in: query
         name: server
-        type: string
+        schema:
+          type: string
       - description: Filter by tool name
         in: query
         name: tool
-        type: string
+        schema:
+          type: string
       - description: Filter by MCP session ID
         in: query
         name: session_id
-        type: string
+        schema:
+          type: string
       - description: Filter by status
         in: query
         name: status
-        type: string
+        schema:
+          type: string
       - description: Filter activities after this time (RFC3339)
         in: query
         name: start_time
-        type: string
+        schema:
+          type: string
       - description: Filter activities before this time (RFC3339)
         in: query
         name: end_time
-        type: string
-      produces:
-      - application/x-ndjson
-      - text/csv
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                type: string
+            application/x-ndjson:
+              schema:
+                type: string
+            text/csv:
+              schema:
+                type: string
           description: Streamed activity records
-          schema:
-            type: string
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Unauthorized
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Internal Server Error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
       security:
       - ApiKeyHeader: []
       - ApiKeyQuery: []
@@ -1811,42 +1383,56 @@ paths:
       - Activity
   /api/v1/activity/summary:
     get:
-      consumes:
-      - application/json
       description: Returns aggregated activity statistics for a time period
       parameters:
       - description: 'Time period: 1h, 24h (default), 7d, 30d'
         in: query
         name: period
-        type: string
+        schema:
+          type: string
       - description: 'Group by: server, tool (optional)'
         in: query
         name: group_by
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data: {}
+                  error:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: OK
-          schema:
-            allOf:
-            - $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
-            - properties:
-                data:
-                  $ref: '#/definitions/mcpproxy-go_internal_contracts.ActivitySummaryResponse'
-              type: object
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Bad Request
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Unauthorized
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
           description: Internal Server Error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
       security:
       - ApiKeyHeader: []
       - ApiKeyQuery: []
@@ -1857,21 +1443,25 @@ paths:
     get:
       description: Retrieves the current MCPProxy configuration including all server
         definitions, global settings, and runtime parameters
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetConfigResponse'
           description: Configuration retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetConfigResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to get configuration
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -1880,38 +1470,42 @@ paths:
       - config
   /api/v1/config/apply:
     post:
-      consumes:
-      - application/json
       description: Applies a new MCPProxy configuration. Validates and persists the
         configuration to disk. Some changes apply immediately, while others may require
         a restart. Returns detailed information about applied changes and restart
         requirements.
-      parameters:
-      - description: Configuration to apply
-        in: body
-        name: config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/config.Config'
+        description: Configuration to apply
         required: true
-        schema:
-          $ref: '#/definitions/mcpproxy-go_internal_config.Config'
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ConfigApplyResult'
           description: Configuration applied successfully with change details
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ConfigApplyResult'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Invalid JSON payload
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to apply configuration
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -1920,37 +1514,41 @@ paths:
       - config
   /api/v1/config/validate:
     post:
-      consumes:
-      - application/json
       description: Validates a provided MCPProxy configuration without applying it.
         Checks for syntax errors, invalid server definitions, conflicting settings,
         and other configuration issues.
-      parameters:
-      - description: Configuration to validate
-        in: body
-        name: config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/config.Config'
+        description: Configuration to validate
         required: true
-        schema:
-          $ref: '#/definitions/mcpproxy-go_internal_config.Config'
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ValidateConfigResponse'
           description: Configuration validation result
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ValidateConfigResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Invalid JSON payload
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Validation failed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -1961,17 +1559,19 @@ paths:
     get:
       description: Get comprehensive health diagnostics including upstream errors,
         OAuth requirements, missing secrets, and Docker status
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.Diagnostics'
           description: Health diagnostics
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.Diagnostics'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -1981,17 +1581,19 @@ paths:
   /api/v1/docker/status:
     get:
       description: Retrieve current Docker availability and recovery status
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
           description: Docker status information
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.SuccessResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2002,17 +1604,19 @@ paths:
     get:
       description: Get comprehensive health diagnostics including upstream errors,
         OAuth requirements, missing secrets, and Docker status
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.Diagnostics'
           description: Health diagnostics
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.Diagnostics'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2028,28 +1632,34 @@ paths:
         in: query
         name: q
         required: true
-        type: string
-      - default: 10
-        description: Maximum number of results
+        schema:
+          type: string
+      - description: Maximum number of results
         in: query
-        maximum: 100
         name: limit
-        type: integer
-      produces:
-      - application/json
+        schema:
+          default: 10
+          maximum: 100
+          type: integer
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SearchToolsResponse'
           description: Search results
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.SearchToolsResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing query parameter)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2066,23 +1676,29 @@ paths:
       - description: Force immediate update check against GitHub
         in: query
         name: refresh
-        type: boolean
-      produces:
-      - application/json
+        schema:
+          type: boolean
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data: {}
+                  error:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: Server information with optional update info
-          schema:
-            allOf:
-            - $ref: '#/definitions/mcpproxy-go_internal_contracts.APIResponse'
-            - properties:
-                data:
-                  $ref: '#/definitions/mcpproxy-go_internal_contracts.InfoResponse'
-              type: object
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2094,21 +1710,25 @@ paths:
       description: Retrieves list of all MCP server registries that can be browsed
         for discovering and installing new upstream servers. Includes registry metadata,
         server counts, and API endpoints.
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetRegistriesResponse'
           description: Registries retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetRegistriesResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to list registries
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2125,38 +1745,48 @@ paths:
         in: path
         name: id
         required: true
-        type: string
+        schema:
+          type: string
       - description: Search query keyword
         in: query
         name: q
-        type: string
+        schema:
+          type: string
       - description: Filter by tag
         in: query
         name: tag
-        type: string
+        schema:
+          type: string
       - description: Maximum number of results (default 10)
         in: query
         name: limit
-        type: integer
-      produces:
-      - application/json
+        schema:
+          type: integer
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SearchRegistryServersResponse'
           description: Servers retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.SearchRegistryServersResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Registry ID required
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to search servers
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2165,35 +1795,46 @@ paths:
       - registries
   /api/v1/secrets:
     post:
-      consumes:
-      - application/json
       description: Stores a secret value in the operating system's secure keyring.
         The secret can then be referenced in configuration using ${keyring:secret-name}
         syntax. Automatically notifies runtime to restart affected servers.
-      produces:
-      - application/json
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: {}
+                type: object
           description: Secret stored successfully with reference syntax
-          schema:
-            additionalProperties: true
-            type: object
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Invalid JSON payload, missing name/value, or unsupported type
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Secret resolver not available or failed to store secret
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2210,35 +1851,45 @@ paths:
         in: path
         name: name
         required: true
-        type: string
+        schema:
+          type: string
       - description: Secret type (only 'keyring' supported, defaults to 'keyring')
         in: query
         name: type
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: {}
+                type: object
           description: Secret deleted successfully
-          schema:
-            additionalProperties: true
-            type: object
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Missing secret name or unsupported type
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Secret resolver not available or failed to delete secret
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2249,17 +1900,19 @@ paths:
     get:
       description: Get a list of all configured upstream MCP servers with their connection
         status and statistics
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetServersResponse'
           description: Server list with statistics
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetServersResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2267,36 +1920,40 @@ paths:
       tags:
       - servers
     post:
-      consumes:
-      - application/json
       description: Add a new MCP upstream server to the configuration. New servers
         are quarantined by default for security.
-      parameters:
-      - description: Server configuration
-        in: body
-        name: server
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.AddServerRequest'
+        description: Server configuration
         required: true
-        schema:
-          $ref: '#/definitions/internal_httpapi.AddServerRequest'
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: Server added successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request - invalid configuration
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Conflict - server with this name already exists
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2312,26 +1969,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: Server removed successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2346,26 +2010,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: Server disabled successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2381,26 +2052,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: Tool discovery triggered successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to discover tools
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2415,26 +2093,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: Server enabled successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2450,26 +2135,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: OAuth login initiated successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2486,30 +2178,39 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: OAuth logout completed successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (management disabled or read-only mode)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2524,31 +2225,39 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      - default: 100
-        description: Number of log lines to retrieve
+        schema:
+          type: string
+      - description: Number of log lines to retrieve
         in: query
         name: tail
-        type: integer
-      produces:
-      - application/json
+        schema:
+          default: 100
+          type: integer
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetServerLogsResponse'
           description: Server logs retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetServerLogsResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2564,26 +2273,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: Server quarantined successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2598,26 +2314,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: Server restarted successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2634,34 +2357,44 @@ paths:
         in: path
         name: id
         required: true
-        type: string
+        schema:
+          type: string
       - description: Maximum number of records to return (1-100, default 50)
         in: query
         name: limit
-        type: integer
-      produces:
-      - application/json
+        schema:
+          type: integer
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetServerToolCallsResponse'
           description: Server tool calls retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetServerToolCallsResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server ID required
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to get server tool calls
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2676,26 +2409,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetServerToolsResponse'
           description: Server tools retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetServerToolsResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2711,26 +2451,33 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: Server unquarantined successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2741,21 +2488,25 @@ paths:
     post:
       description: Disable all configured upstream MCP servers with partial failure
         handling
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/management.BulkOperationResult'
           description: Bulk disable results with success/failure counts
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_management.BulkOperationResult'
         "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (management disabled)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2766,21 +2517,25 @@ paths:
     post:
       description: Enable all configured upstream MCP servers with partial failure
         handling
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/management.BulkOperationResult'
           description: Bulk enable results with success/failure counts
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_management.BulkOperationResult'
         "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (management disabled)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2794,18 +2549,21 @@ paths:
       - description: Reason for reconnection
         in: query
         name: reason
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: All servers reconnected successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ServerActionResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2816,21 +2574,25 @@ paths:
     post:
       description: Restart all configured upstream MCP servers sequentially with partial
         failure handling
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/management.BulkOperationResult'
           description: Bulk restart results with success/failure counts
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_management.BulkOperationResult'
         "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (management disabled)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2846,30 +2608,38 @@ paths:
       - description: Maximum number of sessions to return (1-100, default 10)
         in: query
         name: limit
-        type: integer
+        schema:
+          type: integer
       - description: Number of sessions to skip for pagination (default 0)
         in: query
         name: offset
-        type: integer
-      produces:
-      - application/json
+        schema:
+          type: integer
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetSessionsResponse'
           description: Sessions retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetSessionsResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to get sessions
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2886,30 +2656,39 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetSessionDetailResponse'
           description: Session details retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetSessionDetailResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Session ID required
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Session not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2919,17 +2698,19 @@ paths:
   /api/v1/stats/tokens:
     get:
       description: Retrieve token savings statistics across all servers and sessions
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
           description: Token statistics
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.SuccessResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2940,17 +2721,19 @@ paths:
     get:
       description: Get comprehensive server status including running state, listen
         address, upstream statistics, and timestamp
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
           description: Server status information
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.SuccessResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -2966,34 +2749,43 @@ paths:
       - description: Maximum number of records to return (1-100, default 50)
         in: query
         name: limit
-        type: integer
+        schema:
+          type: integer
       - description: Number of records to skip for pagination (default 0)
         in: query
         name: offset
-        type: integer
+        schema:
+          type: integer
       - description: Filter tool calls by MCP session ID
         in: query
         name: session_id
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetToolCallsResponse'
           description: Tool calls retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetToolCallsResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to get tool calls
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -3010,30 +2802,39 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      produces:
-      - application/json
+        schema:
+          type: string
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GetToolCallDetailResponse'
           description: Tool call details retrieved successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.GetToolCallDetailResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Tool call ID required
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Tool call not found
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -3042,8 +2843,6 @@ paths:
       - tool-calls
   /api/v1/tool-calls/{id}/replay:
     post:
-      consumes:
-      - application/json
       description: Re-executes a previous tool call with optional modified arguments.
         Useful for debugging and testing tool behavior with different inputs. Creates
         a new tool call record linked to the original.
@@ -3052,35 +2851,45 @@ paths:
         in: path
         name: id
         required: true
-        type: string
-      - description: Optional modified arguments for replay
-        in: body
-        name: request
         schema:
-          $ref: '#/definitions/mcpproxy-go_internal_contracts.ReplayToolCallRequest'
-      produces:
-      - application/json
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.ReplayToolCallRequest'
+        description: Optional modified arguments for replay
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ReplayToolCallResponse'
           description: Tool call replayed successfully
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ReplayToolCallResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Tool call ID required or invalid JSON payload
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "405":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Failed to replay tool call
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -3089,90 +2898,62 @@ paths:
       - tool-calls
   /api/v1/tools/call:
     post:
-      consumes:
-      - application/json
       description: Execute a tool on an upstream MCP server (wrapper around MCP tool
         calls)
-      parameters:
-      - description: Tool call request with tool name and arguments
-        in: body
-        name: request
-        required: true
-        schema:
-          properties:
-            arguments:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                arguments:
+                  type: object
+                tool_name:
+                  type: string
               type: object
-            tool_name:
-              type: string
-          type: object
-      produces:
-      - application/json
+        description: Tool call request with tool name and arguments
+        required: true
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
           description: Tool call result
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.SuccessResponse'
         "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (invalid payload or missing tool name)
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
         "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Internal server error or tool execution failure
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_contracts.ErrorResponse'
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Call a tool
       tags:
       - tools
-  /doctor:
-    get:
-      consumes:
-      - application/json
-      description: Aggregates health information from all servers, checks OAuth status,
-        missing secrets, and Docker availability
-      parameters:
-      - description: API Key
-        in: query
-        name: apikey
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: Comprehensive health diagnostics
-          schema:
-            $ref: '#/definitions/main.Diagnostics'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "500":
-          description: Internal server error
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-      security:
-      - ApiKeyAuth: []
-        ApiKeyQuery: []
-      summary: Run health diagnostics
-      tags:
-      - diagnostics
   /healthz:
     get:
       description: Get comprehensive health status including all component health
         (Kubernetes-compatible liveness probe)
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/observability.HealthResponse'
           description: Service is healthy
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_observability.HealthResponse'
         "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/observability.HealthResponse'
           description: Service is unhealthy
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_observability.HealthResponse'
       summary: Get health status
       tags:
       - health
@@ -3180,198 +2961,19 @@ paths:
     get:
       description: Get readiness status including all component readiness checks (Kubernetes-compatible
         readiness probe)
-      produces:
-      - application/json
       responses:
         "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/observability.ReadinessResponse'
           description: Service is ready
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_observability.ReadinessResponse'
         "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/observability.ReadinessResponse'
           description: Service is not ready
-          schema:
-            $ref: '#/definitions/mcpproxy-go_internal_observability.ReadinessResponse'
       summary: Get readiness status
       tags:
       - health
-  /servers:
-    get:
-      consumes:
-      - application/json
-      description: Returns all configured MCP servers with connection status, tool
-        counts, and aggregate statistics
-      parameters:
-      - description: API Key (alternative to header for browser/SSE)
-        in: query
-        name: apikey
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: List of servers with statistics
-          schema:
-            $ref: '#/definitions/main.ServersResponse'
-        "401":
-          description: Unauthorized - missing or invalid API key
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "500":
-          description: Internal server error
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-      security:
-      - ApiKeyAuth: []
-        ApiKeyQuery: []
-      summary: List all upstream servers
-      tags:
-      - servers
-  /servers/{name}/logs:
-    get:
-      consumes:
-      - application/json
-      description: Returns recent log entries for a specific upstream server
-      parameters:
-      - description: Server name
-        in: path
-        name: name
-        required: true
-        type: string
-      - description: Number of lines to return (default 50, max 1000)
-        in: query
-        name: tail
-        type: integer
-      - description: API Key
-        in: query
-        name: apikey
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: Log entries
-          schema:
-            items:
-              $ref: '#/definitions/main.LogEntry'
-            type: array
-        "400":
-          description: Bad request - invalid tail parameter
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "404":
-          description: Server not found
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "500":
-          description: Internal server error
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-      security:
-      - ApiKeyAuth: []
-        ApiKeyQuery: []
-      summary: Get server logs
-      tags:
-      - servers
-  /servers/{name}/restart:
-    post:
-      consumes:
-      - application/json
-      description: Stops and restarts the connection to a specific upstream MCP server.
-        Emits servers.changed event.
-      parameters:
-      - description: Server name
-        in: path
-        name: name
-        required: true
-        type: string
-      - description: API Key (alternative to header)
-        in: query
-        name: apikey
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: Success message
-          schema:
-            additionalProperties:
-              type: string
-            type: object
-        "400":
-          description: Bad request - invalid server name
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "403":
-          description: Forbidden - read-only mode or management disabled
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "404":
-          description: Server not found
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "500":
-          description: Internal server error
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-      security:
-      - ApiKeyAuth: []
-        ApiKeyQuery: []
-      summary: Restart an upstream server
-      tags:
-      - servers
-  /servers/restart_all:
-    post:
-      consumes:
-      - application/json
-      description: Sequentially restarts all configured servers. Returns partial success
-        if some servers fail.
-      parameters:
-      - description: API Key
-        in: query
-        name: apikey
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: Restart results with success/failure counts
-          schema:
-            $ref: '#/definitions/main.RestartAllResponse'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "403":
-          description: Forbidden - read-only mode
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-        "500":
-          description: Internal server error
-          schema:
-            $ref: '#/definitions/main.ErrorResponse'
-      security:
-      - ApiKeyAuth: []
-        ApiKeyQuery: []
-      summary: Restart all upstream servers
-      tags:
-      - servers
-securityDefinitions:
-  ApiKeyAuth:
-    description: API key authentication. Provide your API key in the X-API-Key header.
-    in: header
-    name: X-API-Key
-    type: apiKey
-  ApiKeyQuery:
-    description: API key authentication via query parameter. Use ?apikey=your-key
-    in: query
-    name: apikey
-    type: apiKey
-swagger: "2.0"
