@@ -58,6 +58,7 @@ mcpproxy activity list [flags]
 | `--server` | `-s` | | Filter by server name |
 | `--tool` | | | Filter by tool name |
 | `--status` | | | Filter by status: `success`, `error`, `blocked` |
+| `--intent-type` | | | Filter by intent operation type: `read`, `write`, `destructive` |
 | `--session` | | | Filter by MCP session ID |
 | `--start-time` | | | Filter records after this time (RFC3339) |
 | `--end-time` | | | Filter records before this time (RFC3339) |
@@ -76,6 +77,12 @@ mcpproxy activity list --type tool_call --limit 10
 # List errors from github server
 mcpproxy activity list --server github --status error
 
+# List only read operations
+mcpproxy activity list --intent-type read
+
+# List destructive operations for audit
+mcpproxy activity list --intent-type destructive --limit 100
+
 # List activity as JSON
 mcpproxy activity list -o json
 
@@ -89,13 +96,15 @@ mcpproxy activity list --limit 20 --offset 40
 ### Output (Table)
 
 ```
-ID               SRC  TYPE         SERVER      TOOL           STATUS   DURATION   TIME
-01JFXYZ123ABC    MCP  tool_call    github      create_issue   success  245ms      2 min ago
-01JFXYZ123ABD    CLI  tool_call    filesystem  read_file      error    125ms      5 min ago
-01JFXYZ123ABE    MCP  policy       private     get_secret     blocked  0ms        10 min ago
+ID               SRC  TYPE         SERVER      TOOL           INTENT  STATUS   DURATION   TIME
+01JFXYZ123ABC    MCP  tool_call    github      create_issue   write   success  245ms      2 min ago
+01JFXYZ123ABD    CLI  tool_call    filesystem  read_file      read    error    125ms      5 min ago
+01JFXYZ123ABE    MCP  policy       private     get_secret     -       blocked  0ms        10 min ago
 
 Showing 3 of 150 records (page 1)
 ```
+
+**Intent Column**: Shows the declared operation type (`read`, `write`, `destructive`) or `-` if no intent was declared.
 
 **Source Indicators:**
 - `MCP` - AI agent call via MCP protocol
