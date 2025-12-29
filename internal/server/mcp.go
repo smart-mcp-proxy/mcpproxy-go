@@ -3365,9 +3365,6 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	switch toolName {
 	case "upstream_servers":
 		result, err = p.handleUpstreamServers(ctx, request)
-	case "call_tool":
-		// Legacy call_tool - still supported internally for backward compatibility
-		result, err = p.handleCallTool(ctx, request)
 	case contracts.ToolVariantRead:
 		result, err = p.handleCallToolRead(ctx, request)
 	case contracts.ToolVariantWrite:
@@ -3389,18 +3386,10 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	default:
 		// Check if this is an upstream tool in server:tool format
 		if strings.Contains(toolName, ":") {
-			// Route upstream tools through handleCallTool which handles server:tool format
-			// Create a request with the tool name in the "name" parameter
-			upstreamRequest := mcp.CallToolRequest{}
-			upstreamRequest.Params.Name = "call_tool"
-			upstreamRequest.Params.Arguments = map[string]interface{}{
-				"name": toolName,
-				"args": request.Params.Arguments,
-			}
-			result, err = p.handleCallTool(ctx, upstreamRequest)
-		} else {
-			return nil, fmt.Errorf("unknown tool: %s", toolName)
+			// Legacy call_tool removed - direct server:tool calls must use call_tool_read/write/destructive
+			return nil, fmt.Errorf("direct tool calls removed: use call_tool_read, call_tool_write, or call_tool_destructive with the tool name in the 'name' parameter")
 		}
+		return nil, fmt.Errorf("unknown tool: %s", toolName)
 	}
 
 	if err != nil {
