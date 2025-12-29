@@ -32,14 +32,43 @@ Each tool call record includes:
   "type": "tool_call",
   "server_name": "github-server",
   "tool_name": "create_issue",
+  "tool_variant": "call_tool_write",
   "arguments": {"title": "Bug report", "body": "..."},
   "response": "Issue #123 created",
   "status": "success",
   "duration_ms": 245,
   "timestamp": "2025-01-15T10:30:00Z",
-  "session_id": "mcp-session-abc123"
+  "session_id": "mcp-session-abc123",
+  "intent": {
+    "operation_type": "write",
+    "data_sensitivity": "internal",
+    "reason": "Creating bug report per user request"
+  }
 }
 ```
+
+### Intent Tracking
+
+Every tool call includes intent information for security auditing:
+
+| Field | Description |
+|-------|-------------|
+| `tool_variant` | Which tool was used: `call_tool_read`, `call_tool_write`, `call_tool_destructive` |
+| `intent.operation_type` | Agent's declared intent: `read`, `write`, `destructive` |
+| `intent.data_sensitivity` | Data classification: `public`, `internal`, `private`, `unknown` |
+| `intent.reason` | Agent's explanation for the operation |
+
+Filter by intent type:
+
+```bash
+# Show only destructive operations
+mcpproxy activity list --intent-type destructive
+
+# REST API
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?intent_type=destructive"
+```
+
+See [Intent Declaration](/features/intent-declaration) for details on the intent-based permission system.
 
 ## CLI Commands
 
