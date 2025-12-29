@@ -1618,10 +1618,21 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		}
 		}
 
-		// Check for OAuth error in last_error
+		// Check for OAuth error in last_error - this indicates OAuth autodiscovery detected
+		// an OAuth-required server that has no token (user needs to authenticate)
 		if oauthStatus != string(oauth.OAuthStatusExpired) && serverStatus.LastError != "" {
 			if oauth.IsOAuthError(serverStatus.LastError) {
-				oauthStatus = string(oauth.OAuthStatusError)
+				// If we have no oauthConfig yet, this is an autodiscovery server that needs OAuth
+				if oauthConfig == nil {
+					oauthConfig = map[string]interface{}{
+						"autodiscovery": true,
+					}
+					// Set status to "none" - user hasn't authenticated yet
+					oauthStatus = string(oauth.OAuthStatusNone)
+				} else {
+					// Has config but error - token might be invalid
+					oauthStatus = string(oauth.OAuthStatusError)
+				}
 			}
 		}
 
