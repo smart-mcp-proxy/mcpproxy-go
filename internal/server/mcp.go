@@ -294,7 +294,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 	// call_tool_read - Read-only operations
 	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
-		mcp.WithDescription("Execute a READ-ONLY tool discovered via retrieve_tools. Use for operations that query data without modifying state (e.g., get user info, list repositories, search). Requires intent.operation_type='read'. Will be rejected if server marks tool as destructive. Check retrieve_tools response for 'call_with' recommendation."),
+		mcp.WithDescription("Execute a READ-ONLY tool. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only. Requires intent.operation_type='read'."),
 		mcp.WithTitleAnnotation("Call Tool (Read)"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("name",
@@ -313,7 +313,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 	// call_tool_write - State-modifying operations
 	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
-		mcp.WithDescription("Execute a STATE-MODIFYING tool discovered via retrieve_tools. Use for operations that create or update resources (e.g., create issue, update file, send message). Requires intent.operation_type='write'. Will be rejected if server marks tool as destructive. Check retrieve_tools response for 'call_with' recommendation."),
+		mcp.WithDescription("Execute a STATE-MODIFYING tool. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state. Requires intent.operation_type='write'."),
 		mcp.WithTitleAnnotation("Call Tool (Write)"),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("name",
@@ -332,7 +332,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 	// call_tool_destructive - Irreversible operations
 	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
-		mcp.WithDescription("Execute a DESTRUCTIVE tool discovered via retrieve_tools. Use for operations that delete or permanently modify resources (e.g., delete repository, revoke access, drop table). Requires intent.operation_type='destructive'. Most permissive - allowed regardless of server annotations. Check retrieve_tools response for 'call_with' recommendation."),
+		mcp.WithDescription("Execute a DESTRUCTIVE tool. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations. Requires intent.operation_type='destructive'."),
 		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("name",
@@ -768,7 +768,7 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 			mcpTool["call_with"] = contracts.DeriveCallWith(annotations)
 		} else {
 			// Fallback for tools without server prefix (shouldn't happen normally)
-			mcpTool["call_with"] = contracts.ToolVariantWrite // Safe default
+			mcpTool["call_with"] = contracts.ToolVariantRead // Default to read - safest option
 		}
 
 		// Add usage statistics if requested
@@ -787,11 +787,12 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 		"query": query,
 		"total": len(results),
 		// Add usage instructions for intent-based tool calling (Spec 018)
-		"usage_instructions": "Use the 'call_with' field to select the appropriate tool variant: " +
-			"call_tool_read for read-only operations, " +
-			"call_tool_write for state-modifying operations, " +
-			"call_tool_destructive for irreversible operations. " +
-			"Always include an 'intent' parameter with matching 'operation_type'.",
+		"usage_instructions": "TOOL SELECTION GUIDE: Check the 'call_with' field for each tool, then use the matching tool variant. " +
+			"DECISION RULES BY TOOL NAME: " +
+			"(1) READ (call_tool_read): search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. DEFAULT choice when unsure. " +
+			"(2) WRITE (call_tool_write): create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. " +
+			"(3) DESTRUCTIVE (call_tool_destructive): delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. " +
+			"INTENT PARAMETER: Always include 'intent' object with 'operation_type' matching your tool choice (read/write/destructive). Optional fields: data_sensitivity, reason.",
 	}
 
 	// Add debug information if requested

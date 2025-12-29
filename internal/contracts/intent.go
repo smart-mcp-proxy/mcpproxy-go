@@ -226,7 +226,10 @@ func (i *IntentDeclaration) ValidateAgainstServerAnnotations(toolVariant, server
 	return nil
 }
 
-// DeriveCallWith derives the recommended tool variant from server annotations
+// DeriveCallWith derives the recommended tool variant from server annotations.
+// When annotations are not provided by the upstream server, defaults to call_tool_read
+// since most tools are read-only (search, query, list, get operations).
+// LLMs should analyze the tool description to override this default when appropriate.
 func DeriveCallWith(annotations *config.ToolAnnotations) string {
 	if annotations != nil {
 		if annotations.DestructiveHint != nil && *annotations.DestructiveHint {
@@ -235,8 +238,13 @@ func DeriveCallWith(annotations *config.ToolAnnotations) string {
 		if annotations.ReadOnlyHint != nil && *annotations.ReadOnlyHint {
 			return ToolVariantRead
 		}
+		// If annotations exist but neither hint is set, the server explicitly
+		// didn't mark it as read-only or destructive, so it's likely a write operation
+		return ToolVariantWrite
 	}
-	return ToolVariantWrite // Safe default
+	// No annotations from server - default to read as most tools are read-only
+	// (search, query, list, get, fetch, check, view, find operations)
+	return ToolVariantRead
 }
 
 // isValidOperationType checks if the operation type is valid
