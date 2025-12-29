@@ -37,6 +37,7 @@ var (
 	activityLimit      int
 	activityOffset     int
 	activityIntentType string // Spec 018: Filter by operation type (read, write, destructive)
+	activityNoIcons    bool   // Disable emoji icons in output
 
 	// Show command flags
 	activityIncludeResponse bool
@@ -268,7 +269,22 @@ func formatIntentIndicator(activity map[string]interface{}) string {
 }
 
 // formatOperationIcon returns the visual indicator for an operation type
+// If activityNoIcons is true, returns text instead of emoji
 func formatOperationIcon(opType string) string {
+	if activityNoIcons {
+		// Text-only output
+		switch opType {
+		case "read":
+			return "read"
+		case "write":
+			return "write"
+		case "destructive":
+			return "destructive"
+		default:
+			return "-"
+		}
+	}
+	// Emoji output
 	switch opType {
 	case "read":
 		return "📖" // Read operation
@@ -485,6 +501,7 @@ func init() {
 	activityListCmd.Flags().IntVarP(&activityLimit, "limit", "n", 50, "Max records to return (1-100)")
 	activityListCmd.Flags().IntVar(&activityOffset, "offset", 0, "Pagination offset")
 	activityListCmd.Flags().StringVar(&activityIntentType, "intent-type", "", "Filter by intent operation type: read, write, destructive")
+	activityListCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
 
 	// Watch command flags
 	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision")
@@ -492,6 +509,7 @@ func init() {
 
 	// Show command flags
 	activityShowCmd.Flags().BoolVar(&activityIncludeResponse, "include-response", false, "Show full response (may be large)")
+	activityShowCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
 
 	// Summary command flags
 	activitySummaryCmd.Flags().StringVarP(&activityPeriod, "period", "p", "24h", "Time period: 1h, 24h, 7d, 30d")
