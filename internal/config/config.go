@@ -14,7 +14,9 @@ const (
 	defaultPort = "127.0.0.1:8080" // Localhost-only binding by default for security
 )
 
-// Duration is a wrapper around time.Duration that can be marshaled to/from JSON
+// Duration is a wrapper around time.Duration that can be marshaled to/from JSON.
+// When serialized to JSON, it is represented as a string (e.g., "30s", "5m").
+// @swaggertype string
 type Duration time.Duration
 
 // MarshalJSON implements json.Marshaler interface
@@ -55,7 +57,7 @@ type Config struct {
 	TopK              int             `json:"top_k" mapstructure:"top-k"`
 	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
 	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
-	CallToolTimeout   Duration        `json:"call_tool_timeout" mapstructure:"call-tool-timeout"`
+	CallToolTimeout   Duration        `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -111,6 +113,9 @@ type Config struct {
 	ActivityMaxRecords         int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`                   // Max records before pruning (default: 100000)
 	ActivityMaxResponseSize    int `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
 	ActivityCleanupIntervalMin int `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
+
+	// Intent declaration settings (Spec 018)
+	IntentDeclaration *IntentDeclarationConfig `json:"intent_declaration,omitempty" mapstructure:"intent-declaration"`
 }
 
 // TLSConfig represents TLS configuration
@@ -178,7 +183,7 @@ type DockerIsolationConfig struct {
 	NetworkMode   string            `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Docker network mode (default: bridge)
 	MemoryLimit   string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"`   // Memory limit for containers
 	CPULimit      string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`         // CPU limit for containers
-	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout"`             // Container startup timeout
+	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout" swaggertype:"string"`             // Container startup timeout
 	ExtraArgs     []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments
 	LogDriver     string            `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver (default: json-file)
 	LogMaxSize    string            `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files (default: 100m)
@@ -200,7 +205,7 @@ type IsolationConfig struct {
 // DockerRecoveryConfig represents Docker recovery settings for the tray application
 type DockerRecoveryConfig struct {
 	Enabled          bool       `json:"enabled" mapstructure:"enabled"`                       // Enable Docker recovery monitoring (default: true)
-	CheckIntervals   []Duration `json:"check_intervals,omitempty" mapstructure:"intervals"`   // Custom health check intervals (exponential backoff)
+	CheckIntervals   []Duration `json:"check_intervals,omitempty" mapstructure:"intervals" swaggerignore:"true"`  // Custom health check intervals (exponential backoff)
 	MaxRetries       int        `json:"max_retries,omitempty" mapstructure:"max_retries"`     // Maximum retry attempts (0 = unlimited)
 	NotifyOnStart    bool       `json:"notify_on_start" mapstructure:"notify_on_start"`       // Show notification when recovery starts (default: true)
 	NotifyOnSuccess  bool       `json:"notify_on_success" mapstructure:"notify_on_success"`   // Show notification on successful recovery (default: true)
@@ -298,7 +303,7 @@ type RegistryEntry struct {
 	ServersURL  string      `json:"servers_url,omitempty"`
 	Tags        []string    `json:"tags,omitempty"`
 	Protocol    string      `json:"protocol,omitempty"`
-	Count       interface{} `json:"count,omitempty"` // number or string
+	Count       interface{} `json:"count,omitempty" swaggertype:"primitive,string"` // number or string
 }
 
 // CursorMCPConfig represents the structure for Cursor IDE MCP configuration
@@ -362,6 +367,29 @@ type ToolAnnotations struct {
 	DestructiveHint *bool  `json:"destructiveHint,omitempty"`
 	IdempotentHint  *bool  `json:"idempotentHint,omitempty"`
 	OpenWorldHint   *bool  `json:"openWorldHint,omitempty"`
+}
+
+// IntentDeclarationConfig controls intent validation behavior for tool calls
+type IntentDeclarationConfig struct {
+	// StrictServerValidation controls whether server annotation mismatches
+	// cause rejection (true) or just warnings (false).
+	// Default: true (reject mismatches)
+	StrictServerValidation bool `json:"strict_server_validation" mapstructure:"strict-server-validation"`
+}
+
+// DefaultIntentDeclarationConfig returns the default intent declaration configuration
+func DefaultIntentDeclarationConfig() *IntentDeclarationConfig {
+	return &IntentDeclarationConfig{
+		StrictServerValidation: true, // Security by default
+	}
+}
+
+// IsStrictServerValidation returns whether strict server validation is enabled
+func (c *IntentDeclarationConfig) IsStrictServerValidation() bool {
+	if c == nil {
+		return true // Default to strict for security
+	}
+	return c.StrictServerValidation
 }
 
 // ToolRegistration represents a tool registration
@@ -569,6 +597,9 @@ func DefaultConfig() *Config {
 		ActivityMaxRecords:         100000, // 100K records max
 		ActivityMaxResponseSize:    65536,  // 64KB response truncation
 		ActivityCleanupIntervalMin: 60,     // 1 hour cleanup interval
+
+		// Intent declaration defaults (Spec 018) - strict validation by default for security
+		IntentDeclaration: DefaultIntentDeclarationConfig(),
 	}
 }
 
@@ -896,6 +927,11 @@ func (c *Config) Validate() error {
 			DefaultModel: "gpt-4",       // Default to GPT-4 tokenization
 			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
 		}
+	}
+
+	// Ensure IntentDeclaration config is not nil
+	if c.IntentDeclaration == nil {
+		c.IntentDeclaration = DefaultIntentDeclarationConfig()
 	}
 
 	return nil

@@ -76,26 +76,42 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 	}
 
 	// 2. Connection state checks
-	switch input.State {
+	// Normalize state to lowercase for consistent matching
+	// (ConnectionState.String() returns "Error", "Disconnected", etc.)
+	state := toLower(input.State)
+	switch state {
 	case "error":
-		return &contracts.HealthStatus{
-			Level:      LevelUnhealthy,
-			AdminState: StateEnabled,
-			Summary:    formatErrorSummary(input.LastError),
-			Detail:     input.LastError,
-			Action:     ActionRestart,
-		}
-	case "disconnected":
-		summary := "Disconnected"
-		if input.LastError != "" {
-			summary = formatErrorSummary(input.LastError)
+		// For OAuth-required servers with OAuth-related errors, suggest login instead of restart
+		action := ActionRestart
+		summary := formatErrorSummary(input.LastError)
+		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+			action = ActionLogin
+			summary = "Authentication required"
 		}
 		return &contracts.HealthStatus{
 			Level:      LevelUnhealthy,
 			AdminState: StateEnabled,
 			Summary:    summary,
 			Detail:     input.LastError,
-			Action:     ActionRestart,
+			Action:     action,
+		}
+	case "disconnected":
+		summary := "Disconnected"
+		action := ActionRestart
+		if input.LastError != "" {
+			summary = formatErrorSummary(input.LastError)
+			// For OAuth-required servers with OAuth-related errors, suggest login
+			if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+				action = ActionLogin
+				summary = "Authentication required"
+			}
+		}
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    summary,
+			Detail:     input.LastError,
+			Action:     action,
 		}
 	case "connecting", "idle":
 		return &contracts.HealthStatus{
@@ -284,6 +300,30 @@ func toLower(s string) string {
 func containsLower(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// isOAuthRelatedError checks if the error message indicates an OAuth issue.
+func isOAuthRelatedError(err string) bool {
+	if err == "" {
+		return false
+	}
+	// Check for common OAuth-related error patterns
+	oauthPatterns := []string{
+		"oauth",
+		"authentication required",
+		"authentication strategies failed",
+		"unauthorized",
+		"login required",
+		"token expired",
+		"invalid_grant",
+		"access_denied",
+	}
+	for _, pattern := range oauthPatterns {
+		if containsIgnoreCase(err, pattern) {
 			return true
 		}
 	}

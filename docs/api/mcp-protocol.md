@@ -43,31 +43,104 @@ Search for tools across all connected servers using BM25 keyword search.
 }
 ```
 
-### call_tool
+### call_tool_read
 
-Execute a tool on an upstream server.
+Execute a **read-only** tool on an upstream server. Use for operations that query data without modifying state.
 
 **Input Schema:**
 ```json
 {
-  "server": "string (required) - Server name",
-  "tool": "string (required) - Tool name",
-  "arguments": "object (optional) - Tool arguments"
+  "name": "string (required) - Tool name in server:tool format",
+  "args_json": "string (optional) - Tool arguments as JSON string",
+  "intent": {
+    "operation_type": "read (required)",
+    "data_sensitivity": "string (optional) - public|internal|private|unknown",
+    "reason": "string (optional) - Explanation for audit trail"
+  }
 }
 ```
 
 **Example:**
 ```json
 {
-  "server": "github",
-  "tool": "create_issue",
-  "arguments": {
-    "repo": "owner/repo",
-    "title": "Bug report",
-    "body": "Description of the issue"
+  "name": "github:list_repos",
+  "args_json": "{\"org\": \"myorg\"}",
+  "intent": {
+    "operation_type": "read"
   }
 }
 ```
+
+**Validation:** Rejected if server marks tool as `destructiveHint: true`.
+
+### call_tool_write
+
+Execute a **state-modifying** tool on an upstream server. Use for operations that create or update resources.
+
+**Input Schema:**
+```json
+{
+  "name": "string (required) - Tool name in server:tool format",
+  "args_json": "string (optional) - Tool arguments as JSON string",
+  "intent": {
+    "operation_type": "write (required)",
+    "data_sensitivity": "string (optional) - public|internal|private|unknown",
+    "reason": "string (optional) - Explanation for audit trail"
+  }
+}
+```
+
+**Example:**
+```json
+{
+  "name": "github:create_issue",
+  "args_json": "{\"repo\": \"owner/repo\", \"title\": \"Bug report\", \"body\": \"Description\"}",
+  "intent": {
+    "operation_type": "write",
+    "reason": "Creating bug report per user request"
+  }
+}
+```
+
+**Validation:** Rejected if server marks tool as `destructiveHint: true`.
+
+### call_tool_destructive
+
+Execute a **destructive** tool on an upstream server. Use for operations that delete or permanently modify resources.
+
+**Input Schema:**
+```json
+{
+  "name": "string (required) - Tool name in server:tool format",
+  "args_json": "string (optional) - Tool arguments as JSON string",
+  "intent": {
+    "operation_type": "destructive (required)",
+    "data_sensitivity": "string (optional) - public|internal|private|unknown",
+    "reason": "string (optional) - Explanation for audit trail"
+  }
+}
+```
+
+**Example:**
+```json
+{
+  "name": "github:delete_repo",
+  "args_json": "{\"repo\": \"test-repo\"}",
+  "intent": {
+    "operation_type": "destructive",
+    "data_sensitivity": "private",
+    "reason": "User confirmed deletion"
+  }
+}
+```
+
+**Validation:** Most permissive - allowed regardless of server annotations.
+
+:::tip Choosing the Right Tool Variant
+Use `retrieve_tools` to discover tools - each result includes a `call_with` field recommending the appropriate variant based on server annotations.
+:::
+
+See [Intent Declaration](/features/intent-declaration) for complete documentation on the two-key security model.
 
 ### upstream_servers
 

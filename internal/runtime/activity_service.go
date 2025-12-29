@@ -183,10 +183,25 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
 	durationMs := getInt64Payload(evt.Payload, "duration_ms")
 
+	// Extract intent metadata if present (Spec 018)
+	toolVariant := getStringPayload(evt.Payload, "tool_variant")
+	intent := getMapPayload(evt.Payload, "intent")
 	// Default source to "mcp" if not specified (backwards compatibility)
 	activitySource := storage.ActivitySourceMCP
 	if source != "" {
 		activitySource = storage.ActivitySource(source)
+	}
+
+	// Build metadata with intent information if present
+	var metadata map[string]interface{}
+	if toolVariant != "" || intent != nil {
+		metadata = make(map[string]interface{})
+		if toolVariant != "" {
+			metadata["tool_variant"] = toolVariant
+		}
+		if intent != nil {
+			metadata["intent"] = intent
+		}
 	}
 
 	record := &storage.ActivityRecord{
@@ -202,6 +217,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		Timestamp:         evt.Timestamp,
 		SessionID:         sessionID,
 		RequestID:         requestID,
+		Metadata:          metadata,
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -309,5 +325,18 @@ func getInt64Payload(payload map[string]any, key string) int64 {
 		}
 	}
 	return 0
+}
+
+func getMapPayload(payload map[string]any, key string) map[string]interface{} {
+	if v, ok := payload[key]; ok {
+		if m, ok := v.(map[string]interface{}); ok {
+			return m
+		}
+		// Also handle map[string]any which is an alias
+		if m, ok := v.(map[string]any); ok {
+			return m
+		}
+	}
+	return nil
 }
 

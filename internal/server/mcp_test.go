@@ -708,11 +708,15 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 	assert.True(t, len(servers) > 0, "Expected at least one quarantined server")
 
 	// Test 3: Try to call a tool from the quarantined server (should be blocked)
+	// Using call_tool_write with required intent
 	toolCallRequest := mcp.CallToolRequest{}
-	toolCallRequest.Params.Name = "call_tool"
+	toolCallRequest.Params.Name = "call_tool_write"
 	toolCallRequest.Params.Arguments = map[string]interface{}{
 		"name": "quarantine-test:test_tool",
 		"args": map[string]interface{}{},
+		"intent": map[string]interface{}{
+			"operation_type": "write",
+		},
 	}
 
 	toolCallResult, err := mcpClient.CallTool(ctx, toolCallRequest)

@@ -163,12 +163,25 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 ## MCP Protocol
 
 ### Built-in Tools
-- **`retrieve_tools`** - BM25 keyword search across all upstream tools
-- **`call_tool`** - Proxy tool calls to upstream servers
+- **`retrieve_tools`** - BM25 keyword search across all upstream tools, returns annotations and recommended tool variant
+- **`call_tool_read`** - Proxy read-only tool calls to upstream servers (Spec 018)
+- **`call_tool_write`** - Proxy write tool calls to upstream servers (Spec 018)
+- **`call_tool_destructive`** - Proxy destructive tool calls to upstream servers (Spec 018)
 - **`code_execution`** - Execute JavaScript to orchestrate multiple tools (disabled by default)
 - **`upstream_servers`** - CRUD operations for server management
 
 **Tool Format**: `<serverName>:<toolName>` (e.g., `github:create_issue`)
+
+**Intent Declaration (Spec 018)**: Tool variants enable granular IDE permission control. The `intent` parameter provides two-key security:
+```json
+{
+  "intent": {
+    "operation_type": "read",
+    "data_sensitivity": "public",
+    "reason": "User requested list of repositories"
+  }
+}
+```
 
 ### HTTP API Endpoints
 
@@ -368,6 +381,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt database (existing `~/.mcpproxy/config.db`) (016-activity-log-backend)
 - Go 1.24 (toolchain go1.24.10) + Cobra CLI framework, encoding/json, internal/cli/output (spec 014), internal/cliclien (017-activity-cli-commands)
 - N/A (CLI layer only - uses REST API from spec 016) (017-activity-cli-commands)
+- Go 1.24 (toolchain go1.24.10) + Cobra CLI, Chi router, BBolt (storage), Zap (logging), mark3labs/mcp-go (MCP protocol) (018-intent-declaration)
+- BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord extended with intent metadata (018-intent-declaration)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

@@ -39,6 +39,7 @@ const sidebars = {
       items: [
         'cli/command-reference',
         'cli/management-commands',
+        'cli/activity-commands',
       ],
     },
     {
@@ -60,6 +61,8 @@ const sidebars = {
       type: 'category',
       label: 'Features',
       items: [
+        'features/intent-declaration',
+        'features/activity-log',
         'features/docker-isolation',
         'features/oauth-authentication',
         'features/code-execution',
