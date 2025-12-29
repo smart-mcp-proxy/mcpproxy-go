@@ -383,9 +383,9 @@ func TestDeriveCallWith(t *testing.T) {
 		want        string
 	}{
 		{
-			name:        "nil annotations - defaults to write",
+			name:        "nil annotations - defaults to read",
 			annotations: nil,
-			want:        ToolVariantWrite,
+			want:        ToolVariantRead,
 		},
 		{
 			name:        "empty annotations - defaults to write",
