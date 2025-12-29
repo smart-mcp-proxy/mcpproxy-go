@@ -95,9 +95,9 @@ Add three subcommands under `mcpproxy call`: `tool-read`, `tool-write`, `tool-de
 
 ### Command Signatures
 ```bash
-mcpproxy call tool-read <server:tool> [--args JSON] [--reason TEXT] [--sensitivity LEVEL]
-mcpproxy call tool-write <server:tool> [--args JSON] [--reason TEXT] [--sensitivity LEVEL]
-mcpproxy call tool-destructive <server:tool> [--args JSON] [--reason TEXT] [--sensitivity LEVEL]
+mcpproxy call tool-read --tool-name=<server:tool> [--json_args JSON] [--reason TEXT] [--sensitivity LEVEL]
+mcpproxy call tool-write --tool-name=<server:tool> [--json_args JSON] [--reason TEXT] [--sensitivity LEVEL]
+mcpproxy call tool-destructive --tool-name=<server:tool> [--json_args JSON] [--reason TEXT] [--sensitivity LEVEL]
 ```
 
 ### Alternatives Considered
