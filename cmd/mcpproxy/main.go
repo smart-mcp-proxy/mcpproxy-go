@@ -25,7 +25,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -38,7 +37,7 @@ import (
 	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/cli/output"
+	clioutput "mcpproxy-go/internal/cli/output"
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/experiments"
 	"mcpproxy-go/internal/logs"
@@ -173,7 +172,7 @@ func main() {
 
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added
-	output.SetupHelpJSON(rootCmd)
+	clioutput.SetupHelpJSON(rootCmd)
 
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
@@ -190,6 +189,8 @@ func createSearchServersCommand() *cobra.Command {
 	var registryFlag, searchFlag, tagFlag string
 	var listRegistries bool
 	var limitFlag int
+	var outputFormat string
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:   "search-servers",
@@ -207,7 +208,10 @@ Examples:
   mcpproxy search-servers --registry smithery --search weather --limit 10
 
   # Search for servers tagged as "finance" in the Pulse registry
-  mcpproxy search-servers --registry pulse --tag finance`,
+  mcpproxy search-servers --registry pulse --tag finance
+
+  # Output as JSON
+  mcpproxy search-servers --registry smithery --search weather -o json`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Setup logger for search command (non-server command = WARN level by default)
 			cmdLogLevel, _ := cmd.Flags().GetString("log-level")
@@ -222,8 +226,15 @@ Examples:
 				_ = logger.Sync()
 			}()
 
+			// Resolve output format
+			format := clioutput.ResolveFormat(outputFormat, jsonOutput)
+			formatter, err := clioutput.NewFormatter(format)
+			if err != nil {
+				return err
+			}
+
 			if listRegistries {
-				listAllRegistries(logger)
+				listAllRegistriesFormatted(logger, formatter)
 				return nil
 			}
 
@@ -264,13 +275,40 @@ Examples:
 
 			logger.Info("Search completed", zap.Int("results_count", len(servers)))
 
-			// Print results as JSON
-			output, err := json.MarshalIndent(servers, "", "  ")
-			if err != nil {
-				return fmt.Errorf("failed to format results: %w", err)
+			// Format output based on format flag
+			if format == "table" {
+				// Build table output
+				headers := []string{"NAME", "DESCRIPTION", "INSTALL CMD"}
+				var rows [][]string
+				for _, s := range servers {
+					// Truncate description for table display
+					desc := s.Description
+					if len(desc) > 50 {
+						desc = desc[:47] + "..."
+					}
+					installCmd := s.InstallCmd
+					if installCmd == "" && s.RepositoryInfo != nil && s.RepositoryInfo.NPM != nil && s.RepositoryInfo.NPM.InstallCmd != "" {
+						installCmd = s.RepositoryInfo.NPM.InstallCmd
+					}
+					if installCmd == "" {
+						installCmd = "-"
+					}
+					rows = append(rows, []string{s.Name, desc, installCmd})
+				}
+				out, err := formatter.FormatTable(headers, rows)
+				if err != nil {
+					return fmt.Errorf("failed to format results: %w", err)
+				}
+				fmt.Print(out)
+				fmt.Printf("\nFound %d servers\n", len(servers))
+			} else {
+				// JSON or YAML output
+				out, err := formatter.Format(servers)
+				if err != nil {
+					return fmt.Errorf("failed to format results: %w", err)
+				}
+				fmt.Println(out)
 			}
-
-			fmt.Println(string(output))
 			return nil
 		},
 	}
@@ -280,11 +318,13 @@ Examples:
 	cmd.Flags().StringVarP(&tagFlag, "tag", "t", "", "Filter servers by tag/category")
 	cmd.Flags().IntVarP(&limitFlag, "limit", "l", 10, "Maximum number of results to return (default: 10, max: 50)")
 	cmd.Flags().BoolVar(&listRegistries, "list-registries", false, "List all known registries")
+	cmd.Flags().StringVarP(&outputFormat, "output", "o", "", "Output format: table, json, yaml (default: table)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (shorthand for -o json)")
 
 	return cmd
 }
 
-func listAllRegistries(logger *zap.Logger) {
+func listAllRegistriesFormatted(logger *zap.Logger, formatter clioutput.OutputFormatter) {
 	// Load config and initialize registries
 	cfg, err := config.LoadFromFile("")
 	if err != nil {
@@ -301,16 +341,31 @@ func listAllRegistries(logger *zap.Logger) {
 
 	logger.Info("Found registries", zap.Int("count", len(registryList)))
 
-	// Format as a simple table for CLI display
-	fmt.Printf("%-20s %-30s %s\n", "ID", "NAME", "DESCRIPTION")
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-
-	for i := range registryList {
-		reg := &registryList[i]
-		fmt.Printf("%-20s %-30s %s\n", reg.ID, reg.Name, reg.Description)
+	// Check if we have a table formatter (for table output)
+	if _, isTable := formatter.(*clioutput.TableFormatter); isTable {
+		// Format as table
+		headers := []string{"ID", "NAME", "DESCRIPTION"}
+		var rows [][]string
+		for i := range registryList {
+			reg := &registryList[i]
+			rows = append(rows, []string{reg.ID, reg.Name, reg.Description})
+		}
+		out, err := formatter.FormatTable(headers, rows)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
+			return
+		}
+		fmt.Print(out)
+		fmt.Printf("\nUse --registry <ID> to search a specific registry\n")
+	} else {
+		// JSON or YAML output
+		out, err := formatter.Format(registryList)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
+			return
+		}
+		fmt.Println(out)
 	}
-
-	fmt.Printf("\nUse --registry <ID> to search a specific registry\n")
 }
 
 func runServer(cmd *cobra.Command, _ []string) error {
@@ -655,10 +710,10 @@ func classifyError(err error) int {
 // ResolveOutputFormat determines the output format from global flags and environment.
 // Priority: --json alias > -o flag > MCPPROXY_OUTPUT env var > default (table)
 func ResolveOutputFormat() string {
-	return output.ResolveFormat(globalOutputFormat, globalJSONOutput)
+	return clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
 }
 
 // GetOutputFormatter creates a formatter for the resolved output format.
-func GetOutputFormatter() (output.OutputFormatter, error) {
-	return output.NewFormatter(ResolveOutputFormat())
+func GetOutputFormatter() (clioutput.OutputFormatter, error) {
+	return clioutput.NewFormatter(ResolveOutputFormat())
 }
