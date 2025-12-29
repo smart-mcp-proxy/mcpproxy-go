@@ -859,14 +859,47 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
 	}
 
+	// Parse server and tool name early for activity logging
+	var serverName, actualToolName string
+	if strings.Contains(toolName, ":") {
+		parts := strings.SplitN(toolName, ":", 2)
+		if len(parts) == 2 {
+			serverName = parts[0]
+			actualToolName = parts[1]
+		}
+	}
+
+	// Helper to get session ID for activity logging
+	getSessionID := func() string {
+		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+			return sess.SessionID()
+		}
+		return ""
+	}
+
 	// Extract intent (required for all call_tool_* variants)
 	intent, err := p.extractIntent(request)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Invalid intent parameter: %v", err)), nil
+		errMsg := fmt.Sprintf("Invalid intent parameter: %v", err)
+		// Record activity error for invalid intent
+		if serverName != "" {
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+		}
+		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Validate intent matches tool variant (two-key security model)
 	if errResult := p.validateIntentForVariant(intent, toolVariant); errResult != nil {
+		// Record activity error for intent validation failure
+		var reason string
+		if intent == nil {
+			reason = fmt.Sprintf("Intent validation failed: intent parameter is required for %s", toolVariant)
+		} else {
+			reason = fmt.Sprintf("Intent validation failed: operation_type '%s' does not match tool variant '%s'", intent.OperationType, toolVariant)
+		}
+		if serverName != "" {
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", reason)
+		}
 		return errResult, nil
 	}
 
@@ -894,14 +927,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)), nil
 	}
 
-	// Parse server and tool name
-	parts := strings.SplitN(toolName, ":", 2)
-	if len(parts) != 2 {
+	// Validate tool name was parsed correctly
+	if serverName == "" || actualToolName == "" {
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
 	}
-
-	serverName := parts[0]
-	actualToolName := parts[1]
 
 	p.logger.Debug("handleCallToolVariant: processing request",
 		zap.String("tool_variant", toolVariant),
@@ -914,6 +943,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Validate intent against server annotations (unless call_tool_destructive which is most permissive)
 	if errResult := p.validateIntentAgainstServer(intent, toolVariant, serverName, actualToolName, annotations); errResult != nil {
+		// Record activity error for server annotation mismatch
+		reason := fmt.Sprintf("Intent rejected: tool variant '%s' conflicts with server annotations for %s:%s", toolVariant, serverName, actualToolName)
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", reason)
 		return errResult, nil
 	}
 
@@ -923,14 +955,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.logger.Debug("handleCallToolVariant: server is quarantined",
 			zap.String("server_name", serverName))
 
-		// Extract session ID for activity logging
-		var quarantineSessionID string
-		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
-			quarantineSessionID = sess.SessionID()
-		}
-
 		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, quarantineSessionID, "blocked", "Server is quarantined for security review")
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", "Server is quarantined for security review")
 
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
