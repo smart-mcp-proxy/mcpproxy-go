@@ -129,9 +129,9 @@ Users can invoke tools via CLI with explicit intent using separate commands for 
 
 **Acceptance Scenarios**:
 
-1. **Given** a user runs `mcpproxy call tool-read github:list_repos --args '{}'`, **Then** the tool is called via call_tool_read with operation_type "read"
-2. **Given** a user runs `mcpproxy call tool-write github:create_issue --args '{"title":"Bug"}'`, **Then** the tool is called via call_tool_write with operation_type "write"
-3. **Given** a user runs `mcpproxy call tool-destructive github:delete_repo --args '{"repo":"test"}'`, **Then** the tool is called via call_tool_destructive with operation_type "destructive"
+1. **Given** a user runs `mcpproxy call tool-read --tool-name=github:list_repos --json_args='{}'`, **Then** the tool is called via call_tool_read with operation_type "read"
+2. **Given** a user runs `mcpproxy call tool-write --tool-name=github:create_issue --json_args='{"title":"Bug"}'`, **Then** the tool is called via call_tool_write with operation_type "write"
+3. **Given** a user runs `mcpproxy call tool-destructive --tool-name=github:delete_repo --json_args='{"repo":"test"}'`, **Then** the tool is called via call_tool_destructive with operation_type "destructive"
 4. **Given** a user runs `mcpproxy call tool-read` on a destructive tool, **Then** the command fails with clear error message
 
 ---
@@ -230,9 +230,9 @@ Users can filter activity to see only destructive operations for security review
 - **FR-025**: Tool descriptions MUST reference the correct call_tool variant to use
 
 **CLI Commands**:
-- **FR-026**: System MUST provide `mcpproxy call tool-read <server:tool> [--args JSON]` command
-- **FR-027**: System MUST provide `mcpproxy call tool-write <server:tool> [--args JSON]` command
-- **FR-028**: System MUST provide `mcpproxy call tool-destructive <server:tool> [--args JSON]` command
+- **FR-026**: System MUST provide `mcpproxy call tool-read --tool-name=<server:tool> [--json_args JSON]` command
+- **FR-027**: System MUST provide `mcpproxy call tool-write --tool-name=<server:tool> [--json_args JSON]` command
+- **FR-028**: System MUST provide `mcpproxy call tool-destructive --tool-name=<server:tool> [--json_args JSON]` command
 - **FR-029**: CLI commands MUST auto-populate intent.operation_type based on command used
 - **FR-030**: CLI commands MUST support `--reason` and `--sensitivity` flags for optional intent fields
 

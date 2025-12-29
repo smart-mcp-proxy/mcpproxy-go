@@ -132,7 +132,7 @@
 
 **Goal**: Add mcpproxy call tool-read/write/destructive CLI commands
 
-**Independent Test**: Run `mcpproxy call tool-read github:list_repos --args '{}'` and verify it works
+**Independent Test**: Run `mcpproxy call tool-read --tool-name=github:list_repos --json_args='{}'` and verify it works
 
 ### Implementation for User Story 5
 
