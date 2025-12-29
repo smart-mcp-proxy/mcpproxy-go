@@ -882,25 +882,37 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	intent, err := p.extractIntent(request)
 	if err != nil {
 		errMsg := fmt.Sprintf("Invalid intent parameter: %v", err)
-		// Record activity error for invalid intent
-		if serverName != "" {
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+		// Record activity error for invalid intent (use "unknown" if server name not parsed yet)
+		logServer := serverName
+		if logServer == "" {
+			logServer = "unknown"
 		}
+		logTool := actualToolName
+		if logTool == "" {
+			logTool = toolName
+		}
+		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Validate intent matches tool variant (two-key security model)
 	if errResult := p.validateIntentForVariant(intent, toolVariant); errResult != nil {
-		// Record activity error for intent validation failure
+		// Record activity error for intent validation failure (use "unknown" if server name not parsed yet)
 		var reason string
 		if intent == nil {
 			reason = fmt.Sprintf("Intent validation failed: intent parameter is required for %s", toolVariant)
 		} else {
 			reason = fmt.Sprintf("Intent validation failed: operation_type '%s' does not match tool variant '%s'", intent.OperationType, toolVariant)
 		}
-		if serverName != "" {
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", reason)
+		logServer := serverName
+		if logServer == "" {
+			logServer = "unknown"
 		}
+		logTool := actualToolName
+		if logTool == "" {
+			logTool = toolName
+		}
+		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), "blocked", reason)
 		return errResult, nil
 	}
 
