@@ -59,6 +59,7 @@ mcpproxy activity list [flags]
 | `--tool` | | | Filter by tool name |
 | `--status` | | | Filter by status: `success`, `error`, `blocked` |
 | `--intent-type` | | | Filter by intent operation type: `read`, `write`, `destructive` |
+| `--no-icons` | | | Disable emoji icons in output (use text instead) |
 | `--session` | | | Filter by MCP session ID |
 | `--start-time` | | | Filter records after this time (RFC3339) |
 | `--end-time` | | | Filter records before this time (RFC3339) |
