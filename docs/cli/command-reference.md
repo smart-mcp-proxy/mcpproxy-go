@@ -45,7 +45,7 @@ mcpproxy serve &
 # These commands use daemon mode automatically
 mcpproxy tools list --server=github-server    # Fast - uses daemon
 mcpproxy auth login --server=oauth-server     # OAuth tokens shared with daemon
-mcpproxy call tool --tool-name=github:search  # Uses daemon's connection pool
+mcpproxy call tool --tool-name=github:search --json_args='{}'  # Uses daemon's connection pool
 ```
 
 ### Standalone Mode (Direct Connection)
@@ -234,12 +234,45 @@ mcpproxy tools list [flags]
 Execute a tool:
 
 ```bash
-mcpproxy call tool <server:tool> [flags]
+mcpproxy call tool --tool-name=<server:tool> [flags]
 ```
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--input` | JSON input data for the tool | `{}` |
+| `--tool-name` | Tool name in format `server:tool` or built-in tool name | - |
+| `--json_args, -j` | JSON arguments for the tool | `{}` |
+| `--output, -o` | Output format: pretty, json | `pretty` |
+
+**Examples:**
+```bash
+# Call a built-in tool
+mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}'
+
+# Call an upstream server tool
+mcpproxy call tool --tool-name=github:list_repos --json_args='{"owner":"myorg"}'
+```
+
+### Intent-Based Tool Variants
+
+For granular permission control, use intent-based tool variants:
+
+```bash
+# Read-only operations (safe, no side effects)
+mcpproxy call tool-read --tool-name=github:list_repos --json_args='{}'
+
+# Write operations (creates/modifies state)
+mcpproxy call tool-write --tool-name=github:create_issue --json_args='{"title":"Bug"}'
+
+# Destructive operations (deletes/removes state)
+mcpproxy call tool-destructive --tool-name=github:delete_repo --json_args='{"repo":"test"}'
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--tool-name` | Tool name in format `server:tool` | - |
+| `--json_args, -j` | JSON arguments for the tool | `{}` |
+| `--reason` | Human-readable reason for the operation | - |
+| `--sensitivity` | Data sensitivity: public, internal, private, unknown | - |
 | `--output, -o` | Output format: pretty, json | `pretty` |
 
 ## Code Execution
