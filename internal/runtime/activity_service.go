@@ -186,7 +186,6 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	// Extract intent metadata if present (Spec 018)
 	toolVariant := getStringPayload(evt.Payload, "tool_variant")
 	intent := getMapPayload(evt.Payload, "intent")
-
 	// Default source to "mcp" if not specified (backwards compatibility)
 	activitySource := storage.ActivitySourceMCP
 	if source != "" {
