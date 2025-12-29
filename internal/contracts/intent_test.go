@@ -388,9 +388,9 @@ func TestDeriveCallWith(t *testing.T) {
 			want:        ToolVariantRead,
 		},
 		{
-			name:        "empty annotations - defaults to write",
+			name:        "empty annotations - defaults to read",
 			annotations: &config.ToolAnnotations{},
-			want:        ToolVariantWrite,
+			want:        ToolVariantRead,
 		},
 		{
 			name: "destructiveHint=true - returns destructive",

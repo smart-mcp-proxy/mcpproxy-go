@@ -227,23 +227,33 @@ func (i *IntentDeclaration) ValidateAgainstServerAnnotations(toolVariant, server
 }
 
 // DeriveCallWith derives the recommended tool variant from server annotations.
-// When annotations are not provided by the upstream server, defaults to call_tool_read
-// since most tools are read-only (search, query, list, get operations).
+// Defaults to call_tool_read as the safest option when intent is unclear.
 // LLMs should analyze the tool description to override this default when appropriate.
+//
+// Priority:
+//  1. destructiveHint=true → call_tool_destructive
+//  2. readOnlyHint=false (explicitly NOT read-only) → call_tool_write
+//  3. readOnlyHint=true → call_tool_read
+//  4. No hints / nil annotations → call_tool_read (safe default)
 func DeriveCallWith(annotations *config.ToolAnnotations) string {
 	if annotations != nil {
+		// Destructive takes highest priority
 		if annotations.DestructiveHint != nil && *annotations.DestructiveHint {
 			return ToolVariantDestructive
 		}
+		// Explicit readOnlyHint=false means server says it's NOT read-only
+		if annotations.ReadOnlyHint != nil && !*annotations.ReadOnlyHint {
+			return ToolVariantWrite
+		}
+		// Explicit readOnlyHint=true
 		if annotations.ReadOnlyHint != nil && *annotations.ReadOnlyHint {
 			return ToolVariantRead
 		}
-		// If annotations exist but neither hint is set, the server explicitly
-		// didn't mark it as read-only or destructive, so it's likely a write operation
-		return ToolVariantWrite
 	}
-	// No annotations from server - default to read as most tools are read-only
-	// (search, query, list, get, fetch, check, view, find operations)
+	// No annotations, or annotations without any hints set:
+	// Default to read as the safest option. Most tools are read-only
+	// (search, query, list, get, fetch, check, view, find operations).
+	// LLMs should analyze tool descriptions to select write/destructive when appropriate.
 	return ToolVariantRead
 }
 
