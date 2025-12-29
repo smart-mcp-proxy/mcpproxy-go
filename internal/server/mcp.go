@@ -248,9 +248,11 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 
 // emitActivityToolCallCompleted safely emits a tool call completion event if runtime is available
 // source indicates how the call was triggered: "mcp", "cli", or "api"
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool) {
+// toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
+// intent is the intent declaration metadata - optional
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, response, responseTruncated)
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, response, responseTruncated, toolVariant, intent)
 	}
 }
 
@@ -264,7 +266,7 @@ func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessio
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Then use call_tool with the discovered tool names. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers."),
+		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers."),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("query",
@@ -286,20 +288,66 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
 
-	// call_tool - Execute discovered tools
-	callToolTool := mcp.NewTool("call_tool",
-		mcp.WithDescription("Execute a tool discovered via retrieve_tools. Use the exact tool name from retrieve_tools results (format: 'server:tool'). Call retrieve_tools first if you haven't discovered tools yet."),
-		mcp.WithTitleAnnotation("Call Tool"),
+	// Intent-based tool variants (Spec 018)
+	// These replace the legacy call_tool with three operation-specific variants
+	// that enable granular IDE permission control and require explicit intent declaration.
+
+	// call_tool_read - Read-only operations
+	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
+		mcp.WithDescription("Execute a READ-ONLY tool. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only. Requires intent.operation_type='read'."),
+		mcp.WithTitleAnnotation("Call Tool (Read)"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:get_user'). Get this from retrieve_tools results."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
+		),
+		mcp.WithObject("intent",
+			mcp.Required(),
+			mcp.Description("Intent declaration (required). Must include: operation_type='read'. Optional: data_sensitivity (public|internal|private|unknown), reason (explanation for operation)."),
+		),
+	)
+	p.server.AddTool(callToolReadTool, p.handleCallToolRead)
+
+	// call_tool_write - State-modifying operations
+	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
+		mcp.WithDescription("Execute a STATE-MODIFYING tool. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state. Requires intent.operation_type='write'."),
+		mcp.WithTitleAnnotation("Call Tool (Write)"),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_issue'). Get this from retrieve_tools results."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
+		),
+		mcp.WithObject("intent",
+			mcp.Required(),
+			mcp.Description("Intent declaration (required). Must include: operation_type='write'. Optional: data_sensitivity (public|internal|private|unknown), reason (explanation for operation)."),
+		),
+	)
+	p.server.AddTool(callToolWriteTool, p.handleCallToolWrite)
+
+	// call_tool_destructive - Irreversible operations
+	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
+		mcp.WithDescription("Execute a DESTRUCTIVE tool. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations. Requires intent.operation_type='destructive'."),
+		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("name",
 			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_repository'). Get this from retrieve_tools results."),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:delete_repo'). Get this from retrieve_tools results."),
 		),
 		mcp.WithString("args_json",
-			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: '{\"param1\": \"value1\", \"param2\": 123}'"),
+			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
+		),
+		mcp.WithObject("intent",
+			mcp.Required(),
+			mcp.Description("Intent declaration (required). Must include: operation_type='destructive'. Optional: data_sensitivity (public|internal|private|unknown), reason (explanation for operation)."),
 		),
 	)
-	p.server.AddTool(callToolTool, p.handleCallTool)
+	p.server.AddTool(callToolDestructiveTool, p.handleCallToolDestructive)
 
 	// read_cache - Access paginated data when responses are truncated
 	readCacheTool := mcp.NewTool("read_cache",
@@ -708,6 +756,21 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 			"server":      result.Tool.ServerName,
 		}
 
+		// Look up tool annotations and derive recommended call_with variant (Spec 018)
+		// Parse tool name to get just the tool part (format: server:tool)
+		parts := strings.SplitN(result.Tool.Name, ":", 2)
+		if len(parts) == 2 {
+			annotations := p.lookupToolAnnotations(parts[0], parts[1])
+			if annotations != nil {
+				mcpTool["annotations"] = annotations
+			}
+			// Add call_with recommendation based on annotations
+			mcpTool["call_with"] = contracts.DeriveCallWith(annotations)
+		} else {
+			// Fallback for tools without server prefix (shouldn't happen normally)
+			mcpTool["call_with"] = contracts.ToolVariantRead // Default to read - safest option
+		}
+
 		// Add usage statistics if requested
 		if includeStats {
 			if stats, err := p.storage.GetToolUsage(result.Tool.Name); err == nil {
@@ -723,6 +786,13 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 		"tools": mcpTools,
 		"query": query,
 		"total": len(results),
+		// Add usage instructions for intent-based tool calling (Spec 018)
+		"usage_instructions": "TOOL SELECTION GUIDE: Check the 'call_with' field for each tool, then use the matching tool variant. " +
+			"DECISION RULES BY TOOL NAME: " +
+			"(1) READ (call_tool_read): search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. DEFAULT choice when unsure. " +
+			"(2) WRITE (call_tool_write): create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. " +
+			"(3) DESTRUCTIVE (call_tool_destructive): delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. " +
+			"INTENT PARAMETER: Always include 'intent' object with 'operation_type' matching your tool choice (read/write/destructive). Optional fields: data_sensitivity, reason.",
 	}
 
 	// Add debug information if requested
@@ -758,7 +828,375 @@ func (p *MCPProxyServer) handleRetrieveTools(_ context.Context, request mcp.Call
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-// handleCallTool implements the call_tool functionality
+// handleCallToolRead implements the call_tool_read functionality (Spec 018)
+func (p *MCPProxyServer) handleCallToolRead(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return p.handleCallToolVariant(ctx, request, contracts.ToolVariantRead)
+}
+
+// handleCallToolWrite implements the call_tool_write functionality (Spec 018)
+func (p *MCPProxyServer) handleCallToolWrite(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return p.handleCallToolVariant(ctx, request, contracts.ToolVariantWrite)
+}
+
+// handleCallToolDestructive implements the call_tool_destructive functionality (Spec 018)
+func (p *MCPProxyServer) handleCallToolDestructive(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return p.handleCallToolVariant(ctx, request, contracts.ToolVariantDestructive)
+}
+
+// handleCallToolVariant is the common handler for all call_tool_* variants (Spec 018)
+func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.CallToolRequest, toolVariant string) (*mcp.CallToolResult, error) {
+	// Add panic recovery to ensure server resilience
+	defer func() {
+		if r := recover(); r != nil {
+			p.logger.Error("Recovered from panic in handleCallToolVariant",
+				zap.Any("panic", r),
+				zap.String("tool_variant", toolVariant),
+				zap.Any("request", request))
+		}
+	}()
+
+	toolName, err := request.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
+	}
+
+	// Parse server and tool name early for activity logging
+	var serverName, actualToolName string
+	if strings.Contains(toolName, ":") {
+		parts := strings.SplitN(toolName, ":", 2)
+		if len(parts) == 2 {
+			serverName = parts[0]
+			actualToolName = parts[1]
+		}
+	}
+
+	// Helper to get session ID for activity logging
+	getSessionID := func() string {
+		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+			return sess.SessionID()
+		}
+		return ""
+	}
+
+	// Extract intent (required for all call_tool_* variants)
+	intent, err := p.extractIntent(request)
+	if err != nil {
+		errMsg := fmt.Sprintf("Invalid intent parameter: %v", err)
+		// Record activity error for invalid intent
+		if serverName != "" {
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+		}
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
+	// Validate intent matches tool variant (two-key security model)
+	if errResult := p.validateIntentForVariant(intent, toolVariant); errResult != nil {
+		// Record activity error for intent validation failure
+		var reason string
+		if intent == nil {
+			reason = fmt.Sprintf("Intent validation failed: intent parameter is required for %s", toolVariant)
+		} else {
+			reason = fmt.Sprintf("Intent validation failed: operation_type '%s' does not match tool variant '%s'", intent.OperationType, toolVariant)
+		}
+		if serverName != "" {
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", reason)
+		}
+		return errResult, nil
+	}
+
+	// Get optional args parameter - handle both new JSON string format and legacy object format
+	var args map[string]interface{}
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
+		}
+	}
+
+	// Fallback to legacy object format for backward compatibility
+	if args == nil && request.Params.Arguments != nil {
+		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			if argsParam, ok := argumentsMap["args"]; ok {
+				if argsMap, ok := argsParam.(map[string]interface{}); ok {
+					args = argsMap
+				}
+			}
+		}
+	}
+
+	// Handle upstream tools via upstream manager (requires server:tool format)
+	if !strings.Contains(toolName, ":") {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)), nil
+	}
+
+	// Validate tool name was parsed correctly
+	if serverName == "" || actualToolName == "" {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
+	}
+
+	p.logger.Debug("handleCallToolVariant: processing request",
+		zap.String("tool_variant", toolVariant),
+		zap.String("tool_name", toolName),
+		zap.String("server_name", serverName),
+		zap.String("intent_operation", intent.OperationType))
+
+	// Look up tool annotations from StateView for server annotation validation
+	annotations := p.lookupToolAnnotations(serverName, actualToolName)
+
+	// Validate intent against server annotations (unless call_tool_destructive which is most permissive)
+	if errResult := p.validateIntentAgainstServer(intent, toolVariant, serverName, actualToolName, annotations); errResult != nil {
+		// Record activity error for server annotation mismatch
+		reason := fmt.Sprintf("Intent rejected: tool variant '%s' conflicts with server annotations for %s:%s", toolVariant, serverName, actualToolName)
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", reason)
+		return errResult, nil
+	}
+
+	// Check if server is quarantined before calling tool
+	serverConfig, err := p.storage.GetUpstreamServer(serverName)
+	if err == nil && serverConfig.Quarantined {
+		p.logger.Debug("handleCallToolVariant: server is quarantined",
+			zap.String("server_name", serverName))
+
+		// Emit policy decision event for quarantine block
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", "Server is quarantined for security review")
+
+		// Server is in quarantine - return security warning with tool analysis
+		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
+	}
+
+	// Check connection status before attempting tool call to prevent hanging
+	if client, exists := p.upstreamManager.GetClient(serverName); exists {
+		if !client.IsConnected() {
+			state := client.GetState()
+			if client.IsConnecting() {
+				return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())), nil
+		}
+	} else {
+		p.logger.Error("handleCallToolVariant: no client found for server",
+			zap.String("server_name", serverName))
+		return mcp.NewToolResultError(fmt.Sprintf("No client found for server: %s", serverName)), nil
+	}
+
+	// Extract session information from context (needed for activity events)
+	var sessionID, clientName, clientVersion string
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+		if sessInfo := p.sessionStore.GetSession(sessionID); sessInfo != nil {
+			clientName = sessInfo.ClientName
+			clientVersion = sessInfo.ClientVersion
+		}
+	}
+
+	// Determine activity source from context (CLI/API calls set this, MCP calls have session)
+	activitySource := "mcp"
+	if reqSource := reqcontext.GetRequestSource(ctx); reqSource != reqcontext.SourceUnknown {
+		switch reqSource {
+		case reqcontext.SourceCLI:
+			activitySource = "cli"
+		case reqcontext.SourceRESTAPI:
+			activitySource = "api"
+		default:
+			activitySource = "mcp"
+		}
+	}
+
+	// Generate requestID for activity tracking
+	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+
+	// Emit activity started event with determined source
+	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
+
+	// Call tool via upstream manager with circuit breaker pattern
+	startTime := time.Now()
+	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
+	duration := time.Since(startTime)
+
+	p.logger.Debug("handleCallToolVariant: upstream call completed",
+		zap.String("tool_name", toolName),
+		zap.String("tool_variant", toolVariant),
+		zap.Duration("duration", duration),
+		zap.Error(err))
+
+	// Count tokens for request and response
+	var tokenMetrics *storage.TokenMetrics
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizer := p.mainServer.runtime.Tokenizer()
+		if tokenizer != nil {
+			// Get model for token counting
+			model := "gpt-4" // default
+			if cfg := p.mainServer.runtime.Config(); cfg != nil && cfg.Tokenizer != nil && cfg.Tokenizer.DefaultModel != "" {
+				model = cfg.Tokenizer.DefaultModel
+			}
+
+			// Count input tokens (arguments)
+			inputTokens, inputErr := tokenizer.CountTokensInJSONForModel(args, model)
+			if inputErr != nil {
+				p.logger.Debug("Failed to count input tokens", zap.Error(inputErr))
+			}
+
+			tokenMetrics = &storage.TokenMetrics{
+				InputTokens: inputTokens,
+				Model:       model,
+				Encoding:    tokenizer.(*tokens.DefaultTokenizer).GetDefaultEncoding(),
+			}
+		}
+	}
+
+	// Record tool call for history (even if error)
+	toolCallRecord := &storage.ToolCallRecord{
+		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
+		ServerID:         storage.GenerateServerID(serverConfig),
+		ServerName:       serverName,
+		ToolName:         actualToolName,
+		Arguments:        args,
+		Duration:         int64(duration),
+		Timestamp:        startTime,
+		ConfigPath:       p.mainServer.GetConfigPath(),
+		RequestID:        requestID,
+		Metrics:          tokenMetrics,
+		ExecutionType:    "direct",
+		MCPSessionID:     sessionID,
+		MCPClientName:    clientName,
+		MCPClientVersion: clientVersion,
+		Annotations:      annotations,
+		// Note: Intent metadata is passed to activity system via emitActivityToolCallCompleted
+		// See Spec 018 Phase 4-5 for activity system integration
+	}
+
+	if err != nil {
+		// Record error in tool call history
+		toolCallRecord.Error = err.Error()
+
+		// Log upstream errors for debugging server stability
+		p.logger.Debug("Upstream tool call failed",
+			zap.String("server", serverName),
+			zap.String("tool", actualToolName),
+			zap.String("tool_variant", toolVariant),
+			zap.Error(err),
+			zap.String("error_type", "upstream_failure"))
+
+		// Store error tool call
+		if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+			p.logger.Warn("Failed to record failed tool call", zap.Error(storeErr))
+		}
+
+		// Update session stats even for errors (to track call count)
+		if sessionID != "" && tokenMetrics != nil {
+			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
+		}
+
+		// Emit activity completed event for error (with intent metadata for Spec 018)
+		var intentMap map[string]interface{}
+		if intent != nil {
+			intentMap = intent.ToMap()
+		}
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false, toolVariant, intentMap)
+
+		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
+	}
+
+	// Record successful response
+	toolCallRecord.Response = result
+
+	// Count output tokens for successful response
+	if tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizer := p.mainServer.runtime.Tokenizer()
+		if tokenizer != nil {
+			outputTokens, outputErr := tokenizer.CountTokensInJSONForModel(result, tokenMetrics.Model)
+			if outputErr != nil {
+				p.logger.Debug("Failed to count output tokens", zap.Error(outputErr))
+			} else {
+				tokenMetrics.OutputTokens = outputTokens
+				tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
+				toolCallRecord.Metrics = tokenMetrics
+			}
+		}
+	}
+
+	// Increment usage stats
+	if err := p.storage.IncrementToolUsage(toolName); err != nil {
+		p.logger.Warn("Failed to update tool stats", zap.String("tool_name", toolName), zap.Error(err))
+	}
+
+	// Convert result to JSON string
+	jsonResult, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+
+	response := string(jsonResult)
+
+	// Apply truncation if configured
+	if p.truncator.ShouldTruncate(response) {
+		truncResult := p.truncator.Truncate(response, toolName, args)
+
+		// Track truncation in token metrics
+		if tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
+			tokenizer := p.mainServer.runtime.Tokenizer()
+			if tokenizer != nil {
+				// Count tokens in original response
+				originalTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
+				if err == nil {
+					// Count tokens in truncated response
+					truncatedTokens, err := tokenizer.CountTokensForModel(truncResult.TruncatedContent, tokenMetrics.Model)
+					if err == nil {
+						tokenMetrics.WasTruncated = true
+						tokenMetrics.TruncatedTokens = originalTokens - truncatedTokens
+						// Update output tokens to reflect truncated size
+						tokenMetrics.OutputTokens = truncatedTokens
+						tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
+						toolCallRecord.Metrics = tokenMetrics
+					}
+				}
+			}
+		}
+
+		// If caching is available, store the full response
+		if truncResult.CacheAvailable {
+			if err := p.cacheManager.Store(
+				truncResult.CacheKey,
+				toolName,
+				args,
+				response,
+				truncResult.RecordPath,
+				truncResult.TotalRecords,
+			); err != nil {
+				p.logger.Error("Failed to cache response",
+					zap.String("tool_name", toolName),
+					zap.String("cache_key", truncResult.CacheKey),
+					zap.Error(err))
+				// Fall back to simple truncation if caching fails
+				truncResult.TruncatedContent = p.truncator.Truncate(response, toolName, args).TruncatedContent
+				truncResult.CacheAvailable = false
+			}
+		}
+
+		response = truncResult.TruncatedContent
+	}
+
+	// Store successful tool call in history
+	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
+		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
+	}
+
+	// Update session stats for successful call
+	if sessionID != "" && tokenMetrics != nil {
+		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
+	}
+
+	// Emit activity completed event for success (with intent metadata for Spec 018)
+	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
+	var intentMap map[string]interface{}
+	if intent != nil {
+		intentMap = intent.ToMap()
+	}
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated, toolVariant, intentMap)
+
+	return mcp.NewToolResultText(response), nil
+}
+
+// handleCallTool is the LEGACY call_tool handler - returns error directing to new variants (Spec 018)
 func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Add panic recovery to ensure server resilience
 	defer func() {
@@ -1032,8 +1470,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
-		// Emit activity completed event for error with determined source
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false)
+		// Emit activity completed event for error with determined source (legacy - no intent)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false, "", nil)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -1127,9 +1565,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
-	// Emit activity completed event for success with determined source
+	// Emit activity completed event for success with determined source (legacy - no intent)
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated, "", nil)
 
 	return mcp.NewToolResultText(response), nil
 }
@@ -2830,6 +3268,13 @@ func (p *MCPProxyServer) CallBuiltInTool(ctx context.Context, toolName string, a
 		return p.handleListRegistries(ctx, request)
 	case operationSearchServers:
 		return p.handleSearchServers(ctx, request)
+	// Intent-based tool variants (Spec 018)
+	case contracts.ToolVariantRead:
+		return p.handleCallToolRead(ctx, request)
+	case contracts.ToolVariantWrite:
+		return p.handleCallToolWrite(ctx, request)
+	case contracts.ToolVariantDestructive:
+		return p.handleCallToolDestructive(ctx, request)
 	default:
 		return nil, fmt.Errorf("unknown built-in tool: %s", toolName)
 	}
@@ -2921,7 +3366,14 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	case "upstream_servers":
 		result, err = p.handleUpstreamServers(ctx, request)
 	case "call_tool":
+		// Legacy call_tool - still supported internally for backward compatibility
 		result, err = p.handleCallTool(ctx, request)
+	case contracts.ToolVariantRead:
+		result, err = p.handleCallToolRead(ctx, request)
+	case contracts.ToolVariantWrite:
+		result, err = p.handleCallToolWrite(ctx, request)
+	case contracts.ToolVariantDestructive:
+		result, err = p.handleCallToolDestructive(ctx, request)
 	case "retrieve_tools":
 		result, err = p.handleRetrieveTools(ctx, request)
 	case "quarantine_security":
@@ -2967,4 +3419,107 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 
 	// Return the content as the result
 	return result.Content, nil
+}
+
+// ============================================================================
+// Intent Declaration Support (Spec 018)
+// ============================================================================
+
+// extractIntent extracts the IntentDeclaration from MCP request parameters.
+// Returns nil if intent is not present (caller should handle missing intent error).
+func (p *MCPProxyServer) extractIntent(request mcp.CallToolRequest) (*contracts.IntentDeclaration, error) {
+	// Get intent from request parameters
+	if request.Params.Arguments == nil {
+		return nil, nil
+	}
+
+	argumentsMap, ok := request.Params.Arguments.(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	intentRaw, exists := argumentsMap["intent"]
+	if !exists {
+		return nil, nil
+	}
+
+	intentMap, ok := intentRaw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("intent must be an object")
+	}
+
+	return contracts.IntentFromMap(intentMap), nil
+}
+
+// validateIntentForVariant validates intent for a specific tool variant.
+// Returns an error response if validation fails, nil if validation passes.
+func (p *MCPProxyServer) validateIntentForVariant(intent *contracts.IntentDeclaration, toolVariant string) *mcp.CallToolResult {
+	// Check intent is present
+	if intent == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("intent parameter is required for %s", toolVariant))
+	}
+
+	// Validate two-key match: intent.operation_type must match tool variant
+	if err := intent.ValidateForToolVariant(toolVariant); err != nil {
+		return mcp.NewToolResultError(err.Message)
+	}
+
+	return nil
+}
+
+// validateIntentAgainstServer validates intent against server-provided annotations.
+// Returns an error response if validation fails in strict mode, nil otherwise.
+// In non-strict mode, logs a warning but allows the call.
+func (p *MCPProxyServer) validateIntentAgainstServer(
+	intent *contracts.IntentDeclaration,
+	toolVariant string,
+	serverName string,
+	toolName string,
+	annotations *config.ToolAnnotations,
+) *mcp.CallToolResult {
+	// Get strict validation setting from config
+	strict := p.config.IntentDeclaration.IsStrictServerValidation()
+
+	// Validate against server annotations
+	if err := intent.ValidateAgainstServerAnnotations(toolVariant, fmt.Sprintf("%s:%s", serverName, toolName), annotations, strict); err != nil {
+		if strict {
+			return mcp.NewToolResultError(err.Message)
+		}
+		// Non-strict mode: log warning but allow call
+		p.logger.Warn("Intent does not match server annotations (non-strict mode, allowing call)",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("tool_variant", toolVariant),
+			zap.String("intent_operation", intent.OperationType),
+			zap.String("warning", err.Message))
+	}
+
+	return nil
+}
+
+// lookupToolAnnotations looks up tool annotations from the StateView cache.
+// Returns nil if annotations are not found.
+func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return nil
+	}
+
+	supervisor := p.mainServer.runtime.Supervisor()
+	if supervisor == nil {
+		return nil
+	}
+
+	snapshot := supervisor.StateView().Snapshot()
+	serverStatus, exists := snapshot.Servers[serverName]
+	if !exists {
+		return nil
+	}
+
+	for _, tool := range serverStatus.Tools {
+		if tool.Name == toolName {
+			return tool.Annotations
+		}
+	}
+
+	return nil
 }

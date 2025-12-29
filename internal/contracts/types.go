@@ -8,7 +8,7 @@ import (
 // APIResponse is the standard wrapper for all API responses
 type APIResponse struct {
 	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty"`
+	Data    interface{} `json:"data,omitempty" swaggertype:"object"`
 	Error   string      `json:"error,omitempty"`
 }
 
@@ -102,7 +102,7 @@ type Tool struct {
 	Name        string                 `json:"name"`
 	ServerName  string                 `json:"server_name"`
 	Description string                 `json:"description"`
-	Schema      map[string]interface{} `json:"schema,omitempty"`
+	Schema      map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
 	Usage       int                    `json:"usage"`
 	LastUsed    *time.Time             `json:"last_used,omitempty"`
 	Annotations *ToolAnnotation        `json:"annotations,omitempty"`
@@ -141,7 +141,7 @@ type LogEntry struct {
 	Level     string                 `json:"level"`
 	Message   string                 `json:"message"`
 	Server    string                 `json:"server,omitempty"`
-	Fields    map[string]interface{} `json:"fields,omitempty"`
+	Fields    map[string]interface{} `json:"fields,omitempty" swaggertype:"object"`
 }
 
 // SystemStatus represents the overall system status
@@ -169,14 +169,14 @@ type RuntimeStatus struct {
 // ToolCallRequest represents a request to call a tool
 type ToolCallRequest struct {
 	ToolName string                 `json:"tool_name"`
-	Args     map[string]interface{} `json:"args"`
+	Args     map[string]interface{} `json:"args" swaggertype:"object"`
 }
 
 // ToolCallResponse represents the response from a tool call
 type ToolCallResponse struct {
 	ToolName   string      `json:"tool_name"`
 	ServerName string      `json:"server_name"`
-	Result     interface{} `json:"result"`
+	Result     interface{} `json:"result" swaggertype:"object"`
 	Error      string      `json:"error,omitempty"`
 	Duration   string      `json:"duration"`
 	Timestamp  time.Time   `json:"timestamp"`
@@ -185,10 +185,10 @@ type ToolCallResponse struct {
 // Event represents a system event for SSE streaming
 type Event struct {
 	Type      string                 `json:"type"`
-	Data      interface{}            `json:"data"`
+	Data      interface{}            `json:"data" swaggertype:"object"`
 	Server    string                 `json:"server,omitempty"`
 	Timestamp time.Time              `json:"timestamp"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`
 }
 
 // API Request/Response DTOs
@@ -272,14 +272,14 @@ type GetMigrationAnalysisResponse struct {
 
 // DiagnosticIssue represents a single diagnostic issue
 type DiagnosticIssue struct {
-	Type      string                 `json:"type"`               // error, warning, info
-	Category  string                 `json:"category"`           // oauth, connection, secrets, config
-	Server    string                 `json:"server,omitempty"`   // Associated server (if any)
-	Title     string                 `json:"title"`              // Short title
-	Message   string                 `json:"message"`            // Detailed message
-	Timestamp time.Time              `json:"timestamp"`          // When detected
-	Severity  string                 `json:"severity"`           // critical, high, medium, low
-	Metadata  map[string]interface{} `json:"metadata,omitempty"` // Additional context
+	Type      string                 `json:"type"`                                            // error, warning, info
+	Category  string                 `json:"category"`                                        // oauth, connection, secrets, config
+	Server    string                 `json:"server,omitempty"`                                // Associated server (if any)
+	Title     string                 `json:"title"`                                           // Short title
+	Message   string                 `json:"message"`                                         // Detailed message
+	Timestamp time.Time              `json:"timestamp"`                                       // When detected
+	Severity  string                 `json:"severity"`                                        // critical, high, medium, low
+	Metadata  map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`         // Additional context
 }
 
 // MissingSecret represents an unresolved secret reference
@@ -386,24 +386,24 @@ type TokenMetrics struct {
 
 // ToolCallRecord represents a single recorded tool call with full context
 type ToolCallRecord struct {
-	ID               string                 `json:"id"`                           // Unique identifier
-	ServerID         string                 `json:"server_id"`                    // Server identity hash
-	ServerName       string                 `json:"server_name"`                  // Human-readable server name
-	ToolName         string                 `json:"tool_name"`                    // Tool name (without server prefix)
-	Arguments        map[string]interface{} `json:"arguments"`                    // Tool arguments
-	Response         interface{}            `json:"response,omitempty"`           // Tool response (success only)
-	Error            string                 `json:"error,omitempty"`              // Error message (failure only)
-	Duration         int64                  `json:"duration"`                     // Duration in nanoseconds
-	Timestamp        time.Time              `json:"timestamp"`                    // When the call was made
-	ConfigPath       string                 `json:"config_path"`                  // Active config file path
-	RequestID        string                 `json:"request_id,omitempty"`         // Request correlation ID
-	Metrics          *TokenMetrics          `json:"metrics,omitempty"`            // Token usage metrics (nil for older records)
-	ParentCallID     string                 `json:"parent_call_id,omitempty"`     // Links nested calls to parent code_execution
-	ExecutionType    string                 `json:"execution_type,omitempty"`     // "direct" or "code_execution"
-	MCPSessionID     string                 `json:"mcp_session_id,omitempty"`     // MCP session identifier
-	MCPClientName    string                 `json:"mcp_client_name,omitempty"`    // MCP client name from InitializeRequest
-	MCPClientVersion string                 `json:"mcp_client_version,omitempty"` // MCP client version
-	Annotations      *ToolAnnotation        `json:"annotations,omitempty"`        // Tool behavior hints snapshot
+	ID               string                 `json:"id"`                                                   // Unique identifier
+	ServerID         string                 `json:"server_id"`                                            // Server identity hash
+	ServerName       string                 `json:"server_name"`                                          // Human-readable server name
+	ToolName         string                 `json:"tool_name"`                                            // Tool name (without server prefix)
+	Arguments        map[string]interface{} `json:"arguments" swaggertype:"object"`                       // Tool arguments
+	Response         interface{}            `json:"response,omitempty" swaggertype:"object"`              // Tool response (success only)
+	Error            string                 `json:"error,omitempty"`                                      // Error message (failure only)
+	Duration         int64                  `json:"duration"`                                             // Duration in nanoseconds
+	Timestamp        time.Time              `json:"timestamp"`                                            // When the call was made
+	ConfigPath       string                 `json:"config_path"`                                          // Active config file path
+	RequestID        string                 `json:"request_id,omitempty"`                                 // Request correlation ID
+	Metrics          *TokenMetrics          `json:"metrics,omitempty"`                                    // Token usage metrics (nil for older records)
+	ParentCallID     string                 `json:"parent_call_id,omitempty"`                             // Links nested calls to parent code_execution
+	ExecutionType    string                 `json:"execution_type,omitempty"`                             // "direct" or "code_execution"
+	MCPSessionID     string                 `json:"mcp_session_id,omitempty"`                             // MCP session identifier
+	MCPClientName    string                 `json:"mcp_client_name,omitempty"`                            // MCP client name from InitializeRequest
+	MCPClientVersion string                 `json:"mcp_client_version,omitempty"`                         // MCP client version
+	Annotations      *ToolAnnotation        `json:"annotations,omitempty"`                                // Tool behavior hints snapshot
 }
 
 // GetToolCallsResponse is the response for GET /api/v1/tool-calls
@@ -459,13 +459,13 @@ type ConfigApplyResult struct {
 
 // GetConfigResponse is the response for GET /api/v1/config
 type GetConfigResponse struct {
-	Config     interface{} `json:"config"`      // The configuration object
-	ConfigPath string      `json:"config_path"` // Path to config file
+	Config     interface{} `json:"config" swaggertype:"object"`      // The configuration object
+	ConfigPath string      `json:"config_path"`                      // Path to config file
 }
 
 // ValidateConfigRequest is the request for POST /api/v1/config/validate
 type ValidateConfigRequest struct {
-	Config interface{} `json:"config"` // The configuration to validate
+	Config interface{} `json:"config" swaggertype:"object"` // The configuration to validate
 }
 
 // ValidateConfigResponse is the response for POST /api/v1/config/validate
@@ -476,14 +476,14 @@ type ValidateConfigResponse struct {
 
 // ApplyConfigRequest is the request for POST /api/v1/config/apply
 type ApplyConfigRequest struct {
-	Config interface{} `json:"config"` // The new configuration to apply
+	Config interface{} `json:"config" swaggertype:"object"` // The new configuration to apply
 }
 
 // Tool call replay types
 
 // ReplayToolCallRequest is the request for POST /api/v1/tool-calls/{id}/replay
 type ReplayToolCallRequest struct {
-	Arguments map[string]interface{} `json:"arguments"` // Modified arguments for replay
+	Arguments map[string]interface{} `json:"arguments" swaggertype:"object"` // Modified arguments for replay
 }
 
 // ReplayToolCallResponse is the response for POST /api/v1/tool-calls/{id}/replay
@@ -506,7 +506,7 @@ type Registry struct {
 	ServersURL  string      `json:"servers_url,omitempty"`
 	Tags        []string    `json:"tags,omitempty"`
 	Protocol    string      `json:"protocol,omitempty"`
-	Count       interface{} `json:"count,omitempty"` // number or string
+	Count       interface{} `json:"count,omitempty" swaggertype:"primitive,string"` // number or string
 }
 
 // RepositoryInfo represents detected repository type information
@@ -554,7 +554,7 @@ type SearchRegistryServersResponse struct {
 // SuccessResponse is the standard success response wrapper for API endpoints.
 type SuccessResponse struct {
 	Success bool        `json:"success"`
-	Data    interface{} `json:"data"`
+	Data    interface{} `json:"data" swaggertype:"object"`
 }
 
 // ErrorResponse is the standard error response for API endpoints.

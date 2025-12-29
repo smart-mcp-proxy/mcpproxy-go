@@ -65,15 +65,16 @@ func (a *ActivityRecord) UnmarshalBinary(data []byte) error {
 
 // ActivityFilter represents query parameters for filtering activity records
 type ActivityFilter struct {
-	Type      string    // Filter by activity type
-	Server    string    // Filter by server name
-	Tool      string    // Filter by tool name
-	SessionID string    // Filter by MCP session
-	Status    string    // Filter by status (success/error/blocked)
-	StartTime time.Time // Activities after this time
-	EndTime   time.Time // Activities before this time
-	Limit     int       // Max records to return (default 50, max 100)
-	Offset    int       // Pagination offset
+	Type       string    // Filter by activity type
+	Server     string    // Filter by server name
+	Tool       string    // Filter by tool name
+	SessionID  string    // Filter by MCP session
+	Status     string    // Filter by status (success/error/blocked)
+	StartTime  time.Time // Activities after this time
+	EndTime    time.Time // Activities before this time
+	Limit      int       // Max records to return (default 50, max 100)
+	Offset     int       // Pagination offset
+	IntentType string    // Filter by intent operation type: read, write, destructive (Spec 018)
 }
 
 // DefaultActivityFilter returns an ActivityFilter with sensible defaults
@@ -132,5 +133,42 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		return false
 	}
 
+	// Check intent_type filter (Spec 018)
+	if f.IntentType != "" {
+		recordIntentType := extractIntentType(record)
+		if recordIntentType != f.IntentType {
+			return false
+		}
+	}
+
 	return true
+}
+
+// extractIntentType extracts the operation type from activity metadata.
+// It checks both intent.operation_type and derives from tool_variant as fallback.
+func extractIntentType(record *ActivityRecord) string {
+	if record.Metadata == nil {
+		return ""
+	}
+
+	// Try to get intent.operation_type first
+	if intent, ok := record.Metadata["intent"].(map[string]interface{}); ok {
+		if opType, ok := intent["operation_type"].(string); ok {
+			return opType
+		}
+	}
+
+	// Fall back to deriving from tool_variant
+	if toolVariant, ok := record.Metadata["tool_variant"].(string); ok {
+		switch toolVariant {
+		case "call_tool_read":
+			return "read"
+		case "call_tool_write":
+			return "write"
+		case "call_tool_destructive":
+			return "destructive"
+		}
+	}
+
+	return ""
 }

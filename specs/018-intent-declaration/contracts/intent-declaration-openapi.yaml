@@ -1,0 +1,273 @@
+# OpenAPI 3.0 Additions for Intent Declaration Feature
+# These components should be merged into oas/swagger.yaml
+
+openapi: 3.0.3
+info:
+  title: MCPProxy Intent Declaration API Additions
+  version: 1.0.0
+
+# New/Modified Components
+components:
+  schemas:
+    # New Schema: IntentDeclaration
+    IntentDeclaration:
+      type: object
+      description: Agent's declared intent for a tool call
+      required:
+        - operation_type
+      properties:
+        operation_type:
+          type: string
+          enum: [read, write, destructive]
+          description: |
+            Required operation type that must match the tool variant used.
+            - read: Query/fetch operations that don't modify state
+            - write: Create/update operations that modify state
+            - destructive: Delete/irreversible operations
+          example: "destructive"
+        data_sensitivity:
+          type: string
+          enum: [public, internal, private, unknown]
+          description: |
+            Optional classification of data being accessed/modified.
+            Defaults to "unknown" if not provided.
+          example: "private"
+        reason:
+          type: string
+          maxLength: 1000
+          description: Optional human-readable explanation for the operation
+          example: "User requested repository cleanup"
+
+    # New Schema: ToolWithAnnotations (extends existing tool response)
+    ToolWithAnnotations:
+      type: object
+      description: Tool information with server annotations and call recommendation
+      properties:
+        name:
+          type: string
+          description: Fully-qualified tool name (server:tool format)
+          example: "github:delete_repo"
+        description:
+          type: string
+          description: Tool description
+          example: "Delete a GitHub repository"
+        inputSchema:
+          type: object
+          description: JSON schema for tool arguments
+        score:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: BM25 relevance score
+          example: 0.95
+        server:
+          type: string
+          description: Upstream server name
+          example: "github"
+        annotations:
+          $ref: '#/components/schemas/ToolAnnotations'
+        call_with:
+          type: string
+          enum: [call_tool_read, call_tool_write, call_tool_destructive]
+          description: |
+            MCPProxy's recommendation for which tool variant to use.
+            Derived from server annotations:
+            - destructiveHint=true → call_tool_destructive
+            - readOnlyHint=true → call_tool_read
+            - otherwise → call_tool_write (safe default)
+          example: "call_tool_destructive"
+
+    # New Schema: ToolAnnotations
+    ToolAnnotations:
+      type: object
+      description: Server-provided hints about tool behavior
+      properties:
+        readOnlyHint:
+          type: boolean
+          description: Tool only reads data, doesn't modify state
+          example: true
+        destructiveHint:
+          type: boolean
+          description: Tool performs destructive/irreversible operations
+          example: false
+        idempotentHint:
+          type: boolean
+          description: Tool is idempotent (repeated calls have same effect)
+        openWorldHint:
+          type: boolean
+          description: Tool interacts with external/open-world resources
+
+    # Modified Schema: ActivityRecord (add intent fields)
+    ActivityRecordWithIntent:
+      allOf:
+        - $ref: '#/components/schemas/ActivityRecord'
+        - type: object
+          properties:
+            metadata:
+              type: object
+              properties:
+                intent:
+                  $ref: '#/components/schemas/IntentDeclaration'
+                tool_variant:
+                  type: string
+                  enum: [call_tool_read, call_tool_write, call_tool_destructive]
+                  description: Which tool variant was used for this call
+
+    # New Schema: IntentValidationError
+    IntentValidationError:
+      type: object
+      description: Error response for intent validation failures
+      properties:
+        code:
+          type: string
+          enum:
+            - INTENT_MISMATCH
+            - MISSING_INTENT
+            - MISSING_OPERATION_TYPE
+            - INVALID_OPERATION_TYPE
+            - SERVER_MISMATCH
+            - INVALID_SENSITIVITY
+            - REASON_TOO_LONG
+          description: Error code for programmatic handling
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Intent mismatch: tool is call_tool_read but intent declares write"
+        details:
+          type: object
+          description: Additional context about the error
+          additionalProperties: true
+
+  parameters:
+    # New Query Parameter: intent_type filter
+    IntentTypeFilter:
+      name: intent_type
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [read, write, destructive]
+      description: Filter activities by operation type
+
+# Modified Endpoints
+paths:
+  /api/v1/activity:
+    get:
+      summary: List activity records
+      description: |
+        Returns paginated activity records with optional filtering.
+        Now supports intent_type filter for filtering by operation type.
+      parameters:
+        - $ref: '#/components/parameters/IntentTypeFilter'
+        # ... existing parameters (type, status, server, tool, etc.)
+      responses:
+        '200':
+          description: Activity records with intent information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  activities:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ActivityRecordWithIntent'
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+
+# MCP Tool Definitions (for documentation)
+x-mcp-tools:
+  call_tool_read:
+    description: |
+      Execute a read-only tool discovered via retrieve_tools. Use for operations that
+      query data without modifying state. Requires intent.operation_type='read'. Will be
+      rejected if server marks tool as destructive.
+    inputSchema:
+      type: object
+      required:
+        - name
+        - intent
+      properties:
+        name:
+          type: string
+          description: Tool name in server:tool format
+        args_json:
+          type: string
+          description: JSON string containing tool arguments
+        intent:
+          $ref: '#/components/schemas/IntentDeclaration'
+
+  call_tool_write:
+    description: |
+      Execute a state-modifying tool discovered via retrieve_tools. Use for operations
+      that create or update resources. Requires intent.operation_type='write'. Will be
+      rejected if server marks tool as destructive.
+    inputSchema:
+      type: object
+      required:
+        - name
+        - intent
+      properties:
+        name:
+          type: string
+          description: Tool name in server:tool format
+        args_json:
+          type: string
+          description: JSON string containing tool arguments
+        intent:
+          $ref: '#/components/schemas/IntentDeclaration'
+
+  call_tool_destructive:
+    description: |
+      Execute a destructive tool discovered via retrieve_tools. Use for operations that
+      delete or permanently modify resources. Requires intent.operation_type='destructive'.
+      Most permissive - allowed regardless of server annotations.
+    inputSchema:
+      type: object
+      required:
+        - name
+        - intent
+      properties:
+        name:
+          type: string
+          description: Tool name in server:tool format
+        args_json:
+          type: string
+          description: JSON string containing tool arguments
+        intent:
+          $ref: '#/components/schemas/IntentDeclaration'
+
+  retrieve_tools:
+    description: |
+      Search for tools across all upstream servers. Results include annotations
+      (readOnlyHint, destructiveHint) and recommended call_with variant. Use call_tool_read
+      for read-only operations, call_tool_write for modifications, call_tool_destructive
+      for deletions. Intent must match tool variant.
+    inputSchema:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          description: Search query for tool discovery
+        limit:
+          type: integer
+          default: 20
+          maximum: 100
+          description: Maximum number of tools to return
+    outputSchema:
+      type: object
+      properties:
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolWithAnnotations'
+        usage_instructions:
+          type: string
+          description: Instructions for using the tool variants

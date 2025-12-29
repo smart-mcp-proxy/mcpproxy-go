@@ -36,14 +36,17 @@ const (
 var (
 	// Built-in tools that are handled by the MCP proxy server directly
 	builtInTools = map[string]bool{
-		"upstream_servers":    true,
-		"quarantine_security": true,
-		"retrieve_tools":      true,
-		"call_tool":           true,
-		"read_cache":          true,
-		"list_registries":     true,
-		"search_servers":      true,
-		"code_execution":      true,
+		"upstream_servers":     true,
+		"quarantine_security":  true,
+		"retrieve_tools":       true,
+		"call_tool":            true,
+		"call_tool_read":       true,
+		"call_tool_write":      true,
+		"call_tool_destructive": true,
+		"read_cache":           true,
+		"list_registries":      true,
+		"search_servers":       true,
+		"code_execution":       true,
 	}
 )
 
@@ -56,21 +59,81 @@ var (
 
 	callToolCmd = &cobra.Command{
 		Use:   "tool",
-		Short: "Call a specific tool on an upstream server or built-in tool",
-		Long: `Call a tool on an upstream server using the server:tool_name format, or call built-in tools directly.
+		Short: "Call a specific tool on an upstream server or built-in tool (legacy)",
+		Long: `[DEPRECATED] Use 'call tool-read', 'call tool-write', or 'call tool-destructive' instead.
+
+Call a tool on an upstream server using the server:tool_name format, or call built-in tools directly.
 The upstream server is automatically derived from the tool name prefix for external tools.
 
-Built-in tools: upstream_servers, quarantine_security, retrieve_tools, call_tool, read_cache, list_registries, search_servers
+Built-in tools: upstream_servers, quarantine_security, retrieve_tools, read_cache, list_registries, search_servers
 
 Examples:
   # Built-in tools (no server prefix)
   mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}'
   mcpproxy call tool --tool-name=retrieve_tools --json_args='{"query":"github repositories"}'
-  
+
   # External server tools (server:tool format)
   mcpproxy call tool --tool-name=github-server:list_repos --json_args='{"owner":"user"}'
   mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'`,
 		RunE: runCallTool,
+	}
+
+	// Intent-based tool variant commands (Spec 018)
+	callToolReadCmd = &cobra.Command{
+		Use:   "tool-read",
+		Short: "Call a tool with read-only intent",
+		Long: `Call a tool on an upstream server with read-only intent declaration.
+This command is for operations that only read data without making changes.
+
+The intent is automatically set to operation_type="read".
+IDEs can configure this command for auto-approval of read operations.
+
+Examples:
+  # Read data from a server
+  mcpproxy call tool-read --tool-name=github:list_repos --json_args='{"owner":"user"}'
+
+  # With optional reason
+  mcpproxy call tool-read --tool-name=weather:get_forecast --json_args='{"city":"NYC"}' --reason="Checking weather for trip planning"
+
+  # With data sensitivity classification
+  mcpproxy call tool-read --tool-name=db:query_users --json_args='{}' --sensitivity=internal`,
+		RunE: runCallToolRead,
+	}
+
+	callToolWriteCmd = &cobra.Command{
+		Use:   "tool-write",
+		Short: "Call a tool with write intent",
+		Long: `Call a tool on an upstream server with write intent declaration.
+This command is for operations that create or modify data.
+
+The intent is automatically set to operation_type="write".
+IDEs typically prompt for approval before executing write operations.
+
+Examples:
+  # Create a new issue
+  mcpproxy call tool-write --tool-name=github:create_issue --json_args='{"title":"Bug report","body":"..."}'
+
+  # Update a record with reason
+  mcpproxy call tool-write --tool-name=db:update_user --json_args='{"id":123,"name":"New Name"}' --reason="Correcting user profile"`,
+		RunE: runCallToolWrite,
+	}
+
+	callToolDestructiveCmd = &cobra.Command{
+		Use:   "tool-destructive",
+		Short: "Call a tool with destructive intent",
+		Long: `Call a tool on an upstream server with destructive intent declaration.
+This command is for operations that delete data or have irreversible effects.
+
+The intent is automatically set to operation_type="destructive".
+IDEs should always prompt for explicit confirmation before executing.
+
+Examples:
+  # Delete a repository
+  mcpproxy call tool-destructive --tool-name=github:delete_repo --json_args='{"repo":"old-project"}'
+
+  # Drop a database table with reason
+  mcpproxy call tool-destructive --tool-name=db:drop_table --json_args='{"table":"temp_data"}' --reason="Cleanup after migration"`,
+		RunE: runCallToolDestructive,
 	}
 
 	// Command flags for call tool
@@ -80,6 +143,10 @@ Examples:
 	callConfigPath   string
 	callTimeout      time.Duration
 	callOutputFormat string
+
+	// Intent flags for tool variant commands
+	callIntentReason      string
+	callIntentSensitivity string
 )
 
 // GetCallCommand returns the call command for adding to the root command
@@ -88,10 +155,13 @@ func GetCallCommand() *cobra.Command {
 }
 
 func init() {
-	// Add tool subcommand to call command
+	// Add tool subcommands to call command
 	callCmd.AddCommand(callToolCmd)
+	callCmd.AddCommand(callToolReadCmd)
+	callCmd.AddCommand(callToolWriteCmd)
+	callCmd.AddCommand(callToolDestructiveCmd)
 
-	// Define flags for call tool command
+	// Define flags for legacy call tool command
 	callToolCmd.Flags().StringVarP(&callToolName, "tool-name", "t", "", "Tool name in format server:tool_name (required)")
 	callToolCmd.Flags().StringVarP(&callJSONArgs, "json_args", "j", "{}", "JSON arguments for the tool (default: {})")
 	callToolCmd.Flags().StringVarP(&callLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
@@ -99,27 +169,46 @@ func init() {
 	callToolCmd.Flags().DurationVar(&callTimeout, "timeout", 30*time.Second, "Tool call timeout")
 	callToolCmd.Flags().StringVarP(&callOutputFormat, "output", "o", "pretty", "Output format (pretty, json)")
 
-	// Mark required flags
+	// Mark required flags for legacy command
 	err := callToolCmd.MarkFlagRequired("tool-name")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to mark tool-name flag as required: %v", err))
 	}
 
-	// Add examples and usage help
+	// Add examples and usage help for legacy command
 	callToolCmd.Example = `  # Call built-in tools (no server prefix)
   mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}'
   mcpproxy call tool --tool-name=retrieve_tools --json_args='{"query":"github repositories"}'
-  mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"add","name":"test","command":"uvx","args":["mcp-server-fetch"],"enabled":true}'
 
   # Call external server tools (server:tool format)
   mcpproxy call tool --tool-name=github-server:list_repos --json_args='{"owner":"myorg"}'
-  mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'
-
-  # Call with trace logging to see all details
-  mcpproxy call tool --tool-name=local-script:run_analysis --json_args='{}' --log-level=trace
 
   # Use custom config file
   mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}' --config=/path/to/config.json`
+
+	// Setup flags for intent-based tool variant commands
+	setupToolVariantFlags(callToolReadCmd)
+	setupToolVariantFlags(callToolWriteCmd)
+	setupToolVariantFlags(callToolDestructiveCmd)
+}
+
+// setupToolVariantFlags adds common flags to a tool variant command
+func setupToolVariantFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVarP(&callToolName, "tool-name", "t", "", "Tool name in format server:tool_name (required)")
+	cmd.Flags().StringVarP(&callJSONArgs, "json_args", "j", "{}", "JSON arguments for the tool (default: {})")
+	cmd.Flags().StringVarP(&callLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
+	cmd.Flags().StringVarP(&callConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	cmd.Flags().DurationVar(&callTimeout, "timeout", 30*time.Second, "Tool call timeout")
+	cmd.Flags().StringVarP(&callOutputFormat, "output", "o", "pretty", "Output format (pretty, json)")
+
+	// Intent-specific flags
+	cmd.Flags().StringVar(&callIntentReason, "reason", "", "Human-readable explanation for the operation (max 1000 chars)")
+	cmd.Flags().StringVar(&callIntentSensitivity, "sensitivity", "", "Data sensitivity classification: public, internal, private, unknown")
+
+	// Mark required flags
+	if err := cmd.MarkFlagRequired("tool-name"); err != nil {
+		panic(fmt.Sprintf("Failed to mark tool-name flag as required: %v", err))
+	}
 }
 
 func runCallTool(_ *cobra.Command, _ []string) error {
@@ -480,6 +569,209 @@ func runCallToolStandalone(ctx context.Context, serverName, toolName string, arg
 	result, err := cliClient.CallTool(ctx, toolName, args)
 	if err != nil {
 		return fmt.Errorf("failed to call tool '%s': %w", toolName, err)
+	}
+
+	// Output results based on format
+	switch callOutputFormat {
+	case outputFormatJSON:
+		return outputCallResultAsJSON(result)
+	case outputFormatPretty, "":
+		fallthrough
+	default:
+		fmt.Printf("✅ Tool call completed successfully!\n\n")
+		outputCallResultPretty(result)
+	}
+
+	return nil
+}
+
+// runCallToolRead handles the tool-read command (Spec 018)
+func runCallToolRead(_ *cobra.Command, _ []string) error {
+	return runCallToolVariant("call_tool_read", "read")
+}
+
+// runCallToolWrite handles the tool-write command (Spec 018)
+func runCallToolWrite(_ *cobra.Command, _ []string) error {
+	return runCallToolVariant("call_tool_write", "write")
+}
+
+// runCallToolDestructive handles the tool-destructive command (Spec 018)
+func runCallToolDestructive(_ *cobra.Command, _ []string) error {
+	return runCallToolVariant("call_tool_destructive", "destructive")
+}
+
+// runCallToolVariant is the common implementation for intent-based tool calls
+func runCallToolVariant(toolVariant, operationType string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	// Parse JSON arguments
+	var toolArgs map[string]interface{}
+	if err := json.Unmarshal([]byte(callJSONArgs), &toolArgs); err != nil {
+		return fmt.Errorf("invalid JSON arguments: %w", err)
+	}
+
+	// Build intent declaration
+	intent := map[string]interface{}{
+		"operation_type": operationType,
+	}
+	if callIntentSensitivity != "" {
+		intent["data_sensitivity"] = callIntentSensitivity
+	}
+	if callIntentReason != "" {
+		intent["reason"] = callIntentReason
+	}
+
+	// Build arguments for the tool variant
+	variantArgs := map[string]interface{}{
+		"name":   callToolName,
+		"args":   toolArgs,
+		"intent": intent,
+	}
+
+	// Load configuration
+	globalConfig, err := loadCallConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Create logger
+	logger, err := createLogger(callLogLevel)
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	// Display intent information
+	fmt.Printf("🚀 Intent-Based Tool Call\n")
+	fmt.Printf("   Tool: %s\n", callToolName)
+	fmt.Printf("   Variant: %s (operation_type=%s)\n", toolVariant, operationType)
+	if callIntentSensitivity != "" {
+		fmt.Printf("   Sensitivity: %s\n", callIntentSensitivity)
+	}
+	if callIntentReason != "" {
+		fmt.Printf("   Reason: %s\n", callIntentReason)
+	}
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+	// Detect daemon and use client mode if available
+	if shouldUseCallDaemon(globalConfig.DataDir) {
+		logger.Info("Detected running daemon, using client mode via socket")
+		return runCallToolVariantClientMode(globalConfig.DataDir, toolVariant, variantArgs, logger)
+	}
+
+	// No daemon - use standalone mode
+	logger.Info("No daemon detected, using standalone mode")
+	return runCallToolVariantStandalone(ctx, toolVariant, variantArgs, globalConfig)
+}
+
+// runCallToolVariantClientMode calls tool variant via daemon HTTP API over socket
+func runCallToolVariantClientMode(dataDir, toolVariant string, args map[string]interface{}, logger *zap.Logger) error {
+	// Detect socket endpoint
+	socketPath := socket.DetectSocketPath(dataDir)
+
+	// Create CLI client
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Ping daemon to verify connectivity
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer pingCancel()
+	if err := client.Ping(pingCtx); err != nil {
+		logger.Warn("Failed to ping daemon, falling back to standalone mode",
+			zap.Error(err),
+			zap.String("socket_path", socketPath))
+		// Fall back to standalone mode
+		cfg, _ := loadCallConfig()
+		standaloneCtx := context.Background()
+		return runCallToolVariantStandalone(standaloneCtx, toolVariant, args, cfg)
+	}
+
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n")
+
+	// Call tool via daemon
+	fmt.Printf("🔗 Calling %s via daemon socket...\n", toolVariant)
+	callCtx, callCancel := context.WithTimeout(context.Background(), callTimeout)
+	defer callCancel()
+
+	// The daemon's CallTool expects a tool name and arguments
+	// For tool variants, we call the variant tool directly
+	result, err := client.CallTool(callCtx, toolVariant, args)
+	if err != nil {
+		return fmt.Errorf("failed to call tool via daemon: %w", err)
+	}
+
+	// Output results based on format
+	switch callOutputFormat {
+	case outputFormatJSON:
+		return outputCallResultAsJSON(result)
+	case outputFormatPretty, "":
+		fallthrough
+	default:
+		fmt.Printf("✅ Tool call completed successfully!\n\n")
+		outputCallResultPretty(result)
+	}
+
+	return nil
+}
+
+// runCallToolVariantStandalone calls tool variant directly without daemon
+func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args map[string]interface{}, globalConfig *config.Config) error {
+	fmt.Fprintf(os.Stderr, "⚠️  Using standalone mode - daemon not detected (slower startup)\n")
+
+	// Create logger with appropriate level
+	logger, err := createLogger(callLogLevel)
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	// Create storage manager
+	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar())
+	if err != nil {
+		return fmt.Errorf("failed to create storage manager: %w", err)
+	}
+	defer storageManager.Close()
+
+	// Create index manager
+	indexManager, err := index.NewManager(globalConfig.DataDir, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create index manager: %w", err)
+	}
+	defer indexManager.Close()
+
+	// Create secret resolver for command execution
+	secretResolver := secret.NewResolver()
+
+	// Create upstream manager
+	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB(), secretResolver, storageManager)
+
+	// Create cache manager
+	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
+	if err != nil {
+		return fmt.Errorf("failed to create cache manager: %w", err)
+	}
+	defer cacheManager.Close()
+
+	// Create truncator
+	truncator := truncate.NewTruncator(globalConfig.ToolResponseLimit)
+
+	// Create MCP proxy server
+	mcpProxy := server.NewMCPProxyServer(
+		storageManager,
+		indexManager,
+		upstreamManager,
+		cacheManager,
+		truncator,
+		logger,
+		nil, // mainServer not needed for CLI calls
+		false,
+		globalConfig,
+	)
+
+	fmt.Printf("🛠️  Calling %s...\n", toolVariant)
+
+	// Call the tool variant through the proxy server's public method
+	result, err := mcpProxy.CallBuiltInTool(ctx, toolVariant, args)
+	if err != nil {
+		return fmt.Errorf("failed to call %s: %w", toolVariant, err)
 	}
 
 	// Output results based on format

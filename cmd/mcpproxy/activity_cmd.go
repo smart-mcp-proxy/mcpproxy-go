@@ -27,15 +27,16 @@ import (
 // Activity command flags
 var (
 	// Shared filter flags
-	activityType      string
-	activityServer    string
-	activityTool      string
-	activityStatus    string
-	activitySessionID string
-	activityStartTime string
-	activityEndTime   string
-	activityLimit     int
-	activityOffset    int
+	activityType       string
+	activityServer     string
+	activityTool       string
+	activityStatus     string
+	activitySessionID  string
+	activityStartTime  string
+	activityEndTime    string
+	activityLimit      int
+	activityOffset     int
+	activityIntentType string // Spec 018: Filter by operation type (read, write, destructive)
 
 	// Show command flags
 	activityIncludeResponse bool
@@ -52,15 +53,16 @@ var (
 
 // ActivityFilter contains options for filtering activity records
 type ActivityFilter struct {
-	Type      string
-	Server    string
-	Tool      string
-	Status    string
-	SessionID string
-	StartTime string
-	EndTime   string
-	Limit     int
-	Offset    int
+	Type       string
+	Server     string
+	Tool       string
+	Status     string
+	SessionID  string
+	StartTime  string
+	EndTime    string
+	Limit      int
+	Offset     int
+	IntentType string // Spec 018: Filter by operation type (read, write, destructive)
 }
 
 // Validate validates the filter options
@@ -92,6 +94,21 @@ func (f *ActivityFilter) Validate() error {
 		}
 		if !valid {
 			return fmt.Errorf("invalid status '%s': must be one of %v", f.Status, validStatuses)
+		}
+	}
+
+	// Validate intent_type (Spec 018)
+	if f.IntentType != "" {
+		validIntentTypes := []string{"read", "write", "destructive"}
+		valid := false
+		for _, it := range validIntentTypes {
+			if f.IntentType == it {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid intent-type '%s': must be one of %v", f.IntentType, validIntentTypes)
 		}
 	}
 
@@ -146,6 +163,9 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	}
 	if f.Offset > 0 {
 		q.Set("offset", fmt.Sprintf("%d", f.Offset))
+	}
+	if f.IntentType != "" {
+		q.Set("intent_type", f.IntentType)
 	}
 	return q
 }
@@ -216,6 +236,111 @@ func formatSourceDescription(source string) string {
 		return "REST API"
 	default:
 		return "AI agent via MCP protocol"
+	}
+}
+
+// formatIntentIndicator extracts intent from activity metadata and returns visual indicator
+// Returns emoji indicators: 📖 read, ✏️ write, ⚠️ destructive, or "-" if no intent
+func formatIntentIndicator(activity map[string]interface{}) string {
+	// Extract metadata from activity
+	metadata := getMapField(activity, "metadata")
+	if metadata == nil {
+		return "-"
+	}
+
+	// Extract intent from metadata
+	intent := getMapField(metadata, "intent")
+	if intent == nil {
+		// Check for tool_variant as fallback
+		if toolVariant := getStringField(metadata, "tool_variant"); toolVariant != "" {
+			return formatOperationIcon(toolVariantToOperationType(toolVariant))
+		}
+		return "-"
+	}
+
+	// Get operation_type from intent
+	opType := getStringField(intent, "operation_type")
+	if opType == "" {
+		return "-"
+	}
+
+	return formatOperationIcon(opType)
+}
+
+// formatOperationIcon returns the visual indicator for an operation type
+func formatOperationIcon(opType string) string {
+	switch opType {
+	case "read":
+		return "📖" // Read operation
+	case "write":
+		return "✏️" // Write operation
+	case "destructive":
+		return "⚠️" // Destructive operation
+	default:
+		return "-"
+	}
+}
+
+// toolVariantToOperationType converts tool variant name to operation type
+func toolVariantToOperationType(variant string) string {
+	switch variant {
+	case "call_tool_read":
+		return "read"
+	case "call_tool_write":
+		return "write"
+	case "call_tool_destructive":
+		return "destructive"
+	default:
+		return ""
+	}
+}
+
+// displayIntentSection displays intent information for activity show command
+func displayIntentSection(activity map[string]interface{}) {
+	// Extract metadata from activity
+	metadata := getMapField(activity, "metadata")
+	if metadata == nil {
+		return
+	}
+
+	// Check if there's any intent-related data
+	toolVariant := getStringField(metadata, "tool_variant")
+	intent := getMapField(metadata, "intent")
+
+	if toolVariant == "" && intent == nil {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("Intent Declaration:")
+
+	// Display tool variant if present
+	if toolVariant != "" {
+		opType := toolVariantToOperationType(toolVariant)
+		fmt.Printf("  Tool Variant:      %s\n", toolVariant)
+		if opType != "" {
+			fmt.Printf("  Operation Type:    %s %s\n", formatOperationIcon(opType), opType)
+		}
+	}
+
+	// Display intent details if present
+	if intent != nil {
+		if opType := getStringField(intent, "operation_type"); opType != "" && toolVariant == "" {
+			fmt.Printf("  Operation Type:    %s %s\n", formatOperationIcon(opType), opType)
+		}
+		if sensitivity := getStringField(intent, "data_sensitivity"); sensitivity != "" {
+			fmt.Printf("  Data Sensitivity:  %s\n", sensitivity)
+		}
+		if reason := getStringField(intent, "reason"); reason != "" {
+			fmt.Printf("  Reason:            %s\n", reason)
+		}
+		if reversible, ok := intent["reversible"].(bool); ok {
+			reversibleStr := "no"
+			if reversible {
+				reversibleStr = "yes"
+			}
+			fmt.Printf("  Reversible:        %s\n", reversibleStr)
+		}
 	}
 }
 
@@ -359,6 +484,7 @@ func init() {
 	activityListCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter records before this time (RFC3339)")
 	activityListCmd.Flags().IntVarP(&activityLimit, "limit", "n", 50, "Max records to return (1-100)")
 	activityListCmd.Flags().IntVar(&activityOffset, "offset", 0, "Pagination offset")
+	activityListCmd.Flags().StringVar(&activityIntentType, "intent-type", "", "Filter by intent operation type: read, write, destructive")
 
 	// Watch command flags
 	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision")
@@ -431,15 +557,16 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 
 	// Build filter
 	filter := &ActivityFilter{
-		Type:      activityType,
-		Server:    activityServer,
-		Tool:      activityTool,
-		Status:    activityStatus,
-		SessionID: activitySessionID,
-		StartTime: activityStartTime,
-		EndTime:   activityEndTime,
-		Limit:     activityLimit,
-		Offset:    activityOffset,
+		Type:       activityType,
+		Server:     activityServer,
+		Tool:       activityTool,
+		Status:     activityStatus,
+		SessionID:  activitySessionID,
+		StartTime:  activityStartTime,
+		EndTime:    activityEndTime,
+		Limit:      activityLimit,
+		Offset:     activityOffset,
+		IntentType: activityIntentType,
 	}
 
 	if err := filter.Validate(); err != nil {
@@ -489,7 +616,7 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "STATUS", "DURATION", "TIME"}
+	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "INTENT", "STATUS", "DURATION", "TIME"}
 	rows := make([][]string, 0, len(activities))
 
 	for _, act := range activities {
@@ -501,6 +628,9 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		status := getStringField(act, "status")
 		durationMs := getIntField(act, "duration_ms")
 		timestamp := getStringField(act, "timestamp")
+
+		// Extract intent from metadata (Spec 018)
+		intentStr := formatIntentIndicator(act)
 
 		// Parse and format timestamp
 		timeStr := timestamp
@@ -522,6 +652,7 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			actType,
 			server,
 			tool,
+			intentStr,
 			status,
 			formatActivityDuration(int64(durationMs)),
 			timeStr,
@@ -793,6 +924,9 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 	if errMsg := getStringField(activity, "error_message"); errMsg != "" {
 		fmt.Printf("Error:        %s\n", errMsg)
 	}
+
+	// Intent information (Spec 018)
+	displayIntentSection(activity)
 
 	// Arguments
 	if args, ok := activity["arguments"].(map[string]interface{}); ok && len(args) > 0 {
