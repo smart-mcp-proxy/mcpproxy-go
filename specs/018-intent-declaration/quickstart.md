@@ -91,22 +91,22 @@ Every tool call requires matching intent in **two places**:
 ### Read Operations
 ```bash
 # List repositories (read-only)
-mcpproxy call tool-read github:list_repos --args '{}'
+mcpproxy call tool-read github:list_repos --json_args '{}'
 
 # Get user info
-mcpproxy call tool-read github:get_user --args '{"username":"octocat"}'
+mcpproxy call tool-read github:get_user --json_args '{"username":"octocat"}'
 ```
 
 ### Write Operations
 ```bash
 # Create issue
 mcpproxy call tool-write github:create_issue \
-  --args '{"repo":"test","title":"Bug report"}' \
+  --json_args '{"repo":"test","title":"Bug report"}' \
   --reason "Filing bug from user feedback"
 
 # Update file with sensitivity
 mcpproxy call tool-write github:update_file \
-  --args '{"path":"config.json","content":"..."}' \
+  --json_args '{"path":"config.json","content":"..."}' \
   --sensitivity private
 ```
 
@@ -114,7 +114,7 @@ mcpproxy call tool-write github:update_file \
 ```bash
 # Delete repository (requires explicit destructive variant)
 mcpproxy call tool-destructive github:delete_repo \
-  --args '{"repo":"old-project"}' \
+  --json_args '{"repo":"old-project"}' \
   --reason "Project deprecated, user confirmed"
 ```
 
@@ -146,6 +146,15 @@ mcpproxy activity list --intent-type write --status error
 # Filter via API
 curl -H "X-API-Key: $KEY" \
   "http://127.0.0.1:8080/api/v1/activity?intent_type=destructive"
+```
+
+### Plain Text Output (No Icons/Colors)
+```bash
+# Disable ANSI colors and icons for scripting/logging
+NO_COLOR=1 mcpproxy activity list
+
+# Or use JSON output for machine processing
+mcpproxy activity list -o json
 ```
 
 ## IDE Configuration
@@ -181,11 +190,25 @@ Error: Tool 'github:delete_repo' is marked destructive by server, use call_tool_
 ```
 **Fix**: Check `call_with` in retrieve_tools response and use recommended variant
 
-### Legacy call_tool
+### Legacy call_tool (CLI)
+
+The CLI command `mcpproxy call tool` is marked as **legacy** and will be deprecated in a future release.
+It continues to work but does not support intent declaration. Use the new variants instead:
+
+```bash
+# Legacy (deprecated)
+mcpproxy call tool --tool-name=github:list_repos --json_args '{}'
+
+# New (recommended)
+mcpproxy call tool-read github:list_repos --json_args '{}'
 ```
-Error: Tool 'call_tool' not found. Use call_tool_read, call_tool_write, or call_tool_destructive
-```
-**Fix**: The legacy `call_tool` has been removed. Use the new variants.
+
+### Legacy call_tool (MCP)
+
+In the MCP interface, the legacy `call_tool` has been **removed**. Clients must use:
+- `call_tool_read` for read operations
+- `call_tool_write` for write operations
+- `call_tool_destructive` for destructive operations
 
 ## Configuration
 
@@ -219,19 +242,19 @@ If you're upgrading from a version with the legacy `call_tool`:
 
 ```bash
 # 1. Search for tools
-mcpproxy call tool github:retrieve_tools --args '{"query":"file operations"}'
+mcpproxy call tool --tool-name=retrieve_tools --json_args '{"query":"file operations"}'
 
 # 2. Read a file (auto-approved in IDE)
-mcpproxy call tool-read github:get_file --args '{"path":"README.md"}'
+mcpproxy call tool-read github:get_file --json_args '{"path":"README.md"}'
 
 # 3. Update a file (IDE prompts for approval)
 mcpproxy call tool-write github:update_file \
-  --args '{"path":"README.md","content":"# Updated"}' \
+  --json_args '{"path":"README.md","content":"# Updated"}' \
   --reason "Updating documentation"
 
 # 4. Delete a file (IDE shows warning + confirmation)
 mcpproxy call tool-destructive github:delete_file \
-  --args '{"path":"old-file.txt"}' \
+  --json_args '{"path":"old-file.txt"}' \
   --reason "Cleaning up deprecated file"
 
 # 5. Review activity

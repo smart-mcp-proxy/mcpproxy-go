@@ -20,7 +20,6 @@ import (
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/upstream"
-	"mcpproxy-go/internal/upstream/cli"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -34,23 +33,6 @@ const (
 )
 
 var (
-	// Built-in tools that are handled by the MCP proxy server directly
-	builtInTools = map[string]bool{
-		"upstream_servers":     true,
-		"quarantine_security":  true,
-		"retrieve_tools":       true,
-		"call_tool":            true,
-		"call_tool_read":       true,
-		"call_tool_write":      true,
-		"call_tool_destructive": true,
-		"read_cache":           true,
-		"list_registries":      true,
-		"search_servers":       true,
-		"code_execution":       true,
-	}
-)
-
-var (
 	callCmd = &cobra.Command{
 		Use:   "call",
 		Short: "Call tools on upstream servers",
@@ -59,22 +41,23 @@ var (
 
 	callToolCmd = &cobra.Command{
 		Use:   "tool",
-		Short: "Call a specific tool on an upstream server or built-in tool (legacy)",
-		Long: `[DEPRECATED] Use 'call tool-read', 'call tool-write', or 'call tool-destructive' instead.
+		Short: "[REMOVED] Use 'call tool-read', 'call tool-write', or 'call tool-destructive'",
+		Long: `[REMOVED] The legacy 'call tool' command has been removed.
 
-Call a tool on an upstream server using the server:tool_name format, or call built-in tools directly.
-The upstream server is automatically derived from the tool name prefix for external tools.
-
-Built-in tools: upstream_servers, quarantine_security, retrieve_tools, read_cache, list_registries, search_servers
+Use the intent-based variants instead:
+  - mcpproxy call tool-read       For read-only operations (search, query, list, get)
+  - mcpproxy call tool-write      For state-modifying operations (create, update, send)
+  - mcpproxy call tool-destructive For irreversible operations (delete, remove, drop)
 
 Examples:
-  # Built-in tools (no server prefix)
-  mcpproxy call tool --tool-name=upstream_servers --json_args='{"operation":"list"}'
-  mcpproxy call tool --tool-name=retrieve_tools --json_args='{"query":"github repositories"}'
+  # Read operations
+  mcpproxy call tool-read --tool-name=github:list_repos --json_args='{}'
 
-  # External server tools (server:tool format)
-  mcpproxy call tool --tool-name=github-server:list_repos --json_args='{"owner":"user"}'
-  mcpproxy call tool --tool-name=weather-api:get_weather --json_args='{"city":"San Francisco"}'`,
+  # Write operations
+  mcpproxy call tool-write --tool-name=github:create_issue --json_args='{"title":"Bug"}'
+
+  # Destructive operations
+  mcpproxy call tool-destructive --tool-name=github:delete_repo --json_args='{"repo":"test"}'`,
 		RunE: runCallTool,
 	}
 
@@ -212,63 +195,15 @@ func setupToolVariantFlags(cmd *cobra.Command) {
 }
 
 func runCallTool(_ *cobra.Command, _ []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
-	defer cancel()
+	return fmt.Errorf(`the legacy 'call tool' command has been removed
 
-	// Parse JSON arguments
-	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(callJSONArgs), &args); err != nil {
-		return fmt.Errorf("invalid JSON arguments: %w", err)
-	}
+Use the intent-based variants instead:
+  mcpproxy call tool-read        For read-only operations
+  mcpproxy call tool-write       For state-modifying operations
+  mcpproxy call tool-destructive For irreversible operations
 
-	// Load configuration
-	globalConfig, err := loadCallConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Create logger early for daemon detection
-	logger, err := createLogger(callLogLevel)
-	if err != nil {
-		return fmt.Errorf("failed to create logger: %w", err)
-	}
-
-	// Detect daemon and use client mode for ALL tool calls (built-in and external)
-	if shouldUseCallDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket")
-		return runCallToolClientMode(globalConfig.DataDir, callToolName, args, logger)
-	}
-
-	// Check if this is a built-in tool (no server prefix)
-	if builtInTools[callToolName] {
-		logger.Info("No daemon detected, using standalone mode for built-in tool")
-		return runBuiltInTool(ctx, callToolName, args, globalConfig)
-	}
-
-	// Parse tool name to extract server name for external tools
-	parts := strings.SplitN(callToolName, ":", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid tool name format: %s (expected server:tool_name or built-in tool name)", callToolName)
-	}
-
-	serverName := parts[0]
-	toolName := parts[1]
-
-	// Validate server exists in config
-	if !serverExistsInConfigForCall(serverName, globalConfig) {
-		return fmt.Errorf("server '%s' not found in configuration. Available servers: %v",
-			serverName, getAvailableServerNamesForCall(globalConfig))
-	}
-
-	fmt.Printf("🚀 MCP Tool Call - Server: %s, Tool: %s\n", serverName, toolName)
-	fmt.Printf("📝 Log Level: %s\n", callLogLevel)
-	fmt.Printf("⏱️  Timeout: %v\n", callTimeout)
-	fmt.Printf("🔧 Arguments: %s\n", callJSONArgs)
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-
-	// No daemon detected (already checked), use standalone mode
-	logger.Info("No daemon detected, using standalone mode for external tool")
-	return runCallToolStandalone(ctx, serverName, toolName, args, globalConfig)
+Example:
+  mcpproxy call tool-read --tool-name=github:list_repos --json_args='{}'`)
 }
 
 // loadCallConfig loads the MCP configuration file for call command
@@ -355,85 +290,6 @@ func outputCallResultPretty(result interface{}) {
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }
 
-// runBuiltInTool handles calling built-in tools via the MCP proxy server
-func runBuiltInTool(ctx context.Context, toolName string, args map[string]interface{}, globalConfig *config.Config) error {
-	fmt.Printf("🚀 Built-in Tool Call: %s\n", toolName)
-	fmt.Printf("📝 Log Level: %s\n", callLogLevel)
-	fmt.Printf("⏱️  Timeout: %v\n", callTimeout)
-	fmt.Printf("🔧 Arguments: %s\n", callJSONArgs)
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-
-	// Create logger with appropriate level
-	logger, err := createLogger(callLogLevel)
-	if err != nil {
-		return fmt.Errorf("failed to create logger: %w", err)
-	}
-
-	// Create storage manager
-	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar())
-	if err != nil {
-		return fmt.Errorf("failed to create storage manager: %w", err)
-	}
-	defer storageManager.Close()
-
-	// Create index manager
-	indexManager, err := index.NewManager(globalConfig.DataDir, logger)
-	if err != nil {
-		return fmt.Errorf("failed to create index manager: %w", err)
-	}
-	defer indexManager.Close()
-
-	// Create secret resolver for command execution
-	secretResolver := secret.NewResolver()
-
-	// Create upstream manager
-	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB(), secretResolver, storageManager)
-
-	// Create cache manager
-	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
-	if err != nil {
-		return fmt.Errorf("failed to create cache manager: %w", err)
-	}
-	defer cacheManager.Close()
-
-	// Create truncator
-	truncator := truncate.NewTruncator(globalConfig.ToolResponseLimit)
-
-	// Create MCP proxy server
-	mcpProxy := server.NewMCPProxyServer(
-		storageManager,
-		indexManager,
-		upstreamManager,
-		cacheManager,
-		truncator,
-		logger,
-		nil, // mainServer not needed for CLI calls
-		false,
-		globalConfig,
-	)
-
-	fmt.Printf("🛠️  Calling built-in tool '%s'...\n", toolName)
-
-	// Call the built-in tool through the proxy server's public method
-	result, err := mcpProxy.CallBuiltInTool(ctx, toolName, args)
-	if err != nil {
-		return fmt.Errorf("failed to call built-in tool '%s': %w", toolName, err)
-	}
-
-	// Output results based on format
-	switch callOutputFormat {
-	case outputFormatJSON:
-		return outputCallResultAsJSON(result)
-	case outputFormatPretty, "":
-		fallthrough
-	default:
-		fmt.Printf("✅ Built-in tool call completed successfully!\n\n")
-		outputCallResultPretty(result)
-	}
-
-	return nil
-}
-
 // createLogger creates a zap logger with the specified level
 func createLogger(level string) (*zap.Logger, error) {
 	var zapLevel zap.AtomicLevel
@@ -462,127 +318,10 @@ func createLogger(level string) (*zap.Logger, error) {
 	return config.Build()
 }
 
-// getAvailableServerNamesForCall returns a list of available server names from config
-func getAvailableServerNamesForCall(globalConfig *config.Config) []string {
-	var names []string
-	for _, server := range globalConfig.Servers {
-		names = append(names, server.Name)
-	}
-	return names
-}
-
-// serverExistsInConfigForCall checks if a server exists in the configuration
-func serverExistsInConfigForCall(serverName string, globalConfig *config.Config) bool {
-	for _, server := range globalConfig.Servers {
-		if server.Name == serverName {
-			return true
-		}
-	}
-	return false
-}
-
 // shouldUseCallDaemon checks if daemon is running by detecting socket file.
 func shouldUseCallDaemon(dataDir string) bool {
 	socketPath := socket.DetectSocketPath(dataDir)
 	return socket.IsSocketAvailable(socketPath)
-}
-
-// runCallToolClientMode calls tool via daemon HTTP API over socket.
-func runCallToolClientMode(dataDir, toolName string, args map[string]interface{}, logger *zap.Logger) error {
-	// Detect socket endpoint
-	socketPath := socket.DetectSocketPath(dataDir)
-
-	// Create CLI client
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
-	// Ping daemon to verify connectivity
-	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer pingCancel()
-	if err := client.Ping(pingCtx); err != nil {
-		logger.Warn("Failed to ping daemon, falling back to standalone mode",
-			zap.Error(err),
-			zap.String("socket_path", socketPath),
-			zap.String("data_dir", dataDir),
-			zap.String("reason", "daemon_unavailable"))
-		// Fall back to standalone mode
-		cfg, _ := loadCallConfig()
-		parts := strings.SplitN(toolName, ":", 2)
-		if len(parts) == 2 {
-			standaloneCtx := context.Background()
-			return runCallToolStandalone(standaloneCtx, parts[0], parts[1], args, cfg)
-		}
-		return fmt.Errorf("invalid tool name format: %s", toolName)
-	}
-
-	// ADD CLI mode indicator
-	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n")
-
-	// Call tool via daemon with appropriate timeout
-	fmt.Printf("🔗 Calling tool via daemon socket...\n")
-	callCtx, callCancel := context.WithTimeout(context.Background(), callTimeout)
-	defer callCancel()
-	result, err := client.CallTool(callCtx, toolName, args)
-	if err != nil {
-		return fmt.Errorf("failed to call tool via daemon: %w", err)
-	}
-
-	// Output results based on format
-	switch callOutputFormat {
-	case outputFormatJSON:
-		return outputCallResultAsJSON(result)
-	case outputFormatPretty, "":
-		fallthrough
-	default:
-		fmt.Printf("✅ Tool call completed successfully!\n\n")
-		outputCallResultPretty(result)
-	}
-
-	return nil
-}
-
-// runCallToolStandalone calls tool directly by connecting to the server (existing logic).
-func runCallToolStandalone(ctx context.Context, serverName, toolName string, args map[string]interface{}, globalConfig *config.Config) error {
-	// ADD standalone mode indicator
-	fmt.Fprintf(os.Stderr, "⚠️  Using standalone mode - daemon not detected (slower startup)\n")
-
-	// Create CLI client
-	cliClient, err := cli.NewClient(serverName, globalConfig, callLogLevel)
-	if err != nil {
-		return fmt.Errorf("failed to create CLI client: %w", err)
-	}
-
-	// Connect to server
-	fmt.Printf("🔗 Connecting to server '%s'...\n", serverName)
-	if err := cliClient.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
-	}
-
-	// Ensure cleanup on exit
-	defer func() {
-		if disconnectErr := cliClient.Disconnect(); disconnectErr != nil {
-			fmt.Printf("⚠️  Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
-		}
-	}()
-
-	// Call the tool
-	fmt.Printf("🛠️  Calling tool '%s' with arguments...\n", toolName)
-	result, err := cliClient.CallTool(ctx, toolName, args)
-	if err != nil {
-		return fmt.Errorf("failed to call tool '%s': %w", toolName, err)
-	}
-
-	// Output results based on format
-	switch callOutputFormat {
-	case outputFormatJSON:
-		return outputCallResultAsJSON(result)
-	case outputFormatPretty, "":
-		fallthrough
-	default:
-		fmt.Printf("✅ Tool call completed successfully!\n\n")
-		outputCallResultPretty(result)
-	}
-
-	return nil
 }
 
 // runCallToolRead handles the tool-read command (Spec 018)
