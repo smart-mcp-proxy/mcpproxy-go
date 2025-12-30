@@ -78,6 +78,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/activity',
+      name: 'activity',
+      component: () => import('@/views/Activity.vue'),
+      meta: {
+        title: 'Activity Log',
+      },
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'not-found',
       component: () => import('@/views/NotFound.vue'),

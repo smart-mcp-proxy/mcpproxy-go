@@ -310,3 +310,67 @@ export interface SearchRegistryServersResponse {
   query?: string
   tag?: string
 }
+
+// Activity Log types (RFC-003)
+
+export type ActivityType =
+  | 'tool_call'
+  | 'policy_decision'
+  | 'quarantine_change'
+  | 'server_change'
+
+export type ActivitySource = 'mcp' | 'cli' | 'api'
+
+export type ActivityStatus = 'success' | 'error' | 'blocked'
+
+export interface ActivityRecord {
+  id: string
+  type: ActivityType
+  source?: ActivitySource
+  server_name?: string
+  tool_name?: string
+  arguments?: Record<string, any>
+  response?: string
+  response_truncated?: boolean
+  status: ActivityStatus
+  error_message?: string
+  duration_ms?: number
+  timestamp: string
+  session_id?: string
+  request_id?: string
+  metadata?: Record<string, any>
+}
+
+export interface ActivityListResponse {
+  activities: ActivityRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface ActivityDetailResponse {
+  activity: ActivityRecord
+}
+
+export interface ActivityTopServer {
+  name: string
+  count: number
+}
+
+export interface ActivityTopTool {
+  server: string
+  tool: string
+  count: number
+}
+
+export interface ActivitySummaryResponse {
+  period: string
+  total_count: number
+  success_count: number
+  error_count: number
+  blocked_count: number
+  top_servers?: ActivityTopServer[]
+  top_tools?: ActivityTopTool[]
+  start_time: string
+  end_time: string
+}
