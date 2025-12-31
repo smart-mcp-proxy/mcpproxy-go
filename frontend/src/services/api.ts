@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -483,6 +483,61 @@ class APIService {
   // Info endpoint (version and update information)
   async getInfo(): Promise<APIResponse<InfoResponse>> {
     return this.request<InfoResponse>('/api/v1/info')
+  }
+
+  // Activity Log endpoints (RFC-003)
+  async getActivities(params?: {
+    type?: string
+    server?: string
+    tool?: string
+    session_id?: string
+    status?: string
+    intent_type?: string
+    start_time?: string
+    end_time?: string
+    limit?: number
+    offset?: number
+  }): Promise<APIResponse<ActivityListResponse>> {
+    const searchParams = new URLSearchParams()
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== '') {
+          searchParams.append(key, String(value))
+        }
+      })
+    }
+    const url = `/api/v1/activity${searchParams.toString() ? '?' + searchParams.toString() : ''}`
+    return this.request<ActivityListResponse>(url)
+  }
+
+  async getActivityDetail(id: string): Promise<APIResponse<ActivityDetailResponse>> {
+    return this.request<ActivityDetailResponse>(`/api/v1/activity/${encodeURIComponent(id)}`)
+  }
+
+  async getActivitySummary(period: string = '24h'): Promise<APIResponse<ActivitySummaryResponse>> {
+    return this.request<ActivitySummaryResponse>(`/api/v1/activity/summary?period=${period}`)
+  }
+
+  getActivityExportUrl(params: {
+    format: 'json' | 'csv'
+    type?: string
+    server?: string
+    status?: string
+    start_time?: string
+    end_time?: string
+    include_bodies?: boolean
+  }): string {
+    const searchParams = new URLSearchParams()
+    searchParams.append('format', params.format)
+    if (this.apiKey) {
+      searchParams.append('apikey', this.apiKey)
+    }
+    Object.entries(params).forEach(([key, value]) => {
+      if (key !== 'format' && value !== undefined && value !== '') {
+        searchParams.append(key, String(value))
+      }
+    })
+    return `${this.baseUrl}/api/v1/activity/export?${searchParams.toString()}`
   }
 
   // Utility methods

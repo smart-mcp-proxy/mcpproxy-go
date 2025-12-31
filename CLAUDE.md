@@ -383,6 +383,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - N/A (CLI layer only - uses REST API from spec 016) (017-activity-cli-commands)
 - Go 1.24 (toolchain go1.24.10) + Cobra CLI, Chi router, BBolt (storage), Zap (logging), mark3labs/mcp-go (MCP protocol) (018-intent-declaration)
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord extended with intent metadata (018-intent-declaration)
+- TypeScript 5.9, Vue 3.5, Go 1.24 (backend already exists) + Vue 3, Vue Router 4, Pinia 2, Tailwind CSS 3, DaisyUI 4, Vite 5 (019-activity-webui)
+- N/A (frontend consumes REST API from backend) (019-activity-webui)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

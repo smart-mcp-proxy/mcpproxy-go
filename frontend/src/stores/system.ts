@@ -159,6 +159,47 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Listen for activity events (tool calls, policy decisions, etc.)
+    es.addEventListener('activity.tool_call.started', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE activity.tool_call.started event received:', data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity-started', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE activity.tool_call.started event:', error)
+      }
+    })
+
+    es.addEventListener('activity.tool_call.completed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE activity.tool_call.completed event received:', data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE activity.tool_call.completed event:', error)
+      }
+    })
+
+    es.addEventListener('activity.policy_decision', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE activity.policy_decision event received:', data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity-policy', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE activity.policy_decision event:', error)
+      }
+    })
+
+    es.addEventListener('activity', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE activity event received:', data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE activity event:', error)
+      }
+    })
+
     es.onerror = (event) => {
       connected.value = false
       console.error('EventSource error occurred:', event)
