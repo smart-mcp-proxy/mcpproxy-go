@@ -837,8 +837,8 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 	// Format for table output: [HH:MM:SS] [SRC] server:tool status duration
 	timestamp := time.Now().Format("15:04:05")
 	source := getStringField(event, "source")
-	server := getStringField(event, "server")
-	tool := getStringField(event, "tool")
+	server := getStringField(event, "server_name")
+	tool := getStringField(event, "tool_name")
 	status := getStringField(event, "status")
 	durationMs := getIntField(event, "duration_ms")
 	errMsg := getStringField(event, "error")
