@@ -822,7 +822,7 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 
 	// Apply client-side filters
 	if activityServer != "" {
-		if server := getStringField(event, "server"); server != activityServer {
+		if server := getStringField(event, "server_name"); server != activityServer {
 			return
 		}
 	}
