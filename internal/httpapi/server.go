@@ -42,6 +42,11 @@ type ServerController interface {
 	GetStatus() interface{}
 	StatusChannel() <-chan interface{}
 	EventsChannel() <-chan internalRuntime.Event
+	// SubscribeEvents creates a new per-client event subscription channel.
+	// Each SSE client should get its own channel to avoid competing for events.
+	SubscribeEvents() chan internalRuntime.Event
+	// UnsubscribeEvents closes and removes the subscription channel.
+	UnsubscribeEvents(chan internalRuntime.Event)
 
 	// Server management
 	GetAllServers() ([]map[string]interface{}, error)
@@ -1646,9 +1651,15 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	// Add small delay to ensure browser processes the connection
 	time.Sleep(100 * time.Millisecond)
 
-	// Get status & event channels
+	// Get status channel (shared)
 	statusCh := s.controller.StatusChannel()
-	eventsCh := s.controller.EventsChannel()
+
+	// Create per-client event subscription to avoid competing for events
+	// Each SSE client gets its own channel so all clients receive all events
+	eventsCh := s.controller.SubscribeEvents()
+	if eventsCh != nil {
+		defer s.controller.UnsubscribeEvents(eventsCh)
+	}
 
 	s.logger.Debug("SSE connection established",
 		"status_channel_nil", statusCh == nil,
