@@ -162,8 +162,26 @@ func (s *Server) StatusChannel() <-chan interface{} {
 }
 
 // EventsChannel exposes runtime events for tray/UI consumers.
+// Deprecated: Use SubscribeEvents for per-client subscriptions to avoid event competition.
 func (s *Server) EventsChannel() <-chan runtime.Event {
 	return s.eventsCh
+}
+
+// SubscribeEvents creates a new per-client event subscription channel.
+// Each SSE client should get its own channel to avoid competing for events.
+func (s *Server) SubscribeEvents() chan runtime.Event {
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.SubscribeEvents()
+}
+
+// UnsubscribeEvents closes and removes the subscription channel.
+func (s *Server) UnsubscribeEvents(ch chan runtime.Event) {
+	if s.runtime == nil || ch == nil {
+		return
+	}
+	s.runtime.UnsubscribeEvents(ch)
 }
 
 // GetManagementService returns the management service instance from runtime.
