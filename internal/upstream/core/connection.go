@@ -2258,6 +2258,23 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		}
 	}
 
+	// Check if we're attempting public client OAuth with empty client_id
+	// Some servers (like Figma) advertise DCR but return 403, then reject empty client_id
+	parsedAuthURL, parseErr := url.Parse(authURL)
+	if parseErr == nil {
+		clientIDParam := parsedAuthURL.Query().Get("client_id")
+		if clientIDParam == "" && oauthMode == "public client (PKCE)" {
+			c.logger.Error("❌ OAuth server requires client_id but DCR failed",
+				zap.String("server", c.config.Name),
+				zap.String("url", c.config.URL),
+				zap.String("help", "Configure oauth.client_id in server config or contact the OAuth provider"))
+			return fmt.Errorf("OAuth authentication failed for %s: server requires client_id but Dynamic Client Registration (DCR) returned 403 Forbidden. "+
+				"This server does not support public client OAuth. "+
+				"Solution: Configure a static client_id in your server configuration, or contact the OAuth provider to register your application. "+
+				"Example config: {\"oauth\": {\"client_id\": \"your-client-id\"}}", c.config.Name)
+		}
+	}
+
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
 	c.logger.Info("OAuth authorization URL ready",
 		zap.String("server", c.config.Name),
