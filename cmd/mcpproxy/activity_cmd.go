@@ -707,14 +707,48 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// Load config to get endpoint
-	cfg, err := config.Load()
+	// Load config to get endpoint - use same logic as getActivityClient
+	var cfg *config.Config
+	if configFile != "" {
+		cfg, err = config.LoadFromFile(configFile)
+	} else {
+		cfg, err = config.Load()
+	}
 	if err != nil {
 		return outputActivityError(err, "CONFIG_ERROR")
 	}
 
+	// Try socket first, then HTTP (same as getActivityClient)
+	endpoint := socket.GetDefaultSocketPath(cfg.DataDir)
+	if cfg.Listen != "" {
+		// Check if socket exists
+		if _, err := os.Stat(endpoint); os.IsNotExist(err) {
+			// Handle listen addresses like ":8080" (no host)
+			listen := cfg.Listen
+			if strings.HasPrefix(listen, ":") {
+				listen = "127.0.0.1" + listen
+			}
+			endpoint = "http://" + listen
+		}
+	}
+
+	// Create HTTP client with socket support
+	transport := &http.Transport{}
+	dialer, baseURL, dialErr := socket.CreateDialer(endpoint)
+	if dialErr != nil {
+		logger.Sugar().Warnw("Failed to create socket dialer, using TCP",
+			"endpoint", endpoint,
+			"error", dialErr)
+		baseURL = endpoint
+	}
+	if dialer != nil {
+		transport.DialContext = dialer
+		logger.Sugar().Debugw("Using socket/pipe connection for SSE", "endpoint", endpoint)
+	} else {
+		baseURL = endpoint
+	}
+
 	// Build SSE URL
-	baseURL := "http://" + cfg.Listen
 	sseURL := baseURL + "/events"
 	if cfg.APIKey != "" {
 		sseURL += "?apikey=" + cfg.APIKey
@@ -734,17 +768,23 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 
 	outputFormat := ResolveOutputFormat()
 
+	// Create HTTP client with transport
+	httpClient := &http.Client{
+		Transport: transport,
+		Timeout:   0, // No timeout for SSE
+	}
+
 	// Watch with reconnection
-	return watchWithReconnect(ctx, sseURL, outputFormat, logger.Sugar())
+	return watchWithReconnect(ctx, sseURL, outputFormat, logger.Sugar(), httpClient)
 }
 
 // watchWithReconnect watches the SSE stream with automatic reconnection
-func watchWithReconnect(ctx context.Context, sseURL string, outputFormat string, logger *zap.SugaredLogger) error {
+func watchWithReconnect(ctx context.Context, sseURL string, outputFormat string, logger *zap.SugaredLogger, httpClient *http.Client) error {
 	backoff := 1 * time.Second
 	maxBackoff := 30 * time.Second
 
 	for {
-		err := watchActivityStream(ctx, sseURL, outputFormat, logger)
+		err := watchActivityStream(ctx, sseURL, outputFormat, logger, httpClient)
 
 		select {
 		case <-ctx.Done():
@@ -764,15 +804,14 @@ func watchWithReconnect(ctx context.Context, sseURL string, outputFormat string,
 }
 
 // watchActivityStream connects to SSE and streams events
-func watchActivityStream(ctx context.Context, sseURL string, outputFormat string, _ *zap.SugaredLogger) error {
+func watchActivityStream(ctx context.Context, sseURL string, outputFormat string, _ *zap.SugaredLogger, httpClient *http.Client) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
 
-	client := &http.Client{Timeout: 0} // No timeout for SSE
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -796,7 +835,8 @@ func watchActivityStream(ctx context.Context, sseURL string, outputFormat string
 			eventData = strings.TrimPrefix(line, "data: ")
 		case line == "":
 			// Empty line = event complete
-			if strings.HasPrefix(eventType, "activity.") {
+			// Only display completed events (started events have no status/duration)
+			if strings.HasPrefix(eventType, "activity.") && strings.HasSuffix(eventType, ".completed") {
 				displayActivityEvent(eventType, eventData, outputFormat)
 			}
 			eventType, eventData = "", ""
