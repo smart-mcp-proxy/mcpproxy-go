@@ -113,6 +113,10 @@ func (m *MockServerController) EventsChannel() <-chan internalRuntime.Event {
 	close(ch)
 	return ch
 }
+func (m *MockServerController) SubscribeEvents() chan internalRuntime.Event {
+	return make(chan internalRuntime.Event, 16)
+}
+func (m *MockServerController) UnsubscribeEvents(chan internalRuntime.Event) {}
 
 func (m *MockServerController) GetAllServers() ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
