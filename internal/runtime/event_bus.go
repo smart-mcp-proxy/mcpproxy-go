@@ -2,7 +2,7 @@ package runtime
 
 import "time"
 
-const defaultEventBuffer = 16
+const defaultEventBuffer = 256 // Increased from 16 to prevent event dropping when many servers.changed events flood the bus
 
 // SubscribeEvents registers a new subscriber and returns a channel that will receive runtime events.
 // Callers must not close the returned channel; use UnsubscribeEvents when finished.

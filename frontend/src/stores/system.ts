@@ -164,7 +164,9 @@ export const useSystemStore = defineStore('system', () => {
       try {
         const data = JSON.parse(event.data)
         console.log('SSE activity.tool_call.started event received:', data)
-        window.dispatchEvent(new CustomEvent('mcpproxy:activity-started', { detail: data }))
+        // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity-started', { detail: payload }))
       } catch (error) {
         console.error('Failed to parse SSE activity.tool_call.started event:', error)
       }
@@ -174,7 +176,9 @@ export const useSystemStore = defineStore('system', () => {
       try {
         const data = JSON.parse(event.data)
         console.log('SSE activity.tool_call.completed event received:', data)
-        window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: data }))
+        // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: payload }))
       } catch (error) {
         console.error('Failed to parse SSE activity.tool_call.completed event:', error)
       }
@@ -184,7 +188,9 @@ export const useSystemStore = defineStore('system', () => {
       try {
         const data = JSON.parse(event.data)
         console.log('SSE activity.policy_decision event received:', data)
-        window.dispatchEvent(new CustomEvent('mcpproxy:activity-policy', { detail: data }))
+        // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity-policy', { detail: payload }))
       } catch (error) {
         console.error('Failed to parse SSE activity.policy_decision event:', error)
       }
@@ -194,7 +200,9 @@ export const useSystemStore = defineStore('system', () => {
       try {
         const data = JSON.parse(event.data)
         console.log('SSE activity event received:', data)
-        window.dispatchEvent(new CustomEvent('mcpproxy:activity', { detail: data }))
+        // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity', { detail: payload }))
       } catch (error) {
         console.error('Failed to parse SSE activity event:', error)
       }
