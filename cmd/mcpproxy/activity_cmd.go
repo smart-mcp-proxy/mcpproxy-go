@@ -814,10 +814,17 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		return
 	}
 
-	// Parse event data
-	var event map[string]interface{}
-	if err := json.Unmarshal([]byte(eventData), &event); err != nil {
+	// Parse event data - SSE wraps the actual payload in {"payload": ..., "timestamp": ...}
+	var wrapper map[string]interface{}
+	if err := json.Unmarshal([]byte(eventData), &wrapper); err != nil {
 		return
+	}
+
+	// Extract the actual payload from the wrapper
+	event, ok := wrapper["payload"].(map[string]interface{})
+	if !ok {
+		// If no wrapper, use the data directly (for backwards compatibility/testing)
+		event = wrapper
 	}
 
 	// Apply client-side filters
@@ -841,7 +848,7 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 	tool := getStringField(event, "tool_name")
 	status := getStringField(event, "status")
 	durationMs := getIntField(event, "duration_ms")
-	errMsg := getStringField(event, "error")
+	errMsg := getStringField(event, "error_message")
 
 	// Source indicator
 	sourceIcon := formatSourceIndicator(source)

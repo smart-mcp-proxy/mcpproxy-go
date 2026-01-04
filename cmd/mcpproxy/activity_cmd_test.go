@@ -657,7 +657,8 @@ func TestActivitySummaryCommand_Response(t *testing.T) {
 // =============================================================================
 
 func TestDisplayActivityEvent_JSONOutput(t *testing.T) {
-	eventData := `{"id":"01JFXYZ123ABC","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245}`
+	// SSE events wrap the payload in {"payload": ..., "timestamp": ...}
+	eventData := `{"payload":{"id":"01JFXYZ123ABC","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245},"timestamp":1234567890}`
 
 	// Capture stdout
 	oldStdout := os.Stdout
@@ -678,7 +679,8 @@ func TestDisplayActivityEvent_JSONOutput(t *testing.T) {
 }
 
 func TestDisplayActivityEvent_TableOutput(t *testing.T) {
-	eventData := `{"id":"01JFXYZ123ABC","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245}`
+	// SSE events wrap the payload in {"payload": ..., "timestamp": ...}
+	eventData := `{"payload":{"id":"01JFXYZ123ABC","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245},"timestamp":1234567890}`
 
 	// Capture stdout
 	oldStdout := os.Stdout
@@ -700,7 +702,8 @@ func TestDisplayActivityEvent_TableOutput(t *testing.T) {
 }
 
 func TestDisplayActivityEvent_FilteredByServer(t *testing.T) {
-	eventData := `{"id":"01JFXYZ123ABC","server_name":"filesystem","tool_name":"read_file","status":"success","duration_ms":100}`
+	// SSE events wrap the payload in {"payload": ..., "timestamp": ...}
+	eventData := `{"payload":{"id":"01JFXYZ123ABC","server_name":"filesystem","tool_name":"read_file","status":"success","duration_ms":100},"timestamp":1234567890}`
 
 	// Set server filter
 	oldServer := activityServer
