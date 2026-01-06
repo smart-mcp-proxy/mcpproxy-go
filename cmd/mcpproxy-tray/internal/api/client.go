@@ -24,22 +24,34 @@ import (
 	"mcpproxy-go/internal/tray"
 )
 
+// HealthStatus represents the unified health status of an upstream MCP server.
+// This matches the contracts.HealthStatus struct from the core.
+// Spec 013: Health is the single source of truth for server status.
+type HealthStatus struct {
+	Level      string `json:"level"`                 // "healthy", "degraded", "unhealthy"
+	AdminState string `json:"admin_state"`           // "enabled", "disabled", "quarantined"
+	Summary    string `json:"summary"`               // e.g., "Connected (5 tools)"
+	Detail     string `json:"detail,omitempty"`      // Optional longer explanation
+	Action     string `json:"action,omitempty"`      // "login", "restart", "enable", "approve", "set_secret", "configure", "view_logs", ""
+}
+
 // Server represents a server from the API
 type Server struct {
-	Name        string `json:"name"`
-	Connected   bool   `json:"connected"`
-	Connecting  bool   `json:"connecting"`
-	Enabled     bool   `json:"enabled"`
-	Quarantined bool   `json:"quarantined"`
-	Protocol    string `json:"protocol"`
-	URL         string `json:"url"`
-	Command     string `json:"command"`
-	ToolCount   int    `json:"tool_count"`
-	LastError   string `json:"last_error"`
-	Status      string `json:"status"`
-	ShouldRetry bool   `json:"should_retry"`
-	RetryCount  int    `json:"retry_count"`
-	LastRetry   string `json:"last_retry_time"`
+	Name        string        `json:"name"`
+	Connected   bool          `json:"connected"`
+	Connecting  bool          `json:"connecting"`
+	Enabled     bool          `json:"enabled"`
+	Quarantined bool          `json:"quarantined"`
+	Protocol    string        `json:"protocol"`
+	URL         string        `json:"url"`
+	Command     string        `json:"command"`
+	ToolCount   int           `json:"tool_count"`
+	LastError   string        `json:"last_error"`
+	Status      string        `json:"status"`
+	ShouldRetry bool          `json:"should_retry"`
+	RetryCount  int           `json:"retry_count"`
+	LastRetry   string        `json:"last_retry_time"`
+	Health      *HealthStatus `json:"health,omitempty"` // Spec 013: Health is source of truth
 }
 
 // Tool represents a tool from the API
@@ -489,6 +501,30 @@ func (c *Client) GetServers() ([]Server, error) {
 			RetryCount:  getInt(serverMap, "retry_count"),
 			LastRetry:   getString(serverMap, "last_retry_time"),
 		}
+
+		// Extract health status (Spec 013: Health is source of truth)
+		healthRaw := serverMap["health"]
+		if healthMap, ok := healthRaw.(map[string]interface{}); ok && healthMap != nil {
+			server.Health = &HealthStatus{
+				Level:      getString(healthMap, "level"),
+				AdminState: getString(healthMap, "admin_state"),
+				Summary:    getString(healthMap, "summary"),
+				Detail:     getString(healthMap, "detail"),
+				Action:     getString(healthMap, "action"),
+			}
+			if c.logger != nil && server.Health.Level != "" {
+				c.logger.Debugw("Health extracted",
+					"server", server.Name,
+					"level", server.Health.Level,
+					"summary", server.Health.Summary)
+			}
+		} else if healthRaw != nil && c.logger != nil {
+			// Health field exists but wasn't a map - log for debugging
+			c.logger.Warnw("Health field present but wrong type",
+				"server", server.Name,
+				"health_type", fmt.Sprintf("%T", healthRaw))
+		}
+
 		result = append(result, server)
 	}
 
@@ -497,6 +533,18 @@ func (c *Client) GetServers() ([]Server, error) {
 	stateChanged := stateHash != c.lastServerState
 
 	if c.logger != nil {
+		// Count servers with health for debugging
+		healthyCount := 0
+		withHealthCount := 0
+		for _, s := range result {
+			if s.Health != nil {
+				withHealthCount++
+				if s.Health.Level == "healthy" {
+					healthyCount++
+				}
+			}
+		}
+
 		if len(result) == 0 {
 			c.logger.Warnw("API returned zero upstream servers",
 				"base_url", c.baseURL)
@@ -505,6 +553,8 @@ func (c *Client) GetServers() ([]Server, error) {
 			c.logger.Infow("Server state changed",
 				"count", len(result),
 				"connected", countConnected(result),
+				"with_health", withHealthCount,
+				"healthy", healthyCount,
 				"quarantined", countQuarantined(result))
 			c.lastServerState = stateHash
 		}

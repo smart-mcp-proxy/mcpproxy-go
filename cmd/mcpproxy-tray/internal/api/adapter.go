@@ -61,7 +61,11 @@ func (a *ServerAdapter) GetUpstreamStats() map[string]interface{} {
 	connectedCount := 0
 	totalTools := 0
 	for _, server := range servers {
-		if server.Connected {
+		// Spec 013: Use health.level as source of truth
+		if server.Health != nil && server.Health.Level == "healthy" {
+			connectedCount++
+		} else if server.Health == nil && server.Connected {
+			// Fallback to legacy connected field if health not available
 			connectedCount++
 		}
 		totalTools += server.ToolCount
@@ -114,7 +118,11 @@ func (a *ServerAdapter) GetStatus() interface{} {
 
 	connectedCount := 0
 	for _, server := range servers {
-		if server.Connected {
+		// Spec 013: Use health.level as source of truth
+		if server.Health != nil && server.Health.Level == "healthy" {
+			connectedCount++
+		} else if server.Health == nil && server.Connected {
+			// Fallback to legacy connected field if health not available
 			connectedCount++
 		}
 	}
@@ -215,7 +223,7 @@ func (a *ServerAdapter) GetAllServers() ([]map[string]interface{}, error) {
 
 	var result []map[string]interface{}
 	for _, server := range servers {
-		result = append(result, map[string]interface{}{
+		serverMap := map[string]interface{}{
 			"name":            server.Name,
 			"url":             server.URL,
 			"command":         server.Command,
@@ -230,7 +238,20 @@ func (a *ServerAdapter) GetAllServers() ([]map[string]interface{}, error) {
 			"should_retry":    server.ShouldRetry,
 			"retry_count":     server.RetryCount,
 			"last_retry_time": server.LastRetry,
-		})
+		}
+
+		// Spec 013: Include health status as source of truth for connected count
+		if server.Health != nil {
+			serverMap["health"] = map[string]interface{}{
+				"level":       server.Health.Level,
+				"admin_state": server.Health.AdminState,
+				"summary":     server.Health.Summary,
+				"detail":      server.Health.Detail,
+				"action":      server.Health.Action,
+			}
+		}
+
+		result = append(result, serverMap)
 	}
 
 	return result, nil

@@ -16,6 +16,7 @@ import (
 	"fyne.io/systray"
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/contracts"
 )
 
 const (
@@ -343,13 +344,41 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 	}
 
 	// --- Update Title ---
+	// Use health.level as source of truth for connected count (spec: Health is single source of truth)
 	totalServers := len(servers)
 	connectedServers := 0
+	healthyCount := 0
+	legacyConnectedCount := 0
 	for _, server := range servers {
+		serverName, _ := server["name"].(string)
+		healthRaw := server["health"]
+
+		// Check health.level - "healthy" means connected
+		healthLevel := extractHealthLevel(server)
+		if healthLevel == "healthy" {
+			healthyCount++
+			connectedServers++
+			continue
+		}
+		// Fallback to legacy connected field for backward compatibility
 		if connected, ok := server["connected"].(bool); ok && connected {
+			legacyConnectedCount++
 			connectedServers++
 		}
+
+		// Debug: Log servers where health extraction failed but connected=true
+		if healthLevel == "" && healthRaw != nil {
+			m.logger.Warnw("Health extraction failed",
+				"server", serverName,
+				"health_type", fmt.Sprintf("%T", healthRaw),
+				"health_raw", healthRaw)
+		}
 	}
+	m.logger.Infow("Connected count calculated",
+		"healthy", healthyCount,
+		"legacy_connected", legacyConnectedCount,
+		"total_connected", connectedServers,
+		"total_servers", totalServers)
 	menuTitle := fmt.Sprintf("Upstream Servers (%d/%d)", connectedServers, totalServers)
 	if m.upstreamServersMenu != nil {
 		m.upstreamServersMenu.SetTitle(menuTitle)
@@ -1194,5 +1223,34 @@ func (m *MenuManager) LatestQuarantineSnapshot() []map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return cloneServerData(m.latestQuarantined)
+}
+
+// extractHealthLevel extracts the health level from a server map.
+// The health can be stored as either *contracts.HealthStatus (from GetAllServers)
+// or as map[string]interface{} (from JSON deserialization).
+func extractHealthLevel(server map[string]interface{}) string {
+	healthRaw, ok := server["health"]
+	if !ok || healthRaw == nil {
+		return ""
+	}
+
+	// Try direct struct pointer first (from GetAllServers)
+	if hs, ok := healthRaw.(*contracts.HealthStatus); ok && hs != nil {
+		return hs.Level
+	}
+
+	// Try contracts.HealthStatus value (not pointer)
+	if hs, ok := healthRaw.(contracts.HealthStatus); ok {
+		return hs.Level
+	}
+
+	// Try map[string]interface{} (from JSON deserialization)
+	if healthMap, ok := healthRaw.(map[string]interface{}); ok && healthMap != nil {
+		if level, ok := healthMap["level"].(string); ok {
+			return level
+		}
+	}
+
+	return ""
 }
 
