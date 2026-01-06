@@ -10,6 +10,16 @@ import (
 	internalRuntime "mcpproxy-go/internal/runtime"
 )
 
+// ClientInterface defines the methods required by ServerAdapter from the API client.
+// This interface allows for testing with mock implementations.
+type ClientInterface interface {
+	GetServers() ([]Server, error)
+	GetInfo() (map[string]interface{}, error)
+	EnableServer(serverName string, enabled bool) error
+	TriggerOAuthLogin(serverName string) error
+	StatusChannel() <-chan StatusUpdate
+}
+
 // isServerHealthy returns true if the server is considered healthy.
 // It uses health.level as the source of truth, with a fallback to the legacy
 // connected field for backward compatibility when health is nil.
@@ -23,11 +33,11 @@ func isServerHealthy(health *HealthStatus, legacyConnected bool) bool {
 
 // ServerAdapter adapts the API client to the ServerInterface expected by the tray
 type ServerAdapter struct {
-	client *Client
+	client ClientInterface
 }
 
 // NewServerAdapter creates a new server adapter
-func NewServerAdapter(client *Client) *ServerAdapter {
+func NewServerAdapter(client ClientInterface) *ServerAdapter {
 	return &ServerAdapter{
 		client: client,
 	}
