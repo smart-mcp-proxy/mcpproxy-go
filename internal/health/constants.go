@@ -1,4 +1,8 @@
 // Package health provides unified health status calculation for upstream MCP servers.
+//
+// IMPORTANT: These constants are mirrored in TypeScript. When adding or modifying
+// health levels, admin states, or actions, update cmd/generate-types/main.go and
+// regenerate frontend/src/types/contracts.ts by running: go run ./cmd/generate-types
 package health
 
 import "mcpproxy-go/internal/contracts"

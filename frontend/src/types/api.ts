@@ -5,14 +5,27 @@ export interface APIResponse<T = any> {
   error?: string
 }
 
-// Health Status types (unified across all interfaces)
-export interface HealthStatus {
-  level: 'healthy' | 'degraded' | 'unhealthy'
-  admin_state: 'enabled' | 'disabled' | 'quarantined'
-  summary: string
-  detail?: string
-  action?: 'login' | 'restart' | 'enable' | 'approve' | 'view_logs' | 'set_secret' | 'configure' | ''
-}
+// Re-export health types from contracts (generated from Go constants)
+export type { HealthStatus, HealthLevel, AdminState, HealthAction } from './contracts'
+export {
+  HealthLevelHealthy,
+  HealthLevelDegraded,
+  HealthLevelUnhealthy,
+  AdminStateEnabled,
+  AdminStateDisabled,
+  AdminStateQuarantined,
+  HealthActionNone,
+  HealthActionLogin,
+  HealthActionRestart,
+  HealthActionEnable,
+  HealthActionApprove,
+  HealthActionViewLogs,
+  HealthActionSetSecret,
+  HealthActionConfigure,
+} from './contracts'
+
+// Import HealthStatus for use in this file
+import type { HealthStatus } from './contracts'
 
 // Server types
 export interface Server {
