@@ -470,14 +470,6 @@ const isHttpProtocol = computed(() => {
   return server.value?.protocol === 'http' || server.value?.protocol === 'streamable-http'
 })
 
-const needsOAuth = computed(() => {
-  return server.value &&
-         isHttpProtocol.value &&
-         !server.value.connected &&
-         server.value.enabled &&
-         server.value.last_error?.includes('authorization')
-})
-
 // Suggested action from unified health status
 const healthAction = computed(() => {
   return server.value?.health?.action || ''

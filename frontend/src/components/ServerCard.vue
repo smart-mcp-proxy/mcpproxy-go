@@ -269,54 +269,6 @@ const healthAction = computed(() => {
   return props.server.health?.action || ''
 })
 
-const needsOAuth = computed(() => {
-  // Don't show Login button if server is disabled
-  if (!props.server.enabled) return false
-
-  // Don't show Login button while connecting (let the connection attempt finish)
-  if (props.server.connecting) return false
-
-  if (!isHttpProtocol.value) return false
-
-  // Don't show Login if already connected
-  if (props.server.connected) return false
-
-  // HTTP servers always support OAuth via autodiscovery, even without explicit oauth config
-  // oauth: null (new server) and oauth: {} (explicit empty config) should both allow Login
-  // Only require explicit oauth config for non-HTTP protocols (though they don't reach here)
-  const hasOAuthSupport = isHttpProtocol.value || (props.server.oauth !== null && props.server.oauth !== undefined)
-  if (!hasOAuthSupport) return false
-
-  // Show Login if user explicitly logged out
-  if (props.server.user_logged_out) {
-    return true
-  }
-
-  // Use oauth_status for more accurate token state detection
-  // Show Login if: no token, expired token, or error state
-  const oauthStatus = props.server.oauth_status
-  if (oauthStatus === 'expired' || oauthStatus === 'error' || oauthStatus === 'none') {
-    return true
-  }
-
-  // Fallback: if oauth_status not available, use authenticated flag
-  // Show Login if not authenticated (no stored token)
-  if (!props.server.authenticated) {
-    return true
-  }
-
-  // Check for OAuth-related errors that indicate re-authentication is needed
-  const hasOAuthError = props.server.last_error && (
-    props.server.last_error.includes('authorization') ||
-    props.server.last_error.includes('OAuth') ||
-    props.server.last_error.includes('401') ||
-    props.server.last_error.includes('invalid_token') ||
-    props.server.last_error.includes('Missing or invalid access token')
-  )
-
-  return hasOAuthError
-})
-
 const canLogout = computed(() => {
   // Don't show Logout button if server is disabled
   if (!props.server.enabled) return false
