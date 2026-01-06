@@ -1,6 +1,8 @@
 // Package health provides unified health status calculation for upstream MCP servers.
 package health
 
+import "mcpproxy-go/internal/contracts"
+
 // Health levels
 const (
 	LevelHealthy   = "healthy"
@@ -26,3 +28,14 @@ const (
 	ActionSetSecret = "set_secret"
 	ActionConfigure = "configure"
 )
+
+// IsHealthy returns true if the server is considered healthy.
+// It uses health.level as the source of truth, with a fallback to the legacy
+// connected field for backward compatibility when health is nil.
+func IsHealthy(health *contracts.HealthStatus, legacyConnected bool) bool {
+	if health != nil {
+		return health.Level == LevelHealthy
+	}
+	// Fallback to legacy connected field if health is not available
+	return legacyConnected
+}

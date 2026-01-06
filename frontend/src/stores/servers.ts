@@ -2,25 +2,12 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { Server, LoadingState } from '@/types'
 import api from '@/services/api'
+import { isServerConnected } from '@/utils/health'
 
 export const useServersStore = defineStore('servers', () => {
   // State
   const servers = ref<Server[]>([])
   const loading = ref<LoadingState>({ loading: false, error: null })
-
-  // Helper: Check if a server is considered "connected" using health.level as source of truth
-  // Falls back to legacy connected field for backward compatibility
-  function isServerConnected(server: Server): boolean {
-    // Spec 013: health.level is the single source of truth
-    if (server.health?.level === 'healthy') {
-      return true
-    }
-    // Fallback to legacy connected field if health is not present
-    if (!server.health) {
-      return server.connected
-    }
-    return false
-  }
 
   // Computed
   const serverCount = computed(() => ({

@@ -10,6 +10,17 @@ import (
 	internalRuntime "mcpproxy-go/internal/runtime"
 )
 
+// isServerHealthy returns true if the server is considered healthy.
+// It uses health.level as the source of truth, with a fallback to the legacy
+// connected field for backward compatibility when health is nil.
+func isServerHealthy(health *HealthStatus, legacyConnected bool) bool {
+	if health != nil {
+		return health.Level == "healthy"
+	}
+	// Fallback to legacy connected field if health is not available
+	return legacyConnected
+}
+
 // ServerAdapter adapts the API client to the ServerInterface expected by the tray
 type ServerAdapter struct {
 	client *Client
@@ -61,11 +72,7 @@ func (a *ServerAdapter) GetUpstreamStats() map[string]interface{} {
 	connectedCount := 0
 	totalTools := 0
 	for _, server := range servers {
-		// Spec 013: Use health.level as source of truth
-		if server.Health != nil && server.Health.Level == "healthy" {
-			connectedCount++
-		} else if server.Health == nil && server.Connected {
-			// Fallback to legacy connected field if health not available
+		if isServerHealthy(server.Health, server.Connected) {
 			connectedCount++
 		}
 		totalTools += server.ToolCount
@@ -118,11 +125,7 @@ func (a *ServerAdapter) GetStatus() interface{} {
 
 	connectedCount := 0
 	for _, server := range servers {
-		// Spec 013: Use health.level as source of truth
-		if server.Health != nil && server.Health.Level == "healthy" {
-			connectedCount++
-		} else if server.Health == nil && server.Connected {
-			// Fallback to legacy connected field if health not available
+		if isServerHealthy(server.Health, server.Connected) {
 			connectedCount++
 		}
 	}
