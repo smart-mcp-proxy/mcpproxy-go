@@ -3,14 +3,12 @@ package management
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/health"
-	"mcpproxy-go/internal/secret"
 )
 
 // extractHealthFromMap extracts health status from a server map.
@@ -157,61 +155,6 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	return diag, nil
 }
 
-// findMissingSecrets identifies secrets referenced in configuration but not resolvable.
-// This implements T041: helper for identifying which servers reference a secret.
-func (s *service) findMissingSecrets(ctx context.Context, serversRaw []map[string]interface{}) []contracts.MissingSecretInfo {
-	secretUsage := make(map[string][]string) // secret name -> list of servers using it
-
-	for _, srvRaw := range serversRaw {
-		serverName := getStringFromMap(srvRaw, "name")
-
-		// Check environment variables for secret references
-		if envRaw, ok := srvRaw["env"]; ok {
-			if envMap, ok := envRaw.(map[string]interface{}); ok {
-				for _, valueRaw := range envMap {
-					if valueStr, ok := valueRaw.(string); ok {
-						if ref := parseSecretRef(valueStr); ref != nil {
-							if !s.isSecretResolvable(ctx, *ref) {
-								secretUsage[ref.Name] = append(secretUsage[ref.Name], serverName)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Convert map to slice
-	var missingSecrets []contracts.MissingSecretInfo
-	for secretName, servers := range secretUsage {
-		missingSecrets = append(missingSecrets, contracts.MissingSecretInfo{
-			SecretName: secretName,
-			UsedBy:     servers,
-		})
-	}
-
-	return missingSecrets
-}
-
-// isSecretResolvable checks if a secret can be resolved (e.g., environment variable exists).
-func (s *service) isSecretResolvable(ctx context.Context, ref secret.Ref) bool {
-	if s.secretResolver == nil {
-		return false
-	}
-
-	// Environment variables: quick check without resolving to avoid errors
-	if ref.Type == secret.SecretTypeEnv {
-		val, ok := os.LookupEnv(ref.Name)
-		return ok && val != ""
-	}
-
-	// Attempt to resolve; success indicates the secret exists/works
-	if _, err := s.secretResolver.Resolve(ctx, ref); err == nil {
-		return true
-	}
-
-	return false
-}
 
 // checkDockerDaemon checks if Docker daemon is available and returns status.
 // This implements T042: helper for checking Docker availability.
@@ -242,54 +185,6 @@ func (s *service) checkDockerDaemon() *contracts.DockerStatus {
 
 // Helper functions to extract fields from map[string]interface{}
 
-func parseSecretRef(value string) *secret.Ref {
-	if !secret.IsSecretRef(value) {
-		return nil
-	}
-	ref, err := secret.ParseSecretRef(value)
-	if err != nil {
-		return nil
-	}
-	return ref
-}
-
-// detectOAuthIssues identifies OAuth configuration issues like missing parameters.
-func (s *service) detectOAuthIssues(serversRaw []map[string]interface{}) []contracts.OAuthIssue {
-	var issues []contracts.OAuthIssue
-
-	for _, srvRaw := range serversRaw {
-		serverName := getStringFromMap(srvRaw, "name")
-		hasOAuth := srvRaw["oauth"] != nil
-		lastError := getStringFromMap(srvRaw, "last_error")
-		authenticated := getBoolFromMap(srvRaw, "authenticated")
-
-		// Skip servers without OAuth or already authenticated
-		if !hasOAuth || authenticated {
-			continue
-		}
-
-		// Check for parameter-related errors
-		if strings.Contains(strings.ToLower(lastError), "requires") &&
-			strings.Contains(strings.ToLower(lastError), "parameter") {
-			// Extract parameter name from error
-			paramName := extractParameterName(lastError)
-
-			issues = append(issues, contracts.OAuthIssue{
-				ServerName:    serverName,
-				Issue:         "OAuth provider parameter mismatch",
-				Error:         lastError,
-				MissingParams: []string{paramName},
-				Resolution: "MCPProxy auto-detects RFC 8707 resource parameter from Protected Resource Metadata (RFC 9728). " +
-					"Check detected values: mcpproxy auth status --server=" + serverName + ". " +
-					"To override, add extra_params.resource to OAuth config.",
-				DocumentationURL: "https://www.rfc-editor.org/rfc/rfc8707.html",
-			})
-		}
-	}
-
-	return issues
-}
-
 // extractParameterName extracts the parameter name from an error message.
 // Example: "requires 'resource' parameter" -> "resource"
 func extractParameterName(errorMsg string) string {
@@ -314,11 +209,3 @@ func getStringFromMap(m map[string]interface{}, key string) string {
 	return ""
 }
 
-func getBoolFromMap(m map[string]interface{}, key string) bool {
-	if val, ok := m[key]; ok {
-		if b, ok := val.(bool); ok {
-			return b
-		}
-	}
-	return false
-}
