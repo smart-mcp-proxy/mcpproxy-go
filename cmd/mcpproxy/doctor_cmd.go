@@ -253,16 +253,22 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			for _, secretItem := range missingSecrets {
 				if secretMap, ok := secretItem.(map[string]interface{}); ok {
-					name := getStringField(secretMap, "name")
-					server := getStringField(secretMap, "server")
-					reference := getStringField(secretMap, "reference")
+					// Use correct field names from contracts.MissingSecretInfo
+					secretName := getStringField(secretMap, "secret_name")
+					usedBy := getArrayField(secretMap, "used_by")
 
-					fmt.Printf("\n  • %s\n", name)
-					if server != "" {
-						fmt.Printf("    Server: %s\n", server)
-					}
-					if reference != "" {
-						fmt.Printf("    Reference: %s\n", reference)
+					fmt.Printf("\n  • %s\n", secretName)
+					if len(usedBy) > 0 {
+						fmt.Printf("    Used by: ")
+						for i, server := range usedBy {
+							if serverStr, ok := server.(string); ok {
+								if i > 0 {
+									fmt.Printf(", ")
+								}
+								fmt.Printf("%s", serverStr)
+							}
+						}
+						fmt.Println()
 					}
 				}
 			}
