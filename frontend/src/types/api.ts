@@ -1,12 +1,5 @@
-// API Response types
-export interface APIResponse<T = any> {
-  success: boolean
-  data?: T
-  error?: string
-}
-
-// Re-export health types from contracts (generated from Go constants)
-export type { HealthStatus, HealthLevel, AdminState, HealthAction } from './contracts'
+// Re-export common types from contracts (generated from Go constants)
+export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction } from './contracts'
 export {
   HealthLevelHealthy,
   HealthLevelDegraded,
