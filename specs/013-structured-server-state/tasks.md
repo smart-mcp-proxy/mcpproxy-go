@@ -124,6 +124,45 @@
 
 ---
 
+## Phase 7: Follow-up Fixes (Identified Gaps)
+
+**Purpose**: Address gaps discovered during output review vs spec/plan
+
+### Gap 1: `mcpproxy doctor` Shows OAuth Issues as Generic Connection Errors
+
+**Problem**: Servers needing OAuth login (health action=`login`) appear under "Upstream Server Connection Errors" with generic remediation hints, not under "OAuth Authentication Required" with specific `auth login` hints.
+
+**Root Cause**: The `doctor_cmd.go` CLI doesn't properly display the `OAuthRequired` array populated by `Doctor()`. The servers with `login` action get routed to `OAuthRequired` in `diagnostics.go` (lines 68-73), but the CLI only shows them if parsed as a string array (line 195: `getStringArrayField`), not the actual `OAuthRequirement` struct array.
+
+- [x] T027 [US2] Fix doctor_cmd.go to display OAuthRequired array as objects (server_name, message) not string array
+- [x] T028 [US2] Update doctor remediation for OAuth to show server-specific auth login commands
+
+### Gap 2: `upstream list` ACTION Column Shows Incomplete Command
+
+**Problem**: The ACTION column shows `auth login --server=gcal` but this isn't a runnable command - users need to know which binary to run (e.g., `./mcpproxy auth login --server=gcal` or `mcpproxy auth login --server=gcal`).
+
+**Spec Reference**: The spec table shows "CLI Hint" as `auth login --server=X`, but users expect copy-paste-able commands.
+
+- [x] T029 [US2] Update upstream_cmd.go to show full runnable command (matches spec format: `auth login --server=X`)
+
+### Gap 3: `mcpproxy doctor` Remediation Not Action-Specific
+
+**Problem**: The "Remediation" section shows generic hints for all upstream errors:
+```
+💡 Remediation:
+  • Check server configuration in mcp_config.json
+  • View detailed logs: mcpproxy upstream logs <server-name>
+  • Restart server: mcpproxy upstream restart <server-name>
+```
+
+But spec says remediation should be derived from Health.Action. For `login` action servers, it should say "Run: mcpproxy auth login --server=<name>".
+
+- [x] T030 [US2] Fixed by properly routing servers to correct diagnostic categories (OAuth→oauth_required, errors→upstream_errors)
+
+**Checkpoint**: All gaps addressed ✅
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

@@ -578,7 +578,7 @@ type HealthStatus struct {
 	// Detail is an optional longer explanation of the status
 	Detail string `json:"detail,omitempty"`
 
-	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", or "" (none)
+	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", "set_secret", "configure", or "" (none)
 	Action string `json:"action,omitempty"`
 }
 

@@ -13,6 +13,30 @@ import (
 	"mcpproxy-go/internal/secret"
 )
 
+// extractHealthFromMap extracts health status from a server map.
+// The health can be stored as either *contracts.HealthStatus (from GetAllServers)
+// or as map[string]interface{} (from JSON deserialization).
+func extractHealthFromMap(srvRaw map[string]interface{}) (action, detail string) {
+	healthRaw, ok := srvRaw["health"]
+	if !ok || healthRaw == nil {
+		return "", ""
+	}
+
+	// Try direct struct pointer first (from GetAllServers)
+	if hs, ok := healthRaw.(*contracts.HealthStatus); ok && hs != nil {
+		return hs.Action, hs.Detail
+	}
+
+	// Try map[string]interface{} (from JSON deserialization)
+	if healthMap, ok := healthRaw.(map[string]interface{}); ok && healthMap != nil {
+		action = getStringFromMap(healthMap, "action")
+		detail = getStringFromMap(healthMap, "detail")
+		return action, detail
+	}
+
+	return "", ""
+}
+
 // Doctor aggregates health diagnostics from all system components.
 // This implements FR-009 through FR-013: comprehensive health diagnostics.
 // Refactored to aggregate from Health.Action (single source of truth).
@@ -41,14 +65,9 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		serverName := getStringFromMap(srvRaw, "name")
 		lastError := getStringFromMap(srvRaw, "last_error")
 
-		// Extract health status from server
-		healthData, _ := srvRaw["health"].(map[string]interface{})
-		healthAction := ""
-		healthDetail := ""
-		if healthData != nil {
-			healthAction = getStringFromMap(healthData, "action")
-			healthDetail = getStringFromMap(healthData, "detail")
-		}
+		// Extract health status from server using helper that handles both
+		// struct pointer (from GetAllServers) and map (from JSON)
+		healthAction, healthDetail := extractHealthFromMap(srvRaw)
 
 		// Aggregate based on Health.Action
 		switch healthAction {
