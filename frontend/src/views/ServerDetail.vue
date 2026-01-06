@@ -80,10 +80,10 @@
                   {{ isHttpProtocol ? 'Reconnect' : 'Restart' }}
                 </button>
               </li>
-              <li v-if="needsOAuth">
+              <li v-if="healthAction === 'login'">
                 <button @click="triggerOAuth" :disabled="actionLoading">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                  OAuth Login
+                  Login
                 </button>
               </li>
               <li v-if="server.enabled && server.connected">
@@ -476,6 +476,11 @@ const needsOAuth = computed(() => {
          !server.value.connected &&
          server.value.enabled &&
          server.value.last_error?.includes('authorization')
+})
+
+// Suggested action from unified health status
+const healthAction = computed(() => {
+  return server.value?.health?.action || ''
 })
 
 const filteredTools = computed(() => {
