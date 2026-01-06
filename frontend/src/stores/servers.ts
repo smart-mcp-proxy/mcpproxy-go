@@ -8,16 +8,30 @@ export const useServersStore = defineStore('servers', () => {
   const servers = ref<Server[]>([])
   const loading = ref<LoadingState>({ loading: false, error: null })
 
+  // Helper: Check if a server is considered "connected" using health.level as source of truth
+  // Falls back to legacy connected field for backward compatibility
+  function isServerConnected(server: Server): boolean {
+    // Spec 013: health.level is the single source of truth
+    if (server.health?.level === 'healthy') {
+      return true
+    }
+    // Fallback to legacy connected field if health is not present
+    if (!server.health) {
+      return server.connected
+    }
+    return false
+  }
+
   // Computed
   const serverCount = computed(() => ({
     total: servers.value.length,
-    connected: servers.value.filter(s => s.connected).length,
+    connected: servers.value.filter(isServerConnected).length,
     enabled: servers.value.filter(s => s.enabled).length,
     quarantined: servers.value.filter(s => s.quarantined).length,
   }))
 
   const connectedServers = computed(() =>
-    servers.value.filter(s => s.connected)
+    servers.value.filter(isServerConnected)
   )
 
   const enabledServers = computed(() =>
