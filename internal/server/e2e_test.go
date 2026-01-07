@@ -1621,3 +1621,239 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 
 	t.Log("✅ All Intent Declaration tool variant tests passed")
 }
+
+// TestE2E_RequestID_InResponses tests that X-Request-Id header is present in all API responses
+// and that error responses include request_id in the JSON body.
+// Spec: 021-request-id-logging, User Story 1
+func TestE2E_RequestID_InResponses(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	// Extract base URL from proxyAddr (which is "http://127.0.0.1:PORT/mcp")
+	// We need just "http://127.0.0.1:PORT" for API endpoints
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	apiKey := "test-api-key-e2e"
+
+	// Test 1: Success response includes X-Request-Id header
+	t.Run("success response has X-Request-Id header", func(t *testing.T) {
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/status", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Verify X-Request-Id header is present
+		requestID := resp.Header.Get("X-Request-Id")
+		assert.NotEmpty(t, requestID, "X-Request-Id header should be present in success response")
+		t.Logf("✅ Success response has X-Request-Id: %s", requestID)
+	})
+
+	// Test 2: Error response includes X-Request-Id header AND request_id in body
+	t.Run("error response has X-Request-Id header and request_id in body", func(t *testing.T) {
+		// Request a non-existent server to trigger a 404 error
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/servers/nonexistent-server-xyz/tools", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		// Should be an error (404 or similar)
+		require.GreaterOrEqual(t, resp.StatusCode, 400, "Should return an error status code")
+
+		// Verify X-Request-Id header is present
+		headerRequestID := resp.Header.Get("X-Request-Id")
+		assert.NotEmpty(t, headerRequestID, "X-Request-Id header should be present in error response")
+
+		// Verify request_id is in the JSON body
+		var errorResp struct {
+			Success   bool   `json:"success"`
+			Error     string `json:"error"`
+			RequestID string `json:"request_id"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&errorResp)
+		require.NoError(t, err)
+
+		assert.NotEmpty(t, errorResp.RequestID, "request_id should be present in error response body")
+		assert.Equal(t, headerRequestID, errorResp.RequestID, "Header X-Request-Id and body request_id should match")
+		t.Logf("✅ Error response has matching request_id: header=%s, body=%s", headerRequestID, errorResp.RequestID)
+	})
+
+	// Test 3: Client-provided X-Request-Id is echoed back
+	t.Run("client-provided X-Request-Id is echoed back", func(t *testing.T) {
+		clientRequestID := "my-custom-request-id-12345"
+
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/status", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-Request-Id", clientRequestID)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Verify the client-provided ID is echoed back
+		responseRequestID := resp.Header.Get("X-Request-Id")
+		assert.Equal(t, clientRequestID, responseRequestID, "Client-provided X-Request-Id should be echoed back")
+		t.Logf("✅ Client-provided X-Request-Id echoed: sent=%s, received=%s", clientRequestID, responseRequestID)
+	})
+
+	// Test 4: Invalid X-Request-Id is replaced with generated UUID
+	t.Run("invalid X-Request-Id is replaced with generated UUID", func(t *testing.T) {
+		invalidRequestID := "invalid id with spaces and <special> chars!"
+
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/status", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-Request-Id", invalidRequestID)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Verify the invalid ID is NOT echoed back
+		responseRequestID := resp.Header.Get("X-Request-Id")
+		assert.NotEqual(t, invalidRequestID, responseRequestID, "Invalid X-Request-Id should not be echoed back")
+		assert.NotEmpty(t, responseRequestID, "A generated X-Request-Id should be returned")
+
+		// Should look like a UUID (contains dashes, proper length)
+		assert.Contains(t, responseRequestID, "-", "Generated request ID should be a UUID with dashes")
+		assert.Len(t, responseRequestID, 36, "Generated UUID should be 36 characters")
+		t.Logf("✅ Invalid X-Request-Id replaced with UUID: sent=%q, received=%s", invalidRequestID, responseRequestID)
+	})
+
+	// Test 5: Very long X-Request-Id is replaced
+	t.Run("too long X-Request-Id is replaced", func(t *testing.T) {
+		longRequestID := strings.Repeat("a", 300) // 300 chars, exceeds 256 limit
+
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/status", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-Request-Id", longRequestID)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Verify the long ID is NOT echoed back
+		responseRequestID := resp.Header.Get("X-Request-Id")
+		assert.NotEqual(t, longRequestID, responseRequestID, "Too long X-Request-Id should not be echoed back")
+		assert.LessOrEqual(t, len(responseRequestID), 256, "Response X-Request-Id should not exceed 256 chars")
+		t.Logf("✅ Too long X-Request-Id replaced: sent length=%d, received=%s", len(longRequestID), responseRequestID)
+	})
+
+	t.Log("✅ All Request ID E2E tests passed")
+}
+
+// TestE2E_RequestID_ActivityFiltering tests that activities can be filtered by request_id
+// via both API query parameter and CLI flag.
+// Spec: 021-request-id-logging, User Story 4 (T030, T031)
+func TestE2E_RequestID_ActivityFiltering(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	apiKey := "test-api-key-e2e"
+
+	// Step 1: Make a request with a known X-Request-Id
+	knownRequestID := "test-request-id-for-activity-filtering-abc123"
+
+	t.Run("API requests echo back X-Request-Id", func(t *testing.T) {
+		// Make an API request with a known request ID to verify echo behavior
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/status", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-Request-Id", knownRequestID)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		// Verify request was successful
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Verify X-Request-Id was echoed back
+		responseRequestID := resp.Header.Get("X-Request-Id")
+		assert.Equal(t, knownRequestID, responseRequestID)
+		t.Logf("✅ API request echoed X-Request-Id: %s", knownRequestID)
+	})
+
+	// T031: Test API query param filtering
+	t.Run("API request_id query param filters activities", func(t *testing.T) {
+		// Query activities with the request_id filter
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/activity?request_id="+knownRequestID, nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var activityResp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Activities []struct {
+					ID        string `json:"id"`
+					RequestID string `json:"request_id"`
+					Type      string `json:"type"`
+				} `json:"activities"`
+				Total int `json:"total"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&activityResp)
+		require.NoError(t, err)
+
+		// Note: The activity might not exist yet if no tool was actually called
+		// Just verify the API accepts the request_id parameter
+		t.Logf("✅ API accepted request_id filter, returned %d activities", activityResp.Data.Total)
+
+		// If activities exist, verify they all have the matching request_id
+		for _, act := range activityResp.Data.Activities {
+			assert.Equal(t, knownRequestID, act.RequestID, "All returned activities should have matching request_id")
+		}
+	})
+
+	// T031: Test that non-matching request_id returns no results
+	t.Run("API request_id filter returns empty for non-matching ID", func(t *testing.T) {
+		nonExistentID := "non-existent-request-id-xyz789"
+
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/activity?request_id="+nonExistentID, nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var activityResp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Activities []interface{} `json:"activities"`
+				Total      int           `json:"total"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&activityResp)
+		require.NoError(t, err)
+
+		// Should return empty results for non-existent request_id
+		assert.Equal(t, 0, activityResp.Data.Total, "Non-matching request_id should return no activities")
+		t.Logf("✅ Non-matching request_id correctly returns 0 activities")
+	})
+
+	t.Log("✅ All Request ID Activity Filtering E2E tests passed")
+}

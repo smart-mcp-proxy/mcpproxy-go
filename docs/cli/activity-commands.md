@@ -59,6 +59,7 @@ mcpproxy activity list [flags]
 | `--tool` | | | Filter by tool name |
 | `--status` | | | Filter by status: `success`, `error`, `blocked` |
 | `--intent-type` | | | Filter by intent operation type: `read`, `write`, `destructive` |
+| `--request-id` | | | Filter by HTTP request ID for log correlation |
 | `--no-icons` | | | Disable emoji icons in output (use text instead) |
 | `--session` | | | Filter by MCP session ID |
 | `--start-time` | | | Filter records after this time (RFC3339) |
@@ -83,6 +84,9 @@ mcpproxy activity list --intent-type read
 
 # List destructive operations for audit
 mcpproxy activity list --intent-type destructive --limit 100
+
+# Find activity by request ID (useful for error correlation)
+mcpproxy activity list --request-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 # List activity as JSON
 mcpproxy activity list -o json
@@ -125,7 +129,8 @@ Showing 3 of 150 records (page 1)
       "tool_name": "create_issue",
       "status": "success",
       "duration_ms": 245,
-      "timestamp": "2025-01-15T10:30:00Z"
+      "timestamp": "2025-01-15T10:30:00Z",
+      "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     }
   ],
   "total": 150,

@@ -185,7 +185,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				s.logger.Warn("TCP connection rejected - API key not configured",
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr))
-				s.writeError(w, http.StatusUnauthorized, "API key authentication required but not configured. Please set MCPPROXY_API_KEY or configure api_key in config file.")
+				s.writeError(w, r, http.StatusUnauthorized, "API key authentication required but not configured. Please set MCPPROXY_API_KEY or configure api_key in config file.")
 				return
 			}
 
@@ -194,7 +194,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				s.logger.Warn("TCP connection with invalid API key",
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr))
-				s.writeError(w, http.StatusUnauthorized, "Invalid or missing API key")
+				s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 				return
 			}
 
@@ -260,11 +260,13 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Core middleware
-	s.router.Use(s.httpLoggingMiddleware()) // Custom HTTP API logging
+	// Request ID middleware MUST be first to ensure all responses have X-Request-Id header
+	s.router.Use(RequestIDMiddleware)
+	s.router.Use(RequestIDLoggerMiddleware(s.logger)) // Add request_id to logger context
+	s.router.Use(s.httpLoggingMiddleware())           // Custom HTTP API logging
 	s.router.Use(middleware.Recoverer)
-	s.router.Use(middleware.RequestID)
 	s.router.Use(s.correlationIDMiddleware()) // Correlation ID and request source tracking
-	s.logger.Debug("Core middleware configured (logging, recovery, request ID, correlation ID)")
+	s.logger.Debug("Core middleware configured (request ID, logging, recovery, correlation ID)")
 
 	// CORS headers for browser access
 	s.router.Use(func(next http.Handler) http.Handler {
@@ -504,8 +506,23 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) 
 	}
 }
 
-func (s *Server) writeError(w http.ResponseWriter, status int, message string) {
-	s.writeJSON(w, status, contracts.NewErrorResponse(message))
+// writeError writes an error response including request_id from the request context
+// T014: Updated signature to include request for request_id extraction
+func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	requestID := reqcontext.GetRequestID(r.Context())
+	s.writeJSON(w, status, contracts.NewErrorResponseWithRequestID(message, requestID))
+}
+
+// getRequestLogger returns a logger with request_id attached, or falls back to the server logger
+// T019: Helper for request-scoped logging
+func (s *Server) getRequestLogger(r *http.Request) *zap.SugaredLogger {
+	if r == nil {
+		return s.logger
+	}
+	if logger := GetLogger(r.Context()); logger != nil {
+		return logger
+	}
+	return s.logger
 }
 
 func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
@@ -656,7 +673,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 
 		if err != nil {
 			s.logger.Error("Failed to list servers via management service", "error", err)
-			s.writeError(w, http.StatusInternalServerError, "Failed to get servers")
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to get servers")
 			return
 		}
 
@@ -686,7 +703,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	genericServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.logger.Error("Failed to get servers", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to get servers")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get servers")
 		return
 	}
 
@@ -733,19 +750,19 @@ type AddServerRequest struct {
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	var req AddServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
 
 	// Validate required fields
 	if req.Name == "" {
-		s.writeError(w, http.StatusBadRequest, "Server name is required")
+		s.writeError(w, r, http.StatusBadRequest, "Server name is required")
 		return
 	}
 
 	// Must have either URL or command
 	if req.URL == "" && req.Command == "" {
-		s.writeError(w, http.StatusBadRequest, "Either 'url' or 'command' is required")
+		s.writeError(w, r, http.StatusBadRequest, "Either 'url' or 'command' is required")
 		return
 	}
 
@@ -783,18 +800,19 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add server via controller
+	logger := s.getRequestLogger(r) // T019: Use request-scoped logger
 	if err := s.controller.AddServer(r.Context(), serverConfig); err != nil {
 		// Check if it's a duplicate name error
 		if strings.Contains(err.Error(), "already exists") {
-			s.writeError(w, http.StatusConflict, err.Error())
+			s.writeError(w, r, http.StatusConflict, err.Error())
 			return
 		}
-		s.logger.Error("Failed to add server", "server", req.Name, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to add server: %v", err))
+		logger.Error("Failed to add server", "server", req.Name, "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to add server: %v", err))
 		return
 	}
 
-	s.logger.Info("Server added successfully", "server", req.Name, "quarantined", quarantined)
+	logger.Info("Server added successfully", "server", req.Name, "quarantined", quarantined)
 	s.writeSuccess(w, contracts.ServerActionResponse{
 		Server:  req.Name,
 		Action:  "add",
@@ -818,23 +836,25 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
+
+	logger := s.getRequestLogger(r) // T019: Use request-scoped logger
 
 	// Remove server via controller
 	if err := s.controller.RemoveServer(r.Context(), serverID); err != nil {
 		// Check if it's a not found error
 		if strings.Contains(err.Error(), "not found") {
-			s.writeError(w, http.StatusNotFound, err.Error())
+			s.writeError(w, r, http.StatusNotFound, err.Error())
 			return
 		}
-		s.logger.Error("Failed to remove server", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to remove server: %v", err))
+		logger.Error("Failed to remove server", "server", serverID, "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to remove server: %v", err))
 		return
 	}
 
-	s.logger.Info("Server removed successfully", "server", serverID)
+	logger.Info("Server removed successfully", "server", serverID)
 	s.writeSuccess(w, contracts.ServerActionResponse{
 		Server:  serverID,
 		Action:  "remove",
@@ -858,7 +878,7 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -870,7 +890,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 
 		if err != nil {
 			s.logger.Error("Failed to enable server via management service", "server", serverID, "error", err)
-			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
 			return
 		}
 
@@ -888,7 +908,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	async, err := s.toggleServerAsync(serverID, true)
 	if err != nil {
 		s.logger.Error("Failed to enable server", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
 		return
 	}
 
@@ -924,7 +944,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -936,7 +956,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 
 		if err != nil {
 			s.logger.Error("Failed to disable server via management service", "server", serverID, "error", err)
-			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
 			return
 		}
 
@@ -954,7 +974,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	async, err := s.toggleServerAsync(serverID, false)
 	if err != nil {
 		s.logger.Error("Failed to disable server", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
 		return
 	}
 
@@ -992,7 +1012,7 @@ func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Requ
 		s.logger.Error("Failed to trigger force reconnect for servers",
 			"reason", reason,
 			"error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to reconnect servers: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to reconnect servers: %v", err))
 		return
 	}
 
@@ -1023,14 +1043,14 @@ func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 	})
 	if !ok {
 		s.logger.Error("Failed to get management service")
-		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
 
 	result, err := mgmtSvc.RestartAll(r.Context())
 	if err != nil {
 		s.logger.Error("RestartAll operation failed", "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart all servers: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to restart all servers: %v", err))
 		return
 	}
 
@@ -1055,14 +1075,14 @@ func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 	})
 	if !ok {
 		s.logger.Error("Failed to get management service")
-		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
 
 	result, err := mgmtSvc.EnableAll(r.Context())
 	if err != nil {
 		s.logger.Error("EnableAll operation failed", "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to enable all servers: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to enable all servers: %v", err))
 		return
 	}
 
@@ -1087,14 +1107,14 @@ func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 	})
 	if !ok {
 		s.logger.Error("Failed to get management service")
-		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
 
 	result, err := mgmtSvc.DisableAll(r.Context())
 	if err != nil {
 		s.logger.Error("DisableAll operation failed", "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable all servers: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to disable all servers: %v", err))
 		return
 	}
 
@@ -1117,7 +1137,7 @@ func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -1153,7 +1173,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 
 			// Non-OAuth error - treat as failure
 			s.logger.Error("Failed to restart server via management service", "server", serverID, "error", err)
-			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
 			return
 		}
 
@@ -1202,7 +1222,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 
 			// Non-OAuth error - treat as failure
 			s.logger.Error("Failed to restart server", "server", serverID, "error", err)
-			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
 			return
 		}
 		s.logger.Debug("Server restart completed synchronously", "server", serverID)
@@ -1242,7 +1262,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -1252,11 +1272,11 @@ func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Reques
 		s.logger.Error("Failed to discover tools for server", "server", serverID, "error", err)
 		
 		if strings.Contains(err.Error(), "not found") {
-			s.writeError(w, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
 			return
 		}
 		
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to discover tools: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to discover tools: %v", err))
 		return
 	}
 
@@ -1304,7 +1324,7 @@ func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) 
 func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -1314,7 +1334,7 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	if !ok {
 		s.logger.Error("Management service not available or missing TriggerOAuthLogin method")
-		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
 
@@ -1323,14 +1343,14 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 
 		// Map errors to HTTP status codes (T019)
 		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {
-			s.writeError(w, http.StatusForbidden, err.Error())
+			s.writeError(w, r, http.StatusForbidden, err.Error())
 			return
 		}
 		if strings.Contains(err.Error(), "not found") {
-			s.writeError(w, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
 			return
 		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to trigger login: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to trigger login: %v", err))
 		return
 	}
 
@@ -1360,7 +1380,7 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -1370,7 +1390,7 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 	})
 	if !ok {
 		s.logger.Error("Management service not available or missing TriggerOAuthLogout method")
-		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
 
@@ -1379,14 +1399,14 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 
 		// Map errors to HTTP status codes
 		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {
-			s.writeError(w, http.StatusForbidden, err.Error())
+			s.writeError(w, r, http.StatusForbidden, err.Error())
 			return
 		}
 		if strings.Contains(err.Error(), "not found") {
-			s.writeError(w, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
 			return
 		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to trigger logout: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to trigger logout: %v", err))
 		return
 	}
 
@@ -1415,13 +1435,13 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
 	if err := s.controller.QuarantineServer(serverID, true); err != nil {
 		s.logger.Error("Failed to quarantine server", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to quarantine server: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to quarantine server: %v", err))
 		return
 	}
 
@@ -1450,13 +1470,13 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
 	if err := s.controller.QuarantineServer(serverID, false); err != nil {
 		s.logger.Error("Failed to unquarantine server", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to unquarantine server: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to unquarantine server: %v", err))
 		return
 	}
 
@@ -1485,7 +1505,7 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -1495,7 +1515,7 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	})
 	if !ok {
 		s.logger.Error("Management service not available or missing GetServerTools method")
-		s.writeError(w, http.StatusInternalServerError, "Management service not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
 
@@ -1505,10 +1525,10 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 
 		// Map errors to HTTP status codes (T018)
 		if strings.Contains(err.Error(), "not found") {
-			s.writeError(w, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
 			return
 		}
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get tools: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to get tools: %v", err))
 		return
 	}
 
@@ -1541,7 +1561,7 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -1556,7 +1576,7 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 	logEntries, err := s.controller.GetServerLogs(serverID, tail)
 	if err != nil {
 		s.logger.Error("Failed to get server logs", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get logs: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to get logs: %v", err))
 		return
 	}
 
@@ -1585,7 +1605,7 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
-		s.writeError(w, http.StatusBadRequest, "Query parameter 'q' required")
+		s.writeError(w, r, http.StatusBadRequest, "Query parameter 'q' required")
 		return
 	}
 
@@ -1600,7 +1620,7 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	results, err := s.controller.SearchTools(query, limit)
 	if err != nil {
 		s.logger.Error("Failed to search tools", "query", query, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
 		return
 	}
 
@@ -1760,7 +1780,7 @@ func (s *Server) writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, canF
 func (s *Server) handleGetSecretRefs(w http.ResponseWriter, r *http.Request) {
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
-		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
 		return
 	}
 
@@ -1771,7 +1791,7 @@ func (s *Server) handleGetSecretRefs(w http.ResponseWriter, r *http.Request) {
 	refs, err := resolver.ListAll(ctx)
 	if err != nil {
 		s.logger.Error("Failed to list secret references", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to list secret references")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to list secret references")
 		return
 	}
 
@@ -1795,20 +1815,20 @@ func (s *Server) handleGetSecretRefs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMigrateSecrets(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
-		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
 		return
 	}
 
 	// Get current configuration
 	cfg := s.controller.GetCurrentConfig()
 	if cfg == nil {
-		s.writeError(w, http.StatusInternalServerError, "Configuration not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
 		return
 	}
 
@@ -1832,14 +1852,14 @@ func (s *Server) handleMigrateSecrets(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) {
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
-		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
 		return
 	}
 
 	// Get current configuration
 	cfg := s.controller.GetCurrentConfig()
 	if cfg == nil {
-		s.writeError(w, http.StatusInternalServerError, "Configuration not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
 		return
 	}
 
@@ -1850,7 +1870,7 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 	configSecrets, err := resolver.ExtractConfigSecrets(ctx, cfg)
 	if err != nil {
 		s.logger.Error("Failed to extract config secrets", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to extract config secrets")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to extract config secrets")
 		return
 	}
 
@@ -1873,13 +1893,13 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 // @Router       /api/v1/secrets [post]
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
-		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
 		return
 	}
 
@@ -1890,17 +1910,17 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
 
 	if request.Name == "" {
-		s.writeError(w, http.StatusBadRequest, "Secret name is required")
+		s.writeError(w, r, http.StatusBadRequest, "Secret name is required")
 		return
 	}
 
 	if request.Value == "" {
-		s.writeError(w, http.StatusBadRequest, "Secret value is required")
+		s.writeError(w, r, http.StatusBadRequest, "Secret value is required")
 		return
 	}
 
@@ -1911,7 +1931,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// Only allow keyring type for security
 	if request.Type != secretTypeKeyring {
-		s.writeError(w, http.StatusBadRequest, "Only keyring type is supported")
+		s.writeError(w, r, http.StatusBadRequest, "Only keyring type is supported")
 		return
 	}
 
@@ -1926,7 +1946,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	err := resolver.Store(ctx, ref, request.Value)
 	if err != nil {
 		s.logger.Error("Failed to store secret", "name", request.Name, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to store secret: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to store secret: %v", err))
 		return
 	}
 
@@ -1964,19 +1984,19 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 // @Router       /api/v1/secrets/{name} [delete]
 func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
-		s.writeError(w, http.StatusInternalServerError, "Secret resolver not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
 		return
 	}
 
 	name := chi.URLParam(r, "name")
 	if name == "" {
-		s.writeError(w, http.StatusBadRequest, "Secret name is required")
+		s.writeError(w, r, http.StatusBadRequest, "Secret name is required")
 		return
 	}
 
@@ -1988,7 +2008,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 
 	// Only allow keyring type for security
 	if secretType != secretTypeKeyring {
-		s.writeError(w, http.StatusBadRequest, "Only keyring type is supported")
+		s.writeError(w, r, http.StatusBadRequest, "Only keyring type is supported")
 		return
 	}
 
@@ -2003,7 +2023,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	err := resolver.Delete(ctx, ref)
 	if err != nil {
 		s.logger.Error("Failed to delete secret", "name", name, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete secret: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to delete secret: %v", err))
 		return
 	}
 
@@ -2038,7 +2058,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/doctor [get]
 func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -2050,7 +2070,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 		if err != nil {
 			s.logger.Error("Failed to get diagnostics via management service", "error", err)
-			s.writeError(w, http.StatusInternalServerError, "Failed to get diagnostics")
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to get diagnostics")
 			return
 		}
 
@@ -2062,7 +2082,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	genericServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.logger.Error("Failed to get servers for diagnostics", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to get servers")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get servers")
 		return
 	}
 
@@ -2130,14 +2150,14 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/stats/tokens [get]
 func (s *Server) handleGetTokenStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	tokenStats, err := s.controller.GetTokenSavings()
 	if err != nil {
 		s.logger.Error("Failed to calculate token savings", "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to calculate token savings: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to calculate token savings: %v", err))
 		return
 	}
 
@@ -2239,7 +2259,7 @@ func (s *Server) canResolveSecret(ref *contracts.Ref) bool {
 // @Router       /api/v1/tool-calls [get]
 func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -2275,7 +2295,7 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		s.logger.Error("Failed to get tool calls", "error", err, "session_id", sessionID)
-		s.writeError(w, http.StatusInternalServerError, "Failed to get tool calls")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get tool calls")
 		return
 	}
 
@@ -2305,13 +2325,13 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 // @Router       /api/v1/tool-calls/{id} [get]
 func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		s.writeError(w, http.StatusBadRequest, "Tool call ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Tool call ID required")
 		return
 	}
 
@@ -2319,7 +2339,7 @@ func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request)
 	toolCall, err := s.controller.GetToolCallByID(id)
 	if err != nil {
 		s.logger.Error("Failed to get tool call detail", "id", id, "error", err)
-		s.writeError(w, http.StatusNotFound, "Tool call not found")
+		s.writeError(w, r, http.StatusNotFound, "Tool call not found")
 		return
 	}
 
@@ -2347,13 +2367,13 @@ func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request)
 // @Router       /api/v1/servers/{id}/tool-calls [get]
 func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
-		s.writeError(w, http.StatusBadRequest, "Server ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
 	}
 
@@ -2370,7 +2390,7 @@ func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request
 	toolCalls, err := s.controller.GetServerToolCalls(serverID, limit)
 	if err != nil {
 		s.logger.Error("Failed to get server tool calls", "server", serverID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to get server tool calls")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get server tool calls")
 		return
 	}
 
@@ -2412,20 +2432,20 @@ func convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.T
 // @Router       /api/v1/tool-calls/{id}/replay [post]
 func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		s.writeError(w, http.StatusBadRequest, "Tool call ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Tool call ID required")
 		return
 	}
 
 	// Parse request body for modified arguments
 	var request contracts.ReplayToolCallRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
 
@@ -2433,7 +2453,7 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 	newToolCall, err := s.controller.ReplayToolCall(id, request.Arguments)
 	if err != nil {
 		s.logger.Error("Failed to replay tool call", "id", id, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to replay tool call: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to replay tool call: %v", err))
 		return
 	}
 
@@ -2462,19 +2482,19 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 // @Router       /api/v1/config [get]
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	cfg, err := s.controller.GetConfig()
 	if err != nil {
 		s.logger.Error("Failed to get configuration", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to get configuration")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
 		return
 	}
 
 	if cfg == nil {
-		s.writeError(w, http.StatusInternalServerError, "Configuration not available")
+		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
 		return
 	}
 
@@ -2503,13 +2523,13 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // @Router       /api/v1/config/validate [post]
 func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	var cfg config.Config
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
 
@@ -2517,7 +2537,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	validationErrors, err := s.controller.ValidateConfig(&cfg)
 	if err != nil {
 		s.logger.Error("Failed to validate configuration", "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Validation failed: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Validation failed: %v", err))
 		return
 	}
 
@@ -2545,13 +2565,13 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 // @Router       /api/v1/config/apply [post]
 func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	var cfg config.Config
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
 
@@ -2562,7 +2582,7 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	result, err := s.controller.ApplyConfig(&cfg, cfgPath)
 	if err != nil {
 		s.logger.Error("Failed to apply configuration", "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to apply configuration: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to apply configuration: %v", err))
 		return
 	}
 
@@ -2594,7 +2614,7 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -2604,12 +2624,12 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
 
 	if request.ToolName == "" {
-		s.writeError(w, http.StatusBadRequest, "Tool name is required")
+		s.writeError(w, r, http.StatusBadRequest, "Tool name is required")
 		return
 	}
 
@@ -2621,7 +2641,7 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)
 	if err != nil {
 		s.logger.Error("Failed to call tool", "tool", request.ToolName, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to call tool: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to call tool: %v", err))
 		return
 	}
 
@@ -2640,11 +2660,11 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries [get]
-func (s *Server) handleListRegistries(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 	registries, err := s.controller.ListRegistries()
 	if err != nil {
 		s.logger.Error("Failed to list registries", "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to list registries: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list registries: %v", err))
 		return
 	}
 
@@ -2706,7 +2726,7 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Request) {
 	registryID := chi.URLParam(r, "id")
 	if registryID == "" {
-		s.writeError(w, http.StatusBadRequest, "Registry ID is required")
+		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
 	}
 
@@ -2725,7 +2745,7 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 	servers, err := s.controller.SearchRegistryServers(registryID, tag, query, limit)
 	if err != nil {
 		s.logger.Error("Failed to search registry servers", "registry", registryID, "error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to search servers: %v", err))
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to search servers: %v", err))
 		return
 	}
 
@@ -2809,7 +2829,7 @@ func getBool(m map[string]interface{}, key string) bool {
 // @Router       /api/v1/sessions [get]
 func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -2835,7 +2855,7 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	sessions, total, err := s.controller.GetRecentSessions(limit)
 	if err != nil {
 		s.logger.Error("Failed to get sessions", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to get sessions")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get sessions")
 		return
 	}
 
@@ -2873,13 +2893,13 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 // @Router       /api/v1/sessions/{id} [get]
 func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		s.writeError(w, http.StatusBadRequest, "Session ID required")
+		s.writeError(w, r, http.StatusBadRequest, "Session ID required")
 		return
 	}
 
@@ -2887,7 +2907,7 @@ func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) 
 	session, err := s.controller.GetSessionByID(id)
 	if err != nil {
 		s.logger.Error("Failed to get session detail", "id", id, "error", err)
-		s.writeError(w, http.StatusNotFound, "Session not found")
+		s.writeError(w, r, http.StatusNotFound, "Session not found")
 		return
 	}
 
@@ -2911,7 +2931,7 @@ func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 	status := s.controller.GetDockerRecoveryStatus()
 	if status == nil {
-		s.writeError(w, http.StatusInternalServerError, "failed to get Docker status")
+		s.writeError(w, r, http.StatusInternalServerError, "failed to get Docker status")
 		return
 	}
 
