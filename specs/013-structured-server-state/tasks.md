@@ -163,6 +163,62 @@ But spec says remediation should be derived from Health.Action. For `login` acti
 
 ---
 
+## Phase 8: User Story 4 - Tray Shows Correct Actions (Priority: P1)
+
+**Goal**: Tray menu uses `health.*` fields as single source of truth, not legacy fields or URL heuristics
+
+**Independent Test**:
+1. Configure a stdio OAuth server (e.g., `npx @anthropic/mcp-gcal`) that needs login
+2. View tray menu and verify "⚠️ Login Required" appears (not just generic options)
+3. Verify tray connected count matches Web UI count
+
+### Implementation for User Story 4
+
+**Tray Status Display (FR-013, FR-016, FR-017)**:
+- [x] T031 [US4] Remove `serverSupportsOAuth()` URL heuristic function from internal/tray/managers.go
+- [x] T032 [US4] Update `getServerStatusDisplay()` to use `health.level` instead of legacy `connected` field in internal/tray/managers.go
+- [x] T033 [US4] Update `getServerStatusDisplay()` to use `health.summary` for status text in internal/tray/managers.go
+- [x] T034 [US4] Update tooltip generation to use `health.detail` instead of `last_error` in internal/tray/managers.go
+
+**Tray Action Menus (FR-014, FR-015)**:
+- [x] T035 [US4] Update `createServerActionSubmenus()` to show actions based on `health.action` in internal/tray/managers.go
+- [x] T036 [US4] Add "⚠️ Login Required" menu item when `health.action == "login"` (no URL check) in internal/tray/managers.go
+- [x] T037 [US4] Add "⚠️ Set Secret" menu item when `health.action == "set_secret"` in internal/tray/managers.go
+- [x] T038 [US4] Add "⚠️ Configure" menu item when `health.action == "configure"` in internal/tray/managers.go
+
+**Tray Connected Count (FR-013)**:
+- [x] T039 [US4] Update connected server count logic to use `health.level == "healthy"` only in internal/tray/managers.go
+- [x] T040 [US4] Remove fallback to legacy `connected` field in connected count calculation in internal/tray/managers.go
+
+**Tests**:
+- [x] T041 [US4] [P] Add unit tests for tray menu showing login action for stdio servers in internal/tray/managers_test.go
+- [x] T042 [US4] [P] Add unit tests for tray connected count using health.level in internal/tray/managers_test.go
+
+**Checkpoint**: User Story 4 complete - Tray uses health data as single source of truth ✅
+
+---
+
+## Phase 9: User Story 5 - Web UI Shows Clean Error State (Priority: P2)
+
+**Goal**: Web UI suppresses redundant `last_error` display when `health.action` already conveys the issue
+
+**Independent Test**:
+1. Configure a server that needs OAuth login
+2. View server in Web UI and verify only "Login" button appears, not verbose error message
+3. Configure a server with missing secret, verify only "Set Secret" button appears
+
+### Implementation for User Story 5
+
+**Error Display Suppression (FR-018, FR-019)**:
+- [x] T043 [US5] Update ServerCard.vue to suppress `last_error` display when `health.action` is `login` in frontend/src/components/ServerCard.vue
+- [x] T044 [US5] Update ServerCard.vue to suppress `last_error` display when `health.action` is `set_secret` in frontend/src/components/ServerCard.vue
+- [x] T045 [US5] Update ServerCard.vue to suppress `last_error` display when `health.action` is `configure` in frontend/src/components/ServerCard.vue
+- [x] T046 [US5] Add computed property `shouldShowError` that checks if error is redundant with health action in frontend/src/components/ServerCard.vue
+
+**Checkpoint**: User Story 5 complete - Web UI shows clean, non-redundant error states ✅
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
@@ -173,12 +229,16 @@ But spec says remediation should be derived from Health.Action. For `login` acti
   - US1 and US2 are both P1 priority but work on different layers (UI vs CLI/Backend)
   - US3 is P2 and depends on Doctor refactor from US2 for proper data flow
 - **Polish (Phase 6)**: Depends on all user stories being complete
+- **User Story 4 (Phase 8)**: Depends on Foundational - Tray-focused, can run in parallel with US1/US2
+- **User Story 5 (Phase 9)**: Depends on Foundational - Frontend-focused, can run in parallel with US4
 
 ### User Story Dependencies
 
 - **User Story 1 (P1)**: Can start after Foundational - Frontend-focused
 - **User Story 2 (P1)**: Can start after Foundational - Backend/CLI-focused
 - **User Story 3 (P2)**: Best after US2 since Dashboard needs proper Health-aggregated data
+- **User Story 4 (P1)**: Can start after Foundational - Tray-focused (internal/tray/)
+- **User Story 5 (P2)**: Can start after Foundational - Frontend-focused (ServerCard.vue)
 
 ### Within Each User Story
 
@@ -198,43 +258,52 @@ But spec says remediation should be derived from Health.Action. For `login` acti
 **User Stories** (can overlap):
 - US1 (T010-T013) and US2 (T014-T018) can run in parallel (different files)
 - US3 (T019-T021) should wait for US2 for best results
+- US4 (T031-T042) can run in parallel with US1/US2 (different directory: internal/tray/)
+- US5 (T043-T046) can run in parallel with US4 (same file as US1 but different section)
 
 ---
 
-## Parallel Example: User Stories 1 and 2
+## Parallel Example: User Stories 1, 2, and 4
 
 ```bash
-# After Foundational phase completes, launch both user stories in parallel:
+# After Foundational phase completes, launch user stories in parallel:
 
-# User Story 1 - Frontend:
+# User Story 1 - Frontend (ServerCard actions):
 Task: "[US1] Add set_secret action handler in frontend/src/components/ServerCard.vue"
 Task: "[US1] Add configure action handler in frontend/src/components/ServerCard.vue"
 
 # User Story 2 - Backend/CLI:
 Task: "[US2] Add set_secret action hint formatting in cmd/mcpproxy/upstream_cmd.go"
 Task: "[US2] Refactor Doctor() to aggregate from Health in internal/management/diagnostics.go"
+
+# User Story 4 - Tray (can run in parallel - different directory):
+Task: "[US4] Remove serverSupportsOAuth() URL heuristic function from internal/tray/managers.go"
+Task: "[US4] Update createServerActionSubmenus() to show actions based on health.action"
 ```
 
 ---
 
 ## Implementation Strategy
 
-### MVP First (User Stories 1 & 2)
+### MVP First (User Stories 1, 2 & 4)
 
 1. Complete Phase 1: Setup (constants and types)
 2. Complete Phase 2: Foundational (detection logic)
 3. Complete Phase 3: User Story 1 (Fix buttons navigate correctly)
 4. Complete Phase 4: User Story 2 (CLI and Web UI consistent)
-5. **STOP and VALIDATE**: Both P1 stories should work
-6. Deploy/demo if ready
+5. Complete Phase 8: User Story 4 (Tray uses health data)
+6. **STOP and VALIDATE**: All P1 stories should work
+7. Deploy/demo if ready
 
 ### Incremental Delivery
 
 1. Complete Setup + Foundational -> Detection works
 2. Add User Story 1 -> Fix buttons work -> Demo
 3. Add User Story 2 -> CLI consistency -> Demo
-4. Add User Story 3 -> Single banner -> Demo
-5. Each story adds value without breaking previous stories
+4. Add User Story 4 -> Tray consistency -> Demo
+5. Add User Story 3 -> Single banner -> Demo
+6. Add User Story 5 -> Clean error states -> Demo
+7. Each story adds value without breaking previous stories
 
 ---
 

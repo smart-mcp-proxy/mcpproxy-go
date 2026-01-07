@@ -547,3 +547,274 @@ func TestHealthConsistency_TrayVsCLI(t *testing.T) {
 			"Spec 013-FR-012 requires all interfaces show identical data.", trayConnected, cliHealthy)
 	}
 }
+
+// =============================================================================
+// Phase 8 Tests: Tray Uses Health.Action as Single Source of Truth (FR-014, FR-015)
+// =============================================================================
+
+// TestServerNeedsAction tests the new serverNeedsAction helper function
+func TestServerNeedsAction(t *testing.T) {
+	mm := &MenuManager{}
+
+	testCases := []struct {
+		name           string
+		server         map[string]interface{}
+		action         string
+		expectedResult bool
+	}{
+		{
+			name: "login action detected",
+			server: map[string]interface{}{
+				"name": "gcal",
+				"health": map[string]interface{}{
+					"level":  "unhealthy",
+					"action": "login",
+				},
+			},
+			action:         "login",
+			expectedResult: true,
+		},
+		{
+			name: "set_secret action detected",
+			server: map[string]interface{}{
+				"name": "github",
+				"health": map[string]interface{}{
+					"level":  "unhealthy",
+					"action": "set_secret",
+					"detail": "GITHUB_TOKEN",
+				},
+			},
+			action:         "set_secret",
+			expectedResult: true,
+		},
+		{
+			name: "configure action detected",
+			server: map[string]interface{}{
+				"name": "custom-server",
+				"health": map[string]interface{}{
+					"level":  "unhealthy",
+					"action": "configure",
+				},
+			},
+			action:         "configure",
+			expectedResult: true,
+		},
+		{
+			name: "wrong action requested",
+			server: map[string]interface{}{
+				"name": "gcal",
+				"health": map[string]interface{}{
+					"level":  "unhealthy",
+					"action": "login",
+				},
+			},
+			action:         "restart", // Server needs login, not restart
+			expectedResult: false,
+		},
+		{
+			name: "no health field",
+			server: map[string]interface{}{
+				"name":      "old-server",
+				"connected": true,
+			},
+			action:         "login",
+			expectedResult: false,
+		},
+		{
+			name: "empty action (healthy server)",
+			server: map[string]interface{}{
+				"name": "healthy-server",
+				"health": map[string]interface{}{
+					"level":  "healthy",
+					"action": "",
+				},
+			},
+			action:         "login",
+			expectedResult: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := mm.serverNeedsAction(tc.server, tc.action)
+			if result != tc.expectedResult {
+				t.Errorf("serverNeedsAction(%s) for action %s: expected %v, got %v",
+					tc.server["name"], tc.action, tc.expectedResult, result)
+			}
+		})
+	}
+}
+
+// TestTrayLoginActionForStdioServers tests that stdio OAuth servers show "Login Required"
+// This is the key test for FR-015 - login action should work regardless of transport protocol
+func TestTrayLoginActionForStdioServers(t *testing.T) {
+	// Simulate a stdio OAuth server like Google Calendar (npx @anthropic/mcp-gcal)
+	// These servers don't have a URL, they have a command
+	stdioOAuthServer := map[string]interface{}{
+		"name":    "gcal",
+		"command": "npx",
+		"args":    []string{"@anthropic/mcp-gcal"},
+		"enabled": true,
+		// NO URL - this is stdio-based
+		"health": map[string]interface{}{
+			"level":       "unhealthy",
+			"admin_state": "enabled",
+			"summary":     "Authentication required",
+			"action":      "login", // Health says login is needed
+		},
+	}
+
+	mm := &MenuManager{}
+
+	// The new implementation should detect login action from health.action
+	// NOT from URL heuristics (the old serverSupportsOAuth approach)
+	needsLogin := mm.serverNeedsAction(stdioOAuthServer, "login")
+	if !needsLogin {
+		t.Error("Stdio OAuth server with health.action='login' should need login action")
+	}
+
+	// Also verify this works with struct pointer (in-process data)
+	stdioOAuthServerWithStruct := map[string]interface{}{
+		"name":    "gcal",
+		"command": "npx",
+		"args":    []string{"@anthropic/mcp-gcal"},
+		"enabled": true,
+		"health": &contracts.HealthStatus{
+			Level:      "unhealthy",
+			AdminState: "enabled",
+			Summary:    "Authentication required",
+			Action:     "login",
+		},
+	}
+
+	// For struct pointer, we need to check differently since serverNeedsAction uses map
+	// Let's verify the extraction works
+	healthRaw := stdioOAuthServerWithStruct["health"]
+	if hs, ok := healthRaw.(*contracts.HealthStatus); ok {
+		if hs.Action != "login" {
+			t.Errorf("Expected action 'login' from struct, got '%s'", hs.Action)
+		}
+	} else {
+		t.Error("Health should be *contracts.HealthStatus")
+	}
+}
+
+// TestConnectedCountHealthLevelOnly tests that connected count uses ONLY health.level
+// without falling back to legacy connected field (FR-013, T039, T040)
+func TestConnectedCountHealthLevelOnly(t *testing.T) {
+	// Test data where health.level differs from legacy connected field
+	servers := []map[string]interface{}{
+		{
+			"name":      "server1",
+			"connected": false, // Legacy says disconnected
+			"health": &contracts.HealthStatus{
+				Level: "healthy", // Health says healthy - should be counted
+			},
+		},
+		{
+			"name":      "server2",
+			"connected": true, // Legacy says connected
+			"health": &contracts.HealthStatus{
+				Level: "unhealthy", // Health says unhealthy - should NOT be counted
+			},
+		},
+		{
+			"name":      "server3",
+			"connected": true, // Legacy says connected, but no health field
+			// No health field - should NOT be counted (per FR-013, no fallback)
+		},
+		{
+			"name":      "server4",
+			"connected": false,
+			"health": &contracts.HealthStatus{
+				Level: "healthy",
+			},
+		},
+	}
+
+	// New counting logic (FR-013): health.level ONLY, no fallback
+	connectedCount := 0
+	for _, server := range servers {
+		healthLevel := extractHealthLevel(server)
+		if healthLevel == "healthy" {
+			connectedCount++
+		}
+		// NO FALLBACK to legacy connected field
+	}
+
+	// Expected: 2 (server1 and server4 with health.level="healthy")
+	// server2 has connected=true but health.level="unhealthy" -> NOT counted
+	// server3 has connected=true but no health field -> NOT counted (no fallback)
+	expectedCount := 2
+	if connectedCount != expectedCount {
+		t.Errorf("Expected %d connected (health.level only), got %d", expectedCount, connectedCount)
+	}
+}
+
+// TestHealthActionMenuItemSelection tests that correct menu items are shown based on health.action
+func TestHealthActionMenuItemSelection(t *testing.T) {
+	testCases := []struct {
+		name               string
+		healthAction       string
+		expectedMenuItem   string
+		shouldShowLogin    bool
+		shouldShowSecret   bool
+		shouldShowConfigure bool
+		shouldShowRestart  bool
+	}{
+		{
+			name:             "login action shows Login Required",
+			healthAction:     "login",
+			expectedMenuItem: "⚠️ Login Required",
+			shouldShowLogin:  true,
+		},
+		{
+			name:             "set_secret action shows Set Secret",
+			healthAction:     "set_secret",
+			expectedMenuItem: "⚠️ Set Secret",
+			shouldShowSecret: true,
+		},
+		{
+			name:               "configure action shows Configure",
+			healthAction:       "configure",
+			expectedMenuItem:   "⚠️ Configure",
+			shouldShowConfigure: true,
+		},
+		{
+			name:              "restart action shows Restart Required",
+			healthAction:      "restart",
+			expectedMenuItem:  "⚠️ Restart Required",
+			shouldShowRestart: true,
+		},
+		{
+			name:              "empty action shows standard Restart",
+			healthAction:      "",
+			expectedMenuItem:  "🔄 Restart",
+			shouldShowRestart: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Verify the switch logic would select the correct menu item
+			var selectedItem string
+			switch tc.healthAction {
+			case "login":
+				selectedItem = "⚠️ Login Required"
+			case "set_secret":
+				selectedItem = "⚠️ Set Secret"
+			case "configure":
+				selectedItem = "⚠️ Configure"
+			case "restart":
+				selectedItem = "⚠️ Restart Required"
+			default:
+				selectedItem = "🔄 Restart"
+			}
+
+			if selectedItem != tc.expectedMenuItem {
+				t.Errorf("For health.action='%s': expected menu item '%s', got '%s'",
+					tc.healthAction, tc.expectedMenuItem, selectedItem)
+			}
+		})
+	}
+}

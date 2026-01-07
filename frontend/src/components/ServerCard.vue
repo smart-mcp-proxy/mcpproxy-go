@@ -50,8 +50,8 @@
         </div>
       </div>
 
-      <!-- Error message -->
-      <div v-if="server.last_error" class="alert alert-error alert-sm mb-4">
+      <!-- Error message - suppressed when health.action conveys the issue (FR-018, FR-019) -->
+      <div v-if="shouldShowError" class="alert alert-error alert-sm mb-4">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
@@ -267,6 +267,22 @@ const statusTooltip = computed(() => {
 // Suggested action from health status
 const healthAction = computed(() => {
   return props.server.health?.action || ''
+})
+
+// Determine if error message should be shown (FR-018, FR-019)
+// Suppress verbose last_error when health.action already conveys the issue
+const shouldShowError = computed(() => {
+  // No error to show
+  if (!props.server.last_error) return false
+
+  // Actions where the button is sufficient - error is redundant (T043-T046)
+  const actionsSuppressingError = ['login', 'set_secret', 'configure']
+  if (actionsSuppressingError.includes(healthAction.value)) {
+    return false
+  }
+
+  // Show error for other cases (restart, view_logs, or no action)
+  return true
 })
 
 const canLogout = computed(() => {

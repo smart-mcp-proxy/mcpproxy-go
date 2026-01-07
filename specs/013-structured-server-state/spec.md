@@ -55,6 +55,29 @@ As a developer, I want to see ONE consolidated health display on the Dashboard.
 
 ---
 
+### User Story 4 - Tray Shows Correct Actions (Priority: P1)
+
+As a developer, when I click on a server in the macOS tray menu, I want to see the appropriate action based on the server's health status.
+
+**Acceptance Scenarios**:
+
+1. **Given** a stdio OAuth server needing login (e.g., `npx @anthropic/mcp-gcal`), **When** I click on it in the tray, **Then** I see "⚠️ Login Required" as a menu option
+2. **Given** a server with `health.action == "login"`, **When** I view tray, **Then** "Login Required" appears regardless of whether server uses URL or command
+3. **Given** a healthy server, **When** I view tray status, **Then** the tray shows the same connected count as Web UI
+
+---
+
+### User Story 5 - Web UI Shows Clean Error State (Priority: P2)
+
+As a developer, when a server needs authentication, I don't want to see redundant technical error messages.
+
+**Acceptance Scenarios**:
+
+1. **Given** a server with `health.action == "login"`, **When** I view it in Web UI, **Then** I see only the "Login" button, not a verbose error alert
+2. **Given** a server with `health.action == "set_secret"`, **When** I view it, **Then** I see only the "Set Secret" button, not the underlying error
+
+---
+
 ## Requirements
 
 ### Health as Source of Truth
@@ -95,12 +118,39 @@ As a developer, I want to see ONE consolidated health display on the Dashboard.
 
 - **FR-012**: `upstream list` MUST handle new Health actions with appropriate CLI hints
 
+### Tray Application
+
+- **FR-013**: Tray MUST use `health.level` for server status icons, not legacy `connected` field
+- **FR-014**: Tray MUST use `health.action` to determine available actions, not URL heuristics
+- **FR-015**: Tray MUST show "Login" action when `health.action == "login"`, regardless of transport protocol (stdio/http)
+- **FR-016**: Tray MUST use `health.summary` for status text, not construct from legacy fields
+- **FR-017**: Tray MUST use `health.detail` for tooltip details, not `last_error`
+
+| Health Action | Tray Menu Item | Behavior |
+|---------------|----------------|----------|
+| `login` | "⚠️ Login Required" | Opens OAuth flow |
+| `restart` | "🔄 Restart" | Restarts server |
+| `enable` | "Enable" | Enables server |
+| `approve` | "Approve" | Unquarantines server |
+| `set_secret` | "⚠️ Set Secret" | Opens Web UI secrets page |
+| `configure` | "⚠️ Configure" | Opens Web UI server config |
+| `view_logs` | "View Logs" | Opens Web UI logs page |
+| `""` | (standard menu) | No special action needed |
+
+### Web UI Error Display
+
+- **FR-018**: Web UI MUST NOT show redundant `last_error` when `health.action` already conveys the issue
+- **FR-019**: When `health.action` is `login`, `set_secret`, or `configure`, the action button is sufficient - suppress verbose error alert
+
 ## Success Criteria
 
 - **SC-001**: Users see exactly ONE health section on Dashboard
 - **SC-002**: `mcpproxy doctor` output is derived from same data as Web UI
 - **SC-003**: All action buttons navigate to appropriate fix locations
 - **SC-004**: Missing secrets show which servers are affected (aggregated by secret name)
+- **SC-005**: Tray shows "Login Required" for stdio OAuth servers (e.g., Google Calendar via npx)
+- **SC-006**: Tray connected count matches Web UI and CLI (all use `health.level`)
+- **SC-007**: Web UI does not show verbose error message when login button is already displayed
 
 ## Health Status Reference
 
