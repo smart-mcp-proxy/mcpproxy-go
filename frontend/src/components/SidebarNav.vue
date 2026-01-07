@@ -77,7 +77,8 @@ const menuItems = [
   { name: 'Secrets', path: '/secrets' },
   { name: 'Search', path: '/search' },
   { name: 'Tool Call History', path: '/tool-calls' },
-  { name: 'Activity Log', path: '/activity' },
+  // TODO: Re-enable in next release
+  // { name: 'Activity Log', path: '/activity' },
   { name: 'Repositories', path: '/repositories' },
   { name: 'Configuration', path: '/settings' },
 ]
