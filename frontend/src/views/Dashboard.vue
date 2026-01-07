@@ -141,8 +141,8 @@
     </div>
 
 
-    <!-- Activity Widget -->
-    <ActivityWidget />
+    <!-- TODO: Re-enable Activity Widget in next release -->
+    <!-- <ActivityWidget /> -->
 
     <!-- Recent Sessions -->
     <div class="card bg-base-100 shadow-md">
@@ -329,7 +329,8 @@ import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import TokenPieChart from '@/components/TokenPieChart.vue'
-import ActivityWidget from '@/components/ActivityWidget.vue'
+// TODO: Re-enable in next release
+// import ActivityWidget from '@/components/ActivityWidget.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 
 const serversStore = useServersStore()
