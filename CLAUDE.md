@@ -65,6 +65,7 @@ See [docs/cli-management-commands.md](docs/cli-management-commands.md) for compl
 ```bash
 mcpproxy activity list              # List recent activity
 mcpproxy activity list --type tool_call --status error  # Filter by type/status
+mcpproxy activity list --request-id <id>  # Filter by HTTP request ID (for error correlation)
 mcpproxy activity watch             # Real-time activity stream
 mcpproxy activity show <id>         # View activity details
 mcpproxy activity summary           # Show 24h statistics
@@ -200,6 +201,8 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `GET /events` | SSE stream for live updates |
 
 **Authentication**: Use `X-API-Key` header or `?apikey=` query parameter.
+
+**Request ID Tracking**: All responses include `X-Request-Id` header. Error responses include `request_id` in JSON body. Use for log correlation: `mcpproxy activity list --request-id <id>`.
 
 **Real-time Updates**:
 - `GET /events` - Server-Sent Events (SSE) stream for live updates
@@ -385,6 +388,9 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord extended with intent metadata (018-intent-declaration)
 - TypeScript 5.9, Vue 3.5, Go 1.24 (backend already exists) + Vue 3, Vue Router 4, Pinia 2, Tailwind CSS 3, DaisyUI 4, Vite 5 (019-activity-webui)
 - N/A (frontend consumes REST API from backend) (019-activity-webui)
+- Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), Zap (logging), mark3labs/mcp-go (MCP protocol) (020-oauth-login-feedback)
+- Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), Zap (logging), google/uuid (ID generation) (021-request-id-logging)
+- BBolt database (`~/.mcpproxy/config.db`) - activity log extended with request_id field (021-request-id-logging)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

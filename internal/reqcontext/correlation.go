@@ -15,6 +15,12 @@ const (
 
 	// RequestSourceKey is the context key for request source
 	RequestSourceKey ContextKey = "request_source"
+
+	// RequestIDKey is the context key for request IDs (X-Request-Id header)
+	RequestIDKey ContextKey = "request_id"
+
+	// LoggerKey is the context key for request-scoped logger
+	LoggerKey ContextKey = "logger"
 )
 
 // RequestSource indicates where the request originated
@@ -85,4 +91,20 @@ func WithMetadata(ctx context.Context, source RequestSource) context.Context {
 	ctx = WithCorrelationID(ctx, correlationID)
 	ctx = WithRequestSource(ctx, source)
 	return ctx
+}
+
+// WithRequestID adds a request ID to the context
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, RequestIDKey, requestID)
+}
+
+// GetRequestID retrieves the request ID from context
+func GetRequestID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if id, ok := ctx.Value(RequestIDKey).(string); ok {
+		return id
+	}
+	return ""
 }

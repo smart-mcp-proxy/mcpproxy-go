@@ -25,12 +25,39 @@ type Client struct {
 	logger     *zap.SugaredLogger
 }
 
+// APIError represents an error from the API that includes request_id for log correlation.
+// T023: Added for CLI error display with request ID
+type APIError struct {
+	Message   string `json:"error"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// Error implements the error interface.
+func (e *APIError) Error() string {
+	return e.Message
+}
+
+// HasRequestID returns true if the error has a request ID for log correlation.
+func (e *APIError) HasRequestID() bool {
+	return e.RequestID != ""
+}
+
+// FormatWithRequestID returns a formatted error message including the request ID.
+func (e *APIError) FormatWithRequestID() string {
+	if e.RequestID != "" {
+		return fmt.Sprintf("%s\n\nRequest ID: %s\nUse 'mcpproxy activity list --request-id %s' to find related logs.",
+			e.Message, e.RequestID, e.RequestID)
+	}
+	return e.Message
+}
+
 // CodeExecResult represents code execution result.
 type CodeExecResult struct {
-	OK     bool                   `json:"ok"`
-	Result interface{}            `json:"result,omitempty"`
-	Error  *CodeExecError         `json:"error,omitempty"`
-	Stats  map[string]interface{} `json:"stats,omitempty"`
+	OK        bool                   `json:"ok"`
+	Result    interface{}            `json:"result,omitempty"`
+	Error     *CodeExecError         `json:"error,omitempty"`
+	Stats     map[string]interface{} `json:"stats,omitempty"`
+	RequestID string                 `json:"request_id,omitempty"` // T023: For error correlation
 }
 
 // CodeExecError represents execution error.
@@ -91,6 +118,12 @@ func (c *Client) prepareRequest(ctx context.Context, req *http.Request) {
 	if c.apiKey != "" {
 		req.Header.Set("X-API-Key", c.apiKey)
 	}
+}
+
+// parseAPIError creates an APIError from API response fields.
+// T023: Helper to create errors with request_id for CLI display.
+func parseAPIError(errorMsg, requestID string) error {
+	return &APIError{Message: errorMsg, RequestID: requestID}
 }
 
 // CodeExec executes JavaScript code via the daemon API.
@@ -196,9 +229,10 @@ func (c *Client) CallTool(
 
 	// Parse response (REST API format: {"success": true, "data": <result>})
 	var apiResp struct {
-		Success bool        `json:"success"`
-		Data    interface{} `json:"data"`
-		Error   string      `json:"error"`
+		Success   bool        `json:"success"`
+		Data      interface{} `json:"data"`
+		Error     string      `json:"error"`
+		RequestID string      `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -206,7 +240,8 @@ func (c *Client) CallTool(
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("tool call failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, &APIError{Message: apiResp.Error, RequestID: apiResp.RequestID}
 	}
 
 	// Convert data to CallToolResult format
@@ -295,7 +330,8 @@ func (c *Client) GetServers(ctx context.Context) ([]map[string]interface{}, erro
 		Data    struct {
 			Servers []map[string]interface{} `json:"servers"`
 		} `json:"data"`
-		Error string `json:"error"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -303,7 +339,7 @@ func (c *Client) GetServers(ctx context.Context) ([]map[string]interface{}, erro
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data.Servers, nil
@@ -337,7 +373,8 @@ func (c *Client) GetServerLogs(ctx context.Context, serverName string, tail int)
 		Data    struct {
 			Logs []contracts.LogEntry `json:"logs"`
 		} `json:"data"`
-		Error string `json:"error"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -345,7 +382,8 @@ func (c *Client) GetServerLogs(ctx context.Context, serverName string, tail int)
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data.Logs, nil
@@ -388,8 +426,9 @@ func (c *Client) ServerAction(ctx context.Context, serverName, action string) er
 	}
 
 	var apiResp struct {
-		Success bool   `json:"success"`
-		Error   string `json:"error"`
+		Success   bool   `json:"success"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -397,7 +436,8 @@ func (c *Client) ServerAction(ctx context.Context, serverName, action string) er
 	}
 
 	if !apiResp.Success {
-		return fmt.Errorf("action failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return nil
@@ -427,9 +467,10 @@ func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, er
 	}
 
 	var apiResp struct {
-		Success bool                   `json:"success"`
-		Data    map[string]interface{} `json:"data"`
-		Error   string                 `json:"error"`
+		Success   bool                   `json:"success"`
+		Data      map[string]interface{} `json:"data"`
+		Error     string                 `json:"error"`
+		RequestID string                 `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -437,7 +478,8 @@ func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, er
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data, nil
@@ -476,9 +518,10 @@ func (c *Client) GetInfoWithRefresh(ctx context.Context, refresh bool) (map[stri
 	}
 
 	var apiResp struct {
-		Success bool                   `json:"success"`
-		Data    map[string]interface{} `json:"data"`
-		Error   string                 `json:"error"`
+		Success   bool                   `json:"success"`
+		Data      map[string]interface{} `json:"data"`
+		Error     string                 `json:"error"`
+		RequestID string                 `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -486,7 +529,8 @@ func (c *Client) GetInfoWithRefresh(ctx context.Context, refresh bool) (map[stri
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data, nil
@@ -527,9 +571,10 @@ func (c *Client) RestartAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	var apiResp struct {
-		Success bool                 `json:"success"`
-		Data    *BulkOperationResult `json:"data"`
-		Error   string               `json:"error"`
+		Success   bool                 `json:"success"`
+		Data      *BulkOperationResult `json:"data"`
+		Error     string               `json:"error"`
+		RequestID string               `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -537,7 +582,8 @@ func (c *Client) RestartAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("restart_all failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data, nil
@@ -570,9 +616,10 @@ func (c *Client) EnableAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	var apiResp struct {
-		Success bool                 `json:"success"`
-		Data    *BulkOperationResult `json:"data"`
-		Error   string               `json:"error"`
+		Success   bool                 `json:"success"`
+		Data      *BulkOperationResult `json:"data"`
+		Error     string               `json:"error"`
+		RequestID string               `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -580,7 +627,8 @@ func (c *Client) EnableAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("enable_all failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data, nil
@@ -613,9 +661,10 @@ func (c *Client) DisableAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	var apiResp struct {
-		Success bool                 `json:"success"`
-		Data    *BulkOperationResult `json:"data"`
-		Error   string               `json:"error"`
+		Success   bool                 `json:"success"`
+		Data      *BulkOperationResult `json:"data"`
+		Error     string               `json:"error"`
+		RequestID string               `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -623,7 +672,8 @@ func (c *Client) DisableAll(ctx context.Context) (*BulkOperationResult, error) {
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("disable_all failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data, nil
@@ -657,7 +707,8 @@ func (c *Client) GetServerTools(ctx context.Context, serverName string) ([]map[s
 		Data    struct {
 			Tools []map[string]interface{} `json:"tools"`
 		} `json:"data"`
-		Error string `json:"error"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -665,7 +716,8 @@ func (c *Client) GetServerTools(ctx context.Context, serverName string) ([]map[s
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data.Tools, nil
@@ -701,7 +753,8 @@ func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error
 			Action  string `json:"action"`
 			Success bool   `json:"success"`
 		} `json:"data"`
-		Error string `json:"error"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -709,7 +762,8 @@ func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error
 	}
 
 	if !apiResp.Success {
-		return fmt.Errorf("login failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return nil
@@ -745,7 +799,8 @@ func (c *Client) TriggerOAuthLogout(ctx context.Context, serverName string) erro
 			Action  string `json:"action"`
 			Success bool   `json:"success"`
 		} `json:"data"`
-		Error string `json:"error"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -753,7 +808,8 @@ func (c *Client) TriggerOAuthLogout(ctx context.Context, serverName string) erro
 	}
 
 	if !apiResp.Success {
-		return fmt.Errorf("logout failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return nil
@@ -818,9 +874,10 @@ func (c *Client) AddServer(ctx context.Context, req *AddServerRequest) (*AddServ
 	}
 
 	var apiResp struct {
-		Success bool             `json:"success"`
-		Data    *AddServerResult `json:"data"`
-		Error   string           `json:"error"`
+		Success   bool             `json:"success"`
+		Data      *AddServerResult `json:"data"`
+		Error     string           `json:"error"`
+		RequestID string           `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
@@ -828,7 +885,8 @@ func (c *Client) AddServer(ctx context.Context, req *AddServerRequest) (*AddServ
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("add server failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data, nil
@@ -866,8 +924,9 @@ func (c *Client) RemoveServer(ctx context.Context, serverName string) error {
 	}
 
 	var apiResp struct {
-		Success bool   `json:"success"`
-		Error   string `json:"error"`
+		Success   bool   `json:"success"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
@@ -875,7 +934,8 @@ func (c *Client) RemoveServer(ctx context.Context, serverName string) error {
 	}
 
 	if !apiResp.Success {
-		return fmt.Errorf("remove server failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return nil
@@ -924,7 +984,8 @@ func (c *Client) ListActivities(ctx context.Context, filter ActivityFilterParams
 			Activities []map[string]interface{} `json:"activities"`
 			Total      int                      `json:"total"`
 		} `json:"data"`
-		Error string `json:"error"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -932,7 +993,8 @@ func (c *Client) ListActivities(ctx context.Context, filter ActivityFilterParams
 	}
 
 	if !apiResp.Success {
-		return nil, 0, fmt.Errorf("API call failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, 0, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data.Activities, apiResp.Data.Total, nil
@@ -972,7 +1034,8 @@ func (c *Client) GetActivityDetail(ctx context.Context, activityID string) (map[
 		Data    struct {
 			Activity map[string]interface{} `json:"activity"`
 		} `json:"data"`
-		Error string `json:"error"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -980,7 +1043,8 @@ func (c *Client) GetActivityDetail(ctx context.Context, activityID string) (map[
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data.Activity, nil
@@ -1016,9 +1080,10 @@ func (c *Client) GetActivitySummary(ctx context.Context, period, groupBy string)
 	}
 
 	var apiResp struct {
-		Success bool                   `json:"success"`
-		Data    map[string]interface{} `json:"data"`
-		Error   string                 `json:"error"`
+		Success   bool                   `json:"success"`
+		Data      map[string]interface{} `json:"data"`
+		Error     string                 `json:"error"`
+		RequestID string                 `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
@@ -1026,7 +1091,8 @@ func (c *Client) GetActivitySummary(ctx context.Context, period, groupBy string)
 	}
 
 	if !apiResp.Success {
-		return nil, fmt.Errorf("API call failed: %s", apiResp.Error)
+		// T023: Return APIError with request_id for CLI display
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
 	return apiResp.Data, nil

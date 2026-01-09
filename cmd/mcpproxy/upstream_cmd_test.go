@@ -1370,3 +1370,149 @@ func TestNewServerQuarantineDefault(t *testing.T) {
 		}
 	})
 }
+
+// T021: Test that CLI prints request_id on error
+func TestOutputError_WithRequestID(t *testing.T) {
+	t.Run("prints request_id when APIError has one", func(t *testing.T) {
+		// Capture stderr
+		oldStderr := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+		defer func() { os.Stderr = oldStderr }()
+
+		// Set table format (human-readable output)
+		globalOutputFormat = "table"
+		globalJSONOutput = false
+
+		// Create an APIError with request_id
+		apiErr := &cliclient.APIError{
+			Message:   "server not found",
+			RequestID: "test-request-id-12345",
+		}
+
+		// Call outputError
+		_ = outputError(apiErr, "SERVER_NOT_FOUND")
+
+		w.Close()
+		var buf bytes.Buffer
+		buf.ReadFrom(r)
+		output := buf.String()
+
+		// Verify request_id is printed
+		if !strings.Contains(output, "test-request-id-12345") {
+			t.Errorf("Expected output to contain request_id 'test-request-id-12345', got: %s", output)
+		}
+
+		// Verify suggestion to use activity list
+		if !strings.Contains(output, "mcpproxy activity list --request-id") {
+			t.Errorf("Expected output to contain activity list suggestion, got: %s", output)
+		}
+	})
+
+	t.Run("JSON output includes request_id field", func(t *testing.T) {
+		// Capture stdout (JSON/YAML goes to stdout)
+		oldStdout := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		defer func() { os.Stdout = oldStdout }()
+
+		// Set JSON format
+		globalOutputFormat = "json"
+		globalJSONOutput = true
+
+		// Create an APIError with request_id
+		apiErr := &cliclient.APIError{
+			Message:   "server not found",
+			RequestID: "json-request-id-67890",
+		}
+
+		// Call outputError
+		_ = outputError(apiErr, "SERVER_NOT_FOUND")
+
+		w.Close()
+		var buf bytes.Buffer
+		buf.ReadFrom(r)
+		output := buf.String()
+
+		// Verify JSON output contains request_id
+		var jsonOutput map[string]interface{}
+		if err := json.Unmarshal([]byte(output), &jsonOutput); err != nil {
+			t.Fatalf("Failed to parse JSON output: %v (output was: %s)", err, output)
+		}
+
+		requestID, ok := jsonOutput["request_id"].(string)
+		if !ok {
+			t.Errorf("Expected JSON to contain request_id field, got: %v", jsonOutput)
+		}
+		if requestID != "json-request-id-67890" {
+			t.Errorf("Expected request_id 'json-request-id-67890', got: %s", requestID)
+		}
+	})
+}
+
+// T022: Test that CLI does NOT print request_id on success
+func TestOutputError_WithoutRequestID(t *testing.T) {
+	t.Run("does not print request_id when APIError has none", func(t *testing.T) {
+		// Capture stderr
+		oldStderr := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+		defer func() { os.Stderr = oldStderr }()
+
+		// Set table format
+		globalOutputFormat = "table"
+		globalJSONOutput = false
+
+		// Create an APIError without request_id
+		apiErr := &cliclient.APIError{
+			Message:   "server not found",
+			RequestID: "", // Empty request_id
+		}
+
+		// Call outputError
+		_ = outputError(apiErr, "SERVER_NOT_FOUND")
+
+		w.Close()
+		var buf bytes.Buffer
+		buf.ReadFrom(r)
+		output := buf.String()
+
+		// Verify "Request ID:" is NOT printed
+		if strings.Contains(output, "Request ID:") {
+			t.Errorf("Expected output to NOT contain 'Request ID:' when request_id is empty, got: %s", output)
+		}
+
+		// Verify error message is still printed
+		if !strings.Contains(output, "server not found") {
+			t.Errorf("Expected output to contain error message, got: %s", output)
+		}
+	})
+
+	t.Run("does not print request_id for regular errors", func(t *testing.T) {
+		// Capture stderr
+		oldStderr := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+		defer func() { os.Stderr = oldStderr }()
+
+		// Set table format
+		globalOutputFormat = "table"
+		globalJSONOutput = false
+
+		// Create a regular error (not APIError)
+		regularErr := os.ErrNotExist
+
+		// Call outputError
+		_ = outputError(regularErr, "FILE_NOT_FOUND")
+
+		w.Close()
+		var buf bytes.Buffer
+		buf.ReadFrom(r)
+		output := buf.String()
+
+		// Verify "Request ID:" is NOT printed
+		if strings.Contains(output, "Request ID:") {
+			t.Errorf("Expected output to NOT contain 'Request ID:' for regular errors, got: %s", output)
+		}
+	})
+}

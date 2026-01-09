@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"mcpproxy-go/internal/reqcontext"
 )
 
 // CodeExecRequest represents the request body for code execution.
@@ -27,10 +29,11 @@ type CodeExecOptions struct {
 
 // CodeExecResponse represents the response format.
 type CodeExecResponse struct {
-	OK     bool                   `json:"ok"`
-	Result interface{}            `json:"result,omitempty"`
-	Error  *CodeExecError         `json:"error,omitempty"`
-	Stats  map[string]interface{} `json:"stats,omitempty"`
+	OK        bool                   `json:"ok"`
+	Result    interface{}            `json:"result,omitempty"`
+	Error     *CodeExecError         `json:"error,omitempty"`
+	Stats     map[string]interface{} `json:"stats,omitempty"`
+	RequestID string                 `json:"request_id,omitempty"` // T016: Added for error correlation
 }
 
 // CodeExecError represents execution error details.
@@ -62,13 +65,13 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
 	var req CodeExecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid JSON request body")
+		h.writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Invalid JSON request body")
 		return
 	}
 
 	// Validate required fields
 	if req.Code == "" {
-		h.writeError(w, http.StatusBadRequest, "MISSING_CODE", "Code field is required")
+		h.writeError(w, r, http.StatusBadRequest, "MISSING_CODE", "Code field is required")
 		return
 	}
 
@@ -100,7 +103,7 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	result, err := h.toolCaller.CallTool(ctx, "code_execution", args)
 	if err != nil {
 		h.logger.Errorw("Code execution failed", "error", err)
-		h.writeError(w, http.StatusInternalServerError, "EXECUTION_FAILED", err.Error())
+		h.writeError(w, r, http.StatusInternalServerError, "EXECUTION_FAILED", err.Error())
 		return
 	}
 
@@ -329,7 +332,9 @@ func (h *CodeExecHandler) parseResult(result interface{}) CodeExecResponse {
 	}
 }
 
-func (h *CodeExecHandler) writeError(w http.ResponseWriter, status int, code, message string) {
+// T016: Updated to include request_id in error responses
+func (h *CodeExecHandler) writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	requestID := reqcontext.GetRequestID(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	response := CodeExecResponse{
@@ -338,6 +343,7 @@ func (h *CodeExecHandler) writeError(w http.ResponseWriter, status int, code, me
 			Code:    code,
 			Message: message,
 		},
+		RequestID: requestID,
 	}
 	json.NewEncoder(w).Encode(response)
 }

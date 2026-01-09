@@ -392,10 +392,20 @@ func NewSuccessResponse(data interface{}) APIResponse {
 	}
 }
 
+// NewErrorResponse creates an error response without request ID (for backward compatibility)
 func NewErrorResponse(errorMsg string) APIResponse {
 	return APIResponse{
 		Success: false,
 		Error:   errorMsg,
+	}
+}
+
+// NewErrorResponseWithRequestID creates an error response with request ID for log correlation
+func NewErrorResponseWithRequestID(errorMsg, requestID string) APIResponse {
+	return APIResponse{
+		Success:   false,
+		Error:     errorMsg,
+		RequestID: requestID,
 	}
 }
 

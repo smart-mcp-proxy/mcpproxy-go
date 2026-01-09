@@ -243,7 +243,8 @@ func runToolsListClientMode(ctx context.Context, dataDir, serverName string, log
 	// Fetch tools from daemon
 	tools, err := client.GetServerTools(ctx, serverName)
 	if err != nil {
-		return fmt.Errorf("failed to get server tools from daemon: %w", err)
+		// T027: Use cliError to include request_id in error output
+		return cliError("failed to get server tools from daemon", err)
 	}
 
 	// Output results

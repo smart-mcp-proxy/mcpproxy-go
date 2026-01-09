@@ -16,6 +16,9 @@ type StructuredError struct {
 
 	// Context contains additional structured data about the error
 	Context map[string]interface{} `json:"context,omitempty" yaml:"context,omitempty"`
+
+	// RequestID is the server-generated request ID for log correlation (T023)
+	RequestID string `json:"request_id,omitempty" yaml:"request_id,omitempty"`
 }
 
 // Error implements the error interface for StructuredError.
@@ -63,6 +66,12 @@ func (e StructuredError) WithContext(key string, value interface{}) StructuredEr
 		e.Context = make(map[string]interface{})
 	}
 	e.Context[key] = value
+	return e
+}
+
+// WithRequestID adds a request ID for log correlation (T023).
+func (e StructuredError) WithRequestID(requestID string) StructuredError {
+	e.RequestID = requestID
 	return e
 }
 

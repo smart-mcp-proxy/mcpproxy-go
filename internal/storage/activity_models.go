@@ -75,6 +75,7 @@ type ActivityFilter struct {
 	Limit      int       // Max records to return (default 50, max 100)
 	Offset     int       // Pagination offset
 	IntentType string    // Filter by intent operation type: read, write, destructive (Spec 018)
+	RequestID  string    // Filter by HTTP request ID for correlation (Spec 021)
 }
 
 // DefaultActivityFilter returns an ActivityFilter with sensible defaults
@@ -139,6 +140,11 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		if recordIntentType != f.IntentType {
 			return false
 		}
+	}
+
+	// Check request_id filter (Spec 021)
+	if f.RequestID != "" && record.RequestID != f.RequestID {
+		return false
 	}
 
 	return true
