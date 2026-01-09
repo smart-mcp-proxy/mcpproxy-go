@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -2540,6 +2541,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
 				c.logger.Warn("⚠️ OAuth metadata validation failed",
 					zap.String("server", c.config.Name),
+					zap.String("correlation_id", result.CorrelationID),
 					zap.String("error_type", metadataErr.ErrorType),
 					zap.String("message", metadataErr.Message))
 
@@ -2836,6 +2838,343 @@ func (c *Client) ClearOAuthState() {
 func (c *Client) ForceOAuthFlow(ctx context.Context) error {
 	_, err := c.ForceOAuthFlowWithResult(ctx)
 	return err
+}
+
+// StartOAuthFlowQuick starts the OAuth flow and returns browser status immediately.
+// Unlike ForceOAuthFlowWithResult which blocks until OAuth completes, this function:
+// 1. Gets authorization URL synchronously (quick operation)
+// 2. Checks HEADLESS environment variable
+// 3. Attempts browser open and captures result
+// 4. Returns OAuthStartResult immediately
+// 5. Continues OAuth callback handling in a goroutine
+//
+// This is used by the login API endpoint to return accurate browser_opened status
+// without blocking the HTTP response for the full OAuth flow.
+func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, error) {
+	// Generate correlation ID first so all logs can use it
+	result := &OAuthStartResult{
+		CorrelationID: fmt.Sprintf("oauth-%s-%d", c.config.Name, time.Now().UnixNano()),
+	}
+
+	c.logger.Info("🔐 Starting quick OAuth flow",
+		zap.String("server", c.config.Name),
+		zap.String("correlation_id", result.CorrelationID))
+
+	// Fast-fail if OAuth is clearly not applicable for this server
+	if !oauth.ShouldUseOAuth(c.config) {
+		c.logger.Warn("⚠️ OAuth not applicable for server",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", result.CorrelationID))
+		return result, fmt.Errorf("OAuth is not supported or not applicable for server '%s'", c.config.Name)
+	}
+
+	// Check if OAuth is already in progress
+	if c.isOAuthInProgress() {
+		c.logger.Warn("⚠️ OAuth authorization already in progress",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", result.CorrelationID))
+		return result, fmt.Errorf("OAuth authorization already in progress for %s", c.config.Name)
+	}
+
+	// Clear any existing OAuth state
+	c.clearOAuthState()
+
+	// Ensure transport type is determined
+	if c.transportType == "" {
+		c.transportType = transport.DetermineTransportType(c.config)
+	}
+
+	// Create OAuth config
+	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(c.config, c.storage)
+	if oauthConfig == nil {
+		c.logger.Error("❌ Failed to create OAuth config",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", result.CorrelationID))
+		return result, fmt.Errorf("failed to create OAuth config - server may not support OAuth")
+	}
+
+	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
+	if c.config.URL != "" {
+		_, validationErr := oauth.ValidateOAuthMetadata(c.config.URL, c.config.Name, 5*time.Second)
+		if validationErr != nil {
+			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
+				c.logger.Warn("⚠️ OAuth metadata validation failed",
+					zap.String("server", c.config.Name),
+					zap.String("correlation_id", result.CorrelationID),
+					zap.String("error_type", metadataErr.ErrorType))
+				return result, &contracts.OAuthFlowError{
+					Success:       false,
+					ErrorType:     metadataErr.ErrorType,
+					ErrorCode:     metadataErr.ErrorCode,
+					ServerName:    c.config.Name,
+					CorrelationID: result.CorrelationID,
+					Message:       metadataErr.Message,
+					Suggestion:    metadataErr.Suggestion,
+				}
+			}
+		}
+	}
+
+	// Get authorization URL - this is the key synchronous operation
+	authURL, oauthHandler, codeVerifier, state, err := c.getAuthorizationURLQuick(ctx, oauthConfig, extraParams, result.CorrelationID)
+	if err != nil {
+		c.logger.Error("❌ Failed to get authorization URL",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", result.CorrelationID),
+			zap.Error(err))
+
+		// Add correlation_id to structured errors for tracing
+		var flowErr *contracts.OAuthFlowError
+		if errors.As(err, &flowErr) {
+			flowErr.CorrelationID = result.CorrelationID
+		}
+		return result, err
+	}
+
+	result.AuthURL = authURL
+	c.logger.Info("🌐 Authorization URL obtained",
+		zap.String("server", c.config.Name),
+		zap.String("correlation_id", result.CorrelationID))
+
+	// Check HEADLESS mode - skip browser if set
+	if os.Getenv("HEADLESS") != "" {
+		c.logger.Info("📵 HEADLESS mode detected - skipping browser open",
+			zap.String("server", c.config.Name),
+			zap.String("auth_url", authURL))
+		result.BrowserOpened = false
+		result.BrowserError = "HEADLESS mode - browser not opened. Please open the auth_url manually."
+
+		// Start OAuth callback handling in background
+		go c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, result.CorrelationID)
+
+		return result, nil
+	}
+
+	// Attempt to open browser
+	if err := c.openBrowser(authURL); err != nil {
+		c.logger.Warn("Failed to open browser automatically",
+			zap.String("server", c.config.Name),
+			zap.String("url", authURL),
+			zap.Error(err))
+		result.BrowserOpened = false
+		result.BrowserError = err.Error()
+	} else {
+		result.BrowserOpened = true
+		c.logger.Info("✅ Browser opened successfully",
+			zap.String("server", c.config.Name))
+	}
+
+	// Start OAuth callback handling in background
+	go c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, result.CorrelationID)
+
+	return result, nil
+}
+
+// getAuthorizationURLQuick gets the authorization URL without starting the full OAuth flow.
+// Returns the URL, OAuth handler, code verifier, and state for later use.
+func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *client.OAuthConfig, extraParams map[string]string, correlationID string) (string, *uptransport.OAuthHandler, string, string, error) {
+	// Create transport config with OAuth
+	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+
+	// Create OAuth-enabled HTTP client
+	httpClient, err := transport.CreateHTTPClient(httpConfig)
+	if err != nil {
+		return "", nil, "", "", fmt.Errorf("failed to create OAuth HTTP client: %w", err)
+	}
+
+	// Store the client
+	c.client = httpClient
+
+	// Start the client
+	if err := c.client.Start(ctx); err != nil {
+		return "", nil, "", "", fmt.Errorf("failed to start OAuth client: %w", err)
+	}
+
+	// Try to initialize - this will trigger OAuth authorization requirement
+	err = c.initialize(ctx)
+	if err == nil {
+		// No OAuth needed - server connected without auth
+		return "", nil, "", "", fmt.Errorf("server connected without OAuth - no authentication required")
+	}
+
+	// Check if this is an OAuth authorization error
+	if !client.IsOAuthAuthorizationRequiredError(err) && !c.isOAuthError(err) {
+		return "", nil, "", "", fmt.Errorf("initialization failed with non-OAuth error: %w", err)
+	}
+
+	// Get the OAuth handler from the error
+	oauthHandler := client.GetOAuthHandler(err)
+	if oauthHandler == nil {
+		return "", nil, "", "", fmt.Errorf("failed to get OAuth handler from error")
+	}
+
+	// Generate PKCE code verifier and challenge
+	codeVerifier, err := client.GenerateCodeVerifier()
+	if err != nil {
+		return "", nil, "", "", fmt.Errorf("failed to generate code verifier: %w", err)
+	}
+	codeChallenge := client.GenerateCodeChallenge(codeVerifier)
+
+	// Generate state parameter
+	state, err := client.GenerateState()
+	if err != nil {
+		return "", nil, "", "", fmt.Errorf("failed to generate state: %w", err)
+	}
+
+	// Check for existing credentials or attempt DCR
+	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
+	hasPersistedCredentials := oauthConfig.ClientID != ""
+
+	if !hasStaticCredentials && !hasPersistedCredentials {
+		c.logger.Info("📋 Attempting Dynamic Client Registration (DCR)",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID))
+
+		var regErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					regErr = fmt.Errorf("DCR panicked: %v", r)
+				}
+			}()
+			regErr = oauthHandler.RegisterClient(ctx, "mcpproxy-go")
+		}()
+
+		if regErr != nil {
+			c.logger.Warn("⚠️ DCR failed",
+				zap.String("server", c.config.Name),
+				zap.String("correlation_id", correlationID),
+				zap.Error(regErr))
+
+			if strings.Contains(regErr.Error(), "403") {
+				c.logger.Error("❌ DCR returned 403 - client_id required",
+					zap.String("server", c.config.Name),
+					zap.String("correlation_id", correlationID),
+					zap.String("suggestion", "Register an OAuth app with the provider"))
+				return "", nil, "", "", &contracts.OAuthFlowError{
+					Success:       false,
+					ErrorType:     contracts.OAuthErrorClientIDRequired,
+					ErrorCode:     contracts.OAuthCodeNoClientID,
+					ServerName:    c.config.Name,
+					CorrelationID: correlationID,
+					Message:       fmt.Sprintf("Server '%s' requires client_id but DCR returned 403", c.config.Name),
+					Suggestion:    "Register an OAuth app with the provider and configure oauth.client_id in server config.",
+				}
+			}
+		} else {
+			c.logger.Info("✅ DCR succeeded",
+				zap.String("server", c.config.Name),
+				zap.String("correlation_id", correlationID))
+			// Persist DCR credentials
+			clientID := oauthHandler.GetClientID()
+			clientSecret := oauthHandler.GetClientSecret()
+			if c.storage != nil && clientID != "" {
+				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+				_ = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret)
+			}
+		}
+	}
+
+	// Build and get the authorization URL
+	var authURL string
+	var authURLErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				authURLErr = fmt.Errorf("GetAuthorizationURL panicked: %v", r)
+			}
+		}()
+		authURL, authURLErr = oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
+	}()
+
+	if authURLErr != nil {
+		return "", nil, "", "", &contracts.OAuthFlowError{
+			Success:    false,
+			ErrorType:  contracts.OAuthErrorFlowFailed,
+			ErrorCode:  contracts.OAuthCodeFlowFailed,
+			ServerName: c.config.Name,
+			Message:    fmt.Sprintf("Failed to get authorization URL: %v", authURLErr),
+			Suggestion: "Check server OAuth configuration and try again.",
+		}
+	}
+
+	return authURL, oauthHandler, codeVerifier, state, nil
+}
+
+// waitForOAuthCallbackAsync waits for OAuth callback and handles token exchange in background.
+func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *uptransport.OAuthHandler, codeVerifier, state, correlationID string) {
+	c.markOAuthInProgress()
+	defer func() {
+		c.oauthMu.Lock()
+		c.oauthInProgress = false
+		c.oauthMu.Unlock()
+	}()
+
+	c.logger.Info("⏳ Waiting for OAuth callback in background",
+		zap.String("server", c.config.Name),
+		zap.String("correlation_id", correlationID))
+
+	// Get or create callback server
+	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
+	if !exists {
+		c.logger.Error("❌ Callback server not found",
+			zap.String("server", c.config.Name))
+		return
+	}
+
+	select {
+	case params := <-callbackServer.CallbackChan:
+		c.logger.Info("🎯 OAuth callback received",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID))
+
+		// Verify state parameter
+		if params["state"] != state {
+			c.logger.Error("❌ State mismatch in OAuth callback",
+				zap.String("server", c.config.Name),
+				zap.String("expected", state),
+				zap.String("got", params["state"]))
+			return
+		}
+
+		// Get authorization code
+		code := params["code"]
+		if code == "" {
+			if params["error"] != "" {
+				c.logger.Error("❌ OAuth authorization failed",
+					zap.String("server", c.config.Name),
+					zap.String("error", params["error"]),
+					zap.String("description", params["error_description"]))
+			}
+			return
+		}
+
+		// Exchange the authorization code for a token
+		if err := oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier); err != nil {
+			c.logger.Error("❌ Failed to exchange authorization code",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			return
+		}
+
+		c.logger.Info("✅ OAuth authorization successful",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID))
+
+		// Mark OAuth as complete
+		c.markOAuthComplete()
+		tokenManager := oauth.GetTokenStoreManager()
+		tokenManager.MarkOAuthCompleted(c.config.Name)
+
+	case <-time.After(120 * time.Second):
+		c.logger.Warn("⏱️ OAuth authorization timeout",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID))
+
+	case <-ctx.Done():
+		c.logger.Info("OAuth flow cancelled",
+			zap.String("server", c.config.Name))
+	}
 }
 
 // ForceOAuthFlowWithResult forces an OAuth authentication flow and returns the auth URL and browser status.

@@ -14,6 +14,7 @@ import (
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/reqcontext"
 	"mcpproxy-go/internal/secret"
+	"mcpproxy-go/internal/upstream/core"
 )
 
 // BulkOperationResult holds the results of a bulk operation across multiple servers.
@@ -100,6 +101,11 @@ type Service interface {
 	// or server doesn't support OAuth.
 	TriggerOAuthLogin(ctx context.Context, name string) error
 
+	// TriggerOAuthLoginQuick initiates OAuth 2.x authentication flow and returns browser status immediately.
+	// Unlike TriggerOAuthLogin which runs fully async, this returns actual browser_opened status.
+	// Used by HTTP handler to return accurate OAuthStartResponse (Spec 020 fix).
+	TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error)
+
 	// TriggerOAuthLogout clears OAuth token and disconnects a specific server.
 	// This operation respects disable_management and read_only configuration gates.
 	// Emits "servers.changed" event on successful logout.
@@ -128,6 +134,8 @@ type RuntimeOperations interface {
 	BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error)
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
 	TriggerOAuthLogin(serverName string) error
+	// TriggerOAuthLoginQuick returns browser status immediately (Spec 020 fix)
+	TriggerOAuthLoginQuick(serverName string) (*core.OAuthStartResult, error)
 	TriggerOAuthLogout(serverName string) error
 	RefreshOAuthToken(serverName string) error
 }
@@ -707,6 +715,29 @@ func (s *service) TriggerOAuthLogin(ctx context.Context, name string) error {
 	// (existing behavior - no changes needed)
 
 	return nil
+}
+
+// TriggerOAuthLoginQuick initiates OAuth and returns browser status immediately (Spec 020 fix).
+// Unlike TriggerOAuthLogin which runs fully async, this returns actual browser_opened, auth_url status.
+func (s *service) TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error) {
+	// Validate input
+	if name == "" {
+		return nil, fmt.Errorf("server name required")
+	}
+
+	// Check configuration gates (T015)
+	if err := s.checkWriteGates(); err != nil {
+		return nil, err
+	}
+
+	// Delegate to runtime's quick OAuth method
+	result, err := s.runtime.TriggerOAuthLoginQuick(name)
+	if err != nil {
+		return result, fmt.Errorf("failed to start OAuth: %w", err)
+	}
+
+	// Event will be emitted by upstream manager on OAuth completion
+	return result, nil
 }
 
 // AuthStatus returns detailed OAuth authentication status for a specific server.

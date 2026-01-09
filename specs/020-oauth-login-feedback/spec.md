@@ -212,6 +212,32 @@ OAuth flows can fail AFTER pre-flight validation passes but BEFORE the browser o
 - **SC-009**: CLI displays `debug_hint` for all OAuth runtime errors
 - **SC-010**: Zero "internal error (panic recovered)" messages visible to users
 
+## Known Issues (Post-Implementation)
+
+### BUG-001: browser_opened Hardcoded to True (Fixed in PR #XXX)
+
+**Problem**: The initial implementation at `internal/httpapi/server.go:1393` hardcoded `BrowserOpened: true` instead of using the actual browser status. This happened because:
+
+1. `TriggerOAuthLogin()` called `StartManualOAuth()` which runs asynchronously
+2. `StartManualOAuth()` returns `nil` immediately before the browser is opened
+3. HTTP handler assumed `browser_opened: true` with comment "Assumed true since errors are returned above"
+
+**Root Cause**: The OAuth flow was fully async, but the API needed synchronous feedback about browser status.
+
+**Fix**: Created `StartManualOAuthQuick()` which:
+1. Gets authorization URL synchronously
+2. Checks HEADLESS environment variable
+3. Attempts browser open and captures result
+4. Returns `OAuthStartResult` with actual `BrowserOpened`, `AuthURL`, `BrowserError`
+5. Continues OAuth callback handling in goroutine
+
+**Files Changed**:
+- `internal/upstream/core/connection.go` - Added `StartOAuthFlowQuick()`
+- `internal/upstream/manager.go` - Added `StartManualOAuthQuick()`
+- `internal/runtime/runtime.go` - Updated return type
+- `internal/management/service.go` - Updated return type
+- `internal/httpapi/server.go` - Use actual result
+
 ## Assumptions
 
 - The daemon already has OAuth flow infrastructure (callback server, token handling)

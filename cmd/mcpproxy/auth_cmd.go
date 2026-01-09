@@ -615,14 +615,17 @@ func displayOAuthFlowError(err *contracts.OAuthFlowError) {
 	fmt.Fprintf(os.Stderr, "\n💡 Suggestion: %s\n", err.Suggestion)
 
 	// Build debug hint with log correlation commands
+	// OAuth errors are logged to main.log, not server-specific logs
 	fmt.Fprintf(os.Stderr, "\n🔍 Debug:\n")
 	fmt.Fprintf(os.Stderr, "   Server logs: mcpproxy upstream logs %s\n", err.ServerName)
-	if err.RequestID != "" {
-		fmt.Fprintf(os.Stderr, "   Activity log: mcpproxy activity list --request-id %s\n", err.RequestID)
-		fmt.Fprintf(os.Stderr, "   Request ID: %s\n", err.RequestID)
-	}
 	if err.CorrelationID != "" {
+		if logDir, logDirErr := logs.GetLogDir(); logDirErr == nil {
+			fmt.Fprintf(os.Stderr, "   OAuth logs:  grep %s %s/main.log\n", err.CorrelationID, logDir)
+		}
 		fmt.Fprintf(os.Stderr, "   Correlation ID: %s\n", err.CorrelationID)
+	}
+	if err.RequestID != "" {
+		fmt.Fprintf(os.Stderr, "   Request ID: %s\n", err.RequestID)
 	}
 	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 }

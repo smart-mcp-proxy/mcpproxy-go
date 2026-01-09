@@ -1801,6 +1801,91 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	return nil
 }
 
+// StartManualOAuthQuick starts OAuth and returns browser status immediately.
+// Unlike StartManualOAuth (fully async, no result) or StartManualOAuthWithInfo (fully sync, blocks),
+// this returns browser status quickly but continues the OAuth callback handling in background.
+//
+// This is the recommended method for API endpoints that need to return browser_opened status.
+func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResult, error) {
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+	if !exists {
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
+
+	cfg := client.Config
+	m.logger.Info("Starting quick OAuth flow (returns browser status immediately)",
+		zap.String("server", cfg.Name))
+
+	// Preflight: if server does not appear to require OAuth, return error
+	if !oauth.ShouldUseOAuth(cfg) {
+		m.logger.Info("OAuth not applicable based on config", zap.String("server", cfg.Name))
+		return nil, fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
+	}
+
+	// Create a transient core client that uses the daemon's storage
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
+	}
+
+	// Use a long-running context for the OAuth callback (30 minutes)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+
+	// Clear OAuth state for fresh flow
+	coreClient.ClearOAuthState()
+
+	// Start the quick OAuth flow - this returns immediately with browser status
+	result, err := coreClient.StartOAuthFlowQuick(ctx)
+	if err != nil {
+		cancel()
+		return result, err
+	}
+
+	// Set up reconnection after OAuth completes (in background)
+	go func() {
+		defer cancel()
+
+		// Wait a bit for OAuth to complete (the callback handling runs in background)
+		// Then trigger reconnect
+		time.Sleep(2 * time.Second)
+
+		// Check if OAuth completed by looking for token
+		if m.storage != nil {
+			serverKey := oauth.GenerateServerKey(cfg.Name, cfg.URL)
+			token, _ := m.storage.GetOAuthToken(serverKey)
+			if token != nil && token.AccessToken != "" {
+				m.logger.Info("OAuth token obtained, triggering reconnect",
+					zap.String("server", cfg.Name))
+				if err := m.RetryConnection(cfg.Name); err != nil {
+					m.logger.Warn("Failed to trigger reconnect after OAuth",
+						zap.String("server", cfg.Name),
+						zap.Error(err))
+				}
+			}
+		}
+
+		// Also set up a watcher for OAuth completion
+		tokenManager := oauth.GetTokenStoreManager()
+		for i := 0; i < 60; i++ { // Check for 2 minutes
+			if tokenManager.HasRecentOAuthCompletion(cfg.Name) {
+				m.logger.Info("OAuth completion detected, triggering reconnect",
+					zap.String("server", cfg.Name))
+				if err := m.RetryConnection(cfg.Name); err != nil {
+					m.logger.Warn("Failed to trigger reconnect after OAuth completion",
+						zap.String("server", cfg.Name),
+						zap.Error(err))
+				}
+				return
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}()
+
+	return result, nil
+}
+
 // StartManualOAuthWithInfo performs an in-process OAuth flow and returns the auth URL and browser status.
 // This is used by Phase 3 (Spec 020) to return structured information about the OAuth flow start.
 // Unlike StartManualOAuth, this method waits for the auth URL to be obtained before returning.
