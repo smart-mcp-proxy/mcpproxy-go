@@ -147,8 +147,17 @@ func TestOutputDiagnostics_PrettyFormat_WithUpstreamErrors(t *testing.T) {
 
 func TestOutputDiagnostics_PrettyFormat_WithOAuthRequired(t *testing.T) {
 	diag := map[string]interface{}{
-		"total_issues":   2,
-		"oauth_required": []interface{}{"sentry-server", "github-server"},
+		"total_issues": 2,
+		"oauth_required": []interface{}{
+			map[string]interface{}{
+				"server_name": "sentry-server",
+				"message":     "Authentication required",
+			},
+			map[string]interface{}{
+				"server_name": "github-server",
+				"message":     "",
+			},
+		},
 	}
 
 	// Capture stdout
@@ -191,9 +200,8 @@ func TestOutputDiagnostics_PrettyFormat_WithMissingSecrets(t *testing.T) {
 		"total_issues": 1,
 		"missing_secrets": []interface{}{
 			map[string]interface{}{
-				"name":      "API_KEY",
-				"server":    "weather-api",
-				"reference": "${WEATHER_API_KEY}",
+				"secret_name": "API_KEY",
+				"used_by":     []interface{}{"weather-api"},
 			},
 		},
 	}
@@ -225,9 +233,6 @@ func TestOutputDiagnostics_PrettyFormat_WithMissingSecrets(t *testing.T) {
 	}
 	if !strings.Contains(output, "weather-api") {
 		t.Error("Missing server name")
-	}
-	if !strings.Contains(output, "${WEATHER_API_KEY}") {
-		t.Error("Missing secret reference")
 	}
 }
 
@@ -606,8 +611,8 @@ func TestOutputDiagnostics_SecretWithoutOptionalFields(t *testing.T) {
 		"total_issues": 1,
 		"missing_secrets": []interface{}{
 			map[string]interface{}{
-				"name": "API_KEY",
-				// server and reference are optional
+				"secret_name": "API_KEY",
+				// used_by is optional
 			},
 		},
 	}
@@ -633,5 +638,51 @@ func TestOutputDiagnostics_SecretWithoutOptionalFields(t *testing.T) {
 	// Should still display the secret name
 	if !strings.Contains(output, "API_KEY") {
 		t.Error("Should display secret name even without optional fields")
+	}
+}
+
+// TestOutputDiagnostics_MissingSecretsRealJSON tests that the doctor command
+// correctly parses the actual JSON field names produced by the backend.
+// The MissingSecretInfo struct uses json:"secret_name" and json:"used_by",
+// NOT "name", "server", "reference".
+func TestOutputDiagnostics_MissingSecretsRealJSON(t *testing.T) {
+	// This is the ACTUAL JSON structure produced by the backend
+	// (see internal/contracts/types.go MissingSecretInfo struct)
+	diag := map[string]interface{}{
+		"total_issues": 1,
+		"missing_secrets": []interface{}{
+			map[string]interface{}{
+				"secret_name": "GITHUB_TOKEN",              // NOT "name"
+				"used_by":     []interface{}{"github-mcp"}, // NOT "server" (and it's an array)
+			},
+		},
+	}
+
+	// Capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+
+	doctorOutput = "pretty"
+	err := outputDiagnostics(diag, nil)
+
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if err != nil {
+		t.Errorf("outputDiagnostics() returned error: %v", err)
+	}
+
+	// Verify the secret name is displayed
+	if !strings.Contains(output, "GITHUB_TOKEN") {
+		t.Errorf("Should display secret name 'GITHUB_TOKEN' from secret_name field.\nGot output:\n%s", output)
+	}
+
+	// Verify the server name is displayed
+	if !strings.Contains(output, "github-mcp") {
+		t.Errorf("Should display server 'github-mcp' from used_by field.\nGot output:\n%s", output)
 	}
 }

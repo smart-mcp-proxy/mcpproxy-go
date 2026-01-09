@@ -10,13 +10,34 @@ import (
 	internalRuntime "mcpproxy-go/internal/runtime"
 )
 
+// ClientInterface defines the methods required by ServerAdapter from the API client.
+// This interface allows for testing with mock implementations.
+type ClientInterface interface {
+	GetServers() ([]Server, error)
+	GetInfo() (map[string]interface{}, error)
+	EnableServer(serverName string, enabled bool) error
+	TriggerOAuthLogin(serverName string) error
+	StatusChannel() <-chan StatusUpdate
+}
+
+// isServerHealthy returns true if the server is considered healthy.
+// It uses health.level as the source of truth, with a fallback to the legacy
+// connected field for backward compatibility when health is nil.
+func isServerHealthy(health *HealthStatus, legacyConnected bool) bool {
+	if health != nil {
+		return health.Level == "healthy"
+	}
+	// Fallback to legacy connected field if health is not available
+	return legacyConnected
+}
+
 // ServerAdapter adapts the API client to the ServerInterface expected by the tray
 type ServerAdapter struct {
-	client *Client
+	client ClientInterface
 }
 
 // NewServerAdapter creates a new server adapter
-func NewServerAdapter(client *Client) *ServerAdapter {
+func NewServerAdapter(client ClientInterface) *ServerAdapter {
 	return &ServerAdapter{
 		client: client,
 	}
@@ -61,7 +82,7 @@ func (a *ServerAdapter) GetUpstreamStats() map[string]interface{} {
 	connectedCount := 0
 	totalTools := 0
 	for _, server := range servers {
-		if server.Connected {
+		if isServerHealthy(server.Health, server.Connected) {
 			connectedCount++
 		}
 		totalTools += server.ToolCount
@@ -114,7 +135,7 @@ func (a *ServerAdapter) GetStatus() interface{} {
 
 	connectedCount := 0
 	for _, server := range servers {
-		if server.Connected {
+		if isServerHealthy(server.Health, server.Connected) {
 			connectedCount++
 		}
 	}
@@ -215,7 +236,7 @@ func (a *ServerAdapter) GetAllServers() ([]map[string]interface{}, error) {
 
 	var result []map[string]interface{}
 	for _, server := range servers {
-		result = append(result, map[string]interface{}{
+		serverMap := map[string]interface{}{
 			"name":            server.Name,
 			"url":             server.URL,
 			"command":         server.Command,
@@ -230,7 +251,20 @@ func (a *ServerAdapter) GetAllServers() ([]map[string]interface{}, error) {
 			"should_retry":    server.ShouldRetry,
 			"retry_count":     server.RetryCount,
 			"last_retry_time": server.LastRetry,
-		})
+		}
+
+		// Spec 013: Include health status as source of truth for connected count
+		if server.Health != nil {
+			serverMap["health"] = map[string]interface{}{
+				"level":       server.Health.Level,
+				"admin_state": server.Health.AdminState,
+				"summary":     server.Health.Summary,
+				"detail":      server.Health.Detail,
+				"action":      server.Health.Action,
+			}
+		}
+
+		result = append(result, serverMap)
 	}
 
 	return result, nil

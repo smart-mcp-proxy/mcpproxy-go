@@ -14,7 +14,7 @@ func main() {
 	typeDefinitions := generateTypeDefinitions()
 
 	// Create output directory if it doesn't exist
-	outputDir := "web/frontend/src/types"
+	outputDir := "frontend/src/types"
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		fmt.Printf("Error creating output directory: %v\n", err)
 		os.Exit(1)
@@ -48,6 +48,50 @@ func generateTypeDefinitions() string {
 
 `)
 
+	// Health constants - generated from internal/health/constants.go
+	// These must stay in sync with the Go constants
+	sb.WriteString(`// Health constants - generated from internal/health/constants.go
+// Health levels
+export const HealthLevelHealthy = 'healthy' as const;
+export const HealthLevelDegraded = 'degraded' as const;
+export const HealthLevelUnhealthy = 'unhealthy' as const;
+export type HealthLevel = typeof HealthLevelHealthy | typeof HealthLevelDegraded | typeof HealthLevelUnhealthy;
+
+// Admin states
+export const AdminStateEnabled = 'enabled' as const;
+export const AdminStateDisabled = 'disabled' as const;
+export const AdminStateQuarantined = 'quarantined' as const;
+export type AdminState = typeof AdminStateEnabled | typeof AdminStateDisabled | typeof AdminStateQuarantined;
+
+// Health actions - suggested remediation for health issues
+export const HealthActionNone = '' as const;
+export const HealthActionLogin = 'login' as const;
+export const HealthActionRestart = 'restart' as const;
+export const HealthActionEnable = 'enable' as const;
+export const HealthActionApprove = 'approve' as const;
+export const HealthActionViewLogs = 'view_logs' as const;
+export const HealthActionSetSecret = 'set_secret' as const;
+export const HealthActionConfigure = 'configure' as const;
+export type HealthAction =
+  | typeof HealthActionNone
+  | typeof HealthActionLogin
+  | typeof HealthActionRestart
+  | typeof HealthActionEnable
+  | typeof HealthActionApprove
+  | typeof HealthActionViewLogs
+  | typeof HealthActionSetSecret
+  | typeof HealthActionConfigure;
+
+export interface HealthStatus {
+  level: HealthLevel;
+  admin_state: AdminState;
+  summary: string;
+  detail?: string;
+  action?: HealthAction;
+}
+
+`)
+
 	// Server types
 	sb.WriteString(`export interface Server {
   id: string;
@@ -63,15 +107,22 @@ func generateTypeDefinitions() string {
   enabled: boolean;
   quarantined: boolean;
   connected: boolean;
+  connecting?: boolean; // Connection attempt in progress
+  authenticated?: boolean; // Has stored OAuth token (regardless of validity)
   status: string;
   last_error?: string;
   connected_at?: string; // ISO date string
   last_reconnect_at?: string; // ISO date string
   reconnect_count: number;
   tool_count: number;
+  tool_list_token_size?: number; // Token size for this server's tools
   created: string; // ISO date string
   updated: string; // ISO date string
   isolation?: IsolationConfig;
+  oauth_status?: 'authenticated' | 'expired' | 'error' | 'none'; // OAuth authentication status
+  token_expires_at?: string; // ISO date string when OAuth token expires
+  user_logged_out?: boolean; // True if user explicitly logged out (prevents auto-reconnection)
+  health?: HealthStatus; // Unified health status calculated by the backend
 }
 
 export interface OAuthConfig {
@@ -306,6 +357,27 @@ export function isAPIError(response: APIResponse): response is APIError {
 
 export function isAPISuccess<T>(response: APIResponse<T>): response is APISuccess<T> {
   return response.success;
+}
+
+// Update check types (from internal/updatecheck/types.go)
+export interface UpdateInfo {
+  available: boolean;
+  latest_version?: string;
+  release_url?: string;
+  checked_at?: string; // ISO date string
+  is_prerelease?: boolean;
+  check_error?: string;
+}
+
+export interface InfoResponse {
+  version: string;
+  web_ui_url: string;
+  listen_addr: string;
+  endpoints: {
+    http: string;
+    socket: string;
+  };
+  update?: UpdateInfo;
 }
 `)
 

@@ -16,6 +16,7 @@ import (
 	"fyne.io/systray"
 	"go.uber.org/zap"
 
+	"mcpproxy-go/internal/contracts"
 )
 
 const (
@@ -343,13 +344,19 @@ func (m *MenuManager) UpdateUpstreamServersMenu(servers []map[string]interface{}
 	}
 
 	// --- Update Title ---
+	// Use health.level as single source of truth for connected count (FR-013, T039, T040)
 	totalServers := len(servers)
 	connectedServers := 0
 	for _, server := range servers {
-		if connected, ok := server["connected"].(bool); ok && connected {
+		// Check health.level - "healthy" means connected (no legacy fallback per FR-013)
+		healthLevel := extractHealthLevel(server)
+		if healthLevel == "healthy" {
 			connectedServers++
 		}
 	}
+	m.logger.Debugw("Connected count calculated",
+		"healthy", connectedServers,
+		"total_servers", totalServers)
 	menuTitle := fmt.Sprintf("Upstream Servers (%d/%d)", connectedServers, totalServers)
 	if m.upstreamServersMenu != nil {
 		m.upstreamServersMenu.SetTitle(menuTitle)
@@ -628,10 +635,9 @@ func (m *MenuManager) ForceRefresh() {
 }
 
 // getServerStatusDisplay returns display text, tooltip, and icon data for a server
-// Uses the unified health status from the backend when available
+// Uses the unified health status from the backend as single source of truth (FR-013, FR-016, FR-017)
 func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (displayText, tooltip string, iconData []byte) {
 	serverName, _ := server["name"].(string)
-	lastError, _ := server["last_error"].(string)
 	shouldRetry, _ := server["should_retry"].(bool)
 
 	var retryCount int
@@ -753,15 +759,11 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	var tooltipLines []string
 	tooltipLines = append(tooltipLines, fmt.Sprintf("%s - %s", serverName, statusText))
 
-	// Add health detail if available
+	// Use health.detail for tooltip details instead of last_error (FR-017, T034)
 	if hasHealth {
 		if detail, ok := healthData["detail"].(string); ok && detail != "" {
 			tooltipLines = append(tooltipLines, fmt.Sprintf("Detail: %s", detail))
 		}
-	}
-
-	if lastError != "" {
-		tooltipLines = append(tooltipLines, fmt.Sprintf("Last error: %s", lastError))
 	}
 
 	if shouldRetry {
@@ -783,49 +785,19 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	return
 }
 
-// serverSupportsOAuth determines if a server supports OAuth authentication
-func (m *MenuManager) serverSupportsOAuth(server map[string]interface{}) bool {
-	// Get server URL
-	serverURL, ok := server["url"].(string)
-	if !ok || serverURL == "" {
+// serverNeedsAction checks if a server needs a specific action based on health.action
+// This replaces the old URL-based serverSupportsOAuth heuristic (FR-014)
+func (m *MenuManager) serverNeedsAction(server map[string]interface{}, action string) bool {
+	healthData, ok := server["health"].(map[string]interface{})
+	if !ok {
 		return false
 	}
-
-	// Check if it's an HTTP/HTTPS server (OAuth is typically used with HTTP-based APIs)
-	urlLower := strings.ToLower(serverURL)
-	if !strings.HasPrefix(urlLower, "http://") && !strings.HasPrefix(urlLower, "https://") {
-		return false
-	}
-
-	// Check for OAuth-related URLs patterns
-	if strings.Contains(urlLower, "oauth") || strings.Contains(urlLower, "auth") {
-		return true
-	}
-
-	// For common MCP servers that we know support OAuth
-	oauthDomains := []string{
-		"sentry.dev",
-		"github.com",
-		"gitlab.com",
-		"google.com",
-		"googleapis.com",
-		"microsoft.com",
-		"oauth.com",
-	}
-
-	for _, domain := range oauthDomains {
-		if strings.Contains(urlLower, domain) {
-			return true
-		}
-	}
-
-	// For any HTTP/HTTPS server, show OAuth option since it might support it
-	// Users can try it and it will fail gracefully if not supported
-	return true
+	healthAction, _ := healthData["action"].(string)
+	return healthAction == action
 }
 
-// createServerActionSubmenus creates action submenus for a server (enable/disable, quarantine, OAuth login, restart)
-// Uses health.action to determine which actions are most relevant
+// createServerActionSubmenus creates action submenus for a server based on health.action
+// Uses health.action as single source of truth for determining which actions to show (FR-014, FR-015)
 func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuItem, server map[string]interface{}) {
 	serverName, _ := server["name"].(string)
 	if serverName == "" {
@@ -835,13 +807,13 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	enabled, _ := server["enabled"].(bool)
 	quarantined, _ := server["quarantined"].(bool)
 
-	// Get health.action if available
+	// Get health.action - this is the single source of truth for what action is needed
 	healthAction := ""
 	if healthData, ok := server["health"].(map[string]interface{}); ok {
 		healthAction, _ = healthData["action"].(string)
 	}
 
-	// Enable/Disable action
+	// Enable/Disable action - always shown
 	var enableText string
 	if enabled {
 		enableText = textDisable
@@ -851,40 +823,67 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
 	m.serverActionItems[serverName] = enableItem
 
-	// Restart action (for stdio servers when health.action is "restart" or server has errors)
-	if enabled && !quarantined {
-		restartItem := serverMenuItem.AddSubMenuItem("🔄 Restart", fmt.Sprintf("Restart server %s", serverName))
-		m.serverRestartItems[serverName] = restartItem
-
-		// Set up restart click handler
-		go func(name string, item *systray.MenuItem) {
-			for range item.ClickedCh {
-				if m.onServerAction != nil {
-					go m.onServerAction(name, "restart")
+	// Show action-specific menu items based on health.action (FR-014, FR-015, FR-036-038)
+	if !quarantined && enabled {
+		switch healthAction {
+		case "login":
+			// Login Required - show prominently (FR-015, T036)
+			oauthItem := serverMenuItem.AddSubMenuItem("⚠️ Login Required", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+			m.serverOAuthItems[serverName] = oauthItem
+			go func(name string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					if m.onServerAction != nil {
+						go m.onServerAction(name, "oauth_login")
+					}
 				}
-			}
-		}(serverName, restartItem)
-	}
+			}(serverName, oauthItem)
 
-	// OAuth Login action (only for servers that support OAuth)
-	if m.serverSupportsOAuth(server) && !quarantined {
-		// Highlight login if health.action suggests it
-		loginLabel := "🔐 OAuth Login"
-		if healthAction == "login" {
-			loginLabel = "⚠️ Login Required"
+		case "set_secret":
+			// Set Secret - opens Web UI secrets page (T037)
+			secretItem := serverMenuItem.AddSubMenuItem("⚠️ Set Secret", fmt.Sprintf("Configure missing secret for %s", serverName))
+			go func(name string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					if m.onServerAction != nil {
+						go m.onServerAction(name, "set_secret")
+					}
+				}
+			}(serverName, secretItem)
+
+		case "configure":
+			// Configure - opens Web UI server config (T038)
+			configItem := serverMenuItem.AddSubMenuItem("⚠️ Configure", fmt.Sprintf("Fix configuration for %s", serverName))
+			go func(name string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					if m.onServerAction != nil {
+						go m.onServerAction(name, "configure")
+					}
+				}
+			}(serverName, configItem)
+
+		case "restart":
+			// Restart suggested by health - show prominently
+			restartItem := serverMenuItem.AddSubMenuItem("⚠️ Restart Required", fmt.Sprintf("Restart server %s to fix issues", serverName))
+			m.serverRestartItems[serverName] = restartItem
+			go func(name string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					if m.onServerAction != nil {
+						go m.onServerAction(name, "restart")
+					}
+				}
+			}(serverName, restartItem)
+
+		default:
+			// No specific action needed - show standard restart option
+			restartItem := serverMenuItem.AddSubMenuItem("🔄 Restart", fmt.Sprintf("Restart server %s", serverName))
+			m.serverRestartItems[serverName] = restartItem
+			go func(name string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					if m.onServerAction != nil {
+						go m.onServerAction(name, "restart")
+					}
+				}
+			}(serverName, restartItem)
 		}
-		oauthItem := serverMenuItem.AddSubMenuItem(loginLabel, fmt.Sprintf("Authenticate with %s using OAuth", serverName))
-		m.serverOAuthItems[serverName] = oauthItem
-
-		// Set up OAuth login click handler
-		go func(name string, item *systray.MenuItem) {
-			for range item.ClickedCh {
-				if m.onServerAction != nil {
-					// Run in new goroutines to avoid blocking the event channel
-					go m.onServerAction(name, "oauth_login")
-				}
-			}
-		}(serverName, oauthItem)
 	}
 
 	// Quarantine action (only if not already quarantined)
@@ -896,7 +895,6 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 		go func(name string, item *systray.MenuItem) {
 			for range item.ClickedCh {
 				if m.onServerAction != nil {
-					// Run in new goroutines to avoid blocking the event channel
 					go m.onServerAction(name, "quarantine")
 				}
 			}
@@ -907,8 +905,6 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	go func(name string, item *systray.MenuItem) {
 		for range item.ClickedCh {
 			if m.onServerAction != nil {
-				// The best approach is to have the sync manager handle the toggle.
-				// We send a generic 'toggle_enable' action and let the handler determine the state.
 				go m.onServerAction(name, "toggle_enable")
 			}
 		}
@@ -1194,5 +1190,34 @@ func (m *MenuManager) LatestQuarantineSnapshot() []map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return cloneServerData(m.latestQuarantined)
+}
+
+// extractHealthLevel extracts the health level from a server map.
+// The health can be stored as either *contracts.HealthStatus (from GetAllServers)
+// or as map[string]interface{} (from JSON deserialization).
+func extractHealthLevel(server map[string]interface{}) string {
+	healthRaw, ok := server["health"]
+	if !ok || healthRaw == nil {
+		return ""
+	}
+
+	// Try direct struct pointer first (from GetAllServers)
+	if hs, ok := healthRaw.(*contracts.HealthStatus); ok && hs != nil {
+		return hs.Level
+	}
+
+	// Try contracts.HealthStatus value (not pointer)
+	if hs, ok := healthRaw.(contracts.HealthStatus); ok {
+		return hs.Level
+	}
+
+	// Try map[string]interface{} (from JSON deserialization)
+	if healthMap, ok := healthRaw.(map[string]interface{}); ok && healthMap != nil {
+		if level, ok := healthMap["level"].(string); ok {
+			return level
+		}
+	}
+
+	return ""
 }
 

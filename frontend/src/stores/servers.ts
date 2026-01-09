@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { Server, LoadingState } from '@/types'
 import api from '@/services/api'
+import { isServerConnected } from '@/utils/health'
 
 export const useServersStore = defineStore('servers', () => {
   // State
@@ -11,13 +12,13 @@ export const useServersStore = defineStore('servers', () => {
   // Computed
   const serverCount = computed(() => ({
     total: servers.value.length,
-    connected: servers.value.filter(s => s.connected).length,
+    connected: servers.value.filter(isServerConnected).length,
     enabled: servers.value.filter(s => s.enabled).length,
     quarantined: servers.value.filter(s => s.quarantined).length,
   }))
 
   const connectedServers = computed(() =>
-    servers.value.filter(s => s.connected)
+    servers.value.filter(isServerConnected)
   )
 
   const enabledServers = computed(() =>

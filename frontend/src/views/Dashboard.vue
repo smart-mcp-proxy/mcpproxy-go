@@ -1,37 +1,5 @@
 <template>
   <div class="space-y-6">
-    <!-- System Diagnostics -->
-    <div
-      v-if="totalDiagnosticsCount > 0"
-      class="alert"
-      :class="{
-        'alert-error': upstreamErrors.length > 0,
-        'alert-warning': upstreamErrors.length === 0 && (oauthRequired.length > 0 || missingSecrets.length > 0),
-        'alert-info': upstreamErrors.length === 0 && oauthRequired.length === 0 && missingSecrets.length === 0
-      }"
-    >
-      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
-      </svg>
-      <div class="flex-1">
-        <h3 class="font-bold">System Diagnostics</h3>
-        <div class="text-sm">
-          <span class="badge badge-sm mr-2">{{ upstreamErrors.length }} Error{{ upstreamErrors.length !== 1 ? 's' : '' }}</span>
-          <span v-if="upstreamErrors.length > 0">{{ upstreamErrors[0].server }}: {{ upstreamErrors[0].message }}</span>
-          <span v-else-if="oauthRequired.length > 0">{{ oauthRequired.length }} server{{ oauthRequired.length !== 1 ? 's' : '' }} need authentication</span>
-          <span v-else-if="missingSecrets.length > 0">{{ missingSecrets.length }} missing secret{{ missingSecrets.length !== 1 ? 's' : '' }}</span>
-        </div>
-      </div>
-      <button class="btn btn-sm" @click="showDiagnosticsDetail = true">
-        Fix
-      </button>
-      <button v-if="totalDiagnosticsCount > 1" class="btn btn-ghost btn-sm" @click="showDiagnosticsDetail = true">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-    </div>
-
     <!-- Servers Needing Attention Banner (using unified health status) -->
     <div
       v-if="serversNeedingAttention.length > 0"
@@ -68,6 +36,20 @@
             >
               Enable
             </button>
+            <router-link
+              v-if="server.health?.action === 'set_secret'"
+              to="/secrets"
+              class="btn btn-xs btn-primary"
+            >
+              Set Secret
+            </router-link>
+            <router-link
+              v-if="server.health?.action === 'configure'"
+              :to="`/servers/${server.name}?tab=config`"
+              class="btn btn-xs btn-primary"
+            >
+              Configure
+            </router-link>
           </div>
           <div v-if="serversNeedingAttention.length > 3" class="text-xs opacity-60">
             ... and {{ serversNeedingAttention.length - 3 }} more

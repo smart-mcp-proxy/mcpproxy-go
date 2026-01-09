@@ -50,8 +50,8 @@
         </div>
       </div>
 
-      <!-- Error message -->
-      <div v-if="server.last_error" class="alert alert-error alert-sm mb-4">
+      <!-- Error message - suppressed when health.action conveys the issue (FR-018, FR-019) -->
+      <div v-if="shouldShowError" class="alert alert-error alert-sm mb-4">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
@@ -115,6 +115,22 @@
           class="btn btn-sm btn-primary"
         >
           View Logs
+        </router-link>
+
+        <router-link
+          v-if="healthAction === 'set_secret'"
+          to="/secrets"
+          class="btn btn-sm btn-primary"
+        >
+          Set Secret
+        </router-link>
+
+        <router-link
+          v-if="healthAction === 'configure'"
+          :to="`/servers/${server.name}?tab=config`"
+          class="btn btn-sm btn-primary"
+        >
+          Configure
         </router-link>
 
         <!-- Logout button (only when connected with OAuth) -->
@@ -253,52 +269,20 @@ const healthAction = computed(() => {
   return props.server.health?.action || ''
 })
 
-const needsOAuth = computed(() => {
-  // Don't show Login button if server is disabled
-  if (!props.server.enabled) return false
+// Determine if error message should be shown (FR-018, FR-019)
+// Suppress verbose last_error when health.action already conveys the issue
+const shouldShowError = computed(() => {
+  // No error to show
+  if (!props.server.last_error) return false
 
-  // Don't show Login button while connecting (let the connection attempt finish)
-  if (props.server.connecting) return false
-
-  if (!isHttpProtocol.value) return false
-
-  // Don't show Login if already connected
-  if (props.server.connected) return false
-
-  // HTTP servers always support OAuth via autodiscovery, even without explicit oauth config
-  // oauth: null (new server) and oauth: {} (explicit empty config) should both allow Login
-  // Only require explicit oauth config for non-HTTP protocols (though they don't reach here)
-  const hasOAuthSupport = isHttpProtocol.value || (props.server.oauth !== null && props.server.oauth !== undefined)
-  if (!hasOAuthSupport) return false
-
-  // Show Login if user explicitly logged out
-  if (props.server.user_logged_out) {
-    return true
+  // Actions where the button is sufficient - error is redundant (T043-T046)
+  const actionsSuppressingError = ['login', 'set_secret', 'configure']
+  if (actionsSuppressingError.includes(healthAction.value)) {
+    return false
   }
 
-  // Use oauth_status for more accurate token state detection
-  // Show Login if: no token, expired token, or error state
-  const oauthStatus = props.server.oauth_status
-  if (oauthStatus === 'expired' || oauthStatus === 'error' || oauthStatus === 'none') {
-    return true
-  }
-
-  // Fallback: if oauth_status not available, use authenticated flag
-  // Show Login if not authenticated (no stored token)
-  if (!props.server.authenticated) {
-    return true
-  }
-
-  // Check for OAuth-related errors that indicate re-authentication is needed
-  const hasOAuthError = props.server.last_error && (
-    props.server.last_error.includes('authorization') ||
-    props.server.last_error.includes('OAuth') ||
-    props.server.last_error.includes('401') ||
-    props.server.last_error.includes('invalid_token') ||
-    props.server.last_error.includes('Missing or invalid access token')
-  )
-
-  return hasOAuthError
+  // Show error for other cases (restart, view_logs, or no action)
+  return true
 })
 
 const canLogout = computed(() => {

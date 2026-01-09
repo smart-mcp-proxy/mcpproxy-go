@@ -20,6 +20,7 @@ import (
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
+	"mcpproxy-go/internal/health"
 	"mcpproxy-go/internal/httpapi"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/management"
@@ -598,6 +599,27 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			protocol = serverStatus.Config.Protocol
 		}
 
+		// Calculate unified health status (Spec 013: Health is single source of truth)
+		healthInput := health.HealthCalculatorInput{
+			Name:        serverStatus.Name,
+			Enabled:     serverStatus.Enabled,
+			Quarantined: serverStatus.Quarantined,
+			State:       status,
+			Connected:   connected,
+			LastError:   serverStatus.LastError,
+			ToolCount:   serverStatus.ToolCount,
+			// Extract missing secret and OAuth config error from last error
+			MissingSecret:  health.ExtractMissingSecret(serverStatus.LastError),
+			OAuthConfigErr: health.ExtractOAuthConfigError(serverStatus.LastError),
+		}
+
+		// Check if OAuth is required for this server
+		if serverStatus.Config != nil && serverStatus.Config.OAuth != nil {
+			healthInput.OAuthRequired = true
+		}
+
+		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())
+
 		result = append(result, map[string]interface{}{
 			"name":            serverStatus.Name,
 			"url":             url,
@@ -613,7 +635,8 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"status":          status,
 			"should_retry":    false, // Managed by Actor internally now
 			"retry_count":     serverStatus.RetryCount,
-			"last_retry_time": nil, // Actor tracks this internally
+			"last_retry_time": nil,    // Actor tracks this internally
+			"health":          healthStatus, // Spec 013: Health is source of truth
 		})
 	}
 
