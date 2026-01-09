@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -399,8 +400,16 @@ func outputServers(servers []map[string]interface{}) error {
 // outputError formats and outputs an error based on the current output format.
 // For structured formats (json, yaml), it outputs a StructuredError.
 // For table format, it outputs a human-readable error message to stderr.
+// T023: Updated to extract request_id from APIError for log correlation
 func outputError(err error, code string) error {
 	outputFormat := ResolveOutputFormat()
+
+	// T023: Extract request_id from APIError if available
+	var requestID string
+	var apiErr *cliclient.APIError
+	if errors.As(err, &apiErr) && apiErr.HasRequestID() {
+		requestID = apiErr.RequestID
+	}
 
 	// Convert to StructuredError if not already
 	var structErr output.StructuredError
@@ -408,6 +417,11 @@ func outputError(err error, code string) error {
 		structErr = se
 	} else {
 		structErr = output.NewStructuredError(code, err.Error())
+	}
+
+	// T023: Add request_id to StructuredError if available
+	if requestID != "" {
+		structErr = structErr.WithRequestID(requestID)
 	}
 
 	// For structured formats, output JSON/YAML error to stdout
@@ -430,7 +444,14 @@ func outputError(err error, code string) error {
 	}
 
 	// For table format, output human-readable error to stderr
-	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	// T023: Include request ID with log retrieval suggestion if available
+	if requestID != "" {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\nRequest ID: %s\n", requestID)
+		fmt.Fprintf(os.Stderr, "Use 'mcpproxy activity list --request-id %s' to find related logs.\n", requestID)
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	}
 	return err
 }
 

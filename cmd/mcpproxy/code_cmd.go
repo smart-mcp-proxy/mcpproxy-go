@@ -198,7 +198,8 @@ func runCodeExecClientMode(dataDir, code string, input map[string]interface{}, l
 		codeAllowedSrvs,
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error calling daemon: %v\n", err)
+		// T029: Use formatErrorWithRequestID to include request_id in error output
+		fmt.Fprintf(os.Stderr, "Error calling daemon: %s\n", formatErrorWithRequestID(err))
 		return exitError(1)
 	}
 

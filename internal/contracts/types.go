@@ -7,9 +7,10 @@ import (
 
 // APIResponse is the standard wrapper for all API responses
 type APIResponse struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty" swaggertype:"object"`
-	Error   string      `json:"error,omitempty"`
+	Success   bool        `json:"success"`
+	Data      interface{} `json:"data,omitempty" swaggertype:"object"`
+	Error     string      `json:"error,omitempty"`
+	RequestID string      `json:"request_id,omitempty"`
 }
 
 // Server represents an upstream MCP server configuration and status
@@ -558,9 +559,11 @@ type SuccessResponse struct {
 }
 
 // ErrorResponse is the standard error response for API endpoints.
+// All error responses include a request_id for log correlation.
 type ErrorResponse struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error"`
+	Success   bool   `json:"success"`
+	Error     string `json:"error"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // HealthStatus represents the unified health status of an upstream MCP server.

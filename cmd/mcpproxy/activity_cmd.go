@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +38,7 @@ var (
 	activityLimit      int
 	activityOffset     int
 	activityIntentType string // Spec 018: Filter by operation type (read, write, destructive)
+	activityRequestID  string // Spec 021: Filter by HTTP request ID for correlation
 	activityNoIcons    bool   // Disable emoji icons in output
 
 	// Show command flags
@@ -64,6 +66,7 @@ type ActivityFilter struct {
 	Limit      int
 	Offset     int
 	IntentType string // Spec 018: Filter by operation type (read, write, destructive)
+	RequestID  string // Spec 021: Filter by HTTP request ID for correlation
 }
 
 // Validate validates the filter options
@@ -167,6 +170,10 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	}
 	if f.IntentType != "" {
 		q.Set("intent_type", f.IntentType)
+	}
+	// Spec 021: Add request_id filter for log correlation
+	if f.RequestID != "" {
+		q.Set("request_id", f.RequestID)
 	}
 	return q
 }
@@ -369,14 +376,30 @@ func outputActivityError(err error, code string) error {
 		return err
 	}
 
+	// T026: Extract request_id from APIError if available
+	var requestID string
+	var apiErr *cliclient.APIError
+	if errors.As(err, &apiErr) && apiErr.HasRequestID() {
+		requestID = apiErr.RequestID
+	}
+
 	if outputFormat == "json" || outputFormat == "yaml" {
 		structErr := output.NewStructuredError(code, err.Error()).
 			WithGuidance("Use 'mcpproxy activity list' to view recent activities").
 			WithRecoveryCommand("mcpproxy activity list --limit 10")
+		// T026: Add request_id to StructuredError if available
+		if requestID != "" {
+			structErr = structErr.WithRequestID(requestID)
+		}
 		result, _ := formatter.FormatError(structErr)
 		fmt.Println(result)
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		// T026: Include request ID with log retrieval suggestion if available
+		if requestID != "" {
+			fmt.Fprintf(os.Stderr, "\nRequest ID: %s\n", requestID)
+			fmt.Fprintf(os.Stderr, "Use 'mcpproxy activity list --request-id %s' to find related logs.\n", requestID)
+		}
 		fmt.Fprintf(os.Stderr, "Hint: Use 'mcpproxy activity list' to view recent activities\n")
 	}
 	return err
@@ -404,6 +427,9 @@ Examples:
 
   # List errors from github server
   mcpproxy activity list --server github --status error
+
+  # List activity by request ID (for error correlation)
+  mcpproxy activity list --request-id abc123-def456
 
   # List activity as JSON
   mcpproxy activity list -o json`,
@@ -501,6 +527,7 @@ func init() {
 	activityListCmd.Flags().IntVarP(&activityLimit, "limit", "n", 50, "Max records to return (1-100)")
 	activityListCmd.Flags().IntVar(&activityOffset, "offset", 0, "Pagination offset")
 	activityListCmd.Flags().StringVar(&activityIntentType, "intent-type", "", "Filter by intent operation type: read, write, destructive")
+	activityListCmd.Flags().StringVar(&activityRequestID, "request-id", "", "Filter by HTTP request ID for log correlation")
 	activityListCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
 
 	// Watch command flags
@@ -585,6 +612,7 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		Limit:      activityLimit,
 		Offset:     activityOffset,
 		IntentType: activityIntentType,
+		RequestID:  activityRequestID,
 	}
 
 	if err := filter.Validate(); err != nil {

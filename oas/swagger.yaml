@@ -400,6 +400,8 @@ components:
           type: object
         error:
           type: string
+        request_id:
+          type: string
         success:
           type: boolean
       type: object
@@ -609,6 +611,8 @@ components:
     contracts.ErrorResponse:
       properties:
         error:
+          type: string
+        request_id:
           type: string
         success:
           type: boolean
@@ -1495,6 +1499,11 @@ paths:
           - write
           - destructive
           type: string
+      - description: Filter by HTTP request ID for log correlation (Spec 021)
+        in: query
+        name: request_id
+        schema:
+          type: string
       - description: Filter activities after this time (RFC3339)
         in: query
         name: start_time
@@ -1531,6 +1540,8 @@ paths:
                   data:
                     type: object
                   error:
+                    type: string
+                  request_id:
                     type: string
                   success:
                     type: boolean
@@ -1586,6 +1597,8 @@ paths:
                   data:
                     type: object
                   error:
+                    type: string
+                  request_id:
                     type: string
                   success:
                     type: boolean
@@ -1725,6 +1738,8 @@ paths:
                   data:
                     type: object
                   error:
+                    type: string
+                  request_id:
                     type: string
                   success:
                     type: boolean
@@ -2004,6 +2019,8 @@ paths:
                   data:
                     type: object
                   error:
+                    type: string
+                  request_id:
                     type: string
                   success:
                     type: boolean

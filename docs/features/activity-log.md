@@ -39,6 +39,7 @@ Each tool call record includes:
   "duration_ms": 245,
   "timestamp": "2025-01-15T10:30:00Z",
   "session_id": "mcp-session-abc123",
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "intent": {
     "operation_type": "write",
     "data_sensitivity": "internal",
@@ -69,6 +70,34 @@ curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?intent_type=des
 ```
 
 See [Intent Declaration](/features/intent-declaration) for details on the intent-based permission system.
+
+### Request ID Correlation
+
+Every activity record includes a `request_id` that links to the HTTP request that triggered it. This is useful for:
+
+- **Error debugging**: When an API error occurs, the error response includes the `request_id`. Use it to find related activity:
+
+```bash
+# Error response includes request_id
+# { "error": "tool call failed", "request_id": "abc123..." }
+
+# Find activity for that request
+mcpproxy activity list --request-id abc123...
+```
+
+- **Request tracing**: Track all tool calls made during a single API request.
+
+- **Log correlation**: The same `request_id` appears in server logs, enabling end-to-end request tracing.
+
+Filter by request ID:
+
+```bash
+# CLI
+mcpproxy activity list --request-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+# REST API
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?request_id=a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
 
 ## CLI Commands
 

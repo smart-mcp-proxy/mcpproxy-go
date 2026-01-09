@@ -35,6 +35,57 @@ curl "http://127.0.0.1:8080/api/v1/servers?apikey=your-api-key"
 http://127.0.0.1:8080/api/v1
 ```
 
+## Request ID Tracking
+
+All API responses include an `X-Request-Id` header for request tracing and log correlation. This is useful for debugging issues and correlating errors with server logs.
+
+### Request Header
+
+You can optionally provide your own request ID:
+
+```bash
+curl -H "X-API-Key: your-api-key" \
+     -H "X-Request-Id: my-custom-id-123" \
+     http://127.0.0.1:8080/api/v1/servers
+```
+
+**Validation rules:**
+- Pattern: `^[a-zA-Z0-9_-]{1,256}$`
+- Max length: 256 characters
+- If missing or invalid, MCPProxy generates a UUID v4
+
+### Response Header
+
+Every response includes the request ID:
+
+```
+X-Request-Id: my-custom-id-123
+```
+
+### Error Responses
+
+Error responses include the `request_id` in the JSON body for easy correlation:
+
+```json
+{
+  "success": false,
+  "error": "server 'nonexistent' not found",
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+### Log Correlation
+
+Use the request ID to find related activity logs:
+
+```bash
+# Via CLI
+mcpproxy activity list --request-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+# Via API
+curl "http://127.0.0.1:8080/api/v1/activity?request_id=a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
+
 ## Endpoints
 
 ### Status

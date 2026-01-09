@@ -1347,7 +1347,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			// For daemon mode, defer OAuth to prevent UI blocking
 			// The connection will be retried by the managed client retry logic
 			// which will eventually complete OAuth in the background
-			if c.isDeferOAuthForTray() {
+			if c.isDeferOAuthForTray(ctx) {
 				c.logger.Info("⏳ Deferring OAuth to prevent UI blocking - will retry in background",
 					zap.String("server", c.config.Name))
 
@@ -1811,6 +1811,8 @@ func (c *Client) isOAuthError(err error) bool {
 		"OAuth authentication failed",
 		"oauth timeout",
 		"oauth error",
+		"no valid token available",   // Transport layer token check
+		"authorization required",      // Generic authorization needed
 	}
 
 	for _, oauthErr := range oauthErrors {
@@ -2541,8 +2543,11 @@ func (c *Client) forceHTTPOAuthFlow(ctx context.Context) error {
 	err = c.initialize(ctx)
 	if err != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
-		if client.IsOAuthAuthorizationRequiredError(err) {
-			c.logger.Info("✅ OAuth authorization requirement triggered - starting manual OAuth flow")
+		// Also check for transport-level OAuth errors (e.g., "no valid token available")
+		if client.IsOAuthAuthorizationRequiredError(err) || c.isOAuthError(err) {
+			c.logger.Info("✅ OAuth authorization requirement triggered - starting manual OAuth flow",
+				zap.String("error_type", fmt.Sprintf("%T", err)),
+				zap.String("error", err.Error()))
 
 			// Handle OAuth authorization manually using the example pattern
 			if oauthErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); oauthErr != nil {
@@ -2716,8 +2721,17 @@ func (c *Client) hasGUIEnvironment() bool {
 	return false
 }
 
-// isDeferOAuthForTray checks if OAuth should be deferred to prevent tray UI blocking
-func (c *Client) isDeferOAuthForTray() bool {
+// isDeferOAuthForTray checks if OAuth should be deferred to prevent tray UI blocking.
+// It accepts a context to check if this is a manual OAuth flow triggered by 'auth login' CLI command.
+func (c *Client) isDeferOAuthForTray(ctx context.Context) bool {
+	// CRITICAL FIX: Never defer manual OAuth flows triggered by 'auth login' CLI command
+	// This fixes issue #155 where 'mcpproxy auth login' doesn't open browser windows
+	if c.isManualOAuthFlow(ctx) {
+		c.logger.Info("🎯 Manual OAuth flow detected (auth login command) - NOT deferring",
+			zap.String("server", c.config.Name))
+		return false
+	}
+
 	// Check if we're in tray mode by looking for tray-specific environment or configuration
 	// During initial server startup, we should defer OAuth to prevent blocking the tray UI
 

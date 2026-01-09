@@ -486,7 +486,8 @@ func runAuthLoginClientMode(ctx context.Context, dataDir, serverName string) err
 
 	// Trigger OAuth via daemon
 	if err := client.TriggerOAuthLogin(ctx, serverName); err != nil {
-		return fmt.Errorf("failed to trigger OAuth login via daemon: %w", err)
+		// T025: Use cliError to include request_id in error output
+		return cliError("failed to trigger OAuth login via daemon", err)
 	}
 
 	fmt.Printf("✅ OAuth authentication flow initiated successfully for server: %s\n", serverName)
@@ -617,7 +618,8 @@ func runAuthLogoutClientMode(ctx context.Context, dataDir, serverName string) er
 
 	// Trigger OAuth logout via daemon
 	if err := client.TriggerOAuthLogout(ctx, serverName); err != nil {
-		return fmt.Errorf("failed to trigger OAuth logout via daemon: %w", err)
+		// T025: Use cliError to include request_id in error output
+		return cliError("failed to trigger OAuth logout via daemon", err)
 	}
 
 	fmt.Printf("✅ OAuth logout completed successfully for server: %s\n", serverName)
