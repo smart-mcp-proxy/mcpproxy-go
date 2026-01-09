@@ -2109,6 +2109,59 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	c.logger.Info("🔐 Starting manual OAuth authorization flow",
 		zap.String("server", c.config.Name))
 
+	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
+	// Validate metadata BEFORE starting the full OAuth flow to fail fast with clear errors
+	if c.config.URL != "" {
+		_, validationErr := oauth.ValidateOAuthMetadata(c.config.URL, c.config.Name, 5*time.Second)
+		if validationErr != nil {
+			// Convert OAuthMetadataError to OAuthFlowError for consistent error handling
+			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
+				c.logger.Warn("⚠️ OAuth metadata validation failed",
+					zap.String("server", c.config.Name),
+					zap.String("error_type", metadataErr.ErrorType),
+					zap.String("message", metadataErr.Message))
+
+				return &contracts.OAuthFlowError{
+					Success:    false,
+					ErrorType:  metadataErr.ErrorType,
+					ErrorCode:  metadataErr.ErrorCode,
+					ServerName: c.config.Name,
+					Message:    metadataErr.Message,
+					Details: &contracts.OAuthErrorDetails{
+						ServerURL: c.config.URL,
+						ProtectedResourceMetadata: func() *contracts.MetadataStatus {
+							if metadataErr.Details.ProtectedResourceMetadata != nil {
+								return &contracts.MetadataStatus{
+									Found:                metadataErr.Details.ProtectedResourceMetadata.Found,
+									URLChecked:           metadataErr.Details.ProtectedResourceMetadata.URLChecked,
+									Error:                metadataErr.Details.ProtectedResourceMetadata.Error,
+									AuthorizationServers: metadataErr.Details.ProtectedResourceMetadata.AuthorizationServers,
+								}
+							}
+							return nil
+						}(),
+						AuthorizationServerMetadata: func() *contracts.MetadataStatus {
+							if metadataErr.Details.AuthorizationServerMetadata != nil {
+								return &contracts.MetadataStatus{
+									Found:      metadataErr.Details.AuthorizationServerMetadata.Found,
+									URLChecked: metadataErr.Details.AuthorizationServerMetadata.URLChecked,
+									Error:      metadataErr.Details.AuthorizationServerMetadata.Error,
+								}
+							}
+							return nil
+						}(),
+					},
+					Suggestion: metadataErr.Suggestion,
+					DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+				}
+			}
+			// For non-metadata errors, log and continue (don't block OAuth flow)
+			c.logger.Debug("OAuth metadata validation returned non-metadata error, continuing with flow",
+				zap.String("server", c.config.Name),
+				zap.Error(validationErr))
+		}
+	}
+
 	// Get the OAuth handler from the error (as shown in the example)
 	oauthHandler := client.GetOAuthHandler(authErr)
 	if oauthHandler == nil {
