@@ -1,7 +1,7 @@
 # Spec 022: OAuth Redirect URI Port Persistence
 
 ## Status
-Implemented
+Draft
 
 ## Problem Statement
 
@@ -199,6 +199,12 @@ No migration needed - new fields are optional and backward compatible:
 3. Port conflicts trigger automatic re-DCR
 4. No manual intervention required for normal token refresh flows
 5. Backward compatible with existing stored credentials
+
+## Timeline
+
+- Phase 1: Data model changes + port storage (1-2 days)
+- Phase 2: Port reuse logic + re-DCR fallback (2-3 days)
+- Phase 3: Testing + documentation (1-2 days)
 
 ## References
 
