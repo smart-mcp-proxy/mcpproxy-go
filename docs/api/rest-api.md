@@ -190,6 +190,82 @@ Set quarantine status.
 
 Restart a server.
 
+#### POST /api/v1/servers/{name}/login
+
+Initiate OAuth authentication flow for a server.
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "server_name": "github-server",
+    "correlation_id": "a1b2c3d4e5f6789012345678",
+    "browser_opened": true,
+    "message": "OAuth authentication started for server 'github-server'. Please complete authentication in browser."
+  }
+}
+```
+
+**OAuthStartResponse Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | boolean | Always `true` for successful initiation |
+| `server_name` | string | Name of the server being authenticated |
+| `correlation_id` | string | Unique ID for tracking this OAuth flow |
+| `auth_url` | string | Authorization URL (for manual browser opening) |
+| `browser_opened` | boolean | Whether browser was automatically opened |
+| `browser_error` | string | Error message if browser opening failed |
+| `message` | string | Human-readable status message |
+
+**Error Response (400 Bad Request):**
+
+OAuth errors return structured error responses for better debugging:
+
+```json
+{
+  "success": false,
+  "error_type": "dcr_failed",
+  "server_name": "github-server",
+  "message": "Dynamic Client Registration failed: 403 Forbidden",
+  "suggestion": "Check if the OAuth server requires pre-registered clients",
+  "correlation_id": "a1b2c3d4e5f6789012345678",
+  "request_id": "req-xyz-123",
+  "details": {
+    "metadata": {
+      "protected_resource_url": "https://api.example.com/.well-known/oauth-protected-resource",
+      "authorization_server_url": "https://auth.example.com/.well-known/oauth-authorization-server",
+      "status": "ok"
+    },
+    "dcr": {
+      "attempted": true,
+      "status": "failed",
+      "error": "403 Forbidden"
+    }
+  },
+  "debug_hint": "For logs: mcpproxy upstream logs github-server"
+}
+```
+
+**OAuthFlowError Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `error_type` | string | Error category: `client_id_required`, `dcr_failed`, `metadata_discovery_failed`, `code_flow_failed` |
+| `server_name` | string | Name of the server |
+| `message` | string | Human-readable error description |
+| `suggestion` | string | Actionable remediation hint |
+| `correlation_id` | string | Flow tracking ID |
+| `request_id` | string | HTTP request ID for log correlation |
+| `details` | object | Diagnostic details (metadata status, DCR status) |
+| `debug_hint` | string | CLI command for debugging |
+
+#### POST /api/v1/servers/{name}/logout
+
+Clear OAuth tokens and disconnect a server.
+
 ### Tools
 
 #### GET /api/v1/tools
