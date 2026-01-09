@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -172,6 +173,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 
 		// 1. Upstream Connection Errors
 		if upstreamErrors := getArrayField(diag, "upstream_errors"); len(upstreamErrors) > 0 {
+			// Sort by server name for consistent output
+			sortArrayByServerName(upstreamErrors)
+
 			fmt.Println("❌ Upstream Server Connection Errors")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			for _, errItem := range upstreamErrors {
@@ -192,21 +196,32 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 		}
 
 		// 2. OAuth Required
-		if oauthRequired := getStringArrayField(diag, "oauth_required"); len(oauthRequired) > 0 {
+		if oauthRequired := getArrayField(diag, "oauth_required"); len(oauthRequired) > 0 {
+			// Sort by server name for consistent output
+			sortArrayByServerName(oauthRequired)
+
 			fmt.Println("🔑 OAuth Authentication Required")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			for _, server := range oauthRequired {
-				fmt.Printf("  • %s\n", server)
+			for _, item := range oauthRequired {
+				if oauthMap, ok := item.(map[string]interface{}); ok {
+					serverName := getStringField(oauthMap, "server_name")
+					message := getStringField(oauthMap, "message")
+					fmt.Printf("\nServer: %s\n", serverName)
+					if message != "" {
+						fmt.Printf("  %s\n", message)
+					} else {
+						fmt.Printf("  Run: mcpproxy auth login --server=%s\n", serverName)
+					}
+				}
 			}
-			fmt.Println()
-			fmt.Println("💡 Remediation:")
-			fmt.Println("  • Authenticate: mcpproxy auth login --server=<server-name>")
-			fmt.Println("  • Check OAuth config in mcp_config.json")
 			fmt.Println()
 		}
 
 		// 3. OAuth Configuration Issues
 		if oauthIssues := getArrayField(diag, "oauth_issues"); len(oauthIssues) > 0 {
+			// Sort by server name for consistent output
+			sortArrayByServerName(oauthIssues)
+
 			fmt.Println("🔍 OAuth Configuration Issues")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			for _, issueItem := range oauthIssues {
@@ -238,16 +253,22 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			for _, secretItem := range missingSecrets {
 				if secretMap, ok := secretItem.(map[string]interface{}); ok {
-					name := getStringField(secretMap, "name")
-					server := getStringField(secretMap, "server")
-					reference := getStringField(secretMap, "reference")
+					// Use correct field names from contracts.MissingSecretInfo
+					secretName := getStringField(secretMap, "secret_name")
+					usedBy := getArrayField(secretMap, "used_by")
 
-					fmt.Printf("\n  • %s\n", name)
-					if server != "" {
-						fmt.Printf("    Server: %s\n", server)
-					}
-					if reference != "" {
-						fmt.Printf("    Reference: %s\n", reference)
+					fmt.Printf("\n  • %s\n", secretName)
+					if len(usedBy) > 0 {
+						fmt.Printf("    Used by: ")
+						for i, server := range usedBy {
+							if serverStr, ok := server.(string); ok {
+								if i > 0 {
+									fmt.Printf(", ")
+								}
+								fmt.Printf("%s", serverStr)
+							}
+						}
+						fmt.Println()
 					}
 				}
 			}
@@ -332,4 +353,18 @@ func createDoctorLogger(level string) (*zap.Logger, error) {
 	}
 
 	return cfg.Build()
+}
+
+// sortArrayByServerName sorts an array of maps by the "server_name" field alphabetically.
+func sortArrayByServerName(arr []interface{}) {
+	sort.Slice(arr, func(i, j int) bool {
+		iMap, iOk := arr[i].(map[string]interface{})
+		jMap, jOk := arr[j].(map[string]interface{})
+		if !iOk || !jOk {
+			return false
+		}
+		iName := getStringField(iMap, "server_name")
+		jName := getStringField(jMap, "server_name")
+		return iName < jName
+	})
 }

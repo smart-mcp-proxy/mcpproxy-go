@@ -725,7 +725,7 @@ components:
       properties:
         action:
           description: 'Action is the suggested fix action: "login", "restart", "enable",
-            "approve", "view_logs", or "" (none)'
+            "approve", "view_logs", "set_secret", "configure", or "" (none)'
           type: string
         admin_state:
           description: 'AdminState indicates the admin state: "enabled", "disabled",

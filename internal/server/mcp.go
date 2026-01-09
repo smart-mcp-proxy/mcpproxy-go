@@ -1790,15 +1790,17 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 
 		// Calculate unified health status
 		healthInput := health.HealthCalculatorInput{
-			Name:          server.Name,
-			Enabled:       server.Enabled,
-			Quarantined:   server.Quarantined,
-			State:         strings.ToLower(connState),
-			Connected:     isConnected,
-			LastError:     lastError,
-			OAuthRequired: server.OAuth != nil,
-			UserLoggedOut: userLoggedOut,
-			ToolCount:     toolCount,
+			Name:           server.Name,
+			Enabled:        server.Enabled,
+			Quarantined:    server.Quarantined,
+			State:          strings.ToLower(connState),
+			Connected:      isConnected,
+			LastError:      lastError,
+			OAuthRequired:  server.OAuth != nil,
+			UserLoggedOut:  userLoggedOut,
+			ToolCount:      toolCount,
+			MissingSecret:  health.ExtractMissingSecret(lastError),
+			OAuthConfigErr: health.ExtractOAuthConfigError(lastError),
 		}
 		serverMap["health"] = health.CalculateHealth(healthInput, health.DefaultHealthConfig())
 
