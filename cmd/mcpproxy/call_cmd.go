@@ -435,7 +435,8 @@ func runCallToolVariantClientMode(dataDir, toolVariant string, args map[string]i
 	// For tool variants, we call the variant tool directly
 	result, err := client.CallTool(callCtx, toolVariant, args)
 	if err != nil {
-		return fmt.Errorf("failed to call tool via daemon: %w", err)
+		// T028: Use cliError to include request_id in error output
+		return cliError("failed to call tool via daemon", err)
 	}
 
 	// Output results based on format

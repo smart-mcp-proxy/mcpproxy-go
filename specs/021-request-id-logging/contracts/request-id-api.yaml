@@ -1,0 +1,277 @@
+# Request ID API Contract
+# Feature: 021-request-id-logging
+# Date: 2026-01-07
+#
+# This contract defines the X-Request-Id header behavior and error response
+# structure for all mcpproxy REST API endpoints.
+
+openapi: 3.0.3
+info:
+  title: MCPProxy Request ID API Extensions
+  version: 1.0.0
+  description: |
+    Request ID mechanism for request-scoped logging and error tracking.
+
+    All API requests:
+    - MAY include `X-Request-Id` header with client-provided ID
+    - WILL receive `X-Request-Id` header in response (generated if not provided)
+
+    All error responses:
+    - WILL include `request_id` field in JSON body
+    - Can be correlated with server logs via `mcpproxy logs --request-id <id>`
+
+components:
+  headers:
+    X-Request-Id:
+      description: |
+        Unique identifier for request tracing and log correlation.
+        - If client provides: Server uses client's value (if valid)
+        - If client omits: Server generates UUID v4
+        - Always returned in response header
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9_-]{1,256}$'
+        example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+        - request_id
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code (snake_case)
+          example: server_not_found
+        message:
+          type: string
+          description: Human-readable error description
+          example: "Server 'google-drvie' not found"
+        request_id:
+          type: string
+          description: Request ID for log correlation
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        suggestion:
+          type: string
+          description: Actionable remediation hint (optional)
+          example: "Check server name spelling. Did you mean 'google-drive'?"
+        details:
+          type: object
+          description: Additional error-specific data (optional)
+          additionalProperties: true
+          example:
+            available_servers: ["google-drive", "github-server"]
+
+    LogEntry:
+      type: object
+      required:
+        - level
+        - msg
+        - timestamp
+      properties:
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+          description: Log level
+        msg:
+          type: string
+          description: Log message
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp
+        request_id:
+          type: string
+          description: Request ID (if in request context)
+        correlation_id:
+          type: string
+          description: OAuth flow correlation ID (if applicable)
+        server:
+          type: string
+          description: Server name (if applicable)
+
+    LogQueryResponse:
+      type: object
+      required:
+        - entries
+        - count
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogEntry'
+        count:
+          type: integer
+          description: Number of entries returned
+        total:
+          type: integer
+          description: Total matching entries (if pagination)
+
+  parameters:
+    RequestIdHeader:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Client-provided request ID for tracing
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9_-]{1,256}$'
+        example: "my-trace-id-123"
+
+    RequestIdQuery:
+      name: request_id
+      in: query
+      required: false
+      description: Filter logs by request ID
+      schema:
+        type: string
+        example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+paths:
+  /api/v1/logs:
+    get:
+      summary: Retrieve logs with optional filtering
+      description: |
+        Returns log entries filtered by request_id, correlation_id, server, level, or time range.
+
+        **New filter**: `request_id` - Filter by request ID from error response
+      operationId: getLogs
+      tags:
+        - logs
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/RequestIdQuery'
+        - name: correlation_id
+          in: query
+          required: false
+          description: Filter by OAuth correlation ID
+          schema:
+            type: string
+        - name: server
+          in: query
+          required: false
+          description: Filter by server name
+          schema:
+            type: string
+        - name: level
+          in: query
+          required: false
+          description: Filter by log level
+          schema:
+            type: string
+            enum: [debug, info, warn, error]
+        - name: since
+          in: query
+          required: false
+          description: Start time filter (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          required: false
+          description: End time filter (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          description: Maximum entries to return
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        '200':
+          description: Log entries retrieved successfully
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogQueryResponse'
+              example:
+                entries:
+                  - level: info
+                    msg: "handling server list request"
+                    timestamp: "2026-01-07T10:30:00Z"
+                    request_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    path: "/api/v1/servers"
+                  - level: error
+                    msg: "server not found"
+                    timestamp: "2026-01-07T10:30:01Z"
+                    request_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    server: "google-drvie"
+                count: 2
+        '400':
+          description: Invalid query parameters
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Example of how X-Request-Id applies to all endpoints
+  /api/v1/servers:
+    get:
+      summary: List all upstream servers (example)
+      description: |
+        Demonstrates X-Request-Id header behavior on a typical endpoint.
+        The header is present on all API responses.
+      operationId: listServers
+      tags:
+        - servers
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: Servers listed successfully
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '500':
+          description: Internal server error
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: internal_error
+                message: "An unexpected error occurred"
+                request_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication
+
+security:
+  - ApiKeyAuth: []
+
+# CLI Usage Examples:
+#
+# Retrieve logs by request ID:
+#   mcpproxy logs --request-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
+#
+# Retrieve logs by request ID with limit:
+#   mcpproxy logs --request-id a1b2c3d4 --tail 50
+#
+# API equivalent:
+#   curl "http://127.0.0.1:8080/api/v1/logs?request_id=a1b2c3d4" -H "X-API-Key: ..."

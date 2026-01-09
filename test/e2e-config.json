@@ -1,5 +1,5 @@
 {
-  "listen": ":8097",
+  "listen": ":8123",
   "enable_socket": true,
   "data_dir": "./test-data",
   "enable_tray": false,
@@ -17,7 +17,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-12-09T12:55:15.105582+02:00"
+      "updated": "2026-01-07T19:43:47.937994+02:00"
     }
   ],
   "top_k": 10,
@@ -49,7 +49,7 @@
     "compress": true,
     "json_format": false
   },
-  "api_key": "25c6ce51beb11836652cd8a7c2bcd801811779595f97c32f99a7d121ba777bb9",
+  "api_key": "8cc73234d967a2889f8066cc89d42741747358f3a7d4225d22fc2a5bbbd9d89e",
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,
@@ -180,5 +180,12 @@
   },
   "enable_code_execution": false,
   "code_execution_timeout_ms": 120000,
-  "code_execution_pool_size": 10
+  "code_execution_pool_size": 10,
+  "activity_retention_days": 90,
+  "activity_max_records": 100000,
+  "activity_max_response_size": 65536,
+  "activity_cleanup_interval_min": 60,
+  "intent_declaration": {
+    "strict_server_validation": true
+  }
 }

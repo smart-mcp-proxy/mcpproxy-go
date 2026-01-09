@@ -75,6 +75,11 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.IntentType = intentType
 	}
 
+	// Request ID filter (Spec 021)
+	if requestID := q.Get("request_id"); requestID != "" {
+		filter.RequestID = requestID
+	}
+
 	filter.Validate()
 	return filter
 }
@@ -91,6 +96,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param session_id query string false "Filter by MCP session ID"
 // @Param status query string false "Filter by status" Enums(success, error, blocked)
 // @Param intent_type query string false "Filter by intent operation type (Spec 018)" Enums(read, write, destructive)
+// @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"
@@ -108,7 +114,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	activities, total, err := s.controller.ListActivities(filter)
 	if err != nil {
 		s.logger.Errorw("Failed to list activities", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to list activities")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to list activities")
 		return
 	}
 
@@ -145,19 +151,19 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		s.writeError(w, http.StatusBadRequest, "Activity ID is required")
+		s.writeError(w, r, http.StatusBadRequest, "Activity ID is required")
 		return
 	}
 
 	activity, err := s.controller.GetActivity(id)
 	if err != nil {
 		s.logger.Errorw("Failed to get activity", "id", id, "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to get activity")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get activity")
 		return
 	}
 
 	if activity == nil {
-		s.writeError(w, http.StatusNotFound, "Activity not found")
+		s.writeError(w, r, http.StatusNotFound, "Activity not found")
 		return
 	}
 
@@ -253,7 +259,7 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 
 	// Validate format
 	if format != "json" && format != "csv" {
-		s.writeError(w, http.StatusBadRequest, "Invalid format. Use 'json' or 'csv'")
+		s.writeError(w, r, http.StatusBadRequest, "Invalid format. Use 'json' or 'csv'")
 		return
 	}
 
@@ -390,7 +396,7 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 
 	duration, err := parsePeriodDuration(period)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, err.Error())
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -408,7 +414,7 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	activities, _, err := s.controller.ListActivities(filter)
 	if err != nil {
 		s.logger.Errorw("Failed to list activities for summary", "error", err)
-		s.writeError(w, http.StatusInternalServerError, "Failed to get activity summary")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get activity summary")
 		return
 	}
 
