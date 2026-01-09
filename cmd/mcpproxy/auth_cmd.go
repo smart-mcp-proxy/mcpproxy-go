@@ -613,9 +613,12 @@ func displayOAuthFlowError(err *contracts.OAuthFlowError) {
 	}
 
 	fmt.Fprintf(os.Stderr, "\n💡 Suggestion: %s\n", err.Suggestion)
-	fmt.Fprintf(os.Stderr, "\n🔍 Debug: %s\n", err.DebugHint)
 
+	// Build debug hint with log correlation commands
+	fmt.Fprintf(os.Stderr, "\n🔍 Debug:\n")
+	fmt.Fprintf(os.Stderr, "   Server logs: mcpproxy upstream logs %s\n", err.ServerName)
 	if err.RequestID != "" {
+		fmt.Fprintf(os.Stderr, "   Activity log: mcpproxy activity list --request-id %s\n", err.RequestID)
 		fmt.Fprintf(os.Stderr, "   Request ID: %s\n", err.RequestID)
 	}
 	if err.CorrelationID != "" {
