@@ -1311,14 +1311,14 @@ func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) 
 
 // handleServerLogin godoc
 // @Summary Trigger OAuth login for server
-// @Description Initiate OAuth authentication flow for a specific upstream MCP server
+// @Description Initiate OAuth authentication flow for a specific upstream MCP server. Returns structured OAuth start response with correlation ID for tracking.
 // @Tags servers
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Param id path string true "Server ID or name"
-// @Success 200 {object} contracts.ServerActionResponse "OAuth login initiated successfully"
-// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Success 200 {object} contracts.OAuthStartResponse "OAuth login initiated successfully"
+// @Failure 400 {object} contracts.OAuthFlowError "OAuth error (client_id required, DCR failed, etc.)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/login [post]
@@ -1378,10 +1378,20 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := contracts.ServerActionResponse{
-		Server:  serverID,
-		Action:  "login",
-		Success: true,
+	// Phase 3 (Spec 020): Return OAuthStartResponse with correlation_id
+	// Note: auth_url is not available here because the OAuth flow runs asynchronously
+	// in the upstream manager. The browser is opened automatically.
+	correlationID := reqcontext.GetCorrelationID(r.Context())
+	if correlationID == "" {
+		correlationID = reqcontext.GetRequestID(r.Context())
+	}
+
+	response := contracts.OAuthStartResponse{
+		Success:       true,
+		ServerName:    serverID,
+		CorrelationID: correlationID,
+		BrowserOpened: true, // Assumed true since errors are returned above
+		Message:       fmt.Sprintf("OAuth authentication started for server '%s'. Please complete authentication in browser.", serverID),
 	}
 
 	s.writeSuccess(w, response)

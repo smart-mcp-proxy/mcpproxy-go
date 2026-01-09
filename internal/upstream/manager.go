@@ -1801,6 +1801,91 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	return nil
 }
 
+// StartManualOAuthWithInfo performs an in-process OAuth flow and returns the auth URL and browser status.
+// This is used by Phase 3 (Spec 020) to return structured information about the OAuth flow start.
+// Unlike StartManualOAuth, this method waits for the auth URL to be obtained before returning.
+func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core.OAuthStartResult, error) {
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+	if !exists {
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
+
+	cfg := client.Config
+	m.logger.Info("Starting in-process manual OAuth with info tracking",
+		zap.String("server", cfg.Name),
+		zap.Bool("force", force))
+
+	// Preflight: if server does not appear to require OAuth, avoid starting
+	if !oauth.ShouldUseOAuth(cfg) && !force {
+		m.logger.Info("OAuth not applicable based on config (no headers, protocol)", zap.String("server", cfg.Name))
+		return nil, fmt.Errorf("OAuth is not supported or not required for server '%s'", cfg.Name)
+	}
+
+	// Create a transient core client that uses the daemon's storage
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+
+	if force {
+		coreClient.ClearOAuthState()
+	}
+
+	// Preflight no-auth check
+	if !force {
+		cpy := *cfg
+		cpy.Headers = cfg.Headers
+		noAuthTransport := transport.DetermineTransportType(&cpy)
+		if noAuthTransport == "http" || noAuthTransport == "streamable-http" || noAuthTransport == "sse" {
+			m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
+			testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
+			if err2 == nil {
+				tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
+				_ = testClient.Connect(tctx)
+				tcancel()
+				if testClient.GetServerInfo() != nil {
+					m.logger.Info("Preflight succeeded without OAuth; skipping OAuth flow", zap.String("server", cfg.Name))
+					cancel()
+					return &core.OAuthStartResult{
+						BrowserOpened: false,
+						CorrelationID: fmt.Sprintf("oauth-%s-%d", cfg.Name, time.Now().UnixNano()),
+					}, nil
+				}
+			}
+		}
+	}
+
+	m.logger.Info("Triggering OAuth flow with result tracking (in-process)", zap.String("server", cfg.Name))
+
+	// Run the OAuth flow synchronously to get the result
+	result, err := coreClient.ForceOAuthFlowWithResult(ctx)
+	cancel()
+
+	if err != nil {
+		m.logger.Warn("In-process OAuth flow failed",
+			zap.String("server", cfg.Name),
+			zap.Error(err))
+		return result, err
+	}
+
+	m.logger.Info("In-process OAuth flow completed successfully",
+		zap.String("server", cfg.Name),
+		zap.String("correlation_id", result.CorrelationID))
+
+	// Immediately attempt reconnect with new tokens
+	if reconnErr := m.RetryConnection(cfg.Name); reconnErr != nil {
+		m.logger.Warn("Failed to trigger reconnect after in-process OAuth",
+			zap.String("server", cfg.Name),
+			zap.Error(reconnErr))
+	}
+
+	return result, nil
+}
+
 // InvalidateAllToolCountCaches invalidates tool count caches for all clients
 // This should be called when tools are known to have changed (e.g., after indexing)
 func (m *Manager) InvalidateAllToolCountCaches() {
