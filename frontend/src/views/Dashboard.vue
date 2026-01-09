@@ -13,7 +13,7 @@
         <div class="text-sm space-y-1 mt-1">
           <div v-for="server in serversNeedingAttention.slice(0, 3)" :key="server.name" class="flex items-center gap-2">
             <span :class="server.health?.level === 'unhealthy' ? 'text-error' : 'text-warning'">●</span>
-            <span class="font-medium">{{ server.name }}</span>
+            <router-link :to="`/servers/${server.name}`" class="font-medium link link-hover">{{ server.name }}</router-link>
             <span class="opacity-70">{{ server.health?.summary }}</span>
             <button
               v-if="server.health?.action === 'login'"
