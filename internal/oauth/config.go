@@ -551,18 +551,49 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.String("hint", "Set oauth.scopes in server config or ensure PRM/AS metadata advertises scopes_supported"))
 	}
 
+	// Check for stored callback port from previous DCR (Spec 022: OAuth Redirect URI Port Persistence)
+	var preferredPort int
+	var serverKey string
+	if storage != nil {
+		serverKey = GenerateServerKey(serverConfig.Name, serverConfig.URL)
+		_, _, storedPort, err := storage.GetOAuthClientCredentials(serverKey)
+		if err == nil && storedPort > 0 {
+			preferredPort = storedPort
+			logger.Info("🔄 Found stored callback port from previous DCR",
+				zap.String("server", serverConfig.Name),
+				zap.Int("preferred_port", preferredPort))
+		}
+	}
+
 	// Start callback server first to get the exact port (as documented in successful approach)
-	logger.Info("🔧 Starting OAuth callback server with dynamic port allocation",
+	logger.Info("🔧 Starting OAuth callback server",
 		zap.String("server", serverConfig.Name),
+		zap.Int("preferred_port", preferredPort),
 		zap.String("approach", "MCPProxy callback server coordination for exact URI matching"))
 
 	// Start our own callback server to get exact port for Cloudflare OAuth
-	callbackServer, err := globalCallbackManager.StartCallbackServer(serverConfig.Name)
+	callbackServer, err := globalCallbackManager.StartCallbackServer(serverConfig.Name, preferredPort)
 	if err != nil {
 		logger.Error("Failed to start OAuth callback server",
 			zap.String("server", serverConfig.Name),
 			zap.Error(err))
 		return nil
+	}
+
+	// Spec 022: Detect port conflict and clear DCR credentials if port changed
+	// This forces fresh DCR with the new port
+	if preferredPort > 0 && callbackServer.Port != preferredPort {
+		logger.Warn("⚠️ Callback port changed, clearing DCR credentials for re-registration",
+			zap.String("server", serverConfig.Name),
+			zap.Int("stored_port", preferredPort),
+			zap.Int("new_port", callbackServer.Port))
+		if storage != nil {
+			if err := storage.ClearOAuthClientCredentials(serverKey); err != nil {
+				logger.Warn("Failed to clear DCR credentials after port change",
+					zap.String("server", serverConfig.Name),
+					zap.Error(err))
+			}
+		}
 	}
 
 	logger.Info("Using exact redirect URI from allocated callback server",
@@ -664,7 +695,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		// Try to load persisted DCR credentials for token refresh
 		if storage != nil {
 			serverKey := GenerateServerKey(serverConfig.Name, serverConfig.URL)
-			persistedClientID, persistedClientSecret, err := storage.GetOAuthClientCredentials(serverKey)
+			persistedClientID, persistedClientSecret, _, err := storage.GetOAuthClientCredentials(serverKey)
 			if err == nil && persistedClientID != "" {
 				clientID = persistedClientID
 				clientSecret = persistedClientSecret
@@ -716,8 +747,10 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	return oauthConfig
 }
 
-// StartCallbackServer starts a new OAuth callback server for the given server name
-func (m *CallbackServerManager) StartCallbackServer(serverName string) (*CallbackServer, error) {
+// StartCallbackServer starts a new OAuth callback server for the given server name.
+// If preferredPort > 0, it attempts to bind to that port first for redirect URI persistence (Spec 022).
+// Falls back to dynamic allocation if the preferred port is unavailable.
+func (m *CallbackServerManager) StartCallbackServer(serverName string, preferredPort int) (*CallbackServer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -729,10 +762,31 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
 		return existing, nil
 	}
 
-	// Allocate a dynamic port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("failed to allocate dynamic port: %w", err)
+	var listener net.Listener
+	var err error
+
+	// Try preferred port first if specified (Spec 022: OAuth Redirect URI Port Persistence)
+	if preferredPort > 0 {
+		listener, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", preferredPort))
+		if err != nil {
+			m.logger.Warn("Preferred port unavailable, falling back to dynamic allocation",
+				zap.String("server", serverName),
+				zap.Int("preferred_port", preferredPort),
+				zap.Error(err))
+			// Fall through to dynamic allocation
+		} else {
+			m.logger.Info("✅ Using preferred port for OAuth callback (port persistence)",
+				zap.String("server", serverName),
+				zap.Int("port", preferredPort))
+		}
+	}
+
+	// Fall back to dynamic port allocation if no listener yet
+	if listener == nil {
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, fmt.Errorf("failed to allocate dynamic port: %w", err)
+		}
 	}
 
 	// Extract the dynamically allocated port

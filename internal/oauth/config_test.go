@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -449,6 +450,70 @@ func TestCreateOAuthConfig_MergesExtraParams(t *testing.T) {
 	resource, hasResource := extraParams["resource"]
 	assert.True(t, hasResource, "extraParams should contain auto-detected 'resource' key")
 	assert.Equal(t, "https://auto-detected.example.com/mcp", resource, "Resource should be auto-detected")
+}
+
+// =============================================================================
+// Spec 022: Tests for OAuth Redirect URI Port Persistence
+// =============================================================================
+
+// TestStartCallbackServerWithPreferredPort verifies that StartCallbackServer
+// uses the preferred port when available.
+func TestStartCallbackServerWithPreferredPort(t *testing.T) {
+	manager := GetGlobalCallbackManager()
+
+	// Find an available port to use as preferred
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	preferredPort := listener.Addr().(*net.TCPAddr).Port
+	listener.Close() // Release the port so we can bind to it again
+
+	// Start callback server with preferred port
+	serverName := "test-preferred-port"
+	callbackServer, err := manager.StartCallbackServer(serverName, preferredPort)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.StopCallbackServer(serverName) })
+
+	// Verify the callback server is using the preferred port
+	assert.Equal(t, preferredPort, callbackServer.Port, "Callback server should use preferred port")
+	assert.Contains(t, callbackServer.RedirectURI, fmt.Sprintf(":%d/", preferredPort), "Redirect URI should contain preferred port")
+}
+
+// TestStartCallbackServerFallback verifies that StartCallbackServer falls back
+// to dynamic allocation when the preferred port is unavailable.
+func TestStartCallbackServerFallback(t *testing.T) {
+	manager := GetGlobalCallbackManager()
+
+	// Occupy a port first
+	occupyListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	occupiedPort := occupyListener.Addr().(*net.TCPAddr).Port
+	defer occupyListener.Close() // Keep port occupied during test
+
+	// Try to start callback server with the occupied port
+	serverName := "test-fallback-port"
+	callbackServer, err := manager.StartCallbackServer(serverName, occupiedPort)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.StopCallbackServer(serverName) })
+
+	// Verify the callback server fell back to a different port
+	assert.NotEqual(t, occupiedPort, callbackServer.Port, "Callback server should use different port when preferred is occupied")
+	assert.Greater(t, callbackServer.Port, 0, "Callback server should have valid port")
+}
+
+// TestStartCallbackServerDynamicPort verifies that StartCallbackServer
+// uses dynamic allocation when preferredPort is 0.
+func TestStartCallbackServerDynamicPort(t *testing.T) {
+	manager := GetGlobalCallbackManager()
+
+	// Start callback server with dynamic port (preferredPort = 0)
+	serverName := "test-dynamic-port"
+	callbackServer, err := manager.StartCallbackServer(serverName, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.StopCallbackServer(serverName) })
+
+	// Verify a valid port was allocated
+	assert.Greater(t, callbackServer.Port, 0, "Callback server should have valid port")
+	assert.Contains(t, callbackServer.RedirectURI, "http://127.0.0.1:", "Redirect URI should have localhost base")
 }
 
 // T008: Test CreateOAuthConfig falls back to server URL when metadata lacks resource field

@@ -390,9 +390,10 @@ func (b *BoltDB) DeleteOAuthToken(serverName string) error {
 	})
 }
 
-// UpdateOAuthClientCredentials updates just the client credentials (from DCR) on an existing token
+// UpdateOAuthClientCredentials updates the client credentials (from DCR) and callback port on an existing token
 // This is called after successful Dynamic Client Registration to persist the obtained client_id/secret
-func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret string) error {
+// and the callback port used for the redirect_uri (Spec 022: OAuth Redirect URI Port Persistence)
+func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret string, callbackPort int) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		data := bucket.Get([]byte(serverKey))
@@ -406,6 +407,7 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 			}
 			record.ClientID = clientID
 			record.ClientSecret = clientSecret
+			record.CallbackPort = callbackPort
 			record.Updated = time.Now()
 		} else {
 			// Create minimal record with just client credentials
@@ -414,6 +416,7 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 				ServerName:   serverKey,
 				ClientID:     clientID,
 				ClientSecret: clientSecret,
+				CallbackPort: callbackPort,
 				Created:      time.Now(),
 				Updated:      time.Now(),
 			}
@@ -427,8 +430,9 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 	})
 }
 
-// GetOAuthClientCredentials retrieves just the client credentials for token refresh
-func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSecret string, err error) {
+// GetOAuthClientCredentials retrieves the client credentials and callback port for token refresh
+// callbackPort returns 0 if not stored (legacy records or fresh records without DCR)
+func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSecret string, callbackPort int, err error) {
 	err = b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		data := bucket.Get([]byte(serverKey))
@@ -442,9 +446,41 @@ func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSe
 		}
 		clientID = record.ClientID
 		clientSecret = record.ClientSecret
+		callbackPort = record.CallbackPort
 		return nil
 	})
 	return
+}
+
+// ClearOAuthClientCredentials clears only the DCR-related fields (ClientID, ClientSecret, CallbackPort)
+// while preserving any existing token data. This is called when the callback port conflicts and
+// fresh DCR is required (Spec 022: OAuth Redirect URI Port Persistence)
+func (b *BoltDB) ClearOAuthClientCredentials(serverKey string) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		data := bucket.Get([]byte(serverKey))
+		if data == nil {
+			return nil // Nothing to clear
+		}
+
+		record := &OAuthTokenRecord{}
+		if err := record.UnmarshalBinary(data); err != nil {
+			return err
+		}
+
+		// Clear DCR-related fields
+		record.ClientID = ""
+		record.ClientSecret = ""
+		record.CallbackPort = 0
+		record.RedirectURI = ""
+		record.Updated = time.Now()
+
+		newData, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(serverKey), newData)
+	})
 }
 
 // ListOAuthTokens returns all OAuth token records
