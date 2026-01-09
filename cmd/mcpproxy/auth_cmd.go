@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"mcpproxy-go/internal/cliclient"
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/logs"
 	"mcpproxy-go/internal/socket"
 	"mcpproxy-go/internal/upstream/cli"
@@ -486,6 +488,19 @@ func runAuthLoginClientMode(ctx context.Context, dataDir, serverName string) err
 
 	// Trigger OAuth via daemon
 	if err := client.TriggerOAuthLogin(ctx, serverName); err != nil {
+		// Spec 020: Check for structured OAuth errors and display rich output
+		var oauthFlowErr *contracts.OAuthFlowError
+		if errors.As(err, &oauthFlowErr) {
+			displayOAuthFlowError(oauthFlowErr)
+			return fmt.Errorf("OAuth authentication failed")
+		}
+
+		var oauthValidationErr *contracts.OAuthValidationError
+		if errors.As(err, &oauthValidationErr) {
+			displayOAuthValidationError(oauthValidationErr)
+			return fmt.Errorf("OAuth validation failed")
+		}
+
 		// T025: Use cliError to include request_id in error output
 		return cliError("failed to trigger OAuth login via daemon", err)
 	}
@@ -546,6 +561,91 @@ func runAuthLoginStandalone(ctx context.Context, serverName string) error {
 // containsIgnoreCase checks if a string contains a substring (case-insensitive)
 func containsIgnoreCase(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+// displayOAuthFlowError displays a structured OAuth flow error with rich formatting.
+// Spec 020: OAuth Login Error Feedback
+func displayOAuthFlowError(err *contracts.OAuthFlowError) {
+	fmt.Fprintf(os.Stderr, "\n❌ OAuth Authentication Failed\n")
+	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	fmt.Fprintf(os.Stderr, "Server:     %s\n", err.ServerName)
+	fmt.Fprintf(os.Stderr, "Error Type: %s (%s)\n", err.ErrorType, err.ErrorCode)
+	fmt.Fprintf(os.Stderr, "Message:    %s\n", err.Message)
+
+	if err.Details != nil {
+		fmt.Fprintf(os.Stderr, "\nDetails:\n")
+		if err.Details.ServerURL != "" {
+			fmt.Fprintf(os.Stderr, "  Server URL: %s\n", err.Details.ServerURL)
+		}
+		if err.Details.ProtectedResourceMetadata != nil {
+			meta := err.Details.ProtectedResourceMetadata
+			fmt.Fprintf(os.Stderr, "  Protected Resource Metadata:\n")
+			fmt.Fprintf(os.Stderr, "    Found: %v\n", meta.Found)
+			fmt.Fprintf(os.Stderr, "    URL Checked: %s\n", meta.URLChecked)
+			if meta.Error != "" {
+				fmt.Fprintf(os.Stderr, "    Error: %s\n", meta.Error)
+			}
+			if len(meta.AuthorizationServers) > 0 {
+				fmt.Fprintf(os.Stderr, "    Authorization Servers: %s\n", strings.Join(meta.AuthorizationServers, ", "))
+			}
+		}
+		if err.Details.AuthorizationServerMetadata != nil {
+			meta := err.Details.AuthorizationServerMetadata
+			fmt.Fprintf(os.Stderr, "  Authorization Server Metadata:\n")
+			fmt.Fprintf(os.Stderr, "    Found: %v\n", meta.Found)
+			fmt.Fprintf(os.Stderr, "    URL Checked: %s\n", meta.URLChecked)
+			if meta.Error != "" {
+				fmt.Fprintf(os.Stderr, "    Error: %s\n", meta.Error)
+			}
+		}
+		if err.Details.DCRStatus != nil {
+			dcr := err.Details.DCRStatus
+			fmt.Fprintf(os.Stderr, "  Dynamic Client Registration:\n")
+			fmt.Fprintf(os.Stderr, "    Attempted: %v\n", dcr.Attempted)
+			fmt.Fprintf(os.Stderr, "    Success: %v\n", dcr.Success)
+			if dcr.StatusCode > 0 {
+				fmt.Fprintf(os.Stderr, "    Status Code: %d\n", dcr.StatusCode)
+			}
+			if dcr.Error != "" {
+				fmt.Fprintf(os.Stderr, "    Error: %s\n", dcr.Error)
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "\n💡 Suggestion: %s\n", err.Suggestion)
+	fmt.Fprintf(os.Stderr, "\n🔍 Debug: %s\n", err.DebugHint)
+
+	if err.RequestID != "" {
+		fmt.Fprintf(os.Stderr, "   Request ID: %s\n", err.RequestID)
+	}
+	if err.CorrelationID != "" {
+		fmt.Fprintf(os.Stderr, "   Correlation ID: %s\n", err.CorrelationID)
+	}
+	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+}
+
+// displayOAuthValidationError displays a structured OAuth validation error with rich formatting.
+// Spec 020: OAuth Login Error Feedback
+func displayOAuthValidationError(err *contracts.OAuthValidationError) {
+	fmt.Fprintf(os.Stderr, "\n❌ OAuth Validation Failed\n")
+	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	fmt.Fprintf(os.Stderr, "Server:     %s\n", err.ServerName)
+	fmt.Fprintf(os.Stderr, "Error Type: %s\n", err.ErrorType)
+	fmt.Fprintf(os.Stderr, "Message:    %s\n", err.Message)
+
+	if len(err.AvailableServers) > 0 {
+		fmt.Fprintf(os.Stderr, "\nAvailable servers:\n")
+		for _, name := range err.AvailableServers {
+			fmt.Fprintf(os.Stderr, "  - %s\n", name)
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "\n💡 Suggestion: %s\n", err.Suggestion)
+
+	if err.CorrelationID != "" {
+		fmt.Fprintf(os.Stderr, "\n🔍 Correlation ID: %s\n", err.CorrelationID)
+	}
+	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 }
 
 // formatDuration formats a duration into a human-readable string

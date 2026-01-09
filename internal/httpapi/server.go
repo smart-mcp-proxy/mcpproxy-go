@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -1340,6 +1341,29 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 
 	if err := mgmtSvc.TriggerOAuthLogin(r.Context(), serverID); err != nil {
 		s.logger.Error("Failed to trigger OAuth login", "server", serverID, "error", err)
+
+		// Spec 020: Check for structured OAuth errors and return them directly
+		var oauthFlowErr *contracts.OAuthFlowError
+		if errors.As(err, &oauthFlowErr) {
+			// Add request ID from context for correlation
+			oauthFlowErr.RequestID = reqcontext.GetRequestID(r.Context())
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			if encErr := json.NewEncoder(w).Encode(oauthFlowErr); encErr != nil {
+				s.logger.Error("Failed to encode OAuth flow error response", "error", encErr)
+			}
+			return
+		}
+
+		var oauthValidationErr *contracts.OAuthValidationError
+		if errors.As(err, &oauthValidationErr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			if encErr := json.NewEncoder(w).Encode(oauthValidationErr); encErr != nil {
+				s.logger.Error("Failed to encode OAuth validation error response", "error", encErr)
+			}
+			return
+		}
 
 		// Map errors to HTTP status codes (T019)
 		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {

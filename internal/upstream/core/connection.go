@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/oauth"
 	"mcpproxy-go/internal/transport"
 
@@ -2231,14 +2232,38 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 				c.logger.Error("GetAuthorizationURL panicked",
 					zap.String("server", c.config.Name),
 					zap.Any("panic", r))
-				authURLErr = fmt.Errorf("failed to get authorization URL: internal error (panic recovered)")
+				authURLErr = fmt.Errorf("internal error (panic recovered): %v", r)
 			}
 		}()
 		authURL, authURLErr = oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
 	}()
 
 	if authURLErr != nil {
-		return fmt.Errorf("failed to get authorization URL: %w", authURLErr)
+		// Return structured error for Spec 020
+		errType := contracts.OAuthErrorFlowFailed
+		errCode := contracts.OAuthCodeFlowFailed
+		suggestion := "Check server logs for details. The OAuth authorization server may not be properly configured."
+
+		// Check for specific error patterns to provide better error classification
+		errStr := authURLErr.Error()
+		if strings.Contains(errStr, "metadata") || strings.Contains(errStr, "404") || strings.Contains(errStr, "not found") {
+			errType = contracts.OAuthErrorMetadataMissing
+			errCode = contracts.OAuthCodeNoMetadata
+			suggestion = "The OAuth authorization server metadata is not available. Contact the server administrator."
+		}
+
+		return &contracts.OAuthFlowError{
+			Success:    false,
+			ErrorType:  errType,
+			ErrorCode:  errCode,
+			ServerName: c.config.Name,
+			Message:    fmt.Sprintf("Failed to get authorization URL for '%s': %s", c.config.Name, authURLErr.Error()),
+			Details: &contracts.OAuthErrorDetails{
+				ServerURL: c.config.URL,
+			},
+			Suggestion: suggestion,
+			DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+		}
 	}
 
 	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
@@ -2276,10 +2301,25 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 				zap.String("server", c.config.Name),
 				zap.String("url", c.config.URL),
 				zap.String("help", "Configure oauth.client_id in server config or contact the OAuth provider"))
-			return fmt.Errorf("OAuth authentication failed for %s: server requires client_id but Dynamic Client Registration (DCR) returned 403 Forbidden. "+
-				"This server does not support public client OAuth. "+
-				"Solution: Configure a static client_id in your server configuration, or contact the OAuth provider to register your application. "+
-				"Example config: {\"oauth\": {\"client_id\": \"your-client-id\"}}", c.config.Name)
+			// Return structured error for Spec 020
+			return &contracts.OAuthFlowError{
+				Success:    false,
+				ErrorType:  contracts.OAuthErrorClientIDRequired,
+				ErrorCode:  contracts.OAuthCodeNoClientID,
+				ServerName: c.config.Name,
+				Message:    fmt.Sprintf("Server '%s' requires client_id but Dynamic Client Registration returned 403", c.config.Name),
+				Details: &contracts.OAuthErrorDetails{
+					ServerURL: c.config.URL,
+					DCRStatus: &contracts.DCRStatus{
+						Attempted:  true,
+						Success:    false,
+						StatusCode: 403,
+						Error:      "Forbidden",
+					},
+				},
+				Suggestion: "Register an OAuth app with the provider and configure oauth.client_id in server config.",
+				DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+			}
 		}
 	}
 
