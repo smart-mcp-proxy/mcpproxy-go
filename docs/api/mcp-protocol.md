@@ -144,21 +144,58 @@ See [Intent Declaration](/features/intent-declaration) for complete documentatio
 
 ### upstream_servers
 
-Manage upstream server configurations.
+Manage upstream server configurations with smart patching support.
 
-**Actions:**
-- `list` - List all servers
-- `add` - Add a new server
+**Operations:**
+- `list` - List all servers with health status
+- `add` - Add a new server (quarantined by default)
 - `remove` - Remove a server
-- `enable` - Enable a server
-- `disable` - Disable a server
+- `update` - Update server (smart merge)
+- `patch` - Patch server (smart merge)
+- `tail_log` - View server logs
 
-**Example (list):**
+**Smart Patching (update/patch):**
+
+Uses deep merge semantics - only specify fields you want to change:
+
+| Field Type | Behavior | Example |
+|------------|----------|---------|
+| Scalars | Replace | `enabled: true` |
+| Maps (env, headers) | Merge | New keys added, existing updated |
+| Arrays (args) | Replace entirely | All args replaced |
+| Objects (isolation, oauth) | Deep merge | Only specified fields change |
+| Explicit `null` | Remove field | `isolation_json: "null"` removes isolation |
+
+**Example (patch - toggle enabled):**
 ```json
 {
-  "action": "list"
+  "operation": "patch",
+  "name": "my-server",
+  "enabled": true
 }
 ```
+Only `enabled` changes - all other fields (env, isolation, oauth) are preserved.
+
+**Example (add with isolation):**
+```json
+{
+  "operation": "add",
+  "name": "isolated-server",
+  "command": "npx",
+  "args_json": "[\"-y\", \"some-mcp-server\"]",
+  "isolation_json": "{\"enabled\": true, \"image\": \"node:20\"}"
+}
+```
+
+**Example (patch isolation image only):**
+```json
+{
+  "operation": "patch",
+  "name": "isolated-server",
+  "isolation_json": "{\"image\": \"node:22\"}"
+}
+```
+Only `isolation.image` changes - `isolation.enabled` and other fields preserved.
 
 ### code_execution
 

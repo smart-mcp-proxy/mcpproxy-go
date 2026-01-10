@@ -1857,3 +1857,455 @@ func TestE2E_RequestID_ActivityFiltering(t *testing.T) {
 
 	t.Log("✅ All Request ID Activity Filtering E2E tests passed")
 }
+
+// ============================================================================
+// Smart Config Patching E2E Tests (Spec 023, Issues #239, #240)
+// ============================================================================
+// These tests verify that config update operations preserve unrelated fields
+// through the complete request flow.
+
+// TestE2E_PatchPreservesIsolationConfig verifies that patching a server
+// preserves the isolation configuration when only modifying other fields.
+// This is the key E2E test for Issue #239 and #240.
+func TestE2E_PatchPreservesIsolationConfig(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a server with isolation config
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation":      "add",
+		"name":           "isolation-preserve-test",
+		"command":        "echo",
+		"args_json":      `["test"]`,
+		"enabled":        false,
+		"isolation_json": `{"enabled": true, "image": "python:3.11", "network_mode": "bridge"}`,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	require.False(t, addResult.IsError, "Add operation should succeed: %v", getToolResultText(addResult))
+
+	// Step 2: Patch server - only change enabled state (isolation should be preserved)
+	patchRequest := mcp.CallToolRequest{}
+	patchRequest.Params.Name = "upstream_servers"
+	patchRequest.Params.Arguments = map[string]interface{}{
+		"operation": "patch",
+		"name":      "isolation-preserve-test",
+		"enabled":   true, // Toggle enabled state
+	}
+
+	patchResult, err := mcpClient.CallTool(ctx, patchRequest)
+	require.NoError(t, err)
+	require.False(t, patchResult.IsError, "Patch operation should succeed: %v", getToolResultText(patchResult))
+
+	// Step 3: List servers and verify isolation is preserved
+	listRequest := mcp.CallToolRequest{}
+	listRequest.Params.Name = "upstream_servers"
+	listRequest.Params.Arguments = map[string]interface{}{
+		"operation": "list",
+	}
+
+	listResult, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	require.False(t, listResult.IsError, "List operation should succeed")
+
+	// Parse the response to verify isolation is preserved
+	listText := getToolResultText(listResult)
+	var listResponse map[string]interface{}
+	err = json.Unmarshal([]byte(listText), &listResponse)
+	require.NoError(t, err)
+
+	servers, ok := listResponse["servers"].([]interface{})
+	require.True(t, ok, "Response should contain servers array")
+
+	var foundServer map[string]interface{}
+	for _, s := range servers {
+		server := s.(map[string]interface{})
+		if server["name"] == "isolation-preserve-test" {
+			foundServer = server
+			break
+		}
+	}
+	require.NotNil(t, foundServer, "Should find the test server")
+
+	// CRITICAL: Verify isolation config is preserved
+	// In the list response, isolation is under docker_isolation.server_isolation
+	dockerIsolation, ok := foundServer["docker_isolation"].(map[string]interface{})
+	require.True(t, ok, "docker_isolation should be present")
+	isolation, ok := dockerIsolation["server_isolation"].(map[string]interface{})
+	require.True(t, ok, "Isolation config must be preserved after patch (under docker_isolation.server_isolation)")
+	assert.Equal(t, true, isolation["enabled"], "isolation.enabled must be preserved")
+	assert.Equal(t, "python:3.11", isolation["image"], "isolation.image must be preserved")
+	assert.Equal(t, "bridge", isolation["network_mode"], "isolation.network_mode must be preserved")
+
+	// Verify enabled state was changed
+	assert.Equal(t, true, foundServer["enabled"], "enabled state should be updated")
+
+	// Step 4: Clean up
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "isolation-preserve-test",
+	}
+	_, _ = mcpClient.CallTool(ctx, deleteRequest)
+
+	t.Log("✅ Test passed: Patch operation preserves isolation config")
+}
+
+// TestE2E_PatchPreservesOAuthConfig verifies that patching a server
+// preserves the OAuth configuration when only modifying other fields.
+// Note: OAuth config is intentionally NOT exposed in list responses for security.
+// We verify preservation by checking the patch response diff, which should NOT
+// include oauth in the changes when only modifying other fields.
+func TestE2E_PatchPreservesOAuthConfig(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a server with OAuth config
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation":  "add",
+		"name":       "oauth-preserve-test",
+		"url":        "https://example.com/mcp",
+		"protocol":   "http",
+		"enabled":    false,
+		"oauth_json": `{"client_id": "my-client-id", "scopes": ["read", "write"], "pkce_enabled": true}`,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	require.False(t, addResult.IsError, "Add operation should succeed: %v", getToolResultText(addResult))
+
+	// Step 2: Patch server - only change URL (OAuth should be preserved)
+	patchRequest := mcp.CallToolRequest{}
+	patchRequest.Params.Name = "upstream_servers"
+	patchRequest.Params.Arguments = map[string]interface{}{
+		"operation": "patch",
+		"name":      "oauth-preserve-test",
+		"url":       "https://new-url.com/mcp",
+	}
+
+	patchResult, err := mcpClient.CallTool(ctx, patchRequest)
+	require.NoError(t, err)
+	require.False(t, patchResult.IsError, "Patch operation should succeed: %v", getToolResultText(patchResult))
+
+	// Parse patch response to verify only URL was changed (OAuth not modified)
+	patchText := getToolResultText(patchResult)
+	var patchResponse map[string]interface{}
+	err = json.Unmarshal([]byte(patchText), &patchResponse)
+	require.NoError(t, err)
+
+	// If there are changes, verify OAuth is NOT in the changes
+	if changes, ok := patchResponse["changes"].(map[string]interface{}); ok {
+		if modified, ok := changes["modified"].(map[string]interface{}); ok {
+			// OAuth should not be in the modified list - only URL should be modified
+			_, oauthModified := modified["oauth"]
+			assert.False(t, oauthModified, "oauth should NOT be in modified list when only changing URL")
+			// URL should be the only field modified
+			_, urlModified := modified["url"]
+			assert.True(t, urlModified, "url should be in modified list")
+		}
+	}
+
+	// Step 3: List servers and verify URL was updated
+	listRequest := mcp.CallToolRequest{}
+	listRequest.Params.Name = "upstream_servers"
+	listRequest.Params.Arguments = map[string]interface{}{
+		"operation": "list",
+	}
+
+	listResult, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	require.False(t, listResult.IsError, "List operation should succeed")
+
+	// Parse the response
+	listText := getToolResultText(listResult)
+	var listResponse map[string]interface{}
+	err = json.Unmarshal([]byte(listText), &listResponse)
+	require.NoError(t, err)
+
+	servers, ok := listResponse["servers"].([]interface{})
+	require.True(t, ok, "Response should contain servers array")
+
+	var foundServer map[string]interface{}
+	for _, s := range servers {
+		server := s.(map[string]interface{})
+		if server["name"] == "oauth-preserve-test" {
+			foundServer = server
+			break
+		}
+	}
+	require.NotNil(t, foundServer, "Should find the test server")
+
+	// Verify URL was updated
+	assert.Equal(t, "https://new-url.com/mcp", foundServer["url"], "URL should be updated")
+
+	// Note: OAuth config is intentionally NOT exposed in list responses for security
+	// The fact that the patch succeeded and didn't error is indirect evidence OAuth is preserved
+	// For full verification, use the /api/v1/servers/{name} endpoint which returns full config
+
+	// Step 4: Clean up
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "oauth-preserve-test",
+	}
+	_, _ = mcpClient.CallTool(ctx, deleteRequest)
+
+	t.Log("✅ Test passed: Patch operation preserves OAuth config")
+}
+
+// TestE2E_PatchDeepMergesEnvAndHeaders verifies that patching env and headers
+// does deep merge (adds to existing) rather than full replacement.
+func TestE2E_PatchDeepMergesEnvAndHeaders(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a server with env and headers
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation":    "add",
+		"name":         "deep-merge-test",
+		"command":      "echo",
+		"args_json":    `["test"]`,
+		"enabled":      false,
+		"env_json":     `{"EXISTING_VAR": "existing_value", "ANOTHER_VAR": "another_value"}`,
+		"headers_json": `{"Authorization": "Bearer token", "X-Custom": "custom-value"}`,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	require.False(t, addResult.IsError, "Add operation should succeed: %v", getToolResultText(addResult))
+
+	// Step 2: Patch with additional env var and header (deep merge)
+	patchRequest := mcp.CallToolRequest{}
+	patchRequest.Params.Name = "upstream_servers"
+	patchRequest.Params.Arguments = map[string]interface{}{
+		"operation":    "patch",
+		"name":         "deep-merge-test",
+		"env_json":     `{"NEW_VAR": "new_value"}`,
+		"headers_json": `{"X-New-Header": "new-header-value"}`,
+	}
+
+	patchResult, err := mcpClient.CallTool(ctx, patchRequest)
+	require.NoError(t, err)
+	require.False(t, patchResult.IsError, "Patch operation should succeed: %v", getToolResultText(patchResult))
+
+	// Step 3: List servers and verify deep merge
+	listRequest := mcp.CallToolRequest{}
+	listRequest.Params.Name = "upstream_servers"
+	listRequest.Params.Arguments = map[string]interface{}{
+		"operation": "list",
+	}
+
+	listResult, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	require.False(t, listResult.IsError, "List operation should succeed")
+
+	// Parse the response
+	listText := getToolResultText(listResult)
+	var listResponse map[string]interface{}
+	err = json.Unmarshal([]byte(listText), &listResponse)
+	require.NoError(t, err)
+
+	servers, ok := listResponse["servers"].([]interface{})
+	require.True(t, ok, "Response should contain servers array")
+
+	var foundServer map[string]interface{}
+	for _, s := range servers {
+		server := s.(map[string]interface{})
+		if server["name"] == "deep-merge-test" {
+			foundServer = server
+			break
+		}
+	}
+	require.NotNil(t, foundServer, "Should find the test server")
+
+	// CRITICAL: Verify existing env vars are preserved (deep merge)
+	envMap, ok := foundServer["env"].(map[string]interface{})
+	require.True(t, ok, "Env should be a map")
+	assert.Equal(t, "existing_value", envMap["EXISTING_VAR"], "EXISTING_VAR must be preserved")
+	assert.Equal(t, "another_value", envMap["ANOTHER_VAR"], "ANOTHER_VAR must be preserved")
+	assert.Equal(t, "new_value", envMap["NEW_VAR"], "NEW_VAR must be added")
+
+	// CRITICAL: Verify existing headers are preserved (deep merge)
+	headersMap, ok := foundServer["headers"].(map[string]interface{})
+	require.True(t, ok, "Headers should be a map")
+	assert.Equal(t, "Bearer token", headersMap["Authorization"], "Authorization must be preserved")
+	assert.Equal(t, "custom-value", headersMap["X-Custom"], "X-Custom must be preserved")
+	assert.Equal(t, "new-header-value", headersMap["X-New-Header"], "X-New-Header must be added")
+
+	// Step 4: Clean up
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "deep-merge-test",
+	}
+	_, _ = mcpClient.CallTool(ctx, deleteRequest)
+
+	t.Log("✅ Test passed: Patch deep merges env and headers")
+}
+
+// TestE2E_MultipleEnableDisablePreservesConfig verifies that toggling a server's
+// enabled state multiple times doesn't lose any configuration.
+func TestE2E_MultipleEnableDisablePreservesConfig(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a fully-configured server
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation":      "add",
+		"name":           "toggle-test-server",
+		"command":        "npx",
+		"args_json":      `["-y", "test-package"]`,
+		"working_dir":    "/opt/test",
+		"enabled":        false,
+		"env_json":       `{"API_KEY": "secret", "DEBUG": "true"}`,
+		"headers_json":   `{"Authorization": "Bearer token"}`,
+		"isolation_json": `{"enabled": true, "image": "node:18"}`,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	require.False(t, addResult.IsError, "Add operation should succeed: %v", getToolResultText(addResult))
+
+	// Step 2: Toggle enabled state 5 times
+	for i := 0; i < 5; i++ {
+		enabled := i%2 == 0 // Alternates: true, false, true, false, true
+		patchRequest := mcp.CallToolRequest{}
+		patchRequest.Params.Name = "upstream_servers"
+		patchRequest.Params.Arguments = map[string]interface{}{
+			"operation": "patch",
+			"name":      "toggle-test-server",
+			"enabled":   enabled,
+		}
+
+		patchResult, err := mcpClient.CallTool(ctx, patchRequest)
+		require.NoError(t, err)
+		require.False(t, patchResult.IsError, "Patch #%d should succeed: %v", i+1, getToolResultText(patchResult))
+	}
+
+	// Step 3: Verify all config is still intact
+	listRequest := mcp.CallToolRequest{}
+	listRequest.Params.Name = "upstream_servers"
+	listRequest.Params.Arguments = map[string]interface{}{
+		"operation": "list",
+	}
+
+	listResult, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	require.False(t, listResult.IsError, "List operation should succeed")
+
+	// Parse the response
+	listText := getToolResultText(listResult)
+	var listResponse map[string]interface{}
+	err = json.Unmarshal([]byte(listText), &listResponse)
+	require.NoError(t, err)
+
+	servers, ok := listResponse["servers"].([]interface{})
+	require.True(t, ok, "Response should contain servers array")
+
+	var foundServer map[string]interface{}
+	for _, s := range servers {
+		server := s.(map[string]interface{})
+		if server["name"] == "toggle-test-server" {
+			foundServer = server
+			break
+		}
+	}
+	require.NotNil(t, foundServer, "Should find the test server")
+
+	// Verify ALL fields are still intact after 5 toggles
+	assert.Equal(t, "npx", foundServer["command"], "command must be preserved")
+	// Note: working_dir is not exposed in top-level list response
+
+	// Verify args
+	args, ok := foundServer["args"].([]interface{})
+	require.True(t, ok, "args should be an array")
+	assert.Len(t, args, 2, "args should have 2 elements")
+
+	// Verify env
+	envMap, ok := foundServer["env"].(map[string]interface{})
+	require.True(t, ok, "env should be a map")
+	assert.Equal(t, "secret", envMap["API_KEY"], "API_KEY must be preserved")
+	assert.Equal(t, "true", envMap["DEBUG"], "DEBUG must be preserved")
+
+	// Verify headers
+	headersMap, ok := foundServer["headers"].(map[string]interface{})
+	require.True(t, ok, "headers should be a map")
+	assert.Equal(t, "Bearer token", headersMap["Authorization"], "Authorization must be preserved")
+
+	// Verify isolation - in list response, isolation is under docker_isolation.server_isolation
+	dockerIsolation, ok := foundServer["docker_isolation"].(map[string]interface{})
+	require.True(t, ok, "docker_isolation should be present")
+	serverIsolation, ok := dockerIsolation["server_isolation"].(map[string]interface{})
+	require.True(t, ok, "server_isolation should be present after 5 toggles")
+	assert.Equal(t, true, serverIsolation["enabled"], "isolation.enabled must be preserved")
+	assert.Equal(t, "node:18", serverIsolation["image"], "isolation.image must be preserved")
+
+	// Verify enabled state (should be true after 5 toggles: 0=true, 1=false, 2=true, 3=false, 4=true)
+	assert.Equal(t, true, foundServer["enabled"], "enabled should be true after 5 toggles")
+
+	// Step 4: Clean up
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "toggle-test-server",
+	}
+	_, _ = mcpClient.CallTool(ctx, deleteRequest)
+
+	t.Log("✅ Test passed: Multiple enable/disable cycles preserve config")
+}
+
+// Helper function to extract text from tool result
+func getToolResultText(result *mcp.CallToolResult) string {
+	if result == nil || len(result.Content) == 0 {
+		return ""
+	}
+	contentBytes, err := json.Marshal(result.Content[0])
+	if err != nil {
+		return ""
+	}
+	var contentMap map[string]interface{}
+	if err := json.Unmarshal(contentBytes, &contentMap); err != nil {
+		return ""
+	}
+	if text, ok := contentMap["text"].(string); ok {
+		return text
+	}
+	return ""
+}

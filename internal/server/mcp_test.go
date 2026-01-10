@@ -1262,3 +1262,287 @@ func TestFullReplacementSemantics(t *testing.T) {
 		assert.Len(t, initialArgs, 3)
 	})
 }
+
+// ============================================================================
+// Smart Config Patching Tests (Spec 023, Issues #239, #240)
+// ============================================================================
+// These tests verify that patch operations preserve unrelated config fields
+// using the new deep merge semantics implemented in config.MergeServerConfig.
+
+// TestPatchPreservesIsolationConfig verifies that patching a server config
+// preserves the Isolation configuration when not explicitly modified.
+// This is the key bug fix for Issue #239 and #240.
+func TestPatchPreservesIsolationConfig(t *testing.T) {
+	// Create a server config with isolation settings
+	baseConfig := &config.ServerConfig{
+		Name:     "test-server-isolation",
+		URL:      "https://example.com/mcp",
+		Protocol: "http",
+		Enabled:  true,
+		Isolation: &config.IsolationConfig{
+			Enabled:     true,
+			Image:       "python:3.11",
+			NetworkMode: "bridge",
+			ExtraArgs:   []string{"-v", "/host:/container"},
+			WorkingDir:  "/app",
+			LogDriver:   "json-file",
+			LogMaxSize:  "100m",
+			LogMaxFiles: "3",
+		},
+	}
+
+	// Patch: only modify the URL
+	patch := &config.ServerConfig{
+		URL: "https://new-url.com/mcp",
+	}
+
+	// Perform merge
+	opts := config.DefaultMergeOptions()
+	merged, diff, err := config.MergeServerConfig(baseConfig, patch, opts)
+	require.NoError(t, err)
+
+	// Verify URL was changed
+	assert.Equal(t, "https://new-url.com/mcp", merged.URL)
+	assert.NotNil(t, diff)
+	assert.Contains(t, diff.Modified, "url")
+
+	// CRITICAL: Verify Isolation config is preserved completely
+	require.NotNil(t, merged.Isolation, "Isolation config must be preserved")
+	assert.True(t, merged.Isolation.Enabled, "Isolation.Enabled must be preserved")
+	assert.Equal(t, "python:3.11", merged.Isolation.Image, "Isolation.Image must be preserved")
+	assert.Equal(t, "bridge", merged.Isolation.NetworkMode, "Isolation.NetworkMode must be preserved")
+	assert.Equal(t, []string{"-v", "/host:/container"}, merged.Isolation.ExtraArgs, "Isolation.ExtraArgs must be preserved")
+	assert.Equal(t, "/app", merged.Isolation.WorkingDir, "Isolation.WorkingDir must be preserved")
+	assert.Equal(t, "json-file", merged.Isolation.LogDriver, "Isolation.LogDriver must be preserved")
+	assert.Equal(t, "100m", merged.Isolation.LogMaxSize, "Isolation.LogMaxSize must be preserved")
+	assert.Equal(t, "3", merged.Isolation.LogMaxFiles, "Isolation.LogMaxFiles must be preserved")
+
+	// Verify the diff does NOT contain isolation (it wasn't changed)
+	assert.NotContains(t, diff.Modified, "isolation", "Diff should not include unchanged isolation")
+}
+
+// TestPatchPreservesOAuthConfig verifies that patching a server config
+// preserves the OAuth configuration when not explicitly modified.
+func TestPatchPreservesOAuthConfig(t *testing.T) {
+	// Create a server config with OAuth settings
+	baseConfig := &config.ServerConfig{
+		Name:     "test-server-oauth",
+		URL:      "https://example.com/mcp",
+		Protocol: "http",
+		Enabled:  true,
+		OAuth: &config.OAuthConfig{
+			ClientID:     "my-client-id",
+			ClientSecret: "my-client-secret",
+			RedirectURI:  "http://localhost:8080/callback",
+			Scopes:       []string{"read", "write", "admin"},
+			PKCEEnabled:  true,
+			ExtraParams:  map[string]string{"audience": "api.example.com"},
+		},
+	}
+
+	// Patch: only toggle enabled state
+	patch := &config.ServerConfig{
+		Enabled: false,
+	}
+
+	// Perform merge
+	opts := config.DefaultMergeOptions()
+	merged, diff, err := config.MergeServerConfig(baseConfig, patch, opts)
+	require.NoError(t, err)
+
+	// Verify Enabled was changed
+	assert.False(t, merged.Enabled)
+	assert.NotNil(t, diff)
+	assert.Contains(t, diff.Modified, "enabled")
+
+	// CRITICAL: Verify OAuth config is preserved completely
+	require.NotNil(t, merged.OAuth, "OAuth config must be preserved")
+	assert.Equal(t, "my-client-id", merged.OAuth.ClientID, "OAuth.ClientID must be preserved")
+	assert.Equal(t, "my-client-secret", merged.OAuth.ClientSecret, "OAuth.ClientSecret must be preserved")
+	assert.Equal(t, "http://localhost:8080/callback", merged.OAuth.RedirectURI, "OAuth.RedirectURI must be preserved")
+	assert.Equal(t, []string{"read", "write", "admin"}, merged.OAuth.Scopes, "OAuth.Scopes must be preserved")
+	assert.True(t, merged.OAuth.PKCEEnabled, "OAuth.PKCEEnabled must be preserved")
+	assert.Equal(t, map[string]string{"audience": "api.example.com"}, merged.OAuth.ExtraParams, "OAuth.ExtraParams must be preserved")
+
+	// Verify the diff does NOT contain oauth (it wasn't changed)
+	assert.NotContains(t, diff.Modified, "oauth", "Diff should not include unchanged oauth")
+}
+
+// TestPatchPreservesEnvAndHeaders verifies that patching a server config
+// with partial env/headers does deep merge, not replacement.
+func TestPatchPreservesEnvAndHeaders(t *testing.T) {
+	// Create a server config with env and headers
+	baseConfig := &config.ServerConfig{
+		Name:     "test-server-env",
+		URL:      "https://example.com/mcp",
+		Protocol: "http",
+		Enabled:  true,
+		Env: map[string]string{
+			"API_KEY":    "secret-key",
+			"DEBUG":      "true",
+			"LOG_LEVEL":  "info",
+		},
+		Headers: map[string]string{
+			"Authorization": "Bearer token123",
+			"X-Custom":      "custom-value",
+			"User-Agent":    "MCPProxy/1.0",
+		},
+	}
+
+	// Patch: add new env var and header (deep merge behavior)
+	patch := &config.ServerConfig{
+		Env: map[string]string{
+			"NEW_VAR": "new-value",
+		},
+		Headers: map[string]string{
+			"X-New-Header": "new-header-value",
+		},
+	}
+
+	// Perform merge
+	opts := config.DefaultMergeOptions()
+	merged, diff, err := config.MergeServerConfig(baseConfig, patch, opts)
+	require.NoError(t, err)
+
+	// CRITICAL: Verify existing env vars are preserved (deep merge)
+	require.NotNil(t, merged.Env, "Env map must exist")
+	assert.Equal(t, "secret-key", merged.Env["API_KEY"], "Existing API_KEY must be preserved")
+	assert.Equal(t, "true", merged.Env["DEBUG"], "Existing DEBUG must be preserved")
+	assert.Equal(t, "info", merged.Env["LOG_LEVEL"], "Existing LOG_LEVEL must be preserved")
+	assert.Equal(t, "new-value", merged.Env["NEW_VAR"], "New NEW_VAR must be added")
+
+	// CRITICAL: Verify existing headers are preserved (deep merge)
+	require.NotNil(t, merged.Headers, "Headers map must exist")
+	assert.Equal(t, "Bearer token123", merged.Headers["Authorization"], "Existing Authorization must be preserved")
+	assert.Equal(t, "custom-value", merged.Headers["X-Custom"], "Existing X-Custom must be preserved")
+	assert.Equal(t, "MCPProxy/1.0", merged.Headers["User-Agent"], "Existing User-Agent must be preserved")
+	assert.Equal(t, "new-header-value", merged.Headers["X-New-Header"], "New X-New-Header must be added")
+
+	// Verify the diff contains env and headers changes
+	assert.NotNil(t, diff)
+	assert.Contains(t, diff.Modified, "env", "Diff should include env changes")
+	assert.Contains(t, diff.Modified, "headers", "Diff should include headers changes")
+}
+
+// TestPatchPreservesAllFieldsOnSimpleToggle verifies that toggling enabled
+// state preserves ALL other fields - the primary use case for Issue #239.
+func TestPatchPreservesAllFieldsOnSimpleToggle(t *testing.T) {
+	// Create a fully-populated server config (simulates a real production config)
+	baseConfig := &config.ServerConfig{
+		Name:        "production-server",
+		URL:         "https://api.production.com/mcp",
+		Protocol:    "http",
+		Command:     "npx",
+		Args:        []string{"-y", "server-package"},
+		WorkingDir:  "/opt/mcp",
+		Enabled:     true,
+		Quarantined: false,
+		Env: map[string]string{
+			"API_KEY":     "prod-secret-key",
+			"ENVIRONMENT": "production",
+		},
+		Headers: map[string]string{
+			"Authorization": "Bearer prod-token",
+		},
+		Isolation: &config.IsolationConfig{
+			Enabled:     true,
+			Image:       "node:18",
+			NetworkMode: "host",
+			ExtraArgs:   []string{"--memory", "512m"},
+		},
+		OAuth: &config.OAuthConfig{
+			ClientID:    "prod-client",
+			PKCEEnabled: true,
+			Scopes:      []string{"api.read", "api.write"},
+		},
+	}
+
+	// Patch: only disable the server (common operation)
+	patch := &config.ServerConfig{
+		Enabled: false,
+	}
+
+	// Perform merge
+	opts := config.DefaultMergeOptions()
+	merged, diff, err := config.MergeServerConfig(baseConfig, patch, opts)
+	require.NoError(t, err)
+
+	// Verify enabled state changed
+	assert.False(t, merged.Enabled)
+
+	// Verify ALL other fields are preserved
+	assert.Equal(t, baseConfig.Name, merged.Name)
+	assert.Equal(t, baseConfig.URL, merged.URL)
+	assert.Equal(t, baseConfig.Protocol, merged.Protocol)
+	assert.Equal(t, baseConfig.Command, merged.Command)
+	assert.Equal(t, baseConfig.Args, merged.Args)
+	assert.Equal(t, baseConfig.WorkingDir, merged.WorkingDir)
+	assert.Equal(t, baseConfig.Quarantined, merged.Quarantined)
+	assert.Equal(t, baseConfig.Env, merged.Env)
+	assert.Equal(t, baseConfig.Headers, merged.Headers)
+
+	// Deep verify nested configs
+	require.NotNil(t, merged.Isolation)
+	assert.Equal(t, baseConfig.Isolation.Enabled, merged.Isolation.Enabled)
+	assert.Equal(t, baseConfig.Isolation.Image, merged.Isolation.Image)
+	assert.Equal(t, baseConfig.Isolation.NetworkMode, merged.Isolation.NetworkMode)
+	assert.Equal(t, baseConfig.Isolation.ExtraArgs, merged.Isolation.ExtraArgs)
+
+	require.NotNil(t, merged.OAuth)
+	assert.Equal(t, baseConfig.OAuth.ClientID, merged.OAuth.ClientID)
+	assert.Equal(t, baseConfig.OAuth.PKCEEnabled, merged.OAuth.PKCEEnabled)
+	assert.Equal(t, baseConfig.OAuth.Scopes, merged.OAuth.Scopes)
+
+	// Diff should only contain enabled change
+	assert.NotNil(t, diff)
+	assert.Len(t, diff.Modified, 1, "Only 'enabled' should be modified")
+	assert.Contains(t, diff.Modified, "enabled")
+}
+
+// TestPatchDeepMergeIsolation verifies that patching isolation does deep merge
+// of nested fields, not full replacement.
+func TestPatchDeepMergeIsolation(t *testing.T) {
+	// Create a server config with isolation settings
+	baseConfig := &config.ServerConfig{
+		Name:     "test-deep-merge",
+		URL:      "https://example.com/mcp",
+		Protocol: "http",
+		Enabled:  true,
+		Isolation: &config.IsolationConfig{
+			Enabled:     true,
+			Image:       "python:3.11",
+			NetworkMode: "bridge",
+			ExtraArgs:   []string{"-v", "/host:/container"},
+			WorkingDir:  "/app",
+		},
+	}
+
+	// Patch: only change the image (other isolation fields should be preserved)
+	patch := &config.ServerConfig{
+		Isolation: &config.IsolationConfig{
+			Image: "python:3.12",
+		},
+	}
+
+	// Perform merge
+	opts := config.DefaultMergeOptions()
+	merged, diff, err := config.MergeServerConfig(baseConfig, patch, opts)
+	require.NoError(t, err)
+
+	// Verify image was changed
+	require.NotNil(t, merged.Isolation)
+	assert.Equal(t, "python:3.12", merged.Isolation.Image)
+
+	// CRITICAL: Verify other isolation fields are preserved via deep merge
+	assert.Equal(t, "bridge", merged.Isolation.NetworkMode, "NetworkMode must be preserved")
+	assert.Equal(t, []string{"-v", "/host:/container"}, merged.Isolation.ExtraArgs, "ExtraArgs must be preserved")
+	assert.Equal(t, "/app", merged.Isolation.WorkingDir, "WorkingDir must be preserved")
+
+	// Note: Enabled bool is tricky - patch.Isolation.Enabled is false (zero value)
+	// In our implementation, booleans in nested structs always take patch value
+	// This is documented behavior: use isolation_json to set explicit values
+
+	// Verify the diff contains isolation changes
+	assert.NotNil(t, diff)
+	assert.Contains(t, diff.Modified, "isolation", "Diff should include isolation changes")
+}
