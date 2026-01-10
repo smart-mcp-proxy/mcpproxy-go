@@ -2638,10 +2638,14 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			c.logger.Info("✅ DCR successful",
 				zap.String("server", c.config.Name),
 				zap.String("client_id", clientID))
-			// Persist DCR credentials for future use
+			// Persist DCR credentials and callback port for future use (Spec 022)
 			if c.storage != nil && clientID != "" {
 				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-				if saveErr := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret); saveErr != nil {
+				var callbackPort int
+				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
+					callbackPort = callbackServer.Port
+				}
+				if saveErr := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); saveErr != nil {
 					c.logger.Warn("Failed to persist DCR credentials",
 						zap.String("server", c.config.Name),
 						zap.Error(saveErr))
@@ -3065,12 +3069,16 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 			c.logger.Info("✅ DCR succeeded",
 				zap.String("server", c.config.Name),
 				zap.String("correlation_id", correlationID))
-			// Persist DCR credentials
+			// Persist DCR credentials and callback port (Spec 022)
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
 			if c.storage != nil && clientID != "" {
 				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-				_ = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret)
+				var callbackPort int
+				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
+					callbackPort = callbackServer.Port
+				}
+				_ = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort)
 			}
 		}
 	}

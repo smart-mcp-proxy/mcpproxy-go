@@ -12,6 +12,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/reqcontext"
+	"mcpproxy-go/internal/upstream/core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -356,13 +357,25 @@ func TestRequestIDInLogs(t *testing.T) {
 // Spec 020: OAuth Login Error Feedback - handleServerLogin Tests
 // =============================================================================
 
-// mockOAuthManagementService implements TriggerOAuthLogin for server login tests
+// mockOAuthManagementService implements TriggerOAuthLoginQuick for server login tests
 type mockOAuthManagementService struct {
-	triggerError error
+	triggerError  error
+	triggerResult *core.OAuthStartResult
 }
 
-func (m *mockOAuthManagementService) TriggerOAuthLogin(_ context.Context, _ string) error {
-	return m.triggerError
+func (m *mockOAuthManagementService) TriggerOAuthLoginQuick(_ context.Context, _ string) (*core.OAuthStartResult, error) {
+	if m.triggerError != nil {
+		return nil, m.triggerError
+	}
+	if m.triggerResult != nil {
+		return m.triggerResult, nil
+	}
+	// Default success result
+	return &core.OAuthStartResult{
+		AuthURL:       "https://example.com/oauth/authorize?client_id=test",
+		BrowserOpened: true,
+		CorrelationID: "test-correlation-id-12345678",
+	}, nil
 }
 
 // mockLoginController is a mock controller for server login tests

@@ -20,6 +20,7 @@ import (
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/updatecheck"
+	"mcpproxy-go/internal/upstream/core"
 )
 
 // MockServerController implements ServerController for testing
@@ -73,6 +74,14 @@ func (m *mockManagementService) GetServerTools(ctx context.Context, name string)
 
 func (m *mockManagementService) TriggerOAuthLogin(ctx context.Context, name string) error {
 	return nil
+}
+
+func (m *mockManagementService) TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error) {
+	return &core.OAuthStartResult{
+		AuthURL:       "https://example.com/oauth/authorize?client_id=test",
+		BrowserOpened: true,
+		CorrelationID: "test-correlation-id",
+	}, nil
 }
 
 func (m *mockManagementService) TriggerOAuthLogout(ctx context.Context, name string) error {
