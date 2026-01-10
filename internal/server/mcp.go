@@ -1839,7 +1839,7 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 			// Add server-specific isolation config
 			if server.Isolation != nil {
 				dockerInfo["server_isolation"] = map[string]interface{}{
-					"enabled":      server.Isolation.Enabled,
+					"enabled":      server.Isolation.IsEnabled(),
 					"image":        server.Isolation.Image,
 					"network_mode": server.Isolation.NetworkMode,
 					"working_dir":  server.Isolation.WorkingDir,

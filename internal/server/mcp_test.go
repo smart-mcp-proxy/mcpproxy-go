@@ -1280,7 +1280,7 @@ func TestPatchPreservesIsolationConfig(t *testing.T) {
 		Protocol: "http",
 		Enabled:  true,
 		Isolation: &config.IsolationConfig{
-			Enabled:     true,
+			Enabled:     config.BoolPtr(true),
 			Image:       "python:3.11",
 			NetworkMode: "bridge",
 			ExtraArgs:   []string{"-v", "/host:/container"},
@@ -1308,7 +1308,7 @@ func TestPatchPreservesIsolationConfig(t *testing.T) {
 
 	// CRITICAL: Verify Isolation config is preserved completely
 	require.NotNil(t, merged.Isolation, "Isolation config must be preserved")
-	assert.True(t, merged.Isolation.Enabled, "Isolation.Enabled must be preserved")
+	assert.True(t, merged.Isolation.IsEnabled(), "Isolation.Enabled must be preserved")
 	assert.Equal(t, "python:3.11", merged.Isolation.Image, "Isolation.Image must be preserved")
 	assert.Equal(t, "bridge", merged.Isolation.NetworkMode, "Isolation.NetworkMode must be preserved")
 	assert.Equal(t, []string{"-v", "/host:/container"}, merged.Isolation.ExtraArgs, "Isolation.ExtraArgs must be preserved")
@@ -1445,7 +1445,7 @@ func TestPatchPreservesAllFieldsOnSimpleToggle(t *testing.T) {
 			"Authorization": "Bearer prod-token",
 		},
 		Isolation: &config.IsolationConfig{
-			Enabled:     true,
+			Enabled:     config.BoolPtr(true),
 			Image:       "node:18",
 			NetworkMode: "host",
 			ExtraArgs:   []string{"--memory", "512m"},
@@ -1483,7 +1483,7 @@ func TestPatchPreservesAllFieldsOnSimpleToggle(t *testing.T) {
 
 	// Deep verify nested configs
 	require.NotNil(t, merged.Isolation)
-	assert.Equal(t, baseConfig.Isolation.Enabled, merged.Isolation.Enabled)
+	assert.Equal(t, baseConfig.Isolation.IsEnabled(), merged.Isolation.IsEnabled())
 	assert.Equal(t, baseConfig.Isolation.Image, merged.Isolation.Image)
 	assert.Equal(t, baseConfig.Isolation.NetworkMode, merged.Isolation.NetworkMode)
 	assert.Equal(t, baseConfig.Isolation.ExtraArgs, merged.Isolation.ExtraArgs)
@@ -1509,7 +1509,7 @@ func TestPatchDeepMergeIsolation(t *testing.T) {
 		Protocol: "http",
 		Enabled:  true,
 		Isolation: &config.IsolationConfig{
-			Enabled:     true,
+			Enabled:     config.BoolPtr(true),
 			Image:       "python:3.11",
 			NetworkMode: "bridge",
 			ExtraArgs:   []string{"-v", "/host:/container"},
@@ -1538,9 +1538,8 @@ func TestPatchDeepMergeIsolation(t *testing.T) {
 	assert.Equal(t, []string{"-v", "/host:/container"}, merged.Isolation.ExtraArgs, "ExtraArgs must be preserved")
 	assert.Equal(t, "/app", merged.Isolation.WorkingDir, "WorkingDir must be preserved")
 
-	// Note: Enabled bool is tricky - patch.Isolation.Enabled is false (zero value)
-	// In our implementation, booleans in nested structs always take patch value
-	// This is documented behavior: use isolation_json to set explicit values
+	// With *bool: patch.Isolation.Enabled is nil (not set), so base value is preserved
+	assert.True(t, merged.Isolation.IsEnabled(), "Enabled must be preserved when patch doesn't set it")
 
 	// Verify the diff contains isolation changes
 	assert.NotNil(t, diff)

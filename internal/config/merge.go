@@ -362,8 +362,11 @@ func MergeIsolationConfig(base, patch *IsolationConfig, removeIfNil bool) *Isola
 	result := copyIsolationConfig(base)
 
 	// Merge scalar fields - non-zero values override
-	// For Enabled, we always take patch value since it's a boolean
-	result.Enabled = patch.Enabled
+	// For Enabled (*bool), only update if explicitly set in patch (non-nil)
+	// This allows distinguishing between "not set" and "set to false"
+	if patch.Enabled != nil {
+		result.Enabled = patch.Enabled
+	}
 
 	if patch.Image != "" {
 		result.Image = patch.Image
@@ -496,13 +499,18 @@ func copyIsolationConfig(src *IsolationConfig) *IsolationConfig {
 	}
 
 	dst := &IsolationConfig{
-		Enabled:     src.Enabled,
 		Image:       src.Image,
 		NetworkMode: src.NetworkMode,
 		WorkingDir:  src.WorkingDir,
 		LogDriver:   src.LogDriver,
 		LogMaxSize:  src.LogMaxSize,
 		LogMaxFiles: src.LogMaxFiles,
+	}
+
+	// Copy *bool by value (not pointer) to avoid shared state
+	if src.Enabled != nil {
+		enabled := *src.Enabled
+		dst.Enabled = &enabled
 	}
 
 	if src.ExtraArgs != nil {

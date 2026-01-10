@@ -197,6 +197,15 @@ Only `enabled` changes - all other fields (env, isolation, oauth) are preserved.
 ```
 Only `isolation.image` changes - `isolation.enabled` and other fields preserved.
 
+:::caution Concurrent Edits
+MCPProxy does not support three-way merge with conflict detection. Avoid making concurrent edits to the same server configuration from multiple sources (MCP tool, Web UI, CLI) simultaneously. If concurrent edits occur, the last write wins and earlier changes may be lost.
+
+**Best practices:**
+- Make configuration changes from a single interface at a time
+- Use the `list` operation to verify current state before patching
+- Consider using the Web UI for interactive editing sessions
+:::
+
 ### code_execution
 
 Execute JavaScript code to orchestrate multiple tools. Disabled by default.

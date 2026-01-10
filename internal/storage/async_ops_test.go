@@ -50,7 +50,7 @@ func TestSaveServerSyncPreservesAllFields(t *testing.T) {
 		Created:     created,
 		Updated:     time.Now(),
 		Isolation: &config.IsolationConfig{
-			Enabled:     true,
+			Enabled:     config.BoolPtr(true),
 			Image:       "python:3.11",
 			NetworkMode: "bridge",
 			ExtraArgs:   []string{"-v", "/host:/container"},
@@ -117,8 +117,8 @@ func TestSaveServerSyncPreservesAllFields(t *testing.T) {
 	if record.Isolation == nil {
 		t.Fatal("Isolation config is nil - data loss detected!")
 	}
-	if record.Isolation.Enabled != serverConfig.Isolation.Enabled {
-		t.Errorf("Isolation.Enabled mismatch: got %v, want %v", record.Isolation.Enabled, serverConfig.Isolation.Enabled)
+	if record.Isolation.IsEnabled() != serverConfig.Isolation.IsEnabled() {
+		t.Errorf("Isolation.Enabled mismatch: got %v, want %v", record.Isolation.IsEnabled(), serverConfig.Isolation.IsEnabled())
 	}
 	if record.Isolation.Image != serverConfig.Isolation.Image {
 		t.Errorf("Isolation.Image mismatch: got %s, want %s", record.Isolation.Image, serverConfig.Isolation.Image)

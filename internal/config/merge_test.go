@@ -114,7 +114,7 @@ func TestMergeServerConfig_NestedStructDeepMerge(t *testing.T) {
 	base := &ServerConfig{
 		Name: "test-server",
 		Isolation: &IsolationConfig{
-			Enabled:     true,
+			Enabled:     BoolPtr(true),
 			Image:       "python:3.11",
 			NetworkMode: "bridge",
 			WorkingDir:  "/app",
@@ -178,7 +178,7 @@ func TestMergeServerConfig_ArrayFieldsReplaced(t *testing.T) {
 		Name: "test-server",
 		Args: []string{"--old", "--args", "--here"},
 		Isolation: &IsolationConfig{
-			Enabled:   true,
+			Enabled:   BoolPtr(true),
 			ExtraArgs: []string{"-v", "/old:/path"},
 		},
 		OAuth: &OAuthConfig{
@@ -234,7 +234,7 @@ func TestMergeServerConfig_OmittedFieldsPreserved(t *testing.T) {
 		Headers:    map[string]string{"Auth": "token"},
 		Enabled:    true,
 		Isolation: &IsolationConfig{
-			Enabled: true,
+			Enabled: BoolPtr(true),
 			Image:   "python:3.11",
 		},
 		OAuth: &OAuthConfig{
@@ -291,7 +291,7 @@ func TestMergeServerConfig_ExplicitNullRemovesField(t *testing.T) {
 	base := &ServerConfig{
 		Name: "test-server",
 		Isolation: &IsolationConfig{
-			Enabled: true,
+			Enabled: BoolPtr(true),
 			Image:   "python:3.11",
 		},
 		OAuth: &OAuthConfig{
@@ -378,7 +378,7 @@ func TestMergeServerConfig_ConfigDiffCapture(t *testing.T) {
 		Protocol: "http",
 		Env:      map[string]string{"OLD": "value"},
 		Isolation: &IsolationConfig{
-			Enabled: true,
+			Enabled: BoolPtr(true),
 			Image:   "python:3.11",
 		},
 	}
@@ -507,7 +507,7 @@ func TestMergeServerConfig_EmptyBase(t *testing.T) {
 		Protocol: "http",
 		Enabled:  true,
 		Isolation: &IsolationConfig{
-			Enabled: true,
+			Enabled: BoolPtr(true),
 			Image:   "python:3.11",
 		},
 	}
@@ -542,7 +542,7 @@ func TestMergeServerConfig_EmptyPatch(t *testing.T) {
 		Protocol: "http",
 		Env:      map[string]string{"KEY": "value"},
 		Isolation: &IsolationConfig{
-			Enabled: true,
+			Enabled: BoolPtr(true),
 			Image:   "python:3.11",
 		},
 	}
@@ -587,7 +587,7 @@ func TestMergeServerConfig_ComplexNestedMerge(t *testing.T) {
 		Enabled:     true,
 		Quarantined: true,
 		Isolation: &IsolationConfig{
-			Enabled:     true,
+			Enabled:     BoolPtr(true),
 			Image:       "python:3.11",
 			NetworkMode: "bridge",
 			WorkingDir:  "/app",
@@ -780,7 +780,7 @@ func TestMergeMap(t *testing.T) {
 // Test MergeIsolationConfig function directly
 func TestMergeIsolationConfig(t *testing.T) {
 	base := &IsolationConfig{
-		Enabled:     true,
+		Enabled:     BoolPtr(true),
 		Image:       "python:3.11",
 		NetworkMode: "bridge",
 		ExtraArgs:   []string{"--old"},
