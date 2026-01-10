@@ -31,6 +31,7 @@ import (
 	"mcpproxy-go/internal/truncate"
 	"mcpproxy-go/internal/updatecheck"
 	"mcpproxy-go/internal/upstream"
+	"mcpproxy-go/internal/upstream/core"
 )
 
 // Status captures high-level state for API consumers.
@@ -1831,6 +1832,33 @@ func (r *Runtime) TriggerOAuthLogin(serverName string) error {
 	}
 
 	return nil
+}
+
+// TriggerOAuthLoginQuick implements RuntimeOperations interface for management service.
+// Returns OAuthStartResult with actual browser status, auth URL, and any errors.
+// This is the synchronous version that provides immediate feedback about browser opening.
+func (r *Runtime) TriggerOAuthLoginQuick(serverName string) (*core.OAuthStartResult, error) {
+	r.logger.Debug("Runtime.TriggerOAuthLoginQuick called", zap.String("server", serverName))
+
+	if r.upstreamManager == nil {
+		return nil, fmt.Errorf("upstream manager not available")
+	}
+
+	// Clear the user logged out flag to allow connection after successful OAuth
+	if err := r.upstreamManager.SetUserLoggedOut(serverName, false); err != nil {
+		r.logger.Warn("Failed to clear user logged out state",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Continue - this is not a fatal error
+	}
+
+	// StartManualOAuthQuick returns immediately with browser status
+	result, err := r.upstreamManager.StartManualOAuthQuick(serverName)
+	if err != nil {
+		return result, fmt.Errorf("failed to start OAuth flow: %w", err)
+	}
+
+	return result, nil
 }
 
 // TriggerOAuthLogout implements RuntimeOperations interface for management service.

@@ -137,6 +137,76 @@ Tokens are stored securely using the system keyring:
 | Windows | Credential Manager |
 | Linux | Secret Service (libsecret) |
 
+## Error Handling
+
+MCPProxy provides structured error responses for OAuth failures, making it easier to diagnose and fix authentication issues.
+
+### Error Types
+
+| Error Type | Description | Common Causes |
+|------------|-------------|---------------|
+| `client_id_required` | OAuth client ID is missing | Server requires pre-registered client, DCR not supported |
+| `dcr_failed` | Dynamic Client Registration failed | Server rejected registration, permission denied |
+| `metadata_discovery_failed` | Could not discover OAuth metadata | Server unreachable, missing `.well-known` endpoints |
+| `code_flow_failed` | Authorization code flow failed | User denied, invalid redirect, network issues |
+
+### CLI Error Output
+
+When OAuth fails, the CLI displays rich error information:
+
+```
+❌ OAuth Error: dcr_failed
+
+Server: github-server
+Message: Dynamic Client Registration failed: 403 Forbidden
+Suggestion: Check if the OAuth server requires pre-registered clients
+
+🔍 Debug:
+   Server logs: mcpproxy upstream logs github-server
+   Activity log: mcpproxy activity list --request-id req-xyz-123
+   Request ID: req-xyz-123
+   Correlation ID: a1b2c3d4e5f6789012345678
+```
+
+### API Error Response
+
+The REST API returns structured `OAuthFlowError` responses:
+
+```json
+{
+  "success": false,
+  "error_type": "dcr_failed",
+  "server_name": "github-server",
+  "message": "Dynamic Client Registration failed: 403 Forbidden",
+  "suggestion": "Check if the OAuth server requires pre-registered clients",
+  "correlation_id": "a1b2c3d4e5f6789012345678",
+  "request_id": "req-xyz-123",
+  "details": {
+    "metadata": {
+      "status": "ok",
+      "protected_resource_url": "https://api.example.com/.well-known/oauth-protected-resource"
+    },
+    "dcr": {
+      "attempted": true,
+      "status": "failed",
+      "error": "403 Forbidden"
+    }
+  }
+}
+```
+
+### Log Correlation
+
+Use the `request_id` from error responses to find related logs:
+
+```bash
+# Find activity records for a specific request
+mcpproxy activity list --request-id req-xyz-123
+
+# View server-specific logs
+mcpproxy upstream logs github-server --tail 50
+```
+
 ## Troubleshooting
 
 ### Browser Doesn't Open

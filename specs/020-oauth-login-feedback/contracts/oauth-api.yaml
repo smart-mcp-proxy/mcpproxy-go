@@ -1,0 +1,234 @@
+# OAuth Login API Contract
+# Feature: 020-oauth-login-feedback
+# Date: 2026-01-06
+#
+# This contract extends the existing mcpproxy REST API (oas/swagger.yaml)
+# with enhanced response payload for the OAuth login endpoint.
+# The endpoint remains async (non-blocking) - returns immediately after starting flow.
+
+openapi: 3.0.3
+info:
+  title: MCPProxy OAuth Login API Extensions
+  version: 1.0.0
+  description: |
+    API contract for OAuth login feedback feature.
+    Enhances POST /api/v1/servers/{id}/login with browser status and auth URL.
+
+    All clients (CLI, tray, Web UI) use the same endpoint and response format.
+    OAuth completion is detected via existing `servers.changed` SSE events.
+
+paths:
+  /api/v1/servers/{id}/login:
+    post:
+      summary: Trigger OAuth authentication flow
+      description: |
+        Initiates OAuth authentication for the specified server.
+
+        This is an **async (non-blocking)** operation. The endpoint:
+        1. Validates the server (exists, enabled, supports OAuth)
+        2. Starts the OAuth flow and attempts to open browser
+        3. Returns immediately with flow status
+
+        The response includes:
+        - `correlation_id`: UUID for log correlation
+        - `auth_url`: Authorization URL (always included)
+        - `browser_opened`: Whether browser launch succeeded
+        - `browser_error`: Error message if browser failed
+
+        **Detecting OAuth completion**:
+        Subscribe to `/events` SSE stream and watch for `servers.changed` event,
+        or poll `GET /api/v1/servers` to check server's OAuth status.
+      operationId: triggerServerLogin
+      tags:
+        - servers
+        - oauth
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Server name to authenticate
+          schema:
+            type: string
+            example: google-drive
+      responses:
+        '200':
+          description: OAuth flow started successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthStartResponse'
+              examples:
+                browserOpened:
+                  summary: Browser opened successfully
+                  value:
+                    success: true
+                    server_name: google-drive
+                    correlation_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                    auth_url: "https://accounts.google.com/o/oauth2/auth?client_id=..."
+                    browser_opened: true
+                    message: "OAuth flow started. Complete authorization in browser."
+                browserFailed:
+                  summary: Browser failed to open (headless)
+                  value:
+                    success: true
+                    server_name: google-drive
+                    correlation_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                    auth_url: "https://accounts.google.com/o/oauth2/auth?client_id=..."
+                    browser_opened: false
+                    browser_error: "Headless mode - browser not available"
+                    message: "OAuth flow started. Open the auth_url manually to complete authorization."
+                browserError:
+                  summary: Browser failed to open (command error)
+                  value:
+                    success: true
+                    server_name: google-drive
+                    correlation_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                    auth_url: "https://accounts.google.com/o/oauth2/auth?client_id=..."
+                    browser_opened: false
+                    browser_error: "xdg-open: command not found"
+                    message: "OAuth flow started. Open the auth_url manually to complete authorization."
+        '400':
+          description: Validation error (server not found, OAuth not supported, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthValidationError'
+              examples:
+                serverNotFound:
+                  summary: Server not found
+                  value:
+                    success: false
+                    error_type: server_not_found
+                    server_name: google-drvie
+                    message: "Server 'google-drvie' not found in configuration"
+                    suggestion: "Check server name spelling. Did you mean 'google-drive'?"
+                    available_servers: ["google-drive", "github-server"]
+                oauthNotSupported:
+                  summary: OAuth not supported
+                  value:
+                    success: false
+                    error_type: oauth_not_supported
+                    server_name: local-stdio-server
+                    message: "Server 'local-stdio-server' uses stdio protocol which does not support OAuth"
+                    suggestion: "OAuth is only available for HTTP/SSE servers"
+                serverDisabled:
+                  summary: Server disabled
+                  value:
+                    success: false
+                    error_type: server_disabled
+                    server_name: google-drive
+                    message: "Server 'google-drive' is disabled"
+                    suggestion: "Enable it first: mcpproxy upstream enable google-drive"
+                serverQuarantined:
+                  summary: Server quarantined
+                  value:
+                    success: false
+                    error_type: server_quarantined
+                    server_name: new-server
+                    message: "Server 'new-server' is quarantined"
+                    suggestion: "Approve the server via Web UI or tray, then try again"
+        '409':
+          description: OAuth flow already in progress for this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthValidationError'
+              example:
+                success: false
+                error_type: flow_in_progress
+                server_name: google-drive
+                message: "OAuth flow already in progress for 'google-drive'"
+                suggestion: "Wait for current flow to complete or check browser"
+                correlation_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+components:
+  schemas:
+    OAuthStartResponse:
+      type: object
+      required:
+        - success
+        - server_name
+        - correlation_id
+        - browser_opened
+        - message
+      properties:
+        success:
+          type: boolean
+          description: Always true for successful OAuth start
+          example: true
+        server_name:
+          type: string
+          description: Name of the server being authenticated
+          example: google-drive
+        correlation_id:
+          type: string
+          format: uuid
+          description: Unique identifier for tracking this flow in logs
+          example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+        auth_url:
+          type: string
+          format: uri
+          description: Authorization URL for manual browser opening (always included)
+          example: "https://accounts.google.com/o/oauth2/auth?client_id=..."
+        browser_opened:
+          type: boolean
+          description: Whether the browser was successfully opened
+          example: true
+        browser_error:
+          type: string
+          description: Error message if browser failed to open (only when browser_opened=false)
+          example: "xdg-open: command not found"
+        message:
+          type: string
+          description: Human-readable status message
+          example: "OAuth flow started. Complete authorization in browser."
+
+    OAuthValidationError:
+      type: object
+      required:
+        - success
+        - error_type
+        - server_name
+        - message
+      properties:
+        success:
+          type: boolean
+          description: Always false for validation errors
+          example: false
+        error_type:
+          type: string
+          enum:
+            - server_not_found
+            - server_disabled
+            - server_quarantined
+            - oauth_not_supported
+            - flow_in_progress
+          description: Category of validation failure
+        server_name:
+          type: string
+          description: Requested server name
+        message:
+          type: string
+          description: Human-readable error description
+        suggestion:
+          type: string
+          description: Actionable remediation hint
+        available_servers:
+          type: array
+          items:
+            type: string
+          description: List of valid server names (for server_not_found)
+        correlation_id:
+          type: string
+          format: uuid
+          description: Existing flow ID (for flow_in_progress)
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication (not required over Unix socket)
+
+security:
+  - ApiKeyAuth: []

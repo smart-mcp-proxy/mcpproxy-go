@@ -20,6 +20,7 @@ import (
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/updatecheck"
+	"mcpproxy-go/internal/upstream/core"
 )
 
 // MockServerController implements ServerController for testing
@@ -73,6 +74,14 @@ func (m *mockManagementService) GetServerTools(ctx context.Context, name string)
 
 func (m *mockManagementService) TriggerOAuthLogin(ctx context.Context, name string) error {
 	return nil
+}
+
+func (m *mockManagementService) TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error) {
+	return &core.OAuthStartResult{
+		AuthURL:       "https://example.com/oauth/authorize?client_id=test",
+		BrowserOpened: true,
+		CorrelationID: "test-correlation-id",
+	}, nil
 }
 
 func (m *mockManagementService) TriggerOAuthLogout(ctx context.Context, name string) error {
@@ -487,7 +496,7 @@ func TestEndpointResponseTypes(t *testing.T) {
 	controller := &MockServerController{}
 	server := NewServer(controller, logger, nil)
 
-	// Test server action endpoints
+	// Test server action endpoints (ServerActionResponse)
 	actionTests := []struct {
 		method string
 		path   string
@@ -496,7 +505,6 @@ func TestEndpointResponseTypes(t *testing.T) {
 		{"POST", "/api/v1/servers/test-server/enable", "enable"},
 		{"POST", "/api/v1/servers/test-server/disable", "disable"},
 		{"POST", "/api/v1/servers/test-server/restart", "restart"},
-		{"POST", "/api/v1/servers/test-server/login", "login"},
 		{"POST", "/api/v1/servers/test-server/logout", "logout"},
 	}
 
@@ -525,6 +533,35 @@ func TestEndpointResponseTypes(t *testing.T) {
 			assert.Equal(t, tt.action, data["action"])
 		})
 	}
+
+	// Test login endpoint (Spec 020: returns OAuthStartResponse instead of ServerActionResponse)
+	t.Run("/api/v1/servers/test-server/login", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/servers/test-server/login", http.NoBody)
+		w := httptest.NewRecorder()
+
+		server.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var response contracts.APIResponse
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+
+		assert.True(t, response.Success)
+
+		// Validate OAuthStartResponse structure (Spec 020)
+		data, ok := response.Data.(map[string]interface{})
+		require.True(t, ok)
+
+		assert.Contains(t, data, "server_name")
+		assert.Contains(t, data, "success")
+		assert.Contains(t, data, "correlation_id")
+		assert.Contains(t, data, "browser_opened")
+		assert.Contains(t, data, "message")
+		assert.Equal(t, "test-server", data["server_name"])
+		assert.Equal(t, true, data["success"])
+		assert.Equal(t, true, data["browser_opened"])
+	})
 }
 
 // Test /api/v1/info endpoint returns version information
