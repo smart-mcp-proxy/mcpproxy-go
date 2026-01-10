@@ -88,6 +88,43 @@ func NewJSONRPCError(code int, message string, data interface{}, httpErr *HTTPEr
 	}
 }
 
+// ErrEndpointDeprecated represents a 410 Gone response indicating the endpoint has been deprecated
+type ErrEndpointDeprecated struct {
+	URL            string `json:"url"`
+	Message        string `json:"message"`
+	MigrationGuide string `json:"migration_guide,omitempty"`
+	NewEndpoint    string `json:"new_endpoint,omitempty"`
+}
+
+func (e *ErrEndpointDeprecated) Error() string {
+	if e.NewEndpoint != "" {
+		return fmt.Sprintf("endpoint deprecated (410 Gone): %s - migrate to: %s", e.Message, e.NewEndpoint)
+	}
+	if e.MigrationGuide != "" {
+		return fmt.Sprintf("endpoint deprecated (410 Gone): %s - see: %s", e.Message, e.MigrationGuide)
+	}
+	return fmt.Sprintf("endpoint deprecated (410 Gone): %s", e.Message)
+}
+
+// IsEndpointDeprecatedError checks if an error indicates a deprecated endpoint (HTTP 410)
+func IsEndpointDeprecatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	_, ok := err.(*ErrEndpointDeprecated)
+	return ok
+}
+
+// NewEndpointDeprecatedError creates a new ErrEndpointDeprecated from response details
+func NewEndpointDeprecatedError(url, message, migrationGuide, newEndpoint string) *ErrEndpointDeprecated {
+	return &ErrEndpointDeprecated{
+		URL:            url,
+		Message:        message,
+		MigrationGuide: migrationGuide,
+		NewEndpoint:    newEndpoint,
+	}
+}
+
 // HTTPTransportConfig holds configuration for HTTP transport
 type HTTPTransportConfig struct {
 	URL          string

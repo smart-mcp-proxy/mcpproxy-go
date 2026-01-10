@@ -3,12 +3,14 @@ package managed
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/secret"
 	"mcpproxy-go/internal/storage"
+	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/upstream/core"
 	"mcpproxy-go/internal/upstream/types"
 
@@ -511,6 +513,18 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 
 	// Handle error states with appropriate log levels
 	if newState == types.StateError && info.LastError != nil {
+		// Check for deprecated endpoint errors first - these require URL changes, not reconnection
+		if mc.isDeprecatedEndpointError(info.LastError) {
+			mc.logger.Error("⚠️ ENDPOINT DEPRECATED: Server URL needs to be updated",
+				zap.String("server", mc.Config.Name),
+				zap.String("current_url", mc.Config.URL),
+				zap.String("error_type", "endpoint_deprecated"),
+				zap.String("action", "Update the server URL in your configuration"),
+				zap.String("hint", "The server may have migrated from /sse to /mcp - check the server's documentation"),
+				zap.Error(info.LastError))
+			return // Don't log as normal reconnection error
+		}
+
 		if mc.isNormalReconnectionError(info.LastError) {
 			mc.logger.Warn("Connection error, will attempt automatic reconnection",
 				zap.String("server", mc.Config.Name),
@@ -930,6 +944,39 @@ func (mc *Client) isNormalReconnectionError(err error) bool {
 
 	for _, reconnErr := range normalReconnectionErrors {
 		if containsString(errStr, reconnErr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isDeprecatedEndpointError checks if error indicates a deprecated/removed endpoint (HTTP 410 Gone)
+// This helps detect when an MCP server has migrated to a new endpoint URL
+func (mc *Client) isDeprecatedEndpointError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for transport.ErrEndpointDeprecated type first
+	if transport.IsEndpointDeprecatedError(err) {
+		return true
+	}
+
+	errStr := strings.ToLower(err.Error())
+	deprecationIndicators := []string{
+		"410",                            // HTTP 410 Gone
+		"gone",                           // Status text
+		"deprecated",                     // Common migration message
+		"removed",                        // Endpoint removed
+		"no longer supported",            // Common deprecation message
+		"use the http transport",         // Sentry-specific migration hint
+		"sse transport has been removed", // Sentry-specific error
+		"endpoint deprecated",            // Our custom error message
+	}
+
+	for _, indicator := range deprecationIndicators {
+		if strings.Contains(errStr, indicator) {
 			return true
 		}
 	}
