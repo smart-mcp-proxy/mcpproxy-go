@@ -556,12 +556,23 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	var serverKey string
 	if storage != nil {
 		serverKey = GenerateServerKey(serverConfig.Name, serverConfig.URL)
-		_, _, storedPort, err := storage.GetOAuthClientCredentials(serverKey)
+		storedClientID, _, storedPort, err := storage.GetOAuthClientCredentials(serverKey)
 		if err == nil && storedPort > 0 {
 			preferredPort = storedPort
 			logger.Info("🔄 Found stored callback port from previous DCR",
 				zap.String("server", serverConfig.Name),
 				zap.Int("preferred_port", preferredPort))
+		} else if err == nil && storedClientID != "" && storedPort == 0 {
+			// Spec 022: Legacy DCR credentials exist but port is unknown
+			// Clear them to force fresh registration with port tracking
+			logger.Warn("⚠️ Legacy DCR credentials found without stored port, clearing for re-registration",
+				zap.String("server", serverConfig.Name),
+				zap.String("client_id", storedClientID))
+			if clearErr := storage.ClearOAuthClientCredentials(serverKey); clearErr != nil {
+				logger.Warn("Failed to clear legacy DCR credentials",
+					zap.String("server", serverConfig.Name),
+					zap.Error(clearErr))
+			}
 		}
 	}
 
