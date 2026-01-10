@@ -76,6 +76,10 @@ type OAuthTokenRecord struct {
 	// These are required for token refresh when using DCR-obtained credentials
 	ClientID     string `json:"client_id,omitempty"`
 	ClientSecret string `json:"client_secret,omitempty"`
+	// CallbackPort and RedirectURI are persisted for OAuth redirect URI port persistence (Spec 022)
+	// These ensure re-authentication uses the same port registered during DCR
+	CallbackPort int    `json:"callback_port,omitempty"` // Port used during DCR for redirect_uri
+	RedirectURI  string `json:"redirect_uri,omitempty"`  // Full redirect URI registered with DCR
 }
 
 // GetServerName returns the actual server name for RefreshManager lookup.
