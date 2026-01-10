@@ -1350,6 +1350,29 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			zap.String("server", c.config.Name),
 			zap.Error(err))
 
+		// Check if this is a deprecated endpoint error (HTTP 410 Gone)
+		// This indicates the server has migrated to a new endpoint URL
+		if c.isDeprecatedEndpointError(err) {
+			correlationID := ""
+			if flowCtx != nil {
+				correlationID = flowCtx.CorrelationID
+			}
+			c.logger.Error("⚠️ ENDPOINT DEPRECATED: Server has migrated to a new URL",
+				zap.String("server", c.config.Name),
+				zap.String("current_url", c.config.URL),
+				zap.String("correlation_id", correlationID),
+				zap.String("action", "Update the server URL in your configuration"),
+				zap.String("hint", "Check the server's documentation or try removing /sse from the URL"),
+				zap.Error(err))
+
+			return transport.NewEndpointDeprecatedError(
+				c.config.URL,
+				fmt.Sprintf("Server '%s' endpoint has been deprecated or removed", c.config.Name),
+				"", // migration guide - extracted from error if available
+				"", // new endpoint - would need to parse from server response
+			)
+		}
+
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(err) {
 			c.logger.Info("🎯 OAuth authorization required during MCP init - deferring OAuth for background processing",
@@ -1863,6 +1886,38 @@ func (c *Client) isConfigError(err error) bool {
 		"no headers configured",
 		"no command specified",
 	})
+}
+
+// isDeprecatedEndpointError checks if error indicates a deprecated/removed endpoint (HTTP 410 Gone)
+// This helps detect when an MCP server has migrated to a new endpoint URL
+func (c *Client) isDeprecatedEndpointError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for transport.ErrEndpointDeprecated type first
+	if transport.IsEndpointDeprecatedError(err) {
+		return true
+	}
+
+	errStr := strings.ToLower(err.Error())
+	deprecationIndicators := []string{
+		"410",                           // HTTP 410 Gone
+		"gone",                          // Status text
+		"deprecated",                    // Common migration message
+		"removed",                       // Endpoint removed
+		"no longer supported",           // Common deprecation message
+		"use the http transport",        // Sentry-specific migration hint
+		"sse transport has been removed", // Sentry-specific error
+	}
+
+	for _, indicator := range deprecationIndicators {
+		if strings.Contains(errStr, indicator) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // initialize performs MCP initialization handshake
