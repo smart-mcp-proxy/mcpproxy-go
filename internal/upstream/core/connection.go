@@ -2183,19 +2183,25 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		} else {
 			oauthMode = "dynamic client registration"
 
-			// Persist DCR credentials for token refresh
+			// Persist DCR credentials and callback port for token refresh (Spec 022: OAuth Redirect URI Port Persistence)
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
 			if c.storage != nil && clientID != "" {
 				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-				if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret); err != nil {
+				// Get the callback server port to persist alongside DCR credentials
+				var callbackPort int
+				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
+					callbackPort = callbackServer.Port
+				}
+				if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); err != nil {
 					c.logger.Warn("Failed to persist DCR credentials - token refresh may fail later",
 						zap.String("server", c.config.Name),
 						zap.Error(err))
 				} else {
 					c.logger.Info("✅ DCR credentials persisted for token refresh",
 						zap.String("server", c.config.Name),
-						zap.String("client_id", clientID))
+						zap.String("client_id", clientID),
+						zap.Int("callback_port", callbackPort))
 				}
 			}
 
