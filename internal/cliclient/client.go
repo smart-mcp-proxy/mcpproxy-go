@@ -724,6 +724,7 @@ func (c *Client) GetServerTools(ctx context.Context, serverName string) ([]map[s
 }
 
 // TriggerOAuthLogin initiates OAuth authentication flow for a server.
+// Returns *contracts.OAuthFlowError for structured OAuth errors (Spec 020).
 func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error {
 	url := fmt.Sprintf("%s/api/v1/servers/%s/login", c.baseURL, serverName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
@@ -740,6 +741,24 @@ func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Spec 020: Check for structured OAuth errors on 400 responses
+	if resp.StatusCode == http.StatusBadRequest {
+		// Try to parse as OAuthFlowError
+		var oauthFlowErr contracts.OAuthFlowError
+		if err := json.Unmarshal(bodyBytes, &oauthFlowErr); err == nil && oauthFlowErr.ErrorType != "" {
+			return &oauthFlowErr
+		}
+
+		// Try to parse as OAuthValidationError
+		var oauthValidationErr contracts.OAuthValidationError
+		if err := json.Unmarshal(bodyBytes, &oauthValidationErr); err == nil && oauthValidationErr.ErrorType != "" {
+			return &oauthValidationErr
+		}
+
+		// Fall back to generic error
+		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	if resp.StatusCode != http.StatusOK {

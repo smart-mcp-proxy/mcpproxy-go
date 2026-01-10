@@ -12,6 +12,7 @@ import (
 	"mcpproxy-go/internal/config"
 	"mcpproxy-go/internal/contracts"
 	"mcpproxy-go/internal/reqcontext"
+	"mcpproxy-go/internal/upstream/core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -349,5 +350,277 @@ func TestRequestIDInLogs(t *testing.T) {
 			}
 		}
 		assert.Equal(t, responseRequestID, loggedRequestID, "Logged request_id should match response header")
+	})
+}
+
+// =============================================================================
+// Spec 020: OAuth Login Error Feedback - handleServerLogin Tests
+// =============================================================================
+
+// mockOAuthManagementService implements TriggerOAuthLoginQuick for server login tests
+type mockOAuthManagementService struct {
+	triggerError  error
+	triggerResult *core.OAuthStartResult
+}
+
+func (m *mockOAuthManagementService) TriggerOAuthLoginQuick(_ context.Context, _ string) (*core.OAuthStartResult, error) {
+	if m.triggerError != nil {
+		return nil, m.triggerError
+	}
+	if m.triggerResult != nil {
+		return m.triggerResult, nil
+	}
+	// Default success result
+	return &core.OAuthStartResult{
+		AuthURL:       "https://example.com/oauth/authorize?client_id=test",
+		BrowserOpened: true,
+		CorrelationID: "test-correlation-id-12345678",
+	}, nil
+}
+
+// mockLoginController is a mock controller for server login tests
+type mockLoginController struct {
+	baseController
+	apiKey  string
+	mgmtSvc *mockOAuthManagementService
+}
+
+func (m *mockLoginController) GetCurrentConfig() any {
+	return &config.Config{
+		APIKey: m.apiKey,
+	}
+}
+
+func (m *mockLoginController) GetManagementService() interface{} {
+	return m.mgmtSvc
+}
+
+// TestHandleServerLogin_OAuthStartResponse tests the POST /api/v1/servers/{id}/login endpoint
+// Spec 020: OAuth Login Error Feedback - Phase 3
+func TestHandleServerLogin_OAuthStartResponse(t *testing.T) {
+	t.Run("returns OAuthStartResponse with all required fields on success", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockLoginController{
+			apiKey:  "test-key",
+			mgmtSvc: &mockOAuthManagementService{triggerError: nil},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/test-server/login", nil)
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code, "Expected 200 OK")
+
+		var resp struct {
+			Success bool                         `json:"success"`
+			Data    contracts.OAuthStartResponse `json:"data"`
+		}
+		err := json.NewDecoder(w.Body).Decode(&resp)
+		require.NoError(t, err)
+
+		// Verify wrapper success
+		assert.True(t, resp.Success, "Wrapper success should be true")
+
+		// Verify OAuthStartResponse fields (Spec 020)
+		assert.True(t, resp.Data.Success, "OAuthStartResponse.Success should be true")
+		assert.Equal(t, "test-server", resp.Data.ServerName, "ServerName should match")
+		assert.NotEmpty(t, resp.Data.CorrelationID, "CorrelationID should be set")
+		assert.True(t, resp.Data.BrowserOpened, "BrowserOpened should be true on success")
+		assert.Empty(t, resp.Data.BrowserError, "BrowserError should be empty on success")
+		assert.Contains(t, resp.Data.Message, "test-server", "Message should mention server name")
+		assert.Contains(t, resp.Data.Message, "OAuth", "Message should mention OAuth")
+	})
+
+	t.Run("includes correlation_id matching X-Correlation-ID header", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockLoginController{
+			apiKey:  "test-key",
+			mgmtSvc: &mockOAuthManagementService{triggerError: nil},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		clientCorrelationID := "client-correlation-id-12345"
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/oauth-server/login", nil)
+		req.Header.Set("X-API-Key", "test-key")
+		req.Header.Set("X-Correlation-ID", clientCorrelationID)
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data contracts.OAuthStartResponse `json:"data"`
+		}
+		err := json.NewDecoder(w.Body).Decode(&resp)
+		require.NoError(t, err)
+
+		// Correlation ID should match the client-provided X-Correlation-ID header
+		assert.Equal(t, clientCorrelationID, resp.Data.CorrelationID,
+			"CorrelationID should match client-provided X-Correlation-ID")
+	})
+
+	t.Run("generates correlation_id when not provided", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockLoginController{
+			apiKey:  "test-key",
+			mgmtSvc: &mockOAuthManagementService{triggerError: nil},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/oauth-server/login", nil)
+		req.Header.Set("X-API-Key", "test-key")
+		// No X-Correlation-ID header - should be auto-generated
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data contracts.OAuthStartResponse `json:"data"`
+		}
+		err := json.NewDecoder(w.Body).Decode(&resp)
+		require.NoError(t, err)
+
+		// Correlation ID should be auto-generated (32-char hex string)
+		assert.NotEmpty(t, resp.Data.CorrelationID, "CorrelationID should be auto-generated")
+		assert.Len(t, resp.Data.CorrelationID, 32, "Auto-generated correlation ID should be 32 chars")
+	})
+
+	t.Run("returns OAuthFlowError with request_id on OAuth failure", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		oauthErr := &contracts.OAuthFlowError{
+			Success:       false,
+			ErrorType:     "client_id_required",
+			ServerName:    "broken-server",
+			Message:       "Client ID is required for OAuth authentication",
+			Suggestion:    "Configure oauth.client_id in server settings",
+			CorrelationID: "flow-123",
+		}
+		mockCtrl := &mockLoginController{
+			apiKey:  "test-key",
+			mgmtSvc: &mockOAuthManagementService{triggerError: oauthErr},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		clientRequestID := "request-for-error-tracking"
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/broken-server/login", nil)
+		req.Header.Set("X-API-Key", "test-key")
+		req.Header.Set(reqcontext.RequestIDHeader, clientRequestID)
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, "Expected 400 Bad Request for OAuth error")
+
+		var errResp contracts.OAuthFlowError
+		err := json.NewDecoder(w.Body).Decode(&errResp)
+		require.NoError(t, err)
+
+		// Verify error fields (Spec 020)
+		assert.False(t, errResp.Success, "Success should be false")
+		assert.Equal(t, "client_id_required", errResp.ErrorType)
+		assert.Equal(t, "broken-server", errResp.ServerName)
+		assert.NotEmpty(t, errResp.Message)
+		assert.NotEmpty(t, errResp.Suggestion)
+		// Request ID should be added from context
+		assert.Equal(t, clientRequestID, errResp.RequestID,
+			"RequestID should be populated from X-Request-Id header")
+	})
+
+	t.Run("returns OAuthValidationError for validation failures", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		validationErr := &contracts.OAuthValidationError{
+			Success:          false,
+			ErrorType:        "server_not_found",
+			ServerName:       "nonexistent",
+			Message:          "Server 'nonexistent' not found",
+			Suggestion:       "Check server name with 'mcpproxy upstream list'",
+			AvailableServers: []string{"server-a", "server-b"},
+		}
+		mockCtrl := &mockLoginController{
+			apiKey:  "test-key",
+			mgmtSvc: &mockOAuthManagementService{triggerError: validationErr},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/nonexistent/login", nil)
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, "Expected 400 Bad Request for validation error")
+
+		var errResp contracts.OAuthValidationError
+		err := json.NewDecoder(w.Body).Decode(&errResp)
+		require.NoError(t, err)
+
+		// Verify validation error fields (Spec 020)
+		assert.False(t, errResp.Success)
+		assert.Equal(t, "server_not_found", errResp.ErrorType)
+		assert.Equal(t, "nonexistent", errResp.ServerName)
+		assert.NotEmpty(t, errResp.Message)
+		assert.NotEmpty(t, errResp.Suggestion)
+		assert.Contains(t, errResp.AvailableServers, "server-a")
+		assert.Contains(t, errResp.AvailableServers, "server-b")
+	})
+
+	t.Run("returns 404 for server not found error", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockLoginController{
+			apiKey:  "test-key",
+			mgmtSvc: &mockOAuthManagementService{triggerError: fmt.Errorf("server 'unknown' not found")},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/unknown/login", nil)
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code, "Expected 404 Not Found")
+	})
+
+	t.Run("returns 403 for management disabled", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockLoginController{
+			apiKey:  "test-key",
+			mgmtSvc: &mockOAuthManagementService{triggerError: fmt.Errorf("management disabled")},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/test-server/login", nil)
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusForbidden, w.Code, "Expected 403 Forbidden")
+	})
+
+	t.Run("returns 400 for empty server ID in URL", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockLoginController{
+			apiKey:  "test-key",
+			mgmtSvc: &mockOAuthManagementService{triggerError: nil},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		// Route with empty ID segment - the router may treat this differently
+		// depending on configuration. Let's test the actual behavior.
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers//login", nil)
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		// The Chi router with empty ID segment returns 400 (Server ID required)
+		assert.Equal(t, http.StatusBadRequest, w.Code, "Expected 400 Bad Request for empty server ID")
 	})
 }

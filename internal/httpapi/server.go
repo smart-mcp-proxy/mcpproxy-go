@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 	"mcpproxy-go/internal/storage"
 	"mcpproxy-go/internal/transport"
 	"mcpproxy-go/internal/updatecheck"
+	"mcpproxy-go/internal/upstream/core"
 )
 
 const (
@@ -1310,14 +1312,14 @@ func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) 
 
 // handleServerLogin godoc
 // @Summary Trigger OAuth login for server
-// @Description Initiate OAuth authentication flow for a specific upstream MCP server
+// @Description Initiate OAuth authentication flow for a specific upstream MCP server. Returns structured OAuth start response with correlation ID for tracking.
 // @Tags servers
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Param id path string true "Server ID or name"
-// @Success 200 {object} contracts.ServerActionResponse "OAuth login initiated successfully"
-// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Success 200 {object} contracts.OAuthStartResponse "OAuth login initiated successfully"
+// @Failure 400 {object} contracts.OAuthFlowError "OAuth error (client_id required, DCR failed, etc.)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/login [post]
@@ -1328,18 +1330,42 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NEW: Call management service instead of controller (T017)
+	// Call management service TriggerOAuthLoginQuick (Spec 020 fix: returns actual browser status)
 	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		TriggerOAuthLogin(ctx context.Context, name string) error
+		TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error)
 	})
 	if !ok {
-		s.logger.Error("Management service not available or missing TriggerOAuthLogin method")
+		s.logger.Error("Management service not available or missing TriggerOAuthLoginQuick method")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
 
-	if err := mgmtSvc.TriggerOAuthLogin(r.Context(), serverID); err != nil {
+	result, err := mgmtSvc.TriggerOAuthLoginQuick(r.Context(), serverID)
+	if err != nil {
 		s.logger.Error("Failed to trigger OAuth login", "server", serverID, "error", err)
+
+		// Spec 020: Check for structured OAuth errors and return them directly
+		var oauthFlowErr *contracts.OAuthFlowError
+		if errors.As(err, &oauthFlowErr) {
+			// Add request ID from context for correlation
+			oauthFlowErr.RequestID = reqcontext.GetRequestID(r.Context())
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			if encErr := json.NewEncoder(w).Encode(oauthFlowErr); encErr != nil {
+				s.logger.Error("Failed to encode OAuth flow error response", "error", encErr)
+			}
+			return
+		}
+
+		var oauthValidationErr *contracts.OAuthValidationError
+		if errors.As(err, &oauthValidationErr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			if encErr := json.NewEncoder(w).Encode(oauthValidationErr); encErr != nil {
+				s.logger.Error("Failed to encode OAuth validation error response", "error", encErr)
+			}
+			return
+		}
 
 		// Map errors to HTTP status codes (T019)
 		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {
@@ -1354,10 +1380,35 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := contracts.ServerActionResponse{
-		Server:  serverID,
-		Action:  "login",
-		Success: true,
+	// Phase 3 (Spec 020): Return OAuthStartResponse with actual browser status and auth_url
+	correlationID := reqcontext.GetCorrelationID(r.Context())
+	if correlationID == "" {
+		correlationID = reqcontext.GetRequestID(r.Context())
+	}
+
+	// Use actual result from StartManualOAuthQuick
+	browserOpened := result != nil && result.BrowserOpened
+	authURL := ""
+	browserError := ""
+	if result != nil {
+		authURL = result.AuthURL
+		browserError = result.BrowserError
+	}
+
+	// Determine appropriate message based on browser status
+	message := fmt.Sprintf("OAuth authentication started for server '%s'. Please complete authentication in browser.", serverID)
+	if !browserOpened && authURL != "" {
+		message = fmt.Sprintf("Could not open browser automatically. Please open this URL manually: %s", authURL)
+	}
+
+	response := contracts.OAuthStartResponse{
+		Success:       true,
+		ServerName:    serverID,
+		CorrelationID: correlationID,
+		BrowserOpened: browserOpened,
+		AuthURL:       authURL,
+		BrowserError:  browserError,
+		Message:       message,
 	}
 
 	s.writeSuccess(w, response)

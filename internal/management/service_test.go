@@ -3,14 +3,15 @@ package management
 import (
 	"context"
 	"fmt"
-	"testing"
 	"sync"
+	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
 	"mcpproxy-go/internal/config"
+	"mcpproxy-go/internal/upstream/core"
 )
 
 // mockEventEmitter implements the EventEmitter interface for testing
@@ -350,6 +351,21 @@ func (m *mockRuntimeOperations) TriggerOAuthLogin(serverName string) error {
 		return fmt.Errorf("server name required")
 	}
 	return nil
+}
+
+// TriggerOAuthLoginQuick implements RuntimeOperations for testing (Spec 020 fix)
+func (m *mockRuntimeOperations) TriggerOAuthLoginQuick(serverName string) (*core.OAuthStartResult, error) {
+	if m.failOnServer != "" && serverName == m.failOnServer {
+		return nil, fmt.Errorf("OAuth start failed")
+	}
+	if serverName == "" {
+		return nil, fmt.Errorf("server name required")
+	}
+	return &core.OAuthStartResult{
+		BrowserOpened: true,
+		AuthURL:       "https://example.com/oauth/authorize",
+		CorrelationID: "test-correlation-id",
+	}, nil
 }
 
 // TriggerOAuthLogout implements RuntimeOperations for testing

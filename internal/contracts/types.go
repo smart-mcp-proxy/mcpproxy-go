@@ -363,6 +363,136 @@ type AuthStatus struct {
 	Message    string     `json:"message"`
 }
 
+// OAuthStartResponse is returned by POST /api/v1/servers/{id}/login when OAuth flow starts successfully.
+// Spec 020: OAuth Login Error Feedback
+type OAuthStartResponse struct {
+	Success       bool   `json:"success"`                   // Always true for successful start
+	ServerName    string `json:"server_name"`               // Name of the server being authenticated
+	CorrelationID string `json:"correlation_id"`            // UUID for tracking this flow
+	AuthURL       string `json:"auth_url,omitempty"`        // Authorization URL (always included for manual use)
+	BrowserOpened bool   `json:"browser_opened"`            // Whether browser launch succeeded
+	BrowserError  string `json:"browser_error,omitempty"`   // Error message if browser launch failed
+	Message       string `json:"message"`                   // Human-readable status message
+}
+
+// OAuthValidationError is returned for pre-flight validation failures before OAuth is attempted.
+// Returned with HTTP 400.
+// Implements the error interface so it can be returned as an error while carrying structured data.
+// Spec 020: OAuth Login Error Feedback
+type OAuthValidationError struct {
+	Success          bool     `json:"success"`                     // Always false
+	ErrorType        string   `json:"error_type"`                  // Category of validation failure
+	ServerName       string   `json:"server_name"`                 // Requested server name
+	Message          string   `json:"message"`                     // Human-readable error description
+	Suggestion       string   `json:"suggestion"`                  // Actionable remediation hint
+	AvailableServers []string `json:"available_servers,omitempty"` // List of valid server names (for server_not_found)
+	CorrelationID    string   `json:"correlation_id,omitempty"`    // Existing flow ID (for flow_in_progress)
+}
+
+// Error implements the error interface for OAuthValidationError.
+func (e *OAuthValidationError) Error() string {
+	return e.Message
+}
+
+// NewOAuthValidationError creates a new OAuthValidationError with the given parameters.
+func NewOAuthValidationError(serverName, errorType, message, suggestion string) *OAuthValidationError {
+	return &OAuthValidationError{
+		Success:    false,
+		ServerName: serverName,
+		ErrorType:  errorType,
+		Message:    message,
+		Suggestion: suggestion,
+	}
+}
+
+// OAuthFlowError is returned for OAuth runtime failures (after validation passes but before browser opens).
+// Examples: metadata discovery failure, DCR failure, authorization URL construction failure.
+// Implements the error interface so it can be returned as an error while carrying structured data.
+// Spec 020: OAuth Login Error Feedback
+type OAuthFlowError struct {
+	Success       bool               `json:"success"`                   // Always false
+	ErrorType     string             `json:"error_type"`                // Category of OAuth runtime failure
+	ErrorCode     string             `json:"error_code"`                // Machine-readable error code (e.g., OAUTH_NO_METADATA)
+	ServerName    string             `json:"server_name"`               // Server that failed OAuth
+	CorrelationID string             `json:"correlation_id"`            // Flow tracking ID for log correlation
+	RequestID     string             `json:"request_id"`                // HTTP request ID (from PR #237)
+	Message       string             `json:"message"`                   // Human-readable error description
+	Details       *OAuthErrorDetails `json:"details,omitempty"`         // Structured discovery/failure details
+	Suggestion    string             `json:"suggestion"`                // Actionable remediation hint
+	DebugHint     string             `json:"debug_hint"`                // CLI command for log lookup
+}
+
+// Error implements the error interface for OAuthFlowError.
+func (e *OAuthFlowError) Error() string {
+	return e.Message
+}
+
+// NewOAuthFlowError creates a new OAuthFlowError with the given parameters.
+func NewOAuthFlowError(serverName, errorType, errorCode, message, suggestion string) *OAuthFlowError {
+	return &OAuthFlowError{
+		Success:    false,
+		ServerName: serverName,
+		ErrorType:  errorType,
+		ErrorCode:  errorCode,
+		Message:    message,
+		Suggestion: suggestion,
+		DebugHint:  "For logs: mcpproxy upstream logs " + serverName,
+	}
+}
+
+// OAuthErrorDetails contains structured discovery/failure details for OAuth errors.
+type OAuthErrorDetails struct {
+	ServerURL                     string          `json:"server_url"`
+	ProtectedResourceMetadata     *MetadataStatus `json:"protected_resource_metadata,omitempty"`
+	AuthorizationServerMetadata   *MetadataStatus `json:"authorization_server_metadata,omitempty"`
+	DCRStatus                     *DCRStatus      `json:"dcr_status,omitempty"`
+}
+
+// MetadataStatus represents the status of OAuth metadata discovery.
+type MetadataStatus struct {
+	Found                bool     `json:"found"`
+	URLChecked           string   `json:"url_checked"`
+	Error                string   `json:"error,omitempty"`
+	AuthorizationServers []string `json:"authorization_servers,omitempty"`
+}
+
+// DCRStatus represents the status of Dynamic Client Registration.
+type DCRStatus struct {
+	Attempted  bool   `json:"attempted"`
+	Success    bool   `json:"success"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// OAuth validation error type constants
+const (
+	OAuthValidationServerNotFound    = "server_not_found"
+	OAuthValidationServerDisabled    = "server_disabled"
+	OAuthValidationServerQuarantined = "server_quarantined"
+	OAuthValidationNotSupported      = "oauth_not_supported"
+	OAuthValidationFlowInProgress    = "flow_in_progress"
+)
+
+// OAuth flow error type constants
+const (
+	OAuthErrorMetadataMissing  = "oauth_metadata_missing"
+	OAuthErrorMetadataInvalid  = "oauth_metadata_invalid"
+	OAuthErrorResourceMismatch = "oauth_resource_mismatch"
+	OAuthErrorClientIDRequired = "oauth_client_id_required"
+	OAuthErrorDCRFailed        = "oauth_dcr_failed"
+	OAuthErrorFlowFailed       = "oauth_flow_failed"
+)
+
+// OAuth flow error code constants (machine-readable)
+const (
+	OAuthCodeNoMetadata       = "OAUTH_NO_METADATA"
+	OAuthCodeBadMetadata      = "OAUTH_BAD_METADATA"
+	OAuthCodeResourceMismatch = "OAUTH_RESOURCE_MISMATCH"
+	OAuthCodeNoClientID       = "OAUTH_NO_CLIENT_ID"
+	OAuthCodeDCRFailed        = "OAUTH_DCR_FAILED"
+	OAuthCodeFlowFailed       = "OAUTH_FLOW_FAILED"
+)
+
 // OAuth Authentication State Constants
 const (
 	AuthStateAuthenticated   = "authenticated"

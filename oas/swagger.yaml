@@ -563,6 +563,17 @@ components:
           type: array
           uniqueItems: false
       type: object
+    contracts.DCRStatus:
+      properties:
+        attempted:
+          type: boolean
+        error:
+          type: string
+        status_code:
+          type: integer
+        success:
+          type: boolean
+      type: object
     contracts.Diagnostics:
       properties:
         docker_status:
@@ -828,6 +839,20 @@ components:
         total_tokens:
           type: integer
       type: object
+    contracts.MetadataStatus:
+      properties:
+        authorization_servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        error:
+          type: string
+        found:
+          type: boolean
+        url_checked:
+          type: string
+      type: object
     contracts.MissingSecretInfo:
       properties:
         secret_name:
@@ -873,6 +898,50 @@ components:
           description: Whether token is currently valid
           type: boolean
       type: object
+    contracts.OAuthErrorDetails:
+      description: Structured discovery/failure details
+      properties:
+        authorization_server_metadata:
+          $ref: '#/components/schemas/contracts.MetadataStatus'
+        dcr_status:
+          $ref: '#/components/schemas/contracts.DCRStatus'
+        protected_resource_metadata:
+          $ref: '#/components/schemas/contracts.MetadataStatus'
+        server_url:
+          type: string
+      type: object
+    contracts.OAuthFlowError:
+      properties:
+        correlation_id:
+          description: Flow tracking ID for log correlation
+          type: string
+        debug_hint:
+          description: CLI command for log lookup
+          type: string
+        details:
+          $ref: '#/components/schemas/contracts.OAuthErrorDetails'
+        error_code:
+          description: Machine-readable error code (e.g., OAUTH_NO_METADATA)
+          type: string
+        error_type:
+          description: Category of OAuth runtime failure
+          type: string
+        message:
+          description: Human-readable error description
+          type: string
+        request_id:
+          description: 'HTTP request ID (from PR #237)'
+          type: string
+        server_name:
+          description: Server that failed OAuth
+          type: string
+        success:
+          description: Always false
+          type: boolean
+        suggestion:
+          description: Actionable remediation hint
+          type: string
+      type: object
     contracts.OAuthIssue:
       properties:
         documentation_url:
@@ -901,6 +970,30 @@ components:
           type: string
         state:
           type: string
+      type: object
+    contracts.OAuthStartResponse:
+      properties:
+        auth_url:
+          description: Authorization URL (always included for manual use)
+          type: string
+        browser_error:
+          description: Error message if browser launch failed
+          type: string
+        browser_opened:
+          description: Whether browser launch succeeded
+          type: boolean
+        correlation_id:
+          description: UUID for tracking this flow
+          type: string
+        message:
+          description: Human-readable status message
+          type: string
+        server_name:
+          description: Name of the server being authenticated
+          type: string
+        success:
+          description: Always true for successful start
+          type: boolean
       type: object
     contracts.Registry:
       properties:
@@ -2462,7 +2555,7 @@ paths:
   /api/v1/servers/{id}/login:
     post:
       description: Initiate OAuth authentication flow for a specific upstream MCP
-        server
+        server. Returns structured OAuth start response with correlation ID for tracking.
       parameters:
       - description: Server ID or name
         in: path
@@ -2475,14 +2568,14 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ServerActionResponse'
+                $ref: '#/components/schemas/contracts.OAuthStartResponse'
           description: OAuth login initiated successfully
         "400":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Bad request (missing server ID)
+                $ref: '#/components/schemas/contracts.OAuthFlowError'
+          description: OAuth error (client_id required, DCR failed, etc.)
         "404":
           content:
             application/json:
