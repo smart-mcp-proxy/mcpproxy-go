@@ -77,6 +77,30 @@ func (o MergeOptions) ShouldRemove(field string) bool {
 	return o.removeMarkers[field]
 }
 
+// ShouldRemoveMapKey checks if a specific key within a map field should be removed
+// e.g., ShouldRemoveMapKey("env", "API_KEY") checks for "env.API_KEY" marker
+func (o MergeOptions) ShouldRemoveMapKey(mapField, key string) bool {
+	if o.removeMarkers == nil {
+		return false
+	}
+	return o.removeMarkers[mapField+"."+key]
+}
+
+// GetRemoveMarkersForMap returns all keys that should be removed from a map field
+func (o MergeOptions) GetRemoveMarkersForMap(mapField string) []string {
+	if o.removeMarkers == nil {
+		return nil
+	}
+	prefix := mapField + "."
+	var keys []string
+	for marker := range o.removeMarkers {
+		if len(marker) > len(prefix) && marker[:len(prefix)] == prefix {
+			keys = append(keys, marker[len(prefix):])
+		}
+	}
+	return keys
+}
+
 // ConfigDiff captures changes made during a merge operation for auditing
 type ConfigDiff struct {
 	// Modified fields with before/after values
@@ -229,19 +253,35 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		copy(merged.Args, patch.Args)
 	}
 
-	// Map fields - deep merge
-	if patch.Env != nil {
-		if diff != nil && !reflect.DeepEqual(base.Env, patch.Env) {
-			diff.Modified["env"] = FieldChange{Path: "env", From: base.Env, To: patch.Env}
+	// Map fields - deep merge with RFC 7396 null-means-remove support
+	envRemovalKeys := opts.GetRemoveMarkersForMap("env")
+	if patch.Env != nil || len(envRemovalKeys) > 0 {
+		newEnv := MergeMapWithOpts(base.Env, patch.Env, "env", opts)
+		if diff != nil && !reflect.DeepEqual(base.Env, newEnv) {
+			diff.Modified["env"] = FieldChange{Path: "env", From: base.Env, To: newEnv}
+			// Record removed keys in diff
+			for _, key := range envRemovalKeys {
+				if _, existed := base.Env[key]; existed {
+					diff.Removed = append(diff.Removed, "env."+key)
+				}
+			}
 		}
-		merged.Env = MergeMap(base.Env, patch.Env)
+		merged.Env = newEnv
 	}
 
-	if patch.Headers != nil {
-		if diff != nil && !reflect.DeepEqual(base.Headers, patch.Headers) {
-			diff.Modified["headers"] = FieldChange{Path: "headers", From: base.Headers, To: patch.Headers}
+	headersRemovalKeys := opts.GetRemoveMarkersForMap("headers")
+	if patch.Headers != nil || len(headersRemovalKeys) > 0 {
+		newHeaders := MergeMapWithOpts(base.Headers, patch.Headers, "headers", opts)
+		if diff != nil && !reflect.DeepEqual(base.Headers, newHeaders) {
+			diff.Modified["headers"] = FieldChange{Path: "headers", From: base.Headers, To: newHeaders}
+			// Record removed keys in diff
+			for _, key := range headersRemovalKeys {
+				if _, existed := base.Headers[key]; existed {
+					diff.Removed = append(diff.Removed, "headers."+key)
+				}
+			}
 		}
-		merged.Headers = MergeMap(base.Headers, patch.Headers)
+		merged.Headers = newHeaders
 	}
 
 	// Nested struct fields - deep merge or remove
@@ -303,6 +343,39 @@ func MergeMap(dst, src map[string]string) map[string]string {
 	// Merge src - add/update keys
 	for k, v := range src {
 		result[k] = v
+	}
+
+	return result
+}
+
+// MergeMapWithOpts deep merges src into dst with RFC 7396 null-means-remove semantics.
+// Keys marked for removal via opts.ShouldRemoveMapKey are deleted from the result.
+// This implements proper JSON Merge Patch behavior where null values remove keys.
+// The original maps are not modified.
+func MergeMapWithOpts(dst, src map[string]string, mapField string, opts MergeOptions) map[string]string {
+	if dst == nil && src == nil && len(opts.GetRemoveMarkersForMap(mapField)) == 0 {
+		return nil
+	}
+
+	result := make(map[string]string)
+
+	// Copy dst first
+	for k, v := range dst {
+		result[k] = v
+	}
+
+	// Merge src - add/update keys
+	for k, v := range src {
+		result[k] = v
+	}
+
+	// Remove keys marked for removal (RFC 7396: null means remove)
+	for _, key := range opts.GetRemoveMarkersForMap(mapField) {
+		delete(result, key)
+	}
+
+	if len(result) == 0 {
+		return nil
 	}
 
 	return result

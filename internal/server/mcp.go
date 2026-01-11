@@ -2900,7 +2900,13 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 // buildPatchConfigFromRequest constructs a partial ServerConfig from request parameters
 // for use with MergeServerConfig. This implements smart config patching (Issue #239, #240).
 func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest, existingServer *config.ServerConfig) (*config.ServerConfig, config.MergeOptions, error) {
-	patch := &config.ServerConfig{}
+	// Initialize patch with existing boolean values to preserve them by default.
+	// This fixes BUG-01: without this, boolean fields default to false (Go zero value)
+	// and the merge logic incorrectly sees this as a change from true to false.
+	patch := &config.ServerConfig{
+		Enabled:     existingServer.Enabled,
+		Quarantined: existingServer.Quarantined,
+	}
 	opts := config.DefaultMergeOptions()
 
 	// Scalar fields - only set if provided in request
@@ -2917,8 +2923,7 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		patch.Command = command
 	}
 
-	// Boolean fields - check if explicitly set using request inspection
-	// For enabled, check if it's different from existing (indicates explicit set)
+	// Boolean fields - only update if explicitly changed from existing value
 	requestedEnabled := request.GetBool("enabled", existingServer.Enabled)
 	if requestedEnabled != existingServer.Enabled {
 		patch.Enabled = requestedEnabled
@@ -2939,22 +2944,48 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		patch.Args = args
 	}
 
-	// Handle env JSON string - maps are deep merged
+	// Handle env JSON string - maps are deep merged with RFC 7396 null-means-remove
 	if envJSON := request.GetString("env_json", ""); envJSON != "" {
-		var env map[string]string
-		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+		// Parse to interface{} first to detect null values (RFC 7396 semantics)
+		var rawEnv map[string]interface{}
+		if err := json.Unmarshal([]byte(envJSON), &rawEnv); err != nil {
 			return nil, opts, fmt.Errorf("invalid env_json format: %v", err)
 		}
-		patch.Env = env
+		// Convert to string map, marking nulls for removal
+		patch.Env = make(map[string]string)
+		for k, v := range rawEnv {
+			if v == nil {
+				// RFC 7396: null means remove this key
+				opts = opts.WithRemoveMarker("env." + k)
+				p.logger.Debug("Marking env key for removal (null value)", zap.String("key", k))
+			} else if strVal, ok := v.(string); ok {
+				patch.Env[k] = strVal
+			} else {
+				return nil, opts, fmt.Errorf("invalid env_json: value for key %q must be string or null, got %T", k, v)
+			}
+		}
 	}
 
-	// Handle headers JSON string - maps are deep merged
+	// Handle headers JSON string - maps are deep merged with RFC 7396 null-means-remove
 	if headersJSON := request.GetString("headers_json", ""); headersJSON != "" {
-		var headers map[string]string
-		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+		// Parse to interface{} first to detect null values (RFC 7396 semantics)
+		var rawHeaders map[string]interface{}
+		if err := json.Unmarshal([]byte(headersJSON), &rawHeaders); err != nil {
 			return nil, opts, fmt.Errorf("invalid headers_json format: %v", err)
 		}
-		patch.Headers = headers
+		// Convert to string map, marking nulls for removal
+		patch.Headers = make(map[string]string)
+		for k, v := range rawHeaders {
+			if v == nil {
+				// RFC 7396: null means remove this key
+				opts = opts.WithRemoveMarker("headers." + k)
+				p.logger.Debug("Marking header key for removal (null value)", zap.String("key", k))
+			} else if strVal, ok := v.(string); ok {
+				patch.Headers[k] = strVal
+			} else {
+				return nil, opts, fmt.Errorf("invalid headers_json: value for key %q must be string or null, got %T", k, v)
+			}
+		}
 	}
 
 	// Handle isolation JSON string - deep merge for nested config
