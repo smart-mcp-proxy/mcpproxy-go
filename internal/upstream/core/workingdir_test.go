@@ -186,7 +186,7 @@ func TestWorkingDirIntegrationWithDockerIsolation(t *testing.T) {
 			Args:       []string{"-c", "print('hello')"},
 			WorkingDir: tmpDir, // This should be used in combination with Docker isolation
 			Isolation: &config.IsolationConfig{
-				Enabled:    true,
+				Enabled:    config.BoolPtr(true),
 				WorkingDir: "/workspace", // Docker container working dir
 			},
 			Enabled: true,

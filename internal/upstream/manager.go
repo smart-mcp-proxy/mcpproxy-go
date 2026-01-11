@@ -190,7 +190,7 @@ func (m *Manager) shouldEnableDockerRecovery() bool {
 			continue
 		}
 
-		if srv.Isolation != nil && srv.Isolation.Enabled {
+		if srv.Isolation != nil && srv.Isolation.IsEnabled() {
 			return true
 		}
 

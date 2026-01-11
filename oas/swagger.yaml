@@ -221,7 +221,7 @@ components:
       description: Per-server isolation settings
       properties:
         enabled:
-          description: Enable Docker isolation for this server
+          description: Enable Docker isolation for this server (nil = inherit global)
           type: boolean
         extra_args:
           description: Additional docker run arguments for this server
