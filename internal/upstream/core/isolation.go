@@ -134,7 +134,8 @@ func (im *IsolationManager) ShouldIsolate(serverConfig *config.ServerConfig) boo
 	}
 
 	// Check if server has isolation config and it's explicitly disabled
-	if serverConfig.Isolation != nil && !serverConfig.Isolation.Enabled {
+	// With *bool: nil means "inherit global", explicit false means "disabled"
+	if serverConfig.Isolation != nil && serverConfig.Isolation.Enabled != nil && !*serverConfig.Isolation.Enabled {
 		return false
 	}
 

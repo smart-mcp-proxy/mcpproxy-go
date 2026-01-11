@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "upstream_servers MCP Tool - Smart Patch Operations",
+  "description": "Schema for the upstream_servers MCP tool with smart configuration patching. Patch operations use deep merge semantics - only specify fields you want to change. Omitted fields are preserved, not removed.",
+  "type": "object",
+  "properties": {
+    "operation": {
+      "type": "string",
+      "enum": ["list", "add", "remove", "patch", "update"],
+      "description": "Operation to perform. 'patch' and 'update' use smart merge - only modifies specified fields while preserving all others."
+    },
+    "name": {
+      "type": "string",
+      "description": "Server name. Required for patch/update/remove operations."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Enable or disable the server. When patching, omit this field entirely to preserve current state."
+    },
+    "quarantined": {
+      "type": "boolean",
+      "description": "Quarantine status. When patching, omit to preserve current state."
+    },
+    "url": {
+      "type": "string",
+      "description": "Server URL for HTTP/SSE servers. Omit to preserve existing URL."
+    },
+    "protocol": {
+      "type": "string",
+      "enum": ["stdio", "http", "sse", "streamable-http", "auto"],
+      "description": "Server protocol. Omit to preserve existing protocol."
+    },
+    "command": {
+      "type": "string",
+      "description": "Command for stdio servers (e.g., 'uvx', 'npx'). Omit to preserve existing command."
+    },
+    "working_dir": {
+      "type": "string",
+      "description": "Working directory for command execution. Omit to preserve existing working_dir."
+    },
+    "args_json": {
+      "type": "string",
+      "description": "JSON array of command arguments. REPLACES existing args entirely if provided. Omit to preserve existing args. Example: '[\"--verbose\", \"--config\", \"/path/to/config\"]'"
+    },
+    "env_json": {
+      "type": "string",
+      "description": "JSON object of environment variables. MERGES with existing env vars - new keys are added, existing keys are updated. Use null value to remove a specific var. Example: '{\"DEBUG\": \"true\"}' to add, '{\"DEBUG\": null}' to remove."
+    },
+    "headers_json": {
+      "type": "string",
+      "description": "JSON object of HTTP headers. MERGES with existing headers - new keys are added, existing keys are updated. Use null value to remove a specific header. Example: '{\"Authorization\": \"Bearer token\"}'"
+    },
+    "isolation_json": {
+      "type": "string",
+      "description": "JSON object for Docker isolation config. MERGES with existing isolation settings - only provided fields are updated. Fields: enabled (bool), image (string), network_mode (string), extra_args (array - replaces), working_dir (string). Use 'null' (the literal string) to remove isolation entirely. Example: '{\"image\": \"python:3.12\"}' to update only the image."
+    },
+    "oauth_json": {
+      "type": "string",
+      "description": "JSON object for OAuth config. MERGES with existing OAuth settings - only provided fields are updated. Fields: client_id, client_secret, authorization_url, token_url, scopes (array - replaces), callback_port, resource_url, resource_autodetect. Use 'null' to remove OAuth entirely."
+    }
+  },
+  "required": ["operation"],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "operation": { "enum": ["patch", "update", "remove"] } }
+      },
+      "then": {
+        "required": ["name"]
+      }
+    }
+  ],
+  "examples": [
+    {
+      "title": "Enable server (minimal patch)",
+      "value": {
+        "operation": "patch",
+        "name": "github-server",
+        "enabled": true
+      },
+      "description": "Only changes 'enabled' field. All other config preserved."
+    },
+    {
+      "title": "Update Docker image only",
+      "value": {
+        "operation": "patch",
+        "name": "ElevenLabs",
+        "isolation_json": "{\"image\": \"python:3.12\"}"
+      },
+      "description": "Updates isolation.image while preserving isolation.enabled, isolation.network_mode, etc."
+    },
+    {
+      "title": "Add environment variable",
+      "value": {
+        "operation": "patch",
+        "name": "my-server",
+        "env_json": "{\"DEBUG\": \"true\"}"
+      },
+      "description": "Adds DEBUG=true while preserving all existing env vars."
+    },
+    {
+      "title": "Remove environment variable",
+      "value": {
+        "operation": "patch",
+        "name": "my-server",
+        "env_json": "{\"DEBUG\": null}"
+      },
+      "description": "Removes DEBUG env var while preserving all other env vars."
+    },
+    {
+      "title": "Remove isolation entirely",
+      "value": {
+        "operation": "patch",
+        "name": "my-server",
+        "isolation_json": "null"
+      },
+      "description": "Removes the isolation block entirely. Use literal string 'null', not JSON null."
+    },
+    {
+      "title": "Update multiple fields",
+      "value": {
+        "operation": "patch",
+        "name": "my-server",
+        "url": "https://new.api.com",
+        "enabled": true
+      },
+      "description": "Updates url and enabled. All other fields (isolation, oauth, env, headers, args) preserved."
+    },
+    {
+      "title": "Replace command args",
+      "value": {
+        "operation": "patch",
+        "name": "my-server",
+        "args_json": "[\"--verbose\"]"
+      },
+      "description": "REPLACES all existing args with new array. Arrays are NOT merged."
+    }
+  ]
+}

@@ -182,6 +182,9 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		Headers:     serverConfig.Headers,
 		Created:     serverConfig.Created,
 		Updated:     time.Now(),
+		// Fix: Include all nested config fields to prevent data loss (Issue #239, #240)
+		Isolation: serverConfig.Isolation,
+		OAuth:     serverConfig.OAuth,
 	}
 	return am.db.SaveUpstream(record)
 }

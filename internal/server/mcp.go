@@ -390,12 +390,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// upstream_servers - Basic server management (with security checks)
 	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
 		upstreamServersTool := mcp.NewTool("upstream_servers",
-			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Configure per-server Docker images, CPU/memory limits, and network isolation. Use 'isolation_enabled', 'isolation_image', 'isolation_memory_limit', 'isolation_cpu_limit' parameters for custom settings.\n\nUpdate/Patch Behavior: Both 'update' and 'patch' operations use FULL REPLACEMENT for env_json, args_json, and headers_json fields. The provided value completely replaces the existing value. To delete all env vars, provide empty object '{}'. To keep some keys while removing others, provide only the keys you want to keep."),
+			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Configure per-server Docker images, CPU/memory limits, and network isolation. Use 'isolation_enabled', 'isolation_image', 'isolation_memory_limit', 'isolation_cpu_limit' parameters for custom settings.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)"),
 			mcp.WithTitleAnnotation("Upstream Servers"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Operation: list, add, remove, update, patch, tail_log. 'update' and 'patch' both use full replacement for env/args/headers fields. For quarantine operations, use the 'quarantine_security' tool."),
+				mcp.Description("Operation: list, add, remove, update, patch, tail_log. 'update' and 'patch' use smart merge - only specified fields change, others preserved. For quarantine operations, use the 'quarantine_security' tool."),
 				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log"),
 			),
 			mcp.WithString("name",
@@ -408,10 +408,10 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Description("Command to run for stdio servers (e.g., 'uvx', 'python')"),
 			),
 			mcp.WithString("args_json",
-				mcp.Description("Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]'). For update/patch: REPLACES all existing args."),
+				mcp.Description("Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]'). For update/patch: REPLACES all existing args (arrays are not merged)."),
 			),
 			mcp.WithString("env_json",
-				mcp.Description("Environment variables for stdio servers as JSON object (e.g., '{\"API_KEY\": \"value\"}'). For update/patch: REPLACES all existing env vars. Use '{}' to clear all env vars."),
+				mcp.Description("Environment variables for stdio servers as JSON object (e.g., '{\"API_KEY\": \"value\"}'). For update/patch: MERGES with existing vars (new keys added, existing keys updated)."),
 			),
 			mcp.WithString("url",
 				mcp.Description("Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')"),
@@ -421,7 +421,13 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Enum("stdio", "http", "sse", "streamable-http", "auto"),
 			),
 			mcp.WithString("headers_json",
-				mcp.Description("HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: REPLACES all existing headers. Use '{}' to clear all headers."),
+				mcp.Description("HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: MERGES with existing headers (new keys added, existing keys updated)."),
+			),
+			mcp.WithString("isolation_json",
+				mcp.Description("Docker isolation config as JSON object. MERGES with existing settings - only provided fields change. Use 'null' to remove isolation entirely. Example: '{\"image\": \"python:3.12\"}' updates only the image."),
+			),
+			mcp.WithString("oauth_json",
+				mcp.Description("OAuth config as JSON object. MERGES with existing settings. Use 'null' to remove OAuth entirely. Fields: client_id, client_secret, scopes (array - replaces)."),
 			),
 			mcp.WithBoolean("enabled",
 				mcp.Description("Whether server should be enabled (default: true)"),
@@ -1833,7 +1839,7 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 			// Add server-specific isolation config
 			if server.Isolation != nil {
 				dockerInfo["server_isolation"] = map[string]interface{}{
-					"enabled":      server.Isolation.Enabled,
+					"enabled":      server.Isolation.IsEnabled(),
 					"image":        server.Isolation.Image,
 					"network_mode": server.Isolation.NetworkMode,
 					"working_dir":  server.Isolation.WorkingDir,
@@ -2483,6 +2489,26 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	// Get working directory parameter
 	workingDir := request.GetString("working_dir", "")
 
+	// Handle isolation_json for per-server Docker isolation config
+	var isolation *config.IsolationConfig
+	if isolationJSON := request.GetString("isolation_json", ""); isolationJSON != "" {
+		var isoConfig config.IsolationConfig
+		if err := json.Unmarshal([]byte(isolationJSON), &isoConfig); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid isolation_json format: %v", err)), nil
+		}
+		isolation = &isoConfig
+	}
+
+	// Handle oauth_json for OAuth configuration
+	var oauth *config.OAuthConfig
+	if oauthJSON := request.GetString("oauth_json", ""); oauthJSON != "" {
+		var oauthConfig config.OAuthConfig
+		if err := json.Unmarshal([]byte(oauthJSON), &oauthConfig); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid oauth_json format: %v", err)), nil
+		}
+		oauth = &oauthConfig
+	}
+
 	// Auto-detect protocol
 	protocol := request.GetString("protocol", "")
 	if protocol == "" {
@@ -2507,6 +2533,8 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		Enabled:     enabled,
 		Quarantined: quarantined, // Respect user's quarantine setting (defaults to true for security)
 		Created:     time.Now(),
+		Isolation:   isolation,
+		OAuth:       oauth,
 	}
 
 	// Save to storage
@@ -2688,62 +2716,36 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
 	}
 
-	// Update fields if provided
-	updatedServer := *existingServer
-	if url := request.GetString("url", ""); url != "" {
-		updatedServer.URL = url
+	// Build patch config from request parameters
+	patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existingServer)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	if protocol := request.GetString("protocol", ""); protocol != "" {
-		updatedServer.Protocol = protocol
-	}
-	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
-		updatedServer.WorkingDir = workingDir
-	}
-	if command := request.GetString("command", ""); command != "" {
-		updatedServer.Command = command
-	}
-	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
 
-	// Handle env JSON string for update
-	if envJSON := request.GetString("env_json", ""); envJSON != "" {
-		var env map[string]string
-		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid env_json format: %v", err)), nil
-		}
-		updatedServer.Env = env
-		p.logger.Info("Server env vars updated via MCP tool",
+	// Use smart merge to preserve existing config fields (Fix for #239, #240)
+	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil
+	}
+
+	// Log the config diff for audit trail (FR-006)
+	if configDiff != nil && !configDiff.IsEmpty() {
+		p.logger.Info("Server config updated via MCP tool",
 			zap.String("server", name),
-			zap.String("operation", "update"))
-	}
-
-	// Handle args JSON string for update
-	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
-		var args []string
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
-		}
-		updatedServer.Args = args
-	}
-
-	// Handle headers JSON string for update
-	if headersJSON := request.GetString("headers_json", ""); headersJSON != "" {
-		var headers map[string]string
-		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid headers_json format: %v", err)), nil
-		}
-		updatedServer.Headers = headers
+			zap.Any("modified", configDiff.Modified),
+			zap.Strings("removed", configDiff.Removed))
 	}
 
 	// Update in storage
-	if err := p.storage.UpdateUpstream(serverID, &updatedServer); err != nil {
+	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil
 	}
 
 	// Update in upstream manager with connection monitoring
 	p.upstreamManager.RemoveServer(serverID)
 	var connectionStatus, connectionMessage string
-	if updatedServer.Enabled {
-		if err := p.upstreamManager.AddServer(serverID, &updatedServer); err != nil {
+	if mergedServer.Enabled {
+		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
 			connectionStatus = statusError
 			connectionMessage = fmt.Sprintf("Failed to update server config: %v", err)
@@ -2765,18 +2767,26 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		p.mainServer.OnUpstreamServerChange()
 	}
 
-	// Check for Docker isolation warnings
+	// Build response with diff for LLM transparency
 	responseMap := map[string]interface{}{
 		"id":                 serverID,
 		"name":               name,
 		"updated":            true,
-		"enabled":            updatedServer.Enabled,
+		"enabled":            mergedServer.Enabled,
 		"connection_status":  connectionStatus,
 		"connection_message": connectionMessage,
 	}
 
+	// Include diff in response for LLM transparency (T4.3)
+	if configDiff != nil && !configDiff.IsEmpty() {
+		responseMap["changes"] = map[string]interface{}{
+			"modified": configDiff.Modified,
+			"removed":  configDiff.Removed,
+		}
+	}
+
 	if isolationManager := p.getIsolationManager(); isolationManager != nil {
-		if warning := isolationManager.GetDockerIsolationWarning(&updatedServer); warning != "" {
+		if warning := isolationManager.GetDockerIsolationWarning(mergedServer); warning != "" {
 			responseMap["docker_warnings"] = []string{warning}
 		}
 	}
@@ -2815,61 +2825,35 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
 	}
 
-	// Update fields if provided
-	updatedServer := *existingServer
-	if url := request.GetString("url", ""); url != "" {
-		updatedServer.URL = url
+	// Build patch config from request parameters
+	patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existingServer)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	if protocol := request.GetString("protocol", ""); protocol != "" {
-		updatedServer.Protocol = protocol
-	}
-	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
-		updatedServer.WorkingDir = workingDir
-	}
-	if command := request.GetString("command", ""); command != "" {
-		updatedServer.Command = command
-	}
-	updatedServer.Enabled = request.GetBool("enabled", updatedServer.Enabled)
 
-	// Handle env JSON string for patch
-	if envJSON := request.GetString("env_json", ""); envJSON != "" {
-		var env map[string]string
-		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid env_json format: %v", err)), nil
-		}
-		updatedServer.Env = env
-		p.logger.Info("Server env vars updated via MCP tool",
+	// Use smart merge to preserve existing config fields (Fix for #239, #240)
+	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil
+	}
+
+	// Log the config diff for audit trail (FR-006)
+	if configDiff != nil && !configDiff.IsEmpty() {
+		p.logger.Info("Server config patched via MCP tool",
 			zap.String("server", name),
-			zap.String("operation", "patch"))
-	}
-
-	// Handle args JSON string for patch
-	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
-		var args []string
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
-		}
-		updatedServer.Args = args
-	}
-
-	// Handle headers JSON string for patch
-	if headersJSON := request.GetString("headers_json", ""); headersJSON != "" {
-		var headers map[string]string
-		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid headers_json format: %v", err)), nil
-		}
-		updatedServer.Headers = headers
+			zap.Any("modified", configDiff.Modified),
+			zap.Strings("removed", configDiff.Removed))
 	}
 
 	// Update in storage
-	if err := p.storage.UpdateUpstream(serverID, &updatedServer); err != nil {
+	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil
 	}
 
 	// Update in upstream manager
 	p.upstreamManager.RemoveServer(serverID)
-	if updatedServer.Enabled {
-		if err := p.upstreamManager.AddServer(serverID, &updatedServer); err != nil {
+	if mergedServer.Enabled {
+		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
 		}
 	}
@@ -2883,16 +2867,24 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		p.mainServer.OnUpstreamServerChange()
 	}
 
-	// Check for Docker isolation warnings
+	// Build response with diff for LLM transparency
 	responseMap := map[string]interface{}{
 		"id":      serverID,
 		"name":    name,
 		"updated": true,
-		"enabled": updatedServer.Enabled,
+		"enabled": mergedServer.Enabled,
+	}
+
+	// Include diff in response for LLM transparency (T4.3)
+	if configDiff != nil && !configDiff.IsEmpty() {
+		responseMap["changes"] = map[string]interface{}{
+			"modified": configDiff.Modified,
+			"removed":  configDiff.Removed,
+		}
 	}
 
 	if isolationManager := p.getIsolationManager(); isolationManager != nil {
-		if warning := isolationManager.GetDockerIsolationWarning(&updatedServer); warning != "" {
+		if warning := isolationManager.GetDockerIsolationWarning(mergedServer); warning != "" {
 			responseMap["docker_warnings"] = []string{warning}
 		}
 	}
@@ -2903,6 +2895,97 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	}
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// buildPatchConfigFromRequest constructs a partial ServerConfig from request parameters
+// for use with MergeServerConfig. This implements smart config patching (Issue #239, #240).
+func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest, existingServer *config.ServerConfig) (*config.ServerConfig, config.MergeOptions, error) {
+	patch := &config.ServerConfig{}
+	opts := config.DefaultMergeOptions()
+
+	// Scalar fields - only set if provided in request
+	if url := request.GetString("url", ""); url != "" {
+		patch.URL = url
+	}
+	if protocol := request.GetString("protocol", ""); protocol != "" {
+		patch.Protocol = protocol
+	}
+	if workingDir := request.GetString("working_dir", ""); workingDir != "" {
+		patch.WorkingDir = workingDir
+	}
+	if command := request.GetString("command", ""); command != "" {
+		patch.Command = command
+	}
+
+	// Boolean fields - check if explicitly set using request inspection
+	// For enabled, check if it's different from existing (indicates explicit set)
+	requestedEnabled := request.GetBool("enabled", existingServer.Enabled)
+	if requestedEnabled != existingServer.Enabled {
+		patch.Enabled = requestedEnabled
+	}
+
+	// Handle quarantined similarly
+	requestedQuarantined := request.GetBool("quarantined", existingServer.Quarantined)
+	if requestedQuarantined != existingServer.Quarantined {
+		patch.Quarantined = requestedQuarantined
+	}
+
+	// Handle args JSON string - arrays are replaced entirely
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		var args []string
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return nil, opts, fmt.Errorf("invalid args_json format: %v", err)
+		}
+		patch.Args = args
+	}
+
+	// Handle env JSON string - maps are deep merged
+	if envJSON := request.GetString("env_json", ""); envJSON != "" {
+		var env map[string]string
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return nil, opts, fmt.Errorf("invalid env_json format: %v", err)
+		}
+		patch.Env = env
+	}
+
+	// Handle headers JSON string - maps are deep merged
+	if headersJSON := request.GetString("headers_json", ""); headersJSON != "" {
+		var headers map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+			return nil, opts, fmt.Errorf("invalid headers_json format: %v", err)
+		}
+		patch.Headers = headers
+	}
+
+	// Handle isolation JSON string - deep merge for nested config
+	if isolationJSON := request.GetString("isolation_json", ""); isolationJSON != "" {
+		// Check for explicit null removal
+		if isolationJSON == "null" {
+			opts = opts.WithRemoveMarker("isolation")
+		} else {
+			var isolation config.IsolationConfig
+			if err := json.Unmarshal([]byte(isolationJSON), &isolation); err != nil {
+				return nil, opts, fmt.Errorf("invalid isolation_json format: %v", err)
+			}
+			patch.Isolation = &isolation
+		}
+	}
+
+	// Handle oauth JSON string - deep merge for nested config
+	if oauthJSON := request.GetString("oauth_json", ""); oauthJSON != "" {
+		// Check for explicit null removal
+		if oauthJSON == "null" {
+			opts = opts.WithRemoveMarker("oauth")
+		} else {
+			var oauth config.OAuthConfig
+			if err := json.Unmarshal([]byte(oauthJSON), &oauth); err != nil {
+				return nil, opts, fmt.Errorf("invalid oauth_json format: %v", err)
+			}
+			patch.OAuth = &oauth
+		}
+	}
+
+	return patch, opts, nil
 }
 
 // getIndexedToolCount returns the total number of indexed tools

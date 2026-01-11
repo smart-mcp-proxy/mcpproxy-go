@@ -192,7 +192,7 @@ type DockerIsolationConfig struct {
 
 // IsolationConfig represents per-server isolation settings
 type IsolationConfig struct {
-	Enabled     bool     `json:"enabled" mapstructure:"enabled"`                       // Enable Docker isolation for this server
+	Enabled     *bool    `json:"enabled,omitempty" mapstructure:"enabled"`             // Enable Docker isolation for this server (nil = inherit global)
 	Image       string   `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
 	NetworkMode string   `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
 	ExtraArgs   []string `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server
@@ -200,6 +200,21 @@ type IsolationConfig struct {
 	LogDriver   string   `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
 	LogMaxSize  string   `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
 	LogMaxFiles string   `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
+}
+
+// IsEnabled returns true if isolation is explicitly enabled, false otherwise.
+// Returns false if Enabled is nil (not set).
+func (ic *IsolationConfig) IsEnabled() bool {
+	if ic == nil || ic.Enabled == nil {
+		return false
+	}
+	return *ic.Enabled
+}
+
+// BoolPtr returns a pointer to the given bool value.
+// Useful for setting *bool fields in struct literals.
+func BoolPtr(b bool) *bool {
+	return &b
 }
 
 // DockerRecoveryConfig represents Docker recovery settings for the tray application

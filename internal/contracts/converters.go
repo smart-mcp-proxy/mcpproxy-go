@@ -44,7 +44,7 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 	// Convert isolation config if present
 	if cfg.Isolation != nil {
 		server.Isolation = &IsolationConfig{
-			Enabled:     cfg.Isolation.Enabled,
+			Enabled:     cfg.Isolation.IsEnabled(), // Dereference *bool safely
 			Image:       cfg.Isolation.Image,
 			MemoryLimit: "", // TODO: Move from DockerIsolationConfig
 			CPULimit:    "", // TODO: Move from DockerIsolationConfig
