@@ -391,6 +391,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), Zap (logging), mark3labs/mcp-go (MCP protocol) (020-oauth-login-feedback)
 - Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), Zap (logging), google/uuid (ID generation) (021-request-id-logging)
 - BBolt database (`~/.mcpproxy/config.db`) - activity log extended with request_id field (021-request-id-logging)
+- Go 1.24 (toolchain go1.24.10) + mcp-go v0.43.1 (OAuth client), BBolt (storage), Prometheus (metrics), Zap (logging) (023-oauth-state-persistence)
+- BBolt database (`~/.mcpproxy/config.db`) - `oauth_tokens` bucket with `OAuthTokenRecord` model (023-oauth-state-persistence)
 - Go 1.24 (toolchain go1.24.10) + TypeScript 5.x / Vue 3.5 + Cobra CLI, Chi router, BBolt storage, Zap logging, mark3labs/mcp-go, Vue 3, Tailwind CSS, DaisyUI (024-expand-activity-log)
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord model (024-expand-activity-log)
 
