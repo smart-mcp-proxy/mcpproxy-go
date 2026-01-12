@@ -39,6 +39,10 @@ type MetricsManager struct {
 	actorConnectLatency   *prometheus.HistogramVec
 	actorRetries          *prometheus.CounterVec
 	actorFailures         *prometheus.CounterVec
+
+	// OAuth refresh metrics (Spec 023)
+	oauthRefreshTotal    *prometheus.CounterVec
+	oauthRefreshDuration *prometheus.HistogramVec
 }
 
 // NewMetricsManager creates a new metrics manager
@@ -199,6 +203,24 @@ func (mm *MetricsManager) initMetrics() {
 		},
 		[]string{"server", "error_type"},
 	)
+
+	// OAuth refresh metrics (Spec 023)
+	mm.oauthRefreshTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_oauth_refresh_total",
+			Help: "Total number of OAuth token refresh attempts",
+		},
+		[]string{"server", "result"},
+	)
+
+	mm.oauthRefreshDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "mcpproxy_oauth_refresh_duration_seconds",
+			Help:    "OAuth token refresh duration in seconds",
+			Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30},
+		},
+		[]string{"server", "result"},
+	)
 }
 
 // registerMetrics registers all metrics with the registry
@@ -224,6 +246,9 @@ func (mm *MetricsManager) registerMetrics() {
 		mm.actorConnectLatency,
 		mm.actorRetries,
 		mm.actorFailures,
+		// OAuth refresh metrics (Spec 023)
+		mm.oauthRefreshTotal,
+		mm.oauthRefreshDuration,
 	)
 
 	// Also register Go runtime metrics
@@ -360,4 +385,18 @@ func (mm *MetricsManager) RecordActorRetry(server string) {
 // RecordActorFailure records an actor failure
 func (mm *MetricsManager) RecordActorFailure(server, errorType string) {
 	mm.actorFailures.WithLabelValues(server, errorType).Inc()
+}
+
+// OAuth refresh metrics (Spec 023)
+
+// RecordOAuthRefresh records an OAuth token refresh attempt.
+// Result should be one of: "success", "failed_network", "failed_invalid_grant", "failed_other".
+func (mm *MetricsManager) RecordOAuthRefresh(server, result string) {
+	mm.oauthRefreshTotal.WithLabelValues(server, result).Inc()
+}
+
+// RecordOAuthRefreshDuration records the duration of an OAuth token refresh attempt.
+// Result should be one of: "success", "failed_network", "failed_invalid_grant", "failed_other".
+func (mm *MetricsManager) RecordOAuthRefreshDuration(server, result string, duration time.Duration) {
+	mm.oauthRefreshDuration.WithLabelValues(server, result).Observe(duration.Seconds())
 }

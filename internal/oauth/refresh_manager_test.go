@@ -215,20 +215,20 @@ func TestRefreshManager_RetryWithExponentialBackoff(t *testing.T) {
 	}
 }
 
-// T014: Test RefreshManager stops after max retries
-func TestRefreshManager_StopOnMaxRetries(t *testing.T) {
+// T014: Test RefreshManager stops on permanent failure (invalid_grant)
+func TestRefreshManager_StopOnPermanentFailure(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	store := newMockTokenStore()
 	emitter := &mockEventEmitter{}
 
 	config := &RefreshManagerConfig{
-		Threshold:  0.1,
-		MaxRetries: 1, // Only 1 retry for faster test
+		Threshold: 0.1,
 	}
 
 	manager := NewRefreshManager(store, nil, config, logger)
+	// Use invalid_grant error which should be classified as permanent
 	runtime := &mockRuntime{
-		refreshErr: errors.New("permanent failure"),
+		refreshErr: errors.New("invalid_grant: refresh token expired"),
 	}
 	manager.SetRuntime(runtime)
 	manager.SetEventEmitter(emitter)
@@ -238,26 +238,27 @@ func TestRefreshManager_StopOnMaxRetries(t *testing.T) {
 	require.NoError(t, err)
 	defer manager.Stop()
 
-	// Manually trigger a refresh that will fail
+	// Manually trigger a refresh that will fail permanently
 	expiresAt := time.Now().Add(10 * time.Second)
 	manager.OnTokenSaved("test-server", expiresAt)
 
 	// Give time for the schedule to be set up
 	time.Sleep(50 * time.Millisecond)
 
-	// Directly call executeRefresh to test max retry behavior
+	// Directly call executeRefresh to test permanent failure behavior
 	manager.executeRefresh("test-server")
 
-	// After max retries, schedule should be removed
+	// Wait for processing
 	time.Sleep(50 * time.Millisecond)
 
-	// Trigger another refresh to exceed max retries
-	manager.executeRefresh("test-server")
+	// Check that failure event was emitted for permanent failure
+	assert.Equal(t, 1, emitter.GetFailedEvents(), "Should emit failure event for invalid_grant error")
 
-	time.Sleep(50 * time.Millisecond)
-
-	// Check that failure event was emitted
-	assert.GreaterOrEqual(t, emitter.GetFailedEvents(), 1, "Should emit failure event after max retries")
+	// Schedule should have RefreshStateFailed set
+	schedule := manager.GetSchedule("test-server")
+	if schedule != nil {
+		assert.Equal(t, RefreshStateFailed, schedule.RefreshState, "State should be failed for permanent error")
+	}
 }
 
 // T015: Test RefreshManager coordination with OAuthFlowCoordinator
@@ -450,15 +451,16 @@ func TestRefreshManager_SuccessEmitsEvent(t *testing.T) {
 	assert.Equal(t, 1, emitter.GetRefreshedEvents(), "Should emit refreshed event on success")
 }
 
-// Test that expired tokens are not scheduled
-func TestRefreshManager_ExpiredTokenNotScheduled(t *testing.T) {
+// Test that expired tokens without refresh token are marked as failed
+func TestRefreshManager_ExpiredTokenWithoutRefreshToken(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	store := newMockTokenStore()
 
-	// Token that already expired
+	// Token that already expired with no refresh token
 	store.AddToken(&storage.OAuthTokenRecord{
-		ServerName: "expired-server",
-		ExpiresAt:  time.Now().Add(-1 * time.Hour), // Already expired
+		ServerName:   "expired-server",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour), // Already expired
+		RefreshToken: "",                             // No refresh token
 	})
 
 	manager := NewRefreshManager(store, nil, nil, logger)
@@ -468,6 +470,45 @@ func TestRefreshManager_ExpiredTokenNotScheduled(t *testing.T) {
 	require.NoError(t, err)
 	defer manager.Stop()
 
-	// Should not schedule refresh for expired token
-	assert.Equal(t, 0, manager.GetScheduleCount(), "Expired tokens should not be scheduled")
+	// Should have a schedule in failed state (not scheduled for refresh)
+	schedule := manager.GetSchedule("expired-server")
+	require.NotNil(t, schedule, "Should have a schedule entry for tracking state")
+	assert.Equal(t, RefreshStateFailed, schedule.RefreshState, "Expired tokens without refresh token should be in failed state")
+}
+
+// Test that expired tokens with refresh token are queued for immediate refresh
+func TestRefreshManager_ExpiredTokenWithRefreshToken(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+
+	// Token that already expired but has refresh token
+	store.AddToken(&storage.OAuthTokenRecord{
+		ServerName:   "expired-server",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour), // Already expired
+		RefreshToken: "valid-refresh-token",          // Has refresh token
+	})
+
+	runtime := &mockRuntime{
+		refreshErr: errors.New("network error"),
+	}
+
+	manager := NewRefreshManager(store, nil, nil, logger)
+	manager.SetRuntime(runtime)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Wait for async startup refresh to execute
+	time.Sleep(100 * time.Millisecond)
+
+	// Should have attempted refresh
+	calls := runtime.GetRefreshCalls()
+	assert.Len(t, calls, 1, "Should attempt immediate refresh for expired token with refresh token")
+
+	// Should be in retrying state (not failed since error is retryable)
+	schedule := manager.GetSchedule("expired-server")
+	require.NotNil(t, schedule, "Should have a schedule entry")
+	assert.Equal(t, RefreshStateRetrying, schedule.RefreshState, "Should be retrying after network error")
 }

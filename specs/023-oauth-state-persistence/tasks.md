@@ -24,11 +24,11 @@
 
 **Purpose**: Constants, types, and metrics infrastructure needed by all user stories
 
-- [ ] T001 Add RefreshState type and constants in internal/oauth/refresh_manager.go
-- [ ] T002 [P] Add RetryBackoffBase (10s) and MaxRetryBackoff (5min) constants in internal/oauth/refresh_manager.go
-- [ ] T003 [P] Extend RefreshSchedule struct with RetryBackoff, MaxBackoff, LastAttempt, RefreshState fields in internal/oauth/refresh_manager.go
-- [ ] T004 [P] Add OAuth refresh metrics (mcpproxy_oauth_refresh_total counter, mcpproxy_oauth_refresh_duration_seconds histogram) in internal/observability/metrics.go
-- [ ] T005 [P] Add RecordOAuthRefresh() and RecordOAuthRefreshDuration() methods to MetricsManager in internal/observability/metrics.go
+- [X] T001 Add RefreshState type and constants in internal/oauth/refresh_manager.go
+- [X] T002 [P] Add RetryBackoffBase (10s) and MaxRetryBackoff (5min) constants in internal/oauth/refresh_manager.go
+- [X] T003 [P] Extend RefreshSchedule struct with RetryBackoff, MaxBackoff, LastAttempt, RefreshState fields in internal/oauth/refresh_manager.go
+- [X] T004 [P] Add OAuth refresh metrics (mcpproxy_oauth_refresh_total counter, mcpproxy_oauth_refresh_duration_seconds histogram) in internal/observability/metrics.go
+- [X] T005 [P] Add RecordOAuthRefresh() and RecordOAuthRefreshDuration() methods to MetricsManager in internal/observability/metrics.go
 
 ---
 
@@ -38,12 +38,12 @@
 
 **CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T006 Implement calculateBackoff(retryCount int) method with exponential backoff and 5min cap in internal/oauth/refresh_manager.go
-- [ ] T007 Add rate limiting check (min 10s between attempts per server) in internal/oauth/refresh_manager.go
-- [ ] T008 [P] Fix misleading LogTokenRefreshSuccess() function - rename to LogClientConnectionSuccess() in internal/oauth/logging.go
-- [ ] T009 [P] Fix misleading success log at line ~1239 in internal/upstream/core/connection.go (HTTP connection)
-- [ ] T010 [P] Fix misleading success log at line ~1696 in internal/upstream/core/connection.go (SSE connection)
-- [ ] T011 Add accurate LogTokenRefreshAttempt() and LogTokenRefreshResult() functions in internal/oauth/logging.go
+- [X] T006 Implement calculateBackoff(retryCount int) method with exponential backoff and 5min cap in internal/oauth/refresh_manager.go
+- [X] T007 Add rate limiting check (min 10s between attempts per server) in internal/oauth/refresh_manager.go
+- [X] T008 [P] Fix misleading LogTokenRefreshSuccess() function - rename to LogClientConnectionSuccess() in internal/oauth/logging.go
+- [X] T009 [P] Fix misleading success log at line ~1239 in internal/upstream/core/connection.go (HTTP connection)
+- [X] T010 [P] Fix misleading success log at line ~1696 in internal/upstream/core/connection.go (SSE connection)
+- [X] T011 Add accurate LogTokenRefreshAttempt() and LogTokenRefreshResult() functions in internal/oauth/logging.go
 
 **Checkpoint**: Backoff algorithm and accurate logging ready - user story implementation can begin
 
@@ -57,12 +57,12 @@
 
 ### Implementation for User Story 1
 
-- [ ] T012 [US1] Modify RefreshManager.Start() to detect expired tokens at startup in internal/oauth/refresh_manager.go
-- [ ] T013 [US1] Add executeImmediateRefresh() method for expired tokens with valid refresh tokens in internal/oauth/refresh_manager.go
-- [ ] T014 [US1] Emit metrics on refresh attempt (success/failure with result label) in internal/oauth/refresh_manager.go
-- [ ] T015 [US1] Add structured logging for startup refresh attempts with server name, token age, result in internal/oauth/refresh_manager.go
-- [ ] T016 [US1] Update RefreshSchedule state to RefreshStateRetrying on failure in internal/oauth/refresh_manager.go
-- [ ] T017 [US1] Add unit test for startup refresh with expired access token in internal/oauth/refresh_manager_test.go
+- [X] T012 [US1] Modify RefreshManager.Start() to detect expired tokens at startup in internal/oauth/refresh_manager.go
+- [X] T013 [US1] Add executeImmediateRefresh() method for expired tokens with valid refresh tokens in internal/oauth/refresh_manager.go
+- [X] T014 [US1] Emit metrics on refresh attempt (success/failure with result label) in internal/oauth/refresh_manager.go
+- [X] T015 [US1] Add structured logging for startup refresh attempts with server name, token age, result in internal/oauth/refresh_manager.go
+- [X] T016 [US1] Update RefreshSchedule state to RefreshStateRetrying on failure in internal/oauth/refresh_manager.go
+- [X] T017 [US1] Add unit test for startup refresh with expired access token in internal/oauth/refresh_manager_test.go
 
 **Checkpoint**: OAuth servers survive restart - verify with manual test per quickstart.md
 
@@ -76,11 +76,11 @@
 
 ### Implementation for User Story 2
 
-- [ ] T018 [US2] Modify executeRefresh() to use new exponential backoff on failure in internal/oauth/refresh_manager.go
-- [ ] T019 [US2] Implement rescheduleWithBackoff() using calculateBackoff() in internal/oauth/refresh_manager.go
-- [ ] T020 [US2] Continue retries until token expiration (not limited retry count) in internal/oauth/refresh_manager.go
-- [ ] T021 [US2] Update RefreshSchedule.RefreshState transitions (Scheduled -> Retrying -> Failed) in internal/oauth/refresh_manager.go
-- [ ] T022 [US2] Emit refresh duration metric on each attempt in internal/oauth/refresh_manager.go
+- [X] T018 [US2] Modify executeRefresh() to use new exponential backoff on failure in internal/oauth/refresh_manager.go
+- [X] T019 [US2] Implement rescheduleWithBackoff() using calculateBackoff() in internal/oauth/refresh_manager.go
+- [X] T020 [US2] Continue retries until token expiration (not limited retry count) in internal/oauth/refresh_manager.go
+- [X] T021 [US2] Update RefreshSchedule.RefreshState transitions (Scheduled -> Retrying -> Failed) in internal/oauth/refresh_manager.go
+- [X] T022 [US2] Emit refresh duration metric on each attempt in internal/oauth/refresh_manager.go
 - [ ] T023 [US2] Add unit test for exponential backoff sequence (10s, 20s, 40s, 80s, 160s, 300s cap) in internal/oauth/refresh_manager_test.go
 - [ ] T024 [US2] Add unit test for unlimited retries until token expiration in internal/oauth/refresh_manager_test.go
 
@@ -96,14 +96,14 @@
 
 ### Implementation for User Story 3
 
-- [ ] T025 [US3] Add RefreshState, RefreshRetryCount, RefreshLastError, RefreshNextAttempt fields to HealthCalculatorInput in internal/health/calculator.go
-- [ ] T026 [US3] Implement health calculation for RefreshStateRetrying -> degraded level in internal/health/calculator.go
-- [ ] T027 [US3] Implement health calculation for RefreshStateFailed -> unhealthy level in internal/health/calculator.go
-- [ ] T028 [US3] Set appropriate health detail messages per refresh state in internal/health/calculator.go
-- [ ] T029 [US3] Set appropriate health action per state (view_logs for retrying, login for failed) in internal/health/calculator.go
-- [ ] T030 [US3] Add error classification for invalid_grant (permanent) vs network errors (retryable) in internal/oauth/refresh_manager.go
-- [ ] T031 [US3] Expose RefreshSchedule state via RefreshManager.GetRefreshState(serverName) method in internal/oauth/refresh_manager.go
-- [ ] T032 [US3] Wire RefreshManager state into health calculation flow in internal/health/calculator.go
+- [X] T025 [US3] Add RefreshState, RefreshRetryCount, RefreshLastError, RefreshNextAttempt fields to HealthCalculatorInput in internal/health/calculator.go
+- [X] T026 [US3] Implement health calculation for RefreshStateRetrying -> degraded level in internal/health/calculator.go
+- [X] T027 [US3] Implement health calculation for RefreshStateFailed -> unhealthy level in internal/health/calculator.go
+- [X] T028 [US3] Set appropriate health detail messages per refresh state in internal/health/calculator.go
+- [X] T029 [US3] Set appropriate health action per state (view_logs for retrying, login for failed) in internal/health/calculator.go
+- [X] T030 [US3] Add error classification for invalid_grant (permanent) vs network errors (retryable) in internal/oauth/refresh_manager.go
+- [X] T031 [US3] Expose RefreshSchedule state via RefreshManager.GetRefreshState(serverName) method in internal/oauth/refresh_manager.go
+- [X] T032 [US3] Wire RefreshManager state into health calculation flow in internal/health/calculator.go
 - [ ] T033 [US3] Add unit test for health status output per refresh state in internal/health/calculator_test.go
 
 **Checkpoint**: Health status shows specific refresh failure reasons
@@ -114,8 +114,8 @@
 
 **Purpose**: Final validation, cleanup, and documentation
 
-- [ ] T034 [P] Verify all logging follows naming convention (OAuth token refresh *) in internal/oauth/logging.go
-- [ ] T035 [P] Run existing tests to ensure no regressions: go test ./internal/...
+- [X] T034 [P] Verify all logging follows naming convention (OAuth token refresh *) in internal/oauth/logging.go
+- [X] T035 [P] Run existing tests to ensure no regressions: go test ./internal/...
 - [ ] T036 [P] Run E2E tests: ./scripts/test-api-e2e.sh
 - [ ] T037 Verify metrics endpoint shows new OAuth metrics: curl http://localhost:8080/metrics | grep oauth_refresh
 - [ ] T038 Manual verification per quickstart.md success criteria checklist
