@@ -8,6 +8,21 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
+// RefreshState represents the current state of token refresh for health reporting.
+// Mirrors oauth.RefreshState for decoupling.
+type RefreshState int
+
+const (
+	// RefreshStateIdle means no refresh is pending or in progress.
+	RefreshStateIdle RefreshState = iota
+	// RefreshStateScheduled means a proactive refresh is scheduled at 80% lifetime.
+	RefreshStateScheduled
+	// RefreshStateRetrying means refresh failed and is retrying with exponential backoff.
+	RefreshStateRetrying
+	// RefreshStateFailed means refresh permanently failed (e.g., invalid_grant).
+	RefreshStateFailed
+)
+
 // HealthCalculatorInput contains all fields needed to calculate health status.
 // This struct normalizes data from different sources (StateView, storage, config).
 type HealthCalculatorInput struct {
@@ -36,6 +51,12 @@ type HealthCalculatorInput struct {
 
 	// Tool info
 	ToolCount int
+
+	// Refresh state (for health status integration - Spec 023)
+	RefreshState       RefreshState // Current refresh state from RefreshManager
+	RefreshRetryCount  int          // Number of retry attempts
+	RefreshLastError   string       // Human-readable error message
+	RefreshNextAttempt *time.Time   // When next retry will occur
 }
 
 // HealthCalculatorConfig contains configurable thresholds for health calculation.
@@ -219,7 +240,35 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		}
 	}
 
-	// 6. Healthy state - connected with valid authentication (if required)
+	// 6. Refresh state checks (Spec 023)
+	// Check if refresh is in a degraded or failed state
+	switch input.RefreshState {
+	case RefreshStateRetrying:
+		// Refresh failed but retrying - degraded status
+		detail := formatRefreshRetryDetail(input.RefreshRetryCount, input.RefreshNextAttempt, input.RefreshLastError)
+		return &contracts.HealthStatus{
+			Level:      LevelDegraded,
+			AdminState: StateEnabled,
+			Summary:    "Token refresh pending",
+			Detail:     detail,
+			Action:     ActionViewLogs,
+		}
+	case RefreshStateFailed:
+		// Refresh permanently failed - unhealthy status
+		detail := "Re-authentication required"
+		if input.RefreshLastError != "" {
+			detail = fmt.Sprintf("Re-authentication required: %s", input.RefreshLastError)
+		}
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    "Refresh token expired",
+			Detail:     detail,
+			Action:     ActionLogin,
+		}
+	}
+
+	// 7. Healthy state - connected with valid authentication (if required)
 	return &contracts.HealthStatus{
 		Level:      LevelHealthy,
 		AdminState: StateEnabled,
@@ -300,6 +349,30 @@ func formatExpiringTokenSummary(timeUntilExpiry time.Duration) string {
 		return "Token expiring in 1h"
 	}
 	return fmt.Sprintf("Token expiring in %dh", hours)
+}
+
+// formatRefreshRetryDetail formats the detail message for a refresh retry state.
+func formatRefreshRetryDetail(retryCount int, nextAttempt *time.Time, lastError string) string {
+	var detail string
+
+	// Start with retry count and next attempt time
+	if nextAttempt != nil && !nextAttempt.IsZero() {
+		detail = fmt.Sprintf("Refresh retry %d scheduled for %s", retryCount, nextAttempt.Format(time.RFC3339))
+	} else {
+		detail = fmt.Sprintf("Refresh retry %d pending", retryCount)
+	}
+
+	// Add last error if available
+	if lastError != "" {
+		// Truncate error if too long
+		errorMsg := lastError
+		if len(errorMsg) > 100 {
+			errorMsg = errorMsg[:97] + "..."
+		}
+		detail = fmt.Sprintf("%s: %s", detail, errorMsg)
+	}
+
+	return detail
 }
 
 // containsIgnoreCase checks if s contains substr, ignoring case.

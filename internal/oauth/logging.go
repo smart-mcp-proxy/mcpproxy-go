@@ -159,27 +159,76 @@ func LogTokenMetadata(logger *zap.Logger, metadata TokenMetadata) {
 	)
 }
 
-// LogTokenRefreshAttempt logs a token refresh attempt.
-func LogTokenRefreshAttempt(logger *zap.Logger, attempt int, maxAttempts int) {
-	logger.Info("Attempting OAuth token refresh",
+// LogClientConnectionAttempt logs a client connection attempt (not an actual token refresh).
+// Note: This is called when retrying client.Start(), which may trigger automatic
+// token refresh internally by mcp-go, but we cannot observe whether refresh actually occurred.
+func LogClientConnectionAttempt(logger *zap.Logger, attempt int, maxAttempts int) {
+	logger.Info("OAuth client connection attempt",
 		zap.Int("attempt", attempt),
 		zap.Int("max_attempts", maxAttempts),
 	)
 }
 
-// LogTokenRefreshSuccess logs a successful token refresh.
-func LogTokenRefreshSuccess(logger *zap.Logger, duration time.Duration) {
-	logger.Info("OAuth token refresh successful",
+// LogClientConnectionSuccess logs a successful client connection.
+// Note: This does NOT mean a token refresh occurred - it means the client connected.
+// The mcp-go library may have used a cached token or performed automatic refresh internally.
+func LogClientConnectionSuccess(logger *zap.Logger, duration time.Duration) {
+	logger.Info("OAuth client connection successful",
 		zap.Duration("duration", duration),
 	)
 }
 
-// LogTokenRefreshFailure logs a failed token refresh attempt.
-func LogTokenRefreshFailure(logger *zap.Logger, attempt int, err error) {
-	logger.Warn("OAuth token refresh failed",
+// LogClientConnectionFailure logs a failed client connection attempt.
+func LogClientConnectionFailure(logger *zap.Logger, attempt int, err error) {
+	logger.Warn("OAuth client connection failed",
 		zap.Int("attempt", attempt),
 		zap.Error(err),
 	)
+}
+
+// Deprecated: Use LogClientConnectionAttempt instead.
+// LogTokenRefreshAttempt is kept for backward compatibility but is misleading.
+func LogTokenRefreshAttempt(logger *zap.Logger, attempt int, maxAttempts int) {
+	LogClientConnectionAttempt(logger, attempt, maxAttempts)
+}
+
+// Deprecated: Use LogClientConnectionSuccess instead.
+// LogTokenRefreshSuccess is kept for backward compatibility but is misleading.
+// This is called when client.Start() succeeds, not when a token refresh occurs.
+func LogTokenRefreshSuccess(logger *zap.Logger, duration time.Duration) {
+	LogClientConnectionSuccess(logger, duration)
+}
+
+// Deprecated: Use LogClientConnectionFailure instead.
+// LogTokenRefreshFailure is kept for backward compatibility but is misleading.
+func LogTokenRefreshFailure(logger *zap.Logger, attempt int, err error) {
+	LogClientConnectionFailure(logger, attempt, err)
+}
+
+// LogActualTokenRefreshAttempt logs an actual proactive token refresh attempt.
+// This is called by RefreshManager when it initiates a token refresh operation.
+func LogActualTokenRefreshAttempt(logger *zap.Logger, serverName string, tokenAge time.Duration) {
+	logger.Info("OAuth token refresh attempt",
+		zap.String("server", serverName),
+		zap.Duration("token_age", tokenAge),
+	)
+}
+
+// LogActualTokenRefreshResult logs the result of an actual token refresh operation.
+// This is called by RefreshManager after a refresh attempt completes.
+func LogActualTokenRefreshResult(logger *zap.Logger, serverName string, success bool, duration time.Duration, err error) {
+	if success {
+		logger.Info("OAuth token refresh succeeded",
+			zap.String("server", serverName),
+			zap.Duration("duration", duration),
+		)
+	} else {
+		logger.Warn("OAuth token refresh failed",
+			zap.String("server", serverName),
+			zap.Duration("duration", duration),
+			zap.Error(err),
+		)
+	}
 }
 
 // LogOAuthFlowStart logs the start of an OAuth flow.
