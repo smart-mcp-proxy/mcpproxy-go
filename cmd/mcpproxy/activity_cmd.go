@@ -71,18 +71,26 @@ type ActivityFilter struct {
 
 // Validate validates the filter options
 func (f *ActivityFilter) Validate() error {
-	// Validate type
+	// Validate type(s) - supports comma-separated values (Spec 024)
 	if f.Type != "" {
-		validTypes := []string{"tool_call", "policy_decision", "quarantine_change", "server_change"}
-		valid := false
-		for _, t := range validTypes {
-			if f.Type == t {
-				valid = true
-				break
-			}
+		validTypes := []string{
+			"tool_call", "policy_decision", "quarantine_change", "server_change",
+			"system_start", "system_stop", "internal_tool_call", "config_change", // Spec 024: new types
 		}
-		if !valid {
-			return fmt.Errorf("invalid type '%s': must be one of %v", f.Type, validTypes)
+		// Split by comma for multi-type support
+		types := strings.Split(f.Type, ",")
+		for _, t := range types {
+			t = strings.TrimSpace(t)
+			valid := false
+			for _, vt := range validTypes {
+				if t == vt {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return fmt.Errorf("invalid type '%s': must be one of %v", t, validTypes)
+			}
 		}
 	}
 
@@ -517,7 +525,7 @@ func init() {
 	activityCmd.AddCommand(activityExportCmd)
 
 	// List command flags
-	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision, quarantine_change, server_change")
+	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
 	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked")
@@ -531,7 +539,7 @@ func init() {
 	activityListCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
 
 	// Watch command flags
-	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision")
+	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
 	activityWatchCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 
 	// Show command flags
@@ -547,7 +555,7 @@ func init() {
 	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export format: json, csv")
 	activityExportCmd.Flags().BoolVar(&activityIncludeBodies, "include-bodies", false, "Include full request/response bodies")
 	// Reuse list filter flags for export
-	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type")
+	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
 	activityExportCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityExportCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status")

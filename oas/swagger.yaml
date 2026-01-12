@@ -1549,7 +1549,8 @@ paths:
     get:
       description: Returns paginated list of activity records with optional filtering
       parameters:
-      - description: Filter by activity type
+      - description: Filter by activity type(s), comma-separated for multiple (Spec
+          024)
         in: query
         name: type
         schema:
@@ -1558,6 +1559,10 @@ paths:
           - policy_decision
           - quarantine_change
           - server_change
+          - system_start
+          - system_stop
+          - internal_tool_call
+          - config_change
           type: string
       - description: Filter by server name
         in: query

@@ -10,22 +10,29 @@ Access the Activity Log by navigating to `/ui/activity` in the MCPProxy web inte
 
 ### Activity Table
 
-The main view displays activities in a table with the following columns:
+The main view displays activities in a sortable table with the following columns:
 
-| Column | Description |
-|--------|-------------|
-| Time | Timestamp with relative time display (e.g., "5m ago") |
-| Type | Activity type with icon indicator |
-| Server | Link to the server that generated the activity |
-| Details | Tool name or action description |
-| Status | Color-coded badge (green=success, red=error, orange=blocked) |
-| Duration | Execution time in ms or seconds |
+| Column | Sortable | Description |
+|--------|----------|-------------|
+| Time | Yes | Timestamp with relative time display (e.g., "5m ago"). Default sort: newest first |
+| Type | Yes | Activity type with icon indicator |
+| Server | Yes | Link to the server that generated the activity |
+| Details | No | Tool name or action description |
+| Intent | No | Operation type badge (read/write/destructive) with tooltip showing full intent details |
+| Status | Yes | Color-coded badge (green=success, red=error, orange=blocked) |
+| Duration | Yes | Execution time in ms or seconds |
+
+**Sorting**: Click any sortable column header to sort. Click again to toggle between ascending/descending. The current sort column and direction are indicated with an arrow.
 
 ### Activity Types
 
 | Type | Icon | Description |
 |------|------|-------------|
-| Tool Call | 🔧 | MCP tool invocations |
+| Tool Call | 🔧 | MCP tool invocations to upstream servers |
+| System Start | 🚀 | MCPProxy server startup events |
+| System Stop | 🛑 | MCPProxy server shutdown events |
+| Internal Tool Call | ⚙️ | Internal proxy tool calls (`retrieve_tools`, `call_tool_*`, `code_execution`, `upstream_servers`, etc.) |
+| Config Change | ⚡ | Configuration changes (server added/removed/updated) |
 | Policy Decision | 🛡️ | Security policy evaluations |
 | Quarantine Change | ⚠️ | Server quarantine status changes |
 | Server Change | 🔄 | Server enable/disable/restart events |
@@ -40,12 +47,13 @@ Activities appear automatically via Server-Sent Events (SSE):
 ### Filtering
 
 Filter activities by:
-- **Type**: Tool Call, Policy Decision, Quarantine Change, Server Change
+- **Type**: Multi-select dropdown with checkboxes. Select one or more types to filter (uses OR logic between selected types):
+  - Tool Call, System Start, System Stop, Internal Tool Call, Config Change, Policy Decision, Quarantine Change, Server Change
 - **Server**: Dynamically populated from activity data
 - **Status**: Success, Error, Blocked
 - **Date Range**: From/To datetime pickers to filter by time period
 
-Filters combine with AND logic. Active filters are displayed as badges below the filter controls.
+Type filters combine with OR logic (show any selected type). Other filters combine with AND logic. Active filters are displayed as badges below the filter controls.
 
 ### Activity Details
 
@@ -102,9 +110,10 @@ The Activity Log uses these REST API endpoints:
 | `GET /api/v1/activity/export` | Export activities (JSON/CSV) |
 
 Query parameters for filtering:
-- `type`: Filter by activity type
+- `type`: Filter by activity type (comma-separated for multiple, e.g., `?type=tool_call,config_change`)
 - `server`: Filter by server name
 - `status`: Filter by status
+- `intent_type`: Filter by intent operation type (`read`, `write`, `destructive`)
 - `limit`: Maximum records to return
 - `offset`: Pagination offset
 

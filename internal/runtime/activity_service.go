@@ -165,6 +165,15 @@ func (s *ActivityService) handleEvent(evt Event) {
 			zap.String("tool_name", getStringPayload(evt.Payload, "tool_name")),
 			zap.String("session_id", getStringPayload(evt.Payload, "session_id")),
 			zap.String("request_id", getStringPayload(evt.Payload, "request_id")))
+	// Spec 024: System lifecycle events
+	case EventTypeActivitySystemStart:
+		s.handleSystemStart(evt)
+	case EventTypeActivitySystemStop:
+		s.handleSystemStop(evt)
+	case EventTypeActivityInternalToolCall:
+		s.handleInternalToolCall(evt)
+	case EventTypeActivityConfigChange:
+		s.handleConfigChange(evt)
 	default:
 		// Ignore other event types
 	}
@@ -293,6 +302,182 @@ func (s *ActivityService) handleQuarantineChange(evt Event) {
 	}
 }
 
+// handleSystemStart persists a system start event (Spec 024).
+func (s *ActivityService) handleSystemStart(evt Event) {
+	version := getStringPayload(evt.Payload, "version")
+	listenAddress := getStringPayload(evt.Payload, "listen_address")
+	startupDurationMs := getInt64Payload(evt.Payload, "startup_duration_ms")
+	configPath := getStringPayload(evt.Payload, "config_path")
+
+	record := &storage.ActivityRecord{
+		Type:   storage.ActivityTypeSystemStart,
+		Source: storage.ActivitySourceAPI, // System events come from the API server
+		Status: "success",
+		Metadata: map[string]interface{}{
+			"version":            version,
+			"listen_address":     listenAddress,
+			"startup_duration_ms": startupDurationMs,
+			"config_path":        configPath,
+		},
+		Timestamp: evt.Timestamp,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save system start activity",
+			zap.Error(err),
+			zap.String("version", version))
+	} else {
+		s.logger.Info("System start activity recorded",
+			zap.String("id", record.ID),
+			zap.String("version", version),
+			zap.Int64("startup_duration_ms", startupDurationMs))
+	}
+}
+
+// handleSystemStop persists a system stop event (Spec 024).
+func (s *ActivityService) handleSystemStop(evt Event) {
+	reason := getStringPayload(evt.Payload, "reason")
+	signal := getStringPayload(evt.Payload, "signal")
+	uptimeSeconds := getInt64Payload(evt.Payload, "uptime_seconds")
+	errorMsg := getStringPayload(evt.Payload, "error_message")
+
+	status := "success"
+	if errorMsg != "" {
+		status = "error"
+	}
+
+	record := &storage.ActivityRecord{
+		Type:         storage.ActivityTypeSystemStop,
+		Source:       storage.ActivitySourceAPI,
+		Status:       status,
+		ErrorMessage: errorMsg,
+		Metadata: map[string]interface{}{
+			"reason":         reason,
+			"signal":         signal,
+			"uptime_seconds": uptimeSeconds,
+		},
+		Timestamp: evt.Timestamp,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save system stop activity",
+			zap.Error(err),
+			zap.String("reason", reason))
+	} else {
+		s.logger.Info("System stop activity recorded",
+			zap.String("id", record.ID),
+			zap.String("reason", reason),
+			zap.Int64("uptime_seconds", uptimeSeconds))
+	}
+}
+
+// handleInternalToolCall persists an internal tool call event (Spec 024).
+func (s *ActivityService) handleInternalToolCall(evt Event) {
+	internalToolName := getStringPayload(evt.Payload, "internal_tool_name")
+	targetServer := getStringPayload(evt.Payload, "target_server")
+	targetTool := getStringPayload(evt.Payload, "target_tool")
+	toolVariant := getStringPayload(evt.Payload, "tool_variant")
+	sessionID := getStringPayload(evt.Payload, "session_id")
+	requestID := getStringPayload(evt.Payload, "request_id")
+	status := getStringPayload(evt.Payload, "status")
+	errorMsg := getStringPayload(evt.Payload, "error_message")
+	durationMs := getInt64Payload(evt.Payload, "duration_ms")
+	intent := getMapPayload(evt.Payload, "intent")
+
+	metadata := map[string]interface{}{
+		"internal_tool_name": internalToolName,
+	}
+	if targetServer != "" {
+		metadata["target_server"] = targetServer
+	}
+	if targetTool != "" {
+		metadata["target_tool"] = targetTool
+	}
+	if toolVariant != "" {
+		metadata["tool_variant"] = toolVariant
+	}
+	if intent != nil {
+		metadata["intent"] = intent
+	}
+
+	record := &storage.ActivityRecord{
+		Type:         storage.ActivityTypeInternalToolCall,
+		Source:       storage.ActivitySourceMCP,
+		ToolName:     internalToolName,
+		ServerName:   targetServer,
+		Status:       status,
+		ErrorMessage: errorMsg,
+		DurationMs:   durationMs,
+		Metadata:     metadata,
+		Timestamp:    evt.Timestamp,
+		SessionID:    sessionID,
+		RequestID:    requestID,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save internal tool call activity",
+			zap.Error(err),
+			zap.String("internal_tool_name", internalToolName))
+	} else {
+		s.logger.Debug("Internal tool call activity recorded",
+			zap.String("id", record.ID),
+			zap.String("internal_tool_name", internalToolName),
+			zap.String("status", status))
+	}
+}
+
+// handleConfigChange persists a config change event (Spec 024).
+func (s *ActivityService) handleConfigChange(evt Event) {
+	action := getStringPayload(evt.Payload, "action")
+	affectedEntity := getStringPayload(evt.Payload, "affected_entity")
+	source := getStringPayload(evt.Payload, "source")
+
+	var activitySource storage.ActivitySource
+	switch source {
+	case "cli":
+		activitySource = storage.ActivitySourceCLI
+	case "mcp":
+		activitySource = storage.ActivitySourceMCP
+	default:
+		activitySource = storage.ActivitySourceAPI
+	}
+
+	metadata := map[string]interface{}{
+		"action":          action,
+		"affected_entity": affectedEntity,
+	}
+	if changedFields := getSlicePayload(evt.Payload, "changed_fields"); len(changedFields) > 0 {
+		metadata["changed_fields"] = changedFields
+	}
+	if prevValues := getMapPayload(evt.Payload, "previous_values"); prevValues != nil {
+		metadata["previous_values"] = prevValues
+	}
+	if newValues := getMapPayload(evt.Payload, "new_values"); newValues != nil {
+		metadata["new_values"] = newValues
+	}
+
+	record := &storage.ActivityRecord{
+		Type:       storage.ActivityTypeConfigChange,
+		Source:     activitySource,
+		ServerName: affectedEntity,
+		Status:     "success",
+		Metadata:   metadata,
+		Timestamp:  evt.Timestamp,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save config change activity",
+			zap.Error(err),
+			zap.String("action", action),
+			zap.String("affected_entity", affectedEntity))
+	} else {
+		s.logger.Info("Config change activity recorded",
+			zap.String("id", record.ID),
+			zap.String("action", action),
+			zap.String("affected_entity", affectedEntity))
+	}
+}
+
 // Helper functions to extract payload values safely
 
 func getStringPayload(payload map[string]any, key string) string {
@@ -335,6 +520,34 @@ func getMapPayload(payload map[string]any, key string) map[string]interface{} {
 		// Also handle map[string]any which is an alias
 		if m, ok := v.(map[string]any); ok {
 			return m
+		}
+	}
+	return nil
+}
+
+func getSlicePayload(payload map[string]any, key string) []string {
+	if v, ok := payload[key]; ok {
+		if s, ok := v.([]string); ok {
+			return s
+		}
+		// Also handle []interface{} and convert to []string
+		if arr, ok := v.([]interface{}); ok {
+			result := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if str, ok := item.(string); ok {
+					result = append(result, str)
+				}
+			}
+			return result
+		}
+		if arr, ok := v.([]any); ok {
+			result := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if str, ok := item.(string); ok {
+					result = append(result, str)
+				}
+			}
+			return result
 		}
 	}
 	return nil

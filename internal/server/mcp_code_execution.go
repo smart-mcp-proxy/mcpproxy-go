@@ -296,6 +296,18 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		return nil, fmt.Errorf("failed to serialize result: %w", err)
 	}
 
+	// Spec 024: Emit internal tool call event for code_execution
+	var status, errorMsg string
+	if result.Ok {
+		status = "success"
+	} else {
+		status = "error"
+		if result.Error != nil {
+			errorMsg = result.Error.Message
+		}
+	}
+	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), nil)
+
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
 			mcp.NewTextContent(string(resultJSON)),

@@ -20,7 +20,27 @@ const (
 	ActivityTypeQuarantineChange ActivityType = "quarantine_change"
 	// ActivityTypeServerChange represents a server configuration change
 	ActivityTypeServerChange ActivityType = "server_change"
+	// ActivityTypeSystemStart represents MCPProxy server startup (Spec 024)
+	ActivityTypeSystemStart ActivityType = "system_start"
+	// ActivityTypeSystemStop represents MCPProxy server shutdown (Spec 024)
+	ActivityTypeSystemStop ActivityType = "system_stop"
+	// ActivityTypeInternalToolCall represents internal MCP tool calls like retrieve_tools, call_tool_* (Spec 024)
+	ActivityTypeInternalToolCall ActivityType = "internal_tool_call"
+	// ActivityTypeConfigChange represents configuration changes like server add/remove/update (Spec 024)
+	ActivityTypeConfigChange ActivityType = "config_change"
 )
+
+// ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
+var ValidActivityTypes = []string{
+	string(ActivityTypeToolCall),
+	string(ActivityTypePolicyDecision),
+	string(ActivityTypeQuarantineChange),
+	string(ActivityTypeServerChange),
+	string(ActivityTypeSystemStart),
+	string(ActivityTypeSystemStop),
+	string(ActivityTypeInternalToolCall),
+	string(ActivityTypeConfigChange),
+}
 
 // ActivitySource indicates how the activity was triggered
 type ActivitySource string
@@ -65,7 +85,7 @@ func (a *ActivityRecord) UnmarshalBinary(data []byte) error {
 
 // ActivityFilter represents query parameters for filtering activity records
 type ActivityFilter struct {
-	Type       string    // Filter by activity type
+	Types      []string  // Filter by activity types (Spec 024: supports multiple types with OR logic)
 	Server     string    // Filter by server name
 	Tool       string    // Filter by tool name
 	SessionID  string    // Filter by MCP session
@@ -101,9 +121,18 @@ func (f *ActivityFilter) Validate() {
 
 // Matches checks if an activity record matches the filter criteria
 func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
-	// Check type filter
-	if f.Type != "" && string(record.Type) != f.Type {
-		return false
+	// Check types filter (Spec 024: OR logic for multiple types)
+	if len(f.Types) > 0 {
+		typeMatches := false
+		for _, t := range f.Types {
+			if string(record.Type) == t {
+				typeMatches = true
+				break
+			}
+		}
+		if !typeMatches {
+			return false
+		}
 	}
 
 	// Check server filter

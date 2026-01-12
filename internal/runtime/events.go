@@ -28,6 +28,16 @@ const (
 	EventTypeActivityPolicyDecision EventType = "activity.policy_decision"
 	// EventTypeActivityQuarantineChange is emitted when a server's quarantine state changes.
 	EventTypeActivityQuarantineChange EventType = "activity.quarantine_change"
+
+	// Spec 024: Expanded Activity Log events
+	// EventTypeActivitySystemStart is emitted when MCPProxy server starts.
+	EventTypeActivitySystemStart EventType = "activity.system.start"
+	// EventTypeActivitySystemStop is emitted when MCPProxy server stops.
+	EventTypeActivitySystemStop EventType = "activity.system.stop"
+	// EventTypeActivityInternalToolCall is emitted when an internal tool (retrieve_tools, call_tool_*, etc.) completes.
+	EventTypeActivityInternalToolCall EventType = "activity.internal_tool_call.completed"
+	// EventTypeActivityConfigChange is emitted when configuration changes (server add/remove/update).
+	EventTypeActivityConfigChange EventType = "activity.config_change"
 )
 
 // Event is a typed notification published by the runtime event bus.

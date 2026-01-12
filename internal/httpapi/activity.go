@@ -19,9 +19,9 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 	filter := storage.DefaultActivityFilter()
 	q := r.URL.Query()
 
-	// Type filter
+	// Type filter (Spec 024: supports comma-separated multiple types)
 	if typeStr := q.Get("type"); typeStr != "" {
-		filter.Type = typeStr
+		filter.Types = strings.Split(typeStr, ",")
 	}
 
 	// Server filter
@@ -90,7 +90,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Tags Activity
 // @Accept json
 // @Produce json
-// @Param type query string false "Filter by activity type" Enums(tool_call, policy_decision, quarantine_change, server_change)
+// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change)
 // @Param server query string false "Filter by server name"
 // @Param tool query string false "Filter by tool name"
 // @Param session_id query string false "Filter by MCP session ID"
