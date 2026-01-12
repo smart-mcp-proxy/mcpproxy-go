@@ -390,7 +390,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// upstream_servers - Basic server management (with security checks)
 	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
 		upstreamServersTool := mcp.NewTool("upstream_servers",
-			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Configure per-server Docker images, CPU/memory limits, and network isolation. Use 'isolation_enabled', 'isolation_image', 'isolation_memory_limit', 'isolation_cpu_limit' parameters for custom settings.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)"),
+			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Use 'isolation_json' parameter to configure per-server Docker images, CPU/memory limits, and network isolation. Example: {\"enabled\": true, \"image\": \"node:20\", \"network_mode\": \"bridge\"}.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Enable isolation: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"enabled\\\": true}\"} - enables isolation with defaults\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)"),
 			mcp.WithTitleAnnotation("Upstream Servers"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("operation",
@@ -431,25 +431,6 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			),
 			mcp.WithBoolean("enabled",
 				mcp.Description("Whether server should be enabled (default: true)"),
-			),
-			// Docker isolation parameters
-			mcp.WithBoolean("isolation_enabled",
-				mcp.Description("Enable Docker isolation for this server (stdio servers only)"),
-			),
-			mcp.WithString("isolation_image",
-				mcp.Description("Custom Docker image for isolation (e.g., 'python:3.11', 'node:20')"),
-			),
-			mcp.WithString("isolation_memory_limit",
-				mcp.Description("Memory limit for Docker container (e.g., '512m', '1g')"),
-			),
-			mcp.WithString("isolation_cpu_limit",
-				mcp.Description("CPU limit for Docker container (e.g., '0.5', '1.0')"),
-			),
-			mcp.WithString("isolation_network_mode",
-				mcp.Description("Docker network mode (e.g., 'bridge', 'none', 'host')"),
-			),
-			mcp.WithString("isolation_working_dir",
-				mcp.Description("Working directory inside Docker container"),
 			),
 		)
 		p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
