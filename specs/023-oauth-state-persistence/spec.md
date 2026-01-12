@@ -5,6 +5,14 @@
 **Status**: Draft
 **Input**: Fix token refresh so OAuth servers survive restarts and proactively refresh before expiration
 
+## Clarifications
+
+### Session 2026-01-12
+
+- Q: What happens when a proactive refresh attempt fails before token expiration? → A: Immediate retry with exponential backoff (10s, 20s, 40s...) up to expiration time, surfacing failures as health status for user visibility across CLI, menubar, and web UI.
+- Q: Should refresh operations emit metrics for observability? → A: Full Prometheus metrics only (`mcpproxy_oauth_refresh_total`, `mcpproxy_oauth_refresh_duration_seconds`), leveraging existing MetricsManager infrastructure.
+- Q: When should refresh schedules be created/destroyed? → A: Schedule exists iff tokens exist (created post-auth or when loaded at startup, destroyed when tokens removed). Implementation details deferred to planning.
+
 ## Problem Statement
 
 OAuth-enabled MCP servers require manual re-authentication after any mcpproxy downtime (restart, laptop sleep, weekend). Despite having refresh tokens stored in the database, the automatic token refresh is not working reliably.
@@ -80,7 +88,7 @@ As a developer, when automatic token refresh fails, I want to understand why it 
   - System should detect this on the subsequent connection attempt and report the specific error rather than entering a retry loop.
 
 - What happens during a network partition?
-  - System should use exponential backoff for refresh retries, with clear status indicating retry attempts.
+  - System should use exponential backoff for refresh retries (10s → 20s → 40s → 80s → 5min cap), with health status showing "Refresh retry pending" and next attempt time.
 
 ## Requirements *(mandatory)*
 
@@ -94,11 +102,14 @@ As a developer, when automatic token refresh fails, I want to understand why it 
 - **FR-006**: System MUST display distinct health status messages for different refresh failure types (expired refresh token, network error, provider error).
 - **FR-007**: System MUST remove or correct the current misleading "OAuth token refresh successful" logging that reports success when `Start()` returns nil.
 - **FR-008**: System MUST rate-limit refresh attempts to no more than one per 10 seconds per server.
+- **FR-009**: System MUST implement exponential backoff retry (10s, 20s, 40s, 80s, capped at 5 minutes) when proactive refresh fails, continuing attempts until token expiration.
+- **FR-010**: System MUST surface ongoing refresh failures as degraded health status on the upstream server, visible in CLI (`upstream list`), menubar, and web control panel.
+- **FR-011**: System MUST emit Prometheus metrics for OAuth refresh operations: `mcpproxy_oauth_refresh_total` (counter with labels: server, result) and `mcpproxy_oauth_refresh_duration_seconds` (histogram with labels: server, result).
 
 ### Key Entities
 
 - **OAuth Token**: Access token, refresh token, expiration timestamp, token type, scope. Stored in database with server identifier.
-- **Refresh Schedule**: Server name, scheduled refresh time, retry count, last error. Managed by RefreshManager.
+- **Refresh Schedule**: Server name, scheduled refresh time, retry count, last error. Managed by RefreshManager. Lifecycle invariant: exists iff tokens exist for server.
 - **Health Status**: Level (healthy/degraded/unhealthy), summary, detail (including refresh error), suggested action.
 
 ## Success Criteria *(mandatory)*
