@@ -221,7 +221,8 @@ export const useSystemStore = defineStore('system', () => {
     })
 
     // Listen for system lifecycle events (Spec 024)
-    es.addEventListener('activity.system_start', (event) => {
+    // Note: Backend sends "activity.system.start" (with dots, not underscores)
+    es.addEventListener('activity.system.start', (event) => {
       try {
         const data = JSON.parse(event.data)
         console.log('SSE activity.system_start event received:', data)
@@ -232,7 +233,8 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
-    es.addEventListener('activity.system_stop', (event) => {
+    // Note: Backend sends "activity.system.stop" (with dots, not underscores)
+    es.addEventListener('activity.system.stop', (event) => {
       try {
         const data = JSON.parse(event.data)
         console.log('SSE activity.system_stop event received:', data)

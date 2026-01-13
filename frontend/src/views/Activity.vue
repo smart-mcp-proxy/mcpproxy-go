@@ -806,7 +806,15 @@ const handleActivityEvent = (event: CustomEvent) => {
 
   const payload = event.detail
   // SSE events indicate new activity - refresh the list from API
-  if (payload && (payload.server_name || payload.tool_name || payload.type)) {
+  // Check for fields from different event types:
+  // - tool_call: server_name, tool_name
+  // - internal_tool_call: internal_tool_name, target_server, target_tool
+  // - config_change: action, affected_entity
+  // - system_start/stop: version, listen_address, reason
+  if (payload && (
+    payload.server_name || payload.tool_name || payload.type ||
+    payload.internal_tool_name || payload.action || payload.version || payload.reason
+  )) {
     console.log('Activity event received, refreshing from API:', payload)
     loadActivities()
   }
@@ -817,7 +825,13 @@ const handleActivityCompleted = (event: CustomEvent) => {
 
   const payload = event.detail
   // SSE completed events indicate activity finished - refresh from API
-  if (payload && (payload.server_name || payload.tool_name || payload.status)) {
+  // Check for fields from different event types:
+  // - tool_call: server_name, tool_name, status
+  // - internal_tool_call: internal_tool_name, target_server, status
+  if (payload && (
+    payload.server_name || payload.tool_name || payload.status ||
+    payload.internal_tool_name || payload.target_server
+  )) {
     console.log('Activity completed event received, refreshing from API:', payload)
     loadActivities()
   }
