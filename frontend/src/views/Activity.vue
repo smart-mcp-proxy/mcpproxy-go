@@ -546,11 +546,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
 import JsonViewer from '@/components/JsonViewer.vue'
 
+const route = useRoute()
 const systemStore = useSystemStore()
 
 // State
@@ -976,6 +978,12 @@ const handleKeydown = (event: KeyboardEvent) => {
 
 // Lifecycle
 onMounted(() => {
+  // Check for session filter from URL query params (linked from Dashboard/Sessions pages)
+  const sessionParam = route.query.session as string | undefined
+  if (sessionParam) {
+    filterSession.value = sessionParam
+  }
+
   loadActivities()
 
   // Listen for SSE activity events

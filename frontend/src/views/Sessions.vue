@@ -110,11 +110,11 @@
                 </td>
                 <td>
                   <router-link
-                    :to="{ name: 'tool-calls', query: { session: session.id } }"
+                    :to="{ name: 'activity', query: { session: session.id } }"
                     class="btn btn-xs btn-primary"
-                    title="View tool calls for this session"
+                    title="View activity for this session"
                   >
-                    View Calls
+                    View Activity
                   </router-link>
                 </td>
               </tr>
