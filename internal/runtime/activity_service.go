@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"go.uber.org/zap"
@@ -188,6 +189,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	source := getStringPayload(evt.Payload, "source")
 	status := getStringPayload(evt.Payload, "status")
 	errorMsg := getStringPayload(evt.Payload, "error_message")
+	arguments := getMapPayload(evt.Payload, "arguments")
 	response := getStringPayload(evt.Payload, "response")
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
 	durationMs := getInt64Payload(evt.Payload, "duration_ms")
@@ -218,6 +220,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		Source:            activitySource,
 		ServerName:        serverName,
 		ToolName:          toolName,
+		Arguments:         arguments,
 		Response:          response,
 		ResponseTruncated: responseTruncated,
 		Status:            status,
@@ -383,6 +386,21 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	errorMsg := getStringPayload(evt.Payload, "error_message")
 	durationMs := getInt64Payload(evt.Payload, "duration_ms")
 	intent := getMapPayload(evt.Payload, "intent")
+	arguments := getMapPayload(evt.Payload, "arguments")
+
+	// Extract response - can be various types, convert to string
+	var responseStr string
+	if resp := evt.Payload["response"]; resp != nil {
+		switch r := resp.(type) {
+		case string:
+			responseStr = r
+		default:
+			// Convert to JSON for other types
+			if jsonBytes, err := json.Marshal(r); err == nil {
+				responseStr = string(jsonBytes)
+			}
+		}
+	}
 
 	metadata := map[string]interface{}{
 		"internal_tool_name": internalToolName,
@@ -405,6 +423,8 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		Source:       storage.ActivitySourceMCP,
 		ToolName:     internalToolName,
 		ServerName:   targetServer,
+		Arguments:    arguments,
+		Response:     responseStr,
 		Status:       status,
 		ErrorMessage: errorMsg,
 		DurationMs:   durationMs,

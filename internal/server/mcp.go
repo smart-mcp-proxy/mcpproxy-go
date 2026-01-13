@@ -248,11 +248,12 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 
 // emitActivityToolCallCompleted safely emits a tool call completion event if runtime is available
 // source indicates how the call was triggered: "mcp", "cli", or "api"
+// arguments is the input parameters passed to the tool call
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, response, responseTruncated, toolVariant, intent)
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent)
 	}
 }
 
@@ -265,10 +266,11 @@ func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessio
 // emitActivityInternalToolCall safely emits an internal tool call completion event (Spec 024)
 // internalToolName is the name of the internal tool (retrieve_tools, call_tool_read, etc.)
 // targetServer and targetTool are used for call_tool_* handlers
+// arguments contains the input parameters, response contains the output
 // intent is the intent declaration metadata
-func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, intent map[string]interface{}) {
+func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, intent)
+		p.mainServer.runtime.EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent)
 	}
 }
 
@@ -627,7 +629,7 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 
 	registry, err := request.RequireString("registry")
 	if err != nil {
-		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'registry': %v", err)), nil
 	}
 
@@ -650,7 +652,7 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 			zap.String("search", search),
 			zap.String("tag", tag),
 			zap.Error(err))
-		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
 	}
 
@@ -674,12 +676,12 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
-		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
 	}
 
 	// Spec 024: Emit success event
-	p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil)
+	p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil, nil, nil)
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
@@ -715,12 +717,12 @@ func (p *MCPProxyServer) handleListRegistries(ctx context.Context, _ mcp.CallToo
 		"message":    "Available MCP registries. Use 'search_servers' tool with a registry ID to find servers.",
 	})
 	if err != nil {
-		p.emitActivityInternalToolCall("list_registries", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("list_registries", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize registries: %v", err)), nil
 	}
 
 	// Spec 024: Emit success event
-	p.emitActivityInternalToolCall("list_registries", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil)
+	p.emitActivityInternalToolCall("list_registries", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil, nil, nil)
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
@@ -739,7 +741,7 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 	query, err := request.RequireString("query")
 	if err != nil {
 		// Emit internal tool call event for error case
-		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'query': %v", err)), nil
 	}
 
@@ -758,7 +760,7 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 	results, err := p.index.Search(query, limit)
 	if err != nil {
 		p.logger.Error("Search failed", zap.String("query", query), zap.Error(err))
-		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
 	}
 
@@ -859,12 +861,12 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
-		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
 	}
 
 	// Emit success event (Spec 024)
-	p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil)
+	p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil, nil, nil)
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
@@ -1006,35 +1008,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return errResult, nil
 	}
 
-	// Check if server is quarantined before calling tool
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err == nil && serverConfig.Quarantined {
-		p.logger.Debug("handleCallToolVariant: server is quarantined",
-			zap.String("server_name", serverName))
-
-		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", "Server is quarantined for security review")
-
-		// Server is in quarantine - return security warning with tool analysis
-		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
-	}
-
-	// Check connection status before attempting tool call to prevent hanging
-	if client, exists := p.upstreamManager.GetClient(serverName); exists {
-		if !client.IsConnected() {
-			state := client.GetState()
-			if client.IsConnecting() {
-				return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())), nil
-			}
-			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())), nil
-		}
-	} else {
-		p.logger.Error("handleCallToolVariant: no client found for server",
-			zap.String("server_name", serverName))
-		return mcp.NewToolResultError(fmt.Sprintf("No client found for server: %s", serverName)), nil
-	}
-
-	// Extract session information from context (needed for activity events)
+	// Extract session information from context early (needed for activity events, including early failures)
 	var sessionID, clientName, clientVersion string
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
@@ -1059,6 +1033,52 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+
+	// Check if server is quarantined before calling tool
+	serverConfig, err := p.storage.GetUpstreamServer(serverName)
+	if err == nil && serverConfig.Quarantined {
+		p.logger.Debug("handleCallToolVariant: server is quarantined",
+			zap.String("server_name", serverName))
+
+		// Emit policy decision event for quarantine block
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", "Server is quarantined for security review")
+
+		// Server is in quarantine - return security warning with tool analysis
+		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
+	}
+
+	// Check connection status before attempting tool call to prevent hanging
+	if client, exists := p.upstreamManager.GetClient(serverName); exists {
+		if !client.IsConnected() {
+			state := client.GetState()
+			errMsg := ""
+			if client.IsConnecting() {
+				errMsg = fmt.Sprintf("Server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())
+			} else {
+				errMsg = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
+			}
+			// Log the early failure to activity (Spec 024)
+			var intentMap map[string]interface{}
+			if intent != nil {
+				intentMap = intent.ToMap()
+			}
+			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, args, errMsg, false, toolVariant, intentMap)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+	} else {
+		p.logger.Error("handleCallToolVariant: no client found for server",
+			zap.String("server_name", serverName))
+		errMsg := fmt.Sprintf("No client found for server: %s", serverName)
+		// Log the early failure to activity (Spec 024)
+		var intentMap map[string]interface{}
+		if intent != nil {
+			intentMap = intent.ToMap()
+		}
+		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, args, errMsg, false, toolVariant, intentMap)
+		return mcp.NewToolResultError(errMsg), nil
+	}
 
 	// Emit activity started event with determined source
 	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
@@ -1147,11 +1167,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if intent != nil {
 			intentMap = intent.ToMap()
 		}
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false, toolVariant, intentMap)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), args, "", false, toolVariant, intentMap)
 
 		// Spec 024: Emit internal tool call event for error
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
-		p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "error", err.Error(), time.Since(internalStartTime).Milliseconds(), intentMap)
+		p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "error", err.Error(), time.Since(internalStartTime).Milliseconds(), args, nil, intentMap)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -1251,11 +1271,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated, toolVariant, intentMap)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), args, response, responseTruncated, toolVariant, intentMap)
 
 	// Spec 024: Emit internal tool call event for success
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
-	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "success", "", time.Since(internalStartTime).Milliseconds(), intentMap)
+	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "success", "", time.Since(internalStartTime).Milliseconds(), args, result, intentMap)
 
 	return mcp.NewToolResultText(response), nil
 }
@@ -1359,53 +1379,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		zap.String("actual_tool_name", actualToolName),
 		zap.Any("args", args))
 
-	// Check if server is quarantined before calling tool
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err == nil && serverConfig.Quarantined {
-		p.logger.Debug("handleCallTool: server is quarantined",
-			zap.String("server_name", serverName))
-
-		// Extract session ID for activity logging
-		var quarantineSessionID string
-		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
-			quarantineSessionID = sess.SessionID()
-		}
-
-		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, quarantineSessionID, "blocked", "Server is quarantined for security review")
-
-		// Server is in quarantine - return security warning with tool analysis
-		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
-	}
-
-	p.logger.Debug("handleCallTool: checking connection status",
-		zap.String("server_name", serverName))
-
-	// Check connection status before attempting tool call to prevent hanging
-	if client, exists := p.upstreamManager.GetClient(serverName); exists {
-		p.logger.Debug("handleCallTool: client found",
-			zap.String("server_name", serverName),
-			zap.Bool("is_connected", client.IsConnected()),
-			zap.String("state", client.GetState().String()))
-
-		if !client.IsConnected() {
-			state := client.GetState()
-			if client.IsConnecting() {
-				return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())), nil
-			}
-			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())), nil
-		}
-	} else {
-		p.logger.Error("handleCallTool: no client found for server",
-			zap.String("server_name", serverName))
-		return mcp.NewToolResultError(fmt.Sprintf("No client found for server: %s", serverName)), nil
-	}
-
-	p.logger.Debug("handleCallTool: calling upstream manager",
-		zap.String("tool_name", toolName),
-		zap.String("server_name", serverName))
-
-	// Extract session information from context (needed for activity events)
+	// Extract session information from context early (needed for activity events, including early failures)
 	var sessionID, clientName, clientVersion string
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
@@ -1430,6 +1404,56 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+
+	// Check if server is quarantined before calling tool
+	serverConfig, err := p.storage.GetUpstreamServer(serverName)
+	if err == nil && serverConfig.Quarantined {
+		p.logger.Debug("handleCallTool: server is quarantined",
+			zap.String("server_name", serverName))
+
+		// Emit policy decision event for quarantine block
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", "Server is quarantined for security review")
+
+		// Server is in quarantine - return security warning with tool analysis
+		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
+	}
+
+	p.logger.Debug("handleCallTool: checking connection status",
+		zap.String("server_name", serverName))
+
+	// Check connection status before attempting tool call to prevent hanging
+	if client, exists := p.upstreamManager.GetClient(serverName); exists {
+		p.logger.Debug("handleCallTool: client found",
+			zap.String("server_name", serverName),
+			zap.Bool("is_connected", client.IsConnected()),
+			zap.String("state", client.GetState().String()))
+
+		if !client.IsConnected() {
+			state := client.GetState()
+			errMsg := ""
+			if client.IsConnecting() {
+				errMsg = fmt.Sprintf("Server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())
+			} else {
+				errMsg = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
+			}
+			// Log the early failure to activity (Spec 024)
+			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, args, errMsg, false, "", nil)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+	} else {
+		p.logger.Error("handleCallTool: no client found for server",
+			zap.String("server_name", serverName))
+		errMsg := fmt.Sprintf("No client found for server: %s", serverName)
+		// Log the early failure to activity (Spec 024)
+		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, args, errMsg, false, "", nil)
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
+	p.logger.Debug("handleCallTool: calling upstream manager",
+		zap.String("tool_name", toolName),
+		zap.String("server_name", serverName))
 
 	// Emit activity started event with determined source
 	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
@@ -1535,7 +1559,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 
 		// Emit activity completed event for error with determined source (legacy - no intent)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), "", false, "", nil)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), args, "", false, "", nil)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -1631,7 +1655,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Emit activity completed event for success with determined source (legacy - no intent)
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), response, responseTruncated, "", nil)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), args, response, responseTruncated, "", nil)
 
 	return mcp.NewToolResultText(response), nil
 }
@@ -1702,20 +1726,20 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 	operation, err := request.RequireString("operation")
 	if err != nil {
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'operation': %v", err)), nil
 	}
 
 	// Security checks
 	if p.config.ReadOnlyMode {
 		if operation != operationList {
-			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Operation not allowed in read-only mode", time.Since(startTime).Milliseconds(), nil)
+			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Operation not allowed in read-only mode", time.Since(startTime).Milliseconds(), nil, nil, nil)
 			return mcp.NewToolResultError("Operation not allowed in read-only mode"), nil
 		}
 	}
 
 	if p.config.DisableManagement {
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError("Server management is disabled for security"), nil
 	}
 
@@ -1723,12 +1747,12 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	switch operation {
 	case operationAdd:
 		if !p.config.AllowServerAdd {
-			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), nil)
+			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), nil, nil, nil)
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil
 		}
 	case operationRemove:
 		if !p.config.AllowServerRemove {
-			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Removing servers is not allowed", time.Since(startTime).Milliseconds(), nil)
+			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Removing servers is not allowed", time.Since(startTime).Milliseconds(), nil, nil, nil)
 			return mcp.NewToolResultError("Removing servers is not allowed"), nil
 		}
 	}
@@ -1757,13 +1781,13 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	case "restart":
 		result, opErr = p.handleRestartUpstream(ctx, request)
 	default:
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown operation: %s", operation), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown operation: %s", operation), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
 	}
 
 	// Spec 024: Emit activity event based on result
 	if opErr != nil {
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", opErr.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", opErr.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 	} else if result != nil && result.IsError {
 		// Extract error message from result if available
 		errMsg := "operation failed"
@@ -1772,9 +1796,9 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 				errMsg = textContent.Text
 			}
 		}
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), nil, nil, nil)
 	} else {
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil, nil, nil)
 	}
 
 	return result, opErr
@@ -1793,18 +1817,18 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 
 	operation, err := request.RequireString("operation")
 	if err != nil {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'operation': %v", err)), nil
 	}
 
 	// Security checks
 	if p.config.ReadOnlyMode {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError("Quarantine operations not allowed in read-only mode"), nil
 	}
 
 	if p.config.DisableManagement {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError("Server management is disabled for security"), nil
 	}
 
@@ -1820,13 +1844,13 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	case "quarantine":
 		result, opErr = p.handleQuarantineUpstream(ctx, request)
 	default:
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown quarantine operation: %s", operation), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown quarantine operation: %s", operation), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown quarantine operation: %s", operation)), nil
 	}
 
 	// Spec 024: Emit activity event based on result
 	if opErr != nil {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", opErr.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", opErr.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 	} else if result != nil && result.IsError {
 		// Extract error message from result if available
 		errMsg := "operation failed"
@@ -1835,9 +1859,9 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 				errMsg = textContent.Text
 			}
 		}
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), nil, nil, nil)
 	} else {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil, nil, nil)
 	}
 
 	return result, opErr
@@ -3263,7 +3287,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 
 	key, err := request.RequireString("key")
 	if err != nil {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'key': %v", err)), nil
 	}
 
@@ -3273,30 +3297,30 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 
 	// Validate parameters
 	if offset < 0 {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Offset must be non-negative", time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Offset must be non-negative", time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError("Offset must be non-negative"), nil
 	}
 	if limit <= 0 || limit > 1000 {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Limit must be between 1 and 1000", time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Limit must be between 1 and 1000", time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError("Limit must be between 1 and 1000"), nil
 	}
 
 	// Retrieve cached data
 	response, err := p.cacheManager.GetRecords(key, offset, limit)
 	if err != nil {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to retrieve cached data: %v", err)), nil
 	}
 
 	// Serialize response
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil)
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
 	}
 
 	// Spec 024: Emit success event
-	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil)
+	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), nil, nil, nil)
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }

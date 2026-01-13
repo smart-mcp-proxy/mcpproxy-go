@@ -125,6 +125,19 @@
             </select>
           </div>
 
+          <!-- Session Filter -->
+          <div class="form-control min-w-[180px]">
+            <label class="label py-1">
+              <span class="label-text text-xs">Session</span>
+            </label>
+            <select v-model="filterSession" class="select select-bordered select-sm">
+              <option value="">All Sessions</option>
+              <option v-for="session in availableSessions" :key="session.id" :value="session.id">
+                {{ session.label }}
+              </option>
+            </select>
+          </div>
+
           <!-- Date Range Filter -->
           <div class="form-control min-w-[160px]">
             <label class="label py-1">
@@ -190,6 +203,7 @@
           </span>
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
+          <span v-if="filterSession" class="badge badge-sm badge-outline">Session: {{ getSessionLabel(filterSession) }}</span>
           <span v-if="filterStartDate" class="badge badge-sm badge-outline">From: {{ new Date(filterStartDate).toLocaleString() }}</span>
           <span v-if="filterEndDate" class="badge badge-sm badge-outline">To: {{ new Date(filterEndDate).toLocaleString() }}</span>
         </div>
@@ -551,6 +565,7 @@ const autoRefresh = ref(true)
 // Filters
 const selectedTypes = ref<string[]>([])
 const filterServer = ref('')
+const filterSession = ref('')
 const filterStatus = ref('')
 const filterStartDate = ref('')
 const filterEndDate = ref('')
@@ -586,8 +601,42 @@ const availableServers = computed(() => {
   return Array.from(servers).sort()
 })
 
+// Available sessions with client name and session_id suffix (Spec 024)
+interface SessionOption {
+  id: string
+  label: string
+  clientName?: string
+}
+const availableSessions = computed((): SessionOption[] => {
+  const sessionsMap = new Map<string, { clientName?: string }>()
+  activities.value.forEach(a => {
+    if (a.session_id && !sessionsMap.has(a.session_id)) {
+      // Try to get client name from metadata or any available source
+      const clientName = a.metadata?.client_name as string | undefined
+      sessionsMap.set(a.session_id, { clientName })
+    }
+  })
+
+  return Array.from(sessionsMap.entries())
+    .map(([sessionId, info]) => {
+      // Format: "ClientName ...12345" or "...12345" if no client name
+      const suffix = sessionId.slice(-5)
+      const label = info.clientName
+        ? `${info.clientName} ...${suffix}`
+        : `...${suffix}`
+      return { id: sessionId, label, clientName: info.clientName }
+    })
+    .sort((a, b) => a.label.localeCompare(b.label))
+})
+
+// Get session label by ID for display in Active Filters
+const getSessionLabel = (sessionId: string): string => {
+  const session = availableSessions.value.find(s => s.id === sessionId)
+  return session?.label || `...${sessionId.slice(-5)}`
+}
+
 const hasActiveFilters = computed(() => {
-  return selectedTypes.value.length > 0 || filterServer.value || filterStatus.value || filterStartDate.value || filterEndDate.value
+  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterStartDate.value || filterEndDate.value
 })
 
 const filteredActivities = computed(() => {
@@ -599,6 +648,10 @@ const filteredActivities = computed(() => {
   }
   if (filterServer.value) {
     result = result.filter(a => a.server_name === filterServer.value)
+  }
+  // Session filter (Spec 024)
+  if (filterSession.value) {
+    result = result.filter(a => a.session_id === filterSession.value)
   }
   if (filterStatus.value) {
     result = result.filter(a => a.status === filterStatus.value)
@@ -683,6 +736,7 @@ const loadActivities = async () => {
 const clearFilters = () => {
   selectedTypes.value = []
   filterServer.value = ''
+  filterSession.value = ''
   filterStatus.value = ''
   filterStartDate.value = ''
   filterEndDate.value = ''

@@ -102,9 +102,10 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // EmitActivityToolCallCompleted emits an event when a tool execution finishes.
 // This is used to track activity for observability and debugging.
 // source indicates how the call was triggered: "mcp", "cli", or "api"
+// arguments is the input parameters passed to the tool call
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
 	payload := map[string]any{
 		"server_name":        serverName,
 		"tool_name":          toolName,
@@ -116,6 +117,10 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 		"duration_ms":        durationMs,
 		"response":           response,
 		"response_truncated": responseTruncated,
+	}
+	// Add arguments if provided
+	if arguments != nil {
+		payload["arguments"] = arguments
 	}
 	// Add intent metadata if provided (Spec 018)
 	if toolVariant != "" {
@@ -174,8 +179,9 @@ func (r *Runtime) EmitActivitySystemStop(reason, signal string, uptimeSeconds in
 // EmitActivityInternalToolCall emits an event when an internal tool is called (Spec 024).
 // internalToolName is the name of the internal tool (retrieve_tools, call_tool_read, etc.)
 // targetServer and targetTool are used for call_tool_* handlers
+// arguments contains the input parameters, response contains the output
 // intent is the intent declaration metadata
-func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, intent map[string]interface{}) {
+func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}) {
 	payload := map[string]any{
 		"internal_tool_name": internalToolName,
 		"session_id":         sessionID,
@@ -192,6 +198,12 @@ func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, t
 	}
 	if toolVariant != "" {
 		payload["tool_variant"] = toolVariant
+	}
+	if arguments != nil {
+		payload["arguments"] = arguments
+	}
+	if response != nil {
+		payload["response"] = response
 	}
 	if intent != nil {
 		payload["intent"] = intent

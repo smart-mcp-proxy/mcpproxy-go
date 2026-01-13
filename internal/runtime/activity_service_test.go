@@ -182,6 +182,13 @@ func TestEmitActivityInternalToolCall(t *testing.T) {
 		"operation_type":   "read",
 		"data_sensitivity": "public",
 	}
+	testArgs := map[string]interface{}{
+		"username": "octocat",
+	}
+	testResponse := map[string]interface{}{
+		"login": "octocat",
+		"id":    1,
+	}
 	rt.EmitActivityInternalToolCall(
 		"call_tool_read",
 		"github",
@@ -192,6 +199,8 @@ func TestEmitActivityInternalToolCall(t *testing.T) {
 		"success",
 		"",
 		250,
+		testArgs,
+		testResponse,
 		intent,
 	)
 
@@ -209,6 +218,13 @@ func TestEmitActivityInternalToolCall(t *testing.T) {
 		assert.Equal(t, "", evt.Payload["error_message"])
 		assert.Equal(t, int64(250), evt.Payload["duration_ms"])
 		assert.NotNil(t, evt.Payload["intent"])
+		// Verify arguments and response are captured
+		assert.NotNil(t, evt.Payload["arguments"])
+		args := evt.Payload["arguments"].(map[string]interface{})
+		assert.Equal(t, "octocat", args["username"])
+		assert.NotNil(t, evt.Payload["response"])
+		resp := evt.Payload["response"].(map[string]interface{})
+		assert.Equal(t, "octocat", resp["login"])
 	case <-time.After(2 * time.Second):
 		t.Fatal("Did not receive activity.internal_tool_call.completed event within timeout")
 	}

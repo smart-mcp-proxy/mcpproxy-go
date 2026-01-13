@@ -306,7 +306,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			errorMsg = result.Error.Message
 		}
 	}
-	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), nil)
+	codeExecArgs := map[string]interface{}{
+		"code":  code,
+		"input": options.Input,
+	}
+	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil)
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
