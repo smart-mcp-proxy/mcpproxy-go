@@ -38,6 +38,8 @@ As an AI agent developer, I want to see all internal MCPProxy tool calls (retrie
 3. **Given** an AI agent calls `call_tool_write` or `call_tool_destructive`, **When** the tool completes, **Then** an activity record is created with intent, target server, tool name, and execution duration
 4. **Given** code_execution is enabled and used, **When** code execution completes, **Then** an activity record is created with the code executed, input data, and result summary
 
+**Note on Duplicate Filtering**: Successful `call_tool_*` internal tool calls are excluded by default from activity listings (Web UI, CLI, API) because they appear as duplicates alongside their corresponding upstream `tool_call` entries. Failed `call_tool_*` calls are still shown since they have no corresponding upstream tool call entry. Use `include_call_tool=true` query parameter (API) to show all internal tool calls including successful `call_tool_*`.
+
 ---
 
 ### User Story 3 - Log Configuration Changes (Priority: P1)

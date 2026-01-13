@@ -80,6 +80,12 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.RequestID = requestID
 	}
 
+	// Include call_tool_* internal tool calls (default: exclude successful ones)
+	// Set include_call_tool=true to show all internal tool calls including successful call_tool_*
+	if q.Get("include_call_tool") == "true" {
+		filter.ExcludeCallToolSuccess = false
+	}
+
 	filter.Validate()
 	return filter
 }
@@ -97,6 +103,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param status query string false "Filter by status" Enums(success, error, blocked)
 // @Param intent_type query string false "Filter by intent operation type (Spec 018)" Enums(read, write, destructive)
 // @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
+// @Param include_call_tool query bool false "Include successful call_tool_* internal tool calls (default: false, excluded to avoid duplicates)"
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"

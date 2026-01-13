@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -96,13 +97,20 @@ type ActivityFilter struct {
 	Offset     int       // Pagination offset
 	IntentType string    // Filter by intent operation type: read, write, destructive (Spec 018)
 	RequestID  string    // Filter by HTTP request ID for correlation (Spec 021)
+
+	// ExcludeCallToolSuccess filters out successful call_tool_* internal tool calls.
+	// These appear as duplicates since the actual upstream tool call is also logged.
+	// Failed call_tool_* calls are still shown (no corresponding tool_call entry).
+	// Default: true (to avoid duplicate entries in UI/CLI)
+	ExcludeCallToolSuccess bool
 }
 
 // DefaultActivityFilter returns an ActivityFilter with sensible defaults
 func DefaultActivityFilter() ActivityFilter {
 	return ActivityFilter{
-		Limit:  50,
-		Offset: 0,
+		Limit:                  50,
+		Offset:                 0,
+		ExcludeCallToolSuccess: true, // Exclude successful call_tool_* to avoid duplicates
 	}
 }
 
@@ -174,6 +182,17 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 	// Check request_id filter (Spec 021)
 	if f.RequestID != "" && record.RequestID != f.RequestID {
 		return false
+	}
+
+	// Exclude successful call_tool_* internal tool calls to avoid duplicates
+	// These have a corresponding tool_call entry that shows the actual upstream call.
+	// Failed call_tool_* calls are shown since they have no corresponding tool_call.
+	if f.ExcludeCallToolSuccess {
+		if record.Type == ActivityTypeInternalToolCall &&
+			record.Status == "success" &&
+			strings.HasPrefix(record.ToolName, "call_tool_") {
+			return false
+		}
 	}
 
 	return true

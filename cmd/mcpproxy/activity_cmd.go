@@ -932,6 +932,17 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		}
 	}
 
+	// Skip successful call_tool_* internal tool calls to avoid duplicates
+	// These have a corresponding tool_call entry that shows the actual upstream call.
+	// Failed call_tool_* calls are shown since they have no corresponding tool_call.
+	if eventCategory == "internal_tool_call" {
+		internalToolName := getStringField(event, "internal_tool_name")
+		status := getStringField(event, "status")
+		if status == "success" && strings.HasPrefix(internalToolName, "call_tool_") {
+			return
+		}
+	}
+
 	// Format output based on event type
 	timestamp := time.Now().Format("15:04:05")
 

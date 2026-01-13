@@ -69,6 +69,12 @@ Internal tool calls log when internal proxy tools are used:
 }
 ```
 
+:::note Duplicate Filtering
+By default, **successful** `call_tool_*` internal tool calls (`call_tool_read`, `call_tool_write`, `call_tool_destructive`) are excluded from activity listings because they appear as duplicates alongside their corresponding upstream `tool_call` entries. **Failed** `call_tool_*` calls are always shown since they have no corresponding upstream tool call entry.
+
+To include all internal tool calls including successful `call_tool_*`, use `include_call_tool=true` in the API query parameter.
+:::
+
 ### Config Change Events
 
 Configuration changes are logged for audit trails:
@@ -230,6 +236,7 @@ GET /api/v1/activity
 | `end_time` | string | Filter before this time (RFC3339) |
 | `limit` | integer | Max records (1-100, default: 50) |
 | `offset` | integer | Pagination offset (default: 0) |
+| `include_call_tool` | boolean | Include successful `call_tool_*` internal tool calls (default: false). By default, successful `call_tool_*` are excluded because they appear as duplicates alongside their upstream `tool_call` entries. Failed `call_tool_*` are always shown. |
 
 **Example:**
 

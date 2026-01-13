@@ -1622,6 +1622,12 @@ paths:
         name: offset
         schema:
           type: integer
+      - description: Include successful call_tool_* internal tool calls (default false,
+          excluded to avoid duplicates)
+        in: query
+        name: include_call_tool
+        schema:
+          type: boolean
       requestBody:
         content:
           application/json:
