@@ -54,18 +54,49 @@
     <div class="card bg-base-100 shadow-md">
       <div class="card-body py-4">
         <div class="flex flex-wrap gap-4 items-end">
-          <!-- Type Filter -->
-          <div class="form-control min-w-[150px]">
+          <!-- Type Filter (Multi-select dropdown) -->
+          <div class="form-control min-w-[180px]">
             <label class="label py-1">
               <span class="label-text text-xs">Type</span>
             </label>
-            <select v-model="filterType" class="select select-bordered select-sm">
-              <option value="">All Types</option>
-              <option value="tool_call">Tool Call</option>
-              <option value="policy_decision">Policy Decision</option>
-              <option value="quarantine_change">Quarantine Change</option>
-              <option value="server_change">Server Change</option>
-            </select>
+            <div class="dropdown dropdown-bottom">
+              <div
+                tabindex="0"
+                role="button"
+                class="select select-bordered select-sm w-full text-left flex items-center justify-between"
+              >
+                <span v-if="selectedTypes.length === 0">All Types</span>
+                <span v-else-if="selectedTypes.length === activityTypes.length">All Types</span>
+                <span v-else class="truncate">{{ selectedTypes.length }} selected</span>
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
+              <ul tabindex="0" class="dropdown-content z-[10] menu p-2 shadow-lg bg-base-200 rounded-box w-56">
+                <li class="menu-title flex flex-row justify-between items-center">
+                  <span>Event Types</span>
+                  <button
+                    v-if="selectedTypes.length > 0"
+                    @click.stop="clearTypeFilter"
+                    class="btn btn-xs btn-ghost"
+                  >
+                    Clear
+                  </button>
+                </li>
+                <li v-for="type in activityTypes" :key="type.value">
+                  <label class="label cursor-pointer justify-start gap-2 py-1">
+                    <input
+                      type="checkbox"
+                      :checked="selectedTypes.includes(type.value)"
+                      @change="toggleTypeFilter(type.value)"
+                      class="checkbox checkbox-sm"
+                    />
+                    <span class="text-lg">{{ type.icon }}</span>
+                    <span>{{ type.label }}</span>
+                  </label>
+                </li>
+              </ul>
+            </div>
           </div>
 
           <!-- Server Filter -->
@@ -91,6 +122,19 @@
               <option value="success">Success</option>
               <option value="error">Error</option>
               <option value="blocked">Blocked</option>
+            </select>
+          </div>
+
+          <!-- Session Filter -->
+          <div class="form-control min-w-[180px]">
+            <label class="label py-1">
+              <span class="label-text text-xs">Session</span>
+            </label>
+            <select v-model="filterSession" class="select select-bordered select-sm">
+              <option value="">All Sessions</option>
+              <option v-for="session in availableSessions" :key="session.id" :value="session.id">
+                {{ session.label }}
+              </option>
             </select>
           </div>
 
@@ -146,9 +190,20 @@
         <!-- Active Filters Summary -->
         <div v-if="hasActiveFilters" class="flex flex-wrap gap-2 mt-2 pt-2 border-t border-base-300">
           <span class="text-xs text-base-content/60">Active filters:</span>
-          <span v-if="filterType" class="badge badge-sm badge-outline">Type: {{ formatType(filterType) }}</span>
+          <span
+            v-for="type in selectedTypes"
+            :key="type"
+            class="badge badge-sm badge-outline gap-1 cursor-pointer hover:badge-error"
+            @click="toggleTypeFilter(type)"
+          >
+            {{ getTypeIcon(type) }} {{ formatType(type) }}
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </span>
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
+          <span v-if="filterSession" class="badge badge-sm badge-outline">Session: {{ getSessionLabel(filterSession) }}</span>
           <span v-if="filterStartDate" class="badge badge-sm badge-outline">From: {{ new Date(filterStartDate).toLocaleString() }}</span>
           <span v-if="filterEndDate" class="badge badge-sm badge-outline">To: {{ new Date(filterEndDate).toLocaleString() }}</span>
         </div>
@@ -186,12 +241,23 @@
           <table class="table table-sm">
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Type</th>
-                <th>Server</th>
+                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('timestamp')">
+                  Time {{ getSortIndicator('timestamp') }}
+                </th>
+                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('type')">
+                  Type {{ getSortIndicator('type') }}
+                </th>
+                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('server_name')">
+                  Server {{ getSortIndicator('server_name') }}
+                </th>
                 <th>Details</th>
-                <th>Status</th>
-                <th>Duration</th>
+                <th>Intent</th>
+                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('status')">
+                  Status {{ getSortIndicator('status') }}
+                </th>
+                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('duration_ms')">
+                  Duration {{ getSortIndicator('duration_ms') }}
+                </th>
                 <th></th>
               </tr>
             </thead>
@@ -235,6 +301,20 @@
                     <span v-else class="text-base-content/40">-</span>
                   </div>
                 </td>
+                <!-- Intent column (Spec 024: US5) -->
+                <td>
+                  <div
+                    v-if="activity.metadata?.intent?.operation_type"
+                    class="tooltip tooltip-top"
+                    :data-tip="activity.metadata?.intent?.reason || 'No reason provided'"
+                  >
+                    <span class="badge badge-sm gap-1" :class="getIntentBadgeClass(activity.metadata.intent.operation_type)">
+                      {{ getIntentIcon(activity.metadata.intent.operation_type) }}
+                      {{ activity.metadata.intent.operation_type }}
+                    </span>
+                  </div>
+                  <span v-else class="text-base-content/40">-</span>
+                </td>
                 <td>
                   <div
                     class="badge badge-sm"
@@ -263,7 +343,7 @@
           <!-- Pagination -->
           <div v-if="totalPages > 1" class="flex justify-between items-center mt-4 pt-4 border-t border-base-300">
             <div class="text-sm text-base-content/60">
-              Showing {{ (currentPage - 1) * pageSize + 1 }}-{{ Math.min(currentPage * pageSize, filteredActivities.length) }} of {{ filteredActivities.length }}
+              Showing {{ (currentPage - 1) * pageSize + 1 }}-{{ Math.min(currentPage * pageSize, sortedActivities.length) }} of {{ sortedActivities.length }}
             </div>
             <div class="join">
               <button
@@ -372,6 +452,35 @@
               </div>
             </div>
 
+            <!-- Policy Decision Details (for blocked activities) -->
+            <div v-if="selectedActivity.type === 'policy_decision' || selectedActivity.status === 'blocked'">
+              <h4 class="font-semibold mb-2 text-warning flex items-center gap-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                Policy Decision
+              </h4>
+              <div class="alert alert-warning">
+                <div class="flex flex-col gap-2 w-full">
+                  <div class="flex items-center gap-2">
+                    <span class="font-semibold">Decision:</span>
+                    <span class="badge badge-warning">{{ selectedActivity.metadata?.decision || selectedActivity.status || 'Blocked' }}</span>
+                  </div>
+                  <div v-if="selectedActivity.metadata?.reason" class="flex flex-col gap-1">
+                    <span class="font-semibold">Reason:</span>
+                    <span class="text-sm">{{ selectedActivity.metadata.reason }}</span>
+                  </div>
+                  <div v-else-if="selectedActivity.metadata?.policy_rule" class="flex flex-col gap-1">
+                    <span class="font-semibold">Policy Rule:</span>
+                    <span class="text-sm">{{ selectedActivity.metadata.policy_rule }}</span>
+                  </div>
+                  <div v-else class="text-sm italic">
+                    Tool call was blocked by security policy
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- Arguments (Request) -->
             <div v-if="selectedActivity.arguments && Object.keys(selectedActivity.arguments).length > 0">
               <h4 class="font-semibold mb-2 flex items-center gap-2">
@@ -419,6 +528,15 @@
                 </div>
               </div>
             </div>
+
+            <!-- Additional Metadata (for debugging/detailed view) -->
+            <div v-if="hasAdditionalMetadata(selectedActivity)">
+              <h4 class="font-semibold mb-2 flex items-center gap-2">
+                Additional Details
+                <span class="badge badge-sm badge-ghost">JSON</span>
+              </h4>
+              <JsonViewer :data="getAdditionalMetadata(selectedActivity)" max-height="12rem" />
+            </div>
           </div>
         </div>
       </div>
@@ -428,11 +546,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
 import JsonViewer from '@/components/JsonViewer.vue'
 
+const route = useRoute()
 const systemStore = useSystemStore()
 
 // State
@@ -445,15 +565,34 @@ const showDetailDrawer = ref(false)
 const autoRefresh = ref(true)
 
 // Filters
-const filterType = ref('')
+const selectedTypes = ref<string[]>([])
 const filterServer = ref('')
+const filterSession = ref('')
 const filterStatus = ref('')
 const filterStartDate = ref('')
 const filterEndDate = ref('')
 
+// Activity types configuration (Spec 024: includes new types)
+const activityTypes = [
+  { value: 'tool_call', label: 'Tool Call', icon: '🔧' },
+  { value: 'system_start', label: 'System Start', icon: '🚀' },
+  { value: 'system_stop', label: 'System Stop', icon: '🛑' },
+  { value: 'internal_tool_call', label: 'Internal Tool Call', icon: '⚙️' },
+  { value: 'config_change', label: 'Config Change', icon: '⚡' },
+  { value: 'policy_decision', label: 'Policy Decision', icon: '🛡️' },
+  { value: 'quarantine_change', label: 'Quarantine Change', icon: '⚠️' },
+  { value: 'server_change', label: 'Server Change', icon: '🔄' },
+]
+
 // Pagination
 const currentPage = ref(1)
 const pageSize = ref(25)
+
+// Sorting (Spec 024: US6)
+type SortColumn = 'timestamp' | 'type' | 'server_name' | 'status' | 'duration_ms'
+type SortDirection = 'asc' | 'desc'
+const sortColumn = ref<SortColumn>('timestamp')
+const sortDirection = ref<SortDirection>('desc') // Default: newest first
 
 // Computed
 const availableServers = computed(() => {
@@ -464,18 +603,57 @@ const availableServers = computed(() => {
   return Array.from(servers).sort()
 })
 
+// Available sessions with client name and session_id suffix (Spec 024)
+interface SessionOption {
+  id: string
+  label: string
+  clientName?: string
+}
+const availableSessions = computed((): SessionOption[] => {
+  const sessionsMap = new Map<string, { clientName?: string }>()
+  activities.value.forEach(a => {
+    if (a.session_id && !sessionsMap.has(a.session_id)) {
+      // Try to get client name from metadata or any available source
+      const clientName = a.metadata?.client_name as string | undefined
+      sessionsMap.set(a.session_id, { clientName })
+    }
+  })
+
+  return Array.from(sessionsMap.entries())
+    .map(([sessionId, info]) => {
+      // Format: "ClientName ...12345" or "...12345" if no client name
+      const suffix = sessionId.slice(-5)
+      const label = info.clientName
+        ? `${info.clientName} ...${suffix}`
+        : `...${suffix}`
+      return { id: sessionId, label, clientName: info.clientName }
+    })
+    .sort((a, b) => a.label.localeCompare(b.label))
+})
+
+// Get session label by ID for display in Active Filters
+const getSessionLabel = (sessionId: string): string => {
+  const session = availableSessions.value.find(s => s.id === sessionId)
+  return session?.label || `...${sessionId.slice(-5)}`
+}
+
 const hasActiveFilters = computed(() => {
-  return filterType.value || filterServer.value || filterStatus.value || filterStartDate.value || filterEndDate.value
+  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterStartDate.value || filterEndDate.value
 })
 
 const filteredActivities = computed(() => {
   let result = activities.value
 
-  if (filterType.value) {
-    result = result.filter(a => a.type === filterType.value)
+  // Multi-type filter (Spec 024): OR logic - show activities matching ANY selected type
+  if (selectedTypes.value.length > 0) {
+    result = result.filter(a => selectedTypes.value.includes(a.type))
   }
   if (filterServer.value) {
     result = result.filter(a => a.server_name === filterServer.value)
+  }
+  // Session filter (Spec 024)
+  if (filterSession.value) {
+    result = result.filter(a => a.session_id === filterSession.value)
   }
   if (filterStatus.value) {
     result = result.filter(a => a.status === filterStatus.value)
@@ -492,11 +670,41 @@ const filteredActivities = computed(() => {
   return result
 })
 
-const totalPages = computed(() => Math.ceil(filteredActivities.value.length / pageSize.value))
+// Sorted activities (Spec 024: US6)
+const sortedActivities = computed(() => {
+  const result = [...filteredActivities.value]
+  const col = sortColumn.value
+  const dir = sortDirection.value
+
+  result.sort((a, b) => {
+    let aVal: string | number | undefined
+    let bVal: string | number | undefined
+
+    if (col === 'timestamp') {
+      aVal = new Date(a.timestamp).getTime()
+      bVal = new Date(b.timestamp).getTime()
+    } else if (col === 'duration_ms') {
+      aVal = a.duration_ms ?? 0
+      bVal = b.duration_ms ?? 0
+    } else {
+      aVal = a[col] ?? ''
+      bVal = b[col] ?? ''
+    }
+
+    if (typeof aVal === 'string' && typeof bVal === 'string') {
+      return dir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal)
+    }
+    return dir === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number)
+  })
+
+  return result
+})
+
+const totalPages = computed(() => Math.ceil(sortedActivities.value.length / pageSize.value))
 
 const paginatedActivities = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
-  return filteredActivities.value.slice(start, start + pageSize.value)
+  return sortedActivities.value.slice(start, start + pageSize.value)
 })
 
 // Load activities
@@ -528,12 +736,46 @@ const loadActivities = async () => {
 
 // Clear filters
 const clearFilters = () => {
-  filterType.value = ''
+  selectedTypes.value = []
   filterServer.value = ''
+  filterSession.value = ''
   filterStatus.value = ''
   filterStartDate.value = ''
   filterEndDate.value = ''
   currentPage.value = 1
+}
+
+// Toggle type filter (Spec 024: multi-select support)
+const toggleTypeFilter = (type: string) => {
+  const index = selectedTypes.value.indexOf(type)
+  if (index >= 0) {
+    selectedTypes.value.splice(index, 1)
+  } else {
+    selectedTypes.value.push(type)
+  }
+}
+
+// Clear type filter only
+const clearTypeFilter = () => {
+  selectedTypes.value = []
+}
+
+// Sort by column (Spec 024: US6)
+const sortBy = (column: SortColumn) => {
+  if (sortColumn.value === column) {
+    // Toggle direction if same column
+    sortDirection.value = sortDirection.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    // New column - default to descending for timestamp/duration, ascending for others
+    sortColumn.value = column
+    sortDirection.value = column === 'timestamp' || column === 'duration_ms' ? 'desc' : 'asc'
+  }
+}
+
+// Get sort indicator for column header
+const getSortIndicator = (column: SortColumn): string => {
+  if (sortColumn.value !== column) return ''
+  return sortDirection.value === 'asc' ? '↑' : '↓'
 }
 
 // Select activity for detail view
@@ -551,7 +793,8 @@ const closeDetailDrawer = () => {
 const exportActivities = (format: 'json' | 'csv') => {
   const url = api.getActivityExportUrl({
     format,
-    type: filterType.value || undefined,
+    // Spec 024: Pass comma-separated types for multi-type filter
+    type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
     server: filterServer.value || undefined,
     status: filterStatus.value || undefined,
   })
@@ -565,7 +808,15 @@ const handleActivityEvent = (event: CustomEvent) => {
 
   const payload = event.detail
   // SSE events indicate new activity - refresh the list from API
-  if (payload && (payload.server_name || payload.tool_name || payload.type)) {
+  // Check for fields from different event types:
+  // - tool_call: server_name, tool_name
+  // - internal_tool_call: internal_tool_name, target_server, target_tool
+  // - config_change: action, affected_entity
+  // - system_start/stop: version, listen_address, reason
+  if (payload && (
+    payload.server_name || payload.tool_name || payload.type ||
+    payload.internal_tool_name || payload.action || payload.version || payload.reason
+  )) {
     console.log('Activity event received, refreshing from API:', payload)
     loadActivities()
   }
@@ -576,7 +827,13 @@ const handleActivityCompleted = (event: CustomEvent) => {
 
   const payload = event.detail
   // SSE completed events indicate activity finished - refresh from API
-  if (payload && (payload.server_name || payload.tool_name || payload.status)) {
+  // Check for fields from different event types:
+  // - tool_call: server_name, tool_name, status
+  // - internal_tool_call: internal_tool_name, target_server, status
+  if (payload && (
+    payload.server_name || payload.tool_name || payload.status ||
+    payload.internal_tool_name || payload.target_server
+  )) {
     console.log('Activity completed event received, refreshing from API:', payload)
     loadActivities()
   }
@@ -600,8 +857,13 @@ const formatRelativeTime = (timestamp: string): string => {
 }
 
 const formatType = (type: string): string => {
+  // Spec 024: Include new activity types
   const typeLabels: Record<string, string> = {
     'tool_call': 'Tool Call',
+    'system_start': 'System Start',
+    'system_stop': 'System Stop',
+    'internal_tool_call': 'Internal Tool Call',
+    'config_change': 'Config Change',
     'policy_decision': 'Policy Decision',
     'quarantine_change': 'Quarantine Change',
     'server_change': 'Server Change'
@@ -610,8 +872,13 @@ const formatType = (type: string): string => {
 }
 
 const getTypeIcon = (type: string): string => {
+  // Spec 024: Include new activity types
   const typeIcons: Record<string, string> = {
     'tool_call': '🔧',
+    'system_start': '🚀',
+    'system_stop': '🛑',
+    'internal_tool_call': '⚙️',
+    'config_change': '⚡',
     'policy_decision': '🛡️',
     'quarantine_change': '⚠️',
     'server_change': '🔄'
@@ -670,10 +937,37 @@ const getIntentBadgeClass = (operationType: string): string => {
   return classes[operationType] || 'badge-ghost'
 }
 
+// Check if there's additional metadata beyond what we show in dedicated sections
+const hasAdditionalMetadata = (activity: ActivityRecord): boolean => {
+  if (!activity.metadata) return false
+
+  // Filter out fields we already show in dedicated sections
+  const shownFields = ['intent', 'decision', 'reason', 'policy_rule']
+  const additionalKeys = Object.keys(activity.metadata).filter(k => !shownFields.includes(k))
+
+  return additionalKeys.length > 0
+}
+
+// Get metadata excluding fields already shown in dedicated sections
+const getAdditionalMetadata = (activity: ActivityRecord): Record<string, unknown> => {
+  if (!activity.metadata) return {}
+
+  const shownFields = ['intent', 'decision', 'reason', 'policy_rule']
+  const result: Record<string, unknown> = {}
+
+  for (const [key, value] of Object.entries(activity.metadata)) {
+    if (!shownFields.includes(key)) {
+      result[key] = value
+    }
+  }
+
+  return result
+}
+
 // Reset page when filters change
-watch([filterType, filterServer, filterStatus, filterStartDate, filterEndDate], () => {
+watch([selectedTypes, filterServer, filterStatus, filterStartDate, filterEndDate], () => {
   currentPage.value = 1
-})
+}, { deep: true })
 
 // Keyboard handler for closing drawer
 const handleKeydown = (event: KeyboardEvent) => {
@@ -684,6 +978,12 @@ const handleKeydown = (event: KeyboardEvent) => {
 
 // Lifecycle
 onMounted(() => {
+  // Check for session filter from URL query params (linked from Dashboard/Sessions pages)
+  const sessionParam = route.query.session as string | undefined
+  if (sessionParam) {
+    filterSession.value = sessionParam
+  }
+
   loadActivities()
 
   // Listen for SSE activity events

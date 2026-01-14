@@ -62,14 +62,6 @@ const router = createRouter({
       },
     },
     {
-      path: '/tool-calls',
-      name: 'tool-calls',
-      component: () => import('@/views/ToolCalls.vue'),
-      meta: {
-        title: 'Tool Call History',
-      },
-    },
-    {
       path: '/sessions',
       name: 'sessions',
       component: () => import('@/views/Sessions.vue'),

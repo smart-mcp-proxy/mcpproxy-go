@@ -194,11 +194,11 @@
                 </td>
                 <td>
                   <router-link
-                    :to="{ name: 'tool-calls', query: { session: session.id } }"
+                    :to="{ name: 'activity', query: { session: session.id } }"
                     class="btn btn-xs btn-primary"
-                    title="View tool calls for this session"
+                    title="View activity for this session"
                   >
-                    View Calls
+                    View Activity
                   </router-link>
                 </td>
               </tr>
@@ -219,7 +219,7 @@
               ({{ recentToolCalls.length }} calls, avg {{ formatNumber(tokenStats.avgTokensPerCall) }}/call)
             </p>
           </div>
-          <router-link to="/tool-calls" class="btn btn-sm btn-ghost">
+          <router-link to="/activity" class="btn btn-sm btn-ghost">
             View All →
           </router-link>
         </div>

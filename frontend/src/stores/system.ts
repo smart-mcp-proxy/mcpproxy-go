@@ -208,6 +208,55 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Listen for internal tool call events (Spec 024)
+    es.addEventListener('activity.internal_tool_call.completed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE activity.internal_tool_call.completed event received:', data)
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: payload }))
+      } catch (error) {
+        console.error('Failed to parse SSE activity.internal_tool_call.completed event:', error)
+      }
+    })
+
+    // Listen for system lifecycle events (Spec 024)
+    // Note: Backend sends "activity.system.start" (with dots, not underscores)
+    es.addEventListener('activity.system.start', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE activity.system_start event received:', data)
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity', { detail: payload }))
+      } catch (error) {
+        console.error('Failed to parse SSE activity.system_start event:', error)
+      }
+    })
+
+    // Note: Backend sends "activity.system.stop" (with dots, not underscores)
+    es.addEventListener('activity.system.stop', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE activity.system_stop event received:', data)
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity', { detail: payload }))
+      } catch (error) {
+        console.error('Failed to parse SSE activity.system_stop event:', error)
+      }
+    })
+
+    // Listen for config change events (Spec 024)
+    es.addEventListener('activity.config_change', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('SSE activity.config_change event received:', data)
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:activity', { detail: payload }))
+      } catch (error) {
+        console.error('Failed to parse SSE activity.config_change event:', error)
+      }
+    })
+
     es.onerror = (event) => {
       connected.value = false
       console.error('EventSource error occurred:', event)

@@ -71,18 +71,26 @@ type ActivityFilter struct {
 
 // Validate validates the filter options
 func (f *ActivityFilter) Validate() error {
-	// Validate type
+	// Validate type(s) - supports comma-separated values (Spec 024)
 	if f.Type != "" {
-		validTypes := []string{"tool_call", "policy_decision", "quarantine_change", "server_change"}
-		valid := false
-		for _, t := range validTypes {
-			if f.Type == t {
-				valid = true
-				break
-			}
+		validTypes := []string{
+			"tool_call", "policy_decision", "quarantine_change", "server_change",
+			"system_start", "system_stop", "internal_tool_call", "config_change", // Spec 024: new types
 		}
-		if !valid {
-			return fmt.Errorf("invalid type '%s': must be one of %v", f.Type, validTypes)
+		// Split by comma for multi-type support
+		types := strings.Split(f.Type, ",")
+		for _, t := range types {
+			t = strings.TrimSpace(t)
+			valid := false
+			for _, vt := range validTypes {
+				if t == vt {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return fmt.Errorf("invalid type '%s': must be one of %v", t, validTypes)
+			}
 		}
 	}
 
@@ -517,7 +525,7 @@ func init() {
 	activityCmd.AddCommand(activityExportCmd)
 
 	// List command flags
-	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision, quarantine_change, server_change")
+	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
 	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked")
@@ -531,7 +539,7 @@ func init() {
 	activityListCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
 
 	// Watch command flags
-	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type: tool_call, policy_decision")
+	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
 	activityWatchCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 
 	// Show command flags
@@ -547,7 +555,7 @@ func init() {
 	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export format: json, csv")
 	activityExportCmd.Flags().BoolVar(&activityIncludeBodies, "include-bodies", false, "Include full request/response bodies")
 	// Reuse list filter flags for export
-	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type")
+	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
 	activityExportCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityExportCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status")
@@ -863,8 +871,9 @@ func watchActivityStream(ctx context.Context, sseURL string, outputFormat string
 			eventData = strings.TrimPrefix(line, "data: ")
 		case line == "":
 			// Empty line = event complete
-			// Only display completed events (started events have no status/duration)
-			if strings.HasPrefix(eventType, "activity.") && strings.HasSuffix(eventType, ".completed") {
+			// Display all activity events except .started (which have no meaningful status/duration)
+			// Includes: .completed, policy_decision, system_start, system_stop, config_change
+			if strings.HasPrefix(eventType, "activity.") && !strings.HasSuffix(eventType, ".started") {
 				displayActivityEvent(eventType, eventData, outputFormat)
 			}
 			eventType, eventData = "", ""
@@ -895,22 +904,72 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		event = wrapper
 	}
 
+	// Determine event category from eventType (e.g., "activity.tool_call.completed" -> "tool_call")
+	parts := strings.Split(eventType, ".")
+	eventCategory := ""
+	if len(parts) >= 2 {
+		eventCategory = parts[1]
+	}
+
 	// Apply client-side filters
 	if activityServer != "" {
-		if server := getStringField(event, "server_name"); server != activityServer {
+		// For tool_call events, check server_name
+		// For internal_tool_call events, check target_server
+		server := getStringField(event, "server_name")
+		if server == "" {
+			server = getStringField(event, "target_server")
+		}
+		if server == "" {
+			server = getStringField(event, "affected_entity") // for config_change
+		}
+		if server != activityServer {
 			return
 		}
 	}
 	if activityType != "" {
-		// Event type is like "activity.tool_call.completed", extract the middle part
-		parts := strings.Split(eventType, ".")
-		if len(parts) >= 2 && parts[1] != activityType {
+		if eventCategory != activityType {
 			return
 		}
 	}
 
-	// Format for table output: [HH:MM:SS] [SRC] server:tool status duration
+	// Skip successful call_tool_* internal tool calls to avoid duplicates
+	// These have a corresponding tool_call entry that shows the actual upstream call.
+	// Failed call_tool_* calls are shown since they have no corresponding tool_call.
+	if eventCategory == "internal_tool_call" {
+		internalToolName := getStringField(event, "internal_tool_name")
+		status := getStringField(event, "status")
+		if status == "success" && strings.HasPrefix(internalToolName, "call_tool_") {
+			return
+		}
+	}
+
+	// Format output based on event type
 	timestamp := time.Now().Format("15:04:05")
+
+	var line string
+	switch eventCategory {
+	case "tool_call":
+		line = formatToolCallEvent(event, timestamp)
+	case "internal_tool_call":
+		line = formatInternalToolCallEvent(event, timestamp)
+	case "policy_decision":
+		line = formatPolicyDecisionEvent(event, timestamp)
+	case "system_start":
+		line = formatSystemStartEvent(event, timestamp)
+	case "system_stop":
+		line = formatSystemStopEvent(event, timestamp)
+	case "config_change":
+		line = formatConfigChangeEvent(event, timestamp)
+	default:
+		// Fallback for unknown event types
+		line = fmt.Sprintf("[%s] [?] %s", timestamp, eventType)
+	}
+
+	fmt.Println(line)
+}
+
+// formatToolCallEvent formats a tool_call event for display
+func formatToolCallEvent(event map[string]interface{}, timestamp string) string {
 	source := getStringField(event, "source")
 	server := getStringField(event, "server_name")
 	tool := getStringField(event, "tool_name")
@@ -918,19 +977,8 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 	durationMs := getIntField(event, "duration_ms")
 	errMsg := getStringField(event, "error_message")
 
-	// Source indicator
 	sourceIcon := formatSourceIndicator(source)
-
-	// Status indicator
-	statusIcon := "?"
-	switch status {
-	case "success":
-		statusIcon = "\u2713" // checkmark
-	case "error":
-		statusIcon = "\u2717" // X
-	case "blocked":
-		statusIcon = "\u2298" // circle with slash
-	}
+	statusIcon := formatStatusIcon(status)
 
 	line := fmt.Sprintf("[%s] [%s] %s:%s %s %s", timestamp, sourceIcon, server, tool, statusIcon, formatActivityDuration(int64(durationMs)))
 	if errMsg != "" {
@@ -939,8 +987,106 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 	if status == "blocked" {
 		line += " BLOCKED"
 	}
+	return line
+}
 
-	fmt.Println(line)
+// formatInternalToolCallEvent formats an internal_tool_call event for display
+func formatInternalToolCallEvent(event map[string]interface{}, timestamp string) string {
+	internalTool := getStringField(event, "internal_tool_name")
+	targetServer := getStringField(event, "target_server")
+	targetTool := getStringField(event, "target_tool")
+	status := getStringField(event, "status")
+	durationMs := getIntField(event, "duration_ms")
+	errMsg := getStringField(event, "error_message")
+
+	statusIcon := formatStatusIcon(status)
+
+	// Format: [HH:MM:SS] [INT] internal_tool -> target_server:target_tool status duration
+	target := ""
+	if targetServer != "" && targetTool != "" {
+		target = fmt.Sprintf(" -> %s:%s", targetServer, targetTool)
+	} else if targetServer != "" {
+		target = fmt.Sprintf(" -> %s", targetServer)
+	}
+
+	line := fmt.Sprintf("[%s] [INT] %s%s %s %s", timestamp, internalTool, target, statusIcon, formatActivityDuration(int64(durationMs)))
+	if errMsg != "" {
+		line += " " + errMsg
+	}
+	return line
+}
+
+// formatPolicyDecisionEvent formats a policy_decision event for display
+func formatPolicyDecisionEvent(event map[string]interface{}, timestamp string) string {
+	server := getStringField(event, "server_name")
+	tool := getStringField(event, "tool_name")
+	decision := getStringField(event, "decision")
+	reason := getStringField(event, "reason")
+
+	statusIcon := "\u2298" // circle with slash for blocked
+	if decision == "allowed" {
+		statusIcon = "\u2713"
+	}
+
+	line := fmt.Sprintf("[%s] [POL] %s:%s %s", timestamp, server, tool, statusIcon)
+	if reason != "" {
+		line += " " + reason
+	}
+	return line
+}
+
+// formatSystemStartEvent formats a system_start event for display
+func formatSystemStartEvent(event map[string]interface{}, timestamp string) string {
+	version := getStringField(event, "version")
+	listenAddr := getStringField(event, "listen_address")
+	startupMs := getIntField(event, "startup_duration_ms")
+
+	return fmt.Sprintf("[%s] [SYS] \u25B6 Started v%s on %s (%s)", timestamp, version, listenAddr, formatActivityDuration(int64(startupMs)))
+}
+
+// formatSystemStopEvent formats a system_stop event for display
+func formatSystemStopEvent(event map[string]interface{}, timestamp string) string {
+	reason := getStringField(event, "reason")
+	signal := getStringField(event, "signal")
+	uptimeSec := getIntField(event, "uptime_seconds")
+	errMsg := getStringField(event, "error_message")
+
+	line := fmt.Sprintf("[%s] [SYS] \u25A0 Stopped: %s", timestamp, reason)
+	if signal != "" {
+		line += fmt.Sprintf(" (signal: %s)", signal)
+	}
+	if uptimeSec > 0 {
+		line += fmt.Sprintf(" uptime: %ds", uptimeSec)
+	}
+	if errMsg != "" {
+		line += " error: " + errMsg
+	}
+	return line
+}
+
+// formatConfigChangeEvent formats a config_change event for display
+func formatConfigChangeEvent(event map[string]interface{}, timestamp string) string {
+	action := getStringField(event, "action")
+	entity := getStringField(event, "affected_entity")
+	source := getStringField(event, "source")
+
+	sourceIcon := formatSourceIndicator(source)
+
+	return fmt.Sprintf("[%s] [%s] \u2699 Config: %s %s", timestamp, sourceIcon, action, entity)
+}
+
+// formatStatusIcon returns a status icon for the given status
+func formatStatusIcon(status string) string {
+	switch status {
+	case "success":
+		return "\u2713" // checkmark
+	case "error":
+		return "\u2717" // X
+	case "blocked":
+		return "\u2298" // circle with slash
+	default:
+		return "?"
+	}
 }
 
 // runActivityShow implements the activity show command
