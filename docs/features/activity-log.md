@@ -18,9 +18,85 @@ The activity log captures:
 | Event Type | Description |
 |------------|-------------|
 | `tool_call` | Every tool call made through MCPProxy |
+| `system_start` | MCPProxy server startup events |
+| `system_stop` | MCPProxy server shutdown events |
+| `internal_tool_call` | Internal proxy tool calls (retrieve_tools, call_tool_*, code_execution, etc.) |
+| `config_change` | Configuration changes (server added/removed/updated) |
 | `policy_decision` | Tool calls blocked by policy rules |
 | `quarantine_change` | Server quarantine/unquarantine events |
 | `server_change` | Server enable/disable/restart events |
+
+### System Lifecycle Events
+
+System lifecycle events track when MCPProxy starts and stops:
+
+```json
+{
+  "id": "01JFXYZ123DEF",
+  "type": "system_start",
+  "status": "success",
+  "timestamp": "2025-01-15T10:00:00Z",
+  "metadata": {
+    "version": "v0.5.0",
+    "listen_address": "127.0.0.1:8080",
+    "startup_duration_ms": 150,
+    "config_path": "/Users/user/.mcpproxy/mcp_config.json"
+  }
+}
+```
+
+### Internal Tool Call Events
+
+Internal tool calls log when internal proxy tools are used:
+
+```json
+{
+  "id": "01JFXYZ123GHI",
+  "type": "internal_tool_call",
+  "status": "success",
+  "duration_ms": 45,
+  "timestamp": "2025-01-15T10:05:00Z",
+  "metadata": {
+    "internal_tool_name": "call_tool_read",
+    "target_server": "github-server",
+    "target_tool": "get_user",
+    "tool_variant": "call_tool_read",
+    "intent": {
+      "operation_type": "read",
+      "data_sensitivity": "public"
+    }
+  }
+}
+```
+
+:::note Duplicate Filtering
+By default, **successful** `call_tool_*` internal tool calls (`call_tool_read`, `call_tool_write`, `call_tool_destructive`) are excluded from activity listings because they appear as duplicates alongside their corresponding upstream `tool_call` entries. **Failed** `call_tool_*` calls are always shown since they have no corresponding upstream tool call entry.
+
+To include all internal tool calls including successful `call_tool_*`, use `include_call_tool=true` in the API query parameter.
+:::
+
+### Config Change Events
+
+Configuration changes are logged for audit trails:
+
+```json
+{
+  "id": "01JFXYZ123JKL",
+  "type": "config_change",
+  "server_name": "github-server",
+  "status": "success",
+  "timestamp": "2025-01-15T10:10:00Z",
+  "metadata": {
+    "action": "server_added",
+    "affected_entity": "github-server",
+    "source": "mcp",
+    "new_values": {
+      "name": "github-server",
+      "url": "https://api.github.com/mcp"
+    }
+  }
+}
+```
 
 ### Tool Call Records
 
@@ -151,7 +227,7 @@ GET /api/v1/activity
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `type` | string | Filter by type: `tool_call`, `policy_decision`, `quarantine_change`, `server_change` |
+| `type` | string | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change` |
 | `server` | string | Filter by server name |
 | `tool` | string | Filter by tool name |
 | `session_id` | string | Filter by MCP session ID |
@@ -160,12 +236,19 @@ GET /api/v1/activity
 | `end_time` | string | Filter before this time (RFC3339) |
 | `limit` | integer | Max records (1-100, default: 50) |
 | `offset` | integer | Pagination offset (default: 0) |
+| `include_call_tool` | boolean | Include successful `call_tool_*` internal tool calls (default: false). By default, successful `call_tool_*` are excluded because they appear as duplicates alongside their upstream `tool_call` entries. Failed `call_tool_*` are always shown. |
 
 **Example:**
 
 ```bash
 # List recent tool calls
 curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?type=tool_call&limit=10"
+
+# Filter by multiple types (comma-separated)
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call,config_change"
+
+# List system lifecycle events
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?type=system_start,system_stop"
 
 # Filter by server
 curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?server=github-server"

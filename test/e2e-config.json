@@ -1,5 +1,5 @@
 {
-  "listen": ":8123",
+  "listen": ":8081",
   "enable_socket": true,
   "data_dir": "./test-data",
   "enable_tray": false,
@@ -17,7 +17,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2026-01-09T13:13:22.292541+02:00"
+      "updated": "2026-01-12T21:16:48.553309+02:00"
     }
   ],
   "top_k": 10,
@@ -49,7 +49,7 @@
     "compress": true,
     "json_format": false
   },
-  "api_key": "8cc73234d967a2889f8066cc89d42741747358f3a7d4225d22fc2a5bbbd9d89e",
+  "api_key": "c4eecdd97874603f7c0dec8a499154ca60d852b5cc85f5318fbb1c756b317d1d",
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,

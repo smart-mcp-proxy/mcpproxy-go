@@ -61,6 +61,13 @@ type Server struct {
 
 	statusCh chan interface{}
 	eventsCh chan runtime.Event
+
+	// Spec 024: Track server start time for lifecycle events
+	startTime time.Time
+
+	// Spec 024: Shutdown info for lifecycle events
+	shutdownReason string
+	shutdownSignal string
 }
 
 // NewServer creates a new server instance
@@ -221,6 +228,11 @@ func (s *Server) forwardRuntimeStatus() {
 
 // Start starts the MCP proxy server
 func (s *Server) Start(ctx context.Context) error {
+	// Spec 024: Track server start time for lifecycle events
+	s.mu.Lock()
+	s.startTime = time.Now()
+	s.mu.Unlock()
+
 	s.logger.Info("Starting MCP proxy server")
 
 	// Handle graceful shutdown when context is cancelled (for full application shutdown only)
@@ -286,6 +298,19 @@ func (s *Server) Start(ctx context.Context) error {
 		s.updateStatus(runtime.PhaseRunning, "Server is running in stdio mode")
 		s.runtime.SetRunning(true)
 
+		// Spec 024: Emit system_start activity event for stdio mode
+		startupDurationMs := time.Since(s.startTime).Milliseconds()
+		configPath := ""
+		if s.runtime != nil {
+			configPath = s.runtime.ConfigPath()
+		}
+		s.runtime.EmitActivitySystemStart(
+			httpapi.GetBuildVersion(),
+			"stdio",
+			startupDurationMs,
+			configPath,
+		)
+
 		// Serve using stdio (standard MCP transport)
 		if err := server.ServeStdio(s.mcpProxy.GetMCPServer()); err != nil {
 			return fmt.Errorf("MCP server error: %w", err)
@@ -296,6 +321,16 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // discoverAndIndexTools discovers tools from upstream servers and indexes them
+
+// SetShutdownInfo sets the reason and signal for shutdown (Spec 024).
+// Call this before Shutdown() to include shutdown context in activity logs.
+func (s *Server) SetShutdownInfo(reason, signal string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdownReason = reason
+	s.shutdownSignal = signal
+}
+
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown() error {
 	s.mu.Lock()
@@ -306,7 +341,19 @@ func (s *Server) Shutdown() error {
 	}
 	s.shutdown = true
 	httpServer := s.httpServer
+	startTime := s.startTime
+	reason := s.shutdownReason
+	signal := s.shutdownSignal
 	s.mu.Unlock()
+
+	// Spec 024: Emit system_stop event before actual shutdown begins
+	if s.runtime != nil && !startTime.IsZero() {
+		uptimeSeconds := int64(time.Since(startTime).Seconds())
+		if reason == "" {
+			reason = "shutdown"
+		}
+		s.runtime.EmitActivitySystemStop(reason, signal, uptimeSeconds, "")
+	}
 
 	if s.eventsCh != nil {
 		s.runtime.UnsubscribeEvents(s.eventsCh)
@@ -1359,6 +1406,19 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 	// Broadcast running status with resolved listen address so readiness checks succeed immediately.
 	s.updateStatus(runtime.PhaseRunning, fmt.Sprintf("Server is running on %s", displayAddr))
+
+	// Spec 024: Emit system_start activity event
+	startupDurationMs := time.Since(s.startTime).Milliseconds()
+	configPath := ""
+	if s.runtime != nil {
+		configPath = s.runtime.ConfigPath()
+	}
+	s.runtime.EmitActivitySystemStart(
+		httpapi.GetBuildVersion(),
+		displayAddr,
+		startupDurationMs,
+		configPath,
+	)
 
 	// List all registered endpoints for visibility
 	allEndpoints := []string{

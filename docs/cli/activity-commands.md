@@ -54,7 +54,7 @@ mcpproxy activity list [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--type` | `-t` | | Filter by type: `tool_call`, `policy_decision`, `quarantine_change`, `server_change` |
+| `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change` |
 | `--server` | `-s` | | Filter by server name |
 | `--tool` | | | Filter by tool name |
 | `--status` | | | Filter by status: `success`, `error`, `blocked` |
@@ -90,6 +90,18 @@ mcpproxy activity list --request-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 # List activity as JSON
 mcpproxy activity list -o json
+
+# List multiple event types (comma-separated)
+mcpproxy activity list --type tool_call,config_change
+
+# List system lifecycle events
+mcpproxy activity list --type system_start,system_stop
+
+# List internal tool calls (retrieve_tools, call_tool_*, upstream_servers, etc.)
+mcpproxy activity list --type internal_tool_call
+
+# List configuration changes
+mcpproxy activity list --type config_change
 
 # List activity from today
 mcpproxy activity list --start-time "$(date -u +%Y-%m-%dT00:00:00Z)"
@@ -163,7 +175,7 @@ mcpproxy activity watch [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--type` | `-t` | | Filter by type: `tool_call`, `policy_decision` |
+| `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change` |
 | `--server` | `-s` | | Filter by server name |
 
 ### Examples
@@ -174,6 +186,9 @@ mcpproxy activity watch
 
 # Watch only tool calls from github
 mcpproxy activity watch --type tool_call --server github
+
+# Watch system and config events
+mcpproxy activity watch --type system_start,system_stop,config_change
 
 # Watch with JSON output (NDJSON)
 mcpproxy activity watch -o json
@@ -205,6 +220,7 @@ Source indicators (`[MCP]`, `[CLI]`, `[API]`) show how the tool call was trigger
 - Automatically reconnects on connection loss (exponential backoff)
 - Exits cleanly on SIGINT (Ctrl+C) or SIGTERM
 - Buffers high-volume events to prevent terminal flooding
+- **Filters out successful `call_tool_*` internal tool calls** to avoid duplicates (they have corresponding `tool_call` entries)
 
 ### Exit Codes
 
@@ -425,6 +441,12 @@ mcpproxy activity export --format csv | gzip > activity.csv.gz
 
 # Export errors only
 mcpproxy activity export --status error --output errors.jsonl
+
+# Export specific event types
+mcpproxy activity export --type tool_call,internal_tool_call --output tool-calls.jsonl
+
+# Export config changes for audit
+mcpproxy activity export --type config_change --output config-audit.jsonl
 ```
 
 ### Output (JSON - JSON Lines)
@@ -537,6 +559,44 @@ Hint: Use 'mcpproxy activity list' to find valid activity IDs
 | `INVALID_TIME_RANGE` | End time before start time |
 | `CONNECTION_ERROR` | Cannot connect to daemon |
 | `EXPORT_ERROR` | Error writing export file |
+
+---
+
+## Event Types Reference
+
+The activity log captures the following event types:
+
+| Type | Description |
+|------|-------------|
+| `tool_call` | Every tool call made through MCPProxy to upstream servers |
+| `system_start` | MCPProxy server startup events |
+| `system_stop` | MCPProxy server shutdown events |
+| `internal_tool_call` | Internal proxy tool calls (`retrieve_tools`, `call_tool_*`, `code_execution`, `upstream_servers`, etc.) |
+| `config_change` | Configuration changes (server added/removed/updated) |
+| `policy_decision` | Tool calls blocked by policy rules |
+| `quarantine_change` | Server quarantine/unquarantine events |
+| `server_change` | Server enable/disable/restart events |
+
+:::note Duplicate Filtering for call_tool_*
+By default, **successful** `call_tool_*` internal tool calls are filtered out from `activity list`, `activity watch`, and the Web UI because they appear as duplicates alongside their corresponding upstream `tool_call` entries. **Failed** `call_tool_*` calls are always shown since they have no corresponding tool call entry.
+
+To include all internal tool calls in API responses, use `include_call_tool=true` query parameter.
+:::
+
+### Multi-Type Filtering
+
+You can filter by multiple types using comma-separated values:
+
+```bash
+# Filter by multiple types
+mcpproxy activity list --type tool_call,internal_tool_call
+
+# System lifecycle events
+mcpproxy activity list --type system_start,system_stop
+
+# All config-related events
+mcpproxy activity list --type config_change,quarantine_change,server_change
+```
 
 ---
 

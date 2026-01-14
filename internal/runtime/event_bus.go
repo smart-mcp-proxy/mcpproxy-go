@@ -102,9 +102,10 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // EmitActivityToolCallCompleted emits an event when a tool execution finishes.
 // This is used to track activity for observability and debugging.
 // source indicates how the call was triggered: "mcp", "cli", or "api"
+// arguments is the input parameters passed to the tool call
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
 	payload := map[string]any{
 		"server_name":        serverName,
 		"tool_name":          toolName,
@@ -116,6 +117,10 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 		"duration_ms":        durationMs,
 		"response":           response,
 		"response_truncated": responseTruncated,
+	}
+	// Add arguments if provided
+	if arguments != nil {
+		payload["arguments"] = arguments
 	}
 	// Add intent metadata if provided (Spec 018)
 	if toolVariant != "" {
@@ -147,4 +152,82 @@ func (r *Runtime) EmitActivityQuarantineChange(serverName string, quarantined bo
 		"reason":      reason,
 	}
 	r.publishEvent(newEvent(EventTypeActivityQuarantineChange, payload))
+}
+
+// EmitActivitySystemStart emits an event when MCPProxy server starts (Spec 024).
+func (r *Runtime) EmitActivitySystemStart(version, listenAddress string, startupDurationMs int64, configPath string) {
+	payload := map[string]any{
+		"version":             version,
+		"listen_address":      listenAddress,
+		"startup_duration_ms": startupDurationMs,
+		"config_path":         configPath,
+	}
+	r.publishEvent(newEvent(EventTypeActivitySystemStart, payload))
+}
+
+// EmitActivitySystemStop emits an event when MCPProxy server stops (Spec 024).
+func (r *Runtime) EmitActivitySystemStop(reason, signal string, uptimeSeconds int64, errorMsg string) {
+	payload := map[string]any{
+		"reason":         reason,
+		"signal":         signal,
+		"uptime_seconds": uptimeSeconds,
+		"error_message":  errorMsg,
+	}
+	r.publishEvent(newEvent(EventTypeActivitySystemStop, payload))
+}
+
+// EmitActivityInternalToolCall emits an event when an internal tool is called (Spec 024).
+// internalToolName is the name of the internal tool (retrieve_tools, call_tool_read, etc.)
+// targetServer and targetTool are used for call_tool_* handlers
+// arguments contains the input parameters, response contains the output
+// intent is the intent declaration metadata
+func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}) {
+	payload := map[string]any{
+		"internal_tool_name": internalToolName,
+		"session_id":         sessionID,
+		"request_id":         requestID,
+		"status":             status,
+		"error_message":      errorMsg,
+		"duration_ms":        durationMs,
+	}
+	if targetServer != "" {
+		payload["target_server"] = targetServer
+	}
+	if targetTool != "" {
+		payload["target_tool"] = targetTool
+	}
+	if toolVariant != "" {
+		payload["tool_variant"] = toolVariant
+	}
+	if arguments != nil {
+		payload["arguments"] = arguments
+	}
+	if response != nil {
+		payload["response"] = response
+	}
+	if intent != nil {
+		payload["intent"] = intent
+	}
+	r.publishEvent(newEvent(EventTypeActivityInternalToolCall, payload))
+}
+
+// EmitActivityConfigChange emits an event when configuration changes (Spec 024).
+// action is one of: server_added, server_removed, server_updated, settings_changed
+// source indicates how the change was triggered: "mcp", "cli", or "api"
+func (r *Runtime) EmitActivityConfigChange(action, affectedEntity, source string, changedFields []string, previousValues, newValues map[string]interface{}) {
+	payload := map[string]any{
+		"action":          action,
+		"affected_entity": affectedEntity,
+		"source":          source,
+	}
+	if len(changedFields) > 0 {
+		payload["changed_fields"] = changedFields
+	}
+	if previousValues != nil {
+		payload["previous_values"] = previousValues
+	}
+	if newValues != nil {
+		payload["new_values"] = newValues
+	}
+	r.publishEvent(newEvent(EventTypeActivityConfigChange, payload))
 }

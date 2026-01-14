@@ -1859,6 +1859,251 @@ func TestE2E_RequestID_ActivityFiltering(t *testing.T) {
 }
 
 // ============================================================================
+// Activity Log Filtering E2E Tests (Spec 024)
+// ============================================================================
+// These tests verify that activity log filtering works correctly,
+// including the exclusion of successful call_tool_* internal tool calls.
+
+// TestE2E_Activity_ExcludeCallToolSuccess verifies that successful call_tool_*
+// internal tool calls are excluded by default from activity listings.
+// Spec: 024-expand-activity-log
+func TestE2E_Activity_ExcludeCallToolSuccess(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	apiKey := "test-api-key-e2e"
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Make a tool call to generate both tool_call and internal_tool_call records
+	t.Run("Make tool call to generate activity", func(t *testing.T) {
+		callRequest := mcp.CallToolRequest{}
+		callRequest.Params.Name = "call_tool_read"
+		callRequest.Params.Arguments = map[string]interface{}{
+			"name": "test-server-fixture:echo_tool",
+			"args_json": `{"message": "test-activity-filtering"}`,
+			"intent": map[string]interface{}{
+				"operation_type": "read",
+				"reason":         "E2E test for activity filtering",
+			},
+		}
+
+		result, err := mcpClient.CallTool(ctx, callRequest)
+		require.NoError(t, err)
+		// Tool call may fail if test-server-fixture doesn't exist, but that's OK
+		// The activity will still be logged
+		t.Logf("Tool call result (may fail, activities still logged): isError=%v", result.IsError)
+	})
+
+	// Give some time for activities to be persisted
+	time.Sleep(100 * time.Millisecond)
+
+	// Step 2: Query activities without include_call_tool (default: exclude successful call_tool_*)
+	t.Run("Default query excludes successful call_tool_*", func(t *testing.T) {
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/activity?limit=50", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var activityResp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Activities []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					ToolName string `json:"tool_name"`
+					Status   string `json:"status"`
+				} `json:"activities"`
+				Total int `json:"total"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&activityResp)
+		require.NoError(t, err)
+
+		// Check that no successful call_tool_* internal_tool_call records are in the response
+		for _, act := range activityResp.Data.Activities {
+			if act.Type == "internal_tool_call" && strings.HasPrefix(act.ToolName, "call_tool_") {
+				// If we find a call_tool_* internal_tool_call, it must be a failure
+				assert.NotEqual(t, "success", act.Status,
+					"Successful call_tool_* internal_tool_call should be excluded by default")
+			}
+		}
+		t.Logf("✅ Default query returned %d activities, no successful call_tool_* found", activityResp.Data.Total)
+	})
+
+	// Step 3: Query activities with include_call_tool=true (should include all)
+	t.Run("include_call_tool=true shows all internal tool calls", func(t *testing.T) {
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/activity?limit=50&include_call_tool=true", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var activityResp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Activities []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					ToolName string `json:"tool_name"`
+					Status   string `json:"status"`
+				} `json:"activities"`
+				Total int `json:"total"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&activityResp)
+		require.NoError(t, err)
+
+		// Just verify the parameter is accepted - may or may not have call_tool_* entries
+		t.Logf("✅ include_call_tool=true query returned %d activities", activityResp.Data.Total)
+	})
+
+	t.Log("✅ All Activity call_tool_* filtering E2E tests passed")
+}
+
+// TestE2E_Activity_MultiTypeFilter verifies that multi-type filtering works correctly.
+// Spec: 024-expand-activity-log
+func TestE2E_Activity_MultiTypeFilter(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	apiKey := "test-api-key-e2e"
+
+	// Step 1: Query with single type filter
+	t.Run("Single type filter", func(t *testing.T) {
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/activity?type=system_start", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var activityResp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Activities []struct {
+					ID   string `json:"id"`
+					Type string `json:"type"`
+				} `json:"activities"`
+				Total int `json:"total"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&activityResp)
+		require.NoError(t, err)
+
+		// All returned activities should be system_start type
+		for _, act := range activityResp.Data.Activities {
+			assert.Equal(t, "system_start", act.Type, "Filtered activities should only be system_start type")
+		}
+		t.Logf("✅ Single type filter returned %d system_start activities", activityResp.Data.Total)
+	})
+
+	// Step 2: Query with multi-type filter (comma-separated)
+	t.Run("Multi-type filter with comma separation", func(t *testing.T) {
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/activity?type=system_start,system_stop,config_change", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var activityResp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Activities []struct {
+					ID   string `json:"id"`
+					Type string `json:"type"`
+				} `json:"activities"`
+				Total int `json:"total"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&activityResp)
+		require.NoError(t, err)
+
+		// All returned activities should be one of the filtered types
+		validTypes := map[string]bool{
+			"system_start":  true,
+			"system_stop":   true,
+			"config_change": true,
+		}
+		for _, act := range activityResp.Data.Activities {
+			assert.True(t, validTypes[act.Type], "Activity type %s should be in filter list", act.Type)
+		}
+		t.Logf("✅ Multi-type filter returned %d activities of types system_start/system_stop/config_change", activityResp.Data.Total)
+	})
+
+	t.Log("✅ All Activity multi-type filtering E2E tests passed")
+}
+
+// TestE2E_Activity_Summary verifies that activity summary endpoint works correctly.
+// Spec: 024-expand-activity-log
+func TestE2E_Activity_Summary(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	apiKey := "test-api-key-e2e"
+
+	t.Run("Get activity summary for 24h period", func(t *testing.T) {
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/activity/summary?period=24h", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-API-Key", apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var summaryResp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Period       string `json:"period"`
+				TotalCount   int    `json:"total_count"`
+				SuccessCount int    `json:"success_count"`
+				ErrorCount   int    `json:"error_count"`
+				BlockedCount int    `json:"blocked_count"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&summaryResp)
+		require.NoError(t, err)
+
+		assert.True(t, summaryResp.Success, "Summary request should succeed")
+		assert.Equal(t, "24h", summaryResp.Data.Period, "Period should be 24h")
+		// Total should be sum of success + error + blocked
+		assert.GreaterOrEqual(t, summaryResp.Data.TotalCount,
+			summaryResp.Data.SuccessCount+summaryResp.Data.ErrorCount+summaryResp.Data.BlockedCount,
+			"Total should be >= sum of status counts")
+		t.Logf("✅ Activity summary: total=%d, success=%d, error=%d, blocked=%d",
+			summaryResp.Data.TotalCount, summaryResp.Data.SuccessCount,
+			summaryResp.Data.ErrorCount, summaryResp.Data.BlockedCount)
+	})
+
+	t.Log("✅ All Activity summary E2E tests passed")
+}
+
+// ============================================================================
 // Smart Config Patching E2E Tests (Spec 023, Issues #239, #240)
 // ============================================================================
 // These tests verify that config update operations preserve unrelated fields

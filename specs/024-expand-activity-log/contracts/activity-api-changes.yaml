@@ -1,0 +1,312 @@
+# Activity API Changes for Spec 024
+# These changes extend the existing activity API endpoints
+
+openapi: 3.0.0
+info:
+  title: Activity API Extensions (Spec 024)
+  version: 1.0.0
+  description: |
+    Extensions to the Activity Log API for Spec 024 (Expand Activity Log).
+
+    Changes:
+    - Multi-type filter support (comma-separated types)
+    - New event types: system_start, system_stop, internal_tool_call, config_change
+
+paths:
+  /api/v1/activity:
+    get:
+      summary: List activity records
+      description: |
+        List activity records with filtering and pagination.
+
+        **New in Spec 024**: The `type` parameter now accepts comma-separated values
+        for filtering by multiple event types (OR logic).
+      parameters:
+        - name: type
+          in: query
+          description: |
+            Filter by activity type(s). Accepts comma-separated values for multi-type filtering.
+
+            Valid types:
+            - `tool_call` - Upstream tool executions
+            - `policy_decision` - Policy blocking tool calls
+            - `quarantine_change` - Server quarantine changes
+            - `server_change` - Server enable/disable/restart
+            - `system_start` - MCPProxy server started (NEW)
+            - `system_stop` - MCPProxy server stopped (NEW)
+            - `internal_tool_call` - Internal MCP tool calls (NEW)
+            - `config_change` - Configuration changes (NEW)
+
+            Example: `?type=tool_call,internal_tool_call`
+          schema:
+            type: string
+            example: "tool_call,internal_tool_call"
+        - name: server
+          in: query
+          description: Filter by server name
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by status (success, error, blocked)
+          schema:
+            type: string
+            enum: [success, error, blocked]
+        - name: intent_type
+          in: query
+          description: Filter by intent operation type
+          schema:
+            type: string
+            enum: [read, write, destructive]
+        - name: request_id
+          in: query
+          description: Filter by HTTP request ID
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum records to return (1-100, default 50)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          description: Pagination offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Activity records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityListResponse'
+
+components:
+  schemas:
+    ActivityType:
+      type: string
+      description: Type of activity event
+      enum:
+        - tool_call
+        - policy_decision
+        - quarantine_change
+        - server_change
+        - system_start       # NEW
+        - system_stop        # NEW
+        - internal_tool_call # NEW
+        - config_change      # NEW
+
+    ActivityRecord:
+      type: object
+      required:
+        - id
+        - type
+        - status
+        - timestamp
+      properties:
+        id:
+          type: string
+          description: Unique identifier (ULID format)
+          example: "01JFXYZ123ABC"
+        type:
+          $ref: '#/components/schemas/ActivityType'
+        source:
+          type: string
+          description: How activity was triggered
+          enum: [mcp, cli, api]
+        server_name:
+          type: string
+          description: Name of upstream MCP server (if applicable)
+        tool_name:
+          type: string
+          description: Name of tool called (if applicable)
+        arguments:
+          type: object
+          description: Tool call arguments
+          additionalProperties: true
+        response:
+          type: string
+          description: Tool response (potentially truncated)
+        response_truncated:
+          type: boolean
+          description: True if response was truncated
+        status:
+          type: string
+          description: Result status
+          enum: [success, error, blocked]
+        error_message:
+          type: string
+          description: Error details if status is error
+        duration_ms:
+          type: integer
+          description: Execution duration in milliseconds
+        timestamp:
+          type: string
+          format: date-time
+          description: When activity occurred
+        session_id:
+          type: string
+          description: MCP session ID for correlation
+        request_id:
+          type: string
+          description: HTTP request ID for correlation
+        metadata:
+          type: object
+          description: Type-specific metadata
+          additionalProperties: true
+
+    # NEW: System Start Metadata
+    SystemStartMetadata:
+      type: object
+      description: Metadata for system_start events
+      properties:
+        version:
+          type: string
+          description: MCPProxy version
+          example: "v1.2.3"
+        listen_address:
+          type: string
+          description: HTTP listener address
+          example: "127.0.0.1:8080"
+        startup_duration_ms:
+          type: integer
+          description: Time from command start to ready
+          example: 1250
+        config_path:
+          type: string
+          description: Path to config file used
+          example: "/Users/user/.mcpproxy/mcp_config.json"
+        unclean_previous_shutdown:
+          type: boolean
+          description: True if previous session didn't log system_stop
+
+    # NEW: System Stop Metadata
+    SystemStopMetadata:
+      type: object
+      description: Metadata for system_stop events
+      properties:
+        reason:
+          type: string
+          description: Shutdown reason
+          enum: [signal, manual, error]
+        signal:
+          type: string
+          description: Signal name if reason is signal
+          example: "SIGTERM"
+        uptime_seconds:
+          type: integer
+          description: Total server uptime
+          example: 3600
+        error_message:
+          type: string
+          description: Error details if reason is error
+
+    # NEW: Internal Tool Call Metadata
+    InternalToolCallMetadata:
+      type: object
+      description: Metadata for internal_tool_call events
+      properties:
+        internal_tool_name:
+          type: string
+          description: Name of internal tool called
+          enum:
+            - retrieve_tools
+            - call_tool_read
+            - call_tool_write
+            - call_tool_destructive
+            - code_execution
+            - upstream_servers
+            - quarantine_security
+            - list_registries
+            - search_servers
+            - read_cache
+        target_server:
+          type: string
+          description: Target upstream server (for call_tool_*)
+        target_tool:
+          type: string
+          description: Target upstream tool (for call_tool_*)
+        tool_variant:
+          type: string
+          description: Tool variant used
+          enum: [call_tool_read, call_tool_write, call_tool_destructive]
+        intent:
+          $ref: '#/components/schemas/IntentDeclaration'
+
+    # NEW: Config Change Metadata
+    ConfigChangeMetadata:
+      type: object
+      description: Metadata for config_change events
+      properties:
+        action:
+          type: string
+          description: Type of config change
+          enum:
+            - server_added
+            - server_removed
+            - server_updated
+            - settings_changed
+        affected_entity:
+          type: string
+          description: Name of affected server or "global"
+        changed_fields:
+          type: array
+          items:
+            type: string
+          description: List of fields that changed
+        previous_values:
+          type: object
+          description: Previous values for changed fields
+          additionalProperties: true
+        new_values:
+          type: object
+          description: New values for changed fields
+          additionalProperties: true
+
+    IntentDeclaration:
+      type: object
+      description: Intent declaration from Spec 018
+      properties:
+        operation_type:
+          type: string
+          enum: [read, write, destructive]
+        data_sensitivity:
+          type: string
+          enum: [public, internal, private, unknown]
+        reason:
+          type: string
+          description: Agent's explanation for the operation
+
+    ActivityListResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          required:
+            - activities
+            - total
+            - limit
+            - offset
+          properties:
+            activities:
+              type: array
+              items:
+                $ref: '#/components/schemas/ActivityRecord'
+            total:
+              type: integer
+              description: Total matching records
+            limit:
+              type: integer
+              description: Records per page
+            offset:
+              type: integer
+              description: Current offset
