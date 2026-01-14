@@ -28,6 +28,7 @@ func TestChecker_CheckNow(t *testing.T) {
 
 	if info == nil {
 		t.Fatal("CheckNow returned nil")
+		return // unreachable but satisfies staticcheck SA5011
 	}
 
 	if info.CurrentVersion != "v1.0.0" {
