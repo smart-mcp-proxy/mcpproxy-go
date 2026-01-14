@@ -9,10 +9,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/contracts"
-	"mcpproxy-go/internal/reqcontext"
-	"mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"mcpproxy-go/internal/secureenv"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"os"
 	"time"
 )

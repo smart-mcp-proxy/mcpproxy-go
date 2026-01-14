@@ -11,7 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 )
 
 // Re-export transport types for backward compatibility

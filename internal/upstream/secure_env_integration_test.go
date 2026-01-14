@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/secret"
-	"mcpproxy-go/internal/secureenv"
-	"mcpproxy-go/internal/transport"
-	"mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 func TestSecureEnvironmentIntegration(t *testing.T) {

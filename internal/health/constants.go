@@ -5,7 +5,7 @@
 // regenerate frontend/src/types/contracts.ts by running: go run ./cmd/generate-types
 package health
 
-import "mcpproxy-go/internal/contracts"
+import "github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 
 // Health levels
 const (

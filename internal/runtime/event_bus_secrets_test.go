@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func TestEmitSecretsChanged(t *testing.T) {

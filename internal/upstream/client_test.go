@@ -13,10 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/secret"
-	"mcpproxy-go/internal/transport"
-	"mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // createTestServer creates a simple HTTP server for testing that simulates connection issues

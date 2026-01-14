@@ -3,7 +3,7 @@ package actor
 import (
 	"time"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // State represents the actor's connection state

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"mcpproxy-go/internal/experiments"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 )
 
 // Constants for repeated strings

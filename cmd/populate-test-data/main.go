@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"go.uber.org/zap"
 )
 

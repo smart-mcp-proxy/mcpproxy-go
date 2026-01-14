@@ -28,11 +28,11 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
-	"mcpproxy-go/cmd/mcpproxy-tray/internal/monitor"
-	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
-	"mcpproxy-go/internal/socket"
-	"mcpproxy-go/internal/tray"
+	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/api"
+	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/monitor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
 )
 
 const (

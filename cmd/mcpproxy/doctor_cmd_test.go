@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 func TestOutputDiagnostics_JSONFormat(t *testing.T) {

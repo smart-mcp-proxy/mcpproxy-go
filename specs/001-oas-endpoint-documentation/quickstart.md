@@ -21,7 +21,7 @@ Create Go struct types in `internal/contracts/` for your endpoint's request/resp
 // internal/contracts/config.go (example)
 package contracts
 
-import "mcpproxy-go/internal/config"
+import "github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 
 // GetConfigResponse represents the response for GET /api/v1/config
 type GetConfigResponse struct {

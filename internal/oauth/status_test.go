@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 
 	"github.com/stretchr/testify/assert"
 )

@@ -7,7 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func newTestRuntime(t *testing.T) *Runtime {

@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"mcpproxy-go/internal/oauth"
-	"mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

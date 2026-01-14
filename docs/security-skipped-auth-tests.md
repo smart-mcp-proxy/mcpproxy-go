@@ -111,7 +111,7 @@ import (
 
     "github.com/stretchr/testify/assert"
     "go.uber.org/zap"
-    "mcpproxy-go/internal/transport"
+    "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 )
 
 // TestAPIKeyMiddleware_TCPRequiresAuth ensures TCP connections ALWAYS require API key

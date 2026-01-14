@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 
 	"go.uber.org/zap"
 )
@@ -19,7 +19,7 @@ const (
 	npmRegistryURL        = "https://registry.npmjs.org"
 	requestTimeout        = 10 * time.Second
 	batchRequestTimeout   = 3 * time.Second // Short timeout for batch operations
-	userAgent             = "mcpproxy-go/1.0"
+	userAgent             = "github.com/smart-mcp-proxy/mcpproxy-go/1.0"
 	maxConcurrentRequests = 10 // Limit concurrent requests
 )
 

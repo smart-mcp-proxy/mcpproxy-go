@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"mcpproxy-go/internal/jsruntime"
-	"mcpproxy-go/internal/storage"
-	"mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // ServerIdentity represents a unique server identity based on stable configuration

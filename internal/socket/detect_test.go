@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

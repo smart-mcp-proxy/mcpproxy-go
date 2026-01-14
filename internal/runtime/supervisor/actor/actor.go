@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // Actor represents a single server actor with its own goroutine and state machine.

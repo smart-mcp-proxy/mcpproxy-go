@@ -10,9 +10,9 @@ import (
 	"net/url"
 	"time"
 
-	"mcpproxy-go/internal/contracts"
-	"mcpproxy-go/internal/reqcontext"
-	"mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 
 	"go.uber.org/zap"
 )

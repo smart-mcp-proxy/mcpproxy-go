@@ -9,10 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"mcpproxy-go/internal/cli/output"
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/logs"
-	"mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 // GetSecretsCommand returns the secrets management command

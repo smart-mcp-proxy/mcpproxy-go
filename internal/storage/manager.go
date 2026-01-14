@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 
 	"go.etcd.io/bbolt"
 	bboltErrors "go.etcd.io/bbolt/errors"

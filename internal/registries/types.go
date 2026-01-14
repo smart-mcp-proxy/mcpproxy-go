@@ -1,6 +1,6 @@
 package registries
 
-import "mcpproxy-go/internal/experiments"
+import "github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 
 // RegistryEntry represents a registry in the embedded registry list
 type RegistryEntry struct {

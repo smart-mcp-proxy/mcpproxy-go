@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 )
 
 // MockUpstreamAdapter is a test double for UpstreamAdapter

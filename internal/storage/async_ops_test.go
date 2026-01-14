@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap/zaptest"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // TestSaveServerSyncPreservesAllFields verifies that saveServerSync copies all ServerConfig fields.

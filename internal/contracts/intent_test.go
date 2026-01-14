@@ -3,7 +3,7 @@ package contracts
 import (
 	"testing"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func TestIntentDeclaration_Validate(t *testing.T) {

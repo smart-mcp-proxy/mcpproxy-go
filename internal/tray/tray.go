@@ -26,10 +26,10 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
-	"mcpproxy-go/internal/config"
-	internalRuntime "mcpproxy-go/internal/runtime"
-	"mcpproxy-go/internal/server"
-	// "mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
+	// "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
 )
 
 const (

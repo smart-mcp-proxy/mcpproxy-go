@@ -11,9 +11,9 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/cliclient"
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 var (
