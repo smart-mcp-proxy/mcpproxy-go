@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
 func TestCalculateHealth_DisabledServer(t *testing.T) {
@@ -761,4 +763,20 @@ func TestFormatRefreshRetryDetail(t *testing.T) {
 		assert.Contains(t, result, "...")
 		assert.LessOrEqual(t, len(result), 200) // Reasonable max length
 	})
+}
+
+// TestRefreshStateSync ensures health.RefreshState values stay in sync with oauth.RefreshState.
+// The health package mirrors oauth.RefreshState for decoupling, but the values must match
+// for proper state mapping when wiring RefreshManager state into health calculation.
+func TestRefreshStateSync(t *testing.T) {
+	// Verify that the integer values match between health and oauth packages
+	// This test will fail if either package changes its constants without updating the other
+	assert.Equal(t, int(RefreshStateIdle), int(oauth.RefreshStateIdle),
+		"RefreshStateIdle values must match between health and oauth packages")
+	assert.Equal(t, int(RefreshStateScheduled), int(oauth.RefreshStateScheduled),
+		"RefreshStateScheduled values must match between health and oauth packages")
+	assert.Equal(t, int(RefreshStateRetrying), int(oauth.RefreshStateRetrying),
+		"RefreshStateRetrying values must match between health and oauth packages")
+	assert.Equal(t, int(RefreshStateFailed), int(oauth.RefreshStateFailed),
+		"RefreshStateFailed values must match between health and oauth packages")
 }
