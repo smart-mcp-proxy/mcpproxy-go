@@ -404,6 +404,7 @@ func TestMergeServerConfig_ConfigDiffCapture(t *testing.T) {
 
 	if diff == nil {
 		t.Fatal("Expected diff to be generated")
+		return // unreachable but satisfies staticcheck SA5011
 	}
 
 	// Check modified fields
@@ -727,6 +728,7 @@ func TestMergeServerConfig_ComplexNestedMerge(t *testing.T) {
 	// Verify diff captured expected changes
 	if diff == nil {
 		t.Fatal("Expected diff to be generated")
+		return // unreachable but satisfies staticcheck SA5011
 	}
 	if len(diff.Modified) < 5 {
 		t.Errorf("Expected at least 5 modified fields, got %d", len(diff.Modified))
