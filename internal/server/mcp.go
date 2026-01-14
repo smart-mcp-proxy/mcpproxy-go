@@ -294,12 +294,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 	// call_tool_read - Read-only operations
 	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
-		mcp.WithDescription("Execute a READ-ONLY tool. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only. Requires intent.operation_type='read'."),
+		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only. Requires intent.operation_type='read'."),
 		mcp.WithTitleAnnotation("Call Tool (Read)"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("name",
 			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:get_user'). Get this from retrieve_tools results."),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:get_user'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail."),
 		),
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
@@ -313,12 +313,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 	// call_tool_write - State-modifying operations
 	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
-		mcp.WithDescription("Execute a STATE-MODIFYING tool. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state. Requires intent.operation_type='write'."),
+		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state. Requires intent.operation_type='write'."),
 		mcp.WithTitleAnnotation("Call Tool (Write)"),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("name",
 			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_issue'). Get this from retrieve_tools results."),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_issue'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail."),
 		),
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
@@ -332,12 +332,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 	// call_tool_destructive - Irreversible operations
 	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
-		mcp.WithDescription("Execute a DESTRUCTIVE tool. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations. Requires intent.operation_type='destructive'."),
+		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations. Requires intent.operation_type='destructive'."),
 		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("name",
 			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:delete_repo'). Get this from retrieve_tools results."),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:delete_repo'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail."),
 		),
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
@@ -972,9 +972,21 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())), nil
 		}
 	} else {
+		// Get list of available servers for helpful error message
+		availableServers := p.upstreamManager.GetAllServerNames()
+		serverList := strings.Join(availableServers, ", ")
+		if len(availableServers) == 0 {
+			serverList = "(no servers configured)"
+		}
+
 		p.logger.Error("handleCallToolVariant: no client found for server",
-			zap.String("server_name", serverName))
-		return mcp.NewToolResultError(fmt.Sprintf("No client found for server: %s", serverName)), nil
+			zap.String("server_name", serverName),
+			zap.Strings("available_servers", availableServers))
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"No client found for server: %s. Available servers: [%s]. "+
+				"IMPORTANT: Use 'retrieve_tools' first to discover tools and their exact server:tool names, "+
+				"or use 'upstream_servers operation=\"list\"' to see all configured servers.",
+			serverName, serverList)), nil
 	}
 
 	// Extract session information from context (needed for activity events)
