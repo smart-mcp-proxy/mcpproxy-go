@@ -140,13 +140,28 @@ func TestActivityFilter_Matches(t *testing.T) {
 			matches: true,
 		},
 		{
-			name:    "type matches",
-			filter:  ActivityFilter{Type: "tool_call"},
+			name:    "single type matches",
+			filter:  ActivityFilter{Types: []string{"tool_call"}},
 			matches: true,
 		},
 		{
-			name:    "type does not match",
-			filter:  ActivityFilter{Type: "policy_decision"},
+			name:    "single type does not match",
+			filter:  ActivityFilter{Types: []string{"policy_decision"}},
+			matches: false,
+		},
+		{
+			name:    "multiple types OR logic - first matches",
+			filter:  ActivityFilter{Types: []string{"tool_call", "policy_decision"}},
+			matches: true,
+		},
+		{
+			name:    "multiple types OR logic - second matches",
+			filter:  ActivityFilter{Types: []string{"policy_decision", "tool_call"}},
+			matches: true,
+		},
+		{
+			name:    "multiple types OR logic - none match",
+			filter:  ActivityFilter{Types: []string{"policy_decision", "quarantine_change"}},
 			matches: false,
 		},
 		{
@@ -204,7 +219,7 @@ func TestActivityFilter_Matches(t *testing.T) {
 		{
 			name:    "multiple filters all match",
 			filter:  ActivityFilter{
-				Type:   "tool_call",
+				Types:  []string{"tool_call"},
 				Server: "github",
 				Status: "success",
 			},
@@ -213,7 +228,7 @@ func TestActivityFilter_Matches(t *testing.T) {
 		{
 			name:    "multiple filters one fails",
 			filter:  ActivityFilter{
-				Type:   "tool_call",
+				Types:  []string{"tool_call"},
 				Server: "gitlab", // does not match
 				Status: "success",
 			},
@@ -401,8 +416,8 @@ func TestListActivities_Filtering(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Filter by type
-	filter := ActivityFilter{Type: "tool_call", Limit: 50}
+	// Filter by single type
+	filter := ActivityFilter{Types: []string{"tool_call"}, Limit: 50}
 	records, total, err := manager.ListActivities(filter)
 	require.NoError(t, err)
 	assert.Equal(t, 3, total)
@@ -420,11 +435,17 @@ func TestListActivities_Filtering(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, total)
 
-	// Combined filters
-	filter = ActivityFilter{Type: "tool_call", Server: "github", Limit: 50}
+	// Combined filters with single type
+	filter = ActivityFilter{Types: []string{"tool_call"}, Server: "github", Limit: 50}
 	_, total, err = manager.ListActivities(filter)
 	require.NoError(t, err)
 	assert.Equal(t, 2, total)
+
+	// Multi-type filter (Spec 024)
+	filter = ActivityFilter{Types: []string{"tool_call", "policy_decision"}, Limit: 50}
+	_, total, err = manager.ListActivities(filter)
+	require.NoError(t, err)
+	assert.Equal(t, 4, total) // 3 tool_call + 1 policy_decision
 }
 
 func TestDeleteActivity(t *testing.T) {

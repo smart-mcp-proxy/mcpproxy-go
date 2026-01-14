@@ -895,6 +895,13 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 		"enabled": enabled,
 	})
 
+	// Emit config change activity for audit trail (Spec 024)
+	action := "server_disabled"
+	if enabled {
+		action = "server_enabled"
+	}
+	r.EmitActivityConfigChange(action, serverName, "api", []string{"enabled"}, map[string]interface{}{"enabled": !enabled}, map[string]interface{}{"enabled": enabled})
+
 	r.HandleUpstreamServerChange(r.AppContext())
 
 	return nil

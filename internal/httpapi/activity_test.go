@@ -29,10 +29,28 @@ func TestParseActivityFilters(t *testing.T) {
 			},
 		},
 		{
-			name:  "type filter",
+			name:  "single type filter",
 			query: "type=tool_call",
 			expected: storage.ActivityFilter{
-				Type:   "tool_call",
+				Types:  []string{"tool_call"},
+				Limit:  50,
+				Offset: 0,
+			},
+		},
+		{
+			name:  "multiple types filter (Spec 024)",
+			query: "type=tool_call,policy_decision",
+			expected: storage.ActivityFilter{
+				Types:  []string{"tool_call", "policy_decision"},
+				Limit:  50,
+				Offset: 0,
+			},
+		},
+		{
+			name:  "all new event types (Spec 024)",
+			query: "type=system_start,system_stop,internal_tool_call,config_change",
+			expected: storage.ActivityFilter{
+				Types:  []string{"system_start", "system_stop", "internal_tool_call", "config_change"},
 				Limit:  50,
 				Offset: 0,
 			},
@@ -90,10 +108,10 @@ func TestParseActivityFilters(t *testing.T) {
 			},
 		},
 		{
-			name:  "multiple filters",
+			name:  "multiple filters with types",
 			query: "type=tool_call&server=github&status=success&limit=20",
 			expected: storage.ActivityFilter{
-				Type:   "tool_call",
+				Types:  []string{"tool_call"},
 				Server: "github",
 				Status: "success",
 				Limit:  20,
@@ -107,7 +125,7 @@ func TestParseActivityFilters(t *testing.T) {
 			req := httptest.NewRequest("GET", "/api/v1/activity?"+tt.query, nil)
 			filter := parseActivityFilters(req)
 
-			assert.Equal(t, tt.expected.Type, filter.Type)
+			assert.Equal(t, tt.expected.Types, filter.Types)
 			assert.Equal(t, tt.expected.Server, filter.Server)
 			assert.Equal(t, tt.expected.Tool, filter.Tool)
 			assert.Equal(t, tt.expected.SessionID, filter.SessionID)
