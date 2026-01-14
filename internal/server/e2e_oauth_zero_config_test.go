@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/oauth"
-	"mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

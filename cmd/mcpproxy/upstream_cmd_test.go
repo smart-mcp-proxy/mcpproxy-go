@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"mcpproxy-go/internal/cliclient"
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 // jsonEscapePath escapes a path for embedding in JSON strings.

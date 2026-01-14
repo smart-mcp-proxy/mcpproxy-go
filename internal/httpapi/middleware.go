@@ -6,7 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
 // RequestIDMiddleware extracts or generates a request ID for each request.

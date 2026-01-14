@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"strings"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/tlslocal"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
 
 	"github.com/spf13/cobra"
 )

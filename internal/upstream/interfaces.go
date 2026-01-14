@@ -4,8 +4,8 @@ import (
 	"context"
 	"io"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/upstream/types"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )

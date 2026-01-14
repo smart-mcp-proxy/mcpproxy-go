@@ -10,11 +10,11 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/contracts"
-	"mcpproxy-go/internal/reqcontext"
-	"mcpproxy-go/internal/secret"
-	"mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 
 // BulkOperationResult holds the results of a bulk operation across multiple servers.

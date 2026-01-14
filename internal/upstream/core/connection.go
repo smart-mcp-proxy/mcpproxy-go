@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"mcpproxy-go/internal/contracts"
-	"mcpproxy-go/internal/oauth"
-	"mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 
 	"github.com/mark3labs/mcp-go/client"
 	uptransport "github.com/mark3labs/mcp-go/client/transport"

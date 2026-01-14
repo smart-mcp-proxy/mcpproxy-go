@@ -22,7 +22,7 @@ import (
     "sync"
     "time"
 
-    "mcpproxy-go/internal/storage"
+    "github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
     "go.uber.org/zap"
 )
 

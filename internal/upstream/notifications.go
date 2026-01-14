@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"mcpproxy-go/internal/upstream/types"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // NotificationLevel represents the level of a notification

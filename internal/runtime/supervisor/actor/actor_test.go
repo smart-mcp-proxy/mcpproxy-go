@@ -7,7 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // MockClient simulates a managed.Client for testing

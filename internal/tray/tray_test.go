@@ -10,7 +10,7 @@ import (
 
 	"go.uber.org/zap/zaptest"
 
-	internalRuntime "mcpproxy-go/internal/runtime"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // MockServerInterface provides a mock implementation for testing

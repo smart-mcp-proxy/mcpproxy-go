@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"mcpproxy-go/internal/testutil"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/testutil"
 )
 
 func assertServerReady(t *testing.T, server *testutil.TestServer) {

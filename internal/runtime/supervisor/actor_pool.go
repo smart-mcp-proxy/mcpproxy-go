@@ -8,8 +8,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // ActorPoolSimple is a simplified facade over UpstreamManager that delegates all operations.

@@ -8,10 +8,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/oauth"
-	"mcpproxy-go/internal/runtime/configsvc"
-	"mcpproxy-go/internal/runtime/supervisor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 )
 
 const connectAttemptTimeout = 45 * time.Second

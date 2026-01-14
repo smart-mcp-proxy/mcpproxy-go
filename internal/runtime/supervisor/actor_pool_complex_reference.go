@@ -8,9 +8,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/runtime/supervisor/actor"
-	"mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor/actor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // ActorPool manages the lifecycle of server actors and provides stats for Supervisor.

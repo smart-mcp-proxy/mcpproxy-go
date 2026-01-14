@@ -5,7 +5,7 @@ package tray
 import (
 	"fmt"
 
-	"mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 
 	"github.com/gen2brain/beeep"
 	"go.uber.org/zap"

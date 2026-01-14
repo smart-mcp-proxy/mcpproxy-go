@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 )
 
 // TruncationResult represents the result of truncating a tool response

@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	swag "github.com/swaggo/swag/v2"
-	_ "mcpproxy-go/oas" // Import generated docs
+	_ "github.com/smart-mcp-proxy/mcpproxy-go/oas" // Import generated docs
 )
 
 // SetupSwaggerHandler returns a handler for Swagger UI

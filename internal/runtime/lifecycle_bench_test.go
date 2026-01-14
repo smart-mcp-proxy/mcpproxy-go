@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // BenchmarkLoadConfiguredServers measures the time to load and synchronize server configurations

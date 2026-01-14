@@ -27,7 +27,7 @@ import (
 	"syscall"
 	"time"
 
-	"mcpproxy-go/tests/oauthserver"
+	"github.com/smart-mcp-proxy/mcpproxy-go/tests/oauthserver"
 )
 
 func main() {

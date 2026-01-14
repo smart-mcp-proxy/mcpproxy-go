@@ -11,10 +11,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/runtime/configsvc"
-	"mcpproxy-go/internal/runtime/stateview"
-	"mcpproxy-go/internal/upstream/types"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // Supervisor manages the desired vs actual state reconciliation for upstream servers.

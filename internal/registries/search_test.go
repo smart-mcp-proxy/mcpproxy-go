@@ -3,7 +3,7 @@ package registries
 import (
 	"context"
 	"encoding/json"
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"mcpproxy-go/internal/cache"
-	"mcpproxy-go/internal/experiments"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

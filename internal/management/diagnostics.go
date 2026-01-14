@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"mcpproxy-go/internal/contracts"
-	"mcpproxy-go/internal/health"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
 
 // extractHealthFromMap extracts health status from a server map.

@@ -38,14 +38,14 @@ import (
 	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
-	clioutput "mcpproxy-go/internal/cli/output"
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/experiments"
-	"mcpproxy-go/internal/logs"
-	"mcpproxy-go/internal/registries"
-	"mcpproxy-go/internal/server"
-	"mcpproxy-go/internal/storage"
-	_ "mcpproxy-go/oas" // Import generated swagger docs
+	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	_ "github.com/smart-mcp-proxy/mcpproxy-go/oas" // Import generated swagger docs
 )
 
 var (

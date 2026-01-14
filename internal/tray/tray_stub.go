@@ -7,7 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
-	internalRuntime "mcpproxy-go/internal/runtime"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // ServerInterface defines the interface for server control (stub version)

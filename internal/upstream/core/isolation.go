@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Command and package manager constants

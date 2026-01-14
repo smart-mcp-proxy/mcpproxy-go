@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // OAuthStatus represents the current authentication state of an OAuth server.

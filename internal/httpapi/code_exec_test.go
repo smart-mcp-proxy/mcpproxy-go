@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"mcpproxy-go/internal/contracts"
-	"mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
