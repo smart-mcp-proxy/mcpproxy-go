@@ -2019,6 +2019,19 @@ func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolRe
 			MissingSecret:  health.ExtractMissingSecret(lastError),
 			OAuthConfigErr: health.ExtractOAuthConfigError(lastError),
 		}
+
+		// T032: Wire refresh state into health calculation (Spec 023)
+		if p.mainServer != nil && p.mainServer.runtime != nil {
+			if refreshMgr := p.mainServer.runtime.RefreshManager(); refreshMgr != nil {
+				if refreshState := refreshMgr.GetRefreshState(server.Name); refreshState != nil {
+					healthInput.RefreshState = health.RefreshState(refreshState.State)
+					healthInput.RefreshRetryCount = refreshState.RetryCount
+					healthInput.RefreshLastError = refreshState.LastError
+					healthInput.RefreshNextAttempt = refreshState.NextAttempt
+				}
+			}
+		}
+
 		serverMap["health"] = health.CalculateHealth(healthInput, health.DefaultHealthConfig())
 
 		// Add Docker isolation information

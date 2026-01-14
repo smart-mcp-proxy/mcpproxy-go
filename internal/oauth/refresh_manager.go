@@ -94,6 +94,16 @@ type RefreshEventEmitter interface {
 	EmitOAuthRefreshFailed(serverName string, errorMsg string)
 }
 
+// RefreshMetricsRecorder defines metrics recording methods for OAuth refresh operations.
+// This interface decouples RefreshManager from the concrete MetricsManager.
+type RefreshMetricsRecorder interface {
+	// RecordOAuthRefresh records an OAuth token refresh attempt.
+	// Result should be one of: "success", "failed_network", "failed_invalid_grant", "failed_other".
+	RecordOAuthRefresh(server, result string)
+	// RecordOAuthRefreshDuration records the duration of an OAuth token refresh attempt.
+	RecordOAuthRefreshDuration(server, result string, duration time.Duration)
+}
+
 // RefreshManagerConfig holds configuration for the RefreshManager.
 type RefreshManagerConfig struct {
 	Threshold  float64 // Percentage of lifetime at which to refresh (default: 0.8)
@@ -102,18 +112,19 @@ type RefreshManagerConfig struct {
 
 // RefreshManager coordinates proactive OAuth token refresh across all servers.
 type RefreshManager struct {
-	storage      RefreshTokenStore
-	coordinator  *OAuthFlowCoordinator
-	runtime      RefreshRuntimeOperations
-	eventEmitter RefreshEventEmitter
-	schedules    map[string]*RefreshSchedule
-	threshold    float64
-	maxRetries   int
-	mu           sync.RWMutex
-	logger       *zap.Logger
-	ctx          context.Context
-	cancel       context.CancelFunc
-	started      bool
+	storage         RefreshTokenStore
+	coordinator     *OAuthFlowCoordinator
+	runtime         RefreshRuntimeOperations
+	eventEmitter    RefreshEventEmitter
+	metricsRecorder RefreshMetricsRecorder
+	schedules       map[string]*RefreshSchedule
+	threshold       float64
+	maxRetries      int
+	mu              sync.RWMutex
+	logger          *zap.Logger
+	ctx             context.Context
+	cancel          context.CancelFunc
+	started         bool
 }
 
 // NewRefreshManager creates a new RefreshManager instance.
@@ -158,6 +169,12 @@ func (m *RefreshManager) SetRuntime(runtime RefreshRuntimeOperations) {
 // SetEventEmitter sets the event emitter for SSE notifications.
 func (m *RefreshManager) SetEventEmitter(emitter RefreshEventEmitter) {
 	m.eventEmitter = emitter
+}
+
+// SetMetricsRecorder sets the metrics recorder for Prometheus metrics.
+// This enables FR-011: OAuth refresh metrics emission.
+func (m *RefreshManager) SetMetricsRecorder(recorder RefreshMetricsRecorder) {
+	m.metricsRecorder = recorder
 }
 
 // Start initializes the refresh manager and loads existing tokens.
@@ -322,6 +339,13 @@ func (m *RefreshManager) executeImmediateRefresh(serverName string) {
 
 	// Log the result
 	LogActualTokenRefreshResult(m.logger, serverName, refreshErr == nil, duration, refreshErr)
+
+	// Record metrics (T014: Emit metrics on refresh attempt)
+	if m.metricsRecorder != nil {
+		result := classifyRefreshError(refreshErr)
+		m.metricsRecorder.RecordOAuthRefresh(serverName, result)
+		m.metricsRecorder.RecordOAuthRefreshDuration(serverName, result, duration)
+	}
 
 	if refreshErr != nil {
 		m.handleRefreshFailure(serverName, refreshErr)
@@ -532,12 +556,21 @@ func (m *RefreshManager) executeRefresh(serverName string) {
 	m.logger.Info("Executing proactive token refresh",
 		zap.String("server", serverName))
 
-	// Attempt refresh
+	// Attempt refresh with timing for metrics (T022: Emit refresh duration metric)
+	startTime := time.Now()
 	var refreshErr error
 	if m.runtime != nil {
 		refreshErr = m.runtime.RefreshOAuthToken(serverName)
 	} else {
 		refreshErr = ErrRefreshFailed
+	}
+	duration := time.Since(startTime)
+
+	// Record metrics (T022: Emit refresh duration metric on each attempt)
+	if m.metricsRecorder != nil {
+		result := classifyRefreshError(refreshErr)
+		m.metricsRecorder.RecordOAuthRefresh(serverName, result)
+		m.metricsRecorder.RecordOAuthRefreshDuration(serverName, result, duration)
 	}
 
 	if refreshErr != nil {

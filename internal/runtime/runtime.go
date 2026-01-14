@@ -1474,6 +1474,20 @@ func (r *Runtime) GetManagementService() interface{} {
 	return r.managementService
 }
 
+// SetRefreshMetricsRecorder sets the metrics recorder for OAuth token refresh operations.
+// This enables FR-011: OAuth refresh metrics emission.
+func (r *Runtime) SetRefreshMetricsRecorder(recorder oauth.RefreshMetricsRecorder) {
+	if r.refreshManager != nil {
+		r.refreshManager.SetMetricsRecorder(recorder)
+	}
+}
+
+// RefreshManager returns the OAuth refresh manager for health status integration.
+// Returns nil if refresh manager hasn't been initialized.
+func (r *Runtime) RefreshManager() *oauth.RefreshManager {
+	return r.refreshManager
+}
+
 // EmitServersChanged implements the EventEmitter interface for the management service.
 // This delegates to the runtime's internal event emission mechanism.
 func (r *Runtime) EmitServersChanged(reason string, extra map[string]any) {
@@ -1698,6 +1712,16 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		}
 		if !tokenExpiresAt.IsZero() {
 			healthInput.TokenExpiresAt = &tokenExpiresAt
+		}
+
+		// T032: Wire refresh state into health calculation (Spec 023)
+		if r.refreshManager != nil {
+			if refreshState := r.refreshManager.GetRefreshState(serverStatus.Name); refreshState != nil {
+				healthInput.RefreshState = health.RefreshState(refreshState.State)
+				healthInput.RefreshRetryCount = refreshState.RetryCount
+				healthInput.RefreshLastError = refreshState.LastError
+				healthInput.RefreshNextAttempt = refreshState.NextAttempt
+			}
 		}
 
 		healthStatus := health.CalculateHealth(healthInput, healthConfig)
