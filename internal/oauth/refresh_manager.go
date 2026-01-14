@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
 
 // Default refresh configuration
@@ -31,6 +32,11 @@ const (
 
 	// MaxRetryBackoff is the maximum backoff duration (5 minutes per FR-009).
 	MaxRetryBackoff = 5 * time.Minute
+
+	// MaxExpiredTokenAge is how long after token expiration we continue retrying
+	// before giving up completely. After this duration, we assume the refresh token
+	// is no longer valid even if it wasn't explicitly rejected.
+	MaxExpiredTokenAge = 24 * time.Hour
 )
 
 // RefreshState represents the current state of token refresh for health reporting.
@@ -656,9 +662,9 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 	if !expiresAt.IsZero() && now.After(expiresAt) {
 		// Token has already expired - check if we should give up
 		// We'll keep trying as long as there's a chance the refresh token is still valid
-		// Only give up if we've been trying for a very long time (e.g., > 24 hours past expiration)
+		// Only give up if we've been trying for too long (MaxExpiredTokenAge)
 		timeSinceExpiry := now.Sub(expiresAt)
-		if timeSinceExpiry > 24*time.Hour {
+		if timeSinceExpiry > MaxExpiredTokenAge {
 			m.logger.Error("OAuth token refresh failed - token expired too long ago",
 				zap.String("server", serverName),
 				zap.Duration("expired_for", timeSinceExpiry),
@@ -699,7 +705,7 @@ func classifyRefreshError(err error) string {
 		"refresh token invalid",
 	}
 	for _, pattern := range permanentErrors {
-		if containsIgnoreCase(errStr, pattern) {
+		if stringutil.ContainsIgnoreCase(errStr, pattern) {
 			return "failed_invalid_grant"
 		}
 	}
@@ -716,37 +722,12 @@ func classifyRefreshError(err error) string {
 		"context deadline exceeded",
 	}
 	for _, pattern := range networkErrors {
-		if containsIgnoreCase(errStr, pattern) {
+		if stringutil.ContainsIgnoreCase(errStr, pattern) {
 			return "failed_network"
 		}
 	}
 
 	return "failed_other"
-}
-
-// containsIgnoreCase checks if s contains substr, ignoring case.
-func containsIgnoreCase(s, substr string) bool {
-	sLower := toLower(s)
-	substrLower := toLower(substr)
-	for i := 0; i <= len(sLower)-len(substrLower); i++ {
-		if sLower[i:i+len(substrLower)] == substrLower {
-			return true
-		}
-	}
-	return false
-}
-
-// toLower converts a string to lowercase (ASCII only).
-func toLower(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b[i] = c
-	}
-	return string(b)
 }
 
 // calculateBackoff calculates the exponential backoff duration for a given retry count.

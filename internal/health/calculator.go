@@ -3,9 +3,11 @@ package health
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
 
 // RefreshState represents the current state of token refresh for health reporting.
@@ -125,7 +127,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 	// 4. Connection state checks
 	// Normalize state to lowercase for consistent matching
 	// (ConnectionState.String() returns "Error", "Disconnected", etc.)
-	state := toLower(input.State)
+	state := strings.ToLower(input.State)
 	switch state {
 	case "error":
 		// For OAuth-required servers with OAuth-related errors, suggest login instead of restart
@@ -320,7 +322,7 @@ func formatErrorSummary(lastError string) string {
 
 	// Check for known patterns (in order)
 	for _, mapping := range errorMappings {
-		if containsIgnoreCase(lastError, mapping.pattern) {
+		if stringutil.ContainsIgnoreCase(lastError, mapping.pattern) {
 			return mapping.friendly
 		}
 	}
@@ -375,36 +377,6 @@ func formatRefreshRetryDetail(retryCount int, nextAttempt *time.Time, lastError 
 	return detail
 }
 
-// containsIgnoreCase checks if s contains substr, ignoring case.
-func containsIgnoreCase(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr ||
-		 containsLower(toLower(s), toLower(substr)))
-}
-
-// toLower is a simple ASCII lowercase conversion.
-func toLower(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b[i] = c
-	}
-	return string(b)
-}
-
-// containsLower checks if s contains substr (both should be lowercase).
-func containsLower(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
 // isOAuthRelatedError checks if the error message indicates an OAuth issue.
 func isOAuthRelatedError(err string) bool {
 	if err == "" {
@@ -422,7 +394,7 @@ func isOAuthRelatedError(err string) bool {
 		"access_denied",
 	}
 	for _, pattern := range oauthPatterns {
-		if containsIgnoreCase(err, pattern) {
+		if stringutil.ContainsIgnoreCase(err, pattern) {
 			return true
 		}
 	}
@@ -475,7 +447,7 @@ func ExtractOAuthConfigError(lastError string) string {
 	}
 
 	for _, pattern := range configPatterns {
-		if containsIgnoreCase(lastError, pattern) {
+		if stringutil.ContainsIgnoreCase(lastError, pattern) {
 			return lastError
 		}
 	}
