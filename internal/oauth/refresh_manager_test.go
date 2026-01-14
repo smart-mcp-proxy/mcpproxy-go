@@ -512,3 +512,108 @@ func TestRefreshManager_ExpiredTokenWithRefreshToken(t *testing.T) {
 	require.NotNil(t, schedule, "Should have a schedule entry")
 	assert.Equal(t, RefreshStateRetrying, schedule.RefreshState, "Should be retrying after network error")
 }
+
+// T023: Test exponential backoff sequence (10s, 20s, 40s, 80s, 160s, 300s cap)
+func TestRefreshManager_ExponentialBackoffSequence(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	manager := NewRefreshManager(nil, nil, nil, logger)
+
+	// Test the backoff sequence: 10s -> 20s -> 40s -> 80s -> 160s -> 300s (cap)
+	expectedBackoffs := []time.Duration{
+		10 * time.Second,  // retry 0: 10s * 2^0 = 10s
+		20 * time.Second,  // retry 1: 10s * 2^1 = 20s
+		40 * time.Second,  // retry 2: 10s * 2^2 = 40s
+		80 * time.Second,  // retry 3: 10s * 2^3 = 80s
+		160 * time.Second, // retry 4: 10s * 2^4 = 160s
+		300 * time.Second, // retry 5: 10s * 2^5 = 320s, capped to 300s
+		300 * time.Second, // retry 6: still capped at 300s
+		300 * time.Second, // retry 7: still capped at 300s
+	}
+
+	for i, expected := range expectedBackoffs {
+		actual := manager.calculateBackoff(i)
+		assert.Equal(t, expected, actual, "Backoff at retry %d should be %v, got %v", i, expected, actual)
+	}
+
+	// Verify constants match expected values
+	assert.Equal(t, 10*time.Second, RetryBackoffBase, "RetryBackoffBase should be 10s")
+	assert.Equal(t, 5*time.Minute, MaxRetryBackoff, "MaxRetryBackoff should be 5min (300s)")
+}
+
+// T024: Test unlimited retries until token expiration
+func TestRefreshManager_UnlimitedRetriesUntilExpiration(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+	emitter := &mockEventEmitter{}
+
+	config := &RefreshManagerConfig{
+		Threshold: 0.1,
+	}
+
+	manager := NewRefreshManager(store, nil, config, logger)
+	// Use a network error which is retryable (not permanent like invalid_grant)
+	runtime := &mockRuntime{
+		refreshErr: errors.New("connection timeout"),
+	}
+	manager.SetRuntime(runtime)
+	manager.SetEventEmitter(emitter)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Create a token that expires far in the future
+	expiresAt := time.Now().Add(1 * time.Hour)
+	manager.OnTokenSaved("test-server", expiresAt)
+
+	// Give time for the schedule to be set up
+	time.Sleep(50 * time.Millisecond)
+
+	// Simulate multiple refresh failures
+	for i := 0; i < 5; i++ {
+		manager.executeRefresh("test-server")
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Verify that:
+	// 1. Schedule still exists (not cleared due to max retries)
+	schedule := manager.GetSchedule("test-server")
+	require.NotNil(t, schedule, "Schedule should still exist for retryable errors")
+
+	// 2. State is RefreshStateRetrying (not failed)
+	assert.Equal(t, RefreshStateRetrying, schedule.RefreshState, "State should be retrying for network errors")
+
+	// 3. No failure events emitted (only permanent failures emit events)
+	assert.Equal(t, 0, emitter.GetFailedEvents(), "No failure events for retryable network errors")
+
+	// 4. Retry count should have increased
+	assert.GreaterOrEqual(t, schedule.RetryCount, 5, "Retry count should increase with each failure")
+}
+
+// Test error classification for metrics
+func TestClassifyRefreshError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected string
+	}{
+		{"nil error", nil, "success"},
+		{"invalid_grant", errors.New("invalid_grant: refresh token expired"), "failed_invalid_grant"},
+		{"refresh token expired", errors.New("refresh token expired"), "failed_invalid_grant"},
+		{"connection timeout", errors.New("connection timeout"), "failed_network"},
+		{"connection refused", errors.New("connection refused"), "failed_network"},
+		{"dial tcp error", errors.New("dial tcp: no such host"), "failed_network"},
+		{"EOF error", errors.New("unexpected EOF"), "failed_network"},
+		{"context deadline exceeded", errors.New("context deadline exceeded"), "failed_network"},
+		{"generic error", errors.New("unknown server error"), "failed_other"},
+		{"server_error", errors.New("OAuth server_error"), "failed_other"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := classifyRefreshError(tt.err)
+			assert.Equal(t, tt.expected, result, "Error classification mismatch for: %v", tt.err)
+		})
+	}
+}
