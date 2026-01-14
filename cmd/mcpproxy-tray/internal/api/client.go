@@ -20,8 +20,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/socket"
-	"mcpproxy-go/internal/tray"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
 )
 
 // HealthStatus represents the unified health status of an upstream MCP server.

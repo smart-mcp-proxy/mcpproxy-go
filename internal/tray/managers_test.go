@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 func TestMenuSorting(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 
 	"github.com/mark3labs/mcp-go/client"
 	transport "github.com/mark3labs/mcp-go/client/transport"

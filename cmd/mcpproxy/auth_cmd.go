@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"mcpproxy-go/internal/cliclient"
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/contracts"
-	"mcpproxy-go/internal/logs"
-	"mcpproxy-go/internal/socket"
-	"mcpproxy-go/internal/upstream/cli"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/cli"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"

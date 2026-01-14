@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // HealthCalculatorInput contains all fields needed to calculate health status.

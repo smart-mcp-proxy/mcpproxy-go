@@ -10,9 +10,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/cmd/mcpproxy-tray/internal/api"
-	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
-	"mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/api"
+	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 // HealthStatus represents the health status of the core service

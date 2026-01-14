@@ -12,14 +12,14 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/oauth"
-	"mcpproxy-go/internal/secret"
-	"mcpproxy-go/internal/storage"
-	"mcpproxy-go/internal/transport"
-	"mcpproxy-go/internal/upstream/core"
-	"mcpproxy-go/internal/upstream/managed"
-	"mcpproxy-go/internal/upstream/types"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // Docker recovery constants - internal implementation defaults

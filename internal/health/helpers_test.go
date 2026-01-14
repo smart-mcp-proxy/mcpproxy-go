@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 func TestIsHealthy_WithHealthyLevel(t *testing.T) {

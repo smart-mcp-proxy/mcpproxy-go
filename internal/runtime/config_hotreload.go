@@ -2,7 +2,7 @@ package runtime
 
 import (
 	"fmt"
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"reflect"
 )
 

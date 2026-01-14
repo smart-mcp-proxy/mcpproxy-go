@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"

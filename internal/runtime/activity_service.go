@@ -7,7 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Default retention configuration

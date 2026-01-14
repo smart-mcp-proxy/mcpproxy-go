@@ -1,4 +1,4 @@
-module mcpproxy-go
+module github.com/smart-mcp-proxy/mcpproxy-go
 
 go 1.24.0
 

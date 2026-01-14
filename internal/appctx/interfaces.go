@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/storage"
-	"mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 
 	"github.com/mark3labs/mcp-go/client"
 	"go.uber.org/zap"

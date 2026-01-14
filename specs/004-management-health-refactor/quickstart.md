@@ -38,7 +38,7 @@ package management
 
 import (
     "context"
-    "mcpproxy-go/internal/contracts"
+    "github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 type Service interface {
@@ -308,7 +308,7 @@ import (
     "github.com/go-chi/chi/v5"
     httpSwagger "github.com/swaggo/http-swagger"
 
-    _ "mcpproxy-go/oas" // Import generated docs
+    _ "github.com/smart-mcp-proxy/mcpproxy-go/oas" // Import generated docs
 )
 
 func (s *Server) mountSwaggerUI(r chi.Router) {
@@ -520,7 +520,7 @@ swag init -g cmd/mcpproxy/main.go --output docs --outputTypes yaml
 **Solution**: Check docs import:
 ```go
 import (
-    _ "mcpproxy-go/oas" // Must import generated docs
+    _ "github.com/smart-mcp-proxy/mcpproxy-go/oas" // Must import generated docs
 )
 ```
 

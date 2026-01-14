@@ -15,7 +15,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
 )
 
 // Windows-specific ProcessMonitor implementation without POSIX process groups.

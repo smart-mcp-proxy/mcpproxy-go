@@ -14,13 +14,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/contracts"
-	internalRuntime "mcpproxy-go/internal/runtime"
-	"mcpproxy-go/internal/secret"
-	"mcpproxy-go/internal/storage"
-	"mcpproxy-go/internal/updatecheck"
-	"mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 
 // MockServerController implements ServerController for testing

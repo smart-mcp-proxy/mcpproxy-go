@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

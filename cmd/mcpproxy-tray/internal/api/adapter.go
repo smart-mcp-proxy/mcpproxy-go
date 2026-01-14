@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	internalRuntime "mcpproxy-go/internal/runtime"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // ClientInterface defines the methods required by ServerAdapter from the API client.

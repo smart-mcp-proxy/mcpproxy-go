@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // TestActivityEventTypes verifies that activity event types are defined correctly

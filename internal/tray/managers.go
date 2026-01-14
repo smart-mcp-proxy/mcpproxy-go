@@ -16,7 +16,7 @@ import (
 	"fyne.io/systray"
 	"go.uber.org/zap"
 
-	"mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 const (

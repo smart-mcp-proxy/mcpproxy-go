@@ -2,7 +2,7 @@ package storage
 
 import (
 	"encoding/json"
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"time"
 )
 

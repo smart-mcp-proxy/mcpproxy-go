@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // ToolInfo represents a cached tool definition.

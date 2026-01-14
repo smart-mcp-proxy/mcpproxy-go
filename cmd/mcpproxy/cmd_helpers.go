@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 )
 
 // cmd_helpers.go provides type-safe helper functions for extracting fields

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/secureenv"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

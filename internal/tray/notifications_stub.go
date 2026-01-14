@@ -3,7 +3,7 @@
 package tray
 
 import (
-	"mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 
 	"go.uber.org/zap"
 )

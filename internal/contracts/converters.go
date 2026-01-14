@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // ConvertServerConfig converts a config.ServerConfig to a contracts.Server

@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"mcpproxy-go/internal/config"
-	"mcpproxy-go/internal/secret"
-	"mcpproxy-go/internal/storage"
-	"mcpproxy-go/internal/transport"
-	"mcpproxy-go/internal/upstream/core"
-	"mcpproxy-go/internal/upstream/types"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
