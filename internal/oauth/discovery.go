@@ -403,6 +403,8 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 		authServerBaseURL = baseURL
 	}
 
+	// Trim trailing slash to avoid double-slash in URL (e.g., "https://example.com//.well-known/...")
+	authServerBaseURL = strings.TrimSuffix(authServerBaseURL, "/")
 	authServerMetadataURL := authServerBaseURL + "/.well-known/oauth-authorization-server"
 	result.AuthorizationServerMetadataURL = authServerMetadataURL
 
