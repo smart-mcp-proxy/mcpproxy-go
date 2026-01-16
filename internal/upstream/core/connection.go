@@ -2743,6 +2743,25 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		}
 	}
 
+	// Inject extra params (including RFC 8707 resource) into authorization URL
+	if len(extraParams) > 0 {
+		parsedURL, err := url.Parse(authURL)
+		if err == nil {
+			query := parsedURL.Query()
+			for key, value := range extraParams {
+				if query.Get(key) == "" { // Don't override existing params
+					query.Set(key, value)
+				}
+			}
+			parsedURL.RawQuery = query.Encode()
+			authURL = parsedURL.String()
+			c.logger.Info("📋 Injected extra params into authorization URL",
+				zap.String("server", c.config.Name),
+				zap.String("correlation_id", result.CorrelationID),
+				zap.Int("param_count", len(extraParams)))
+		}
+	}
+
 	// Store the auth URL in the result
 	result.AuthURL = authURL
 	c.logger.Info("🌐 Authorization URL obtained",
@@ -3158,6 +3177,25 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 			ServerName: c.config.Name,
 			Message:    fmt.Sprintf("Failed to get authorization URL: %v", authURLErr),
 			Suggestion: "Check server OAuth configuration and try again.",
+		}
+	}
+
+	// Inject extra params (including RFC 8707 resource) into authorization URL
+	if len(extraParams) > 0 {
+		parsedURL, err := url.Parse(authURL)
+		if err == nil {
+			query := parsedURL.Query()
+			for key, value := range extraParams {
+				if query.Get(key) == "" { // Don't override existing params
+					query.Set(key, value)
+				}
+			}
+			parsedURL.RawQuery = query.Encode()
+			authURL = parsedURL.String()
+			c.logger.Info("📋 Injected extra params into authorization URL",
+				zap.String("server", c.config.Name),
+				zap.String("correlation_id", correlationID),
+				zap.Int("param_count", len(extraParams)))
 		}
 	}
 
