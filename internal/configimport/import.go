@@ -129,11 +129,9 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 	}
 
 	// Validate filter - check if requested servers were found
-	if filterSet != nil {
-		for name := range filterSet {
-			if !foundServers[name] {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("requested server '%s' not found in config", name))
-			}
+	for name := range filterSet {
+		if !foundServers[name] {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("requested server '%s' not found in config", name))
 		}
 	}
 

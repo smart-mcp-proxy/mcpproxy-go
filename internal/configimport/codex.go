@@ -57,7 +57,7 @@ func (p *CodexParser) Parse(content []byte) ([]*ParsedServer, error) {
 		}
 	}
 
-	if cfg.MCPServers == nil || len(cfg.MCPServers) == 0 {
+	if len(cfg.MCPServers) == 0 {
 		return nil, &ImportError{
 			Type:    "no_servers",
 			Message: "no MCP servers found in Codex config (looking for [mcp_servers.*] sections)",

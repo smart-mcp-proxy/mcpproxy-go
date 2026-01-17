@@ -38,7 +38,7 @@ func (p *ClaudeCodeParser) Parse(content []byte) ([]*ParsedServer, error) {
 		}
 	}
 
-	if cfg.MCPServers == nil || len(cfg.MCPServers) == 0 {
+	if len(cfg.MCPServers) == 0 {
 		return nil, &ImportError{
 			Type:    "no_servers",
 			Message: "no MCP servers found in Claude Code config",
