@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "sse-server": {
+      "type": "sse",
+      "url": "http://localhost:8080/sse",
+      "headers": {
+        "X-Custom-Header": "value"
+      }
+    },
+    "streamable-server": {
+      "type": "streamable-http",
+      "url": "http://localhost:9090/stream",
+      "auth": {
+        "CLIENT_ID": "my-client-id",
+        "CLIENT_SECRET": "my-client-secret",
+        "scopes": ["read", "write"]
+      }
+    },
+    "with-cwd": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "cwd": "/home/user/project"
+    }
+  }
+}

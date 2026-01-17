@@ -1,0 +1,20 @@
+{
+  "globalShortcut": "Ctrl+Shift+M",
+  "mcpServers": {
+    "github": {
+      "command": "uvx",
+      "args": ["mcp-server-github"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    }
+  }
+}
