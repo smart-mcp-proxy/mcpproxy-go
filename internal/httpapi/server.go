@@ -341,8 +341,10 @@ func (s *Server) setupRoutes() {
 		// Server management
 		r.Get("/servers", s.handleGetServers)
 		r.Post("/servers", s.handleAddServer)          // T001: Add server
-		r.Post("/servers/import", s.handleImportServers)      // Import from file upload
+		r.Post("/servers/import", s.handleImportServers)            // Import from file upload
 		r.Post("/servers/import/json", s.handleImportServersJSON) // Import from JSON/TOML content
+		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths)  // Get canonical config paths
+		r.Post("/servers/import/path", s.handleImportFromPath)           // Import from file path
 		r.Post("/servers/reconnect", s.handleForceReconnectServers)
 		// T076-T077: Bulk operation routes
 		r.Post("/servers/restart_all", s.handleRestartAll)
