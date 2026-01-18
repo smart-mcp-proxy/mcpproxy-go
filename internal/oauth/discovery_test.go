@@ -451,6 +451,7 @@ func TestBuildRFC8414MetadataURLs(t *testing.T) {
 			expectedURLs: []string{
 				"https://auth.smithery.ai/.well-known/oauth-authorization-server/googledrive",
 				"https://auth.smithery.ai/googledrive/.well-known/oauth-authorization-server",
+				"https://auth.smithery.ai/.well-known/oauth-authorization-server", // Base URL fallback (Cloudflare-style)
 			},
 		},
 		{
@@ -459,6 +460,7 @@ func TestBuildRFC8414MetadataURLs(t *testing.T) {
 			expectedURLs: []string{
 				"https://auth.example.com/.well-known/oauth-authorization-server/path1/path2/issuer",
 				"https://auth.example.com/path1/path2/issuer/.well-known/oauth-authorization-server",
+				"https://auth.example.com/.well-known/oauth-authorization-server", // Base URL fallback
 			},
 		},
 		{
@@ -467,6 +469,16 @@ func TestBuildRFC8414MetadataURLs(t *testing.T) {
 			expectedURLs: []string{
 				"https://auth.smithery.ai/.well-known/oauth-authorization-server/googledrive",
 				"https://auth.smithery.ai/googledrive/.well-known/oauth-authorization-server",
+				"https://auth.smithery.ai/.well-known/oauth-authorization-server", // Base URL fallback
+			},
+		},
+		{
+			name:          "Cloudflare-style URL with path",
+			authServerURL: "https://logs.mcp.cloudflare.com/mcp",
+			expectedURLs: []string{
+				"https://logs.mcp.cloudflare.com/.well-known/oauth-authorization-server/mcp",
+				"https://logs.mcp.cloudflare.com/mcp/.well-known/oauth-authorization-server",
+				"https://logs.mcp.cloudflare.com/.well-known/oauth-authorization-server", // This one works for Cloudflare
 			},
 		},
 		{
@@ -478,7 +490,7 @@ func TestBuildRFC8414MetadataURLs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			urls := buildRFC8414MetadataURLs(tt.authServerURL)
+			urls := BuildRFC8414MetadataURLs(tt.authServerURL)
 
 			if len(urls) != len(tt.expectedURLs) {
 				t.Errorf("URL count mismatch: got %d, want %d", len(urls), len(tt.expectedURLs))
