@@ -427,3 +427,294 @@ func TestDiscoverProtectedResourceMetadata_Timeout(t *testing.T) {
 		t.Errorf("Expected nil metadata on timeout, got %+v", metadata)
 	}
 }
+
+// Test RFC 8414 URL building for authorization server metadata discovery
+func TestBuildRFC8414MetadataURLs(t *testing.T) {
+	tests := []struct {
+		name         string
+		authServerURL string
+		expectedURLs []string
+	}{
+		{
+			name:          "Simple base URL without path",
+			authServerURL: "https://auth.example.com",
+			expectedURLs:  []string{"https://auth.example.com/.well-known/oauth-authorization-server"},
+		},
+		{
+			name:          "Base URL with trailing slash",
+			authServerURL: "https://auth.example.com/",
+			expectedURLs:  []string{"https://auth.example.com/.well-known/oauth-authorization-server"},
+		},
+		{
+			name:          "Smithery-style URL with path (RFC 8414 compliant)",
+			authServerURL: "https://auth.smithery.ai/googledrive",
+			expectedURLs: []string{
+				"https://auth.smithery.ai/.well-known/oauth-authorization-server/googledrive",
+				"https://auth.smithery.ai/googledrive/.well-known/oauth-authorization-server",
+				"https://auth.smithery.ai/.well-known/oauth-authorization-server", // Base URL fallback (Cloudflare-style)
+			},
+		},
+		{
+			name:          "URL with multi-level path",
+			authServerURL: "https://auth.example.com/path1/path2/issuer",
+			expectedURLs: []string{
+				"https://auth.example.com/.well-known/oauth-authorization-server/path1/path2/issuer",
+				"https://auth.example.com/path1/path2/issuer/.well-known/oauth-authorization-server",
+				"https://auth.example.com/.well-known/oauth-authorization-server", // Base URL fallback
+			},
+		},
+		{
+			name:          "URL with path and trailing slash",
+			authServerURL: "https://auth.smithery.ai/googledrive/",
+			expectedURLs: []string{
+				"https://auth.smithery.ai/.well-known/oauth-authorization-server/googledrive",
+				"https://auth.smithery.ai/googledrive/.well-known/oauth-authorization-server",
+				"https://auth.smithery.ai/.well-known/oauth-authorization-server", // Base URL fallback
+			},
+		},
+		{
+			name:          "Cloudflare-style URL with path",
+			authServerURL: "https://logs.mcp.cloudflare.com/mcp",
+			expectedURLs: []string{
+				"https://logs.mcp.cloudflare.com/.well-known/oauth-authorization-server/mcp",
+				"https://logs.mcp.cloudflare.com/mcp/.well-known/oauth-authorization-server",
+				"https://logs.mcp.cloudflare.com/.well-known/oauth-authorization-server", // This one works for Cloudflare
+			},
+		},
+		{
+			name:          "GitHub OAuth URL without path",
+			authServerURL: "https://github.com",
+			expectedURLs:  []string{"https://github.com/.well-known/oauth-authorization-server"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			urls := BuildRFC8414MetadataURLs(tt.authServerURL)
+
+			if len(urls) != len(tt.expectedURLs) {
+				t.Errorf("URL count mismatch: got %d, want %d", len(urls), len(tt.expectedURLs))
+				t.Errorf("Got URLs: %v", urls)
+				t.Errorf("Want URLs: %v", tt.expectedURLs)
+				return
+			}
+
+			for i, url := range urls {
+				if url != tt.expectedURLs[i] {
+					t.Errorf("URL[%d] = %q, want %q", i, url, tt.expectedURLs[i])
+				}
+			}
+		})
+	}
+}
+
+// Test discovery with fallback - simulates Smithery server behavior
+func TestDiscoverAuthServerMetadataWithFallback_SmitheryStyle(t *testing.T) {
+	// Simulate Smithery's behavior: RFC 8414 path works, legacy path returns 404
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Smithery uses RFC 8414 compliant path
+		if r.URL.Path == "/.well-known/oauth-authorization-server/googledrive" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			w.Write([]byte(`{
+				"issuer": "https://auth.smithery.ai/googledrive",
+				"authorization_endpoint": "https://auth.smithery.ai/googledrive/authorize",
+				"token_endpoint": "https://auth.smithery.ai/googledrive/token",
+				"registration_endpoint": "https://auth.smithery.ai/googledrive/register",
+				"response_types_supported": ["code"],
+				"code_challenge_methods_supported": ["S256"]
+			}`))
+			return
+		}
+		// Legacy path returns 404
+		if r.URL.Path == "/googledrive/.well-known/oauth-authorization-server" {
+			w.WriteHeader(404)
+			w.Write([]byte("Cannot GET /googledrive/.well-known/oauth-authorization-server"))
+			return
+		}
+		w.WriteHeader(404)
+		w.Write([]byte("Not found"))
+	}))
+	defer server.Close()
+
+	// Use the server URL with path (simulating auth.smithery.ai/googledrive)
+	authServerURL := server.URL + "/googledrive"
+
+	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(authServerURL, 5*time.Second)
+
+	if err != nil {
+		t.Fatalf("Expected success but got error: %v", err)
+	}
+
+	if metadata == nil {
+		t.Fatal("Expected metadata but got nil")
+	}
+
+	expectedURL := server.URL + "/.well-known/oauth-authorization-server/googledrive"
+	if discoveredURL != expectedURL {
+		t.Errorf("Discovered URL = %q, want %q", discoveredURL, expectedURL)
+	}
+
+	if metadata.AuthorizationEndpoint != "https://auth.smithery.ai/googledrive/authorize" {
+		t.Errorf("AuthorizationEndpoint = %q, want %q", metadata.AuthorizationEndpoint, "https://auth.smithery.ai/googledrive/authorize")
+	}
+
+	if metadata.TokenEndpoint != "https://auth.smithery.ai/googledrive/token" {
+		t.Errorf("TokenEndpoint = %q, want %q", metadata.TokenEndpoint, "https://auth.smithery.ai/googledrive/token")
+	}
+}
+
+// Test discovery with fallback - simulates legacy server behavior (current codebase test servers)
+func TestDiscoverAuthServerMetadataWithFallback_LegacyStyle(t *testing.T) {
+	// Simulate legacy behavior: legacy path works, RFC 8414 path returns 404
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Legacy path (path/.well-known/oauth-authorization-server) works
+		if r.URL.Path == "/myserver/.well-known/oauth-authorization-server" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			w.Write([]byte(`{
+				"issuer": "https://legacy.example.com/myserver",
+				"authorization_endpoint": "https://legacy.example.com/myserver/authorize",
+				"token_endpoint": "https://legacy.example.com/myserver/token",
+				"response_types_supported": ["code"]
+			}`))
+			return
+		}
+		// RFC 8414 path returns 404
+		if r.URL.Path == "/.well-known/oauth-authorization-server/myserver" {
+			w.WriteHeader(404)
+			w.Write([]byte("Not found"))
+			return
+		}
+		w.WriteHeader(404)
+		w.Write([]byte("Not found"))
+	}))
+	defer server.Close()
+
+	authServerURL := server.URL + "/myserver"
+
+	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(authServerURL, 5*time.Second)
+
+	if err != nil {
+		t.Fatalf("Expected success but got error: %v", err)
+	}
+
+	if metadata == nil {
+		t.Fatal("Expected metadata but got nil")
+	}
+
+	expectedURL := server.URL + "/myserver/.well-known/oauth-authorization-server"
+	if discoveredURL != expectedURL {
+		t.Errorf("Discovered URL = %q, want %q", discoveredURL, expectedURL)
+	}
+
+	if metadata.AuthorizationEndpoint != "https://legacy.example.com/myserver/authorize" {
+		t.Errorf("AuthorizationEndpoint = %q", metadata.AuthorizationEndpoint)
+	}
+}
+
+// Test discovery with fallback - both paths fail
+func TestDiscoverAuthServerMetadataWithFallback_AllFail(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte("Not found"))
+	}))
+	defer server.Close()
+
+	authServerURL := server.URL + "/myserver"
+
+	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(authServerURL, 5*time.Second)
+
+	if err == nil {
+		t.Fatal("Expected error but got nil")
+	}
+
+	if metadata != nil {
+		t.Errorf("Expected nil metadata, got %+v", metadata)
+	}
+
+	if discoveredURL != "" {
+		t.Errorf("Expected empty discoveredURL, got %q", discoveredURL)
+	}
+
+	// Error should mention the URLs tried
+	if !containsSubstring(err.Error(), "/.well-known/oauth-authorization-server") {
+		t.Errorf("Error should mention well-known path, got: %v", err)
+	}
+}
+
+// Test discovery with fallback - metadata is incomplete (missing required fields)
+func TestDiscoverAuthServerMetadataWithFallback_IncompleteMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return metadata missing required fields
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{
+			"issuer": "https://auth.example.com",
+			"response_types_supported": ["code"]
+		}`))
+	}))
+	defer server.Close()
+
+	metadata, _, err := discoverAuthServerMetadataWithFallback(server.URL, 5*time.Second)
+
+	if err == nil {
+		t.Fatal("Expected error for incomplete metadata but got nil")
+	}
+
+	if metadata != nil {
+		t.Errorf("Expected nil metadata for incomplete response, got %+v", metadata)
+	}
+
+	// Error should mention missing fields
+	if !containsSubstring(err.Error(), "missing required fields") {
+		t.Errorf("Error should mention missing fields, got: %v", err)
+	}
+}
+
+// Test discovery with simple base URL (no path)
+func TestDiscoverAuthServerMetadataWithFallback_SimpleURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-authorization-server" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			w.Write([]byte(`{
+				"issuer": "https://auth.example.com",
+				"authorization_endpoint": "https://auth.example.com/authorize",
+				"token_endpoint": "https://auth.example.com/token",
+				"response_types_supported": ["code"]
+			}`))
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(server.URL, 5*time.Second)
+
+	if err != nil {
+		t.Fatalf("Expected success but got error: %v", err)
+	}
+
+	if metadata == nil {
+		t.Fatal("Expected metadata but got nil")
+	}
+
+	expectedURL := server.URL + "/.well-known/oauth-authorization-server"
+	if discoveredURL != expectedURL {
+		t.Errorf("Discovered URL = %q, want %q", discoveredURL, expectedURL)
+	}
+}
+
+func containsSubstring(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstringHelper(s, substr))
+}
+
+func containsSubstringHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
