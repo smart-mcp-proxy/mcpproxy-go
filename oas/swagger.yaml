@@ -1475,6 +1475,54 @@ components:
         working_dir:
           type: string
       type: object
+    httpapi.CanonicalConfigPath:
+      properties:
+        description:
+          description: Brief description
+          type: string
+        exists:
+          description: Whether the file exists
+          type: boolean
+        format:
+          description: Format identifier (e.g., "claude_desktop")
+          type: string
+        name:
+          description: Display name (e.g., "Claude Desktop")
+          type: string
+        os:
+          description: Operating system (darwin, windows, linux)
+          type: string
+        path:
+          description: Full path to the config file
+          type: string
+      type: object
+    httpapi.CanonicalConfigPathsResponse:
+      properties:
+        os:
+          description: Current operating system
+          type: string
+        paths:
+          description: List of canonical config paths
+          items:
+            $ref: '#/components/schemas/httpapi.CanonicalConfigPath'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ImportFromPathRequest:
+      properties:
+        format:
+          description: Optional format hint
+          type: string
+        path:
+          description: File path to import from
+          type: string
+        server_names:
+          description: 'Optional: import only these servers'
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
     httpapi.ImportRequest:
       properties:
         content:
@@ -3173,6 +3221,71 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Import servers from JSON/TOML content
+      tags:
+      - servers
+  /api/v1/servers/import/path:
+    post:
+      description: Import MCP server configurations by reading a file from the server's
+        filesystem
+      parameters:
+      - description: If true, return preview without importing
+        in: query
+        name: preview
+        schema:
+          type: boolean
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.ImportFromPathRequest'
+        description: Import request with file path
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ImportResponse'
+          description: Import result
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request - invalid path or format
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: File not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Import servers from a file path
+      tags:
+      - servers
+  /api/v1/servers/import/paths:
+    get:
+      description: Returns well-known configuration file paths for supported formats
+        with existence check
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.CanonicalConfigPathsResponse'
+          description: Canonical config paths
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get canonical config file paths
       tags:
       - servers
   /api/v1/servers/reconnect:

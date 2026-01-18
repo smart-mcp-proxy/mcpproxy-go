@@ -172,7 +172,9 @@ class APIService {
       })
 
       if (!response.ok) {
-        const errorMsg = `HTTP ${response.status}: ${response.statusText}`
+        // Try to extract error message from response body
+        const errorData = await response.json().catch(() => ({}))
+        const errorMsg = errorData.error || `HTTP ${response.status}: ${response.statusText}`
         console.error(`API request failed: ${errorMsg}`)
 
         // Special handling for authentication errors
@@ -587,7 +589,9 @@ class APIService {
       })
 
       if (!response.ok) {
-        const errorMsg = `HTTP ${response.status}: ${response.statusText}`
+        // Extract error message from response body if available
+        const errorData = await response.json().catch(() => ({}))
+        const errorMsg = errorData.error || `HTTP ${response.status}: ${response.statusText}`
         throw new Error(errorMsg)
       }
 
@@ -601,6 +605,29 @@ class APIService {
     }
   }
 
+  // Get canonical config paths for import hints
+  async getCanonicalConfigPaths(): Promise<APIResponse<CanonicalConfigPathsResponse>> {
+    return this.request<CanonicalConfigPathsResponse>('/api/v1/servers/import/paths')
+  }
+
+  // Import servers from a file path on the server's filesystem
+  async importServersFromPath(params: {
+    path: string
+    format?: string
+    server_names?: string[]
+    preview?: boolean
+  }): Promise<APIResponse<ImportResponse>> {
+    const url = `/api/v1/servers/import/path${params.preview ? '?preview=true' : ''}`
+    return this.request<ImportResponse>(url, {
+      method: 'POST',
+      body: JSON.stringify({
+        path: params.path,
+        format: params.format,
+        server_names: params.server_names
+      })
+    })
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {
@@ -610,6 +637,21 @@ class APIService {
       return false
     }
   }
+}
+
+// Canonical config path types
+export interface CanonicalConfigPath {
+  name: string
+  format: string
+  path: string
+  exists: boolean
+  os: string
+  description: string
+}
+
+export interface CanonicalConfigPathsResponse {
+  os: string
+  paths: CanonicalConfigPath[]
 }
 
 export default new APIService()
