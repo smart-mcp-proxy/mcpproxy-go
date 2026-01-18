@@ -1150,42 +1150,45 @@ jobs:
           mkdir -p Formula
 
           cat > Formula/mcpproxy.rb << 'FORMULA_EOF'
-class Mcpproxy < Formula
-  desc "Smart MCP Proxy - Intelligent tool discovery and proxying for MCP servers"
-  homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"
-  version "${VERSION}"
-  license "MIT"
+          class Mcpproxy < Formula
+            desc "Smart MCP Proxy - Intelligent tool discovery and proxying for MCP servers"
+            homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"
+            version "${VERSION}"
+            license "MIT"
 
-  on_macos do
-    if Hardware::CPU.arm?
-      url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VERSION}/mcpproxy-${VERSION}-darwin-arm64.tar.gz"
-      sha256 "${SHA256_DARWIN_ARM64}"
-    else
-      url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VERSION}/mcpproxy-${VERSION}-darwin-amd64.tar.gz"
-      sha256 "${SHA256_DARWIN_AMD64}"
-    end
-  end
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VERSION}/mcpproxy-${VERSION}-darwin-arm64.tar.gz"
+                sha256 "${SHA256_DARWIN_ARM64}"
+              else
+                url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VERSION}/mcpproxy-${VERSION}-darwin-amd64.tar.gz"
+                sha256 "${SHA256_DARWIN_AMD64}"
+              end
+            end
 
-  on_linux do
-    if Hardware::CPU.arm?
-      url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VERSION}/mcpproxy-${VERSION}-linux-arm64.tar.gz"
-      sha256 "${SHA256_LINUX_ARM64}"
-    else
-      url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VERSION}/mcpproxy-${VERSION}-linux-amd64.tar.gz"
-      sha256 "${SHA256_LINUX_AMD64}"
-    end
-  end
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VERSION}/mcpproxy-${VERSION}-linux-arm64.tar.gz"
+                sha256 "${SHA256_LINUX_ARM64}"
+              else
+                url "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VERSION}/mcpproxy-${VERSION}-linux-amd64.tar.gz"
+                sha256 "${SHA256_LINUX_AMD64}"
+              end
+            end
 
-  def install
-    bin.install "mcpproxy"
-    bin.install "mcpproxy-tray" if OS.mac? && File.exist?("mcpproxy-tray")
-  end
+            def install
+              bin.install "mcpproxy"
+              bin.install "mcpproxy-tray" if OS.mac? && File.exist?("mcpproxy-tray")
+            end
 
-  test do
-    assert_match version.to_s, shell_output("#{bin}/mcpproxy --version")
-  end
-end
-FORMULA_EOF
+            test do
+              assert_match version.to_s, shell_output("#{bin}/mcpproxy --version")
+            end
+          end
+          FORMULA_EOF
+
+          # Remove the 10-space YAML indentation from the formula
+          sed -i 's/^          //' Formula/mcpproxy.rb
 
           # Substitute environment variables
           sed -i "s/\${VERSION}/${VERSION}/g" Formula/mcpproxy.rb
