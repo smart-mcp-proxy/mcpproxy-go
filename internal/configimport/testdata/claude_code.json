@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "local-server": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["server.js"],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    },
+    "remote-http": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer token123"
+      }
+    },
+    "remote-sse": {
+      "type": "sse",
+      "url": "http://localhost:9090/events"
+    },
+    "remote-ws": {
+      "type": "websocket",
+      "url": "ws://localhost:7070/ws"
+    }
+  }
+}
