@@ -194,6 +194,68 @@ mcpproxy upstream enable <server-name>
 mcpproxy upstream disable <server-name>
 ```
 
+## Configuration Import
+
+### import
+
+Import MCP server configurations from other AI tools:
+
+```bash
+mcpproxy import [flags]
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--path` | Path to configuration file | - |
+| `--format` | Force format (claude-desktop, claude-code, cursor, codex, gemini) | auto-detect |
+| `--servers` | Comma-separated list of server names to import | all |
+| `--preview` | Preview without importing | `false` |
+
+**Supported Formats:**
+
+| Source | Format Flag | Auto-detected |
+|--------|-------------|---------------|
+| Claude Desktop | `claude-desktop` | Yes |
+| Claude Code | `claude-code` | Yes |
+| Cursor IDE | `cursor` | Yes |
+| Codex CLI | `codex` | Yes (TOML) |
+| Gemini CLI | `gemini` | Yes |
+
+**Examples:**
+
+```bash
+# Import from Claude Desktop config
+mcpproxy import --path ~/Library/Application\ Support/Claude/claude_desktop_config.json
+
+# Import from Claude Code config
+mcpproxy import --path ~/.claude.json
+
+# Preview without importing
+mcpproxy import --path config.json --preview
+
+# Import with format hint (if auto-detect fails)
+mcpproxy import --path config.json --format claude-desktop
+
+# Import only specific servers
+mcpproxy import --path config.json --servers "github-server,filesystem"
+```
+
+**Canonical Config Paths:**
+
+| Source | macOS | Windows | Linux |
+|--------|-------|---------|-------|
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` | `%APPDATA%\Claude\claude_desktop_config.json` | `~/.config/Claude/claude_desktop_config.json` |
+| Claude Code | `~/.claude.json` | `~/.claude.json` | `~/.claude.json` |
+| Cursor IDE | `~/.cursor/mcp.json` | `~/.cursor/mcp.json` | `~/.cursor/mcp.json` |
+| Codex CLI | `~/.codex/config.toml` | `~/.codex/config.toml` | `~/.codex/config.toml` |
+| Gemini CLI | `~/.gemini/settings.json` | `~/.gemini/settings.json` | `~/.gemini/settings.json` |
+
+:::note Imported servers are quarantined
+For security, all imported servers are quarantined by default. Review and approve them before enabling.
+:::
+
+See [Configuration Import](/features/config-import) for Web UI and REST API documentation.
+
 ## Server Discovery
 
 ### search-servers

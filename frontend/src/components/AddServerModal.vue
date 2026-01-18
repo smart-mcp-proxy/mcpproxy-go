@@ -290,6 +290,50 @@
           <label class="label">
             <span class="label-text-alt">Supports Claude Desktop, Claude Code, Cursor IDE, Codex CLI, and Gemini CLI configs</span>
           </label>
+
+          <!-- Canonical Config Paths Hint Panel -->
+          <div v-if="canonicalPaths.length > 0" class="mt-3 p-3 bg-base-200 rounded-lg">
+            <div class="text-sm font-semibold mb-2 flex items-center gap-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Quick Import - Found Configs
+            </div>
+            <div class="space-y-2">
+              <div
+                v-for="config in canonicalPaths"
+                :key="config.path"
+                class="flex items-center justify-between p-2 rounded"
+                :class="config.exists ? 'bg-success/10 border border-success/30' : 'bg-base-300/50'"
+              >
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="font-medium text-sm">{{ config.name }}</span>
+                    <span
+                      v-if="config.exists"
+                      class="badge badge-success badge-xs"
+                    >Found</span>
+                    <span
+                      v-else
+                      class="badge badge-ghost badge-xs"
+                    >Not found</span>
+                  </div>
+                  <div class="text-xs text-base-content/60 truncate" :title="config.path">
+                    {{ config.path }}
+                  </div>
+                </div>
+                <button
+                  v-if="config.exists"
+                  @click="importFromCanonicalPath(config)"
+                  class="btn btn-primary btn-xs ml-2"
+                  :disabled="importingCanonicalPath === config.path"
+                >
+                  <span v-if="importingCanonicalPath === config.path" class="loading loading-spinner loading-xs"></span>
+                  <span v-else>Import</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Paste Content -->
@@ -297,9 +341,23 @@
           <label class="label">
             <span class="label-text font-semibold">Configuration Content</span>
           </label>
-          <textarea
-            v-model="importContent"
-            placeholder='Paste JSON or TOML configuration here...
+          <!-- Editor with line numbers -->
+          <div :class="['flex border rounded-lg overflow-hidden h-48', validationError ? 'border-error' : 'border-base-300']">
+            <!-- Line numbers gutter -->
+            <div
+              ref="lineNumbersRef"
+              class="bg-base-200 text-base-content/50 text-right select-none py-2 px-2 font-mono text-sm overflow-hidden border-r border-base-300"
+              style="min-width: 3rem;"
+            >
+              <div v-for="n in lineCount" :key="n" class="leading-[1.5rem]" :class="{'text-error font-bold': validationError?.line === n}">
+                {{ n }}
+              </div>
+            </div>
+            <!-- Textarea -->
+            <textarea
+              ref="textareaRef"
+              v-model="importContent"
+              placeholder='Paste JSON or TOML configuration here...
 
 Example (Claude Desktop):
 {
@@ -310,9 +368,11 @@ Example (Claude Desktop):
     }
   }
 }'
-            :class="['textarea textarea-bordered h-48 font-mono text-sm', validationError ? 'textarea-error' : '']"
-            @input="debouncePreview"
-          ></textarea>
+              class="flex-1 bg-base-100 font-mono text-sm resize-none border-0 focus:outline-none py-2 px-3 leading-[1.5rem]"
+              @input="debouncePreview"
+              @scroll="syncScroll"
+            ></textarea>
+          </div>
           <!-- Validation Error Display -->
           <div v-if="validationError" class="mt-2 p-3 bg-error/10 border border-error/30 rounded-lg">
             <div class="flex items-start gap-2 text-error">
@@ -457,6 +517,22 @@ Example (Claude Desktop):
           <span>{{ importError }}</span>
         </div>
 
+        <!-- Critical Warnings Display -->
+        <div v-if="selectedServersWithCriticalWarnings.length > 0" class="alert alert-error mt-4">
+          <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <div>
+            <div class="font-bold">Cannot import servers with critical errors</div>
+            <ul class="text-sm mt-1 list-disc list-inside">
+              <li v-for="server in selectedServersWithCriticalWarnings" :key="server.name">
+                <strong>{{ server.name }}:</strong> {{ server.warnings?.filter(w => /missing (command|url) field/i.test(w)).join(', ') }}
+              </li>
+            </ul>
+            <div class="text-sm mt-2">Deselect these servers or fix the configuration before importing.</div>
+          </div>
+        </div>
+
         <!-- Actions -->
         <div class="modal-action">
           <button type="button" @click="handleClose" class="btn btn-ghost">Cancel</button>
@@ -478,10 +554,10 @@ Example (Claude Desktop):
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, computed } from 'vue'
+import { ref, reactive, watch, computed, onMounted } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
-import api from '@/services/api'
+import api, { type CanonicalConfigPath } from '@/services/api'
 import type { ImportResponse, ImportedServer } from '@/types'
 
 interface Props {
@@ -533,17 +609,55 @@ const importLoading = ref(false)
 const selectedServers = ref<Set<string>>(new Set())
 const validationError = ref<{ message: string; line?: number; column?: number; hint?: string } | null>(null)
 
+// Canonical config paths for quick import
+const canonicalPaths = ref<CanonicalConfigPath[]>([])
+const importingCanonicalPath = ref<string | null>(null)
+
+// Editor refs for line numbers
+const textareaRef = ref<HTMLTextAreaElement | null>(null)
+const lineNumbersRef = ref<HTMLDivElement | null>(null)
+
 // Debounce timer for preview
 let previewTimer: ReturnType<typeof setTimeout> | null = null
 
 // Computed
+const lineCount = computed(() => {
+  if (!importContent.value) return 10 // Show at least 10 lines for placeholder
+  return Math.max(importContent.value.split('\n').length, 10)
+})
+
 const allServersSelected = computed(() => {
   if (!previewResult.value?.imported.length) return false
   return previewResult.value.imported.every(s => selectedServers.value.has(s.name))
 })
 
+// Critical warnings that indicate the server won't work
+const criticalWarningPatterns = [
+  /missing command field/i,
+  /missing url field/i,
+]
+
+// Check if a server has critical warnings that should block import
+function hasCriticalWarnings(server: ImportedServer): boolean {
+  if (!server.warnings?.length) return false
+  return server.warnings.some(warning =>
+    criticalWarningPatterns.some(pattern => pattern.test(warning))
+  )
+}
+
+// Get selected servers that have critical warnings
+const selectedServersWithCriticalWarnings = computed(() => {
+  if (!previewResult.value?.imported) return []
+  return previewResult.value.imported.filter(s =>
+    selectedServers.value.has(s.name) && hasCriticalWarnings(s)
+  )
+})
+
 const canImport = computed(() => {
-  return previewResult.value && selectedServers.value.size > 0
+  // Must have preview result and selected servers
+  if (!previewResult.value || selectedServers.value.size === 0) return false
+  // Cannot import if any selected server has critical warnings
+  return selectedServersWithCriticalWarnings.value.length === 0
 })
 
 // Watchers
@@ -744,6 +858,13 @@ function debouncePreview() {
   }, 500)
 }
 
+// Sync scroll between textarea and line numbers
+function syncScroll() {
+  if (textareaRef.value && lineNumbersRef.value) {
+    lineNumbersRef.value.scrollTop = textareaRef.value.scrollTop
+  }
+}
+
 async function triggerPreview() {
   importError.value = ''
   previewResult.value = null
@@ -877,6 +998,60 @@ async function handleImport() {
     importLoading.value = false
   }
 }
+
+// Load canonical config paths for quick import hints
+async function loadCanonicalPaths() {
+  try {
+    const response = await api.getCanonicalConfigPaths()
+    if (response.success && response.data) {
+      // Sort by existence (found configs first), then by name
+      canonicalPaths.value = response.data.paths.sort((a, b) => {
+        if (a.exists !== b.exists) return a.exists ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
+    }
+  } catch (err) {
+    console.error('Failed to load canonical config paths:', err)
+  }
+}
+
+// Import from a canonical config path
+async function importFromCanonicalPath(config: CanonicalConfigPath) {
+  importingCanonicalPath.value = config.path
+  importError.value = ''
+
+  try {
+    // First, preview the import
+    const previewResponse = await api.importServersFromPath({
+      path: config.path,
+      format: config.format,
+      preview: true
+    })
+
+    if (!previewResponse.success || !previewResponse.data) {
+      importError.value = previewResponse.error || 'Failed to preview import'
+      return
+    }
+
+    // Show preview result
+    previewResult.value = previewResponse.data
+
+    // Select all servers by default
+    selectedServers.value.clear()
+    previewResponse.data.imported.forEach(s => selectedServers.value.add(s.name))
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : 'Failed to import from config'
+  } finally {
+    importingCanonicalPath.value = null
+  }
+}
+
+// Load canonical paths when component mounts or when switching to import mode
+watch(() => props.show, (newVal) => {
+  if (newVal) {
+    loadCanonicalPaths()
+  }
+})
 
 function handleClose() {
   // Reset manual form
