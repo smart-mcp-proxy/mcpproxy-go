@@ -1,0 +1,43 @@
+{
+  "mcp": {
+    "allowed": ["github", "filesystem"],
+    "excluded": ["dangerous"]
+  },
+  "mcpServers": {
+    "github": {
+      "command": "uvx",
+      "args": ["mcp-server-github"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "description": "GitHub MCP Server"
+    },
+    "http-api": {
+      "httpUrl": "http://api.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer api-token"
+      }
+    },
+    "sse-server": {
+      "url": "http://localhost:8080/events",
+      "trust": true,
+      "timeout": 30000
+    },
+    "with-oauth": {
+      "httpUrl": "http://auth.example.com/mcp",
+      "oauth": {
+        "enabled": true,
+        "clientId": "gemini-client",
+        "clientSecret": "gemini-secret",
+        "scopes": ["read", "write"],
+        "redirectUri": "http://localhost:3000/callback"
+      }
+    },
+    "with-tools": {
+      "command": "node",
+      "args": ["server.js"],
+      "includeTools": ["safe_tool"],
+      "excludeTools": ["dangerous_tool"]
+    }
+  }
+}

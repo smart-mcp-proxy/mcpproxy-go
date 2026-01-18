@@ -392,6 +392,34 @@ components:
           description: Default encoding (e.g., "cl100k_base")
           type: string
       type: object
+    configimport.FailedServer:
+      properties:
+        details:
+          type: string
+        error:
+          type: string
+        name:
+          type: string
+      type: object
+    configimport.ImportSummary:
+      properties:
+        failed:
+          type: integer
+        imported:
+          type: integer
+        skipped:
+          type: integer
+        total:
+          type: integer
+      type: object
+    configimport.SkippedServer:
+      properties:
+        name:
+          type: string
+        reason:
+          description: '"already_exists", "filtered_out", "invalid_name"'
+          type: string
+      type: object
     contracts.APIResponse:
       allOf:
       - $ref: '#/components/schemas/data'
@@ -1446,6 +1474,80 @@ components:
           type: string
         working_dir:
           type: string
+      type: object
+    httpapi.ImportRequest:
+      properties:
+        content:
+          description: Raw JSON or TOML content
+          type: string
+        format:
+          description: Optional format hint
+          type: string
+        server_names:
+          description: 'Optional: import only these servers'
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ImportResponse:
+      properties:
+        failed:
+          items:
+            $ref: '#/components/schemas/configimport.FailedServer'
+          type: array
+          uniqueItems: false
+        format:
+          type: string
+        format_name:
+          type: string
+        imported:
+          items:
+            $ref: '#/components/schemas/httpapi.ImportedServerResponse'
+          type: array
+          uniqueItems: false
+        skipped:
+          items:
+            $ref: '#/components/schemas/configimport.SkippedServer'
+          type: array
+          uniqueItems: false
+        summary:
+          $ref: '#/components/schemas/configimport.ImportSummary'
+        warnings:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ImportedServerResponse:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        command:
+          type: string
+        fields_skipped:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        name:
+          type: string
+        original_name:
+          type: string
+        protocol:
+          type: string
+        source_format:
+          type: string
+        url:
+          type: string
+        warnings:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
       type: object
     management.BulkOperationResult:
       properties:
@@ -2977,6 +3079,100 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Enable all servers
+      tags:
+      - servers
+  /api/v1/servers/import:
+    post:
+      description: Import MCP server configurations from a Claude Desktop, Claude
+        Code, Cursor IDE, Codex CLI, or Gemini CLI configuration file
+      parameters:
+      - description: If true, return preview without importing
+        in: query
+        name: preview
+        schema:
+          type: boolean
+      - description: Force format (claude-desktop, claude-code, cursor, codex, gemini)
+        in: query
+        name: format
+        schema:
+          type: string
+      - description: Comma-separated list of server names to import
+        in: query
+        name: server_names
+        schema:
+          type: string
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: file
+        description: Configuration file to import
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ImportResponse'
+          description: Import result
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request - invalid file or format
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Import servers from uploaded configuration file
+      tags:
+      - servers
+  /api/v1/servers/import/json:
+    post:
+      description: Import MCP server configurations from raw JSON or TOML content
+        (useful for pasting configurations)
+      parameters:
+      - description: If true, return preview without importing
+        in: query
+        name: preview
+        schema:
+          type: boolean
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.ImportRequest'
+        description: Import request with content
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ImportResponse'
+          description: Import result
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request - invalid content or format
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Import servers from JSON/TOML content
       tags:
       - servers
   /api/v1/servers/reconnect:
