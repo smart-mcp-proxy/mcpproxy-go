@@ -2346,7 +2346,10 @@ func (m *Manager) SetUserLoggedOut(serverName string, loggedOut bool) error {
 
 // RefreshOAuthToken triggers a token refresh for a specific server.
 // This is called by the RefreshManager for proactive token refresh.
-// TODO: This will be fully implemented in Phase 3 (US1) with RefreshManager integration.
+//
+// OAuth detection checks both:
+// 1. Static config (serverConfig.OAuth) - for servers with pre-configured OAuth
+// 2. Database tokens - for servers using dynamic OAuth discovery (Protected Resource Metadata)
 func (m *Manager) RefreshOAuthToken(serverName string) error {
 	m.mu.RLock()
 	client, exists := m.clients[serverName]
@@ -2356,18 +2359,40 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 		return fmt.Errorf("server not found: %s", serverName)
 	}
 
-	// Get the server config to check if it uses OAuth
+	// Check if server uses OAuth via either static config or dynamic discovery
 	serverConfig := client.GetConfig()
-	if serverConfig == nil || serverConfig.OAuth == nil {
+	hasStaticOAuth := serverConfig != nil && serverConfig.OAuth != nil
+
+	// Also check for OAuth tokens in the database (dynamic OAuth discovery)
+	// Servers like atlassian-remote, slack discover OAuth requirements at runtime
+	// via Protected Resource Metadata and store tokens without OAuth in static config
+	hasStoredTokens := false
+	if m.storage != nil && serverConfig != nil {
+		// IMPORTANT: Use GenerateServerKey to match how PersistentTokenStore stores tokens.
+		// Tokens are stored with key = SHA256(serverName|serverURL)[:16], not just serverName.
+		serverKey := oauth.GenerateServerKey(serverName, serverConfig.URL)
+		token, err := m.storage.GetOAuthToken(serverKey)
+		if err == nil && token != nil && token.RefreshToken != "" {
+			hasStoredTokens = true
+			m.logger.Debug("Found OAuth token in database for dynamic OAuth server",
+				zap.String("server", serverName),
+				zap.String("server_key", serverKey),
+				zap.Bool("has_refresh_token", token.RefreshToken != ""))
+		}
+	}
+
+	if !hasStaticOAuth && !hasStoredTokens {
 		return fmt.Errorf("server does not use OAuth: %s", serverName)
 	}
 
-	// TODO: Implement actual token refresh in Phase 3
-	// For now, force a reconnection which will trigger token refresh if needed
-	client.ForceReconnect("manual_token_refresh")
+	// Force a reconnection which will trigger token refresh via mcp-go's
+	// automatic token refresh when TokenStore provides a refresh token
+	client.ForceReconnect("oauth_token_refresh")
 
 	m.logger.Info("OAuth token refresh requested",
-		zap.String("server", serverName))
+		zap.String("server", serverName),
+		zap.Bool("has_static_oauth", hasStaticOAuth),
+		zap.Bool("has_stored_tokens", hasStoredTokens))
 
 	return nil
 }

@@ -42,6 +42,10 @@ func (r *Runtime) StartBackgroundInitialization() {
 
 		// Register token saved callback to wire PersistentTokenStore -> RefreshManager
 		oauth.GetTokenStoreManager().SetTokenSavedCallback(func(serverName string, expiresAt time.Time) {
+			r.logger.Info("OnTokenSaved callback fired - scheduling proactive refresh",
+				zap.String("server", serverName),
+				zap.Time("expires_at", expiresAt),
+				zap.Duration("valid_for", time.Until(expiresAt)))
 			r.refreshManager.OnTokenSaved(serverName, expiresAt)
 		})
 		r.logger.Info("Token saved callback registered for proactive refresh")

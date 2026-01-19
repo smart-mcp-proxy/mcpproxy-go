@@ -54,7 +54,15 @@ func GenerateServerKey(serverName, serverURL string) string {
 	hashStr := hex.EncodeToString(hash[:])
 
 	// Return first 16 characters of hash for readability (still highly unique)
-	return fmt.Sprintf("%s_%s", serverName, hashStr[:16])
+	key := fmt.Sprintf("%s_%s", serverName, hashStr[:16])
+
+	// Log key generation for debugging server key mismatches
+	zap.L().Debug("Generated OAuth server key",
+		zap.String("server_name", serverName),
+		zap.String("server_url", serverURL),
+		zap.String("generated_key", key))
+
+	return key
 }
 
 // GetToken retrieves the OAuth token from persistent storage
@@ -67,11 +75,13 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	}
 
 	p.logger.Debug("🔍 Loading OAuth token from persistent storage",
+		zap.String("server_name", p.serverName),
 		zap.String("server_key", p.serverKey))
 
 	record, err := p.storage.GetOAuthToken(p.serverKey)
 	if err != nil {
 		p.logger.Debug("❌ No stored OAuth token found",
+			zap.String("server_name", p.serverName),
 			zap.String("server_key", p.serverKey),
 			zap.Error(err))
 		return nil, transport.ErrNoToken
@@ -147,6 +157,19 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 		Scope:           scope,
 		HasRefreshToken: record.RefreshToken != "",
 	})
+
+	// Warn if returning an expired token without a refresh token - mcp-go cannot refresh this
+	if isExpired && record.RefreshToken == "" {
+		p.logger.Warn("⚠️ Returning expired token WITHOUT refresh_token - refresh will fail",
+			zap.String("server_name", p.serverName),
+			zap.String("server_key", p.serverKey),
+			zap.Time("expired_at", record.ExpiresAt))
+	} else if record.RefreshToken == "" {
+		p.logger.Warn("⚠️ Token has no refresh_token - cannot be refreshed when it expires",
+			zap.String("server_name", p.serverName),
+			zap.String("server_key", p.serverKey),
+			zap.Time("expires_at", record.ExpiresAt))
+	}
 
 	// Return the token - mcp-go library will check IsExpired() and handle refresh if needed
 	// For long-lived tokens, we subtract the grace period from ExpiresAt to trigger refresh earlier

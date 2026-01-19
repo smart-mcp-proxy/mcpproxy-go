@@ -191,6 +191,7 @@ func (m *RefreshManager) Start(ctx context.Context) error {
 	defer m.mu.Unlock()
 
 	if m.started {
+		m.logger.Debug("RefreshManager already started, skipping")
 		return nil // Already started
 	}
 
@@ -198,31 +199,50 @@ func (m *RefreshManager) Start(ctx context.Context) error {
 	m.ctx, m.cancel = context.WithCancel(ctx)
 	m.started = true
 
-	m.logger.Info("Starting RefreshManager")
+	m.logger.Info("RefreshManager.Start() called")
 
 	// Track startup refresh stats
 	var scheduled, immediateRefresh, expired int
 
 	// Load existing tokens and schedule refreshes
 	if m.storage != nil {
+		m.logger.Debug("Loading OAuth tokens from storage",
+			zap.Bool("storage_available", true))
+
 		tokens, err := m.storage.ListOAuthTokens()
 		if err != nil {
-			m.logger.Warn("Failed to load existing tokens", zap.Error(err))
+			m.logger.Warn("Failed to load existing tokens",
+				zap.Error(err))
 			// Continue - we can still handle new tokens
 		} else {
+			m.logger.Info("OAuth tokens retrieved from storage",
+				zap.Int("count", len(tokens)))
 			// Collect tokens that need immediate refresh (expired access token but valid refresh token)
 			var tokensToRefresh []string
 
 			for _, token := range tokens {
 				if token == nil || token.ExpiresAt.IsZero() {
+					m.logger.Debug("Skipping nil or zero-expiry token")
 					continue
 				}
 
 				serverName := token.GetServerName()
 				now := time.Now()
 
+				// Log each token being processed for debugging
+				m.logger.Debug("Processing OAuth token",
+					zap.String("server", serverName),
+					zap.String("storage_key", token.ServerName),
+					zap.Time("expires_at", token.ExpiresAt),
+					zap.Bool("has_refresh_token", token.RefreshToken != ""),
+					zap.Bool("is_expired", token.ExpiresAt.Before(now)),
+					zap.Duration("time_until_expiry", token.ExpiresAt.Sub(now)))
+
 				if token.ExpiresAt.After(now) {
 					// Token not expired - schedule proactive refresh at 80% lifetime
+					m.logger.Debug("Scheduling proactive refresh for non-expired token",
+						zap.String("server", serverName),
+						zap.Time("expires_at", token.ExpiresAt))
 					m.scheduleRefreshLocked(serverName, token.ExpiresAt)
 					scheduled++
 				} else if token.RefreshToken != "" {
@@ -269,10 +289,18 @@ func (m *RefreshManager) Start(ctx context.Context) error {
 
 			// Execute immediate refreshes asynchronously (after releasing the lock)
 			if len(tokensToRefresh) > 0 {
+				m.logger.Info("Starting asynchronous refresh for expired tokens",
+					zap.Int("count", len(tokensToRefresh)),
+					zap.Strings("servers", tokensToRefresh))
 				go m.executeStartupRefreshes(tokensToRefresh)
 			}
 		}
+	} else {
+		m.logger.Warn("RefreshManager started with nil storage - token persistence disabled")
 	}
+
+	m.logger.Info("RefreshManager startup complete",
+		zap.Int("schedules_created", len(m.schedules)))
 
 	return nil
 }
