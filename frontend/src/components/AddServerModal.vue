@@ -612,6 +612,8 @@ const validationError = ref<{ message: string; line?: number; column?: number; h
 // Canonical config paths for quick import
 const canonicalPaths = ref<CanonicalConfigPath[]>([])
 const importingCanonicalPath = ref<string | null>(null)
+// Track the active canonical path when importing (to use correct API in handleImport)
+const activeCanonicalImport = ref<{ path: string; format: string } | null>(null)
 
 // Editor refs for line numbers
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
@@ -870,6 +872,8 @@ async function triggerPreview() {
   previewResult.value = null
   selectedServers.value.clear()
   validationError.value = null
+  // Clear canonical import when doing file/paste preview
+  activeCanonicalImport.value = null
 
   if (importMode.value === 'file' && importFile.value) {
     await previewFromFile()
@@ -964,7 +968,15 @@ async function handleImport() {
     const serverNames = Array.from(selectedServers.value)
 
     let response
-    if (importMode.value === 'file' && importFile.value) {
+    if (activeCanonicalImport.value) {
+      // Import from canonical path (e.g., Claude Desktop config)
+      response = await api.importServersFromPath({
+        path: activeCanonicalImport.value.path,
+        format: activeCanonicalImport.value.format,
+        server_names: serverNames,
+        preview: false
+      })
+    } else if (importMode.value === 'file' && importFile.value) {
       response = await api.importServersFromFile(importFile.value, {
         format: importFormat.value || undefined,
         server_names: serverNames,
@@ -1036,6 +1048,9 @@ async function importFromCanonicalPath(config: CanonicalConfigPath) {
     // Show preview result
     previewResult.value = previewResponse.data
 
+    // Store the canonical path info for use in handleImport
+    activeCanonicalImport.value = { path: config.path, format: config.format }
+
     // Select all servers by default
     selectedServers.value.clear()
     previewResponse.data.imported.forEach(s => selectedServers.value.add(s.name))
@@ -1078,6 +1093,7 @@ function handleClose() {
   importError.value = ''
   validationError.value = null
   selectedServers.value.clear()
+  activeCanonicalImport.value = null
 
   // Reset tab
   activeTab.value = 'manual'
