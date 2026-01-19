@@ -268,7 +268,7 @@ cat > "$TEMP_DIR/Distribution.xml" << EOF
     <title>MCP Proxy ${VERSION#v}</title>
     <organization>com.smartmcpproxy</organization>
     <domains enable_localSystem="true"/>
-    <options customize="never" require-scripts="true" rootVolumeOnly="true" />
+    <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64" />
 
     <!-- Define documents displayed at various steps -->
     <welcome file="welcome_en.rtf" mime-type="text/rtf"/>
