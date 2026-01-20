@@ -135,12 +135,14 @@ func (m *mockEventEmitter) GetFailedEvents() int {
 	return len(m.failedEvents)
 }
 
-// T012: Test RefreshManager scheduleRefresh at 80% lifetime
-func TestRefreshManager_ScheduleAt80PercentLifetime(t *testing.T) {
+// T012: Test RefreshManager hybrid refresh strategy
+// Uses the EARLIER of: 75% of lifetime OR (expiry - 5 minutes buffer)
+func TestRefreshManager_HybridRefreshStrategy(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	store := newMockTokenStore()
 
-	// Token that expires in 1 hour (well above MinRefreshInterval of 5s)
+	// Token that expires in 1 hour (well above MinRefreshBuffer of 5 minutes)
+	// For 1-hour token: 75% = 45 min, buffer = 55 min, so percentage wins (45 min)
 	expiresAt := time.Now().Add(1 * time.Hour)
 	store.AddToken(&storage.OAuthTokenRecord{
 		ServerName: "test-server",
@@ -160,17 +162,54 @@ func TestRefreshManager_ScheduleAt80PercentLifetime(t *testing.T) {
 	schedule := manager.GetSchedule("test-server")
 	require.NotNil(t, schedule, "Schedule should be created")
 
-	// Verify refresh is scheduled at approximately 80% of lifetime
-	// With 1 hour token, 80% = 48 minutes, so refresh should be around 48 minutes from now
+	// Verify refresh is scheduled using hybrid strategy
+	// With 1 hour token: 75% = 45 min (percentage-based wins over 55 min buffer-based)
 	assert.Equal(t, "test-server", schedule.ServerName)
 	assert.Equal(t, expiresAt, schedule.ExpiresAt)
 
-	// Verify scheduled time is approximately at 80% threshold
-	expectedRefreshDelay := time.Duration(float64(1*time.Hour) * 0.8) // 48 minutes
+	// Verify scheduled time is approximately at 75% threshold (hybrid chooses earlier time)
+	expectedRefreshDelay := time.Duration(float64(1*time.Hour) * DefaultRefreshThreshold) // 45 minutes
 	actualRefreshDelay := time.Until(schedule.ScheduledRefresh)
 	// Allow 10 second tolerance for test timing
 	assert.InDelta(t, expectedRefreshDelay.Seconds(), actualRefreshDelay.Seconds(), 10.0,
-		"Refresh should be scheduled at ~80%% of lifetime")
+		"Refresh should be scheduled at ~75%% of lifetime for long-lived tokens")
+}
+
+// T012b: Test buffer-based strategy for short-lived tokens
+// For tokens where 75% would leave less than 5 minutes buffer, use 5-minute buffer instead
+func TestRefreshManager_BufferBasedStrategy(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+
+	// Token that expires in 10 minutes
+	// For 10-min token: 75% = 7.5 min (2.5 min buffer), buffer-based = 5 min (5 min buffer)
+	// Buffer-based wins because 5 min < 7.5 min delay
+	expiresAt := time.Now().Add(10 * time.Minute)
+	store.AddToken(&storage.OAuthTokenRecord{
+		ServerName: "test-server",
+		ExpiresAt:  expiresAt,
+	})
+
+	manager := NewRefreshManager(store, nil, nil, logger)
+	runtime := &mockRuntime{}
+	manager.SetRuntime(runtime)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Verify schedule was created
+	schedule := manager.GetSchedule("test-server")
+	require.NotNil(t, schedule, "Schedule should be created")
+
+	// Verify refresh is scheduled using buffer-based strategy (5 minutes before expiry)
+	// Buffer = expiresAt - refreshAt should be ~5 minutes
+	actualBuffer := schedule.ExpiresAt.Sub(schedule.ScheduledRefresh)
+	expectedBuffer := MinRefreshBuffer // 5 minutes
+	// Allow 10 second tolerance for test timing
+	assert.InDelta(t, expectedBuffer.Seconds(), actualBuffer.Seconds(), 10.0,
+		"Short-lived tokens should use 5-minute buffer strategy")
 }
 
 // T013: Test RefreshManager retry with exponential backoff

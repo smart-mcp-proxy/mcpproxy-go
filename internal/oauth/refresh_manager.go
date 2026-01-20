@@ -16,8 +16,9 @@ import (
 // Default refresh configuration
 const (
 	// DefaultRefreshThreshold is the percentage of token lifetime at which proactive refresh triggers.
-	// 0.8 means refresh at 80% of lifetime (e.g., 30s token → refresh at 24s).
-	DefaultRefreshThreshold = 0.8
+	// Used in hybrid calculation: refresh at the EARLIER of (threshold * lifetime) or (expiry - MinRefreshBuffer).
+	// 0.75 means refresh at 75% of lifetime for long-lived tokens.
+	DefaultRefreshThreshold = 0.75
 
 	// DefaultMaxRetries is the maximum number of refresh attempts before giving up.
 	// Set to 0 for unlimited retries until token expiration (FR-009).
@@ -25,6 +26,11 @@ const (
 
 	// MinRefreshInterval prevents too-frequent refresh attempts.
 	MinRefreshInterval = 5 * time.Second
+
+	// MinRefreshBuffer is the minimum time before expiration to schedule a refresh.
+	// This ensures adequate time for retries even with short-lived tokens.
+	// Industry best practice: Google and Microsoft recommend 5 minutes.
+	MinRefreshBuffer = 5 * time.Minute
 
 	// RetryBackoffBase is the base duration for exponential backoff on retry.
 	// Per FR-008: minimum 10 seconds between refresh attempts per server.
@@ -45,7 +51,7 @@ type RefreshState int
 const (
 	// RefreshStateIdle means no refresh is pending or in progress.
 	RefreshStateIdle RefreshState = iota
-	// RefreshStateScheduled means a proactive refresh is scheduled at 80% lifetime.
+	// RefreshStateScheduled means a proactive refresh is scheduled (hybrid: 75% lifetime or 5min buffer).
 	RefreshStateScheduled
 	// RefreshStateRetrying means refresh failed and is retrying with exponential backoff.
 	RefreshStateRetrying
@@ -73,7 +79,7 @@ func (s RefreshState) String() string {
 type RefreshSchedule struct {
 	ServerName       string        // Unique server identifier
 	ExpiresAt        time.Time     // When the current token expires
-	ScheduledRefresh time.Time     // When proactive refresh is scheduled (80% of lifetime)
+	ScheduledRefresh time.Time     // When proactive refresh is scheduled (hybrid strategy)
 	RetryCount       int           // Number of refresh retry attempts
 	LastError        string        // Last refresh error message
 	Timer            *time.Timer   // Background timer for scheduled refresh
@@ -184,7 +190,7 @@ func (m *RefreshManager) SetMetricsRecorder(recorder RefreshMetricsRecorder) {
 }
 
 // Start initializes the refresh manager and loads existing tokens.
-// For non-expired tokens, it schedules proactive refresh at 80% lifetime.
+// For non-expired tokens, it schedules proactive refresh using hybrid strategy.
 // For expired tokens with valid refresh tokens, it attempts immediate refresh.
 func (m *RefreshManager) Start(ctx context.Context) error {
 	m.mu.Lock()
@@ -239,7 +245,7 @@ func (m *RefreshManager) Start(ctx context.Context) error {
 					zap.Duration("time_until_expiry", token.ExpiresAt.Sub(now)))
 
 				if token.ExpiresAt.After(now) {
-					// Token not expired - schedule proactive refresh at 80% lifetime
+					// Token not expired - schedule proactive refresh using hybrid strategy
 					m.logger.Debug("Scheduling proactive refresh for non-expired token",
 						zap.String("server", serverName),
 						zap.Time("expires_at", token.ExpiresAt))
@@ -502,10 +508,15 @@ func (m *RefreshManager) GetRefreshState(serverName string) *RefreshStateInfo {
 
 // scheduleRefreshLocked schedules a proactive refresh for a token.
 // Must be called with m.mu held.
+//
+// Uses a hybrid refresh strategy (industry best practice):
+//   - Refresh at the EARLIER of: (threshold * lifetime) OR (expiry - MinRefreshBuffer)
+//   - This ensures short-lived tokens get adequate buffer time for retries
+//   - Long-lived tokens refresh at 75% of lifetime (e.g., 1-hour token → 45 min)
+//   - Short-lived tokens get at least 5 minutes buffer (e.g., 10-min token → 5 min)
 func (m *RefreshManager) scheduleRefreshLocked(serverName string, expiresAt time.Time) {
 	now := time.Now()
 
-	// Calculate when to refresh (at threshold % of lifetime)
 	lifetime := expiresAt.Sub(now)
 	if lifetime <= 0 {
 		m.logger.Debug("Token already expired, skipping schedule",
@@ -514,17 +525,34 @@ func (m *RefreshManager) scheduleRefreshLocked(serverName string, expiresAt time
 		return
 	}
 
-	// Calculate refresh time at threshold of remaining lifetime
-	refreshDelay := time.Duration(float64(lifetime) * m.threshold)
+	// Hybrid refresh calculation:
+	// 1. Percentage-based: refresh at threshold% of lifetime (default 75%)
+	// 2. Buffer-based: refresh at (expiry - MinRefreshBuffer) for minimum safety margin
+	// Use the EARLIER of the two to ensure adequate time for retries
+	percentageDelay := time.Duration(float64(lifetime) * m.threshold)
+	bufferDelay := lifetime - MinRefreshBuffer
 
-	// Ensure minimum interval
+	// Choose the earlier refresh time (smaller delay)
+	var refreshDelay time.Duration
+	var strategy string
+	if bufferDelay > 0 && bufferDelay < percentageDelay {
+		// Buffer-based is earlier - use it for short-lived tokens
+		refreshDelay = bufferDelay
+		strategy = "buffer-based"
+	} else {
+		// Percentage-based is earlier or buffer would be negative
+		refreshDelay = percentageDelay
+		strategy = "percentage-based"
+	}
+
+	// Ensure minimum interval (prevents hammering on very short tokens)
 	if refreshDelay < MinRefreshInterval {
 		refreshDelay = MinRefreshInterval
 	}
 
 	refreshAt := now.Add(refreshDelay)
 
-	// If refresh would be after expiration, schedule for just before expiration
+	// Final safety check: ensure we're not scheduling after expiration
 	if refreshAt.After(expiresAt.Add(-MinRefreshInterval)) {
 		refreshAt = expiresAt.Add(-MinRefreshInterval)
 		refreshDelay = refreshAt.Sub(now)
@@ -534,6 +562,7 @@ func (m *RefreshManager) scheduleRefreshLocked(serverName string, expiresAt time
 				zap.Time("expires_at", expiresAt))
 			return
 		}
+		strategy = "minimum-interval"
 	}
 
 	// Create or update schedule
@@ -558,6 +587,8 @@ func (m *RefreshManager) scheduleRefreshLocked(serverName string, expiresAt time
 		zap.Time("expires_at", expiresAt),
 		zap.Time("refresh_at", refreshAt),
 		zap.Duration("delay", refreshDelay),
+		zap.Duration("buffer", expiresAt.Sub(refreshAt)),
+		zap.String("strategy", strategy),
 		zap.Float64("threshold", m.threshold))
 }
 
