@@ -219,15 +219,35 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		}
 	}
 
-	// Display OAuth status
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("🔐 OAuth Authentication Status")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println()
+	// Filter to only OAuth servers
+	oauthServers := filterOAuthServers(servers)
 
-	hasOAuthServers := false
+	// Get the output formatter based on global flags
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return fmt.Errorf("failed to get output formatter: %w", err)
+	}
+
+	outputFormat := ResolveOutputFormat()
+
+	// For structured formats (json, yaml), output raw data
+	if outputFormat == "json" || outputFormat == "yaml" {
+		result, err := formatter.Format(oauthServers)
+		if err != nil {
+			return fmt.Errorf("failed to format output: %w", err)
+		}
+		fmt.Println(result)
+		return nil
+	}
+
+	// For table format, use human-readable display
+	return displayAuthStatusPretty(oauthServers)
+}
+
+// filterOAuthServers filters servers to only those with OAuth configuration
+func filterOAuthServers(servers []map[string]interface{}) []map[string]interface{} {
+	var oauthServers []map[string]interface{}
 	for _, srv := range servers {
-		name, _ := srv["name"].(string)
 		oauth, _ := srv["oauth"].(map[string]interface{})
 		authenticated, _ := srv["authenticated"].(bool)
 		lastError, _ := srv["last_error"].(string)
@@ -240,11 +260,30 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 			containsIgnoreCase(lastError, "oauth") ||
 			authenticated
 
-		if !isOAuthServer {
-			continue // Skip non-OAuth servers
+		if isOAuthServer {
+			oauthServers = append(oauthServers, srv)
 		}
+	}
+	return oauthServers
+}
 
-		hasOAuthServers = true
+// displayAuthStatusPretty displays OAuth status in human-readable format
+func displayAuthStatusPretty(servers []map[string]interface{}) error {
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("🔐 OAuth Authentication Status")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+
+	if len(servers) == 0 {
+		fmt.Println("ℹ️  No servers with OAuth configuration found.")
+		fmt.Println("   Configure OAuth in mcp_config.json to enable authentication.")
+		return nil
+	}
+
+	for _, srv := range servers {
+		name, _ := srv["name"].(string)
+		oauth, _ := srv["oauth"].(map[string]interface{})
+		lastError, _ := srv["last_error"].(string)
 
 		// Use unified health status from backend (FR-006, FR-007)
 		var healthLevel, adminState, healthSummary, healthAction string
@@ -408,11 +447,6 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		}
 
 		fmt.Println()
-	}
-
-	if !hasOAuthServers {
-		fmt.Println("ℹ️  No servers with OAuth configuration found.")
-		fmt.Println("   Configure OAuth in mcp_config.json to enable authentication.")
 	}
 
 	return nil
