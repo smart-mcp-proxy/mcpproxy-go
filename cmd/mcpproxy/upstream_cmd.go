@@ -20,6 +20,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
@@ -120,6 +121,36 @@ Examples:
 		RunE: runUpstreamAddJSON,
 	}
 
+	upstreamImportCmd = &cobra.Command{
+		Use:   "import <path>",
+		Short: "Import servers from external configuration file",
+		Long: `Import MCP server configurations from Claude Desktop, Claude Code, Cursor IDE, Codex CLI, or Gemini CLI.
+
+Supported formats:
+  - Claude Desktop: ~/Library/Application Support/Claude/claude_desktop_config.json
+  - Claude Code: .claude/settings.json or .claude.json
+  - Cursor IDE: ~/.cursor/mcp.json
+  - Codex CLI: ~/.codex/config.toml
+  - Gemini CLI: ~/.gemini/settings.json
+
+The format is auto-detected from file content. Imported servers are quarantined by default.
+
+Examples:
+  # Import all servers from Claude Desktop config
+  mcpproxy upstream import ~/Library/Application\ Support/Claude/claude_desktop_config.json
+
+  # Preview import without making changes
+  mcpproxy upstream import --dry-run ~/Library/Application\ Support/Claude/claude_desktop_config.json
+
+  # Import specific server by name
+  mcpproxy upstream import --server github ~/.cursor/mcp.json
+
+  # Force format detection
+  mcpproxy upstream import --format claude-desktop config.json`,
+		Args: cobra.ExactArgs(1),
+		RunE: runUpstreamImport,
+	}
+
 	// Command flags
 	upstreamLogLevel   string
 	upstreamConfigPath string
@@ -140,6 +171,11 @@ Examples:
 	// Remove command flags
 	upstreamRemoveYes      bool
 	upstreamRemoveIfExists bool
+
+	// Import command flags
+	upstreamImportServer string
+	upstreamImportFormat string
+	upstreamImportDryRun bool
 )
 
 // GetUpstreamCommand returns the upstream command for adding to the root command.
@@ -159,6 +195,7 @@ func init() {
 	upstreamCmd.AddCommand(upstreamAddCmd)
 	upstreamCmd.AddCommand(upstreamRemoveCmd)
 	upstreamCmd.AddCommand(upstreamAddJSONCmd)
+	upstreamCmd.AddCommand(upstreamImportCmd)
 
 	// Define flags (note: output format handled by global --output/-o flag from root command)
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
@@ -194,6 +231,11 @@ func init() {
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
 	upstreamRemoveCmd.Flags().BoolVarP(&upstreamRemoveYes, "y", "y", false, "Skip confirmation prompt (short form)")
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveIfExists, "if-exists", false, "Don't error if server doesn't exist")
+
+	// Import command flags
+	upstreamImportCmd.Flags().StringVarP(&upstreamImportServer, "server", "s", "", "Import only a specific server by name")
+	upstreamImportCmd.Flags().StringVar(&upstreamImportFormat, "format", "", "Force format (claude-desktop, claude-code, cursor, codex, gemini)")
+	upstreamImportCmd.Flags().BoolVar(&upstreamImportDryRun, "dry-run", false, "Preview import without making changes")
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
@@ -1288,4 +1330,295 @@ func promptConfirmation(message string) (bool, error) {
 
 	response = strings.ToLower(strings.TrimSpace(response))
 	return response == "y" || response == "yes", nil
+}
+
+// runUpstreamImport handles the 'upstream import' command
+func runUpstreamImport(_ *cobra.Command, args []string) error {
+	filePath := args[0]
+
+	// Read file content
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return outputError(output.NewStructuredError(output.ErrCodeInvalidInput, fmt.Sprintf("failed to read file: %v", err)).
+			WithGuidance("Check that the file exists and is readable"), output.ErrCodeInvalidInput)
+	}
+
+	// Build import options
+	opts := &configimport.ImportOptions{
+		Preview: upstreamImportDryRun,
+		Now:     time.Now(),
+	}
+
+	// Parse format hint if provided
+	if upstreamImportFormat != "" {
+		format := parseImportFormat(upstreamImportFormat)
+		if format == configimport.FormatUnknown {
+			return outputError(output.NewStructuredError(output.ErrCodeInvalidInput, fmt.Sprintf("unknown format: %s", upstreamImportFormat)).
+				WithGuidance("Valid formats: claude-desktop, claude-code, cursor, codex, gemini"), output.ErrCodeInvalidInput)
+		}
+		opts.FormatHint = format
+	}
+
+	// Filter by server name if specified
+	if upstreamImportServer != "" {
+		opts.ServerNames = []string{upstreamImportServer}
+	}
+
+	// Load current configuration to check for existing servers
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		return outputError(output.NewStructuredError(output.ErrCodeConfigNotFound, err.Error()).
+			WithGuidance("Check that your config file exists and is valid").
+			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
+	}
+
+	// Build list of existing server names
+	existingNames := make([]string, len(globalConfig.Servers))
+	for i, srv := range globalConfig.Servers {
+		existingNames[i] = srv.Name
+	}
+	opts.ExistingServers = existingNames
+
+	// Run import
+	result, err := configimport.Import(content, opts)
+	if err != nil {
+		// Check if it's a format detection error
+		var importErr *configimport.ImportError
+		if errors.As(err, &importErr) {
+			return outputError(output.NewStructuredError(output.ErrCodeInvalidInput, importErr.Message).
+				WithGuidance("Use --format to specify the configuration format"), output.ErrCodeInvalidInput)
+		}
+		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()), output.ErrCodeOperationFailed)
+	}
+
+	// Output results based on format
+	outputFormat := ResolveOutputFormat()
+
+	if outputFormat == "json" || outputFormat == "yaml" {
+		return outputImportResultStructured(result, outputFormat)
+	}
+
+	return outputImportResultTable(result, upstreamImportDryRun, globalConfig)
+}
+
+// parseImportFormat converts a format string to ConfigFormat
+func parseImportFormat(format string) configimport.ConfigFormat {
+	switch strings.ToLower(format) {
+	case "claude-desktop", "claudedesktop":
+		return configimport.FormatClaudeDesktop
+	case "claude-code", "claudecode":
+		return configimport.FormatClaudeCode
+	case "cursor":
+		return configimport.FormatCursor
+	case "codex":
+		return configimport.FormatCodex
+	case "gemini":
+		return configimport.FormatGemini
+	default:
+		return configimport.FormatUnknown
+	}
+}
+
+// outputImportResultStructured outputs the import result in JSON/YAML format
+func outputImportResultStructured(result *configimport.ImportResult, format string) error {
+	// Build output structure
+	output := map[string]interface{}{
+		"format":       result.Format,
+		"format_name":  result.FormatDisplayName,
+		"summary":      result.Summary,
+		"imported":     buildImportedServersOutput(result.Imported),
+		"skipped":      result.Skipped,
+		"failed":       result.Failed,
+		"warnings":     result.Warnings,
+	}
+
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return err
+	}
+
+	formatted, err := formatter.Format(output)
+	if err != nil {
+		return fmt.Errorf("failed to format output: %w", err)
+	}
+
+	fmt.Println(formatted)
+	return nil
+}
+
+// buildImportedServersOutput builds the output structure for imported servers
+func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[string]interface{} {
+	result := make([]map[string]interface{}, len(imported))
+	for i, s := range imported {
+		result[i] = map[string]interface{}{
+			"name":           s.Server.Name,
+			"protocol":       s.Server.Protocol,
+			"url":            s.Server.URL,
+			"command":        s.Server.Command,
+			"args":           s.Server.Args,
+			"source_format":  s.SourceFormat,
+			"original_name":  s.OriginalName,
+			"fields_skipped": s.FieldsSkipped,
+			"warnings":       s.Warnings,
+		}
+	}
+	return result
+}
+
+// outputImportResultTable outputs the import result in table format
+func outputImportResultTable(result *configimport.ImportResult, dryRun bool, globalConfig *config.Config) error {
+	// Header
+	if dryRun {
+		fmt.Println("🔍 DRY RUN - No changes will be made")
+		fmt.Println()
+	}
+
+	fmt.Printf("📁 Detected format: %s\n", result.FormatDisplayName)
+	fmt.Println()
+
+	// Summary
+	fmt.Printf("Summary:\n")
+	fmt.Printf("  Total servers found: %d\n", result.Summary.Total)
+	fmt.Printf("  To import:          %d\n", result.Summary.Imported)
+	fmt.Printf("  Skipped:            %d\n", result.Summary.Skipped)
+	fmt.Printf("  Failed:             %d\n", result.Summary.Failed)
+	fmt.Println()
+
+	// Show imported servers
+	if len(result.Imported) > 0 {
+		if dryRun {
+			fmt.Println("Servers to import:")
+		} else {
+			fmt.Println("Imported servers:")
+		}
+
+		for _, s := range result.Imported {
+			statusIcon := "✅"
+			if dryRun {
+				statusIcon = "📋"
+			}
+			fmt.Printf("  %s %s (%s)\n", statusIcon, s.Server.Name, s.Server.Protocol)
+
+			// Show warnings for this server
+			if len(s.Warnings) > 0 {
+				for _, w := range s.Warnings {
+					fmt.Printf("      ⚠️  %s\n", w)
+				}
+			}
+
+			// Show skipped fields
+			if len(s.FieldsSkipped) > 0 {
+				fmt.Printf("      ℹ️  Skipped fields: %s\n", strings.Join(s.FieldsSkipped, ", "))
+			}
+		}
+		fmt.Println()
+	}
+
+	// Show skipped servers
+	if len(result.Skipped) > 0 {
+		fmt.Println("Skipped servers:")
+		for _, s := range result.Skipped {
+			reason := s.Reason
+			switch reason {
+			case "already_exists":
+				reason = "already exists in config"
+			case "filtered_out":
+				reason = "not in --server filter"
+			}
+			fmt.Printf("  ⏭️  %s (%s)\n", s.Name, reason)
+		}
+		fmt.Println()
+	}
+
+	// Show failed servers
+	if len(result.Failed) > 0 {
+		fmt.Println("Failed servers:")
+		for _, s := range result.Failed {
+			fmt.Printf("  ❌ %s: %s\n", s.Name, s.Details)
+		}
+		fmt.Println()
+	}
+
+	// Show global warnings
+	if len(result.Warnings) > 0 {
+		fmt.Println("Warnings:")
+		for _, w := range result.Warnings {
+			fmt.Printf("  ⚠️  %s\n", w)
+		}
+		fmt.Println()
+	}
+
+	// If not dry run and we have servers to import, actually add them
+	if !dryRun && len(result.Imported) > 0 {
+		err := applyImportedServers(result.Imported, globalConfig)
+		if err != nil {
+			return err
+		}
+		fmt.Println("🔒 New servers are quarantined by default. Approve them in the web UI.")
+	}
+
+	return nil
+}
+
+// applyImportedServers adds the imported servers to the configuration
+func applyImportedServers(imported []*configimport.ImportedServer, globalConfig *config.Config) error {
+	// Create context
+	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Check if daemon is running
+	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return applyImportedServersDaemonMode(ctx, globalConfig.DataDir, imported)
+	}
+
+	// Direct config file mode
+	return applyImportedServersConfigMode(imported, globalConfig)
+}
+
+// applyImportedServersDaemonMode adds servers via the daemon
+func applyImportedServersDaemonMode(ctx context.Context, dataDir string, imported []*configimport.ImportedServer) error {
+	socketPath := socket.DetectSocketPath(dataDir)
+	client := cliclient.NewClient(socketPath, nil)
+
+	for _, s := range imported {
+		req := &cliclient.AddServerRequest{
+			Name:       s.Server.Name,
+			URL:        s.Server.URL,
+			Command:    s.Server.Command,
+			Args:       s.Server.Args,
+			Env:        s.Server.Env,
+			Headers:    s.Server.Headers,
+			WorkingDir: s.Server.WorkingDir,
+			Protocol:   s.Server.Protocol,
+		}
+
+		// All imported servers are quarantined
+		quarantined := true
+		req.Quarantined = &quarantined
+
+		_, err := client.AddServer(ctx, req)
+		if err != nil {
+			// Log error but continue with other servers
+			fmt.Fprintf(os.Stderr, "  ❌ Failed to add '%s': %v\n", s.Server.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// applyImportedServersConfigMode adds servers directly to the config file
+func applyImportedServersConfigMode(imported []*configimport.ImportedServer, globalConfig *config.Config) error {
+	// Add all imported servers to config
+	for _, s := range imported {
+		globalConfig.Servers = append(globalConfig.Servers, s.Server)
+	}
+
+	// Save config
+	configPath := config.GetConfigPath(globalConfig.DataDir)
+	if err := config.SaveConfig(globalConfig, configPath); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	return nil
 }

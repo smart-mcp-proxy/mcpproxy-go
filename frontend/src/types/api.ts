@@ -380,3 +380,44 @@ export interface ActivitySummaryResponse {
   start_time: string
   end_time: string
 }
+
+// Import server configuration types
+
+export interface ImportSummary {
+  total: number
+  imported: number
+  skipped: number
+  failed: number
+}
+
+export interface ImportedServer {
+  name: string
+  protocol: string
+  url?: string
+  command?: string
+  args?: string[]
+  source_format: string
+  original_name: string
+  fields_skipped?: string[]
+  warnings?: string[]
+}
+
+export interface SkippedServer {
+  name: string
+  reason: string
+}
+
+export interface FailedServer {
+  name: string
+  error: string
+}
+
+export interface ImportResponse {
+  format: string
+  format_name: string
+  summary: ImportSummary
+  imported: ImportedServer[]
+  skipped: SkippedServer[]
+  failed: FailedServer[]
+  warnings: string[]
+}

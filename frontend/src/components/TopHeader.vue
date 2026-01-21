@@ -52,9 +52,9 @@
               systemStore.isRunning ? 'bg-success animate-pulse' : 'bg-error'
             ]"
           />
-          <span class="font-bold">{{ systemStore.upstreamStats.connected_servers }}</span>
+          <span class="font-bold">{{ serversStore.serverCount.connected }}</span>
           <span class="opacity-60">/</span>
-          <span>{{ systemStore.upstreamStats.total_servers }}</span>
+          <span>{{ serversStore.serverCount.total }}</span>
           <span class="text-xs opacity-60">Servers</span>
         </div>
 

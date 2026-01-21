@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -172,7 +172,9 @@ class APIService {
       })
 
       if (!response.ok) {
-        const errorMsg = `HTTP ${response.status}: ${response.statusText}`
+        // Try to extract error message from response body
+        const errorData = await response.json().catch(() => ({}))
+        const errorMsg = errorData.error || `HTTP ${response.status}: ${response.statusText}`
         console.error(`API request failed: ${errorMsg}`)
 
         // Special handling for authentication errors
@@ -540,6 +542,92 @@ class APIService {
     return `${this.baseUrl}/api/v1/activity/export?${searchParams.toString()}`
   }
 
+  // Import server configurations
+  async importServersFromJSON(params: {
+    content: string
+    format?: string
+    server_names?: string[]
+    preview?: boolean
+  }): Promise<APIResponse<ImportResponse>> {
+    const url = `/api/v1/servers/import/json${params.preview ? '?preview=true' : ''}`
+    return this.request<ImportResponse>(url, {
+      method: 'POST',
+      body: JSON.stringify({
+        content: params.content,
+        format: params.format,
+        server_names: params.server_names
+      })
+    })
+  }
+
+  async importServersFromFile(file: File, params?: {
+    format?: string
+    server_names?: string[]
+    preview?: boolean
+  }): Promise<APIResponse<ImportResponse>> {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const searchParams = new URLSearchParams()
+    if (params?.preview) searchParams.append('preview', 'true')
+    if (params?.format) searchParams.append('format', params.format)
+    if (params?.server_names?.length) searchParams.append('server_names', params.server_names.join(','))
+
+    const url = `/api/v1/servers/import${searchParams.toString() ? '?' + searchParams.toString() : ''}`
+
+    // Use custom fetch without Content-Type header (let browser set it for FormData)
+    try {
+      const headers: Record<string, string> = {}
+      if (this.apiKey) {
+        headers['X-API-Key'] = this.apiKey
+      }
+
+      const response = await fetch(`${this.baseUrl}${url}`, {
+        method: 'POST',
+        headers,
+        body: formData
+      })
+
+      if (!response.ok) {
+        // Extract error message from response body if available
+        const errorData = await response.json().catch(() => ({}))
+        const errorMsg = errorData.error || `HTTP ${response.status}: ${response.statusText}`
+        throw new Error(errorMsg)
+      }
+
+      const data = await response.json()
+      return data as APIResponse<ImportResponse>
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    }
+  }
+
+  // Get canonical config paths for import hints
+  async getCanonicalConfigPaths(): Promise<APIResponse<CanonicalConfigPathsResponse>> {
+    return this.request<CanonicalConfigPathsResponse>('/api/v1/servers/import/paths')
+  }
+
+  // Import servers from a file path on the server's filesystem
+  async importServersFromPath(params: {
+    path: string
+    format?: string
+    server_names?: string[]
+    preview?: boolean
+  }): Promise<APIResponse<ImportResponse>> {
+    const url = `/api/v1/servers/import/path${params.preview ? '?preview=true' : ''}`
+    return this.request<ImportResponse>(url, {
+      method: 'POST',
+      body: JSON.stringify({
+        path: params.path,
+        format: params.format,
+        server_names: params.server_names
+      })
+    })
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {
@@ -549,6 +637,21 @@ class APIService {
       return false
     }
   }
+}
+
+// Canonical config path types
+export interface CanonicalConfigPath {
+  name: string
+  format: string
+  path: string
+  exists: boolean
+  os: string
+  description: string
+}
+
+export interface CanonicalConfigPathsResponse {
+  os: string
+  paths: CanonicalConfigPath[]
 }
 
 export default new APIService()

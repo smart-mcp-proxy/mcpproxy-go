@@ -1,0 +1,30 @@
+# Codex CLI MCP Server Configuration
+
+[mcp_servers.github]
+command = "uvx"
+args = ["mcp-server-github"]
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+env_vars = ["HOME", "PATH"]
+
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+cwd = "/home/user"
+
+[mcp_servers.http-server]
+url = "http://localhost:8080/mcp"
+bearer_token_env_var = "API_TOKEN"
+http_headers = { "X-Custom-Header" = "value" }
+
+[mcp_servers.disabled-server]
+command = "node"
+args = ["disabled.js"]
+enabled = false
+
+[mcp_servers.with-timeouts]
+command = "python"
+args = ["-m", "slow_server"]
+startup_timeout_sec = 30.0
+tool_timeout_sec = 60.0
+enabled_tools = ["tool1", "tool2"]
+disabled_tools = ["dangerous_tool"]

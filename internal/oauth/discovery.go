@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -31,6 +32,228 @@ type OAuthServerMetadata struct {
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
 	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
 	RegistrationEndpoint              string   `json:"registration_endpoint,omitempty"`
+}
+
+// BuildRFC8414MetadataURLs constructs OAuth Authorization Server Metadata URLs per RFC 8414.
+//
+// RFC 8414 Section 3.1 specifies that when the issuer URL contains a path component,
+// the well-known path should be inserted between the host and the path:
+//
+//	https://example.com/path → https://example.com/.well-known/oauth-authorization-server/path
+//
+// However, some servers (like the current codebase's test servers) expect the path appended:
+//
+//	https://example.com/path → https://example.com/path/.well-known/oauth-authorization-server
+//
+// This function returns both variants to try, with RFC 8414 compliant path first.
+//
+// For URLs without a path:
+//
+//	https://example.com → https://example.com/.well-known/oauth-authorization-server
+func BuildRFC8414MetadataURLs(authServerURL string) []string {
+	u, err := url.Parse(authServerURL)
+	if err != nil {
+		// Fallback to simple concatenation if URL parsing fails
+		return []string{authServerURL + "/.well-known/oauth-authorization-server"}
+	}
+
+	// Clean the path (remove trailing slash)
+	path := strings.TrimSuffix(u.Path, "/")
+
+	// Base URL without path
+	baseURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+
+	var urls []string
+
+	if path == "" || path == "/" {
+		// No path - simple case
+		urls = append(urls, baseURL+"/.well-known/oauth-authorization-server")
+	} else {
+		// Has path - RFC 8414 says insert .well-known between host and path
+		// Example: https://auth.smithery.ai/googledrive
+		//       → https://auth.smithery.ai/.well-known/oauth-authorization-server/googledrive
+		rfc8414URL := baseURL + "/.well-known/oauth-authorization-server" + path
+		urls = append(urls, rfc8414URL)
+
+		// Also try legacy path (appending .well-known after path) for backward compatibility
+		// Example: https://auth.smithery.ai/googledrive/.well-known/oauth-authorization-server
+		legacyURL := strings.TrimSuffix(authServerURL, "/") + "/.well-known/oauth-authorization-server"
+		urls = append(urls, legacyURL)
+
+		// Also try base URL without path suffix for servers like Cloudflare that host
+		// metadata at the root level regardless of the MCP server path
+		// Example: https://logs.mcp.cloudflare.com/mcp
+		//       → https://logs.mcp.cloudflare.com/.well-known/oauth-authorization-server
+		baseOnlyURL := baseURL + "/.well-known/oauth-authorization-server"
+		urls = append(urls, baseOnlyURL)
+	}
+
+	return urls
+}
+
+// FindWorkingMetadataURL tries each URL from BuildRFC8414MetadataURLs and returns the first one
+// that successfully returns valid OAuth metadata. This is used to pre-validate which URL format
+// works for a given server before passing it to the OAuth handler.
+//
+// Returns the working URL and nil error on success, or empty string and error if none work.
+func FindWorkingMetadataURL(serverURL string, timeout time.Duration) (string, error) {
+	logger := zap.L().Named("oauth.discovery")
+
+	urls := BuildRFC8414MetadataURLs(serverURL)
+	var lastErr error
+
+	for _, metadataURL := range urls {
+		logger.Debug("Validating OAuth metadata URL",
+			zap.String("server_url", serverURL),
+			zap.String("metadata_url", metadataURL))
+
+		metadata, err := fetchAuthorizationServerMetadata(metadataURL, timeout)
+		if err != nil {
+			lastErr = err
+			logger.Debug("Metadata URL validation failed",
+				zap.String("metadata_url", metadataURL),
+				zap.Error(err))
+			continue
+		}
+
+		// Validate required fields
+		if metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
+			lastErr = fmt.Errorf("metadata missing required fields")
+			logger.Debug("Metadata incomplete",
+				zap.String("metadata_url", metadataURL))
+			continue
+		}
+
+		logger.Info("Found working OAuth metadata URL",
+			zap.String("server_url", serverURL),
+			zap.String("metadata_url", metadataURL),
+			zap.String("issuer", metadata.Issuer))
+		return metadataURL, nil
+	}
+
+	return "", fmt.Errorf("no working metadata URL found for %s: %w", serverURL, lastErr)
+}
+
+// discoverAuthServerMetadataWithFallback attempts to discover OAuth Authorization Server Metadata
+// by trying multiple URL patterns per RFC 8414 Section 3.1.
+//
+// It first tries the RFC 8414 compliant URL (well-known inserted between host and path),
+// then falls back to the legacy URL (well-known appended after path).
+//
+// Returns the first successfully discovered metadata and the URL that worked.
+func discoverAuthServerMetadataWithFallback(authServerURL string, timeout time.Duration) (*OAuthServerMetadata, string, error) {
+	logger := zap.L().Named("oauth.discovery")
+
+	urls := BuildRFC8414MetadataURLs(authServerURL)
+	var lastErr error
+	var urlsChecked []string
+
+	for _, metadataURL := range urls {
+		urlsChecked = append(urlsChecked, metadataURL)
+		logger.Debug("Trying OAuth metadata URL",
+			zap.String("auth_server", authServerURL),
+			zap.String("metadata_url", metadataURL))
+
+		metadata, err := fetchAuthorizationServerMetadata(metadataURL, timeout)
+		if err == nil {
+			// Validate required fields
+			if metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
+				lastErr = fmt.Errorf("metadata missing required fields: authorization_endpoint=%q, token_endpoint=%q",
+					metadata.AuthorizationEndpoint, metadata.TokenEndpoint)
+				logger.Debug("OAuth metadata incomplete, trying next URL",
+					zap.String("metadata_url", metadataURL),
+					zap.Error(lastErr))
+				continue
+			}
+
+			logger.Info("✅ OAuth metadata discovered",
+				zap.String("auth_server", authServerURL),
+				zap.String("metadata_url", metadataURL),
+				zap.String("issuer", metadata.Issuer),
+				zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
+				zap.String("token_endpoint", metadata.TokenEndpoint))
+			return metadata, metadataURL, nil
+		}
+
+		lastErr = err
+		logger.Debug("OAuth metadata fetch failed, trying next URL",
+			zap.String("metadata_url", metadataURL),
+			zap.Error(err))
+	}
+
+	return nil, "", fmt.Errorf("failed to discover OAuth metadata from %v: %w", urlsChecked, lastErr)
+}
+
+// DiscoverAuthServerURL attempts to discover the OAuth authorization server URL
+// by fetching the Protected Resource Metadata (RFC 9728) from the MCP server.
+// Returns the first authorization server URL, or empty string if discovery fails.
+//
+// This is important for servers like Smithery that use separate domains:
+//   - MCP Server: server.smithery.ai/googledrive
+//   - Auth Server: auth.smithery.ai/googledrive
+func DiscoverAuthServerURL(serverURL string, timeout time.Duration) string {
+	logger := zap.L().Named("oauth.discovery")
+
+	// First, make a preflight request to get the WWW-Authenticate header with resource_metadata
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Post(serverURL, "application/json", strings.NewReader("{}"))
+	if err != nil {
+		logger.Debug("Preflight request failed for auth server discovery",
+			zap.String("server_url", serverURL),
+			zap.Error(err))
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		logger.Debug("Server did not return 401, cannot discover auth server",
+			zap.String("server_url", serverURL),
+			zap.Int("status_code", resp.StatusCode))
+		return ""
+	}
+
+	// Extract resource_metadata URL from WWW-Authenticate header
+	wwwAuth := resp.Header.Get("WWW-Authenticate")
+	metadataURL := ExtractResourceMetadataURL(wwwAuth)
+	if metadataURL == "" {
+		// Try constructing PRM URL using RFC 9728 pattern
+		u, err := url.Parse(serverURL)
+		if err != nil {
+			return ""
+		}
+		path := strings.TrimSuffix(u.Path, "/")
+		baseURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+		if path != "" {
+			metadataURL = baseURL + "/.well-known/oauth-protected-resource" + path
+		} else {
+			metadataURL = baseURL + "/.well-known/oauth-protected-resource"
+		}
+		logger.Debug("Constructed PRM URL from server URL",
+			zap.String("server_url", serverURL),
+			zap.String("prm_url", metadataURL))
+	}
+
+	// Fetch Protected Resource Metadata
+	metadata, err := DiscoverProtectedResourceMetadata(metadataURL, timeout)
+	if err != nil {
+		logger.Debug("Failed to fetch Protected Resource Metadata",
+			zap.String("metadata_url", metadataURL),
+			zap.Error(err))
+		return ""
+	}
+
+	// Return first authorization server
+	if len(metadata.AuthorizationServers) > 0 {
+		authServer := metadata.AuthorizationServers[0]
+		logger.Info("Discovered OAuth authorization server from PRM",
+			zap.String("server_url", serverURL),
+			zap.String("auth_server", authServer))
+		return authServer
+	}
+
+	logger.Debug("PRM has no authorization_servers",
+		zap.String("server_url", serverURL))
+	return ""
 }
 
 // ExtractResourceMetadataURL parses WWW-Authenticate header to extract resource_metadata URL
@@ -291,13 +514,14 @@ func DetectOAuthAvailability(baseURL string, timeout time.Duration) bool {
 
 // OAuthMetadataValidationResult contains the result of OAuth metadata validation
 type OAuthMetadataValidationResult struct {
-	Valid                         bool
-	ProtectedResourceMetadata     *ProtectedResourceMetadata
-	AuthorizationServerMetadata   *OAuthServerMetadata
-	ProtectedResourceMetadataURL  string
-	AuthorizationServerMetadataURL string
-	ProtectedResourceError        error
-	AuthorizationServerError      error
+	Valid                              bool
+	ProtectedResourceMetadata          *ProtectedResourceMetadata
+	AuthorizationServerMetadata        *OAuthServerMetadata
+	ProtectedResourceMetadataURL       string
+	AuthorizationServerMetadataURL     string
+	AuthorizationServerMetadataURLsTried []string // All URLs tried (RFC 8414 fallback)
+	ProtectedResourceError             error
+	AuthorizationServerError           error
 }
 
 // ValidateOAuthMetadata performs pre-flight validation of OAuth metadata.
@@ -351,18 +575,19 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 		logger.Debug("WWW-Authenticate header lacks resource_metadata",
 			zap.String("server", serverName))
 
-		// Try direct authorization server metadata discovery
-		baseURL, err := parseBaseURL(serverURL)
-		if err != nil {
-			return nil, nil // Can't validate, let OAuth flow handle it
-		}
+		// Try direct authorization server metadata discovery using RFC 8414 compliant paths
+		// Use the full server URL to properly construct RFC 8414 paths that include the path component
+		authMetadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(serverURL, timeout)
+		result.AuthorizationServerMetadataURL = discoveredURL
 
-		authServerURL := baseURL + "/.well-known/oauth-authorization-server"
-		result.AuthorizationServerMetadataURL = authServerURL
-
-		authMetadata, err := fetchAuthorizationServerMetadata(authServerURL, timeout)
 		if err != nil {
 			result.AuthorizationServerError = err
+			// Store all URLs tried for error context
+			urls := BuildRFC8414MetadataURLs(serverURL)
+			result.AuthorizationServerMetadataURLsTried = urls
+			if len(urls) > 0 {
+				result.AuthorizationServerMetadataURL = urls[0]
+			}
 			// Return structured error
 			return result, createMetadataError(serverName, serverURL, result)
 		}
@@ -403,29 +628,30 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 		authServerBaseURL = baseURL
 	}
 
-	// Trim trailing slash to avoid double-slash in URL (e.g., "https://example.com//.well-known/...")
-	authServerBaseURL = strings.TrimSuffix(authServerBaseURL, "/")
-	authServerMetadataURL := authServerBaseURL + "/.well-known/oauth-authorization-server"
-	result.AuthorizationServerMetadataURL = authServerMetadataURL
+	// Use RFC 8414 compliant discovery with fallback for servers like Smithery
+	// that use non-standard well-known paths
+	authMetadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(authServerBaseURL, timeout)
+	result.AuthorizationServerMetadataURL = discoveredURL // Store the URL that worked
 
-	authMetadata, err := fetchAuthorizationServerMetadata(authServerMetadataURL, timeout)
 	if err != nil {
 		result.AuthorizationServerError = err
+		// Store all URLs that were tried for better error messages
+		urls := BuildRFC8414MetadataURLs(authServerBaseURL)
+		result.AuthorizationServerMetadataURLsTried = urls
+		if len(urls) > 0 {
+			result.AuthorizationServerMetadataURL = urls[0] // Store first URL tried for error context
+		}
 		logger.Debug("Failed to fetch authorization server metadata",
 			zap.String("server", serverName),
-			zap.String("metadata_url", authServerMetadataURL),
+			zap.String("auth_server_base", authServerBaseURL),
+			zap.Strings("urls_tried", urls),
 			zap.Error(err))
 		return result, createMetadataError(serverName, serverURL, result)
 	}
 
 	result.AuthorizationServerMetadata = authMetadata
 
-	// Step 5: Validate required fields
-	if authMetadata.AuthorizationEndpoint == "" || authMetadata.TokenEndpoint == "" {
-		result.AuthorizationServerError = fmt.Errorf("metadata missing required fields: authorization_endpoint=%q, token_endpoint=%q",
-			authMetadata.AuthorizationEndpoint, authMetadata.TokenEndpoint)
-		return result, createMetadataError(serverName, serverURL, result)
-	}
+	// Note: Required fields validation is already done in discoverAuthServerMetadataWithFallback
 
 	result.Valid = true
 	logger.Info("✅ OAuth metadata validation successful",
@@ -486,14 +712,25 @@ func createMetadataError(serverName, serverURL string, result *OAuthMetadataVali
 	errorType := errorTypeMetadataMissing
 	errorCode := errorCodeNoMetadata
 	message := "OAuth authorization server metadata not available"
-	suggestion := "The OAuth authorization server is not properly configured. Contact the server administrator."
+
+	// Build suggestion based on URLs tried
+	var suggestion string
+	if len(result.AuthorizationServerMetadataURLsTried) > 0 {
+		suggestion = fmt.Sprintf(
+			"MCPProxy tried the following OAuth metadata URLs but none responded: %v. "+
+				"Verify the authorization server supports OAuth 2.0 discovery (RFC 8414). "+
+				"If using a custom OAuth server, ensure it exposes /.well-known/oauth-authorization-server.",
+			result.AuthorizationServerMetadataURLsTried)
+	} else {
+		suggestion = "The OAuth authorization server is not properly configured. Contact the server administrator."
+	}
 
 	// Check if metadata was found but invalid
 	if result.AuthorizationServerError != nil && strings.Contains(result.AuthorizationServerError.Error(), "missing required fields") {
 		errorType = errorTypeMetadataInvalid
 		errorCode = errorCodeBadMetadata
 		message = "OAuth authorization server metadata is incomplete"
-		suggestion = "The OAuth server metadata is missing required fields. Contact the server administrator."
+		suggestion = "The OAuth server metadata is missing required fields (authorization_endpoint and/or token_endpoint). Contact the server administrator."
 	}
 
 	// Build details structure
@@ -514,10 +751,11 @@ func createMetadataError(serverName, serverURL string, result *OAuthMetadataVali
 		}
 	}
 
-	if result.AuthorizationServerMetadataURL != "" {
+	if result.AuthorizationServerMetadataURL != "" || len(result.AuthorizationServerMetadataURLsTried) > 0 {
 		details.AuthorizationServerMetadata = &metadataStatus{
-			Found:      result.AuthorizationServerMetadata != nil,
-			URLChecked: result.AuthorizationServerMetadataURL,
+			Found:       result.AuthorizationServerMetadata != nil,
+			URLChecked:  result.AuthorizationServerMetadataURL,
+			URLsChecked: result.AuthorizationServerMetadataURLsTried,
 		}
 		if result.AuthorizationServerError != nil {
 			details.AuthorizationServerMetadata.Error = result.AuthorizationServerError.Error()
@@ -560,6 +798,7 @@ type metadataErrorDetails struct {
 type metadataStatus struct {
 	Found                bool     `json:"found"`
 	URLChecked           string   `json:"url_checked"`
+	URLsChecked          []string `json:"urls_checked,omitempty"` // All URLs tried (for RFC 8414 fallback)
 	Error                string   `json:"error,omitempty"`
 	AuthorizationServers []string `json:"authorization_servers,omitempty"`
 }

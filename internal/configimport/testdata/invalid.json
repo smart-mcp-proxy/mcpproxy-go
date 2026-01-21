@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "broken": {
+      "command": "test"
+    }
+  this is invalid json
+}

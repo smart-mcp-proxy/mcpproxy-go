@@ -617,25 +617,41 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		zap.String("redirect_uri", callbackServer.RedirectURI),
 		zap.Int("port", callbackServer.Port))
 
-	// Try to construct explicit metadata URLs to avoid timeout issues during auto-discovery
-	// Extract base URL from server URL for .well-known endpoints
-	baseURL, err := parseBaseURL(serverConfig.URL)
-	if err != nil {
-		logger.Warn("Failed to parse base URL for OAuth metadata",
-			zap.String("server", serverConfig.Name),
-			zap.String("url", serverConfig.URL),
-			zap.Error(err))
-		baseURL = ""
-	}
-
+	// Try to find a working metadata URL by validating multiple URL patterns
+	// Different servers use different URL formats:
+	// - Smithery: Uses separate domains (server.smithery.ai/x for MCP, auth.smithery.ai/x for OAuth)
+	//   OAuth metadata at: https://auth.smithery.ai/.well-known/oauth-authorization-server/googledrive
+	// - Cloudflare: Same domain for MCP and OAuth
+	//   OAuth metadata at: https://logs.mcp.cloudflare.com/.well-known/oauth-authorization-server
 	var authServerMetadataURL string
-	if baseURL != "" {
-		authServerMetadataURL = baseURL + "/.well-known/oauth-authorization-server"
-		logger.Info("Using explicit OAuth metadata URL to avoid auto-discovery timeouts",
-			zap.String("server", serverConfig.Name),
-			zap.String("metadata_url", authServerMetadataURL))
+	if serverConfig.URL != "" {
+		// First, try to discover the auth server URL from Protected Resource Metadata
+		// This is necessary for servers like Smithery that use separate domains
+		authServerURL := DiscoverAuthServerURL(serverConfig.URL, 5*time.Second)
+		urlToUse := serverConfig.URL
+		if authServerURL != "" {
+			urlToUse = authServerURL
+			logger.Info("Using discovered auth server URL for metadata discovery",
+				zap.String("server", serverConfig.Name),
+				zap.String("mcp_url", serverConfig.URL),
+				zap.String("auth_server_url", authServerURL))
+		}
+
+		// Now find the working metadata URL using the auth server URL (or server URL as fallback)
+		workingURL, err := FindWorkingMetadataURL(urlToUse, 10*time.Second)
+		if err != nil {
+			logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
+				zap.String("server", serverConfig.Name),
+				zap.String("url_tried", urlToUse),
+				zap.Error(err))
+		} else {
+			authServerMetadataURL = workingURL
+			logger.Info("Using validated OAuth metadata URL",
+				zap.String("server", serverConfig.Name),
+				zap.String("metadata_url", authServerMetadataURL))
+		}
 	} else {
-		logger.Info("Skipping OAuth metadata URL due to URL parsing issues",
+		logger.Info("Skipping OAuth metadata URL - no server URL configured",
 			zap.String("server", serverConfig.Name))
 	}
 

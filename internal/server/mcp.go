@@ -300,6 +300,21 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
 
+	// tool_search_tool_bm25_20251119 - Anthropic-compatible tool search (lazy loading)
+	// Claude models are fine-tuned to recognize this specific tool name for on-demand tool discovery.
+	// Returns tool_reference content blocks per Anthropic's custom implementation format.
+	// See: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
+	toolSearchBM25Tool := mcp.NewTool("tool_search_tool_bm25_20251119",
+		mcp.WithDescription("Search for tools by keyword or description. Use this to find relevant tools before calling them."),
+		mcp.WithTitleAnnotation("Tool Search (BM25)"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("The search query (e.g. 'weather', 'git commit', 'database query')."),
+		),
+	)
+	p.server.AddTool(toolSearchBM25Tool, p.handleToolSearchBM25)
+
 	// Intent-based tool variants (Spec 018)
 	// These replace the legacy call_tool with three operation-specific variants
 	// that enable granular IDE permission control and require explicit intent declaration.
@@ -896,6 +911,68 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 
 	// Emit success event with args and response (Spec 024)
 	p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil)
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// handleToolSearchBM25 implements the Anthropic-standard tool search tool
+// This tool name (tool_search_tool_bm25_20251119) is fine-tuned into Claude models
+// for lazy loading tool discovery. Returns tool_reference content blocks per
+// Anthropic's custom implementation format.
+// See: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
+func (p *MCPProxyServer) handleToolSearchBM25(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	startTime := time.Now()
+
+	// Extract session info for activity logging (Spec 024)
+	var sessionID string
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+	}
+	requestID := fmt.Sprintf("%d-tool_search_bm25", time.Now().UnixNano())
+
+	query, err := request.RequireString("query")
+	if err != nil {
+		p.emitActivityInternalToolCall("tool_search_tool_bm25_20251119", "", "", "",
+			sessionID, requestID, "error", err.Error(),
+			time.Since(startTime).Milliseconds(), nil, nil, nil)
+		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'query': %v", err)), nil
+	}
+
+	// Build arguments map for activity logging
+	args := map[string]interface{}{"query": query}
+
+	// Search using existing BM25 index (limit to 5 per Anthropic standard)
+	results, err := p.index.Search(query, 5)
+	if err != nil {
+		p.logger.Error("Tool search failed", zap.String("query", query), zap.Error(err))
+		p.emitActivityInternalToolCall("tool_search_tool_bm25_20251119", "", "", "",
+			sessionID, requestID, "error", err.Error(),
+			time.Since(startTime).Milliseconds(), args, nil, nil)
+		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
+	}
+
+	// Build tool_reference content blocks (Anthropic custom implementation format)
+	content := make([]map[string]interface{}, 0, len(results))
+	for _, result := range results {
+		content = append(content, map[string]interface{}{
+			"type":      "tool_reference",
+			"tool_name": result.Tool.Name,
+		})
+	}
+
+	// Return as JSON array (Claude will parse this)
+	jsonResult, err := json.Marshal(content)
+	if err != nil {
+		p.emitActivityInternalToolCall("tool_search_tool_bm25_20251119", "", "", "",
+			sessionID, requestID, "error", err.Error(),
+			time.Since(startTime).Milliseconds(), args, nil, nil)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
+	}
+
+	// Emit success event
+	p.emitActivityInternalToolCall("tool_search_tool_bm25_20251119", "", "", "",
+		sessionID, requestID, "success", "",
+		time.Since(startTime).Milliseconds(), args, content, nil)
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }

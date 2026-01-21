@@ -30,16 +30,20 @@ var (
 	authLoginCmd = &cobra.Command{
 		Use:   "login",
 		Short: "Manually authenticate with an OAuth-enabled server",
-		Long: `Manually trigger OAuth authentication flow for a specific upstream server.
+		Long: `Manually trigger OAuth authentication flow for a specific upstream server or all servers.
 This is useful when:
 - A server requires OAuth but automatic attempts have been rate limited
 - You want to authenticate proactively before using server tools
 - OAuth tokens have expired and need refreshing
+- Multiple servers need re-authentication
 
 The command will open your default browser for OAuth authorization.
+Use --all to authenticate all servers that require OAuth (confirmation prompt unless --force is used).
 
 Examples:
   mcpproxy auth login --server=Sentry-2
+  mcpproxy auth login --all
+  mcpproxy auth login --all --force
   mcpproxy auth login --server=github-server --log-level=debug
   mcpproxy auth login --server=google-calendar --timeout=5m`,
 		RunE: runAuthLogin,
@@ -82,6 +86,7 @@ Examples:
 	authConfigPath string
 	authTimeout    time.Duration
 	authAll        bool
+	authForce      bool
 )
 
 // GetAuthCommand returns the auth command for adding to the root command
@@ -96,7 +101,9 @@ func init() {
 	authCmd.AddCommand(authLogoutCmd)
 
 	// Define flags for auth login command
-	authLoginCmd.Flags().StringVarP(&authServerName, "server", "s", "", "Server name to authenticate with (required)")
+	authLoginCmd.Flags().StringVarP(&authServerName, "server", "s", "", "Server name to authenticate with")
+	authLoginCmd.Flags().BoolVar(&authAll, "all", false, "Authenticate all servers that require OAuth")
+	authLoginCmd.Flags().BoolVar(&authForce, "force", false, "Skip confirmation prompt when using --all")
 	authLoginCmd.Flags().StringVarP(&authLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
 	authLoginCmd.Flags().StringVarP(&authConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	authLoginCmd.Flags().DurationVar(&authTimeout, "timeout", 5*time.Minute, "Authentication timeout")
@@ -114,12 +121,8 @@ func init() {
 	authLogoutCmd.Flags().DurationVar(&authTimeout, "timeout", 30*time.Second, "Logout timeout")
 
 	// Mark required flags
-	err := authLoginCmd.MarkFlagRequired("server")
-	if err != nil {
-		panic(fmt.Sprintf("Failed to mark server flag as required: %v", err))
-	}
-
-	err = authLogoutCmd.MarkFlagRequired("server")
+	// Note: auth login doesn't mark --server as required because --all can be used instead
+	err := authLogoutCmd.MarkFlagRequired("server")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to mark server flag as required: %v", err))
 	}
@@ -127,6 +130,12 @@ func init() {
 	// Add examples
 	authLoginCmd.Example = `  # Authenticate with Sentry-2 server
   mcpproxy auth login --server=Sentry-2
+
+  # Authenticate all servers that require OAuth
+  mcpproxy auth login --all
+
+  # Authenticate all servers without confirmation prompt
+  mcpproxy auth login --all --force
 
   # Authenticate with debug logging
   mcpproxy auth login --server=github-server --log-level=debug
@@ -150,7 +159,18 @@ func init() {
   mcpproxy auth logout --server=github-server --log-level=debug`
 }
 
-func runAuthLogin(_ *cobra.Command, _ []string) error {
+func runAuthLogin(cmd *cobra.Command, _ []string) error {
+	// Validate flags: either --server or --all must be provided (but not both)
+	if authAll && authServerName != "" {
+		return fmt.Errorf("cannot use both --server and --all flags together")
+	}
+	if !authAll && authServerName == "" {
+		return fmt.Errorf("either --server or --all flag is required")
+	}
+
+	// After validation, silence usage for operational errors
+	cmd.SilenceUsage = true
+
 	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
 	defer cancel()
 
@@ -160,6 +180,12 @@ func runAuthLogin(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
+	// Handle --all flag: authenticate all servers
+	if authAll {
+		return runAuthLoginAll(ctx, cfg.DataDir)
+	}
+
+	// Handle single server authentication
 	// Check if daemon is running and use client mode
 	if shouldUseAuthDaemon(cfg.DataDir) {
 		return runAuthLoginClientMode(ctx, cfg.DataDir, authServerName)
@@ -167,6 +193,122 @@ func runAuthLogin(_ *cobra.Command, _ []string) error {
 
 	// No daemon detected, use standalone mode
 	return runAuthLoginStandalone(ctx, authServerName)
+}
+
+// runAuthLoginAll authenticates all servers that require OAuth authentication.
+func runAuthLoginAll(ctx context.Context, dataDir string) error {
+	// Auth login --all REQUIRES daemon
+	if !shouldUseAuthDaemon(dataDir) {
+		return fmt.Errorf("auth login --all requires running daemon. Start with: mcpproxy serve")
+	}
+
+	socketPath := socket.DetectSocketPath(dataDir)
+	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// Ping daemon to verify connectivity
+	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer pingCancel()
+	if err := client.Ping(pingCtx); err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+
+	// Fetch all servers to find those that need OAuth authentication
+	servers, err := client.GetServers(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get servers from daemon: %w", err)
+	}
+
+	// Filter servers that need login (health.action == "login")
+	var serversNeedingAuth []string
+	for _, srv := range servers {
+		name, _ := srv["name"].(string)
+		if health, ok := srv["health"].(map[string]interface{}); ok && health != nil {
+			if action, ok := health["action"].(string); ok && action == "login" {
+				serversNeedingAuth = append(serversNeedingAuth, name)
+			}
+		}
+	}
+
+	if len(serversNeedingAuth) == 0 {
+		fmt.Println("✅ No servers require authentication")
+		fmt.Println("   All OAuth-enabled servers are already authenticated.")
+		return nil
+	}
+
+	// Display servers that will be authenticated
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("🔐 Batch OAuth Authentication")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Printf("\nThe following %d server(s) require authentication:\n", len(serversNeedingAuth))
+	for i, name := range serversNeedingAuth {
+		fmt.Printf("  %d. %s\n", i+1, name)
+	}
+	fmt.Println()
+
+	// Show warning about multiple browser tabs
+	if len(serversNeedingAuth) > 1 {
+		fmt.Printf("⚠️  This will open %d browser tabs for OAuth authorization.\n\n", len(serversNeedingAuth))
+	}
+
+	// Prompt for confirmation unless --force is used
+	if !authForce {
+		fmt.Print("Do you want to continue? (yes/no): ")
+		var response string
+		if _, err := fmt.Scanln(&response); err != nil {
+			return fmt.Errorf("failed to read confirmation: %w", err)
+		}
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "yes" && response != "y" {
+			fmt.Println("\n❌ Authentication cancelled")
+			return nil
+		}
+		fmt.Println()
+	}
+
+	// Authenticate each server
+	var successful, failed int
+	failedServers := make(map[string]string) // server name -> error message
+
+	fmt.Println("Starting authentication...")
+	fmt.Println()
+
+	for i, serverName := range serversNeedingAuth {
+		fmt.Printf("[%d/%d] Authenticating %s...\n", i+1, len(serversNeedingAuth), serverName)
+
+		if err := client.TriggerOAuthLogin(ctx, serverName); err != nil {
+			fmt.Printf("  ❌ Failed: %v\n", err)
+			failed++
+			failedServers[serverName] = err.Error()
+		} else {
+			fmt.Printf("  ✅ Success\n")
+			successful++
+		}
+		fmt.Println()
+	}
+
+	// Display summary
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("📊 Authentication Summary")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Printf("Total: %d  |  Successful: %d  |  Failed: %d\n", len(serversNeedingAuth), successful, failed)
+
+	if failed > 0 {
+		fmt.Println("\n❌ Failed servers:")
+		for serverName, errMsg := range failedServers {
+			fmt.Printf("  • %s: %s\n", serverName, errMsg)
+		}
+		fmt.Println("\nTip: Run 'mcpproxy auth login --server=<name>' to retry individual servers")
+		return fmt.Errorf("%d server(s) failed to authenticate", failed)
+	}
+
+	fmt.Println("\n✅ All servers authenticated successfully!")
+	return nil
 }
 
 func runAuthStatus(_ *cobra.Command, _ []string) error {
@@ -219,15 +361,35 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		}
 	}
 
-	// Display OAuth status
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("🔐 OAuth Authentication Status")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println()
+	// Filter to only OAuth servers
+	oauthServers := filterOAuthServers(servers)
 
-	hasOAuthServers := false
+	// Get the output formatter based on global flags
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return fmt.Errorf("failed to get output formatter: %w", err)
+	}
+
+	outputFormat := ResolveOutputFormat()
+
+	// For structured formats (json, yaml), output raw data
+	if outputFormat == "json" || outputFormat == "yaml" {
+		result, err := formatter.Format(oauthServers)
+		if err != nil {
+			return fmt.Errorf("failed to format output: %w", err)
+		}
+		fmt.Println(result)
+		return nil
+	}
+
+	// For table format, use human-readable display
+	return displayAuthStatusPretty(oauthServers)
+}
+
+// filterOAuthServers filters servers to only those with OAuth configuration
+func filterOAuthServers(servers []map[string]interface{}) []map[string]interface{} {
+	var oauthServers []map[string]interface{}
 	for _, srv := range servers {
-		name, _ := srv["name"].(string)
 		oauth, _ := srv["oauth"].(map[string]interface{})
 		authenticated, _ := srv["authenticated"].(bool)
 		lastError, _ := srv["last_error"].(string)
@@ -240,11 +402,30 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 			containsIgnoreCase(lastError, "oauth") ||
 			authenticated
 
-		if !isOAuthServer {
-			continue // Skip non-OAuth servers
+		if isOAuthServer {
+			oauthServers = append(oauthServers, srv)
 		}
+	}
+	return oauthServers
+}
 
-		hasOAuthServers = true
+// displayAuthStatusPretty displays OAuth status in human-readable format
+func displayAuthStatusPretty(servers []map[string]interface{}) error {
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("🔐 OAuth Authentication Status")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+
+	if len(servers) == 0 {
+		fmt.Println("ℹ️  No servers with OAuth configuration found.")
+		fmt.Println("   Configure OAuth in mcp_config.json to enable authentication.")
+		return nil
+	}
+
+	for _, srv := range servers {
+		name, _ := srv["name"].(string)
+		oauth, _ := srv["oauth"].(map[string]interface{})
+		lastError, _ := srv["last_error"].(string)
 
 		// Use unified health status from backend (FR-006, FR-007)
 		var healthLevel, adminState, healthSummary, healthAction string
@@ -408,11 +589,6 @@ func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, al
 		}
 
 		fmt.Println()
-	}
-
-	if !hasOAuthServers {
-		fmt.Println("ℹ️  No servers with OAuth configuration found.")
-		fmt.Println("   Configure OAuth in mcp_config.json to enable authentication.")
 	}
 
 	return nil

@@ -71,7 +71,7 @@
 
         <!-- Server stats -->
         <div class="flex items-center space-x-1 text-sm">
-          <span class="hidden md:inline">{{ systemStore.upstreamStats.connected_servers }}/{{ systemStore.upstreamStats.total_servers }}</span>
+          <span class="hidden md:inline">{{ serversStore.serverCount.connected }}/{{ serversStore.serverCount.total }}</span>
           <span class="text-xs opacity-60 hidden md:inline">servers</span>
         </div>
       </div>
@@ -106,6 +106,7 @@
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
+import { useServersStore } from '@/stores/servers'
 
 // Icons (we'll use SVG icons directly for simplicity)
 const DashboardIcon = 'svg'
@@ -117,6 +118,7 @@ const SettingsIcon = 'svg'
 
 const route = useRoute()
 const systemStore = useSystemStore()
+const serversStore = useServersStore()
 
 const menuItems = [
   { name: 'Dashboard', path: '/', icon: DashboardIcon },
