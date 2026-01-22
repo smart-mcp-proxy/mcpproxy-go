@@ -823,49 +823,23 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 	enableItem := serverMenuItem.AddSubMenuItem(enableText, fmt.Sprintf("%s server %s", enableText, serverName))
 	m.serverActionItems[serverName] = enableItem
 
-	// Create action menu items for enabled, non-quarantined servers (FR-014, FR-015, FR-036-038)
-	// Always create both OAuth and restart items, then show/hide based on health.action
-	// This allows updateServerActionMenus to toggle visibility when health.action changes
+	// Show action-specific menu items based on health.action (FR-014, FR-015, FR-036-038)
 	if !quarantined && enabled {
-		// Create OAuth login item (hidden initially unless health.action == "login")
-		oauthItem := serverMenuItem.AddSubMenuItem("⚠️ Login Required", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
-		m.serverOAuthItems[serverName] = oauthItem
-		go func(name string, item *systray.MenuItem) {
-			for range item.ClickedCh {
-				if m.onServerAction != nil {
-					go m.onServerAction(name, "oauth_login")
-				}
-			}
-		}(serverName, oauthItem)
-
-		// Create restart item (shown with appropriate text based on health.action)
-		var restartText, restartTooltip string
-		if healthAction == "restart" {
-			restartText = "⚠️ Restart Required"
-			restartTooltip = fmt.Sprintf("Restart server %s to fix issues", serverName)
-		} else {
-			restartText = "🔄 Restart"
-			restartTooltip = fmt.Sprintf("Restart server %s", serverName)
-		}
-		restartItem := serverMenuItem.AddSubMenuItem(restartText, restartTooltip)
-		m.serverRestartItems[serverName] = restartItem
-		go func(name string, item *systray.MenuItem) {
-			for range item.ClickedCh {
-				if m.onServerAction != nil {
-					go m.onServerAction(name, "restart")
-				}
-			}
-		}(serverName, restartItem)
-
-		// Show/hide based on current health.action
 		switch healthAction {
 		case "login":
-			oauthItem.Show()
-			restartItem.Hide()
+			// Login Required - show prominently (FR-015, T036)
+			oauthItem := serverMenuItem.AddSubMenuItem("⚠️ Login Required", fmt.Sprintf("Authenticate with %s using OAuth", serverName))
+			m.serverOAuthItems[serverName] = oauthItem
+			go func(name string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					if m.onServerAction != nil {
+						go m.onServerAction(name, "oauth_login")
+					}
+				}
+			}(serverName, oauthItem)
+
 		case "set_secret":
-			// Set Secret - for now show restart, could add dedicated item later
-			oauthItem.Hide()
-			restartItem.Hide()
+			// Set Secret - opens Web UI secrets page (T037)
 			secretItem := serverMenuItem.AddSubMenuItem("⚠️ Set Secret", fmt.Sprintf("Configure missing secret for %s", serverName))
 			go func(name string, item *systray.MenuItem) {
 				for range item.ClickedCh {
@@ -874,10 +848,9 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 					}
 				}
 			}(serverName, secretItem)
+
 		case "configure":
-			// Configure - for now show restart, could add dedicated item later
-			oauthItem.Hide()
-			restartItem.Hide()
+			// Configure - opens Web UI server config (T038)
 			configItem := serverMenuItem.AddSubMenuItem("⚠️ Configure", fmt.Sprintf("Fix configuration for %s", serverName))
 			go func(name string, item *systray.MenuItem) {
 				for range item.ClickedCh {
@@ -886,13 +859,30 @@ func (m *MenuManager) createServerActionSubmenus(serverMenuItem *systray.MenuIte
 					}
 				}
 			}(serverName, configItem)
+
 		case "restart":
-			oauthItem.Hide()
-			restartItem.Show()
+			// Restart suggested by health - show prominently
+			restartItem := serverMenuItem.AddSubMenuItem("⚠️ Restart Required", fmt.Sprintf("Restart server %s to fix issues", serverName))
+			m.serverRestartItems[serverName] = restartItem
+			go func(name string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					if m.onServerAction != nil {
+						go m.onServerAction(name, "restart")
+					}
+				}
+			}(serverName, restartItem)
+
 		default:
-			// No specific action - show standard restart, hide OAuth
-			oauthItem.Hide()
-			restartItem.Show()
+			// No specific action needed - show standard restart option
+			restartItem := serverMenuItem.AddSubMenuItem("🔄 Restart", fmt.Sprintf("Restart server %s", serverName))
+			m.serverRestartItems[serverName] = restartItem
+			go func(name string, item *systray.MenuItem) {
+				for range item.ClickedCh {
+					if m.onServerAction != nil {
+						go m.onServerAction(name, "restart")
+					}
+				}
+			}(serverName, restartItem)
 		}
 	}
 

@@ -47,7 +47,6 @@ func TestMergeServerConfig_ScalarFieldReplacement(t *testing.T) {
 	// Verify diff captured changes
 	if diff == nil {
 		t.Fatal("Expected diff to be generated")
-		return // unreachable but satisfies staticcheck SA5011
 	}
 	if _, ok := diff.Modified["url"]; !ok {
 		t.Error("URL change not captured in diff")
@@ -323,7 +322,6 @@ func TestMergeServerConfig_ExplicitNullRemovesField(t *testing.T) {
 	// Verify diff captures removal
 	if diff == nil {
 		t.Fatal("Expected diff to be generated")
-		return // unreachable but satisfies staticcheck SA5011
 	}
 	found := false
 	for _, field := range diff.Removed {
@@ -404,7 +402,6 @@ func TestMergeServerConfig_ConfigDiffCapture(t *testing.T) {
 
 	if diff == nil {
 		t.Fatal("Expected diff to be generated")
-		return // unreachable but satisfies staticcheck SA5011
 	}
 
 	// Check modified fields
@@ -728,7 +725,6 @@ func TestMergeServerConfig_ComplexNestedMerge(t *testing.T) {
 	// Verify diff captured expected changes
 	if diff == nil {
 		t.Fatal("Expected diff to be generated")
-		return // unreachable but satisfies staticcheck SA5011
 	}
 	if len(diff.Modified) < 5 {
 		t.Errorf("Expected at least 5 modified fields, got %d", len(diff.Modified))

@@ -2743,22 +2743,29 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		}
 	}
 
-	// Inject extra params (including RFC 8707 resource) into authorization URL
+	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
+	// extraParams contains both auto-detected values (from CreateOAuthConfigWithExtraParams) and manual config
+	// This is the same injection done in handleOAuthAuthorization() - fixes issue #271
 	if len(extraParams) > 0 {
 		parsedURL, err := url.Parse(authURL)
 		if err == nil {
 			query := parsedURL.Query()
 			for key, value := range extraParams {
-				if query.Get(key) == "" { // Don't override existing params
-					query.Set(key, value)
-				}
+				query.Set(key, value)
+				c.logger.Debug("Added extra OAuth parameter to authorization URL",
+					zap.String("server", c.config.Name),
+					zap.String("key", key),
+					zap.String("value", value))
 			}
 			parsedURL.RawQuery = query.Encode()
 			authURL = parsedURL.String()
-			c.logger.Info("📋 Injected extra params into authorization URL",
+			c.logger.Info("✅ Appended extra OAuth parameters to authorization URL",
 				zap.String("server", c.config.Name),
-				zap.String("correlation_id", result.CorrelationID),
-				zap.Int("param_count", len(extraParams)))
+				zap.Int("extra_params_count", len(extraParams)))
+		} else {
+			c.logger.Warn("Failed to parse authorization URL for extra params",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
 		}
 	}
 
@@ -3180,22 +3187,29 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 		}
 	}
 
-	// Inject extra params (including RFC 8707 resource) into authorization URL
+	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
+	// extraParams contains both auto-detected values (from CreateOAuthConfigWithExtraParams) and manual config
+	// This is the same injection done in handleOAuthAuthorization() - fixes issue #271
 	if len(extraParams) > 0 {
 		parsedURL, err := url.Parse(authURL)
 		if err == nil {
 			query := parsedURL.Query()
 			for key, value := range extraParams {
-				if query.Get(key) == "" { // Don't override existing params
-					query.Set(key, value)
-				}
+				query.Set(key, value)
+				c.logger.Debug("Added extra OAuth parameter to authorization URL",
+					zap.String("server", c.config.Name),
+					zap.String("key", key),
+					zap.String("value", value))
 			}
 			parsedURL.RawQuery = query.Encode()
 			authURL = parsedURL.String()
-			c.logger.Info("📋 Injected extra params into authorization URL",
+			c.logger.Info("✅ Appended extra OAuth parameters to authorization URL",
 				zap.String("server", c.config.Name),
-				zap.String("correlation_id", correlationID),
-				zap.Int("param_count", len(extraParams)))
+				zap.Int("extra_params_count", len(extraParams)))
+		} else {
+			c.logger.Warn("Failed to parse authorization URL for extra params",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
 		}
 	}
 
