@@ -66,9 +66,8 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-if ! python3 -c "import fastapi, uvicorn" 2>/dev/null; then
-    echo -e "${RED}ERROR: fastapi or uvicorn not installed${NC}"
-    echo "Run: pip install fastapi uvicorn"
+if ! command -v uv &> /dev/null; then
+    echo -e "${RED}ERROR: uv not found (install: https://docs.astral.sh/uv/)${NC}"
     exit 1
 fi
 
@@ -81,10 +80,11 @@ fi
 
 echo -e "${GREEN}Prerequisites OK${NC}\n"
 
-# Start mock OAuth server
+# Start mock OAuth server using FastAPI
 echo "Starting mock Runlayer OAuth server on port $MOCK_SERVER_PORT..."
 PORT=$MOCK_SERVER_PORT BASE_URL="http://localhost:$MOCK_SERVER_PORT" \
-    python3 "$SCRIPT_DIR/oauth_runlayer_mock.py" > "$TEST_DATA_DIR/mock_server.log" 2>&1 &
+    uv run --with fastapi --with uvicorn python "$SCRIPT_DIR/oauth_runlayer_mock.py" \
+    > "$TEST_DATA_DIR/mock_server.log" 2>&1 &
 MOCK_SERVER_PID=$!
 
 # Wait for mock server to be ready

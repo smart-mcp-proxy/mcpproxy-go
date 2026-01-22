@@ -6,10 +6,11 @@ This server mimics Runlayer's OAuth behavior which requires the RFC 8707
 `resource` parameter in the authorization URL.
 
 Usage:
-    pip install fastmcp uvicorn
-    python oauth_runlayer_mock.py
+    pip install fastapi uvicorn
+    # Or with uv:
+    uv run --with fastapi --with uvicorn python oauth_runlayer_mock.py
 
-    # Or with custom port:
+    # With custom port:
     PORT=9000 python oauth_runlayer_mock.py
 
 The server exposes:
@@ -24,12 +25,11 @@ The server exposes:
 import os
 import json
 import secrets
-from urllib.parse import urlencode, parse_qs, urlparse
+from urllib.parse import urlencode
 from typing import Optional
 
 from fastapi import FastAPI, Request, Response, Query, HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import RedirectResponse
 
 app = FastAPI(title="Runlayer OAuth Mock Server")
 
@@ -40,26 +40,6 @@ BASE_URL = os.environ.get("BASE_URL", f"http://localhost:{PORT}")
 # Storage for registered clients and issued tokens
 registered_clients: dict[str, dict] = {}
 issued_tokens: dict[str, dict] = {}
-
-
-class ClientRegistrationRequest(BaseModel):
-    """Dynamic Client Registration request."""
-    client_name: str = "unknown"
-    redirect_uris: list[str] = []
-    grant_types: list[str] = ["authorization_code", "refresh_token"]
-    response_types: list[str] = ["code"]
-    token_endpoint_auth_method: str = "none"
-
-
-class TokenRequest(BaseModel):
-    """Token exchange request."""
-    grant_type: str
-    code: Optional[str] = None
-    redirect_uri: Optional[str] = None
-    client_id: Optional[str] = None
-    client_secret: Optional[str] = None
-    code_verifier: Optional[str] = None
-    refresh_token: Optional[str] = None
 
 
 @app.get("/.well-known/oauth-protected-resource")
@@ -89,23 +69,26 @@ async def authorization_server_metadata():
 
 
 @app.post("/register")
-async def register_client(request: ClientRegistrationRequest):
+async def register_client(request: Request):
     """Dynamic Client Registration (RFC 7591)."""
+    body = await request.json()
+    client_name = body.get("client_name", "unknown")
+
     client_id = f"mock-client-{secrets.token_hex(8)}"
     client_secret = f"mock-secret-{secrets.token_hex(16)}"
 
     registered_clients[client_id] = {
         "client_id": client_id,
         "client_secret": client_secret,
-        "client_name": request.client_name,
-        "redirect_uris": request.redirect_uris,
+        "client_name": client_name,
+        "redirect_uris": body.get("redirect_uris", []),
     }
 
     return {
         "client_id": client_id,
         "client_secret": client_secret,
-        "client_name": request.client_name,
-        "redirect_uris": request.redirect_uris,
+        "client_name": client_name,
+        "redirect_uris": body.get("redirect_uris", []),
     }
 
 
@@ -147,7 +130,6 @@ async def authorize(
 @app.post("/token")
 async def token(request: Request):
     """Token endpoint."""
-    # Parse form data
     form = await request.form()
     grant_type = form.get("grant_type")
 
@@ -157,31 +139,21 @@ async def token(request: Request):
             raise HTTPException(status_code=400, detail="Invalid authorization code")
 
         # Clean up used code
-        token_data = issued_tokens.pop(code)
-
-        access_token = f"mock-access-token-{secrets.token_hex(16)}"
-        refresh_token = f"mock-refresh-token-{secrets.token_hex(16)}"
+        issued_tokens.pop(code)
 
         return {
-            "access_token": access_token,
+            "access_token": f"mock-access-token-{secrets.token_hex(16)}",
             "token_type": "Bearer",
             "expires_in": 3600,
-            "refresh_token": refresh_token,
+            "refresh_token": f"mock-refresh-token-{secrets.token_hex(16)}",
         }
 
     elif grant_type == "refresh_token":
-        refresh_token = form.get("refresh_token")
-        if not refresh_token:
-            raise HTTPException(status_code=400, detail="Missing refresh_token")
-
-        new_access_token = f"mock-access-token-{secrets.token_hex(16)}"
-        new_refresh_token = f"mock-refresh-token-{secrets.token_hex(16)}"
-
         return {
-            "access_token": new_access_token,
+            "access_token": f"mock-access-token-{secrets.token_hex(16)}",
             "token_type": "Bearer",
             "expires_in": 3600,
-            "refresh_token": new_refresh_token,
+            "refresh_token": f"mock-refresh-token-{secrets.token_hex(16)}",
         }
 
     raise HTTPException(status_code=400, detail=f"Unsupported grant_type: {grant_type}")
