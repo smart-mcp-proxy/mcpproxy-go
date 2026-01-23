@@ -135,12 +135,14 @@ func (m *mockEventEmitter) GetFailedEvents() int {
 	return len(m.failedEvents)
 }
 
-// T012: Test RefreshManager scheduleRefresh at 80% lifetime
-func TestRefreshManager_ScheduleAt80PercentLifetime(t *testing.T) {
+// T012: Test RefreshManager hybrid refresh strategy
+// Uses the EARLIER of: 75% of lifetime OR (expiry - 5 minutes buffer)
+func TestRefreshManager_HybridRefreshStrategy(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	store := newMockTokenStore()
 
-	// Token that expires in 1 hour (well above MinRefreshInterval of 5s)
+	// Token that expires in 1 hour (well above MinRefreshBuffer of 5 minutes)
+	// For 1-hour token: 75% = 45 min, buffer = 55 min, so percentage wins (45 min)
 	expiresAt := time.Now().Add(1 * time.Hour)
 	store.AddToken(&storage.OAuthTokenRecord{
 		ServerName: "test-server",
@@ -160,17 +162,54 @@ func TestRefreshManager_ScheduleAt80PercentLifetime(t *testing.T) {
 	schedule := manager.GetSchedule("test-server")
 	require.NotNil(t, schedule, "Schedule should be created")
 
-	// Verify refresh is scheduled at approximately 80% of lifetime
-	// With 1 hour token, 80% = 48 minutes, so refresh should be around 48 minutes from now
+	// Verify refresh is scheduled using hybrid strategy
+	// With 1 hour token: 75% = 45 min (percentage-based wins over 55 min buffer-based)
 	assert.Equal(t, "test-server", schedule.ServerName)
 	assert.Equal(t, expiresAt, schedule.ExpiresAt)
 
-	// Verify scheduled time is approximately at 80% threshold
-	expectedRefreshDelay := time.Duration(float64(1*time.Hour) * 0.8) // 48 minutes
+	// Verify scheduled time is approximately at 75% threshold (hybrid chooses earlier time)
+	expectedRefreshDelay := time.Duration(float64(1*time.Hour) * DefaultRefreshThreshold) // 45 minutes
 	actualRefreshDelay := time.Until(schedule.ScheduledRefresh)
 	// Allow 10 second tolerance for test timing
 	assert.InDelta(t, expectedRefreshDelay.Seconds(), actualRefreshDelay.Seconds(), 10.0,
-		"Refresh should be scheduled at ~80%% of lifetime")
+		"Refresh should be scheduled at ~75%% of lifetime for long-lived tokens")
+}
+
+// T012b: Test buffer-based strategy for short-lived tokens
+// For tokens where 75% would leave less than 5 minutes buffer, use 5-minute buffer instead
+func TestRefreshManager_BufferBasedStrategy(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+
+	// Token that expires in 10 minutes
+	// For 10-min token: 75% = 7.5 min (2.5 min buffer), buffer-based = 5 min (5 min buffer)
+	// Buffer-based wins because 5 min < 7.5 min delay
+	expiresAt := time.Now().Add(10 * time.Minute)
+	store.AddToken(&storage.OAuthTokenRecord{
+		ServerName: "test-server",
+		ExpiresAt:  expiresAt,
+	})
+
+	manager := NewRefreshManager(store, nil, nil, logger)
+	runtime := &mockRuntime{}
+	manager.SetRuntime(runtime)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Verify schedule was created
+	schedule := manager.GetSchedule("test-server")
+	require.NotNil(t, schedule, "Schedule should be created")
+
+	// Verify refresh is scheduled using buffer-based strategy (5 minutes before expiry)
+	// Buffer = expiresAt - refreshAt should be ~5 minutes
+	actualBuffer := schedule.ExpiresAt.Sub(schedule.ScheduledRefresh)
+	expectedBuffer := MinRefreshBuffer // 5 minutes
+	// Allow 10 second tolerance for test timing
+	assert.InDelta(t, expectedBuffer.Seconds(), actualBuffer.Seconds(), 10.0,
+		"Short-lived tokens should use 5-minute buffer strategy")
 }
 
 // T013: Test RefreshManager retry with exponential backoff
@@ -215,20 +254,20 @@ func TestRefreshManager_RetryWithExponentialBackoff(t *testing.T) {
 	}
 }
 
-// T014: Test RefreshManager stops after max retries
-func TestRefreshManager_StopOnMaxRetries(t *testing.T) {
+// T014: Test RefreshManager stops on permanent failure (invalid_grant)
+func TestRefreshManager_StopOnPermanentFailure(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	store := newMockTokenStore()
 	emitter := &mockEventEmitter{}
 
 	config := &RefreshManagerConfig{
-		Threshold:  0.1,
-		MaxRetries: 1, // Only 1 retry for faster test
+		Threshold: 0.1,
 	}
 
 	manager := NewRefreshManager(store, nil, config, logger)
+	// Use invalid_grant error which should be classified as permanent
 	runtime := &mockRuntime{
-		refreshErr: errors.New("permanent failure"),
+		refreshErr: errors.New("invalid_grant: refresh token expired"),
 	}
 	manager.SetRuntime(runtime)
 	manager.SetEventEmitter(emitter)
@@ -238,26 +277,27 @@ func TestRefreshManager_StopOnMaxRetries(t *testing.T) {
 	require.NoError(t, err)
 	defer manager.Stop()
 
-	// Manually trigger a refresh that will fail
+	// Manually trigger a refresh that will fail permanently
 	expiresAt := time.Now().Add(10 * time.Second)
 	manager.OnTokenSaved("test-server", expiresAt)
 
 	// Give time for the schedule to be set up
 	time.Sleep(50 * time.Millisecond)
 
-	// Directly call executeRefresh to test max retry behavior
+	// Directly call executeRefresh to test permanent failure behavior
 	manager.executeRefresh("test-server")
 
-	// After max retries, schedule should be removed
+	// Wait for processing
 	time.Sleep(50 * time.Millisecond)
 
-	// Trigger another refresh to exceed max retries
-	manager.executeRefresh("test-server")
+	// Check that failure event was emitted for permanent failure
+	assert.Equal(t, 1, emitter.GetFailedEvents(), "Should emit failure event for invalid_grant error")
 
-	time.Sleep(50 * time.Millisecond)
-
-	// Check that failure event was emitted
-	assert.GreaterOrEqual(t, emitter.GetFailedEvents(), 1, "Should emit failure event after max retries")
+	// Schedule should have RefreshStateFailed set
+	schedule := manager.GetSchedule("test-server")
+	if schedule != nil {
+		assert.Equal(t, RefreshStateFailed, schedule.RefreshState, "State should be failed for permanent error")
+	}
 }
 
 // T015: Test RefreshManager coordination with OAuthFlowCoordinator
@@ -450,15 +490,16 @@ func TestRefreshManager_SuccessEmitsEvent(t *testing.T) {
 	assert.Equal(t, 1, emitter.GetRefreshedEvents(), "Should emit refreshed event on success")
 }
 
-// Test that expired tokens are not scheduled
-func TestRefreshManager_ExpiredTokenNotScheduled(t *testing.T) {
+// Test that expired tokens without refresh token are marked as failed
+func TestRefreshManager_ExpiredTokenWithoutRefreshToken(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	store := newMockTokenStore()
 
-	// Token that already expired
+	// Token that already expired with no refresh token
 	store.AddToken(&storage.OAuthTokenRecord{
-		ServerName: "expired-server",
-		ExpiresAt:  time.Now().Add(-1 * time.Hour), // Already expired
+		ServerName:   "expired-server",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour), // Already expired
+		RefreshToken: "",                             // No refresh token
 	})
 
 	manager := NewRefreshManager(store, nil, nil, logger)
@@ -468,6 +509,150 @@ func TestRefreshManager_ExpiredTokenNotScheduled(t *testing.T) {
 	require.NoError(t, err)
 	defer manager.Stop()
 
-	// Should not schedule refresh for expired token
-	assert.Equal(t, 0, manager.GetScheduleCount(), "Expired tokens should not be scheduled")
+	// Should have a schedule in failed state (not scheduled for refresh)
+	schedule := manager.GetSchedule("expired-server")
+	require.NotNil(t, schedule, "Should have a schedule entry for tracking state")
+	assert.Equal(t, RefreshStateFailed, schedule.RefreshState, "Expired tokens without refresh token should be in failed state")
+}
+
+// Test that expired tokens with refresh token are queued for immediate refresh
+func TestRefreshManager_ExpiredTokenWithRefreshToken(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+
+	// Token that already expired but has refresh token
+	store.AddToken(&storage.OAuthTokenRecord{
+		ServerName:   "expired-server",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour), // Already expired
+		RefreshToken: "valid-refresh-token",          // Has refresh token
+	})
+
+	runtime := &mockRuntime{
+		refreshErr: errors.New("network error"),
+	}
+
+	manager := NewRefreshManager(store, nil, nil, logger)
+	manager.SetRuntime(runtime)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Wait for async startup refresh to execute
+	time.Sleep(100 * time.Millisecond)
+
+	// Should have attempted refresh
+	calls := runtime.GetRefreshCalls()
+	assert.Len(t, calls, 1, "Should attempt immediate refresh for expired token with refresh token")
+
+	// Should be in retrying state (not failed since error is retryable)
+	schedule := manager.GetSchedule("expired-server")
+	require.NotNil(t, schedule, "Should have a schedule entry")
+	assert.Equal(t, RefreshStateRetrying, schedule.RefreshState, "Should be retrying after network error")
+}
+
+// T023: Test exponential backoff sequence (10s, 20s, 40s, 80s, 160s, 300s cap)
+func TestRefreshManager_ExponentialBackoffSequence(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	manager := NewRefreshManager(nil, nil, nil, logger)
+
+	// Test the backoff sequence: 10s -> 20s -> 40s -> 80s -> 160s -> 300s (cap)
+	expectedBackoffs := []time.Duration{
+		10 * time.Second,  // retry 0: 10s * 2^0 = 10s
+		20 * time.Second,  // retry 1: 10s * 2^1 = 20s
+		40 * time.Second,  // retry 2: 10s * 2^2 = 40s
+		80 * time.Second,  // retry 3: 10s * 2^3 = 80s
+		160 * time.Second, // retry 4: 10s * 2^4 = 160s
+		300 * time.Second, // retry 5: 10s * 2^5 = 320s, capped to 300s
+		300 * time.Second, // retry 6: still capped at 300s
+		300 * time.Second, // retry 7: still capped at 300s
+	}
+
+	for i, expected := range expectedBackoffs {
+		actual := manager.calculateBackoff(i)
+		assert.Equal(t, expected, actual, "Backoff at retry %d should be %v, got %v", i, expected, actual)
+	}
+
+	// Verify constants match expected values
+	assert.Equal(t, 10*time.Second, RetryBackoffBase, "RetryBackoffBase should be 10s")
+	assert.Equal(t, 5*time.Minute, MaxRetryBackoff, "MaxRetryBackoff should be 5min (300s)")
+}
+
+// T024: Test unlimited retries until token expiration
+func TestRefreshManager_UnlimitedRetriesUntilExpiration(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+	emitter := &mockEventEmitter{}
+
+	config := &RefreshManagerConfig{
+		Threshold: 0.1,
+	}
+
+	manager := NewRefreshManager(store, nil, config, logger)
+	// Use a network error which is retryable (not permanent like invalid_grant)
+	runtime := &mockRuntime{
+		refreshErr: errors.New("connection timeout"),
+	}
+	manager.SetRuntime(runtime)
+	manager.SetEventEmitter(emitter)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Create a token that expires far in the future
+	expiresAt := time.Now().Add(1 * time.Hour)
+	manager.OnTokenSaved("test-server", expiresAt)
+
+	// Give time for the schedule to be set up
+	time.Sleep(50 * time.Millisecond)
+
+	// Simulate multiple refresh failures
+	for i := 0; i < 5; i++ {
+		manager.executeRefresh("test-server")
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Verify that:
+	// 1. Schedule still exists (not cleared due to max retries)
+	schedule := manager.GetSchedule("test-server")
+	require.NotNil(t, schedule, "Schedule should still exist for retryable errors")
+
+	// 2. State is RefreshStateRetrying (not failed)
+	assert.Equal(t, RefreshStateRetrying, schedule.RefreshState, "State should be retrying for network errors")
+
+	// 3. No failure events emitted (only permanent failures emit events)
+	assert.Equal(t, 0, emitter.GetFailedEvents(), "No failure events for retryable network errors")
+
+	// 4. Retry count should have increased
+	assert.GreaterOrEqual(t, schedule.RetryCount, 5, "Retry count should increase with each failure")
+}
+
+// Test error classification for metrics
+func TestClassifyRefreshError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected string
+	}{
+		{"nil error", nil, "success"},
+		{"invalid_grant", errors.New("invalid_grant: refresh token expired"), "failed_invalid_grant"},
+		{"refresh token expired", errors.New("refresh token expired"), "failed_invalid_grant"},
+		{"connection timeout", errors.New("connection timeout"), "failed_network"},
+		{"connection refused", errors.New("connection refused"), "failed_network"},
+		{"dial tcp error", errors.New("dial tcp: no such host"), "failed_network"},
+		{"EOF error", errors.New("unexpected EOF"), "failed_network"},
+		{"context deadline exceeded", errors.New("context deadline exceeded"), "failed_network"},
+		{"generic error", errors.New("unknown server error"), "failed_other"},
+		{"server_error", errors.New("OAuth server_error"), "failed_other"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := classifyRefreshError(tt.err)
+			assert.Equal(t, tt.expected, result, "Error classification mismatch for: %v", tt.err)
+		})
+	}
 }

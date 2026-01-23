@@ -174,6 +174,7 @@ func TestExtractHelpInfo_Flags(t *testing.T) {
 
 	if outputFlag == nil {
 		t.Fatal("Expected to find 'output' flag")
+		return // unreachable but satisfies staticcheck SA5011
 	}
 
 	if outputFlag.Shorthand != "o" {

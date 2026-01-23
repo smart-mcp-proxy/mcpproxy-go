@@ -930,6 +930,43 @@ func (m *MenuManager) updateServerActionMenus(serverName string, server map[stri
 			zap.String("server", serverName),
 			zap.String("action", enableText))
 	}
+
+	// Update OAuth/restart visibility based on current health.action
+	healthAction := ""
+	if healthData, ok := server["health"].(map[string]interface{}); ok {
+		healthAction, _ = healthData["action"].(string)
+	}
+
+	oauthItem, hasOAuth := m.serverOAuthItems[serverName]
+	restartItem, hasRestart := m.serverRestartItems[serverName]
+
+	if hasOAuth && hasRestart {
+		switch healthAction {
+		case "login":
+			oauthItem.Show()
+			restartItem.Hide()
+			m.logger.Debug("Showing OAuth login, hiding restart",
+				zap.String("server", serverName),
+				zap.String("health.action", healthAction))
+		case "restart":
+			oauthItem.Hide()
+			restartItem.Show()
+			restartItem.SetTitle("⚠️ Restart Required")
+			restartItem.SetTooltip(fmt.Sprintf("Restart server %s to fix issues", serverName))
+			m.logger.Debug("Showing restart required, hiding OAuth",
+				zap.String("server", serverName),
+				zap.String("health.action", healthAction))
+		default:
+			// No specific action or other actions - show standard restart, hide OAuth
+			oauthItem.Hide()
+			restartItem.Show()
+			restartItem.SetTitle("🔄 Restart")
+			restartItem.SetTooltip(fmt.Sprintf("Restart server %s", serverName))
+			m.logger.Debug("Showing standard restart, hiding OAuth",
+				zap.String("server", serverName),
+				zap.String("health.action", healthAction))
+		}
+	}
 }
 
 // SynchronizationManager coordinates between state manager and menu manager

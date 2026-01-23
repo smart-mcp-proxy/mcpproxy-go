@@ -3,9 +3,26 @@ package health
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
+)
+
+// RefreshState represents the current state of token refresh for health reporting.
+// Mirrors oauth.RefreshState for decoupling.
+type RefreshState int
+
+const (
+	// RefreshStateIdle means no refresh is pending or in progress.
+	RefreshStateIdle RefreshState = iota
+	// RefreshStateScheduled means a proactive refresh is scheduled at 80% lifetime.
+	RefreshStateScheduled
+	// RefreshStateRetrying means refresh failed and is retrying with exponential backoff.
+	RefreshStateRetrying
+	// RefreshStateFailed means refresh permanently failed (e.g., invalid_grant).
+	RefreshStateFailed
 )
 
 // HealthCalculatorInput contains all fields needed to calculate health status.
@@ -36,6 +53,12 @@ type HealthCalculatorInput struct {
 
 	// Tool info
 	ToolCount int
+
+	// Refresh state (for health status integration - Spec 023)
+	RefreshState       RefreshState // Current refresh state from RefreshManager
+	RefreshRetryCount  int          // Number of retry attempts
+	RefreshLastError   string       // Human-readable error message
+	RefreshNextAttempt *time.Time   // When next retry will occur
 }
 
 // HealthCalculatorConfig contains configurable thresholds for health calculation.
@@ -104,7 +127,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 	// 4. Connection state checks
 	// Normalize state to lowercase for consistent matching
 	// (ConnectionState.String() returns "Error", "Disconnected", etc.)
-	state := toLower(input.State)
+	state := strings.ToLower(input.State)
 	switch state {
 	case "error":
 		// For OAuth-required servers with OAuth-related errors, suggest login instead of restart
@@ -219,7 +242,35 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		}
 	}
 
-	// 6. Healthy state - connected with valid authentication (if required)
+	// 6. Refresh state checks (Spec 023)
+	// Check if refresh is in a degraded or failed state
+	switch input.RefreshState {
+	case RefreshStateRetrying:
+		// Refresh failed but retrying - degraded status
+		detail := formatRefreshRetryDetail(input.RefreshRetryCount, input.RefreshNextAttempt, input.RefreshLastError)
+		return &contracts.HealthStatus{
+			Level:      LevelDegraded,
+			AdminState: StateEnabled,
+			Summary:    "Token refresh pending",
+			Detail:     detail,
+			Action:     ActionViewLogs,
+		}
+	case RefreshStateFailed:
+		// Refresh permanently failed - unhealthy status
+		detail := "Re-authentication required"
+		if input.RefreshLastError != "" {
+			detail = fmt.Sprintf("Re-authentication required: %s", input.RefreshLastError)
+		}
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    "Refresh token expired",
+			Detail:     detail,
+			Action:     ActionLogin,
+		}
+	}
+
+	// 7. Healthy state - connected with valid authentication (if required)
 	return &contracts.HealthStatus{
 		Level:      LevelHealthy,
 		AdminState: StateEnabled,
@@ -271,7 +322,7 @@ func formatErrorSummary(lastError string) string {
 
 	// Check for known patterns (in order)
 	for _, mapping := range errorMappings {
-		if containsIgnoreCase(lastError, mapping.pattern) {
+		if stringutil.ContainsIgnoreCase(lastError, mapping.pattern) {
 			return mapping.friendly
 		}
 	}
@@ -302,34 +353,28 @@ func formatExpiringTokenSummary(timeUntilExpiry time.Duration) string {
 	return fmt.Sprintf("Token expiring in %dh", hours)
 }
 
-// containsIgnoreCase checks if s contains substr, ignoring case.
-func containsIgnoreCase(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr ||
-		 containsLower(toLower(s), toLower(substr)))
-}
+// formatRefreshRetryDetail formats the detail message for a refresh retry state.
+func formatRefreshRetryDetail(retryCount int, nextAttempt *time.Time, lastError string) string {
+	var detail string
 
-// toLower is a simple ASCII lowercase conversion.
-func toLower(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b[i] = c
+	// Start with retry count and next attempt time
+	if nextAttempt != nil && !nextAttempt.IsZero() {
+		detail = fmt.Sprintf("Refresh retry %d scheduled for %s", retryCount, nextAttempt.Format(time.RFC3339))
+	} else {
+		detail = fmt.Sprintf("Refresh retry %d pending", retryCount)
 	}
-	return string(b)
-}
 
-// containsLower checks if s contains substr (both should be lowercase).
-func containsLower(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+	// Add last error if available
+	if lastError != "" {
+		// Truncate error if too long
+		errorMsg := lastError
+		if len(errorMsg) > 100 {
+			errorMsg = errorMsg[:97] + "..."
 		}
+		detail = fmt.Sprintf("%s: %s", detail, errorMsg)
 	}
-	return false
+
+	return detail
 }
 
 // isOAuthRelatedError checks if the error message indicates an OAuth issue.
@@ -349,7 +394,7 @@ func isOAuthRelatedError(err string) bool {
 		"access_denied",
 	}
 	for _, pattern := range oauthPatterns {
-		if containsIgnoreCase(err, pattern) {
+		if stringutil.ContainsIgnoreCase(err, pattern) {
 			return true
 		}
 	}
@@ -402,7 +447,7 @@ func ExtractOAuthConfigError(lastError string) string {
 	}
 
 	for _, pattern := range configPatterns {
-		if containsIgnoreCase(lastError, pattern) {
+		if stringutil.ContainsIgnoreCase(lastError, pattern) {
 			return lastError
 		}
 	}

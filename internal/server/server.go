@@ -24,6 +24,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -85,6 +86,17 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize update checker with build version
 	// This must happen before StartBackgroundInitialization is called
 	rt.SetVersion(httpapi.GetBuildVersion())
+
+	// Initialize observability manager for metrics (FR-011: OAuth refresh metrics)
+	obsConfig := observability.DefaultConfig("mcpproxy", httpapi.GetBuildVersion())
+	obsManager, err := observability.NewManager(logger.Sugar(), &obsConfig)
+	if err != nil {
+		logger.Warn("Failed to create observability manager, metrics will be disabled", zap.Error(err))
+	} else if obsManager.Metrics() != nil {
+		// Wire up metrics recorder to RefreshManager for OAuth refresh metrics
+		rt.SetRefreshMetricsRecorder(obsManager.Metrics())
+		logger.Info("OAuth refresh metrics enabled")
+	}
 
 	// Initialize management service and set it on runtime
 	secretResolver := secret.NewResolver()
@@ -663,6 +675,16 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		// Check if OAuth is required for this server
 		if serverStatus.Config != nil && serverStatus.Config.OAuth != nil {
 			healthInput.OAuthRequired = true
+		}
+
+		// T032: Wire refresh state into health calculation (Spec 023)
+		if refreshMgr := s.runtime.RefreshManager(); refreshMgr != nil {
+			if refreshState := refreshMgr.GetRefreshState(serverStatus.Name); refreshState != nil {
+				healthInput.RefreshState = health.RefreshState(refreshState.State)
+				healthInput.RefreshRetryCount = refreshState.RetryCount
+				healthInput.RefreshLastError = refreshState.LastError
+				healthInput.RefreshNextAttempt = refreshState.NextAttempt
+			}
 		}
 
 		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())

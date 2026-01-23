@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
 func TestCalculateHealth_DisabledServer(t *testing.T) {
@@ -554,4 +556,227 @@ func TestExtractOAuthConfigError(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// T033: Test health status output per refresh state (Spec 023)
+func TestCalculateHealth_RefreshStateRetrying(t *testing.T) {
+	nextAttempt := time.Now().Add(30 * time.Second)
+	input := HealthCalculatorInput{
+		Name:               "test-server",
+		Enabled:            true,
+		State:              "connected",
+		Connected:          true,
+		OAuthRequired:      true,
+		OAuthStatus:        "authenticated",
+		ToolCount:          5,
+		RefreshState:       RefreshStateRetrying,
+		RefreshRetryCount:  3,
+		RefreshLastError:   "connection timeout",
+		RefreshNextAttempt: &nextAttempt,
+	}
+
+	result := CalculateHealth(input, nil)
+
+	assert.Equal(t, LevelDegraded, result.Level, "RefreshStateRetrying should return degraded")
+	assert.Equal(t, StateEnabled, result.AdminState)
+	assert.Equal(t, "Token refresh pending", result.Summary)
+	assert.Contains(t, result.Detail, "Refresh retry 3")
+	assert.Contains(t, result.Detail, "connection timeout")
+	assert.Equal(t, ActionViewLogs, result.Action, "Retrying should suggest view_logs action")
+}
+
+func TestCalculateHealth_RefreshStateFailed(t *testing.T) {
+	input := HealthCalculatorInput{
+		Name:             "test-server",
+		Enabled:          true,
+		State:            "connected",
+		Connected:        true,
+		OAuthRequired:    true,
+		OAuthStatus:      "authenticated",
+		ToolCount:        5,
+		RefreshState:     RefreshStateFailed,
+		RefreshLastError: "invalid_grant: refresh token expired",
+	}
+
+	result := CalculateHealth(input, nil)
+
+	assert.Equal(t, LevelUnhealthy, result.Level, "RefreshStateFailed should return unhealthy")
+	assert.Equal(t, StateEnabled, result.AdminState)
+	assert.Equal(t, "Refresh token expired", result.Summary)
+	assert.Contains(t, result.Detail, "Re-authentication required")
+	assert.Contains(t, result.Detail, "invalid_grant")
+	assert.Equal(t, ActionLogin, result.Action, "Failed should suggest login action")
+}
+
+func TestCalculateHealth_RefreshStateFailedNoError(t *testing.T) {
+	input := HealthCalculatorInput{
+		Name:          "test-server",
+		Enabled:       true,
+		State:         "connected",
+		Connected:     true,
+		OAuthRequired: true,
+		OAuthStatus:   "authenticated",
+		RefreshState:  RefreshStateFailed,
+		// No RefreshLastError
+	}
+
+	result := CalculateHealth(input, nil)
+
+	assert.Equal(t, LevelUnhealthy, result.Level)
+	assert.Equal(t, "Refresh token expired", result.Summary)
+	assert.Equal(t, "Re-authentication required", result.Detail)
+	assert.Equal(t, ActionLogin, result.Action)
+}
+
+func TestCalculateHealth_RefreshStateIdle(t *testing.T) {
+	input := HealthCalculatorInput{
+		Name:          "test-server",
+		Enabled:       true,
+		State:         "connected",
+		Connected:     true,
+		OAuthRequired: true,
+		OAuthStatus:   "authenticated",
+		ToolCount:     5,
+		RefreshState:  RefreshStateIdle, // Idle state
+	}
+
+	result := CalculateHealth(input, nil)
+
+	// RefreshStateIdle should not affect health - server should be healthy
+	assert.Equal(t, LevelHealthy, result.Level)
+	assert.Equal(t, "Connected (5 tools)", result.Summary)
+	assert.Equal(t, ActionNone, result.Action)
+}
+
+func TestCalculateHealth_RefreshStateScheduled(t *testing.T) {
+	input := HealthCalculatorInput{
+		Name:          "test-server",
+		Enabled:       true,
+		State:         "connected",
+		Connected:     true,
+		OAuthRequired: true,
+		OAuthStatus:   "authenticated",
+		ToolCount:     5,
+		RefreshState:  RefreshStateScheduled, // Scheduled for proactive refresh
+	}
+
+	result := CalculateHealth(input, nil)
+
+	// RefreshStateScheduled should not affect health - server should be healthy
+	assert.Equal(t, LevelHealthy, result.Level)
+	assert.Equal(t, "Connected (5 tools)", result.Summary)
+	assert.Equal(t, ActionNone, result.Action)
+}
+
+// Test that higher priority issues take precedence over refresh state
+func TestCalculateHealth_RefreshStatePriority(t *testing.T) {
+	t.Run("disabled takes priority over refresh retrying", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:         "test-server",
+			Enabled:      false,
+			RefreshState: RefreshStateRetrying,
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, StateDisabled, result.AdminState)
+		assert.Equal(t, ActionEnable, result.Action)
+	})
+
+	t.Run("quarantine takes priority over refresh failed", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:         "test-server",
+			Enabled:      true,
+			Quarantined:  true,
+			RefreshState: RefreshStateFailed,
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, StateQuarantined, result.AdminState)
+		assert.Equal(t, ActionApprove, result.Action)
+	})
+
+	t.Run("connection error takes priority over refresh retrying", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:         "test-server",
+			Enabled:      true,
+			State:        "error",
+			LastError:    "connection refused",
+			RefreshState: RefreshStateRetrying,
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, "Connection refused", result.Summary)
+		assert.Equal(t, ActionRestart, result.Action)
+	})
+
+	t.Run("OAuth expired takes priority over refresh retrying", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:          "test-server",
+			Enabled:       true,
+			State:         "connected",
+			OAuthRequired: true,
+			OAuthStatus:   "expired",
+			RefreshState:  RefreshStateRetrying,
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, "Token expired", result.Summary)
+		assert.Equal(t, ActionLogin, result.Action)
+	})
+}
+
+// Test formatRefreshRetryDetail helper function
+func TestFormatRefreshRetryDetail(t *testing.T) {
+	t.Run("with next attempt time and error", func(t *testing.T) {
+		nextAttempt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+		result := formatRefreshRetryDetail(3, &nextAttempt, "network timeout")
+
+		assert.Contains(t, result, "Refresh retry 3")
+		assert.Contains(t, result, "2024-01-15T10:30:00Z")
+		assert.Contains(t, result, "network timeout")
+	})
+
+	t.Run("without next attempt time", func(t *testing.T) {
+		result := formatRefreshRetryDetail(5, nil, "connection refused")
+
+		assert.Contains(t, result, "Refresh retry 5 pending")
+		assert.Contains(t, result, "connection refused")
+	})
+
+	t.Run("without error", func(t *testing.T) {
+		nextAttempt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+		result := formatRefreshRetryDetail(1, &nextAttempt, "")
+
+		assert.Contains(t, result, "Refresh retry 1")
+		assert.Contains(t, result, "2024-01-15T10:30:00Z")
+		assert.NotContains(t, result, ": :")
+	})
+
+	t.Run("truncates long error", func(t *testing.T) {
+		longError := "This is a very long error message that exceeds 100 characters and should be truncated to prevent overly long detail messages in the health status"
+		result := formatRefreshRetryDetail(2, nil, longError)
+
+		assert.Contains(t, result, "...")
+		assert.LessOrEqual(t, len(result), 200) // Reasonable max length
+	})
+}
+
+// TestRefreshStateSync ensures health.RefreshState values stay in sync with oauth.RefreshState.
+// The health package mirrors oauth.RefreshState for decoupling, but the values must match
+// for proper state mapping when wiring RefreshManager state into health calculation.
+func TestRefreshStateSync(t *testing.T) {
+	// Verify that the integer values match between health and oauth packages
+	// This test will fail if either package changes its constants without updating the other
+	assert.Equal(t, int(RefreshStateIdle), int(oauth.RefreshStateIdle),
+		"RefreshStateIdle values must match between health and oauth packages")
+	assert.Equal(t, int(RefreshStateScheduled), int(oauth.RefreshStateScheduled),
+		"RefreshStateScheduled values must match between health and oauth packages")
+	assert.Equal(t, int(RefreshStateRetrying), int(oauth.RefreshStateRetrying),
+		"RefreshStateRetrying values must match between health and oauth packages")
+	assert.Equal(t, int(RefreshStateFailed), int(oauth.RefreshStateFailed),
+		"RefreshStateFailed values must match between health and oauth packages")
 }
