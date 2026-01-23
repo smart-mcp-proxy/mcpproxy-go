@@ -645,27 +645,14 @@ jobs:
             exit 1
           }
 
-      - name: Package Windows installer for signing
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          $VERSION = "${{ github.ref_name }}"
-          $ARCH = "${{ matrix.goarch }}"
-          $INSTALLER_PATH = "dist\mcpproxy-setup-${VERSION}-${ARCH}.exe"
-          $ZIP_PATH = "dist\mcpproxy-setup-${VERSION}-${ARCH}-unsigned.zip"
-
-          # SignPath requires artifacts in ZIP format for GitHub Actions
-          Write-Host "Packaging installer for SignPath signing..."
-          Compress-Archive -Path $INSTALLER_PATH -DestinationPath $ZIP_PATH
-          Write-Host "✅ Created: $ZIP_PATH"
-
       - name: Upload unsigned Windows installer for signing
         if: matrix.goos == 'windows'
         uses: actions/upload-artifact@v4
         id: upload-unsigned-installer
         with:
           name: unsigned-installer-windows-${{ matrix.goarch }}
-          path: dist/mcpproxy-setup-${{ github.ref_name }}-${{ matrix.goarch }}-unsigned.zip
+          # Upload exe directly - GitHub Actions will ZIP it automatically
+          path: dist/mcpproxy-setup-${{ github.ref_name }}-${{ matrix.goarch }}.exe
 
       - name: Create .icns icon (macOS)
         if: matrix.goos == 'darwin'
@@ -931,7 +918,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: signpath-input-windows-${{ matrix.arch }}
-          path: unsigned/*.zip
+          # Upload exe - GitHub Actions will ZIP it for SignPath
+          path: unsigned/*.exe
 
       - name: Submit to SignPath for signing
         uses: signpath/github-action-submit-signing-request@v1
@@ -945,29 +933,22 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: signed
 
-      - name: Extract signed installer from ZIP
+      - name: Prepare signed installer
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           ARCH="${{ matrix.arch }}"
 
-          echo "Extracting signed installer..."
+          echo "Preparing signed installer..."
           cd signed
-          ls -la
+          ls -laR
 
-          # Extract the signed ZIP
-          SIGNED_ZIP=$(find . -name "*.zip" -type f | head -1)
-          if [ -n "$SIGNED_ZIP" ]; then
-            unzip -o "$SIGNED_ZIP"
-          fi
-
-          # Find and rename the signed installer
+          # SignPath returns signed files - find the exe
           SIGNED_EXE=$(find . -name "*.exe" -type f | head -1)
           if [ -n "$SIGNED_EXE" ]; then
-            mv "$SIGNED_EXE" "mcpproxy-setup-${VERSION}-${ARCH}.exe"
+            cp "$SIGNED_EXE" "mcpproxy-setup-${VERSION}-${ARCH}.exe"
             echo "✅ Signed installer: mcpproxy-setup-${VERSION}-${ARCH}.exe"
           else
-            echo "❌ No signed .exe found"
-            ls -laR
+            echo "❌ No signed .exe found in SignPath output"
             exit 1
           fi
 
