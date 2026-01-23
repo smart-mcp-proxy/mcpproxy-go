@@ -2378,6 +2378,31 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 				zap.String("server", serverName),
 				zap.String("server_key", serverKey),
 				zap.Bool("has_refresh_token", token.RefreshToken != ""))
+
+			// IMPORTANT: Proactive refresh requires forcing the OAuth client to actually refresh,
+			// not just reconnect. Many OAuth libraries only refresh when the access token is expired.
+			//
+			// To ensure proactive refresh works for short-lived tokens (e.g. ~2 minutes),
+			// mark the persisted access token as expired before forcing reconnect. The reconnect
+			// will then trigger a real refresh using the refresh token, and the refreshed token
+			// will be persisted by the TokenStore.
+			if token.ExpiresAt.After(time.Now()) {
+				previousExpiresAt := token.ExpiresAt
+				token.ExpiresAt = time.Now().Add(-1 * time.Second)
+				if saveErr := m.storage.SaveOAuthToken(token); saveErr != nil {
+					m.logger.Warn("Failed to mark OAuth token expired for proactive refresh",
+						zap.String("server", serverName),
+						zap.String("server_key", serverKey),
+						zap.Time("previous_expires_at", previousExpiresAt),
+						zap.Error(saveErr))
+				} else {
+					m.logger.Info("Marked OAuth access token expired to force proactive refresh on reconnect",
+						zap.String("server", serverName),
+						zap.String("server_key", serverKey),
+						zap.Time("previous_expires_at", previousExpiresAt),
+						zap.Time("new_expires_at", token.ExpiresAt))
+				}
+			}
 		}
 	}
 

@@ -54,8 +54,8 @@ func TestRefreshOAuthToken_DynamicOAuthDiscovery(t *testing.T) {
 	// Store an OAuth token for the server (as if it had authenticated previously)
 	// The ServerName field is used as the storage key (must match GenerateServerKey output)
 	token := &storage.OAuthTokenRecord{
-		ServerName:   serverKey,             // Key used for storage lookup (hash-based)
-		DisplayName:  "test-dynamic-oauth",  // Human-readable name for RefreshManager
+		ServerName:   serverKey,            // Key used for storage lookup (hash-based)
+		DisplayName:  "test-dynamic-oauth", // Human-readable name for RefreshManager
 		AccessToken:  "expired-access-token",
 		RefreshToken: "valid-refresh-token",
 		TokenType:    "Bearer",
@@ -160,6 +160,79 @@ func TestRefreshOAuthToken_StaticOAuthConfig(t *testing.T) {
 	if err != nil {
 		assert.NotContains(t, err.Error(), "server does not use OAuth")
 	}
+}
+
+// TestRefreshOAuthToken_ProactiveRefreshForcesExpiry verifies that proactive refresh
+// forces a real refresh attempt by marking the stored access token as expired before
+// reconnecting. Without this, OAuth libraries may skip refresh when the access token
+// is still valid (common for short-lived tokens where we refresh at 75% of lifetime).
+func TestRefreshOAuthToken_ProactiveRefreshForcesExpiry(t *testing.T) {
+	logger := zap.NewNop()
+	sugaredLogger := logger.Sugar()
+
+	serverConfig := &config.ServerConfig{
+		Name:     "test-proactive-refresh",
+		URL:      "https://example.com/mcp",
+		Protocol: "http",
+		Enabled:  true,
+		Created:  time.Now(),
+		OAuth: &config.OAuthConfig{
+			ClientID: "test-client-id",
+			Scopes:   []string{"read"},
+		},
+	}
+
+	tempDir := t.TempDir()
+	db, err := storage.NewBoltDB(tempDir, sugaredLogger)
+	require.NoError(t, err)
+	defer db.Close()
+
+	// Store a token that is still valid in the future. The proactive refresh path
+	// should mark it expired in storage to force a refresh attempt.
+	serverKey := oauth.GenerateServerKey(serverConfig.Name, serverConfig.URL)
+	futureExpiry := time.Now().Add(30 * time.Minute)
+	token := &storage.OAuthTokenRecord{
+		ServerName:   serverKey,
+		DisplayName:  serverConfig.Name,
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    futureExpiry,
+		Created:      time.Now().Add(-1 * time.Hour),
+		Updated:      time.Now().Add(-1 * time.Minute),
+	}
+	require.NoError(t, db.SaveOAuthToken(token))
+
+	manager := &Manager{
+		clients:        make(map[string]*managed.Client),
+		logger:         logger,
+		storage:        db,
+		secretResolver: secret.NewResolver(),
+	}
+
+	client, err := managed.NewClient(
+		serverConfig.Name,
+		serverConfig,
+		logger,
+		nil,
+		&config.Config{},
+		db,
+		secret.NewResolver(),
+	)
+	require.NoError(t, err)
+	manager.clients[serverConfig.Name] = client
+
+	// We don't care if the refresh ultimately succeeds (it may fail due to no network).
+	// What we do care about is that the token expiry is forced earlier in storage.
+	_ = manager.RefreshOAuthToken(serverConfig.Name)
+
+	updatedToken, err := db.GetOAuthToken(serverKey)
+	require.NoError(t, err)
+	require.NotNil(t, updatedToken)
+	assert.True(t, updatedToken.ExpiresAt.Before(futureExpiry),
+		"expected token expiry to be forced earlier for proactive refresh")
+	assert.True(t, updatedToken.ExpiresAt.Before(time.Now()),
+		"expected token expiry to be forced into the past for proactive refresh")
 }
 
 // TestRefreshOAuthToken_ServerNotFound tests that non-existent servers return proper error.
