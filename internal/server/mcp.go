@@ -1087,6 +1087,44 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
+	// Handle proxy tools directly (supports being called via call_tool_read/write/destructive variants)
+	// This enables intent-based calls for built-in tools like `upstream_servers`.
+	proxyTools := map[string]bool{
+		operationUpstreamServers: true,
+		operationQuarantineSec:   true,
+		operationRetrieveTools:   true,
+		operationReadCache:       true,
+		operationCodeExecution:   true,
+		operationListRegistries:  true,
+		operationSearchServers:   true,
+	}
+
+	if proxyTools[toolName] {
+		// Handle proxy tools directly by creating a new request with the args
+		proxyRequest := mcp.CallToolRequest{}
+		proxyRequest.Params.Name = toolName
+		proxyRequest.Params.Arguments = args
+
+		switch toolName {
+		case operationUpstreamServers:
+			return p.handleUpstreamServers(ctx, proxyRequest)
+		case operationQuarantineSec:
+			return p.handleQuarantineSecurity(ctx, proxyRequest)
+		case operationRetrieveTools:
+			return p.handleRetrieveTools(ctx, proxyRequest)
+		case operationReadCache:
+			return p.handleReadCache(ctx, proxyRequest)
+		case operationCodeExecution:
+			return p.handleCodeExecution(ctx, proxyRequest)
+		case operationListRegistries:
+			return p.handleListRegistries(ctx, proxyRequest)
+		case operationSearchServers:
+			return p.handleSearchServers(ctx, proxyRequest)
+		default:
+			return mcp.NewToolResultError(fmt.Sprintf("Unknown proxy tool: %s", toolName)), nil
+		}
+	}
+
 	// Handle upstream tools via upstream manager (requires server:tool format)
 	if !strings.Contains(toolName, ":") {
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)), nil
