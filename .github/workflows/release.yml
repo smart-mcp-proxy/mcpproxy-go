@@ -937,19 +937,25 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           ARCH="${{ matrix.arch }}"
+          TARGET="mcpproxy-setup-${VERSION}-${ARCH}.exe"
 
           echo "Preparing signed installer..."
           cd signed
-          ls -laR
+          ls -la
 
-          # SignPath returns signed files - find the exe
-          SIGNED_EXE=$(find . -name "*.exe" -type f | head -1)
-          if [ -n "$SIGNED_EXE" ]; then
-            cp "$SIGNED_EXE" "mcpproxy-setup-${VERSION}-${ARCH}.exe"
-            echo "✅ Signed installer: mcpproxy-setup-${VERSION}-${ARCH}.exe"
+          # SignPath returns signed exe - verify it exists
+          if [ -f "$TARGET" ]; then
+            echo "✅ Signed installer already named correctly: $TARGET"
           else
-            echo "❌ No signed .exe found in SignPath output"
-            exit 1
+            # Find and rename if needed
+            SIGNED_EXE=$(find . -name "*.exe" -type f | head -1)
+            if [ -n "$SIGNED_EXE" ]; then
+              mv "$SIGNED_EXE" "$TARGET"
+              echo "✅ Renamed to: $TARGET"
+            else
+              echo "❌ No signed .exe found in SignPath output"
+              exit 1
+            fi
           fi
 
       - name: Upload signed Windows installer
