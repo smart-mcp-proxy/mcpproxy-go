@@ -42,6 +42,11 @@ type ErrorMode struct {
 	// Device code errors
 	DeviceSlowPoll bool // Return `slow_down` on device polling
 	DeviceExpired  bool // Return `expired_token` on device polling
+
+	// MCP endpoint rate limiting (for resource auto-detection testing)
+	MCPRateLimitCount      int  // Return 429 this many times before real response
+	MCPRateLimitRetryAfter int  // Retry-After header value (seconds, 0 = omit header)
+	MCPRateLimitUseResetAt bool // Use JSON body with reset_at instead of Retry-After header
 }
 
 // Options configures the OAuth test server behavior.
