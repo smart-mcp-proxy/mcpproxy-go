@@ -516,6 +516,263 @@ func TestStartCallbackServerDynamicPort(t *testing.T) {
 	assert.Contains(t, callbackServer.RedirectURI, "http://127.0.0.1:", "Redirect URI should have localhost base")
 }
 
+// =============================================================================
+// Tests for Rate Limit Handling in Resource Auto-Detection
+// =============================================================================
+
+// TestAutoDetectResource_RateLimitWithRetryAfterHeader verifies that 429 responses
+// with Retry-After header are handled correctly and retried.
+func TestAutoDetectResource_RateLimitWithRetryAfterHeader(t *testing.T) {
+	var serverURL string
+	requestCount := 0
+
+	// Create a mock server that returns 429 on first request, then 401
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		if r.URL.Path == "/.well-known/oauth-protected-resource" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"resource": "https://api.example.com/mcp/v1",
+				"authorization_servers": ["https://auth.example.com"]
+			}`))
+			return
+		}
+
+		if r.Method == "POST" {
+			if requestCount == 1 {
+				// First request: return 429 with Retry-After header (short wait for test)
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			// Subsequent request: return 401 with resource metadata link
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	serverURL = mockServer.URL
+
+	logger := zap.NewNop()
+	serverConfig := &config.ServerConfig{
+		Name: "test-rate-limit-retry-after",
+		URL:  mockServer.URL + "/mcp",
+	}
+
+	// Call autoDetectResource
+	result := autoDetectResource(serverConfig, logger)
+
+	// Verify resource was detected after retry
+	assert.Equal(t, "https://api.example.com/mcp/v1", result, "Should detect resource after retry")
+	assert.Equal(t, 3, requestCount, "Should have made 3 requests (1 POST 429 + 1 POST 401 + 1 GET metadata)")
+}
+
+// TestAutoDetectResource_RateLimitWithResetAt verifies that 429 responses
+// with JSON body containing reset_at are handled correctly.
+func TestAutoDetectResource_RateLimitWithResetAt(t *testing.T) {
+	var serverURL string
+	requestCount := 0
+
+	// Create a mock server that returns 429 with reset_at, then 401
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		if r.URL.Path == "/.well-known/oauth-protected-resource" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+				"resource": "https://api.example.com/mcp/v1",
+				"authorization_servers": ["https://auth.example.com"]
+			}`))
+			return
+		}
+
+		if r.Method == "POST" {
+			if requestCount == 1 {
+				// First request: return 429 with reset_at in body (1 second from now)
+				resetAt := time.Now().Add(1 * time.Second).Unix()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				w.Write([]byte(fmt.Sprintf(`{"reset_at": %d}`, resetAt)))
+				return
+			}
+			// Subsequent request: return 401 with resource metadata link
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_request", resource_metadata="%s/.well-known/oauth-protected-resource"`, serverURL))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	serverURL = mockServer.URL
+
+	logger := zap.NewNop()
+	serverConfig := &config.ServerConfig{
+		Name: "test-rate-limit-reset-at",
+		URL:  mockServer.URL + "/mcp",
+	}
+
+	// Call autoDetectResource
+	result := autoDetectResource(serverConfig, logger)
+
+	// Verify resource was detected after retry
+	assert.Equal(t, "https://api.example.com/mcp/v1", result, "Should detect resource after retry")
+	assert.GreaterOrEqual(t, requestCount, 2, "Should have made at least 2 POST requests")
+}
+
+// TestAutoDetectResource_RateLimitExhausted verifies that when all retries are
+// exhausted due to 429, the function falls back to server URL.
+func TestAutoDetectResource_RateLimitExhausted(t *testing.T) {
+	requestCount := 0
+
+	// Create a mock server that always returns 429
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method == "POST" {
+			w.Header().Set("Retry-After", "1") // Short wait for test
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	logger := zap.NewNop()
+	serverConfig := &config.ServerConfig{
+		Name: "test-rate-limit-exhausted",
+		URL:  mockServer.URL + "/mcp",
+	}
+
+	// Call autoDetectResource
+	result := autoDetectResource(serverConfig, logger)
+
+	// Verify fallback to server URL after exhausting retries
+	assert.Equal(t, mockServer.URL+"/mcp", result, "Should fallback to server URL after exhausting retries")
+	// Should have made maxRetries + 1 attempts (0, 1, 2, 3 = 4 attempts)
+	assert.Equal(t, resourceDetectMaxRetries+1, requestCount, "Should have made maxRetries+1 attempts")
+}
+
+// TestAutoDetectResource_ServerError verifies that 5xx responses trigger
+// immediate fallback to server URL without retry.
+func TestAutoDetectResource_ServerError(t *testing.T) {
+	requestCount := 0
+
+	// Create a mock server that returns 500
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error": "internal server error"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	logger := zap.NewNop()
+	serverConfig := &config.ServerConfig{
+		Name: "test-server-error",
+		URL:  mockServer.URL + "/mcp",
+	}
+
+	// Call autoDetectResource
+	result := autoDetectResource(serverConfig, logger)
+
+	// Verify fallback to server URL (no retry for 5xx)
+	assert.Equal(t, mockServer.URL+"/mcp", result, "Should fallback to server URL on 5xx error")
+	assert.Equal(t, 1, requestCount, "Should only make 1 request (no retry for 5xx)")
+}
+
+// TestParseRateLimitWait_RetryAfterSeconds verifies parsing Retry-After header as seconds.
+func TestParseRateLimitWait_RetryAfterSeconds(t *testing.T) {
+	resp := &http.Response{
+		Header: http.Header{},
+	}
+	resp.Header.Set("Retry-After", "30")
+
+	wait := parseRateLimitWait(resp, nil)
+
+	assert.Equal(t, 30*time.Second, wait, "Should parse Retry-After seconds correctly")
+}
+
+// TestParseRateLimitWait_RetryAfterHTTPDate verifies parsing Retry-After header as HTTP-date.
+func TestParseRateLimitWait_RetryAfterHTTPDate(t *testing.T) {
+	resp := &http.Response{
+		Header: http.Header{},
+	}
+	// Set Retry-After to 5 seconds from now in HTTP-date format
+	futureTime := time.Now().Add(5 * time.Second).UTC()
+	resp.Header.Set("Retry-After", futureTime.Format(http.TimeFormat))
+
+	wait := parseRateLimitWait(resp, nil)
+
+	// Allow some tolerance due to test execution time
+	assert.InDelta(t, 5*time.Second, wait, float64(2*time.Second), "Should parse HTTP-date correctly")
+}
+
+// TestParseRateLimitWait_JSONResetAt verifies parsing reset_at from JSON body.
+func TestParseRateLimitWait_JSONResetAt(t *testing.T) {
+	resp := &http.Response{
+		Header: http.Header{},
+	}
+	// Set reset_at to 5 seconds from now
+	resetAt := time.Now().Add(5 * time.Second).Unix()
+	body := []byte(fmt.Sprintf(`{"reset_at": %d}`, resetAt))
+
+	wait := parseRateLimitWait(resp, body)
+
+	// Allow some tolerance due to test execution time
+	assert.InDelta(t, 5*time.Second, wait, float64(2*time.Second), "Should parse reset_at correctly")
+}
+
+// TestParseRateLimitWait_JSONNestedResetAt verifies parsing reset_at from nested detail field.
+func TestParseRateLimitWait_JSONNestedResetAt(t *testing.T) {
+	resp := &http.Response{
+		Header: http.Header{},
+	}
+	// Set reset_at in detail field
+	resetAt := time.Now().Add(5 * time.Second).Unix()
+	body := []byte(fmt.Sprintf(`{"detail": {"reset_at": %d}}`, resetAt))
+
+	wait := parseRateLimitWait(resp, body)
+
+	// Allow some tolerance due to test execution time
+	assert.InDelta(t, 5*time.Second, wait, float64(2*time.Second), "Should parse nested reset_at correctly")
+}
+
+// TestParseRateLimitWait_NoHints verifies that 0 is returned when no hints are present.
+func TestParseRateLimitWait_NoHints(t *testing.T) {
+	resp := &http.Response{
+		Header: http.Header{},
+	}
+	body := []byte(`{"error": "rate limited"}`)
+
+	wait := parseRateLimitWait(resp, body)
+
+	assert.Equal(t, time.Duration(0), wait, "Should return 0 when no hints present")
+}
+
+// TestParseRateLimitWait_HeaderTakesPrecedence verifies Retry-After header takes precedence over body.
+func TestParseRateLimitWait_HeaderTakesPrecedence(t *testing.T) {
+	resp := &http.Response{
+		Header: http.Header{},
+	}
+	resp.Header.Set("Retry-After", "10")
+	// Body has different value
+	resetAt := time.Now().Add(60 * time.Second).Unix()
+	body := []byte(fmt.Sprintf(`{"reset_at": %d}`, resetAt))
+
+	wait := parseRateLimitWait(resp, body)
+
+	assert.Equal(t, 10*time.Second, wait, "Retry-After header should take precedence over body")
+}
+
 // T008: Test CreateOAuthConfig falls back to server URL when metadata lacks resource field
 func TestCreateOAuthConfig_FallsBackToServerURL(t *testing.T) {
 	// Variable to hold server URL for use in handler
