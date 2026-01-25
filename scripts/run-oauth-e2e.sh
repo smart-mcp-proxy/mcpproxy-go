@@ -17,6 +17,7 @@
 #   ./scripts/run-oauth-e2e.sh                    # Run all tests
 #   ./scripts/run-oauth-e2e.sh --short-ttl        # Run with 30s token TTL
 #   ./scripts/run-oauth-e2e.sh --error-injection  # Run with error injection tests
+#   ./scripts/run-oauth-e2e.sh --runlayer-mode    # Run with Runlayer mode (Pydantic 422 errors)
 #   ./scripts/run-oauth-e2e.sh --verbose          # Show verbose output
 
 set -e
@@ -31,6 +32,7 @@ NC='\033[0m' # No Color
 # Parse arguments
 SHORT_TTL=false
 ERROR_INJECTION=false
+RUNLAYER_MODE=false
 VERBOSE=false
 for arg in "$@"; do
   case $arg in
@@ -40,6 +42,10 @@ for arg in "$@"; do
       ;;
     --error-injection)
       ERROR_INJECTION=true
+      shift
+      ;;
+    --runlayer-mode)
+      RUNLAYER_MODE=true
       shift
       ;;
     --verbose)
@@ -163,7 +169,15 @@ mkdir -p "$TEST_RESULTS_DIR"
 # Start OAuth test server with configured TTL
 echo -e "${YELLOW}Starting OAuth test server on port $OAUTH_SERVER_PORT...${NC}"
 echo -e "${BLUE}  Access Token TTL: $ACCESS_TOKEN_TTL${NC}"
-go run ./tests/oauthserver/cmd/server -port $OAUTH_SERVER_PORT -access-token-ttl=$ACCESS_TOKEN_TTL &
+
+# Build OAuth server command
+OAUTH_SERVER_CMD="go run ./tests/oauthserver/cmd/server -port $OAUTH_SERVER_PORT -access-token-ttl=$ACCESS_TOKEN_TTL"
+if [ "$RUNLAYER_MODE" = true ]; then
+  OAUTH_SERVER_CMD="$OAUTH_SERVER_CMD -runlayer-mode"
+  echo -e "${BLUE}  Runlayer Mode: enabled (Pydantic 422 errors)${NC}"
+fi
+
+$OAUTH_SERVER_CMD &
 OAUTH_SERVER_PID=$!
 sleep 3
 

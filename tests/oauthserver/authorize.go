@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -92,6 +93,11 @@ func (s *OAuthTestServer) handleAuthorizeGET(w http.ResponseWriter, r *http.Requ
 
 	// RFC 8707: Require resource indicator if configured
 	if s.options.RequireResourceIndicator && resource == "" {
+		// In Runlayer mode, return Pydantic-style 422 error
+		if s.options.RunlayerMode {
+			s.pydanticValidationError(w, "query", "resource", "Field required")
+			return
+		}
 		s.authorizeError(w, redirectURI, state, "invalid_request", "RFC 8707: resource parameter required")
 		return
 	}
@@ -158,6 +164,11 @@ func (s *OAuthTestServer) handleAuthorizePOST(w http.ResponseWriter, r *http.Req
 
 	// RFC 8707: Require resource indicator if configured
 	if s.options.RequireResourceIndicator && resource == "" {
+		// In Runlayer mode, return Pydantic-style 422 error
+		if s.options.RunlayerMode {
+			s.pydanticValidationError(w, "body", "resource", "Field required")
+			return
+		}
 		s.authorizeError(w, redirectURI, state, "invalid_request", "RFC 8707: resource parameter required")
 		return
 	}
@@ -358,4 +369,23 @@ func verifyPKCE(codeVerifier, codeChallenge, method string) bool {
 	computed := base64.RawURLEncoding.EncodeToString(h[:])
 
 	return computed == codeChallenge
+}
+
+// pydanticValidationError returns a 422 Unprocessable Entity response
+// with Pydantic-style validation error format (used in Runlayer mode).
+func (s *OAuthTestServer) pydanticValidationError(w http.ResponseWriter, location, field, msg string) {
+	resp := PydanticValidationError{
+		Detail: []PydanticErrorDetail{
+			{
+				Type:  "missing",
+				Loc:   []string{location, field},
+				Msg:   msg,
+				Input: nil,
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity) // 422
+	json.NewEncoder(w).Encode(resp)
 }
