@@ -30,6 +30,9 @@ type OAuthTestServer struct {
 	refreshTokens map[string]*RefreshTokenData
 	issuedTokens  []TokenInfo
 
+	// Rate limit tracking
+	mcpRateLimitHits int
+
 	mu sync.RWMutex
 
 	// Test reference
@@ -39,13 +42,15 @@ type OAuthTestServer struct {
 // ServerResult contains everything needed to configure a test client.
 type ServerResult struct {
 	// Server URLs
-	IssuerURL                   string
-	AuthorizationEndpoint       string
-	TokenEndpoint               string
-	JWKSURL                     string
-	RegistrationEndpoint        string // Empty if DCR disabled
-	DeviceAuthorizationEndpoint string // Empty if device code disabled
-	ProtectedResourceURL        string // For WWW-Authenticate detection tests
+	IssuerURL                      string
+	AuthorizationEndpoint          string
+	TokenEndpoint                  string
+	JWKSURL                        string
+	RegistrationEndpoint           string // Empty if DCR disabled
+	DeviceAuthorizationEndpoint    string // Empty if device code disabled
+	ProtectedResourceURL           string // For WWW-Authenticate detection tests
+	MCPURL                         string // MCP endpoint URL (for resource auto-detection testing)
+	ProtectedResourceMetadataURL   string // RFC 9728 metadata URL
 
 	// Pre-registered test client (confidential)
 	ClientID     string
@@ -135,16 +140,18 @@ func StartOnPort(t *testing.T, port int, opts Options) *ServerResult {
 
 	// Build result
 	result := &ServerResult{
-		IssuerURL:             issuerURL,
-		AuthorizationEndpoint: issuerURL + "/authorize",
-		TokenEndpoint:         issuerURL + "/token",
-		JWKSURL:               issuerURL + "/jwks.json",
-		ProtectedResourceURL:  issuerURL + "/protected",
-		ClientID:              confidentialClient.ClientID,
-		ClientSecret:          confidentialClient.ClientSecret,
-		PublicClientID:        publicClient.ClientID,
-		Shutdown:              s.Shutdown,
-		Server:                s,
+		IssuerURL:                    issuerURL,
+		AuthorizationEndpoint:        issuerURL + "/authorize",
+		TokenEndpoint:                issuerURL + "/token",
+		JWKSURL:                      issuerURL + "/jwks.json",
+		ProtectedResourceURL:         issuerURL + "/protected",
+		MCPURL:                       issuerURL + "/mcp",
+		ProtectedResourceMetadataURL: issuerURL + "/.well-known/oauth-protected-resource",
+		ClientID:                     confidentialClient.ClientID,
+		ClientSecret:                 confidentialClient.ClientSecret,
+		PublicClientID:               publicClient.ClientID,
+		Shutdown:                     s.Shutdown,
+		Server:                       s,
 	}
 
 	if opts.EnableDCR {
@@ -226,16 +233,18 @@ func Start(t *testing.T, opts Options) *ServerResult {
 
 	// Build result
 	result := &ServerResult{
-		IssuerURL:             issuerURL,
-		AuthorizationEndpoint: issuerURL + "/authorize",
-		TokenEndpoint:         issuerURL + "/token",
-		JWKSURL:               issuerURL + "/jwks.json",
-		ProtectedResourceURL:  issuerURL + "/protected",
-		ClientID:              confidentialClient.ClientID,
-		ClientSecret:          confidentialClient.ClientSecret,
-		PublicClientID:        publicClient.ClientID,
-		Shutdown:              s.Shutdown,
-		Server:                s,
+		IssuerURL:                    issuerURL,
+		AuthorizationEndpoint:        issuerURL + "/authorize",
+		TokenEndpoint:                issuerURL + "/token",
+		JWKSURL:                      issuerURL + "/jwks.json",
+		ProtectedResourceURL:         issuerURL + "/protected",
+		MCPURL:                       issuerURL + "/mcp",
+		ProtectedResourceMetadataURL: issuerURL + "/.well-known/oauth-protected-resource",
+		ClientID:                     confidentialClient.ClientID,
+		ClientSecret:                 confidentialClient.ClientSecret,
+		PublicClientID:               publicClient.ClientID,
+		Shutdown:                     s.Shutdown,
+		Server:                       s,
 	}
 
 	if opts.EnableDCR {
@@ -255,6 +264,9 @@ func (s *OAuthTestServer) setupRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("/.well-known/oauth-authorization-server", s.handleDiscovery)
 		mux.HandleFunc("/.well-known/openid-configuration", s.handleDiscovery)
 	}
+
+	// Protected Resource Metadata (RFC 9728) - always available for resource auto-detection
+	mux.HandleFunc("/.well-known/oauth-protected-resource", s.handleProtectedResourceMetadata)
 
 	// JWKS endpoint
 	mux.HandleFunc("/jwks.json", s.handleJWKS)
@@ -444,6 +456,14 @@ func (s *OAuthTestServer) SetErrorMode(mode ErrorMode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.options.ErrorMode = mode
+}
+
+// ResetRateLimitCounter resets the MCP rate limit hit counter.
+// Call this between tests to start fresh.
+func (s *OAuthTestServer) ResetRateLimitCounter() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mcpRateLimitHits = 0
 }
 
 // GetAuthorizationCodes returns pending authorization codes (for debugging).

@@ -960,3 +960,109 @@ func TestDeviceCode_VerificationPage(t *testing.T) {
 	assert.Contains(t, string(body), "Device Verification")
 	assert.Contains(t, string(body), deviceResp.UserCode) // Should pre-fill the user code
 }
+
+// --- MCP Rate Limiting Tests ---
+
+func TestMCPRateLimiting(t *testing.T) {
+	t.Run("returns 429 with Retry-After header", func(t *testing.T) {
+		server := Start(t, Options{
+			ErrorMode: ErrorMode{
+				MCPRateLimitCount:      2,
+				MCPRateLimitRetryAfter: 5,
+			},
+		})
+		defer server.Shutdown()
+
+		client := &http.Client{}
+
+		// First request should return 429
+		resp1, err := client.Post(server.MCPURL, "application/json", strings.NewReader("{}"))
+		require.NoError(t, err)
+		defer resp1.Body.Close()
+		assert.Equal(t, http.StatusTooManyRequests, resp1.StatusCode)
+		assert.Equal(t, "5", resp1.Header.Get("Retry-After"))
+
+		// Second request should also return 429
+		resp2, err := client.Post(server.MCPURL, "application/json", strings.NewReader("{}"))
+		require.NoError(t, err)
+		defer resp2.Body.Close()
+		assert.Equal(t, http.StatusTooManyRequests, resp2.StatusCode)
+
+		// Third request should return 401 (past rate limit count)
+		resp3, err := client.Post(server.MCPURL, "application/json", strings.NewReader("{}"))
+		require.NoError(t, err)
+		defer resp3.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp3.StatusCode)
+		assert.Contains(t, resp3.Header.Get("WWW-Authenticate"), "resource_metadata")
+	})
+
+	t.Run("returns 429 with reset_at in body", func(t *testing.T) {
+		server := Start(t, Options{
+			ErrorMode: ErrorMode{
+				MCPRateLimitCount:      1,
+				MCPRateLimitRetryAfter: 10,
+				MCPRateLimitUseResetAt: true,
+			},
+		})
+		defer server.Shutdown()
+
+		client := &http.Client{}
+
+		resp, err := client.Post(server.MCPURL, "application/json", strings.NewReader("{}"))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("Retry-After"), "Should not have Retry-After header when using reset_at")
+
+		body, _ := io.ReadAll(resp.Body)
+		assert.Contains(t, string(body), "reset_at")
+	})
+
+	t.Run("ResetRateLimitCounter works", func(t *testing.T) {
+		server := Start(t, Options{
+			ErrorMode: ErrorMode{
+				MCPRateLimitCount:      1,
+				MCPRateLimitRetryAfter: 1,
+			},
+		})
+		defer server.Shutdown()
+
+		client := &http.Client{}
+
+		// First request returns 429
+		resp1, _ := client.Post(server.MCPURL, "application/json", strings.NewReader("{}"))
+		resp1.Body.Close()
+		assert.Equal(t, http.StatusTooManyRequests, resp1.StatusCode)
+
+		// Reset counter
+		server.Server.ResetRateLimitCounter()
+
+		// Next request should return 429 again (counter reset)
+		resp2, _ := client.Post(server.MCPURL, "application/json", strings.NewReader("{}"))
+		resp2.Body.Close()
+		assert.Equal(t, http.StatusTooManyRequests, resp2.StatusCode)
+	})
+}
+
+// --- Protected Resource Metadata Tests ---
+
+func TestProtectedResourceMetadata(t *testing.T) {
+	server := Start(t, Options{})
+	defer server.Shutdown()
+
+	resp, err := http.Get(server.ProtectedResourceMetadataURL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	var metadata map[string]interface{}
+	err = json.NewDecoder(resp.Body).Decode(&metadata)
+	require.NoError(t, err)
+
+	assert.Equal(t, server.MCPURL, metadata["resource"])
+	assert.Contains(t, metadata, "authorization_servers")
+	assert.Contains(t, metadata, "scopes_supported")
+}
