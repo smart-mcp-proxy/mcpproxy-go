@@ -598,7 +598,7 @@ func TestAutoDetectResource_RateLimitWithResetAt(t *testing.T) {
 				resetAt := time.Now().Add(1 * time.Second).Unix()
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
-				w.Write([]byte(fmt.Sprintf(`{"reset_at": %d}`, resetAt)))
+				fmt.Fprintf(w, `{"reset_at": %d}`, resetAt)
 				return
 			}
 			// Subsequent request: return 401 with resource metadata link
