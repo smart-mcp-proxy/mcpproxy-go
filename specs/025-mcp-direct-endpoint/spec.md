@@ -28,7 +28,7 @@ As an MCP client user, I want to connect to a single endpoint that exposes all a
 
 1. **Given** the direct endpoint is enabled and upstream servers are connected, **When** a client requests the tools list from `/mcp/direct`, **Then** the response includes all tools from connected upstream servers with `server:tool` naming format.
 
-2. **Given** the direct endpoint is enabled, **When** a client requests the tools list, **Then** the response includes all internal MCPProxy tools (retrieve_tools, call_tool_*, upstream_servers, etc.) without a server prefix.
+2. **Given** the direct endpoint is enabled, **When** a client requests the tools list, **Then** the response includes management MCPProxy tools (upstream_servers, quarantine_security, code_execution, list_registries, search_servers, read_cache) without a server prefix. Note: Search-workflow tools (retrieve_tools, call_tool_read, call_tool_write, call_tool_destructive) are excluded as they are redundant in direct mode.
 
 3. **Given** the direct endpoint is enabled and a tool exists as `github:create_issue`, **When** a client calls this tool directly, **Then** the call is routed to the github upstream server and executed successfully.
 
@@ -104,6 +104,26 @@ As an MCP client developer, I want upstream tool annotations (readOnlyHint, dest
 
 ---
 
+### User Story 6 - Admin Server Management (Priority: P2)
+
+As an administrator, I want connected clients to be notified when I disable, enable, quarantine, or unquarantine an upstream server, so their tool lists stay synchronized with the current server state.
+
+**Why this priority**: Essential for operational consistency - admin actions must propagate to all connected clients.
+
+**Independent Test**: Can be tested by disabling/enabling a server while a client is connected and verifying the client receives a tool list update notification.
+
+**Acceptance Scenarios**:
+
+1. **Given** a client is connected to `/mcp/direct` and server "github" is enabled, **When** an administrator disables "github" via CLI/WebUI/API, **Then** the system sends `notifications/tools/list_changed` to the client, and the client's subsequent `tools/list` call excludes github:* tools.
+
+2. **Given** a client is connected to `/mcp/direct` and server "github" is disabled, **When** an administrator enables "github" via CLI/WebUI/API, **Then** the system sends `notifications/tools/list_changed` to the client, and the client's subsequent `tools/list` call includes github:* tools.
+
+3. **Given** a client is connected to `/mcp/direct` and server "github" is not quarantined, **When** an administrator quarantines "github", **Then** the system sends `notifications/tools/list_changed` to the client, and the client's subsequent `tools/list` call excludes github:* tools.
+
+4. **Given** a client is connected to `/mcp/direct` and server "github" is quarantined, **When** an administrator unquarantines (approves) "github", **Then** the system sends `notifications/tools/list_changed` to the client, and the client's subsequent `tools/list` call includes github:* tools (once connected).
+
+---
+
 ### Edge Cases
 
 - What happens when all upstream servers are disabled or quarantined? → Only internal tools are listed
@@ -117,7 +137,7 @@ As an MCP client developer, I want upstream tool annotations (readOnlyHint, dest
 
 - **FR-001**: System MUST provide a new MCP endpoint at `/mcp/direct` when the feature is enabled
 - **FR-002**: System MUST expose all tools from connected, enabled, non-quarantined upstream servers on the direct endpoint
-- **FR-003**: System MUST expose all internal MCPProxy tools (retrieve_tools, call_tool_read, call_tool_write, call_tool_destructive, upstream_servers, quarantine_security, read_cache, code_execution, list_registries, search_servers) on the direct endpoint
+- **FR-003**: System MUST expose management MCPProxy tools (upstream_servers, quarantine_security, read_cache, code_execution, list_registries, search_servers) on the direct endpoint. Search-workflow tools (retrieve_tools, call_tool_read, call_tool_write, call_tool_destructive) MUST be excluded as they are redundant in direct mode
 - **FR-004**: System MUST namespace upstream tools using `server:tool` format to prevent collisions
 - **FR-005**: System MUST NOT namespace internal tools (they appear without prefix)
 - **FR-006**: System MUST exclude tools from quarantined servers
@@ -130,12 +150,13 @@ As an MCP client developer, I want upstream tool annotations (readOnlyHint, dest
 - **FR-013**: System MUST provide a configuration option `enable_direct_endpoint` to enable/disable this feature
 - **FR-014**: System MUST default the `enable_direct_endpoint` configuration to `false` (opt-in)
 - **FR-015**: System MUST return 404 for `/mcp/direct` when the feature is disabled
+- **FR-016**: System MUST send MCP `notifications/tools/list_changed` notification to all connected `/mcp/direct` clients when the tool list changes due to: upstream server connect/disconnect, upstream server enable/disable, upstream server quarantine/unquarantine, or upstream server's own `tools/list_changed` notification
 
 ### Key Entities
 
 - **DirectMCPServer**: A separate MCP server instance that manages the direct endpoint, distinct from the search-based MCPProxyServer
 - **Tool Namespace**: The `server:tool` naming convention that maps upstream tools to their source server
-- **Tool Synchronization**: The mechanism that keeps the direct endpoint's tool list in sync with upstream server state
+- **Tool Synchronization**: The mechanism that keeps the direct endpoint's tool list in sync with upstream server state, using MCP `notifications/tools/list_changed` to notify connected clients of changes
 
 ## Success Criteria *(mandatory)*
 
@@ -146,12 +167,14 @@ As an MCP client developer, I want upstream tool annotations (readOnlyHint, dest
 - **SC-003**: 100% of upstream tool calls through the direct endpoint succeed when the upstream server is healthy
 - **SC-004**: Tool annotations are preserved with 100% fidelity from upstream to direct endpoint
 - **SC-005**: Zero tools from quarantined/disabled/disconnected servers appear in the direct endpoint's tool list
+- **SC-006**: All connected clients receive `notifications/tools/list_changed` within 1 second of an admin action (enable/disable/quarantine/unquarantine)
 
 ## Assumptions
 
 - The existing `EventTypeServersChanged` event provides sufficient notification for tool synchronization
 - The `StateView` contains cached tool information suitable for rebuilding the tool list
 - The `mcp-go` library's `SetTools()` method provides atomic tool list replacement
+- The `mcp-go` library supports sending `notifications/tools/list_changed` to connected clients
 - Internal tool handlers can be shared between the existing MCPProxyServer and the new DirectMCPServer
 
 ## Out of Scope
