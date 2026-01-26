@@ -783,6 +783,16 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 
 	// Check if we already have a server for this name
 	if existing, exists := m.servers[serverName]; exists {
+		// Drain any stale callback parameters from previous OAuth attempts
+		// This prevents state mismatch errors when OAuth fails/times out and is retried
+		select {
+		case staleParams := <-existing.CallbackChan:
+			m.logger.Warn("Drained stale OAuth callback params from previous attempt (prevents state mismatch)",
+				zap.String("server", serverName),
+				zap.String("stale_state", staleParams["state"]))
+		default:
+			// Channel is empty, nothing to drain
+		}
 		m.logger.Debug("Reusing existing callback server",
 			zap.String("server", serverName),
 			zap.Int("port", existing.Port))
