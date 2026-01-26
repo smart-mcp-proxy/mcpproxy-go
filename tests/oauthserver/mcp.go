@@ -55,6 +55,19 @@ func (s *OAuthTestServer) createMCPServer() *mcpserver.MCPServer {
 // oauthMiddleware wraps the MCP handler with OAuth authentication
 func (s *OAuthTestServer) oauthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check for rate limit injection BEFORE auth check
+		if s.options.ErrorMode.MCPRateLimitCount > 0 {
+			s.mu.Lock()
+			s.mcpRateLimitHits++
+			hits := s.mcpRateLimitHits
+			s.mu.Unlock()
+
+			if hits <= s.options.ErrorMode.MCPRateLimitCount {
+				s.sendMCPRateLimited(w)
+				return
+			}
+		}
+
 		// Check for Bearer token authentication
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
@@ -108,4 +121,22 @@ func (s *OAuthTestServer) sendMCPUnauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", wwwAuth)
 	w.WriteHeader(http.StatusUnauthorized)
 	w.Write([]byte(`{"error": "unauthorized", "error_description": "Bearer token required"}`))
+}
+
+// sendMCPRateLimited sends a 429 response for rate limit testing
+func (s *OAuthTestServer) sendMCPRateLimited(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if s.options.ErrorMode.MCPRateLimitRetryAfter > 0 && !s.options.ErrorMode.MCPRateLimitUseResetAt {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", s.options.ErrorMode.MCPRateLimitRetryAfter))
+	}
+
+	w.WriteHeader(http.StatusTooManyRequests)
+
+	if s.options.ErrorMode.MCPRateLimitUseResetAt {
+		resetAt := time.Now().Add(time.Duration(s.options.ErrorMode.MCPRateLimitRetryAfter) * time.Second).Unix()
+		fmt.Fprintf(w, `{"error": "rate_limited", "reset_at": %d}`, resetAt)
+	} else {
+		w.Write([]byte(`{"error": "rate_limited", "error_description": "Too many requests"}`))
+	}
 }

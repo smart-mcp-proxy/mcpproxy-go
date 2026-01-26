@@ -1140,7 +1140,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	logger.Debug("🔧 Creating OAuth config with resource auto-detection")
 
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
 
 	c.logger.Debug("OAuth config created",
 		zap.Bool("config_nil", oauthConfig == nil),
@@ -1613,7 +1613,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	}
 
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
 	if oauthConfig == nil {
 		oauthErr = fmt.Errorf("failed to create OAuth config")
 		return oauthErr
@@ -2970,7 +2970,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	}
 
 	// Create OAuth config
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
@@ -3330,7 +3330,7 @@ func (c *Client) ForceOAuthFlowWithResult(ctx context.Context) (*OAuthStartResul
 // forceHTTPOAuthFlowWithResult forces OAuth flow for HTTP transport and returns auth URL/browser status.
 func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartResult, error) {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
 	if oauthConfig == nil {
 		return nil, fmt.Errorf("failed to create OAuth config - server may not support OAuth")
 	}
@@ -3395,7 +3395,7 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 // forceSSEOAuthFlowWithResult forces OAuth flow for SSE transport and returns auth URL/browser status.
 func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartResult, error) {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(c.config, c.storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
 	if oauthConfig == nil {
 		return nil, fmt.Errorf("failed to create OAuth config - server may not support OAuth")
 	}

@@ -66,3 +66,31 @@ func (s *OAuthTestServer) handleDiscovery(w http.ResponseWriter, r *http.Request
 		return
 	}
 }
+
+// buildProtectedResourceMetadata constructs RFC 9728 Protected Resource Metadata.
+func (s *OAuthTestServer) buildProtectedResourceMetadata() *ProtectedResourceMetadata {
+	return &ProtectedResourceMetadata{
+		Resource:              s.issuerURL + "/mcp",
+		AuthorizationServers:  []string{s.issuerURL},
+		ScopesSupported:       s.options.SupportedScopes,
+		BearerMethodsSupported: []string{"header"},
+	}
+}
+
+// handleProtectedResourceMetadata handles GET /.well-known/oauth-protected-resource requests.
+// This implements RFC 9728 Protected Resource Metadata for resource auto-detection.
+func (s *OAuthTestServer) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	metadata := s.buildProtectedResourceMetadata()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	if err := json.NewEncoder(w).Encode(metadata); err != nil {
+		http.Error(w, "Failed to encode metadata", http.StatusInternalServerError)
+		return
+	}
+}
