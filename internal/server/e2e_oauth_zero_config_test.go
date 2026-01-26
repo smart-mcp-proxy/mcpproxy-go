@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -55,7 +56,7 @@ func TestE2E_ZeroConfigOAuth_ResourceParameterExtraction(t *testing.T) {
 	}
 
 	// Call CreateOAuthConfigWithExtraParams which performs metadata discovery and resource auto-detection
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(serverConfig, storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(context.Background(), serverConfig, storage)
 
 	// Validate OAuth config was created
 	require.NotNil(t, oauthConfig, "OAuth config should be created for HTTP server")
@@ -103,7 +104,7 @@ func TestE2E_ManualExtraParamsOverride(t *testing.T) {
 	}
 
 	// Call CreateOAuthConfigWithExtraParams
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(serverConfig, storage)
+	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(context.Background(), serverConfig, storage)
 
 	// Validate OAuth config was created
 	require.NotNil(t, oauthConfig, "OAuth config should be created")

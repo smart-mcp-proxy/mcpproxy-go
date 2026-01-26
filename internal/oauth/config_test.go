@@ -331,7 +331,7 @@ func TestCreateOAuthConfig_AutoDetectsResource(t *testing.T) {
 	}
 
 	// Call CreateOAuthConfigWithExtraParams to get both config and extraParams
-	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(serverConfig, testStorage)
+	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(context.Background(), serverConfig, testStorage)
 
 	require.NotNil(t, oauthConfig, "OAuth config should be created")
 	require.NotNil(t, extraParams, "Extra params should be returned")
@@ -384,7 +384,7 @@ func TestCreateOAuthConfig_ManualOverride(t *testing.T) {
 	}
 
 	// Call CreateOAuthConfigWithExtraParams
-	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(serverConfig, testStorage)
+	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(context.Background(), serverConfig, testStorage)
 
 	require.NotNil(t, oauthConfig, "OAuth config should be created")
 	require.NotNil(t, extraParams, "Extra params should be returned")
@@ -437,7 +437,7 @@ func TestCreateOAuthConfig_MergesExtraParams(t *testing.T) {
 	}
 
 	// Call CreateOAuthConfigWithExtraParams
-	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(serverConfig, testStorage)
+	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(context.Background(), serverConfig, testStorage)
 
 	require.NotNil(t, oauthConfig, "OAuth config should be created")
 	require.NotNil(t, extraParams, "Extra params should be returned")
@@ -783,6 +783,55 @@ func TestAutoDetectResource_ServerError(t *testing.T) {
 	assert.Equal(t, 1, requestCount, "Should only make 1 request (no retry for 5xx)")
 }
 
+// TestAutoDetectResource_ContextCancellation verifies that context cancellation
+// interrupts rate limit waits and returns fallback immediately.
+func TestAutoDetectResource_ContextCancellation(t *testing.T) {
+	requestCount := 0
+
+	// Create a mock server that always returns 429 with long Retry-After
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method == "POST" {
+			w.Header().Set("Retry-After", "60") // Long wait time
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	logger := zap.NewNop()
+	serverConfig := &config.ServerConfig{
+		Name: "test-context-cancel",
+		URL:  mockServer.URL + "/mcp",
+	}
+
+	// Create a context that will be cancelled quickly
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start autoDetectResource in a goroutine
+	done := make(chan string)
+	go func() {
+		result := autoDetectResource(ctx, serverConfig, logger)
+		done <- result
+	}()
+
+	// Wait for first request to complete, then cancel
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	// Wait for result with timeout
+	select {
+	case result := <-done:
+		// Should fallback to server URL due to context cancellation
+		assert.Equal(t, mockServer.URL+"/mcp", result, "Should fallback to server URL on context cancellation")
+		// Should have made at least 1 request before cancellation
+		assert.GreaterOrEqual(t, requestCount, 1, "Should have made at least 1 request")
+	case <-time.After(2 * time.Second):
+		t.Fatal("autoDetectResource did not return after context cancellation - blocking issue!")
+	}
+}
+
 // TestParseRateLimitWait_RetryAfterSeconds verifies parsing Retry-After header as seconds.
 func TestParseRateLimitWait_RetryAfterSeconds(t *testing.T) {
 	resp := &http.Response{
@@ -905,7 +954,7 @@ func TestCreateOAuthConfig_FallsBackToServerURL(t *testing.T) {
 	}
 
 	// Call CreateOAuthConfigWithExtraParams to get both config and extraParams
-	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(serverConfig, testStorage)
+	oauthConfig, extraParams := CreateOAuthConfigWithExtraParams(context.Background(), serverConfig, testStorage)
 
 	require.NotNil(t, oauthConfig, "OAuth config should be created")
 	require.NotNil(t, extraParams, "Extra params should be returned")

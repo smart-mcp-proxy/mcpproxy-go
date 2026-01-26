@@ -331,7 +331,7 @@ func (m *TokenStoreManager) HasValidToken(ctx context.Context, serverName string
 //  1. Manual extra_params.resource from config (highest priority - preserves backward compatibility)
 //  2. Auto-detected resource from RFC 9728 Protected Resource Metadata
 //  3. Fallback to server URL if metadata is unavailable or lacks resource field
-func CreateOAuthConfigWithExtraParams(serverConfig *config.ServerConfig, storage *storage.BoltDB) (*client.OAuthConfig, map[string]string) {
+func CreateOAuthConfigWithExtraParams(ctx context.Context, serverConfig *config.ServerConfig, storage *storage.BoltDB) (*client.OAuthConfig, map[string]string) {
 	logger := zap.L().Named("oauth")
 
 	// Initialize extraParams map
@@ -351,7 +351,7 @@ func CreateOAuthConfigWithExtraParams(serverConfig *config.ServerConfig, storage
 
 	// Priority 2 & 3: Auto-detect resource if not manually specified
 	if _, hasResource := extraParams["resource"]; !hasResource {
-		detectedResource := autoDetectResource(serverConfig, logger)
+		detectedResource := autoDetectResource(ctx, serverConfig, logger)
 		if detectedResource != "" {
 			extraParams["resource"] = detectedResource
 		}
@@ -408,18 +408,83 @@ func parseRateLimitWait(resp *http.Response, body []byte) time.Duration {
 	return 0 // No hints, caller should use backoff
 }
 
+// parseRateLimitWaitWithSource extracts wait duration and its source from a 429 response.
+// Returns (duration, source) where source is one of:
+// - "retry-after-header" (Retry-After header with seconds or HTTP-date)
+// - "json-body-reset-at" (JSON body with reset_at field)
+// - "" (no hints found, caller should use backoff)
+func parseRateLimitWaitWithSource(resp *http.Response, body []byte) (time.Duration, string) {
+	// Try Retry-After header first (RFC 7231)
+	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+		// Try parsing as seconds
+		if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second, "retry-after-header"
+		}
+		// Try parsing as HTTP-date
+		if t, err := http.ParseTime(retryAfter); err == nil {
+			wait := time.Until(t)
+			if wait > 0 {
+				return wait, "retry-after-header"
+			}
+		}
+	}
+
+	// Try JSON body with reset_at (common pattern in rate limit responses)
+	// Supports both top-level and nested in "detail" object
+	var rateLimit struct {
+		ResetAt int64 `json:"reset_at"`
+		Detail  struct {
+			ResetAt int64 `json:"reset_at"`
+		} `json:"detail"`
+	}
+	if json.Unmarshal(body, &rateLimit) == nil {
+		resetAt := rateLimit.ResetAt
+		if resetAt == 0 {
+			resetAt = rateLimit.Detail.ResetAt
+		}
+		if resetAt > 0 {
+			wait := time.Until(time.Unix(resetAt, 0))
+			if wait > 0 {
+				return wait, "json-body-reset-at"
+			}
+		}
+	}
+
+	return 0, "" // No hints, caller should use backoff
+}
+
 // autoDetectResource attempts to discover the RFC 8707 resource parameter.
 // Returns the detected resource URL, or server URL as fallback, or empty string if
 // the server clearly doesn't require OAuth.
 //
 // This function handles rate limiting (429) by retrying with appropriate backoff,
 // respecting Retry-After headers and JSON body reset_at fields.
-func autoDetectResource(serverConfig *config.ServerConfig, logger *zap.Logger) string {
+// The context allows cancellation during rate limit waits (e.g., during shutdown).
+func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, logger *zap.Logger) string {
 	httpClient := &http.Client{Timeout: resourceDetectRequestTimeout}
 
 	for attempt := 0; attempt <= resourceDetectMaxRetries; attempt++ {
+		// Check context before making request
+		if ctx.Err() != nil {
+			logger.Debug("Context cancelled before resource detection request",
+				zap.String("server", serverConfig.Name),
+				zap.Int("attempt", attempt),
+				zap.Error(ctx.Err()))
+			return serverConfig.URL
+		}
+
 		// POST is the only method guaranteed by MCP spec for the main endpoint
-		resp, err := httpClient.Post(serverConfig.URL, "application/json", strings.NewReader("{}"))
+		req, err := http.NewRequestWithContext(ctx, "POST", serverConfig.URL, strings.NewReader("{}"))
+		if err != nil {
+			logger.Debug("Failed to create request for resource detection",
+				zap.String("server", serverConfig.Name),
+				zap.Int("attempt", attempt),
+				zap.Error(err))
+			return serverConfig.URL
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			logger.Debug("Failed to make preflight request for resource detection",
 				zap.String("server", serverConfig.Name),
@@ -441,10 +506,11 @@ func autoDetectResource(serverConfig *config.ServerConfig, logger *zap.Logger) s
 		case resp.StatusCode == http.StatusTooManyRequests:
 			// 429 - Rate limited: retry with appropriate wait time
 			if attempt < resourceDetectMaxRetries {
-				waitTime := parseRateLimitWait(resp, body)
+				waitTime, waitSource := parseRateLimitWaitWithSource(resp, body)
 				if waitTime == 0 {
 					// No hint from server, use exponential backoff
 					waitTime = resourceDetectDefaultBackoff * time.Duration(1<<uint(attempt))
+					waitSource = "exponential-backoff"
 				}
 				// Cap wait time to avoid blocking too long
 				if waitTime > resourceDetectMaxWait {
@@ -455,10 +521,21 @@ func autoDetectResource(serverConfig *config.ServerConfig, logger *zap.Logger) s
 					zap.String("server", serverConfig.Name),
 					zap.Int("attempt", attempt+1),
 					zap.Int("max_attempts", resourceDetectMaxRetries+1),
-					zap.Duration("wait_time", waitTime))
+					zap.Duration("wait_time", waitTime),
+					zap.String("wait_source", waitSource))
 
-				time.Sleep(waitTime)
-				continue
+				// Context-aware wait: allows cancellation during shutdown
+				select {
+				case <-time.After(waitTime):
+					continue
+				case <-ctx.Done():
+					logger.Debug("Rate-limit wait cancelled",
+						zap.String("server", serverConfig.Name),
+						zap.Int("attempt", attempt+1),
+						zap.Duration("remaining_wait", waitTime),
+						zap.Error(ctx.Err()))
+					return serverConfig.URL
+				}
 			}
 
 			// Exhausted retries - fallback to server URL
