@@ -516,6 +516,100 @@ func TestStartCallbackServerDynamicPort(t *testing.T) {
 	assert.Contains(t, callbackServer.RedirectURI, "http://127.0.0.1:", "Redirect URI should have localhost base")
 }
 
+// TestStartCallbackServerDrainsStaleParams verifies that when a callback server
+// is reused, any stale params from a previous failed OAuth attempt are drained
+// from the channel. This prevents state mismatch errors on OAuth retries.
+// See: https://github.com/smart-mcp-proxy/mcpproxy-go/pull/281
+func TestStartCallbackServerDrainsStaleParams(t *testing.T) {
+	manager := GetGlobalCallbackManager()
+
+	serverName := "test-drain-stale-params"
+
+	// Start callback server first time
+	callbackServer1, err := manager.StartCallbackServer(serverName, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.StopCallbackServer(serverName) })
+
+	originalPort := callbackServer1.Port
+
+	// Simulate a failed OAuth attempt by sending stale params to the channel
+	// This is what happens when OAuth times out after the HTTP callback arrives
+	staleParams := map[string]string{
+		"code":  "stale_auth_code",
+		"state": "stale_state_abc123",
+	}
+	select {
+	case callbackServer1.CallbackChan <- staleParams:
+		// Stale params buffered in channel
+	default:
+		t.Fatal("Failed to send stale params to channel")
+	}
+
+	// Verify stale params are in the channel
+	assert.Len(t, callbackServer1.CallbackChan, 1, "Channel should have stale params")
+
+	// Now simulate a retry - call StartCallbackServer again for the same server
+	// This should reuse the existing server AND drain the stale params
+	callbackServer2, err := manager.StartCallbackServer(serverName, 0)
+	require.NoError(t, err)
+
+	// Verify we got the same server (reused)
+	assert.Equal(t, originalPort, callbackServer2.Port, "Should reuse same callback server")
+	assert.Same(t, callbackServer1, callbackServer2, "Should return same server instance")
+
+	// Verify channel is now empty (stale params were drained)
+	select {
+	case params := <-callbackServer2.CallbackChan:
+		t.Fatalf("Channel should be empty after draining, but got: %v", params)
+	default:
+		// Channel is empty - this is the expected behavior
+	}
+}
+
+// TestStartCallbackServerDrainsStaleParams_EmptyChannel verifies that draining
+// works correctly when the channel is already empty (no stale params).
+func TestStartCallbackServerDrainsStaleParams_EmptyChannel(t *testing.T) {
+	manager := GetGlobalCallbackManager()
+
+	serverName := "test-drain-empty-channel"
+
+	// Start callback server first time
+	callbackServer1, err := manager.StartCallbackServer(serverName, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.StopCallbackServer(serverName) })
+
+	// Don't send any params - channel is empty
+
+	// Call StartCallbackServer again - should work fine with empty channel
+	callbackServer2, err := manager.StartCallbackServer(serverName, 0)
+	require.NoError(t, err)
+
+	// Verify we got the same server
+	assert.Same(t, callbackServer1, callbackServer2, "Should return same server instance")
+
+	// Verify channel is still empty and usable
+	select {
+	case <-callbackServer2.CallbackChan:
+		t.Fatal("Channel should be empty")
+	default:
+		// Expected - channel is empty
+	}
+
+	// Verify we can still send to the channel (it's functional)
+	newParams := map[string]string{"code": "new_code", "state": "new_state"}
+	select {
+	case callbackServer2.CallbackChan <- newParams:
+		// Success
+	default:
+		t.Fatal("Should be able to send to channel")
+	}
+
+	// Verify we can receive
+	received := <-callbackServer2.CallbackChan
+	assert.Equal(t, "new_code", received["code"])
+	assert.Equal(t, "new_state", received["state"])
+}
+
 // T008: Test CreateOAuthConfig falls back to server URL when metadata lacks resource field
 func TestCreateOAuthConfig_FallsBackToServerURL(t *testing.T) {
 	// Variable to hold server URL for use in handler
