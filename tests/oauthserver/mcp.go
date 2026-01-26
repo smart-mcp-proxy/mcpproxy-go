@@ -135,7 +135,7 @@ func (s *OAuthTestServer) sendMCPRateLimited(w http.ResponseWriter) {
 
 	if s.options.ErrorMode.MCPRateLimitUseResetAt {
 		resetAt := time.Now().Add(time.Duration(s.options.ErrorMode.MCPRateLimitRetryAfter) * time.Second).Unix()
-		w.Write([]byte(fmt.Sprintf(`{"error": "rate_limited", "reset_at": %d}`, resetAt)))
+		fmt.Fprintf(w, `{"error": "rate_limited", "reset_at": %d}`, resetAt)
 	} else {
 		w.Write([]byte(`{"error": "rate_limited", "error_description": "Too many requests"}`))
 	}
