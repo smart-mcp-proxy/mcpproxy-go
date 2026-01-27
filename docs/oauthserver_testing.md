@@ -108,6 +108,7 @@ Test Credentials:  testuser / testpass
 ```bash
 -require-pkce=true      # Require PKCE for auth code flow (default: true)
 -require-resource=false # Require RFC 8707 resource indicator (default: false)
+-runlayer-mode=false    # Mimic Runlayer strict validation with Pydantic 422 errors
 ```
 
 ### Token Lifetimes
@@ -165,6 +166,29 @@ go run ./tests/oauthserver/cmd/server -port 9000 \
 go run ./tests/oauthserver/cmd/server -port 9000 \
   -require-resource=true
 ```
+
+### Runlayer Compatibility Mode (Issue #271)
+
+Mimics Runlayer's strict OAuth validation with Pydantic-style 422 errors:
+
+```bash
+go run ./tests/oauthserver/cmd/server -port 9000 -runlayer-mode
+```
+
+When the `resource` parameter is missing, returns:
+```json
+{
+  "detail": [
+    {
+      "type": "missing",
+      "loc": ["query", "resource"],
+      "msg": "Field required"
+    }
+  ]
+}
+```
+
+This mode implies `-require-resource=true`.
 
 ### Test Error Handling
 
@@ -322,3 +346,47 @@ The server requires PKCE by default. Ensure your client:
 - Verify JWKS endpoint is accessible: `curl http://127.0.0.1:9000/jwks.json`
 - Check token expiration (exp claim)
 - Ensure issuer matches server URL
+
+## Alternative: Python Mock Server
+
+For lightweight testing of issue #271 (RFC 8707 resource parameter), there's also a Python/FastAPI mock server:
+
+### Location
+
+`test/integration/oauth_runlayer_mock.py`
+
+### Quick Start
+
+```bash
+# Using uv (recommended)
+PORT=9000 uv run --with fastapi --with uvicorn python test/integration/oauth_runlayer_mock.py
+
+# Using pip
+pip install fastapi uvicorn
+PORT=9000 python test/integration/oauth_runlayer_mock.py
+```
+
+### When to Use Each Server
+
+| Scenario | Recommended |
+|----------|-------------|
+| Full E2E tests with Playwright | Go server |
+| Testing OAuth discovery modes | Go server |
+| Token refresh/expiry testing | Go server |
+| Error injection scenarios | Go server |
+| JWKS/key rotation testing | Go server |
+| Quick RFC 8707 resource tests | Python or Go with `-runlayer-mode` |
+| Issue #271 regression testing | Python (lighter) or Go |
+| CI/CD integration tests | Go (embeddable) |
+
+### Issue #271 Integration Test
+
+```bash
+./test/integration/test_oauth_resource_injection.sh
+```
+
+This script:
+1. Starts the Python mock server
+2. Starts mcpproxy with test configuration
+3. Verifies mcpproxy injects the `resource` parameter correctly
+4. Confirms the auth URL is accepted by the mock server
