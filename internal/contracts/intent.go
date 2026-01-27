@@ -227,16 +227,6 @@ func DeriveCallWith(annotations *config.ToolAnnotations) string {
 	return ToolVariantRead
 }
 
-// isValidOperationType checks if the operation type is valid
-func isValidOperationType(opType string) bool {
-	for _, valid := range ValidOperationTypes {
-		if strings.EqualFold(opType, valid) {
-			return opType == valid // Case-sensitive match required
-		}
-	}
-	return false
-}
-
 // isValidDataSensitivity checks if the data sensitivity is valid
 func isValidDataSensitivity(sensitivity string) bool {
 	for _, valid := range ValidDataSensitivities {
