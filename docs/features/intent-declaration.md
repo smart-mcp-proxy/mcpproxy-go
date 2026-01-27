@@ -44,7 +44,7 @@ MCPProxy Tools:
 
 ## How It Works
 
-The tool variant (`call_tool_read` / `write` / `destructive`) **automatically determines** the operation type:
+The tool variant (`call_tool_read` / `write` / `destructive`) **automatically determines** the operation type. Intent metadata is provided as **flat string parameters** (not nested objects) for maximum compatibility with AI models:
 
 ```json
 {
@@ -52,10 +52,8 @@ The tool variant (`call_tool_read` / `write` / `destructive`) **automatically de
   "arguments": {
     "name": "github:delete_repo",
     "args_json": "{\"repo\": \"test-repo\"}",
-    "intent": {
-      "data_sensitivity": "private",
-      "reason": "User requested repository cleanup"
-    }
+    "intent_data_sensitivity": "private",
+    "intent_reason": "User requested repository cleanup"
   }
 }
 ```
@@ -65,7 +63,7 @@ The `operation_type` is inferred from the tool variant - agents don't need to sp
 ### Validation Chain
 
 1. Tool variant determines operation type (`call_tool_destructive` → "destructive")
-2. Optional intent fields (`data_sensitivity`, `reason`) are validated if provided
+2. Optional intent fields (`intent_data_sensitivity`, `intent_reason`) are validated if provided
 3. Server annotation check → validate against `destructiveHint`/`readOnlyHint`
 
 ## Tool Variants
@@ -86,9 +84,7 @@ Or with optional metadata:
 {
   "name": "github:list_repos",
   "args_json": "{\"org\": \"myorg\"}",
-  "intent": {
-    "reason": "Listing repositories for project analysis"
-  }
+  "intent_reason": "Listing repositories for project analysis"
 }
 ```
 
@@ -104,9 +100,7 @@ Execute state-modifying operations that create or update resources.
 {
   "name": "github:create_issue",
   "args_json": "{\"title\": \"Bug report\", \"body\": \"Details...\"}",
-  "intent": {
-    "reason": "Creating bug report per user request"
-  }
+  "intent_reason": "Creating bug report per user request"
 }
 ```
 
@@ -123,9 +117,8 @@ Execute destructive or irreversible operations.
   "name": "github:delete_repo",
   "args_json": "{\"repo\": \"test-repo\"}",
   "intent": {
-    "data_sensitivity": "private",
-    "reason": "User confirmed deletion of test repository"
-  }
+  "intent_data_sensitivity": "private",
+  "intent_reason": "User confirmed deletion of test repository"
 }
 ```
 
@@ -133,15 +126,16 @@ Execute destructive or irreversible operations.
 - `operation_type` automatically inferred as "destructive"
 - Most permissive - allowed regardless of server annotations
 
-## Intent Parameter
+## Intent Parameters
 
-The `intent` object is **optional** - operation type is automatically inferred from the tool variant:
+Intent metadata is provided as **flat string parameters** for maximum compatibility with AI models (e.g., Gemini):
 
-| Field | Required | Values | Description |
-|-------|----------|--------|-------------|
-| `operation_type` | No | `read`, `write`, `destructive` | Automatically inferred from tool variant |
-| `data_sensitivity` | No | `public`, `internal`, `private`, `unknown` | Data classification for audit |
-| `reason` | No | String (max 1000 chars) | Explanation for audit trail |
+| Parameter | Required | Values | Description |
+|-----------|----------|--------|-------------|
+| `intent_data_sensitivity` | No | `public`, `internal`, `private`, `unknown` | Data classification for audit |
+| `intent_reason` | No | String (max 1000 chars) | Explanation for audit trail |
+
+The `operation_type` is automatically inferred from the tool variant and cannot be overridden.
 
 ### Examples
 
@@ -158,10 +152,8 @@ The `intent` object is **optional** - operation type is automatically inferred f
 {
   "name": "dataserver:write_data",
   "args_json": "{\"id\": \"123\", \"value\": \"new\"}",
-  "intent": {
-    "data_sensitivity": "private",
-    "reason": "Updating user profile with personal information"
-  }
+  "intent_data_sensitivity": "private",
+  "intent_reason": "Updating user profile with personal information"
 }
 ```
 
@@ -363,7 +355,7 @@ The legacy `call_tool` has been removed. Update your integrations:
 }
 ```
 
-The `intent` parameter is optional - `operation_type` is automatically inferred from the tool variant. You can add `data_sensitivity` and `reason` for audit purposes.
+Intent parameters are optional - `operation_type` is automatically inferred from the tool variant. You can add `intent_data_sensitivity` and `intent_reason` for audit purposes.
 
 :::tip Choosing the Right Variant
 When unsure, use `call_tool_destructive` - it's the most permissive and will always succeed validation. Then refine based on `retrieve_tools` guidance.

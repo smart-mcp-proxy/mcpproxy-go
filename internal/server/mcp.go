@@ -332,6 +332,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Optional data sensitivity classification: public, internal, private, or unknown. For audit trail."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Optional explanation for the operation. For audit trail. Max 1000 chars."),
+		),
 	)
 	p.server.AddTool(callToolReadTool, p.handleCallToolRead)
 
@@ -347,6 +353,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Optional data sensitivity classification: public, internal, private, or unknown. For audit trail."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Optional explanation for the operation. For audit trail. Max 1000 chars."),
+		),
 	)
 	p.server.AddTool(callToolWriteTool, p.handleCallToolWrite)
 
@@ -361,6 +373,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		),
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
+		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Optional data sensitivity classification: public, internal, private, or unknown. For audit trail."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Optional explanation for the operation. For audit trail. Max 1000 chars."),
 		),
 	)
 	p.server.AddTool(callToolDestructiveTool, p.handleCallToolDestructive)
@@ -3871,7 +3889,7 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 // extractIntent extracts the IntentDeclaration from MCP request parameters.
 // Returns nil if intent is not present (caller should handle missing intent error).
 func (p *MCPProxyServer) extractIntent(request mcp.CallToolRequest) (*contracts.IntentDeclaration, error) {
-	// Get intent from request parameters
+	// Get intent from flat request parameters (intent_data_sensitivity, intent_reason)
 	if request.Params.Arguments == nil {
 		return nil, nil
 	}
@@ -3881,17 +3899,22 @@ func (p *MCPProxyServer) extractIntent(request mcp.CallToolRequest) (*contracts.
 		return nil, nil
 	}
 
-	intentRaw, exists := argumentsMap["intent"]
-	if !exists {
+	// Extract flat intent parameters
+	dataSensitivity, _ := argumentsMap["intent_data_sensitivity"].(string)
+	reason, _ := argumentsMap["intent_reason"].(string)
+
+	// If neither field is provided, return nil (intent is optional)
+	if dataSensitivity == "" && reason == "" {
 		return nil, nil
 	}
 
-	intentMap, ok := intentRaw.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("intent must be an object")
+	// Build intent from flat parameters
+	intent := &contracts.IntentDeclaration{
+		DataSensitivity: dataSensitivity,
+		Reason:          reason,
 	}
 
-	return contracts.IntentFromMap(intentMap), nil
+	return intent, nil
 }
 
 // validateIntentForVariant validates intent for a specific tool variant.

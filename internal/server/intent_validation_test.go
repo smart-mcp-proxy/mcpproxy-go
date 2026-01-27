@@ -20,45 +20,58 @@ func TestMCPProxyServer_extractIntent(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		request   mcp.CallToolRequest
-		wantNil   bool
-		wantOpTyp string
-		wantErr   bool
+		name            string
+		request         mcp.CallToolRequest
+		wantNil         bool
+		wantSensitivity string
+		wantReason      string
+		wantErr         bool
 	}{
 		{
-			name: "valid intent object",
+			name: "flat intent with data_sensitivity only",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
 					Name: "test",
 					Arguments: map[string]interface{}{
-						"intent": map[string]interface{}{
-							"operation_type": "read",
-						},
+						"intent_data_sensitivity": "private",
 					},
 				},
 			},
-			wantNil:   false,
-			wantOpTyp: "read",
-			wantErr:   false,
+			wantNil:         false,
+			wantSensitivity: "private",
+			wantReason:      "",
+			wantErr:         false,
 		},
 		{
-			name: "intent with all fields",
+			name: "flat intent with reason only",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
 					Name: "test",
 					Arguments: map[string]interface{}{
-						"intent": map[string]interface{}{
-							"operation_type":   "write",
-							"data_sensitivity": "private",
-							"reason":           "test reason",
-						},
+						"intent_reason": "test reason",
 					},
 				},
 			},
-			wantNil:   false,
-			wantOpTyp: "write",
-			wantErr:   false,
+			wantNil:         false,
+			wantSensitivity: "",
+			wantReason:      "test reason",
+			wantErr:         false,
+		},
+		{
+			name: "flat intent with all fields",
+			request: mcp.CallToolRequest{
+				Params: mcp.CallToolParams{
+					Name: "test",
+					Arguments: map[string]interface{}{
+						"intent_data_sensitivity": "internal",
+						"intent_reason":           "user requested update",
+					},
+				},
+			},
+			wantNil:         false,
+			wantSensitivity: "internal",
+			wantReason:      "user requested update",
+			wantErr:         false,
 		},
 		{
 			name: "no intent - nil arguments",
@@ -83,17 +96,18 @@ func TestMCPProxyServer_extractIntent(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "intent not an object - error",
+			name: "no intent - only other args present",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
 					Name: "test",
 					Arguments: map[string]interface{}{
-						"intent": "not an object",
+						"name":      "github:list_repos",
+						"args_json": "{}",
 					},
 				},
 			},
 			wantNil: true,
-			wantErr: true,
+			wantErr: false,
 		},
 	}
 
@@ -118,8 +132,11 @@ func TestMCPProxyServer_extractIntent(t *testing.T) {
 				return
 			}
 
-			if intent.OperationType != tt.wantOpTyp {
-				t.Errorf("extractIntent().OperationType = %v, want %v", intent.OperationType, tt.wantOpTyp)
+			if intent.DataSensitivity != tt.wantSensitivity {
+				t.Errorf("extractIntent().DataSensitivity = %v, want %v", intent.DataSensitivity, tt.wantSensitivity)
+			}
+			if intent.Reason != tt.wantReason {
+				t.Errorf("extractIntent().Reason = %v, want %v", intent.Reason, tt.wantReason)
 			}
 		})
 	}
