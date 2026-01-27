@@ -350,22 +350,17 @@ func runCallToolVariant(toolVariant, operationType string) error {
 		return fmt.Errorf("invalid JSON arguments: %w", err)
 	}
 
-	// Build intent declaration
-	intent := map[string]interface{}{
-		"operation_type": operationType,
+	// Build arguments for the tool variant with flat intent params
+	variantArgs := map[string]interface{}{
+		"name": callToolName,
+		"args": toolArgs,
 	}
+	// Add flat intent params (operation_type is inferred from tool variant)
 	if callIntentSensitivity != "" {
-		intent["data_sensitivity"] = callIntentSensitivity
+		variantArgs["intent_data_sensitivity"] = callIntentSensitivity
 	}
 	if callIntentReason != "" {
-		intent["reason"] = callIntentReason
-	}
-
-	// Build arguments for the tool variant
-	variantArgs := map[string]interface{}{
-		"name":   callToolName,
-		"args":   toolArgs,
-		"intent": intent,
+		variantArgs["intent_reason"] = callIntentReason
 	}
 
 	// Load configuration
