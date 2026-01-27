@@ -1566,35 +1566,30 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 		t.Log("✅ call_tool_destructive with matching intent succeeded")
 	})
 
-	// Test 4: Intent mismatch should fail (call_tool_read with write intent)
-	t.Run("call_tool_read with write intent fails", func(t *testing.T) {
-		mismatchRequest := mcp.CallToolRequest{}
-		mismatchRequest.Params.Name = contracts.ToolVariantRead
-		mismatchRequest.Params.Arguments = map[string]interface{}{
+	// Test 4: Intent operation_type is inferred from tool variant (any provided value is ignored)
+	t.Run("call_tool_read infers operation_type from tool variant", func(t *testing.T) {
+		// Even if operation_type is provided, it will be overwritten by the tool variant
+		requestWithAnyIntent := mcp.CallToolRequest{}
+		requestWithAnyIntent.Params.Name = contracts.ToolVariantRead
+		requestWithAnyIntent.Params.Arguments = map[string]interface{}{
 			"name": "dataserver:read_data",
 			"args": map[string]interface{}{
 				"id": "test-123",
 			},
 			"intent": map[string]interface{}{
-				"operation_type": contracts.OperationTypeWrite, // Mismatch!
+				"operation_type": contracts.OperationTypeWrite, // Will be ignored, inferred as "read"
+				"reason":         "Testing inference",
 			},
 		}
 
-		result, err := mcpClient.CallTool(ctx, mismatchRequest)
+		result, err := mcpClient.CallTool(ctx, requestWithAnyIntent)
 		require.NoError(t, err)
-		assert.True(t, result.IsError, "call_tool_read with write intent should fail")
-
-		// Verify error message mentions mismatch
-		if len(result.Content) > 0 {
-			contentBytes, _ := json.Marshal(result.Content[0])
-			contentStr := string(contentBytes)
-			assert.Contains(t, strings.ToLower(contentStr), "mismatch", "Error should mention intent mismatch")
-		}
-		t.Log("✅ call_tool_read with write intent correctly rejected")
+		assert.False(t, result.IsError, "call_tool_read should succeed - operation_type is inferred from tool variant")
+		t.Log("✅ call_tool_read correctly infers operation_type from tool variant")
 	})
 
-	// Test 5: Missing intent should fail
-	t.Run("call_tool_write without intent fails", func(t *testing.T) {
+	// Test 5: Missing intent should succeed (operation_type is inferred from tool variant)
+	t.Run("call_tool_write without intent succeeds", func(t *testing.T) {
 		noIntentRequest := mcp.CallToolRequest{}
 		noIntentRequest.Params.Name = contracts.ToolVariantWrite
 		noIntentRequest.Params.Arguments = map[string]interface{}{
@@ -1603,20 +1598,13 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 				"id":    "test-456",
 				"value": "new value",
 			},
-			// No intent provided
+			// No intent provided - operation_type will be inferred from tool variant
 		}
 
 		result, err := mcpClient.CallTool(ctx, noIntentRequest)
 		require.NoError(t, err)
-		assert.True(t, result.IsError, "call_tool_write without intent should fail")
-
-		// Verify error message mentions missing intent
-		if len(result.Content) > 0 {
-			contentBytes, _ := json.Marshal(result.Content[0])
-			contentStr := string(contentBytes)
-			assert.Contains(t, strings.ToLower(contentStr), "intent", "Error should mention intent requirement")
-		}
-		t.Log("✅ call_tool_write without intent correctly rejected")
+		assert.False(t, result.IsError, "call_tool_write without intent should succeed - operation_type is inferred")
+		t.Log("✅ call_tool_write without intent succeeds with inferred operation_type")
 	})
 
 	t.Log("✅ All Intent Declaration tool variant tests passed")

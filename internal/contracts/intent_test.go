@@ -7,6 +7,8 @@ import (
 )
 
 func TestIntentDeclaration_Validate(t *testing.T) {
+	// Note: Validate() only checks optional fields (data_sensitivity, reason)
+	// operation_type is inferred from tool variant, not validated here
 	tests := []struct {
 		name        string
 		intent      IntentDeclaration
@@ -14,63 +16,21 @@ func TestIntentDeclaration_Validate(t *testing.T) {
 		wantErrCode string
 	}{
 		{
-			name: "valid read intent",
-			intent: IntentDeclaration{
-				OperationType: OperationTypeRead,
-			},
+			name:    "empty intent - valid (operation_type inferred elsewhere)",
+			intent:  IntentDeclaration{},
 			wantErr: false,
 		},
 		{
-			name: "valid write intent",
+			name: "intent with only optional fields",
 			intent: IntentDeclaration{
-				OperationType: OperationTypeWrite,
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid destructive intent",
-			intent: IntentDeclaration{
-				OperationType: OperationTypeDestructive,
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid intent with all fields",
-			intent: IntentDeclaration{
-				OperationType:   OperationTypeWrite,
 				DataSensitivity: DataSensitivityPrivate,
 				Reason:          "User requested update",
 			},
 			wantErr: false,
 		},
 		{
-			name: "missing operation_type",
-			intent: IntentDeclaration{
-				OperationType: "",
-			},
-			wantErr:     true,
-			wantErrCode: IntentErrorCodeMissingOperationType,
-		},
-		{
-			name: "invalid operation_type",
-			intent: IntentDeclaration{
-				OperationType: "unknown",
-			},
-			wantErr:     true,
-			wantErrCode: IntentErrorCodeInvalidOperationType,
-		},
-		{
-			name: "case sensitive operation_type - uppercase fails",
-			intent: IntentDeclaration{
-				OperationType: "READ",
-			},
-			wantErr:     true,
-			wantErrCode: IntentErrorCodeInvalidOperationType,
-		},
-		{
 			name: "invalid data_sensitivity",
 			intent: IntentDeclaration{
-				OperationType:   OperationTypeRead,
 				DataSensitivity: "secret",
 			},
 			wantErr:     true,
@@ -79,7 +39,6 @@ func TestIntentDeclaration_Validate(t *testing.T) {
 		{
 			name: "valid data_sensitivity - public",
 			intent: IntentDeclaration{
-				OperationType:   OperationTypeRead,
 				DataSensitivity: DataSensitivityPublic,
 			},
 			wantErr: false,
@@ -87,15 +46,20 @@ func TestIntentDeclaration_Validate(t *testing.T) {
 		{
 			name: "valid data_sensitivity - internal",
 			intent: IntentDeclaration{
-				OperationType:   OperationTypeRead,
 				DataSensitivity: DataSensitivityInternal,
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid data_sensitivity - private",
+			intent: IntentDeclaration{
+				DataSensitivity: DataSensitivityPrivate,
 			},
 			wantErr: false,
 		},
 		{
 			name: "valid data_sensitivity - unknown",
 			intent: IntentDeclaration{
-				OperationType:   OperationTypeRead,
 				DataSensitivity: DataSensitivityUnknown,
 			},
 			wantErr: false,
@@ -103,16 +67,14 @@ func TestIntentDeclaration_Validate(t *testing.T) {
 		{
 			name: "reason at max length",
 			intent: IntentDeclaration{
-				OperationType: OperationTypeRead,
-				Reason:        string(make([]byte, MaxReasonLength)),
+				Reason: string(make([]byte, MaxReasonLength)),
 			},
 			wantErr: false,
 		},
 		{
 			name: "reason exceeds max length",
 			intent: IntentDeclaration{
-				OperationType: OperationTypeRead,
-				Reason:        string(make([]byte, MaxReasonLength+1)),
+				Reason: string(make([]byte, MaxReasonLength+1)),
 			},
 			wantErr:     true,
 			wantErrCode: IntentErrorCodeReasonTooLong,
@@ -134,81 +96,62 @@ func TestIntentDeclaration_Validate(t *testing.T) {
 }
 
 func TestIntentDeclaration_ValidateForToolVariant(t *testing.T) {
+	// Note: ValidateForToolVariant now SETS operation_type from tool variant (inference)
+	// It no longer validates that operation_type matches - it always overwrites with inferred value
 	tests := []struct {
-		name        string
-		intent      IntentDeclaration
-		toolVariant string
-		wantErr     bool
-		wantErrCode string
+		name           string
+		intent         IntentDeclaration
+		toolVariant    string
+		wantErr        bool
+		wantErrCode    string
+		wantOpType     string // expected operation_type after call
 	}{
 		{
-			name: "read intent with call_tool_read - matches",
-			intent: IntentDeclaration{
-				OperationType: OperationTypeRead,
-			},
+			name:        "empty intent with call_tool_read - sets operation_type",
+			intent:      IntentDeclaration{},
 			toolVariant: ToolVariantRead,
 			wantErr:     false,
+			wantOpType:  OperationTypeRead,
 		},
 		{
-			name: "write intent with call_tool_write - matches",
+			name:        "empty intent with call_tool_write - sets operation_type",
+			intent:      IntentDeclaration{},
+			toolVariant: ToolVariantWrite,
+			wantErr:     false,
+			wantOpType:  OperationTypeWrite,
+		},
+		{
+			name:        "empty intent with call_tool_destructive - sets operation_type",
+			intent:      IntentDeclaration{},
+			toolVariant: ToolVariantDestructive,
+			wantErr:     false,
+			wantOpType:  OperationTypeDestructive,
+		},
+		{
+			name: "intent with optional fields - sets operation_type",
 			intent: IntentDeclaration{
-				OperationType: OperationTypeWrite,
+				DataSensitivity: DataSensitivityPrivate,
+				Reason:          "test reason",
 			},
 			toolVariant: ToolVariantWrite,
 			wantErr:     false,
+			wantOpType:  OperationTypeWrite,
 		},
 		{
-			name: "destructive intent with call_tool_destructive - matches",
+			name: "intent with invalid data_sensitivity - error",
 			intent: IntentDeclaration{
-				OperationType: OperationTypeDestructive,
-			},
-			toolVariant: ToolVariantDestructive,
-			wantErr:     false,
-		},
-		{
-			name: "read intent with call_tool_write - mismatch",
-			intent: IntentDeclaration{
-				OperationType: OperationTypeRead,
-			},
-			toolVariant: ToolVariantWrite,
-			wantErr:     true,
-			wantErrCode: IntentErrorCodeMismatch,
-		},
-		{
-			name: "write intent with call_tool_read - mismatch",
-			intent: IntentDeclaration{
-				OperationType: OperationTypeWrite,
+				DataSensitivity: "invalid",
 			},
 			toolVariant: ToolVariantRead,
 			wantErr:     true,
-			wantErrCode: IntentErrorCodeMismatch,
+			wantErrCode: IntentErrorCodeInvalidSensitivity,
 		},
 		{
-			name: "read intent with call_tool_destructive - mismatch",
-			intent: IntentDeclaration{
-				OperationType: OperationTypeRead,
-			},
-			toolVariant: ToolVariantDestructive,
+			name:        "unknown tool variant - error",
+			intent:      IntentDeclaration{},
+			toolVariant: "unknown_variant",
 			wantErr:     true,
 			wantErrCode: IntentErrorCodeMismatch,
-		},
-		{
-			name: "destructive intent with call_tool_read - mismatch",
-			intent: IntentDeclaration{
-				OperationType: OperationTypeDestructive,
-			},
-			toolVariant: ToolVariantRead,
-			wantErr:     true,
-			wantErrCode: IntentErrorCodeMismatch,
-		},
-		{
-			name: "missing operation_type - validation fails first",
-			intent: IntentDeclaration{
-				OperationType: "",
-			},
-			toolVariant: ToolVariantRead,
-			wantErr:     true,
-			wantErrCode: IntentErrorCodeMissingOperationType,
 		},
 	}
 
@@ -221,6 +164,9 @@ func TestIntentDeclaration_ValidateForToolVariant(t *testing.T) {
 			}
 			if tt.wantErr && err != nil && err.Code != tt.wantErrCode {
 				t.Errorf("ValidateForToolVariant() error code = %v, wantErrCode %v", err.Code, tt.wantErrCode)
+			}
+			if !tt.wantErr && tt.intent.OperationType != tt.wantOpType {
+				t.Errorf("ValidateForToolVariant() operation_type = %v, want %v", tt.intent.OperationType, tt.wantOpType)
 			}
 		})
 	}

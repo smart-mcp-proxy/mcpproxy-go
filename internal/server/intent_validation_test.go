@@ -135,65 +135,83 @@ func TestMCPProxyServer_validateIntentForVariant(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		intent      *contracts.IntentDeclaration
-		toolVariant string
-		wantErr     bool
+		name           string
+		intent         *contracts.IntentDeclaration
+		toolVariant    string
+		wantErr        bool
+		wantOpType     string // expected operation_type after inference
 	}{
 		{
-			name:        "nil intent - error",
-			intent:      nil,
+			name:           "nil intent - creates default with inferred operation_type",
+			intent:         nil,
+			toolVariant:    contracts.ToolVariantRead,
+			wantErr:        false,
+			wantOpType:     contracts.OperationTypeRead,
+		},
+		{
+			name:           "empty intent - infers operation_type from read variant",
+			intent:         &contracts.IntentDeclaration{},
+			toolVariant:    contracts.ToolVariantRead,
+			wantErr:        false,
+			wantOpType:     contracts.OperationTypeRead,
+		},
+		{
+			name:           "empty intent - infers operation_type from write variant",
+			intent:         &contracts.IntentDeclaration{},
+			toolVariant:    contracts.ToolVariantWrite,
+			wantErr:        false,
+			wantOpType:     contracts.OperationTypeWrite,
+		},
+		{
+			name:           "empty intent - infers operation_type from destructive variant",
+			intent:         &contracts.IntentDeclaration{},
+			toolVariant:    contracts.ToolVariantDestructive,
+			wantErr:        false,
+			wantOpType:     contracts.OperationTypeDestructive,
+		},
+		{
+			name: "intent with optional fields - operation_type inferred",
+			intent: &contracts.IntentDeclaration{
+				DataSensitivity: "private",
+				Reason:          "test reason",
+			},
+			toolVariant: contracts.ToolVariantWrite,
+			wantErr:     false,
+			wantOpType:  contracts.OperationTypeWrite,
+		},
+		{
+			name: "intent with invalid data_sensitivity - error",
+			intent: &contracts.IntentDeclaration{
+				DataSensitivity: "invalid",
+			},
 			toolVariant: contracts.ToolVariantRead,
 			wantErr:     true,
 		},
 		{
-			name: "matching read intent",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeRead,
-			},
-			toolVariant: contracts.ToolVariantRead,
-			wantErr:     false,
-		},
-		{
-			name: "matching write intent",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeWrite,
-			},
-			toolVariant: contracts.ToolVariantWrite,
-			wantErr:     false,
-		},
-		{
-			name: "matching destructive intent",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeDestructive,
-			},
-			toolVariant: contracts.ToolVariantDestructive,
-			wantErr:     false,
-		},
-		{
-			name: "mismatched intent - read declared, write variant",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeRead,
-			},
-			toolVariant: contracts.ToolVariantWrite,
-			wantErr:     true,
-		},
-		{
-			name: "mismatched intent - write declared, read variant",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeWrite,
-			},
-			toolVariant: contracts.ToolVariantRead,
+			name:        "unknown tool variant - error",
+			intent:      &contracts.IntentDeclaration{},
+			toolVariant: "unknown_variant",
 			wantErr:     true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := proxy.validateIntentForVariant(tt.intent, tt.toolVariant)
+			intent, errResult := proxy.validateIntentForVariant(tt.intent, tt.toolVariant)
 
-			if (result != nil) != tt.wantErr {
-				t.Errorf("validateIntentForVariant() error = %v, wantErr %v", result != nil, tt.wantErr)
+			if (errResult != nil) != tt.wantErr {
+				t.Errorf("validateIntentForVariant() error = %v, wantErr %v", errResult != nil, tt.wantErr)
+				return
+			}
+
+			if !tt.wantErr {
+				if intent == nil {
+					t.Errorf("validateIntentForVariant() returned nil intent, want non-nil")
+					return
+				}
+				if intent.OperationType != tt.wantOpType {
+					t.Errorf("validateIntentForVariant() operation_type = %v, want %v", intent.OperationType, tt.wantOpType)
+				}
 			}
 		})
 	}
