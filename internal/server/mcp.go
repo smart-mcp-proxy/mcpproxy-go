@@ -322,7 +322,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// call_tool_read - Read-only operations
 	// NOTE: Intent parameters are flattened (not nested objects) for Gemini 3 Pro compatibility
 	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
-		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only."),
+		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only. Requires intent.operation_type='read'."),
 		mcp.WithTitleAnnotation("Call Tool (Read)"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("name",
@@ -333,17 +333,17 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
 		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Optional data sensitivity classification: public, internal, private, or unknown. For audit trail."),
+			mcp.Description("Data sensitivity: public, internal, private, or unknown. Recommended for compliance tracking."),
 		),
 		mcp.WithString("intent_reason",
-			mcp.Description("Optional explanation for the operation. For audit trail. Max 1000 chars."),
+			mcp.Description("Brief explanation of why this operation is needed. Recommended for audit accountability."),
 		),
 	)
 	p.server.AddTool(callToolReadTool, p.handleCallToolRead)
 
 	// call_tool_write - State-modifying operations
 	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
-		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state."),
+		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state. Requires intent.operation_type='write'."),
 		mcp.WithTitleAnnotation("Call Tool (Write)"),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("name",
@@ -354,17 +354,17 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
 		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Optional data sensitivity classification: public, internal, private, or unknown. For audit trail."),
+			mcp.Description("Data sensitivity: public, internal, private, or unknown. Recommended for compliance tracking."),
 		),
 		mcp.WithString("intent_reason",
-			mcp.Description("Optional explanation for the operation. For audit trail. Max 1000 chars."),
+			mcp.Description("Brief explanation of why this operation is needed. Recommended for audit accountability."),
 		),
 	)
 	p.server.AddTool(callToolWriteTool, p.handleCallToolWrite)
 
 	// call_tool_destructive - Irreversible operations
 	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
-		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations."),
+		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations. Requires intent.operation_type='destructive'."),
 		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("name",
@@ -375,10 +375,10 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
 		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Optional data sensitivity classification: public, internal, private, or unknown. For audit trail."),
+			mcp.Description("Data sensitivity: public, internal, private, or unknown. Recommended for compliance tracking."),
 		),
 		mcp.WithString("intent_reason",
-			mcp.Description("Optional explanation for the operation. For audit trail. Max 1000 chars."),
+			mcp.Description("Brief explanation of why this operation is needed. Recommended for audit accountability."),
 		),
 	)
 	p.server.AddTool(callToolDestructiveTool, p.handleCallToolDestructive)
