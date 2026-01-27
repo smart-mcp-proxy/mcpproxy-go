@@ -42,12 +42,9 @@ MCPProxy Tools:
   [ ] call_tool_destructive → Always ask + confirm
 ```
 
-## Two-Key Security Model
+## How It Works
 
-Agents must declare intent in **two places** that must match:
-
-1. **Tool Selection**: Which variant to call (`call_tool_read` / `write` / `destructive`)
-2. **Intent Parameter**: `intent.operation_type` must match the tool variant
+The tool variant (`call_tool_read` / `write` / `destructive`) **automatically determines** the operation type. Intent metadata is provided as **flat string parameters** (not nested objects) for maximum compatibility with AI models:
 
 ```json
 {
@@ -55,26 +52,19 @@ Agents must declare intent in **two places** that must match:
   "arguments": {
     "name": "github:delete_repo",
     "args_json": "{\"repo\": \"test-repo\"}",
-    "intent": {
-      "operation_type": "destructive",
-      "data_sensitivity": "private",
-      "reason": "User requested repository cleanup"
-    }
+    "intent_data_sensitivity": "private",
+    "intent_reason": "User requested repository cleanup"
   }
 }
 ```
 
-**Why two keys?** This prevents:
-- Accidental misclassification (agent confusion)
-- Intentional misclassification (attack attempts)
-- Sneaking destructive operations through auto-approved read channel
+The `operation_type` is inferred from the tool variant - agents don't need to specify it explicitly.
 
 ### Validation Chain
 
-1. Tool variant declares expected intent (`call_tool_destructive` expects "destructive")
-2. `intent.operation_type` is validated (MUST be "destructive")
-3. Mismatch → **REJECT** with clear error message
-4. Server annotation check → validate against `destructiveHint`/`readOnlyHint`
+1. Tool variant determines operation type (`call_tool_destructive` → "destructive")
+2. Optional intent fields (`intent_data_sensitivity`, `intent_reason`) are validated if provided
+3. Server annotation check → validate against `destructiveHint`/`readOnlyHint`
 
 ## Tool Variants
 
@@ -85,15 +75,21 @@ Execute read-only operations that don't modify state.
 ```json
 {
   "name": "github:list_repos",
+  "args_json": "{\"org\": \"myorg\"}"
+}
+```
+
+Or with optional metadata:
+```json
+{
+  "name": "github:list_repos",
   "args_json": "{\"org\": \"myorg\"}",
-  "intent": {
-    "operation_type": "read"
-  }
+  "intent_reason": "Listing repositories for project analysis"
 }
 ```
 
 **Validation:**
-- `intent.operation_type` MUST be "read"
+- `operation_type` automatically inferred as "read"
 - Rejected if server marks tool as `destructiveHint: true`
 
 ### call_tool_write
@@ -104,15 +100,12 @@ Execute state-modifying operations that create or update resources.
 {
   "name": "github:create_issue",
   "args_json": "{\"title\": \"Bug report\", \"body\": \"Details...\"}",
-  "intent": {
-    "operation_type": "write",
-    "reason": "Creating bug report per user request"
-  }
+  "intent_reason": "Creating bug report per user request"
 }
 ```
 
 **Validation:**
-- `intent.operation_type` MUST be "write"
+- `operation_type` automatically inferred as "write"
 - Rejected if server marks tool as `destructiveHint: true`
 
 ### call_tool_destructive
@@ -124,46 +117,43 @@ Execute destructive or irreversible operations.
   "name": "github:delete_repo",
   "args_json": "{\"repo\": \"test-repo\"}",
   "intent": {
-    "operation_type": "destructive",
-    "data_sensitivity": "private",
-    "reason": "User confirmed deletion of test repository"
-  }
+  "intent_data_sensitivity": "private",
+  "intent_reason": "User confirmed deletion of test repository"
 }
 ```
 
 **Validation:**
-- `intent.operation_type` MUST be "destructive"
+- `operation_type` automatically inferred as "destructive"
 - Most permissive - allowed regardless of server annotations
 
-## Intent Parameter
+## Intent Parameters
 
-The `intent` object is **required** on all tool calls:
+Intent metadata is provided as **flat string parameters** for maximum compatibility with AI models (e.g., Gemini):
 
-| Field | Required | Values | Description |
-|-------|----------|--------|-------------|
-| `operation_type` | Yes | `read`, `write`, `destructive` | Must match tool variant |
-| `data_sensitivity` | No | `public`, `internal`, `private`, `unknown` | Data classification |
-| `reason` | No | String (max 1000 chars) | Explanation for audit trail |
+| Parameter | Required | Values | Description |
+|-----------|----------|--------|-------------|
+| `intent_data_sensitivity` | No | `public`, `internal`, `private`, `unknown` | Data classification for audit |
+| `intent_reason` | No | String (max 1000 chars) | Explanation for audit trail |
+
+The `operation_type` is automatically inferred from the tool variant and cannot be overridden.
 
 ### Examples
 
-**Minimal (required only):**
+**Minimal (no intent needed):**
 ```json
 {
-  "intent": {
-    "operation_type": "read"
-  }
+  "name": "dataserver:read_data",
+  "args_json": "{\"id\": \"123\"}"
 }
 ```
 
-**Full intent:**
+**With optional metadata:**
 ```json
 {
-  "intent": {
-    "operation_type": "write",
-    "data_sensitivity": "private",
-    "reason": "Creating user profile with personal information"
-  }
+  "name": "dataserver:write_data",
+  "args_json": "{\"id\": \"123\", \"value\": \"new\"}",
+  "intent_data_sensitivity": "private",
+  "intent_reason": "Updating user profile with personal information"
 }
 ```
 
@@ -284,22 +274,20 @@ curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?intent_type=des
 
 Clear error messages help agents self-correct:
 
-**Intent mismatch:**
-```
-Intent mismatch: tool is call_tool_read but intent declares write.
-Use call_tool_write for write operations.
-```
-
 **Server annotation conflict:**
 ```
 Tool 'github:delete_repo' is marked destructive by server.
 Use call_tool_destructive instead of call_tool_read.
 ```
 
-**Missing intent:**
+**Invalid data sensitivity:**
 ```
-intent.operation_type is required.
-Provide intent: {operation_type: "read"|"write"|"destructive"}
+Invalid intent.data_sensitivity 'secret': must be public, internal, private, or unknown
+```
+
+**Reason too long:**
+```
+intent.reason exceeds maximum length of 1000 characters
 ```
 
 ## IDE Configuration Examples
@@ -362,13 +350,12 @@ The legacy `call_tool` has been removed. Update your integrations:
   "name": "call_tool_write",
   "arguments": {
     "name": "github:create_issue",
-    "args_json": "{...}",
-    "intent": {
-      "operation_type": "write"
-    }
+    "args_json": "{...}"
   }
 }
 ```
+
+Intent parameters are optional - `operation_type` is automatically inferred from the tool variant. You can add `intent_data_sensitivity` and `intent_reason` for audit purposes.
 
 :::tip Choosing the Right Variant
 When unsure, use `call_tool_destructive` - it's the most permissive and will always succeed validation. Then refine based on `retrieve_tools` guidance.

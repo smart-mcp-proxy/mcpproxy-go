@@ -20,45 +20,58 @@ func TestMCPProxyServer_extractIntent(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		request   mcp.CallToolRequest
-		wantNil   bool
-		wantOpTyp string
-		wantErr   bool
+		name            string
+		request         mcp.CallToolRequest
+		wantNil         bool
+		wantSensitivity string
+		wantReason      string
+		wantErr         bool
 	}{
 		{
-			name: "valid intent object",
+			name: "flat intent with data_sensitivity only",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
 					Name: "test",
 					Arguments: map[string]interface{}{
-						"intent": map[string]interface{}{
-							"operation_type": "read",
-						},
+						"intent_data_sensitivity": "private",
 					},
 				},
 			},
-			wantNil:   false,
-			wantOpTyp: "read",
-			wantErr:   false,
+			wantNil:         false,
+			wantSensitivity: "private",
+			wantReason:      "",
+			wantErr:         false,
 		},
 		{
-			name: "intent with all fields",
+			name: "flat intent with reason only",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
 					Name: "test",
 					Arguments: map[string]interface{}{
-						"intent": map[string]interface{}{
-							"operation_type":   "write",
-							"data_sensitivity": "private",
-							"reason":           "test reason",
-						},
+						"intent_reason": "test reason",
 					},
 				},
 			},
-			wantNil:   false,
-			wantOpTyp: "write",
-			wantErr:   false,
+			wantNil:         false,
+			wantSensitivity: "",
+			wantReason:      "test reason",
+			wantErr:         false,
+		},
+		{
+			name: "flat intent with all fields",
+			request: mcp.CallToolRequest{
+				Params: mcp.CallToolParams{
+					Name: "test",
+					Arguments: map[string]interface{}{
+						"intent_data_sensitivity": "internal",
+						"intent_reason":           "user requested update",
+					},
+				},
+			},
+			wantNil:         false,
+			wantSensitivity: "internal",
+			wantReason:      "user requested update",
+			wantErr:         false,
 		},
 		{
 			name: "no intent - nil arguments",
@@ -83,17 +96,18 @@ func TestMCPProxyServer_extractIntent(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "intent not an object - error",
+			name: "no intent - only other args present",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
 					Name: "test",
 					Arguments: map[string]interface{}{
-						"intent": "not an object",
+						"name":      "github:list_repos",
+						"args_json": "{}",
 					},
 				},
 			},
 			wantNil: true,
-			wantErr: true,
+			wantErr: false,
 		},
 	}
 
@@ -118,8 +132,11 @@ func TestMCPProxyServer_extractIntent(t *testing.T) {
 				return
 			}
 
-			if intent.OperationType != tt.wantOpTyp {
-				t.Errorf("extractIntent().OperationType = %v, want %v", intent.OperationType, tt.wantOpTyp)
+			if intent.DataSensitivity != tt.wantSensitivity {
+				t.Errorf("extractIntent().DataSensitivity = %v, want %v", intent.DataSensitivity, tt.wantSensitivity)
+			}
+			if intent.Reason != tt.wantReason {
+				t.Errorf("extractIntent().Reason = %v, want %v", intent.Reason, tt.wantReason)
 			}
 		})
 	}
@@ -135,65 +152,83 @@ func TestMCPProxyServer_validateIntentForVariant(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		intent      *contracts.IntentDeclaration
-		toolVariant string
-		wantErr     bool
+		name           string
+		intent         *contracts.IntentDeclaration
+		toolVariant    string
+		wantErr        bool
+		wantOpType     string // expected operation_type after inference
 	}{
 		{
-			name:        "nil intent - error",
-			intent:      nil,
+			name:           "nil intent - creates default with inferred operation_type",
+			intent:         nil,
+			toolVariant:    contracts.ToolVariantRead,
+			wantErr:        false,
+			wantOpType:     contracts.OperationTypeRead,
+		},
+		{
+			name:           "empty intent - infers operation_type from read variant",
+			intent:         &contracts.IntentDeclaration{},
+			toolVariant:    contracts.ToolVariantRead,
+			wantErr:        false,
+			wantOpType:     contracts.OperationTypeRead,
+		},
+		{
+			name:           "empty intent - infers operation_type from write variant",
+			intent:         &contracts.IntentDeclaration{},
+			toolVariant:    contracts.ToolVariantWrite,
+			wantErr:        false,
+			wantOpType:     contracts.OperationTypeWrite,
+		},
+		{
+			name:           "empty intent - infers operation_type from destructive variant",
+			intent:         &contracts.IntentDeclaration{},
+			toolVariant:    contracts.ToolVariantDestructive,
+			wantErr:        false,
+			wantOpType:     contracts.OperationTypeDestructive,
+		},
+		{
+			name: "intent with optional fields - operation_type inferred",
+			intent: &contracts.IntentDeclaration{
+				DataSensitivity: "private",
+				Reason:          "test reason",
+			},
+			toolVariant: contracts.ToolVariantWrite,
+			wantErr:     false,
+			wantOpType:  contracts.OperationTypeWrite,
+		},
+		{
+			name: "intent with invalid data_sensitivity - error",
+			intent: &contracts.IntentDeclaration{
+				DataSensitivity: "invalid",
+			},
 			toolVariant: contracts.ToolVariantRead,
 			wantErr:     true,
 		},
 		{
-			name: "matching read intent",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeRead,
-			},
-			toolVariant: contracts.ToolVariantRead,
-			wantErr:     false,
-		},
-		{
-			name: "matching write intent",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeWrite,
-			},
-			toolVariant: contracts.ToolVariantWrite,
-			wantErr:     false,
-		},
-		{
-			name: "matching destructive intent",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeDestructive,
-			},
-			toolVariant: contracts.ToolVariantDestructive,
-			wantErr:     false,
-		},
-		{
-			name: "mismatched intent - read declared, write variant",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeRead,
-			},
-			toolVariant: contracts.ToolVariantWrite,
-			wantErr:     true,
-		},
-		{
-			name: "mismatched intent - write declared, read variant",
-			intent: &contracts.IntentDeclaration{
-				OperationType: contracts.OperationTypeWrite,
-			},
-			toolVariant: contracts.ToolVariantRead,
+			name:        "unknown tool variant - error",
+			intent:      &contracts.IntentDeclaration{},
+			toolVariant: "unknown_variant",
 			wantErr:     true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := proxy.validateIntentForVariant(tt.intent, tt.toolVariant)
+			intent, errResult := proxy.validateIntentForVariant(tt.intent, tt.toolVariant)
 
-			if (result != nil) != tt.wantErr {
-				t.Errorf("validateIntentForVariant() error = %v, wantErr %v", result != nil, tt.wantErr)
+			if (errResult != nil) != tt.wantErr {
+				t.Errorf("validateIntentForVariant() error = %v, wantErr %v", errResult != nil, tt.wantErr)
+				return
+			}
+
+			if !tt.wantErr {
+				if intent == nil {
+					t.Errorf("validateIntentForVariant() returned nil intent, want non-nil")
+					return
+				}
+				if intent.OperationType != tt.wantOpType {
+					t.Errorf("validateIntentForVariant() operation_type = %v, want %v", intent.OperationType, tt.wantOpType)
+				}
 			}
 		})
 	}

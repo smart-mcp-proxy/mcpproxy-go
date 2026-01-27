@@ -55,11 +55,13 @@ var ToolVariantToOperationType = map[string]string{
 const MaxReasonLength = 1000
 
 // IntentDeclaration represents the agent's declared intent for a tool call.
-// This enables the two-key security model where intent must be declared both
-// in tool selection (call_tool_read/write/destructive) and in this parameter.
+// The operation_type is automatically inferred from the tool variant used
+// (call_tool_read/write/destructive), so agents only need to provide optional
+// metadata fields for audit and compliance purposes.
 type IntentDeclaration struct {
-	// OperationType is REQUIRED and must match the tool variant used.
+	// OperationType is automatically inferred from the tool variant.
 	// Valid values: "read", "write", "destructive"
+	// This field is populated by the server based on which tool variant is called.
 	OperationType string `json:"operation_type"`
 
 	// DataSensitivity is optional classification of data being accessed/modified.
@@ -104,29 +106,9 @@ func NewIntentValidationError(code, message string, details map[string]interface
 	}
 }
 
-// Validate validates the IntentDeclaration fields
+// Validate validates the IntentDeclaration optional fields.
+// Note: operation_type is not validated here as it's inferred from tool variant.
 func (i *IntentDeclaration) Validate() *IntentValidationError {
-	// Check operation_type is present
-	if i.OperationType == "" {
-		return NewIntentValidationError(
-			IntentErrorCodeMissingOperationType,
-			"intent.operation_type is required",
-			nil,
-		)
-	}
-
-	// Check operation_type is valid
-	if !isValidOperationType(i.OperationType) {
-		return NewIntentValidationError(
-			IntentErrorCodeInvalidOperationType,
-			fmt.Sprintf("Invalid intent.operation_type '%s': must be read, write, or destructive", i.OperationType),
-			map[string]interface{}{
-				"provided":       i.OperationType,
-				"valid_values":   ValidOperationTypes,
-			},
-		)
-	}
-
 	// Check data_sensitivity if provided
 	if i.DataSensitivity != "" && !isValidDataSensitivity(i.DataSensitivity) {
 		return NewIntentValidationError(
@@ -154,15 +136,12 @@ func (i *IntentDeclaration) Validate() *IntentValidationError {
 	return nil
 }
 
-// ValidateForToolVariant validates that the intent matches the tool variant
+// ValidateForToolVariant validates the intent and sets operation_type from tool variant.
+// The operation_type is automatically inferred from the tool variant, so agents
+// don't need to provide it explicitly.
 func (i *IntentDeclaration) ValidateForToolVariant(toolVariant string) *IntentValidationError {
-	// First validate the intent itself
-	if err := i.Validate(); err != nil {
-		return err
-	}
-
-	// Get expected operation type for this tool variant
-	expectedOpType, ok := ToolVariantToOperationType[toolVariant]
+	// Get operation type for this tool variant
+	opType, ok := ToolVariantToOperationType[toolVariant]
 	if !ok {
 		return NewIntentValidationError(
 			IntentErrorCodeMismatch,
@@ -173,20 +152,11 @@ func (i *IntentDeclaration) ValidateForToolVariant(toolVariant string) *IntentVa
 		)
 	}
 
-	// Check two-key match: intent.operation_type must match tool variant
-	if i.OperationType != expectedOpType {
-		return NewIntentValidationError(
-			IntentErrorCodeMismatch,
-			fmt.Sprintf("Intent mismatch: tool is %s but intent declares %s", toolVariant, i.OperationType),
-			map[string]interface{}{
-				"tool_variant":       toolVariant,
-				"expected_operation": expectedOpType,
-				"declared_operation": i.OperationType,
-			},
-		)
-	}
+	// Set operation_type from tool variant (inferring it)
+	i.OperationType = opType
 
-	return nil
+	// Validate the optional fields
+	return i.Validate()
 }
 
 // ValidateAgainstServerAnnotations validates intent against server-provided annotations
@@ -255,16 +225,6 @@ func DeriveCallWith(annotations *config.ToolAnnotations) string {
 	// (search, query, list, get, fetch, check, view, find operations).
 	// LLMs should analyze tool descriptions to select write/destructive when appropriate.
 	return ToolVariantRead
-}
-
-// isValidOperationType checks if the operation type is valid
-func isValidOperationType(opType string) bool {
-	for _, valid := range ValidOperationTypes {
-		if strings.EqualFold(opType, valid) {
-			return opType == valid // Case-sensitive match required
-		}
-	}
-	return false
 }
 
 // isValidDataSensitivity checks if the data sensitivity is valid

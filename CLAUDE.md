@@ -173,11 +173,10 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 
 **Tool Format**: `<serverName>:<toolName>` (e.g., `github:create_issue`)
 
-**Intent Declaration (Spec 018)**: Tool variants enable granular IDE permission control. The `intent` parameter provides two-key security:
+**Intent Declaration (Spec 018)**: Tool variants enable granular IDE permission control. The `operation_type` is automatically inferred from the tool variant (`call_tool_read` → "read", etc.). Optional `intent` fields for audit:
 ```json
 {
   "intent": {
-    "operation_type": "read",
     "data_sensitivity": "public",
     "reason": "User requested list of repositories"
   }

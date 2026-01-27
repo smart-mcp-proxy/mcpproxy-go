@@ -320,8 +320,9 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// that enable granular IDE permission control and require explicit intent declaration.
 
 	// call_tool_read - Read-only operations
+	// NOTE: Intent parameters are flattened (not nested objects) for Gemini 3 Pro compatibility
 	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
-		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only. Requires intent.operation_type='read'."),
+		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only."),
 		mcp.WithTitleAnnotation("Call Tool (Read)"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("name",
@@ -331,16 +332,18 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
-		mcp.WithObject("intent",
-			mcp.Required(),
-			mcp.Description("Intent declaration (required). Must include: operation_type='read'. Optional: data_sensitivity (public|internal|private|unknown), reason (explanation for operation)."),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data being accessed: public, internal, private, or unknown. Helps track sensitive data access patterns."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this tool being called? Provide context like 'User asked to check status' or 'Gathering data for report'."),
 		),
 	)
 	p.server.AddTool(callToolReadTool, p.handleCallToolRead)
 
 	// call_tool_write - State-modifying operations
 	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
-		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state. Requires intent.operation_type='write'."),
+		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state."),
 		mcp.WithTitleAnnotation("Call Tool (Write)"),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("name",
@@ -350,16 +353,18 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
-		mcp.WithObject("intent",
-			mcp.Required(),
-			mcp.Description("Intent declaration (required). Must include: operation_type='write'. Optional: data_sensitivity (public|internal|private|unknown), reason (explanation for operation)."),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data being modified: public, internal, private, or unknown. Helps track sensitive data changes."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this modification needed? Provide context like 'User requested update' or 'Fixing reported issue'."),
 		),
 	)
 	p.server.AddTool(callToolWriteTool, p.handleCallToolWrite)
 
 	// call_tool_destructive - Irreversible operations
 	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
-		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations. Requires intent.operation_type='destructive'."),
+		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations."),
 		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("name",
@@ -369,9 +374,11 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		mcp.WithString("args_json",
 			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
 		),
-		mcp.WithObject("intent",
-			mcp.Required(),
-			mcp.Description("Intent declaration (required). Must include: operation_type='destructive'. Optional: data_sensitivity (public|internal|private|unknown), reason (explanation for operation)."),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data being deleted: public, internal, private, or unknown. Important for tracking destructive operations on sensitive data."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this deletion needed? Provide justification like 'User confirmed cleanup' or 'Removing obsolete data'."),
 		),
 	)
 	p.server.AddTool(callToolDestructiveTool, p.handleCallToolDestructive)
@@ -875,7 +882,7 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 			"(1) READ (call_tool_read): search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. DEFAULT choice when unsure. " +
 			"(2) WRITE (call_tool_write): create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. " +
 			"(3) DESTRUCTIVE (call_tool_destructive): delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. " +
-			"INTENT PARAMETER: Always include 'intent' object with 'operation_type' matching your tool choice (read/write/destructive). Optional fields: data_sensitivity, reason.",
+			"INTENT TRACKING: Always provide intent_reason (why you're calling this tool) and intent_data_sensitivity (public/internal/private/unknown) to enable activity auditing.",
 	}
 
 	// Add debug information if requested
@@ -1030,7 +1037,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return ""
 	}
 
-	// Extract intent (required for all call_tool_* variants)
+	// Extract intent (optional - operation_type is inferred from tool variant)
 	intent, err := p.extractIntent(request)
 	if err != nil {
 		errMsg := fmt.Sprintf("Invalid intent parameter: %v", err)
@@ -1047,15 +1054,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
-	// Validate intent matches tool variant (two-key security model)
-	if errResult := p.validateIntentForVariant(intent, toolVariant); errResult != nil {
-		// Record activity error for intent validation failure (use "unknown" if server name not parsed yet)
-		var reason string
-		if intent == nil {
-			reason = fmt.Sprintf("Intent validation failed: intent parameter is required for %s", toolVariant)
-		} else {
-			reason = fmt.Sprintf("Intent validation failed: operation_type '%s' does not match tool variant '%s'", intent.OperationType, toolVariant)
-		}
+	// Validate intent and infer operation_type from tool variant
+	intent, errResult := p.validateIntentForVariant(intent, toolVariant)
+	if errResult != nil {
+		// Record activity error for intent validation failure
 		logServer := serverName
 		if logServer == "" {
 			logServer = "unknown"
@@ -1064,7 +1066,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if logTool == "" {
 			logTool = toolName
 		}
-		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), "blocked", reason)
+		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), "blocked", "Intent validation failed")
 		return errResult, nil
 	}
 
@@ -3887,7 +3889,7 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 // extractIntent extracts the IntentDeclaration from MCP request parameters.
 // Returns nil if intent is not present (caller should handle missing intent error).
 func (p *MCPProxyServer) extractIntent(request mcp.CallToolRequest) (*contracts.IntentDeclaration, error) {
-	// Get intent from request parameters
+	// Get intent from flat request parameters (intent_data_sensitivity, intent_reason)
 	if request.Params.Arguments == nil {
 		return nil, nil
 	}
@@ -3897,33 +3899,40 @@ func (p *MCPProxyServer) extractIntent(request mcp.CallToolRequest) (*contracts.
 		return nil, nil
 	}
 
-	intentRaw, exists := argumentsMap["intent"]
-	if !exists {
+	// Extract flat intent parameters
+	dataSensitivity, _ := argumentsMap["intent_data_sensitivity"].(string)
+	reason, _ := argumentsMap["intent_reason"].(string)
+
+	// If neither field is provided, return nil (intent is optional)
+	if dataSensitivity == "" && reason == "" {
 		return nil, nil
 	}
 
-	intentMap, ok := intentRaw.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("intent must be an object")
+	// Build intent from flat parameters
+	intent := &contracts.IntentDeclaration{
+		DataSensitivity: dataSensitivity,
+		Reason:          reason,
 	}
 
-	return contracts.IntentFromMap(intentMap), nil
+	return intent, nil
 }
 
 // validateIntentForVariant validates intent for a specific tool variant.
+// If intent is nil, creates a default intent with operation_type inferred from tool variant.
 // Returns an error response if validation fails, nil if validation passes.
-func (p *MCPProxyServer) validateIntentForVariant(intent *contracts.IntentDeclaration, toolVariant string) *mcp.CallToolResult {
-	// Check intent is present
+// Also returns the intent (possibly created) for use by caller.
+func (p *MCPProxyServer) validateIntentForVariant(intent *contracts.IntentDeclaration, toolVariant string) (*contracts.IntentDeclaration, *mcp.CallToolResult) {
+	// Create default intent if not provided
 	if intent == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("intent parameter is required for %s", toolVariant))
+		intent = &contracts.IntentDeclaration{}
 	}
 
-	// Validate two-key match: intent.operation_type must match tool variant
+	// Validate and set operation_type from tool variant
 	if err := intent.ValidateForToolVariant(toolVariant); err != nil {
-		return mcp.NewToolResultError(err.Message)
+		return nil, mcp.NewToolResultError(err.Message)
 	}
 
-	return nil
+	return intent, nil
 }
 
 // validateIntentAgainstServer validates intent against server-provided annotations.
