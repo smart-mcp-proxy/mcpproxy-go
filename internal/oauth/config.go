@@ -495,7 +495,9 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 		}
 
 		// Read body for potential rate limit info or later use
-		body, _ := io.ReadAll(resp.Body)
+		// Limit read size to prevent memory exhaustion from unexpectedly large responses
+		const maxBodySize = 1 << 20 // 1MB
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 		resp.Body.Close()
 
 		switch {
