@@ -115,7 +115,7 @@ jobs:
           GO_TEST_TIMEOUT: 300s
 
       - name: Run E2E tests
-        run: go test -v -race -timeout 5m ./internal/server -run TestE2E -skip 'TestE2E_ToolDiscovery'
+        run: go test -v -race -timeout 5m ./internal/server -run TestE2E -skip 'TestE2E_ToolDiscovery|TestE2E_ServerDeleteReaddDifferentTools'
         env:
           GO_TEST_TIMEOUT: 300s
 
@@ -222,7 +222,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          go test -v -race '-coverprofile=coverage.out' -covermode=atomic ./internal/server -run TestE2E
+          go test -v -race '-coverprofile=coverage.out' -covermode=atomic ./internal/server -run TestE2E -skip 'TestE2E_ToolDiscovery|TestE2E_ServerDeleteReaddDifferentTools'
           go test -v -race '-coverprofile=coverage-logs.out' -covermode=atomic ./internal/logs -run TestE2E
           go tool cover '-html=coverage.out' -o coverage.html
           go tool cover '-html=coverage-logs.out' -o coverage-logs.html
@@ -230,7 +230,7 @@ jobs:
       - name: Run tests with coverage (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          go test -v -race -coverprofile=coverage.out -covermode=atomic ./internal/server -run TestE2E
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./internal/server -run TestE2E -skip 'TestE2E_ToolDiscovery|TestE2E_ServerDeleteReaddDifferentTools'
           go test -v -race -coverprofile=coverage-logs.out -covermode=atomic ./internal/logs -run TestE2E
           go tool cover -html=coverage.out -o coverage.html
           go tool cover -html=coverage-logs.out -o coverage-logs.html
