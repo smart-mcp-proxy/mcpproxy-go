@@ -320,6 +320,77 @@ func TestBleveIndex_EmptyAndErrorCases(t *testing.T) {
 	assert.Equal(t, uint64(0), count)
 }
 
+func TestBleveIndex_GetAllIndexedServerNames(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_test_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := zap.NewNop()
+	bleveIndex, err := NewBleveIndex(tmpDir, logger)
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	// Test on empty index
+	names, err := bleveIndex.GetAllIndexedServerNames()
+	require.NoError(t, err)
+	assert.Empty(t, names, "Empty index should return no server names")
+
+	// Add tools from multiple servers
+	tools := []*config.ToolMetadata{
+		{Name: "server1:tool_a", ServerName: "server1", Description: "Tool A", Hash: "hash_a"},
+		{Name: "server1:tool_b", ServerName: "server1", Description: "Tool B", Hash: "hash_b"},
+		{Name: "server2:tool_x", ServerName: "server2", Description: "Tool X", Hash: "hash_x"},
+		{Name: "server3:tool_y", ServerName: "server3", Description: "Tool Y", Hash: "hash_y"},
+	}
+
+	err = bleveIndex.BatchIndex(tools)
+	require.NoError(t, err)
+
+	// Verify all servers are returned
+	names, err = bleveIndex.GetAllIndexedServerNames()
+	require.NoError(t, err)
+	assert.Len(t, names, 3, "Should find 3 unique server names")
+	assert.Contains(t, names, "server1")
+	assert.Contains(t, names, "server2")
+	assert.Contains(t, names, "server3")
+}
+
+func TestBleveIndex_GetAllIndexedServerNames_AfterDeletion(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_test_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := zap.NewNop()
+	bleveIndex, err := NewBleveIndex(tmpDir, logger)
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	// Add tools from multiple servers
+	tools := []*config.ToolMetadata{
+		{Name: "server1:tool_a", ServerName: "server1", Description: "Tool A", Hash: "hash_a"},
+		{Name: "server2:tool_x", ServerName: "server2", Description: "Tool X", Hash: "hash_x"},
+	}
+
+	err = bleveIndex.BatchIndex(tools)
+	require.NoError(t, err)
+
+	// Verify both servers are present
+	names, err := bleveIndex.GetAllIndexedServerNames()
+	require.NoError(t, err)
+	assert.Len(t, names, 2)
+
+	// Delete server1's tools
+	err = bleveIndex.DeleteServerTools("server1")
+	require.NoError(t, err)
+
+	// Verify only server2 remains
+	names, err = bleveIndex.GetAllIndexedServerNames()
+	require.NoError(t, err)
+	assert.Len(t, names, 1)
+	assert.Contains(t, names, "server2")
+	assert.NotContains(t, names, "server1", "server1 should be removed after deletion")
+}
+
 // Helper function to create test DeFiLlama tools based on user's data
 func createTestDeFiLlamaTools() []*config.ToolMetadata {
 	tools := []*config.ToolMetadata{

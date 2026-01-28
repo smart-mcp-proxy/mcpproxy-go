@@ -124,6 +124,14 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 	return stats, nil
 }
 
+// GetAllIndexedServerNames returns all unique server names in the index.
+func (m *Manager) GetAllIndexedServerNames() ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.bleveIndex.GetAllIndexedServerNames()
+}
+
 // GetToolsByServer retrieves all tools from a specific server
 func (m *Manager) GetToolsByServer(serverName string) ([]*config.ToolMetadata, error) {
 	m.mu.RLock()

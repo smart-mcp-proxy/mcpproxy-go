@@ -2542,3 +2542,323 @@ func getToolResultText(result *mcp.CallToolResult) string {
 	}
 	return ""
 }
+
+// TestE2E_ServerDeleteReaddDifferentTools validates the full lifecycle of stale index cleanup:
+// 1. Add server with Tool Set A, verify tools are searchable
+// 2. Remove server, verify Tool Set A is no longer searchable
+// 3. Re-add server (same name) with Tool Set B, verify ONLY Tool Set B is searchable
+// This tests that orphaned index entries are cleaned up when servers are removed.
+func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	ctx := context.Background()
+
+	// Tool Set A: Initial tools
+	toolSetA := []mcp.Tool{
+		{
+			Name:        "old_tool_alpha",
+			Description: "Old tool alpha for initial setup",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"param1": map[string]interface{}{
+						"type":        "string",
+						"description": "Alpha parameter",
+					},
+				},
+			},
+		},
+		{
+			Name:        "old_tool_beta",
+			Description: "Old tool beta for initial setup",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"param1": map[string]interface{}{
+						"type":        "string",
+						"description": "Beta parameter",
+					},
+				},
+			},
+		},
+	}
+
+	// Tool Set B: Replacement tools (different names)
+	toolSetB := []mcp.Tool{
+		{
+			Name:        "new_tool_gamma",
+			Description: "New tool gamma after server re-add",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"value": map[string]interface{}{
+						"type":        "string",
+						"description": "Gamma value",
+					},
+				},
+			},
+		},
+	}
+
+	const serverName = "stale-test-server"
+
+	// === Phase 1: Create mock server with Tool Set A ===
+	t.Log("Phase 1: Creating mock server with Tool Set A (old_tool_alpha, old_tool_beta)")
+	mockServerA := env.CreateMockUpstreamServer(serverName, toolSetA)
+
+	// Create MCP client
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	// Add server via upstream_servers
+	addRequestA := mcp.CallToolRequest{}
+	addRequestA.Params.Name = "upstream_servers"
+	addRequestA.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      serverName,
+		"url":       mockServerA.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	addResultA, err := mcpClient.CallTool(ctx, addRequestA)
+	require.NoError(t, err)
+	require.False(t, addResultA.IsError, "Add server should succeed")
+
+	// Unquarantine server
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
+	require.NoError(t, err)
+	serverConfig.Quarantined = false
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
+	require.NoError(t, err)
+
+	// Reload configuration
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	require.NoError(t, err)
+
+	// Wait for connection and discovery
+	time.Sleep(4 * time.Second)
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
+	time.Sleep(2 * time.Second)
+
+	// === Verify Tool Set A is searchable ===
+	t.Log("Phase 1 Verify: Checking Tool Set A is searchable")
+	searchAlpha := mcp.CallToolRequest{}
+	searchAlpha.Params.Name = "retrieve_tools"
+	searchAlpha.Params.Arguments = map[string]interface{}{
+		"query": "old_tool_alpha",
+		"limit": 10,
+	}
+
+	searchAlphaResult, err := mcpClient.CallTool(ctx, searchAlpha)
+	require.NoError(t, err)
+	require.False(t, searchAlphaResult.IsError)
+	alphaText := getToolResultText(searchAlphaResult)
+	assert.Contains(t, alphaText, "old_tool_alpha", "Tool Set A - old_tool_alpha should be searchable")
+
+	searchBeta := mcp.CallToolRequest{}
+	searchBeta.Params.Name = "retrieve_tools"
+	searchBeta.Params.Arguments = map[string]interface{}{
+		"query": "old_tool_beta",
+		"limit": 10,
+	}
+
+	searchBetaResult, err := mcpClient.CallTool(ctx, searchBeta)
+	require.NoError(t, err)
+	require.False(t, searchBetaResult.IsError)
+	betaText := getToolResultText(searchBetaResult)
+	assert.Contains(t, betaText, "old_tool_beta", "Tool Set A - old_tool_beta should be searchable")
+
+	t.Log("Phase 1 Complete: Tool Set A (old_tool_alpha, old_tool_beta) verified searchable")
+
+	// === Phase 2: Stop and remove server ===
+	t.Log("Phase 2: Stopping mock server and removing from config")
+
+	// Stop mock server
+	_ = mockServerA.stopFunc()
+	delete(env.mockServers, serverName)
+
+	// Remove server via upstream_servers
+	removeRequest := mcp.CallToolRequest{}
+	removeRequest.Params.Name = "upstream_servers"
+	removeRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      serverName,
+	}
+
+	removeResult, err := mcpClient.CallTool(ctx, removeRequest)
+	require.NoError(t, err)
+	require.False(t, removeResult.IsError, "Remove server should succeed")
+
+	// Wait for cleanup
+	time.Sleep(3 * time.Second)
+
+	// === Verify Tool Set A is no longer searchable ===
+	t.Log("Phase 2 Verify: Checking Tool Set A is NOT searchable after removal")
+	searchAlphaAfterRemove := mcp.CallToolRequest{}
+	searchAlphaAfterRemove.Params.Name = "retrieve_tools"
+	searchAlphaAfterRemove.Params.Arguments = map[string]interface{}{
+		"query": "old_tool_alpha",
+		"limit": 10,
+	}
+
+	searchAlphaAfterResult, err := mcpClient.CallTool(ctx, searchAlphaAfterRemove)
+	require.NoError(t, err)
+	alphaAfterText := getToolResultText(searchAlphaAfterResult)
+
+	// Parse the response to check tools array
+	var alphaAfterResponse map[string]interface{}
+	if alphaAfterText != "" {
+		_ = json.Unmarshal([]byte(alphaAfterText), &alphaAfterResponse)
+	}
+
+	// Check if tools array is empty or doesn't contain old_tool_alpha
+	if tools, ok := alphaAfterResponse["tools"].([]interface{}); ok {
+		for _, tool := range tools {
+			if toolMap, ok := tool.(map[string]interface{}); ok {
+				if name, ok := toolMap["name"].(string); ok {
+					assert.NotContains(t, name, "old_tool_alpha",
+						"old_tool_alpha should NOT be searchable after server removal")
+				}
+			}
+		}
+	}
+
+	t.Log("Phase 2 Complete: Tool Set A verified NOT searchable after removal")
+
+	// === Phase 3: Create NEW mock server with Tool Set B ===
+	t.Log("Phase 3: Creating NEW mock server with Tool Set B (new_tool_gamma)")
+	mockServerB := env.CreateMockUpstreamServer(serverName, toolSetB)
+
+	// Re-add server via upstream_servers
+	addRequestB := mcp.CallToolRequest{}
+	addRequestB.Params.Name = "upstream_servers"
+	addRequestB.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      serverName,
+		"url":       mockServerB.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	addResultB, err := mcpClient.CallTool(ctx, addRequestB)
+	require.NoError(t, err)
+	require.False(t, addResultB.IsError, "Re-add server should succeed")
+
+	// Unquarantine server again
+	serverConfigB, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
+	require.NoError(t, err)
+	serverConfigB.Quarantined = false
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfigB)
+	require.NoError(t, err)
+
+	// Reload configuration
+	serversB, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+	cfgB := env.proxyServer.runtime.Config()
+	cfgB.Servers = serversB
+	err = env.proxyServer.runtime.LoadConfiguredServers(cfgB)
+	require.NoError(t, err)
+
+	// Wait for connection and discovery
+	time.Sleep(4 * time.Second)
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
+	time.Sleep(2 * time.Second)
+
+	// === Verify ONLY Tool Set B is searchable ===
+	t.Log("Phase 3 Verify: Checking ONLY Tool Set B is searchable")
+
+	// Check new_tool_gamma IS found
+	searchGamma := mcp.CallToolRequest{}
+	searchGamma.Params.Name = "retrieve_tools"
+	searchGamma.Params.Arguments = map[string]interface{}{
+		"query": "new_tool_gamma",
+		"limit": 10,
+	}
+
+	searchGammaResult, err := mcpClient.CallTool(ctx, searchGamma)
+	require.NoError(t, err)
+	require.False(t, searchGammaResult.IsError)
+	gammaText := getToolResultText(searchGammaResult)
+	assert.Contains(t, gammaText, "new_tool_gamma", "Tool Set B - new_tool_gamma SHOULD be searchable")
+
+	// Check old_tool_alpha is NOT found
+	searchOldAlpha := mcp.CallToolRequest{}
+	searchOldAlpha.Params.Name = "retrieve_tools"
+	searchOldAlpha.Params.Arguments = map[string]interface{}{
+		"query": "old_tool_alpha",
+		"limit": 10,
+	}
+
+	searchOldAlphaResult, err := mcpClient.CallTool(ctx, searchOldAlpha)
+	require.NoError(t, err)
+	oldAlphaText := getToolResultText(searchOldAlphaResult)
+
+	// Parse and verify old_tool_alpha is not in results
+	var oldAlphaResponse map[string]interface{}
+	if oldAlphaText != "" {
+		_ = json.Unmarshal([]byte(oldAlphaText), &oldAlphaResponse)
+	}
+	if tools, ok := oldAlphaResponse["tools"].([]interface{}); ok {
+		for _, tool := range tools {
+			if toolMap, ok := tool.(map[string]interface{}); ok {
+				if name, ok := toolMap["name"].(string); ok {
+					assert.NotContains(t, name, "old_tool_alpha",
+						"FAIL: old_tool_alpha should NOT appear after re-add with different tools")
+				}
+			}
+		}
+	}
+
+	// Check old_tool_beta is NOT found
+	searchOldBeta := mcp.CallToolRequest{}
+	searchOldBeta.Params.Name = "retrieve_tools"
+	searchOldBeta.Params.Arguments = map[string]interface{}{
+		"query": "old_tool_beta",
+		"limit": 10,
+	}
+
+	searchOldBetaResult, err := mcpClient.CallTool(ctx, searchOldBeta)
+	require.NoError(t, err)
+	oldBetaText := getToolResultText(searchOldBetaResult)
+
+	// Parse and verify old_tool_beta is not in results
+	var oldBetaResponse map[string]interface{}
+	if oldBetaText != "" {
+		_ = json.Unmarshal([]byte(oldBetaText), &oldBetaResponse)
+	}
+	if tools, ok := oldBetaResponse["tools"].([]interface{}); ok {
+		for _, tool := range tools {
+			if toolMap, ok := tool.(map[string]interface{}); ok {
+				if name, ok := toolMap["name"].(string); ok {
+					assert.NotContains(t, name, "old_tool_beta",
+						"FAIL: old_tool_beta should NOT appear after re-add with different tools")
+				}
+			}
+		}
+	}
+
+	// === Phase 4: Verify new_tool_gamma is callable ===
+	t.Log("Phase 4: Verifying new_tool_gamma is callable")
+	callGamma := mcp.CallToolRequest{}
+	callGamma.Params.Name = "call_tool_read"
+	callGamma.Params.Arguments = map[string]interface{}{
+		"name": serverName + ":new_tool_gamma",
+		"args": map[string]interface{}{
+			"value": "test-value",
+		},
+	}
+
+	callGammaResult, err := mcpClient.CallTool(ctx, callGamma)
+	require.NoError(t, err)
+	assert.False(t, callGammaResult.IsError, "new_tool_gamma should be callable")
+
+	t.Log("Phase 3 & 4 Complete: ONLY Tool Set B (new_tool_gamma) searchable and callable")
+	t.Log("SUCCESS: Stale index entries cleaned up correctly on server re-add")
+}

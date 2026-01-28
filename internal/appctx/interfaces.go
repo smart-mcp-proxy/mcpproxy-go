@@ -68,6 +68,7 @@ type IndexManager interface {
 	DeleteTool(serverName, toolName string) error
 	DeleteServerTools(serverName string) error
 	GetToolsByServer(serverName string) ([]*config.ToolMetadata, error)
+	GetAllIndexedServerNames() ([]string, error)
 
 	// Index management
 	RebuildIndex() error
