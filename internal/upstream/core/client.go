@@ -151,6 +151,30 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 			}
 			resolvedServerConfig.Args = resolvedArgs
 		}
+
+		// Resolve secrets in headers
+		if len(resolvedServerConfig.Headers) > 0 {
+			resolvedHeaders := make(map[string]string)
+			for k, v := range resolvedServerConfig.Headers {
+				resolvedValue, err := secretResolver.ExpandSecretRefs(ctx, v)
+				if err != nil {
+					logger.Error("CRITICAL: Failed to resolve secret in header - server will use UNRESOLVED placeholder",
+						zap.String("server", serverConfig.Name),
+						zap.String("header", k),
+						zap.String("reference", v),
+						zap.Error(err),
+						zap.String("help", "Use Web UI (http://localhost:8080/ui/) or API to add the secret to keyring"))
+					resolvedValue = v
+				} else if resolvedValue != v {
+					logger.Debug("Secret resolved successfully",
+						zap.String("server", serverConfig.Name),
+						zap.String("header", k),
+						zap.String("reference", v))
+				}
+				resolvedHeaders[k] = resolvedValue
+			}
+			resolvedServerConfig.Headers = resolvedHeaders
+		}
 	}
 
 	c := &Client{
