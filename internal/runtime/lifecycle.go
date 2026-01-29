@@ -192,6 +192,8 @@ func (r *Runtime) connectAllWithRetry(ctx context.Context) {
 }
 
 func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
+	r.cleanupOrphanedIndexEntries()
+
 	select {
 	case <-time.After(2 * time.Second):
 		_ = r.DiscoverAndIndexTools(ctx)
@@ -1185,9 +1187,31 @@ func (r *Runtime) cleanupOrphanedIndexEntries() {
 		activeServerMap[serverName] = true
 	}
 
-	// Placeholder for future cleanup strategy; mirrors previous behaviour.
+	indexedServers, err := r.indexManager.GetAllIndexedServerNames()
+	if err != nil {
+		r.logger.Warn("Failed to retrieve indexed server names for orphan cleanup", zap.Error(err))
+		return
+	}
+
+	var removedCount int
+	for _, indexedServer := range indexedServers {
+		if !activeServerMap[indexedServer] {
+			r.logger.Info("Removing orphaned index entries for server no longer in config",
+				zap.String("server", indexedServer))
+			if err := r.indexManager.DeleteServerTools(indexedServer); err != nil {
+				r.logger.Warn("Failed to delete orphaned index entries",
+					zap.String("server", indexedServer),
+					zap.Error(err))
+			} else {
+				removedCount++
+			}
+		}
+	}
+
 	r.logger.Debug("Orphaned index cleanup completed",
-		zap.Int("active_servers", len(activeServers)))
+		zap.Int("active_servers", len(activeServers)),
+		zap.Int("indexed_servers", len(indexedServers)),
+		zap.Int("orphans_removed", removedCount))
 }
 
 // supervisorEventForwarder subscribes to supervisor events and emits runtime events

@@ -8,8 +8,8 @@ import (
 )
 
 // ToolHash computes SHA-256 hash for tool change detection
-// Format: sha256(serverName + toolName + parametersSchemaJSON)
-func ToolHash(serverName, toolName string, parametersSchema interface{}) (string, error) {
+// Format: sha256(serverName + toolName + description + parametersSchemaJSON)
+func ToolHash(serverName, toolName, description string, parametersSchema interface{}) (string, error) {
 	// Serialize parameters schema to JSON for consistent hashing
 	var schemaBytes []byte
 	var err error
@@ -21,8 +21,8 @@ func ToolHash(serverName, toolName string, parametersSchema interface{}) (string
 		}
 	}
 
-	// Combine server name, tool name, and schema JSON
-	combined := serverName + toolName + string(schemaBytes)
+	// Combine server name, tool name, description, and schema JSON
+	combined := serverName + toolName + description + string(schemaBytes)
 
 	// Compute SHA-256 hash
 	hasher := sha256.New()
@@ -49,8 +49,8 @@ func BytesHash(input []byte) string {
 }
 
 // VerifyToolHash verifies if the current tool matches the stored hash
-func VerifyToolHash(serverName, toolName string, parametersSchema interface{}, storedHash string) (bool, error) {
-	currentHash, err := ToolHash(serverName, toolName, parametersSchema)
+func VerifyToolHash(serverName, toolName, description string, parametersSchema interface{}, storedHash string) (bool, error) {
+	currentHash, err := ToolHash(serverName, toolName, description, parametersSchema)
 	if err != nil {
 		return false, err
 	}
@@ -59,8 +59,8 @@ func VerifyToolHash(serverName, toolName string, parametersSchema interface{}, s
 }
 
 // ComputeToolHash computes a SHA256 hash for a tool (alias for ToolHash that doesn't return error)
-func ComputeToolHash(serverName, toolName string, inputSchema interface{}) string {
-	hash, err := ToolHash(serverName, toolName, inputSchema)
+func ComputeToolHash(serverName, toolName, description string, inputSchema interface{}) string {
+	hash, err := ToolHash(serverName, toolName, description, inputSchema)
 	if err != nil {
 		// If hashing fails, return a default hash based on server and tool name
 		fallback := StringHash(fmt.Sprintf("%s:%s", serverName, toolName))

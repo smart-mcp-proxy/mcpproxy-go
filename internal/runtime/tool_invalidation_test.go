@@ -271,6 +271,66 @@ func TestToolCacheInvalidation_ToolModification(t *testing.T) {
 	assert.Contains(t, indexedTools[0].Description, "version 2", "Tool should have updated description")
 }
 
+// TestToolCacheInvalidation_DescriptionOnlyChange verifies description changes are detected.
+// This is critical: the hash now includes description, so description-only changes
+// should produce a different hash and trigger re-indexing.
+func TestToolCacheInvalidation_DescriptionOnlyChange(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:           tempDir,
+		Listen:            "127.0.0.1:0",
+		ToolResponseLimit: 0,
+		Servers:           []*config.ServerConfig{},
+	}
+
+	rt, err := New(cfg, "", zap.NewNop())
+	require.NoError(t, err)
+	defer func() {
+		_ = rt.Close()
+	}()
+
+	ctx := context.Background()
+
+	// Same schema for both versions
+	paramsJSON := `{"type":"object","properties":{"arg1":{"type":"string"}}}`
+
+	// Start with tool_a with original description
+	initialTools := []*config.ToolMetadata{
+		{
+			ServerName:  "test-server",
+			Name:        "tool_a",
+			Description: "Original description",
+			Hash:        "hash_original",
+			ParamsJSON:  paramsJSON,
+		},
+	}
+
+	err = rt.indexManager.BatchIndexTools(initialTools)
+	require.NoError(t, err)
+
+	// Modify only the description (schema unchanged, but hash must differ)
+	modifiedTools := []*config.ToolMetadata{
+		{
+			ServerName:  "test-server",
+			Name:        "tool_a",
+			Description: "Updated description with more details",
+			Hash:        "hash_updated", // Different hash due to different description
+			ParamsJSON:  paramsJSON,     // Same schema
+		},
+	}
+
+	err = rt.applyDifferentialToolUpdate(ctx, "test-server", modifiedTools)
+	require.NoError(t, err)
+
+	// Verify tool was updated
+	indexedTools, err := rt.indexManager.GetToolsByServer("test-server")
+	require.NoError(t, err)
+
+	assert.Len(t, indexedTools, 1, "Should still have 1 tool")
+	assert.Equal(t, "hash_updated", indexedTools[0].Hash, "Tool should have new hash")
+	assert.Contains(t, indexedTools[0].Description, "Updated description", "Tool should have updated description")
+}
+
 // TestToolCacheInvalidation_MultipleServers tests that changes to one server don't affect another
 func TestToolCacheInvalidation_MultipleServers(t *testing.T) {
 	tempDir := t.TempDir()
@@ -326,5 +386,77 @@ func TestToolCacheInvalidation_MultipleServers(t *testing.T) {
 	assert.Len(t, server2Indexed, 2, "Server 2 tools should be unchanged")
 	assert.Contains(t, names2, "tool_x")
 	assert.Contains(t, names2, "tool_y")
+}
+
+// TestToolCacheInvalidation_OrphanCleanup tests that orphaned index entries are cleaned up
+// when a server is removed from the config but its tools remain in the index.
+func TestToolCacheInvalidation_OrphanCleanup(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:           tempDir,
+		Listen:            "127.0.0.1:0",
+		ToolResponseLimit: 0,
+		Servers:           []*config.ServerConfig{},
+	}
+
+	rt, err := New(cfg, "", zap.NewNop())
+	require.NoError(t, err)
+	defer func() {
+		_ = rt.Close()
+	}()
+
+	// Index tools from a server that won't be in the active config
+	orphanedTools := []*config.ToolMetadata{
+		{ServerName: "orphaned-server", Name: "orphan_tool_a", Description: "Orphan A", Hash: "orphan_hash_a"},
+		{ServerName: "orphaned-server", Name: "orphan_tool_b", Description: "Orphan B", Hash: "orphan_hash_b"},
+	}
+	activeTools := []*config.ToolMetadata{
+		{ServerName: "active-server", Name: "active_tool", Description: "Active", Hash: "active_hash"},
+	}
+
+	err = rt.indexManager.BatchIndexTools(append(orphanedTools, activeTools...))
+	require.NoError(t, err)
+
+	// Verify both servers are in the index
+	indexedServers, err := rt.indexManager.GetAllIndexedServerNames()
+	require.NoError(t, err)
+	assert.Len(t, indexedServers, 2)
+	assert.Contains(t, indexedServers, "orphaned-server")
+	assert.Contains(t, indexedServers, "active-server")
+
+	// The upstreamManager only knows about "active-server"
+	// Since upstreamManager is nil in this test, we'll simulate what cleanupOrphanedIndexEntries does
+	// by directly calling the cleanup logic
+
+	// Get active server names (simulating what upstreamManager.GetAllServerNames() would return)
+	activeServerNames := []string{"active-server"} // Only active-server is "configured"
+
+	// Manually implement the cleanup logic to test it
+	activeServerMap := make(map[string]bool)
+	for _, serverName := range activeServerNames {
+		activeServerMap[serverName] = true
+	}
+
+	// Find orphaned servers
+	for _, indexedServer := range indexedServers {
+		if !activeServerMap[indexedServer] {
+			// This server is orphaned - delete its tools
+			err := rt.indexManager.DeleteServerTools(indexedServer)
+			require.NoError(t, err)
+		}
+	}
+
+	// Verify orphaned-server tools are removed
+	indexedServersAfter, err := rt.indexManager.GetAllIndexedServerNames()
+	require.NoError(t, err)
+	assert.Len(t, indexedServersAfter, 1, "Only active-server should remain")
+	assert.Contains(t, indexedServersAfter, "active-server")
+	assert.NotContains(t, indexedServersAfter, "orphaned-server", "orphaned-server should be removed")
+
+	// Verify active-server tools are still present
+	activeIndexed, err := rt.indexManager.GetToolsByServer("active-server")
+	require.NoError(t, err)
+	assert.Len(t, activeIndexed, 1)
+	assert.Equal(t, "active_tool", extractToolName(activeIndexed[0].Name))
 }
 

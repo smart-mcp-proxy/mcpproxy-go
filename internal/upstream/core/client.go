@@ -361,7 +361,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 
 		// Compute hash for tool change detection
 		// Hash is based on serverName + toolName + inputSchema
-		toolMeta.Hash = hash.ComputeToolHash(c.config.Name, tool.Name, tool.InputSchema)
+		toolMeta.Hash = hash.ComputeToolHash(c.config.Name, tool.Name, tool.Description, tool.InputSchema)
 
 		tools = append(tools, toolMeta)
 	}

@@ -377,6 +377,37 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	return tools, nil
 }
 
+// GetAllIndexedServerNames returns the unique set of server names present in the index.
+func (b *BleveIndex) GetAllIndexedServerNames() ([]string, error) {
+	// Use a MatchAll query to scan every document, requesting only the server_name field
+	query := bleve.NewMatchAllQuery()
+	searchReq := bleve.NewSearchRequest(query)
+	searchReq.Size = 0 // We only need facets, not results
+
+	// Add a facet on server_name to get unique values
+	facet := bleve.NewFacetRequest("server_name", 10000) // generous upper bound
+	searchReq.AddFacet("servers", facet)
+
+	searchResult, err := b.index.Search(searchReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query indexed server names: %w", err)
+	}
+
+	facetResult, ok := searchResult.Facets["servers"]
+	if !ok {
+		return nil, nil // no facet result means no documents
+	}
+
+	var names []string
+	for _, term := range facetResult.Terms.Terms() {
+		names = append(names, term.Term)
+	}
+
+	b.logger.Debug("Retrieved indexed server names",
+		zap.Int("count", len(names)))
+	return names, nil
+}
+
 // Helper function to get string field from search results
 func getStringField(fields map[string]interface{}, fieldName string) string {
 	if val, ok := fields[fieldName]; ok {

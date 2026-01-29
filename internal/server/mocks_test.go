@@ -93,6 +93,11 @@ func (m *MockIndex) GetStats() (map[string]interface{}, error) {
 	return args.Get(0).(map[string]interface{}), args.Error(1)
 }
 
+func (m *MockIndex) GetAllIndexedServerNames() ([]string, error) {
+	args := m.Called()
+	return args.Get(0).([]string), args.Error(1)
+}
+
 // MockUpstreamManager is a mock implementation of the upstream manager interface
 type MockUpstreamManager struct {
 	mock.Mock
