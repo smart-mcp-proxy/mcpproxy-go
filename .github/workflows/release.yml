@@ -369,7 +369,7 @@ jobs:
           CGO_LDFLAGS: "-mmacosx-version-min=12.0"
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION} -X mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
+          LDFLAGS="-s -w -X main.version=${VERSION} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
 
           # Determine clean binary name
           if [ "${{ matrix.goos }}" = "windows" ]; then

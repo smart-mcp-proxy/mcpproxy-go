@@ -50,7 +50,7 @@ swagger-verify: swagger
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0-dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE) -X mcpproxy-go/internal/httpapi.buildVersion=$(VERSION) -s -w
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE) -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=$(VERSION) -s -w
 
 # Build complete project
 build: swagger frontend-build
