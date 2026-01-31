@@ -86,6 +86,14 @@ type TokenErrorResponse struct {
 	ErrorURI         string `json:"error_uri,omitempty"`
 }
 
+// ProtectedResourceMetadata represents OAuth 2.0 Protected Resource Metadata (RFC 9728).
+type ProtectedResourceMetadata struct {
+	Resource              string   `json:"resource"`
+	AuthorizationServers  []string `json:"authorization_servers"`
+	ScopesSupported       []string `json:"scopes_supported,omitempty"`
+	BearerMethodsSupported []string `json:"bearer_methods_supported,omitempty"`
+}
+
 // DiscoveryMetadata represents OAuth 2.0 Authorization Server Metadata (RFC 8414).
 type DiscoveryMetadata struct {
 	Issuer                            string   `json:"issuer"`

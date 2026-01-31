@@ -2,11 +2,14 @@ package oauth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +25,12 @@ const (
 	// Default OAuth redirect URI base - port will be dynamically assigned
 	DefaultRedirectURIBase = "http://127.0.0.1"
 	DefaultRedirectPath    = "/oauth/callback"
+
+	// Rate limit retry constants for resource auto-detection
+	resourceDetectMaxRetries     = 3                // Maximum retry attempts on 429
+	resourceDetectMaxWait        = 30 * time.Second // Maximum wait time per retry
+	resourceDetectDefaultBackoff = 5 * time.Second  // Default backoff when no Retry-After hint
+	resourceDetectRequestTimeout = 5 * time.Second  // Timeout for preflight requests
 )
 
 // CallbackServerManager manages OAuth callback servers for dynamic port allocation
@@ -322,7 +331,7 @@ func (m *TokenStoreManager) HasValidToken(ctx context.Context, serverName string
 //  1. Manual extra_params.resource from config (highest priority - preserves backward compatibility)
 //  2. Auto-detected resource from RFC 9728 Protected Resource Metadata
 //  3. Fallback to server URL if metadata is unavailable or lacks resource field
-func CreateOAuthConfigWithExtraParams(serverConfig *config.ServerConfig, storage *storage.BoltDB) (*client.OAuthConfig, map[string]string) {
+func CreateOAuthConfigWithExtraParams(ctx context.Context, serverConfig *config.ServerConfig, storage *storage.BoltDB) (*client.OAuthConfig, map[string]string) {
 	logger := zap.L().Named("oauth")
 
 	// Initialize extraParams map
@@ -342,7 +351,7 @@ func CreateOAuthConfigWithExtraParams(serverConfig *config.ServerConfig, storage
 
 	// Priority 2 & 3: Auto-detect resource if not manually specified
 	if _, hasResource := extraParams["resource"]; !hasResource {
-		detectedResource := autoDetectResource(serverConfig, logger)
+		detectedResource := autoDetectResource(ctx, serverConfig, logger)
 		if detectedResource != "" {
 			extraParams["resource"] = detectedResource
 		}
@@ -354,69 +363,248 @@ func CreateOAuthConfigWithExtraParams(serverConfig *config.ServerConfig, storage
 	return oauthConfig, extraParams
 }
 
-// autoDetectResource attempts to discover the RFC 8707 resource parameter.
-// Returns the detected resource URL, or server URL as fallback, or empty string on failure.
-func autoDetectResource(serverConfig *config.ServerConfig, logger *zap.Logger) string {
-	// Use a client with timeout to avoid blocking on slow/unreachable servers
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	// POST is the only method guaranteed by MCP spec for the main endpoint
-	resp, err := client.Post(serverConfig.URL, "application/json", strings.NewReader("{}"))
-	if err != nil {
-		logger.Debug("Failed to make preflight request for resource detection",
-			zap.String("server", serverConfig.Name),
-			zap.Error(err))
-		// Fallback to server URL
-		return serverConfig.URL
+// parseRateLimitWait extracts wait duration from a 429 response.
+// Checks (in order):
+// 1. Retry-After header (seconds or HTTP-date per RFC 7231)
+// 2. JSON body with reset_at field (Unix timestamp)
+// Returns 0 if no hints found (caller should use backoff).
+func parseRateLimitWait(resp *http.Response, body []byte) time.Duration {
+	// Try Retry-After header first (RFC 7231)
+	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+		// Try parsing as seconds
+		if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		// Try parsing as HTTP-date
+		if t, err := http.ParseTime(retryAfter); err == nil {
+			wait := time.Until(t)
+			if wait > 0 {
+				return wait
+			}
+		}
 	}
-	defer resp.Body.Close()
 
-	// Check for 401 with WWW-Authenticate header containing resource_metadata
-	if resp.StatusCode == http.StatusUnauthorized {
-		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		metadataURL := ExtractResourceMetadataURL(wwwAuth)
-
-		if metadataURL != "" {
-			// Try to fetch Protected Resource Metadata
-			metadata, err := DiscoverProtectedResourceMetadata(metadataURL, 5*time.Second)
-			if err != nil {
-				logger.Debug("Failed to fetch Protected Resource Metadata",
-					zap.String("server", serverConfig.Name),
-					zap.String("metadata_url", metadataURL),
-					zap.Error(err))
-				// Fallback to server URL
-				return serverConfig.URL
+	// Try JSON body with reset_at (common pattern in rate limit responses)
+	// Supports both top-level and nested in "detail" object
+	var rateLimit struct {
+		ResetAt int64 `json:"reset_at"`
+		Detail  struct {
+			ResetAt int64 `json:"reset_at"`
+		} `json:"detail"`
+	}
+	if json.Unmarshal(body, &rateLimit) == nil {
+		resetAt := rateLimit.ResetAt
+		if resetAt == 0 {
+			resetAt = rateLimit.Detail.ResetAt
+		}
+		if resetAt > 0 {
+			wait := time.Until(time.Unix(resetAt, 0))
+			if wait > 0 {
+				return wait
 			}
+		}
+	}
 
-			// Use resource from metadata if available
-			if metadata.Resource != "" {
-				logger.Info("Auto-detected resource parameter from Protected Resource Metadata (RFC 9728)",
-					zap.String("server", serverConfig.Name),
-					zap.String("resource", metadata.Resource))
-				return metadata.Resource
+	return 0 // No hints, caller should use backoff
+}
+
+// parseRateLimitWaitWithSource extracts wait duration and its source from a 429 response.
+// Returns (duration, source) where source is one of:
+// - "retry-after-header" (Retry-After header with seconds or HTTP-date)
+// - "json-body-reset-at" (JSON body with reset_at field)
+// - "" (no hints found, caller should use backoff)
+func parseRateLimitWaitWithSource(resp *http.Response, body []byte) (time.Duration, string) {
+	// Try Retry-After header first (RFC 7231)
+	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+		// Try parsing as seconds
+		if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second, "retry-after-header"
+		}
+		// Try parsing as HTTP-date
+		if t, err := http.ParseTime(retryAfter); err == nil {
+			wait := time.Until(t)
+			if wait > 0 {
+				return wait, "retry-after-header"
 			}
+		}
+	}
 
-			// Metadata exists but lacks resource field - fallback to server URL
-			logger.Info("Protected Resource Metadata lacks resource field, using server URL as fallback",
+	// Try JSON body with reset_at (common pattern in rate limit responses)
+	// Supports both top-level and nested in "detail" object
+	var rateLimit struct {
+		ResetAt int64 `json:"reset_at"`
+		Detail  struct {
+			ResetAt int64 `json:"reset_at"`
+		} `json:"detail"`
+	}
+	if json.Unmarshal(body, &rateLimit) == nil {
+		resetAt := rateLimit.ResetAt
+		if resetAt == 0 {
+			resetAt = rateLimit.Detail.ResetAt
+		}
+		if resetAt > 0 {
+			wait := time.Until(time.Unix(resetAt, 0))
+			if wait > 0 {
+				return wait, "json-body-reset-at"
+			}
+		}
+	}
+
+	return 0, "" // No hints, caller should use backoff
+}
+
+// autoDetectResource attempts to discover the RFC 8707 resource parameter.
+// Returns the detected resource URL, or server URL as fallback, or empty string if
+// the server clearly doesn't require OAuth.
+//
+// This function handles rate limiting (429) by retrying with appropriate backoff,
+// respecting Retry-After headers and JSON body reset_at fields.
+// The context allows cancellation during rate limit waits (e.g., during shutdown).
+func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, logger *zap.Logger) string {
+	httpClient := &http.Client{Timeout: resourceDetectRequestTimeout}
+
+	for attempt := 0; attempt <= resourceDetectMaxRetries; attempt++ {
+		// Check context before making request
+		if ctx.Err() != nil {
+			logger.Debug("Context cancelled before resource detection request",
 				zap.String("server", serverConfig.Name),
-				zap.String("fallback_resource", serverConfig.URL))
+				zap.Int("attempt", attempt),
+				zap.Error(ctx.Err()))
 			return serverConfig.URL
 		}
 
-		// No resource_metadata in WWW-Authenticate - fallback to server URL
-		logger.Debug("WWW-Authenticate header lacks resource_metadata, using server URL as fallback",
+		// POST is the only method guaranteed by MCP spec for the main endpoint
+		req, err := http.NewRequestWithContext(ctx, "POST", serverConfig.URL, strings.NewReader("{}"))
+		if err != nil {
+			logger.Debug("Failed to create request for resource detection",
+				zap.String("server", serverConfig.Name),
+				zap.Int("attempt", attempt),
+				zap.Error(err))
+			return serverConfig.URL
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			logger.Debug("Failed to make preflight request for resource detection",
+				zap.String("server", serverConfig.Name),
+				zap.Int("attempt", attempt),
+				zap.Error(err))
+			// Network error - fallback to server URL per spec
+			return serverConfig.URL
+		}
+
+		// Read body for potential rate limit info or later use
+		// Limit read size to prevent memory exhaustion from unexpectedly large responses
+		const maxBodySize = 1 << 20 // 1MB
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+		resp.Body.Close()
+
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized:
+			// 401 - Normal path: extract resource from metadata
+			return handleUnauthorizedResponse(resp, body, serverConfig, logger)
+
+		case resp.StatusCode == http.StatusTooManyRequests:
+			// 429 - Rate limited: retry with appropriate wait time
+			if attempt < resourceDetectMaxRetries {
+				waitTime, waitSource := parseRateLimitWaitWithSource(resp, body)
+				if waitTime == 0 {
+					// No hint from server, use exponential backoff
+					waitTime = resourceDetectDefaultBackoff * time.Duration(1<<uint(attempt))
+					waitSource = "exponential-backoff"
+				}
+				// Cap wait time to avoid blocking too long
+				if waitTime > resourceDetectMaxWait {
+					waitTime = resourceDetectMaxWait
+				}
+
+				logger.Info("Rate limited during resource auto-detection, waiting before retry",
+					zap.String("server", serverConfig.Name),
+					zap.Int("attempt", attempt+1),
+					zap.Int("max_attempts", resourceDetectMaxRetries+1),
+					zap.Duration("wait_time", waitTime),
+					zap.String("wait_source", waitSource))
+
+				// Context-aware wait: allows cancellation during shutdown
+				select {
+				case <-time.After(waitTime):
+					continue
+				case <-ctx.Done():
+					logger.Debug("Rate-limit wait cancelled",
+						zap.String("server", serverConfig.Name),
+						zap.Int("attempt", attempt+1),
+						zap.Duration("remaining_wait", waitTime),
+						zap.Error(ctx.Err()))
+					return serverConfig.URL
+				}
+			}
+
+			// Exhausted retries - fallback to server URL
+			logger.Warn("Rate limited during resource auto-detection, exhausted retries, using server URL as fallback",
+				zap.String("server", serverConfig.Name),
+				zap.Int("attempts", resourceDetectMaxRetries+1),
+				zap.String("fallback_resource", serverConfig.URL))
+			return serverConfig.URL
+
+		case resp.StatusCode >= 400:
+			// Other 4xx/5xx errors - can't determine auth requirements, fallback to server URL
+			logger.Debug("Server returned error during resource auto-detection, using server URL as fallback",
+				zap.String("server", serverConfig.Name),
+				zap.Int("status_code", resp.StatusCode),
+				zap.String("fallback_resource", serverConfig.URL))
+			return serverConfig.URL
+
+		default:
+			// 2xx/3xx - Server doesn't require authentication at this endpoint
+			logger.Debug("Server did not return 401, skipping resource auto-detection",
+				zap.String("server", serverConfig.Name),
+				zap.Int("status_code", resp.StatusCode))
+			return ""
+		}
+	}
+
+	// Should not reach here, but fallback just in case
+	return serverConfig.URL
+}
+
+// handleUnauthorizedResponse processes a 401 response to extract the resource parameter.
+func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *config.ServerConfig, logger *zap.Logger) string {
+	wwwAuth := resp.Header.Get("WWW-Authenticate")
+	metadataURL := ExtractResourceMetadataURL(wwwAuth)
+
+	if metadataURL != "" {
+		// Try to fetch Protected Resource Metadata
+		metadata, err := DiscoverProtectedResourceMetadata(metadataURL, resourceDetectRequestTimeout)
+		if err != nil {
+			logger.Debug("Failed to fetch Protected Resource Metadata",
+				zap.String("server", serverConfig.Name),
+				zap.String("metadata_url", metadataURL),
+				zap.Error(err))
+			// Fallback to server URL
+			return serverConfig.URL
+		}
+
+		// Use resource from metadata if available
+		if metadata.Resource != "" {
+			logger.Info("Auto-detected resource parameter from Protected Resource Metadata (RFC 9728)",
+				zap.String("server", serverConfig.Name),
+				zap.String("resource", metadata.Resource))
+			return metadata.Resource
+		}
+
+		// Metadata exists but lacks resource field - fallback to server URL
+		logger.Info("Protected Resource Metadata lacks resource field, using server URL as fallback",
 			zap.String("server", serverConfig.Name),
 			zap.String("fallback_resource", serverConfig.URL))
 		return serverConfig.URL
 	}
 
-	// Non-401 response means server doesn't require authentication at this endpoint.
-	// Return empty string to avoid adding unnecessary resource parameter to OAuth flows.
-	// This is correct behavior: resource parameter is only needed for OAuth-protected servers.
-	logger.Debug("Server did not return 401, skipping resource auto-detection",
+	// No resource_metadata in WWW-Authenticate - fallback to server URL
+	logger.Debug("WWW-Authenticate header lacks resource_metadata, using server URL as fallback",
 		zap.String("server", serverConfig.Name),
-		zap.Int("status_code", resp.StatusCode))
-	return ""
+		zap.String("fallback_resource", serverConfig.URL))
+	return serverConfig.URL
 }
 
 // CreateOAuthConfig creates an OAuth configuration for dynamic client registration
