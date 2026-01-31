@@ -101,6 +101,81 @@ func TestBoltDB_GetOAuthClientCredentials_LegacyRecord(t *testing.T) {
 	require.Equal(t, 0, gotPort, "Legacy records should return port 0")
 }
 
+// TestManager_CleanupOrphanedOAuthTokens verifies that orphaned tokens are removed
+// while tokens for valid servers are preserved.
+func TestManager_CleanupOrphanedOAuthTokens(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "storage-cleanup-oauth-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+
+	mgr, err := storage.NewManager(tmpDir, zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	// Create tokens for 4 servers: 2 valid, 2 orphaned
+	validServer1 := "valid-server-1"
+	validServer2 := "valid-server-2"
+	orphanedServer1 := "orphaned-server-1"
+	orphanedServer2 := "orphaned-server-2"
+
+	// Generate server keys with URLs
+	validKey1 := oauth.GenerateServerKey(validServer1, "https://valid1.example.com")
+	validKey2 := oauth.GenerateServerKey(validServer2, "https://valid2.example.com")
+	orphanedKey1 := oauth.GenerateServerKey(orphanedServer1, "https://orphan1.example.com")
+	orphanedKey2 := oauth.GenerateServerKey(orphanedServer2, "https://orphan2.example.com")
+
+	// Save tokens with DisplayName set (as PersistentTokenStore does)
+	err = mgr.GetBoltDB().SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName:  validKey1,
+		DisplayName: validServer1,
+		AccessToken: "valid-token-1",
+	})
+	require.NoError(t, err)
+
+	err = mgr.GetBoltDB().SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName:  validKey2,
+		DisplayName: validServer2,
+		AccessToken: "valid-token-2",
+	})
+	require.NoError(t, err)
+
+	err = mgr.GetBoltDB().SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName:  orphanedKey1,
+		DisplayName: orphanedServer1,
+		AccessToken: "orphan-token-1",
+	})
+	require.NoError(t, err)
+
+	err = mgr.GetBoltDB().SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName:  orphanedKey2,
+		DisplayName: orphanedServer2,
+		AccessToken: "orphan-token-2",
+	})
+	require.NoError(t, err)
+
+	// Cleanup with only valid servers
+	validServers := []string{validServer1, validServer2}
+	deleted, err := mgr.CleanupOrphanedOAuthTokens(validServers)
+	require.NoError(t, err)
+	require.Equal(t, 2, deleted, "Should delete 2 orphaned tokens")
+
+	// Verify valid tokens still exist
+	token1, err := mgr.GetBoltDB().GetOAuthToken(validKey1)
+	require.NoError(t, err)
+	require.Equal(t, "valid-token-1", token1.AccessToken)
+
+	token2, err := mgr.GetBoltDB().GetOAuthToken(validKey2)
+	require.NoError(t, err)
+	require.Equal(t, "valid-token-2", token2.AccessToken)
+
+	// Verify orphaned tokens are gone
+	_, err = mgr.GetBoltDB().GetOAuthToken(orphanedKey1)
+	require.Error(t, err, "Orphaned token 1 should be deleted")
+
+	_, err = mgr.GetBoltDB().GetOAuthToken(orphanedKey2)
+	require.Error(t, err, "Orphaned token 2 should be deleted")
+}
+
 // TestBoltDB_ClearOAuthClientCredentials_PreservesToken verifies that ClearOAuthClientCredentials
 // clears DCR fields but preserves token data (Spec 022).
 func TestBoltDB_ClearOAuthClientCredentials_PreservesToken(t *testing.T) {

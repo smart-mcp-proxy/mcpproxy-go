@@ -1383,3 +1383,68 @@ func (m *Manager) ClearOAuthState(serverName string) error {
 	}
 	return nil
 }
+
+// CleanupOrphanedOAuthTokens removes OAuth tokens for servers that no longer exist in the configuration.
+// This should be called during startup to clean up tokens left behind when servers were removed
+// while mcpproxy was not running, or from older versions that didn't clean up properly.
+func (m *Manager) CleanupOrphanedOAuthTokens(validServerNames []string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.db == nil {
+		return 0, fmt.Errorf("storage not initialized")
+	}
+
+	// Create a set of valid server names for fast lookup
+	validServers := make(map[string]bool, len(validServerNames))
+	for _, name := range validServerNames {
+		validServers[name] = true
+	}
+
+	// Get all OAuth tokens
+	tokens, err := m.db.ListOAuthTokens()
+	if err != nil {
+		return 0, fmt.Errorf("failed to list OAuth tokens: %w", err)
+	}
+
+	// Find orphaned tokens (tokens whose server no longer exists)
+	var orphanedKeys []string
+	for _, token := range tokens {
+		serverName := token.GetServerName()
+		if serverName == "" {
+			// Token has no server name, consider it orphaned
+			orphanedKeys = append(orphanedKeys, token.ServerName)
+			continue
+		}
+		if !validServers[serverName] {
+			orphanedKeys = append(orphanedKeys, token.ServerName)
+			m.logger.Infow("Found orphaned OAuth token",
+				"storage_key", token.ServerName,
+				"display_name", serverName)
+		}
+	}
+
+	if len(orphanedKeys) == 0 {
+		m.logger.Debug("No orphaned OAuth tokens found")
+		return 0, nil
+	}
+
+	// Delete orphaned tokens
+	deleted := 0
+	for _, key := range orphanedKeys {
+		if err := m.db.DeleteOAuthToken(key); err != nil {
+			m.logger.Warnw("Failed to delete orphaned OAuth token",
+				"key", key,
+				"error", err)
+			continue
+		}
+		deleted++
+	}
+
+	m.logger.Infow("Cleaned up orphaned OAuth tokens",
+		"total_tokens", len(tokens),
+		"orphaned_found", len(orphanedKeys),
+		"deleted", deleted)
+
+	return deleted, nil
+}

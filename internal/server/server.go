@@ -922,6 +922,20 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 		return fmt.Errorf("failed to remove server from storage: %w", err)
 	}
 
+	// Clear OAuth state (tokens, client registration) for the removed server
+	// This prevents orphaned tokens from accumulating in the database
+	if err := storageManager.ClearOAuthState(serverName); err != nil {
+		s.logger.Warn("Failed to clear OAuth state for removed server",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Continue - this is cleanup, not critical for removal
+	}
+
+	// Notify RefreshManager to stop tracking this server's token refresh
+	if refreshManager := s.runtime.RefreshManager(); refreshManager != nil {
+		refreshManager.OnTokenCleared(serverName)
+	}
+
 	// Remove from search index
 	if err := s.runtime.IndexManager().DeleteServerTools(serverName); err != nil {
 		s.logger.Warn("Failed to remove server tools from index",

@@ -30,6 +30,24 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Update checker background process started")
 	}
 
+	// Clean up orphaned OAuth tokens before starting the refresh manager
+	// This removes tokens for servers that were deleted while mcpproxy was not running
+	if r.storageManager != nil {
+		r.mu.RLock()
+		validServerNames := make([]string, 0, len(r.cfg.Servers))
+		for _, server := range r.cfg.Servers {
+			validServerNames = append(validServerNames, server.Name)
+		}
+		r.mu.RUnlock()
+
+		if deleted, err := r.storageManager.CleanupOrphanedOAuthTokens(validServerNames); err != nil {
+			r.logger.Warn("Failed to cleanup orphaned OAuth tokens", zap.Error(err))
+		} else if deleted > 0 {
+			r.logger.Info("Cleaned up orphaned OAuth tokens during startup",
+				zap.Int("deleted", deleted))
+		}
+	}
+
 	// Start proactive OAuth token refresh manager
 	if r.refreshManager != nil {
 		r.refreshManager.SetRuntime(r)
