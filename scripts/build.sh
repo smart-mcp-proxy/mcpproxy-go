@@ -10,7 +10,7 @@ echo "Building mcpproxy version: $VERSION"
 echo "Commit: $COMMIT"
 echo "Date: $DATE"
 
-LDFLAGS="-X main.version=$VERSION -X main.commit=$COMMIT -X main.date=$DATE -X mcpproxy-go/internal/httpapi.buildVersion=$VERSION -s -w"
+LDFLAGS="-X main.version=$VERSION -X main.commit=$COMMIT -X main.date=$DATE -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=$VERSION -s -w"
 
 # Build for current platform (with CGO for tray support if needed)
 echo "Building for current platform..."
