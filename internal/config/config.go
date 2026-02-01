@@ -612,6 +612,9 @@ func DefaultConfig() *Config {
 		// Default Docker isolation settings
 		DockerIsolation: DefaultDockerIsolationConfig(),
 
+		// Default sensitive data detection settings (enabled by default for security)
+		SensitiveDataDetection: DefaultSensitiveDataDetectionConfig(),
+
 		// Default registries for MCP server discovery
 		Registries: []RegistryEntry{
 			{

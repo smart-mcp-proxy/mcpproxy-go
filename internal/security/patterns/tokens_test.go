@@ -489,3 +489,478 @@ func TestBearerTokenPattern(t *testing.T) {
 		})
 	}
 }
+
+// Helper functions for building test keys dynamically to avoid secret scanners
+
+// buildGoogleAIKey constructs a test Google AI key dynamically
+func buildGoogleAIKey() string {
+	return "AIzaSy" + strings.Repeat("a", 33)
+}
+
+// buildXAIKey constructs a test xAI key dynamically
+func buildXAIKey() string {
+	return "xai-" + strings.Repeat("a", 48)
+}
+
+// buildGroqKey constructs a test Groq key dynamically
+func buildGroqKey() string {
+	return "gsk_" + strings.Repeat("a", 48)
+}
+
+// buildHuggingFaceToken constructs a test Hugging Face token dynamically
+func buildHuggingFaceToken() string {
+	return "hf_" + strings.Repeat("a", 34)
+}
+
+// buildHuggingFaceOrgToken constructs a test Hugging Face org token dynamically
+func buildHuggingFaceOrgToken() string {
+	return "api_org_" + strings.Repeat("a", 34)
+}
+
+// buildReplicateKey constructs a test Replicate key dynamically
+func buildReplicateKey() string {
+	return "r8_" + strings.Repeat("a", 37)
+}
+
+// buildPerplexityKey constructs a test Perplexity key dynamically
+func buildPerplexityKey() string {
+	return "pplx-" + strings.Repeat("a", 48)
+}
+
+// buildFireworksKey constructs a test Fireworks key dynamically
+func buildFireworksKey() string {
+	return "fw_" + strings.Repeat("a", 24)
+}
+
+// buildAnyscaleKey constructs a test Anyscale key dynamically
+func buildAnyscaleKey() string {
+	return "esecret_" + strings.Repeat("a", 24)
+}
+
+// Test Google AI / Gemini API Key pattern
+func TestGoogleAIKeyPattern(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantMatch bool
+	}{
+		{
+			name:      "Google AI API key",
+			input:     buildGoogleAIKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "Google AI key in config",
+			input:     "GOOGLE_API_KEY=" + buildGoogleAIKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "wrong prefix",
+			input:     "AIzaXy" + strings.Repeat("a", 33),
+			wantMatch: false,
+		},
+		{
+			name:      "too short",
+			input:     "AIzaSy" + strings.Repeat("a", 10),
+			wantMatch: false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+	pattern := findPatternByName(patterns, "google_ai_key")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if pattern == nil {
+				t.Skip("Google AI key pattern not implemented yet")
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Test xAI / Grok API Key pattern
+func TestXAIKeyPattern(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantMatch bool
+	}{
+		{
+			name:      "xAI API key",
+			input:     buildXAIKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "xAI key in env",
+			input:     "XAI_API_KEY=" + buildXAIKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "too short",
+			input:     "xai-" + strings.Repeat("a", 20),
+			wantMatch: false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+	pattern := findPatternByName(patterns, "xai_key")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if pattern == nil {
+				t.Skip("xAI key pattern not implemented yet")
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Test Groq API Key pattern
+func TestGroqKeyPattern(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantMatch bool
+	}{
+		{
+			name:      "Groq API key",
+			input:     buildGroqKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "Groq key in env",
+			input:     "GROQ_API_KEY=" + buildGroqKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "too short",
+			input:     "gsk_" + strings.Repeat("a", 20),
+			wantMatch: false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+	pattern := findPatternByName(patterns, "groq_key")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if pattern == nil {
+				t.Skip("Groq key pattern not implemented yet")
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Test Hugging Face Token patterns
+func TestHuggingFaceTokenPatterns(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantMatch   bool
+		patternName string
+	}{
+		{
+			name:        "Hugging Face user token",
+			input:       buildHuggingFaceToken(),
+			wantMatch:   true,
+			patternName: "huggingface_token",
+		},
+		{
+			name:        "Hugging Face org token",
+			input:       buildHuggingFaceOrgToken(),
+			wantMatch:   true,
+			patternName: "huggingface_org_token",
+		},
+		{
+			name:        "HF token in env",
+			input:       "HF_TOKEN=" + buildHuggingFaceToken(),
+			wantMatch:   true,
+			patternName: "huggingface_token",
+		},
+		{
+			name:        "too short user token",
+			input:       "hf_" + strings.Repeat("a", 10),
+			wantMatch:   false,
+			patternName: "huggingface_token",
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Test Replicate API Key pattern
+func TestReplicateKeyPattern(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantMatch bool
+	}{
+		{
+			name:      "Replicate API key",
+			input:     buildReplicateKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "Replicate key in env",
+			input:     "REPLICATE_API_TOKEN=" + buildReplicateKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "too short",
+			input:     "r8_" + strings.Repeat("a", 10),
+			wantMatch: false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+	pattern := findPatternByName(patterns, "replicate_key")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if pattern == nil {
+				t.Skip("Replicate key pattern not implemented yet")
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Test Perplexity API Key pattern
+func TestPerplexityKeyPattern(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantMatch bool
+	}{
+		{
+			name:      "Perplexity API key",
+			input:     buildPerplexityKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "Perplexity key in env",
+			input:     "PERPLEXITY_API_KEY=" + buildPerplexityKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "too short",
+			input:     "pplx-" + strings.Repeat("a", 20),
+			wantMatch: false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+	pattern := findPatternByName(patterns, "perplexity_key")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if pattern == nil {
+				t.Skip("Perplexity key pattern not implemented yet")
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Test Fireworks AI API Key pattern
+func TestFireworksKeyPattern(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantMatch bool
+	}{
+		{
+			name:      "Fireworks API key",
+			input:     buildFireworksKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "Fireworks key in env",
+			input:     "FIREWORKS_API_KEY=" + buildFireworksKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "too short",
+			input:     "fw_" + strings.Repeat("a", 10),
+			wantMatch: false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+	pattern := findPatternByName(patterns, "fireworks_key")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if pattern == nil {
+				t.Skip("Fireworks key pattern not implemented yet")
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Test Anyscale API Key pattern
+func TestAnyscaleKeyPattern(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantMatch bool
+	}{
+		{
+			name:      "Anyscale API key",
+			input:     buildAnyscaleKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "Anyscale key in env",
+			input:     "ANYSCALE_API_KEY=" + buildAnyscaleKey(),
+			wantMatch: true,
+		},
+		{
+			name:      "too short",
+			input:     "esecret_" + strings.Repeat("a", 10),
+			wantMatch: false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+	pattern := findPatternByName(patterns, "anyscale_key")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if pattern == nil {
+				t.Skip("Anyscale key pattern not implemented yet")
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Test keyword-context based patterns (Mistral, Cohere, DeepSeek, Together)
+func TestKeywordContextPatterns(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantMatch   bool
+		patternName string
+	}{
+		// Mistral AI
+		{
+			name:        "Mistral key in env",
+			input:       "MISTRAL_API_KEY=" + strings.Repeat("a", 32),
+			wantMatch:   true,
+			patternName: "mistral_key",
+		},
+		{
+			name:        "Mistral key in JSON",
+			input:       `"mistral": "` + strings.Repeat("a", 32) + `"`,
+			wantMatch:   true,
+			patternName: "mistral_key",
+		},
+		// Cohere
+		{
+			name:        "Cohere key in env",
+			input:       "COHERE_API_KEY=" + strings.Repeat("a", 40),
+			wantMatch:   true,
+			patternName: "cohere_key",
+		},
+		{
+			name:        "Cohere key with CO_API_KEY",
+			input:       "CO_API_KEY=" + strings.Repeat("a", 40),
+			wantMatch:   true,
+			patternName: "cohere_key",
+		},
+		// DeepSeek
+		{
+			name:        "DeepSeek key in env",
+			input:       "DEEPSEEK_API_KEY=sk-" + strings.Repeat("a", 32),
+			wantMatch:   true,
+			patternName: "deepseek_key",
+		},
+		// Together AI
+		{
+			name:        "Together key in env",
+			input:       "TOGETHER_API_KEY=" + strings.Repeat("a", 48),
+			wantMatch:   true,
+			patternName: "together_key",
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}

@@ -159,6 +159,11 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 		if totalIssues == 0 {
 			fmt.Println("✅ All systems operational! No issues detected.")
 			fmt.Println()
+
+			// Display security features status even when no issues
+			fmt.Println("🔒 Security Features")
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			displaySecurityFeaturesStatus()
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			return nil
 		}
@@ -316,6 +321,13 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 		fmt.Println()
 		fmt.Println("For more details, run: mcpproxy doctor --output=json")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+		// Display security features status
+		fmt.Println()
+		fmt.Println("🔒 Security Features")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		displaySecurityFeaturesStatus()
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	}
 
 	return nil
@@ -367,4 +379,62 @@ func sortArrayByServerName(arr []interface{}) {
 		jName := getStringField(jMap, "server_name")
 		return iName < jName
 	})
+}
+
+// displaySecurityFeaturesStatus shows the status of security features in the doctor output.
+func displaySecurityFeaturesStatus() {
+	// Load config to check security feature settings
+	cfg, err := loadDoctorConfig()
+	if err != nil {
+		fmt.Println("  Unable to load configuration")
+		return
+	}
+
+	// Sensitive Data Detection status
+	sddConfig := cfg.SensitiveDataDetection
+	if sddConfig == nil || sddConfig.IsEnabled() {
+		fmt.Println("  ✓ Sensitive Data Detection: enabled (default)")
+
+		// Show enabled categories
+		if sddConfig != nil && sddConfig.Categories != nil {
+			enabledCategories := []string{}
+			for category, enabled := range sddConfig.Categories {
+				if enabled {
+					enabledCategories = append(enabledCategories, category)
+				}
+			}
+			if len(enabledCategories) > 0 {
+				sort.Strings(enabledCategories)
+				fmt.Printf("    Categories: %s\n", formatCategoryList(enabledCategories))
+			}
+		} else {
+			// Default categories when not explicitly configured
+			fmt.Println("    Categories: all (cloud_credentials, api_token, private_key, ...)")
+		}
+
+		fmt.Println("    View detections: mcpproxy activity list --sensitive-data")
+	} else {
+		fmt.Println("  ✗ Sensitive Data Detection: disabled")
+		fmt.Println("    Enable: set sensitive_data_detection.enabled = true in config")
+	}
+}
+
+// formatCategoryList formats a list of categories for display, truncating if too long.
+func formatCategoryList(categories []string) string {
+	if len(categories) <= 4 {
+		return joinStrings(categories, ", ")
+	}
+	return joinStrings(categories[:4], ", ") + fmt.Sprintf(", ... (%d total)", len(categories))
+}
+
+// joinStrings joins strings with a separator (simple helper).
+func joinStrings(items []string, sep string) string {
+	result := ""
+	for i, item := range items {
+		if i > 0 {
+			result += sep
+		}
+		result += item
+	}
+	return result
 }

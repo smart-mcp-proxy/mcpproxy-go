@@ -16,9 +16,22 @@ func GetTokenPatterns() []*Pattern {
 		slackTokenPattern(),
 		// SendGrid
 		sendgridKeyPattern(),
-		// AI API keys
+		// LLM/AI API keys
 		openaiKeyPattern(),
 		anthropicKeyPattern(),
+		googleAIKeyPattern(),
+		xaiKeyPattern(),
+		groqKeyPattern(),
+		huggingFaceTokenPattern(),
+		huggingFaceOrgTokenPattern(),
+		replicateKeyPattern(),
+		perplexityKeyPattern(),
+		fireworksKeyPattern(),
+		anyscaleKeyPattern(),
+		mistralKeyPattern(),
+		cohereKeyPattern(),
+		deepseekKeyPattern(),
+		togetherAIKeyPattern(),
 		// Generic tokens
 		jwtTokenPattern(),
 		bearerTokenPattern(),
@@ -110,10 +123,11 @@ func sendgridKeyPattern() *Pattern {
 }
 
 // OpenAI API Key
+// Formats: sk-proj-, sk-svcacct-, sk-admin-, sk- (legacy)
+// Contains T3BlbkFJ signature (base64 of "OpenAI") in newer keys
 func openaiKeyPattern() *Pattern {
-	// sk-proj- = project key, sk- = older format
 	return NewPattern("openai_key").
-		WithRegex(`sk-(?:proj-)?[a-zA-Z0-9]{32,}`).
+		WithRegex(`sk-(?:proj-|svcacct-|admin-)?[a-zA-Z0-9_-]{32,}`).
 		WithCategory(CategoryAPIToken).
 		WithSeverity(SeverityCritical).
 		WithDescription("OpenAI API key").
@@ -121,12 +135,158 @@ func openaiKeyPattern() *Pattern {
 }
 
 // Anthropic API Key
+// Format: sk-ant-api03-{93 chars}AA or sk-ant-admin01-{93 chars}AA
 func anthropicKeyPattern() *Pattern {
 	return NewPattern("anthropic_key").
-		WithRegex(`sk-ant-api[a-zA-Z0-9-]{20,}`).
+		WithRegex(`sk-ant-(?:api03|admin01)-[a-zA-Z0-9_-]{20,}`).
 		WithCategory(CategoryAPIToken).
 		WithSeverity(SeverityCritical).
 		WithDescription("Anthropic API key").
+		Build()
+}
+
+// Google AI / Gemini / Vertex AI API Key
+// Format: AIzaSy followed by 33 characters
+func googleAIKeyPattern() *Pattern {
+	return NewPattern("google_ai_key").
+		WithRegex(`AIzaSy[0-9A-Za-z_-]{33}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("Google AI/Gemini API key").
+		Build()
+}
+
+// xAI / Grok API Key
+// Format: xai- prefix followed by 48+ alphanumeric characters
+func xaiKeyPattern() *Pattern {
+	return NewPattern("xai_key").
+		WithRegex(`xai-[a-zA-Z0-9]{48,}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("xAI/Grok API key").
+		Build()
+}
+
+// Groq API Key
+// Format: gsk_ prefix followed by 48 alphanumeric characters
+func groqKeyPattern() *Pattern {
+	return NewPattern("groq_key").
+		WithRegex(`gsk_[a-zA-Z0-9]{48}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("Groq API key").
+		Build()
+}
+
+// Hugging Face User Access Token
+// Format: hf_ prefix followed by 34 alphanumeric characters
+func huggingFaceTokenPattern() *Pattern {
+	return NewPattern("huggingface_token").
+		WithRegex(`hf_[a-zA-Z0-9]{34}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("Hugging Face access token").
+		Build()
+}
+
+// Hugging Face Organization API Token
+// Format: api_org_ prefix followed by 34 alphanumeric characters
+func huggingFaceOrgTokenPattern() *Pattern {
+	return NewPattern("huggingface_org_token").
+		WithRegex(`api_org_[a-zA-Z0-9]{34}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("Hugging Face organization API token").
+		Build()
+}
+
+// Replicate API Token
+// Format: r8_ prefix followed by 37 alphanumeric characters (40 total)
+func replicateKeyPattern() *Pattern {
+	return NewPattern("replicate_key").
+		WithRegex(`r8_[a-zA-Z0-9]{37}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("Replicate API token").
+		Build()
+}
+
+// Perplexity API Key
+// Format: pplx- prefix followed by 48 alphanumeric characters
+func perplexityKeyPattern() *Pattern {
+	return NewPattern("perplexity_key").
+		WithRegex(`pplx-[a-zA-Z0-9]{48}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("Perplexity API key").
+		Build()
+}
+
+// Fireworks AI API Key
+// Format: fw_ prefix followed by 20+ alphanumeric characters
+func fireworksKeyPattern() *Pattern {
+	return NewPattern("fireworks_key").
+		WithRegex(`fw_[a-zA-Z0-9]{20,}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("Fireworks AI API key").
+		Build()
+}
+
+// Anyscale API Key
+// Format: esecret_ prefix followed by 20+ alphanumeric characters
+func anyscaleKeyPattern() *Pattern {
+	return NewPattern("anyscale_key").
+		WithRegex(`esecret_[a-zA-Z0-9]{20,}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("Anyscale API key").
+		Build()
+}
+
+// Mistral AI API Key
+// No unique prefix - uses keyword context for detection
+// 32 alphanumeric characters
+func mistralKeyPattern() *Pattern {
+	return NewPattern("mistral_key").
+		WithRegex(`(?i)(?:mistral|MISTRAL_API_KEY)['":\s=]+([a-zA-Z0-9]{32})`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityHigh).
+		WithDescription("Mistral AI API key").
+		Build()
+}
+
+// Cohere API Key
+// No unique prefix - uses keyword context for detection
+// 40 alphanumeric characters
+func cohereKeyPattern() *Pattern {
+	return NewPattern("cohere_key").
+		WithRegex(`(?i)(?:cohere|CO_API_KEY|COHERE_API_KEY)['":\s=]+([a-zA-Z0-9]{40})`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityHigh).
+		WithDescription("Cohere API key").
+		Build()
+}
+
+// DeepSeek API Key
+// Uses sk- prefix (shared with OpenAI) - uses keyword context
+func deepseekKeyPattern() *Pattern {
+	return NewPattern("deepseek_key").
+		WithRegex(`(?i)(?:deepseek|DEEPSEEK_API_KEY)['":\s=]+(sk-[a-z0-9]{32})`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityHigh).
+		WithDescription("DeepSeek API key").
+		Build()
+}
+
+// Together AI API Key
+// No known unique prefix - uses keyword context
+func togetherAIKeyPattern() *Pattern {
+	return NewPattern("together_key").
+		WithRegex(`(?i)(?:together|TOGETHER_API_KEY)['":\s=]+([a-zA-Z0-9]{40,})`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityHigh).
+		WithDescription("Together AI API key").
 		Build()
 }
 

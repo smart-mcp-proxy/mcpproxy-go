@@ -58,8 +58,26 @@ MCPProxy scans all tool call arguments and responses for sensitive data patterns
 | Slack Token | `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-` | critical |
 | Slack Webhook | `hooks.slack.com/services/` URLs | high |
 | SendGrid API Key | `SG.` prefix with base64 | critical |
-| OpenAI API Key | `sk-` prefix with 48+ characters | critical |
-| Anthropic API Key | `sk-ant-` prefix | critical |
+
+### LLM/AI Provider API Keys
+
+| Provider | Pattern | Severity |
+|----------|---------|----------|
+| OpenAI | `sk-`, `sk-proj-`, `sk-svcacct-`, `sk-admin-` prefixes | critical |
+| Anthropic | `sk-ant-api03-`, `sk-ant-admin01-` prefixes | critical |
+| Google AI/Gemini | `AIzaSy` prefix (39 chars) | critical |
+| xAI/Grok | `xai-` prefix (48+ chars) | critical |
+| Groq | `gsk_` prefix (52 chars) | critical |
+| Hugging Face | `hf_` prefix (37 chars) | critical |
+| Hugging Face Org | `api_org_` prefix | critical |
+| Replicate | `r8_` prefix (40 chars) | critical |
+| Perplexity | `pplx-` prefix (53 chars) | critical |
+| Fireworks AI | `fw_` prefix (20+ chars) | critical |
+| Anyscale | `esecret_` prefix | critical |
+| Mistral AI | Keyword context required | high |
+| Cohere | Keyword context required | high |
+| DeepSeek | `sk-` with keyword context | high |
+| Together AI | Keyword context required | high |
 
 ### Database Credentials
 

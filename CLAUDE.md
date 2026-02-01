@@ -314,7 +314,7 @@ Automatic scanning of tool call arguments and responses for secrets, credentials
 |----------|----------|----------|
 | `cloud_credentials` | AWS keys, GCP API keys, Azure storage keys | critical |
 | `private_key` | RSA, EC, DSA, OpenSSH, PGP private keys | critical |
-| `api_token` | GitHub, GitLab, Stripe, Slack, OpenAI tokens | critical |
+| `api_token` | GitHub, GitLab, Stripe, Slack, OpenAI, Anthropic, Google AI, xAI, Groq, HuggingFace, Replicate, Perplexity, Fireworks, Anyscale, Mistral, Cohere, DeepSeek, Together AI tokens | critical |
 | `database_credential` | MySQL, PostgreSQL, MongoDB connection strings | critical/high |
 | `credit_card` | Visa, Mastercard, Amex (Luhn validated) | high |
 | `sensitive_file` | Paths to `.ssh/`, `.aws/`, `.env` files | high/medium |
