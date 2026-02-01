@@ -231,3 +231,18 @@ func (r *Runtime) EmitActivityConfigChange(action, affectedEntity, source string
 	}
 	r.publishEvent(newEvent(EventTypeActivityConfigChange, payload))
 }
+
+// EmitSensitiveDataDetected emits an event when sensitive data is detected in a tool call (Spec 026).
+// activityID is the ID of the activity record where sensitive data was detected.
+// detectionCount is the number of sensitive data detections found.
+// maxSeverity is the highest severity level among detections (e.g., "high", "medium", "low").
+// detectionTypes is a list of detection type names (e.g., "credit_card", "api_key").
+func (r *Runtime) EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string) {
+	payload := map[string]any{
+		"activity_id":     activityID,
+		"detection_count": detectionCount,
+		"max_severity":    maxSeverity,
+		"detection_types": detectionTypes,
+	}
+	r.publishEvent(newEvent(EventTypeSensitiveDataDetected, payload))
+}

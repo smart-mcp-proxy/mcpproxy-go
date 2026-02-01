@@ -82,6 +82,8 @@ components:
             $ref: '#/components/schemas/config.RegistryEntry'
           type: array
           uniqueItems: false
+        sensitive_data_detection:
+          $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
         tls:
           $ref: '#/components/schemas/config.TLSConfig'
         tokenizer:
@@ -94,6 +96,27 @@ components:
           type: integer
         tray_endpoint:
           description: Tray endpoint override (unix:// or npipe://)
+          type: string
+      type: object
+    config.CustomPattern:
+      properties:
+        category:
+          description: Category (defaults to "custom")
+          type: string
+        keywords:
+          description: Keywords to match (mutually exclusive with Regex)
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        name:
+          description: Unique identifier for this pattern
+          type: string
+        regex:
+          description: Regex pattern (mutually exclusive with Keywords)
+          type: string
+        severity:
+          description: 'Risk level: critical, high, medium, low'
           type: string
       type: object
     config.DockerIsolationConfig:
@@ -321,6 +344,43 @@ components:
         url:
           type: string
       type: object
+    config.SensitiveDataDetectionConfig:
+      description: Sensitive data detection settings (Spec 026)
+      properties:
+        categories:
+          additionalProperties:
+            type: boolean
+          description: Enable/disable specific detection categories
+          type: object
+        custom_patterns:
+          description: User-defined detection patterns
+          items:
+            $ref: '#/components/schemas/config.CustomPattern'
+          type: array
+          uniqueItems: false
+        enabled:
+          description: 'Enable sensitive data detection (default: true)'
+          type: boolean
+        entropy_threshold:
+          description: 'Shannon entropy threshold for high-entropy detection (default:
+            4.5)'
+          type: number
+        max_payload_size_kb:
+          description: 'Max size to scan before truncating (default: 1024)'
+          type: integer
+        scan_requests:
+          description: 'Scan tool call arguments (default: true)'
+          type: boolean
+        scan_responses:
+          description: 'Scan tool responses (default: true)'
+          type: boolean
+        sensitive_keywords:
+          description: Keywords to flag
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
     config.ServerConfig:
       properties:
         args:
@@ -457,14 +517,26 @@ components:
         arguments:
           description: Tool call arguments
           type: object
+        detection_types:
+          description: List of detection types found
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         duration_ms:
           description: Execution duration in milliseconds
           type: integer
         error_message:
           description: Error details if status is "error"
           type: string
+        has_sensitive_data:
+          description: Sensitive data detection fields (Spec 026)
+          type: boolean
         id:
           description: Unique identifier (ULID format)
+          type: string
+        max_severity:
+          description: Highest severity level detected (critical, high, medium, low)
           type: string
         metadata:
           description: Additional context-specific data
@@ -1758,6 +1830,27 @@ paths:
         name: include_call_tool
         schema:
           type: boolean
+      - description: Filter by sensitive data detection (true=has detections, false=no
+          detections)
+        in: query
+        name: sensitive_data
+        schema:
+          type: boolean
+      - description: Filter by specific detection type (e.g., 'aws_access_key', 'credit_card')
+        in: query
+        name: detection_type
+        schema:
+          type: string
+      - description: Filter by severity level
+        in: query
+        name: severity
+        schema:
+          enum:
+          - critical
+          - high
+          - medium
+          - low
+          type: string
       - description: Filter activities after this time (RFC3339)
         in: query
         name: start_time

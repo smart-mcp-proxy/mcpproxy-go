@@ -28,18 +28,20 @@ import (
 // Activity command flags
 var (
 	// Shared filter flags
-	activityType       string
-	activityServer     string
-	activityTool       string
-	activityStatus     string
-	activitySessionID  string
-	activityStartTime  string
-	activityEndTime    string
-	activityLimit      int
-	activityOffset     int
-	activityIntentType string // Spec 018: Filter by operation type (read, write, destructive)
-	activityRequestID  string // Spec 021: Filter by HTTP request ID for correlation
-	activityNoIcons    bool   // Disable emoji icons in output
+	activityType          string
+	activityServer        string
+	activityTool          string
+	activityStatus        string
+	activitySessionID     string
+	activityStartTime     string
+	activityEndTime       string
+	activityLimit         int
+	activityOffset        int
+	activityIntentType    string // Spec 018: Filter by operation type (read, write, destructive)
+	activityRequestID     string // Spec 021: Filter by HTTP request ID for correlation
+	activityNoIcons       bool   // Disable emoji icons in output
+	activityDetectionType string // Spec 026: Filter by detection type (e.g., "aws_access_key")
+	activitySeverity      string // Spec 026: Filter by severity level (critical, high, medium, low)
 
 	// Show command flags
 	activityIncludeResponse bool
@@ -56,17 +58,20 @@ var (
 
 // ActivityFilter contains options for filtering activity records
 type ActivityFilter struct {
-	Type       string
-	Server     string
-	Tool       string
-	Status     string
-	SessionID  string
-	StartTime  string
-	EndTime    string
-	Limit      int
-	Offset     int
-	IntentType string // Spec 018: Filter by operation type (read, write, destructive)
-	RequestID  string // Spec 021: Filter by HTTP request ID for correlation
+	Type          string
+	Server        string
+	Tool          string
+	Status        string
+	SessionID     string
+	StartTime     string
+	EndTime       string
+	Limit         int
+	Offset        int
+	IntentType    string // Spec 018: Filter by operation type (read, write, destructive)
+	RequestID     string // Spec 021: Filter by HTTP request ID for correlation
+	SensitiveData *bool  // Spec 026: Filter by sensitive data detection
+	DetectionType string // Spec 026: Filter by detection type
+	Severity      string // Spec 026: Filter by severity level
 }
 
 // Validate validates the filter options
@@ -121,6 +126,21 @@ func (f *ActivityFilter) Validate() error {
 		}
 		if !valid {
 			return fmt.Errorf("invalid intent-type '%s': must be one of %v", f.IntentType, validIntentTypes)
+		}
+	}
+
+	// Validate severity (Spec 026)
+	if f.Severity != "" {
+		validSeverities := []string{"critical", "high", "medium", "low"}
+		valid := false
+		for _, s := range validSeverities {
+			if f.Severity == s {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid severity '%s': must be one of %v", f.Severity, validSeverities)
 		}
 	}
 
@@ -182,6 +202,16 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	// Spec 021: Add request_id filter for log correlation
 	if f.RequestID != "" {
 		q.Set("request_id", f.RequestID)
+	}
+	// Spec 026: Add sensitive data filters
+	if f.SensitiveData != nil {
+		q.Set("sensitive_data", fmt.Sprintf("%t", *f.SensitiveData))
+	}
+	if f.DetectionType != "" {
+		q.Set("detection_type", f.DetectionType)
+	}
+	if f.Severity != "" {
+		q.Set("severity", f.Severity)
 	}
 	return q
 }
@@ -312,6 +342,64 @@ func formatOperationIcon(opType string) string {
 	}
 }
 
+// formatSensitiveDataIndicator returns a visual indicator if sensitive data was detected
+// Returns "⚠️" (or "SENSITIVE" if no-icons) if detected, "-" otherwise
+func formatSensitiveDataIndicator(activity map[string]interface{}) string {
+	metadata := getMapField(activity, "metadata")
+	if metadata == nil {
+		return "-"
+	}
+
+	detection := getMapField(metadata, "sensitive_data_detection")
+	if detection == nil {
+		return "-"
+	}
+
+	detected, ok := detection["detected"].(bool)
+	if !ok || !detected {
+		return "-"
+	}
+
+	if activityNoIcons {
+		return "SENSITIVE"
+	}
+	return "⚠️"
+}
+
+// getSensitiveDataDetection extracts the sensitive data detection result from activity metadata
+func getSensitiveDataDetection(activity map[string]interface{}) map[string]interface{} {
+	metadata := getMapField(activity, "metadata")
+	if metadata == nil {
+		return nil
+	}
+	return getMapField(metadata, "sensitive_data_detection")
+}
+
+// getMaxSeverity returns the highest severity level from detections
+func getMaxSeverity(detections []interface{}) string {
+	severityOrder := map[string]int{
+		"critical": 4,
+		"high":     3,
+		"medium":   2,
+		"low":      1,
+	}
+
+	maxSeverity := ""
+	maxOrder := 0
+
+	for _, d := range detections {
+		if detection, ok := d.(map[string]interface{}); ok {
+			severity := getStringField(detection, "severity")
+			if order, exists := severityOrder[severity]; exists && order > maxOrder {
+				maxOrder = order
+				maxSeverity = severity
+			}
+		}
+	}
+
+	return maxSeverity
+}
+
 // toolVariantToOperationType converts tool variant name to operation type
 func toolVariantToOperationType(variant string) string {
 	switch variant {
@@ -372,6 +460,90 @@ func displayIntentSection(activity map[string]interface{}) {
 			}
 			fmt.Printf("  Reversible:        %s\n", reversibleStr)
 		}
+	}
+}
+
+// displaySensitiveDataSection displays sensitive data detection information for activity show command (Spec 026)
+func displaySensitiveDataSection(activity map[string]interface{}) {
+	detection := getSensitiveDataDetection(activity)
+	if detection == nil {
+		return
+	}
+
+	detected, ok := detection["detected"].(bool)
+	if !ok {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("Sensitive Data Detection:")
+
+	// Show detection status
+	if detected {
+		if activityNoIcons {
+			fmt.Println("  Status:            DETECTED")
+		} else {
+			fmt.Println("  Status:            \u26a0 DETECTED")
+		}
+	} else {
+		fmt.Println("  Status:            No sensitive data detected")
+		return
+	}
+
+	// Show scan duration if available
+	if scanMs, ok := detection["scan_duration_ms"].(float64); ok {
+		fmt.Printf("  Scan Duration:     %dms\n", int64(scanMs))
+	}
+
+	// Show if truncated
+	if truncated, ok := detection["truncated"].(bool); ok && truncated {
+		fmt.Println("  Note:              Payload was truncated for scanning")
+	}
+
+	// Show detections
+	if detections, ok := detection["detections"].([]interface{}); ok && len(detections) > 0 {
+		fmt.Println()
+		fmt.Println("  Detections:")
+
+		for i, d := range detections {
+			if det, ok := d.(map[string]interface{}); ok {
+				detType := getStringField(det, "type")
+				category := getStringField(det, "category")
+				severity := getStringField(det, "severity")
+				location := getStringField(det, "location")
+				isExample, _ := det["is_likely_example"].(bool)
+
+				fmt.Printf("    [%d] Type:        %s\n", i+1, detType)
+				fmt.Printf("        Category:    %s\n", category)
+				fmt.Printf("        Severity:    %s\n", formatSeverityWithColor(severity))
+				if location != "" {
+					fmt.Printf("        Location:    %s\n", location)
+				}
+				if isExample {
+					fmt.Printf("        Note:        Likely an example/test value\n")
+				}
+				fmt.Println()
+			}
+		}
+	}
+}
+
+// formatSeverityWithColor returns a severity string with visual indicator
+func formatSeverityWithColor(severity string) string {
+	if activityNoIcons {
+		return severity
+	}
+	switch severity {
+	case "critical":
+		return "\u2622 " + severity // radioactive symbol for critical
+	case "high":
+		return "\u26a0 " + severity // warning sign for high
+	case "medium":
+		return "\u26a1 " + severity // lightning for medium
+	case "low":
+		return "\u2139 " + severity // info for low
+	default:
+		return severity
 	}
 }
 
@@ -438,6 +610,15 @@ Examples:
 
   # List activity by request ID (for error correlation)
   mcpproxy activity list --request-id abc123-def456
+
+  # List only activities with sensitive data detected
+  mcpproxy activity list --sensitive-data
+
+  # Filter by detection type
+  mcpproxy activity list --detection-type aws_access_key
+
+  # Filter by severity level
+  mcpproxy activity list --severity critical
 
   # List activity as JSON
   mcpproxy activity list -o json`,
@@ -537,6 +718,10 @@ func init() {
 	activityListCmd.Flags().StringVar(&activityIntentType, "intent-type", "", "Filter by intent operation type: read, write, destructive")
 	activityListCmd.Flags().StringVar(&activityRequestID, "request-id", "", "Filter by HTTP request ID for log correlation")
 	activityListCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
+	// Spec 026: Sensitive data detection filters
+	activityListCmd.Flags().Bool("sensitive-data", false, "Filter to show only activities with sensitive data detected")
+	activityListCmd.Flags().StringVar(&activityDetectionType, "detection-type", "", "Filter by detection type (e.g., aws_access_key, stripe_key)")
+	activityListCmd.Flags().StringVar(&activitySeverity, "severity", "", "Filter by severity level: critical, high, medium, low")
 
 	// Watch command flags
 	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
@@ -581,8 +766,8 @@ func getActivityClient(logger *zap.SugaredLogger) (*cliclient.Client, error) {
 	// Try socket first, then HTTP
 	endpoint := socket.GetDefaultSocketPath(cfg.DataDir)
 	if cfg.Listen != "" {
-		// Check if socket exists
-		if _, err := os.Stat(endpoint); os.IsNotExist(err) {
+		// Check if socket exists (use IsSocketAvailable which handles unix:// prefix)
+		if !socket.IsSocketAvailable(endpoint) {
 			// Handle listen addresses like ":8080" (no host)
 			listen := cfg.Listen
 			if strings.HasPrefix(listen, ":") {
@@ -608,19 +793,29 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = logger.Sync() }()
 
+	// Spec 026: Handle sensitive-data flag
+	var sensitiveDataPtr *bool
+	if cmd.Flags().Changed("sensitive-data") {
+		sensitiveDataVal, _ := cmd.Flags().GetBool("sensitive-data")
+		sensitiveDataPtr = &sensitiveDataVal
+	}
+
 	// Build filter
 	filter := &ActivityFilter{
-		Type:       activityType,
-		Server:     activityServer,
-		Tool:       activityTool,
-		Status:     activityStatus,
-		SessionID:  activitySessionID,
-		StartTime:  activityStartTime,
-		EndTime:    activityEndTime,
-		Limit:      activityLimit,
-		Offset:     activityOffset,
-		IntentType: activityIntentType,
-		RequestID:  activityRequestID,
+		Type:          activityType,
+		Server:        activityServer,
+		Tool:          activityTool,
+		Status:        activityStatus,
+		SessionID:     activitySessionID,
+		StartTime:     activityStartTime,
+		EndTime:       activityEndTime,
+		Limit:         activityLimit,
+		Offset:        activityOffset,
+		IntentType:    activityIntentType,
+		RequestID:     activityRequestID,
+		SensitiveData: sensitiveDataPtr,
+		DetectionType: activityDetectionType,
+		Severity:      activitySeverity,
 	}
 
 	if err := filter.Validate(); err != nil {
@@ -670,7 +865,8 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "INTENT", "STATUS", "DURATION", "TIME"}
+	// Spec 026: Add SENSITIVE column to indicate activities with sensitive data detected
+	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "INTENT", "SENSITIVE", "STATUS", "DURATION", "TIME"}
 	rows := make([][]string, 0, len(activities))
 
 	for _, act := range activities {
@@ -685,6 +881,9 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 
 		// Extract intent from metadata (Spec 018)
 		intentStr := formatIntentIndicator(act)
+
+		// Spec 026: Format sensitive data indicator
+		sensitiveStr := formatSensitiveDataIndicator(act)
 
 		// Parse and format timestamp
 		timeStr := timestamp
@@ -707,6 +906,7 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			server,
 			tool,
 			intentStr,
+			sensitiveStr, // Spec 026: Show sensitive data indicator
 			status,
 			formatActivityDuration(int64(durationMs)),
 			timeStr,
@@ -757,8 +957,8 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 	// Try socket first, then HTTP (same as getActivityClient)
 	endpoint := socket.GetDefaultSocketPath(cfg.DataDir)
 	if cfg.Listen != "" {
-		// Check if socket exists
-		if _, err := os.Stat(endpoint); os.IsNotExist(err) {
+		// Check if socket exists (use IsSocketAvailable which handles unix:// prefix)
+		if !socket.IsSocketAvailable(endpoint) {
 			// Handle listen addresses like ":8080" (no host)
 			listen := cfg.Listen
 			if strings.HasPrefix(listen, ":") {
@@ -1166,6 +1366,9 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 
 	// Intent information (Spec 018)
 	displayIntentSection(activity)
+
+	// Sensitive Data Detection (Spec 026)
+	displaySensitiveDataSection(activity)
 
 	// Arguments
 	if args, ok := activity["arguments"].(map[string]interface{}); ok && len(args) > 0 {

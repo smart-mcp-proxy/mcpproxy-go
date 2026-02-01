@@ -345,6 +345,10 @@ export interface ActivityRecord {
   session_id?: string
   request_id?: string
   metadata?: Record<string, any>
+  // Spec 026: Sensitive data detection fields
+  has_sensitive_data?: boolean
+  detection_types?: string[]
+  max_severity?: 'critical' | 'high' | 'medium' | 'low'
 }
 
 export interface ActivityListResponse {

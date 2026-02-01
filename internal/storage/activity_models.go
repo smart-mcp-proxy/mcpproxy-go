@@ -98,6 +98,11 @@ type ActivityFilter struct {
 	IntentType string    // Filter by intent operation type: read, write, destructive (Spec 018)
 	RequestID  string    // Filter by HTTP request ID for correlation (Spec 021)
 
+	// Sensitive data detection filters (Spec 026)
+	SensitiveData *bool  // Filter by sensitive data detection (nil=no filter, true=has detections, false=no detections)
+	DetectionType string // Filter by specific detection type (e.g., "aws_access_key", "credit_card")
+	Severity      string // Filter by severity level (critical, high, medium, low)
+
 	// ExcludeCallToolSuccess filters out successful call_tool_* internal tool calls.
 	// These appear as duplicates since the actual upstream tool call is also logged.
 	// Failed call_tool_* calls are still shown (no corresponding tool_call entry).
@@ -195,7 +200,112 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		}
 	}
 
+	// Check sensitive data detection filters (Spec 026)
+	if f.SensitiveData != nil || f.DetectionType != "" || f.Severity != "" {
+		detected, detectionTypes, maxSeverity := extractSensitiveDataInfo(record)
+
+		// Filter by has_sensitive_data
+		if f.SensitiveData != nil {
+			if *f.SensitiveData && !detected {
+				return false
+			}
+			if !*f.SensitiveData && detected {
+				return false
+			}
+		}
+
+		// Filter by detection type
+		if f.DetectionType != "" {
+			found := false
+			for _, dt := range detectionTypes {
+				if dt == f.DetectionType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+
+		// Filter by severity
+		if f.Severity != "" {
+			if maxSeverity != f.Severity {
+				return false
+			}
+		}
+	}
+
 	return true
+}
+
+// extractSensitiveDataInfo extracts sensitive data detection info from activity metadata.
+// Returns (detected bool, detectionTypes []string, maxSeverity string).
+func extractSensitiveDataInfo(record *ActivityRecord) (bool, []string, string) {
+	if record.Metadata == nil {
+		return false, nil, ""
+	}
+
+	detection, ok := record.Metadata["sensitive_data_detection"].(map[string]interface{})
+	if !ok {
+		return false, nil, ""
+	}
+
+	detected, _ := detection["detected"].(bool)
+	if !detected {
+		return false, nil, ""
+	}
+
+	// Extract detection types
+	var detectionTypes []string
+	typeSet := make(map[string]struct{})
+
+	if detections, ok := detection["detections"].([]interface{}); ok {
+		for _, d := range detections {
+			if det, ok := d.(map[string]interface{}); ok {
+				if dtype, ok := det["type"].(string); ok {
+					if _, exists := typeSet[dtype]; !exists {
+						typeSet[dtype] = struct{}{}
+						detectionTypes = append(detectionTypes, dtype)
+					}
+				}
+			}
+		}
+	}
+
+	// Calculate max severity
+	maxSeverity := calculateMaxSeverity(detection)
+
+	return detected, detectionTypes, maxSeverity
+}
+
+// calculateMaxSeverity determines the highest severity from detection results.
+// Severity order: critical > high > medium > low
+func calculateMaxSeverity(detection map[string]interface{}) string {
+	severityOrder := map[string]int{
+		"critical": 4,
+		"high":     3,
+		"medium":   2,
+		"low":      1,
+	}
+
+	maxLevel := 0
+	maxSeverity := ""
+
+	if detections, ok := detection["detections"].([]interface{}); ok {
+		for _, d := range detections {
+			if det, ok := d.(map[string]interface{}); ok {
+				if sev, ok := det["severity"].(string); ok {
+					if level, exists := severityOrder[sev]; exists && level > maxLevel {
+						maxLevel = level
+						maxSeverity = sev
+					}
+				}
+			}
+		}
+	}
+
+	return maxSeverity
 }
 
 // extractIntentType extracts the operation type from activity metadata.

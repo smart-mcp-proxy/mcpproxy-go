@@ -20,6 +20,8 @@ const connectAttemptTimeout = 45 * time.Second
 func (r *Runtime) StartBackgroundInitialization() {
 	// Start activity service for persisting tool call events
 	if r.activityService != nil {
+		// Set event emitter for sensitive data detection events (Spec 026)
+		r.activityService.SetEventEmitter(r)
 		go r.activityService.Start(r.appCtx, r)
 		r.logger.Info("Activity service started for event logging")
 	}

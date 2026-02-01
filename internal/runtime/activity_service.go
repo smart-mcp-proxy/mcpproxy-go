@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -19,6 +20,13 @@ const (
 	// DefaultRetentionCheckInterval is the default interval between retention checks (1 hour)
 	DefaultRetentionCheckInterval = 1 * time.Hour
 )
+
+// SensitiveDataEventEmitter provides the ability to emit sensitive data detection events.
+// This interface is implemented by Runtime to enable event emission from ActivityService.
+type SensitiveDataEventEmitter interface {
+	// EmitSensitiveDataDetected emits an event when sensitive data is detected.
+	EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string)
+}
 
 // ActivityService subscribes to activity events and persists them to storage.
 // It runs as a background goroutine and handles activity recording non-blocking.
@@ -35,6 +43,12 @@ type ActivityService struct {
 	maxAge        time.Duration
 	maxRecords    int
 	checkInterval time.Duration
+
+	// Sensitive data detector (Spec 026)
+	detector *security.Detector
+
+	// Event emitter for sensitive data detection events (Spec 026)
+	eventEmitter SensitiveDataEventEmitter
 }
 
 // NewActivityService creates a new activity service.
@@ -47,7 +61,20 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 		maxAge:        DefaultRetentionMaxAge,
 		maxRecords:    DefaultRetentionMaxRecords,
 		checkInterval: DefaultRetentionCheckInterval,
+		detector:      nil, // Detector is optional, set via SetDetector
 	}
+}
+
+// SetDetector sets the sensitive data detector for async scanning (Spec 026).
+// If set, tool call arguments and responses will be scanned for sensitive data.
+func (s *ActivityService) SetDetector(detector *security.Detector) {
+	s.detector = detector
+}
+
+// SetEventEmitter sets the event emitter for sensitive data detection events (Spec 026).
+// If set, events will be emitted when sensitive data is detected in tool calls.
+func (s *ActivityService) SetEventEmitter(emitter SensitiveDataEventEmitter) {
+	s.eventEmitter = emitter
 }
 
 // SetRetentionConfig updates the retention configuration.
@@ -243,6 +270,11 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 			zap.String("server_name", serverName),
 			zap.String("tool_name", toolName),
 			zap.String("status", status))
+
+		// Run async sensitive data detection (Spec 026)
+		if s.detector != nil {
+			go s.runAsyncDetection(record.ID, arguments, response)
+		}
 	}
 }
 
@@ -571,5 +603,113 @@ func getSlicePayload(payload map[string]any, key string) []string {
 		}
 	}
 	return nil
+}
+
+// runAsyncDetection performs sensitive data detection asynchronously (Spec 026).
+// It scans tool call arguments and responses for sensitive data, then updates
+// the activity record metadata with the detection results and emits an event.
+func (s *ActivityService) runAsyncDetection(recordID string, arguments map[string]interface{}, response string) {
+	if s.detector == nil {
+		return
+	}
+
+	// Convert arguments to JSON string for scanning
+	var argsStr string
+	if arguments != nil {
+		if argsBytes, err := json.Marshal(arguments); err == nil {
+			argsStr = string(argsBytes)
+		}
+	}
+
+	// Run the detection scan
+	result := s.detector.Scan(argsStr, response)
+
+	// Only update the record if something was detected
+	if result.Detected {
+		s.logger.Info("Sensitive data detected in tool call",
+			zap.String("record_id", recordID),
+			zap.Int("detection_count", len(result.Detections)),
+			zap.Int64("scan_duration_ms", result.ScanDurationMs))
+
+		// Convert result to metadata format
+		detectionMeta := map[string]interface{}{
+			"sensitive_data_detection": map[string]interface{}{
+				"detected":         result.Detected,
+				"detection_count":  len(result.Detections),
+				"detections":       result.Detections,
+				"scan_duration_ms": result.ScanDurationMs,
+				"truncated":        result.Truncated,
+			},
+		}
+
+		// Update the activity record metadata
+		if err := s.storage.UpdateActivityMetadata(recordID, detectionMeta); err != nil {
+			s.logger.Error("Failed to update activity metadata with detection results",
+				zap.Error(err),
+				zap.String("record_id", recordID))
+		}
+
+		// Emit sensitive_data.detected event (Spec 026)
+		if s.eventEmitter != nil {
+			// Extract max severity and unique detection types
+			maxSeverity := s.extractMaxSeverity(result.Detections)
+			detectionTypes := s.extractDetectionTypes(result.Detections)
+
+			s.eventEmitter.EmitSensitiveDataDetected(
+				recordID,
+				len(result.Detections),
+				maxSeverity,
+				detectionTypes,
+			)
+		}
+	} else {
+		s.logger.Debug("No sensitive data detected in tool call",
+			zap.String("record_id", recordID),
+			zap.Int64("scan_duration_ms", result.ScanDurationMs))
+	}
+}
+
+// extractMaxSeverity returns the highest severity level from a list of detections.
+// Severity order: critical > high > medium > low
+func (s *ActivityService) extractMaxSeverity(detections []security.Detection) string {
+	severityOrder := map[string]int{
+		"critical": 4,
+		"high":     3,
+		"medium":   2,
+		"low":      1,
+	}
+
+	maxSeverity := ""
+	maxOrder := 0
+
+	for _, d := range detections {
+		order, exists := severityOrder[d.Severity]
+		if exists && order > maxOrder {
+			maxOrder = order
+			maxSeverity = d.Severity
+		}
+	}
+
+	if maxSeverity == "" && len(detections) > 0 {
+		// Fallback to first detection's severity if none matched
+		maxSeverity = detections[0].Severity
+	}
+
+	return maxSeverity
+}
+
+// extractDetectionTypes returns a unique list of detection types from a list of detections.
+func (s *ActivityService) extractDetectionTypes(detections []security.Detection) []string {
+	seen := make(map[string]struct{})
+	types := make([]string, 0, len(detections))
+
+	for _, d := range detections {
+		if _, exists := seen[d.Type]; !exists {
+			seen[d.Type] = struct{}{}
+			types = append(types, d.Type)
+		}
+	}
+
+	return types
 }
 

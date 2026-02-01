@@ -304,6 +304,81 @@ See `docs/code_execution/` for complete guides:
 
 See [docs/features/security-quarantine.md](docs/features/security-quarantine.md) for details.
 
+## Sensitive Data Detection
+
+Automatic scanning of tool call arguments and responses for secrets, credentials, and sensitive data. Enabled by default and integrates with the activity log for security auditing.
+
+### Detection Categories
+
+| Category | Examples | Severity |
+|----------|----------|----------|
+| `cloud_credentials` | AWS keys, GCP API keys, Azure storage keys | critical |
+| `private_key` | RSA, EC, DSA, OpenSSH, PGP private keys | critical |
+| `api_token` | GitHub, GitLab, Stripe, Slack, OpenAI tokens | critical |
+| `database_credential` | MySQL, PostgreSQL, MongoDB connection strings | critical/high |
+| `credit_card` | Visa, Mastercard, Amex (Luhn validated) | high |
+| `sensitive_file` | Paths to `.ssh/`, `.aws/`, `.env` files | high/medium |
+| `high_entropy` | Base64/hex strings with high Shannon entropy | medium |
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `internal/security/detector.go` | Main detector with `Scan()` method |
+| `internal/security/types.go` | Detection, Result, Severity, Category types |
+| `internal/security/patterns/` | Pattern definitions by category |
+| `internal/security/patterns/cloud.go` | AWS, GCP, Azure credential patterns |
+| `internal/security/patterns/keys.go` | Private key detection patterns |
+| `internal/security/patterns/tokens.go` | API token patterns |
+| `internal/security/patterns/database.go` | Database connection string patterns |
+| `internal/security/patterns/creditcard.go` | Credit card patterns with Luhn validation |
+| `internal/security/entropy.go` | High-entropy string detection |
+| `internal/security/paths.go` | Sensitive file path patterns |
+| `internal/runtime/activity_service.go` | Integration point via `SetDetector()` |
+
+### CLI Commands
+
+```bash
+mcpproxy activity list --sensitive-data              # Show only activities with detections
+mcpproxy activity list --severity critical           # Filter by severity level
+mcpproxy activity list --detection-type aws_access_key  # Filter by detection type
+mcpproxy activity show <id>                          # View detection details
+mcpproxy activity export --sensitive-data --output audit.jsonl  # Export for compliance
+```
+
+### Configuration
+
+```json
+{
+  "sensitive_data_detection": {
+    "enabled": true,
+    "scan_requests": true,
+    "scan_responses": true,
+    "max_payload_size_kb": 1024,
+    "entropy_threshold": 4.5,
+    "categories": {
+      "cloud_credentials": true,
+      "private_key": true,
+      "api_token": true,
+      "database_credential": true,
+      "credit_card": true,
+      "high_entropy": true
+    },
+    "custom_patterns": [
+      {
+        "name": "internal_api_key",
+        "regex": "INTERNAL-[A-Z0-9]{32}",
+        "severity": "high",
+        "category": "custom"
+      }
+    ],
+    "sensitive_keywords": ["password", "secret"]
+  }
+}
+```
+
+See [docs/features/sensitive-data-detection.md](docs/features/sensitive-data-detection.md) for complete reference.
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -394,6 +469,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt database (`~/.mcpproxy/config.db`) - `oauth_tokens` bucket with `OAuthTokenRecord` model (023-oauth-state-persistence)
 - Go 1.24 (toolchain go1.24.10) + TypeScript 5.x / Vue 3.5 + Cobra CLI, Chi router, BBolt storage, Zap logging, mark3labs/mcp-go, Vue 3, Tailwind CSS, DaisyUI (024-expand-activity-log)
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord model (024-expand-activity-log)
+- Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), regexp (stdlib), existing ActivityService (026-pii-detection)
+- BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord.Metadata extension (026-pii-detection)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

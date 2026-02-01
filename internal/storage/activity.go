@@ -426,3 +426,61 @@ func ActivityRecordFromJSON(data []byte) (*ActivityRecord, error) {
 	}
 	return &record, nil
 }
+
+// UpdateActivityMetadata updates the metadata of an existing activity record.
+// This is used for async updates like sensitive data detection results.
+// The updates map is merged into the existing metadata (existing keys are preserved unless overwritten).
+func (m *Manager) UpdateActivityMetadata(id string, updates map[string]interface{}) error {
+	if id == "" {
+		return fmt.Errorf("activity ID cannot be empty")
+	}
+	if len(updates) == 0 {
+		return nil // Nothing to update
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ActivityRecordsBucket))
+		if bucket == nil {
+			return fmt.Errorf("activity bucket not found")
+		}
+
+		// Find the record by ID
+		cursor := bucket.Cursor()
+		var key []byte
+		var record *ActivityRecord
+
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if parseActivityKey(k) == id {
+				key = k
+				record = &ActivityRecord{}
+				if err := record.UnmarshalBinary(v); err != nil {
+					return fmt.Errorf("failed to unmarshal activity record: %w", err)
+				}
+				break
+			}
+		}
+
+		if record == nil {
+			return fmt.Errorf("activity record not found: %s", id)
+		}
+
+		// Merge updates into existing metadata
+		if record.Metadata == nil {
+			record.Metadata = make(map[string]interface{})
+		}
+		for k, v := range updates {
+			record.Metadata[k] = v
+		}
+
+		// Save updated record
+		data, err := record.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated activity record: %w", err)
+		}
+
+		return bucket.Put(key, data)
+	})
+}
