@@ -31,6 +31,7 @@ const sidebars = {
         'configuration/config-file',
         'configuration/upstream-servers',
         'configuration/environment-variables',
+        'configuration/sensitive-data-detection',
       ],
     },
     {
@@ -40,6 +41,7 @@ const sidebars = {
         'cli/command-reference',
         'cli/management-commands',
         'cli/activity-commands',
+        'cli/sensitive-data-commands',
       ],
     },
     {
@@ -63,6 +65,7 @@ const sidebars = {
       items: [
         'features/intent-declaration',
         'features/activity-log',
+        'features/sensitive-data-detection',
         'features/docker-isolation',
         'features/oauth-authentication',
         'features/code-execution',

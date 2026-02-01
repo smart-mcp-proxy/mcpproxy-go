@@ -22,6 +22,7 @@ MCPProxy is a Go-based application that acts as an intelligent proxy between AI 
 - **Security Quarantine** - Blocks Tool Poisoning Attacks (TPA) by quarantining new servers until manually approved
 - **Containerized MCP Servers** - Run upstream servers in Docker isolation for enhanced security
 - **Audit & Transparency** - Full logging of all tool calls for debugging and compliance
+- **Sensitive Data Detection** - Automatic detection of API keys, credentials, PII, and other sensitive data in tool calls for compliance monitoring
 
 ## Key Features
 

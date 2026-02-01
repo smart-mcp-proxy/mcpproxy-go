@@ -135,6 +135,63 @@ Every tool call includes intent information for security auditing:
 | `intent.data_sensitivity` | Data classification: `public`, `internal`, `private`, `unknown` |
 | `intent.reason` | Agent's explanation for the operation |
 
+### Sensitive Data Detection
+
+Activity records automatically include sensitive data detection metadata when MCPProxy detects potentially sensitive information in tool arguments or responses. This helps identify data handling patterns and supports compliance monitoring.
+
+```json
+{
+  "id": "01JFXYZ123ABC",
+  "type": "tool_call",
+  "server_name": "github-server",
+  "tool_name": "create_issue",
+  "status": "success",
+  "metadata": {
+    "sensitive_data_detection": {
+      "detected": true,
+      "categories": ["api_key", "email"],
+      "argument_detections": [
+        {
+          "field": "body",
+          "category": "api_key",
+          "confidence": 0.95
+        }
+      ],
+      "response_detections": [
+        {
+          "field": "author.email",
+          "category": "email",
+          "confidence": 0.99
+        }
+      ]
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `detected` | Whether any sensitive data was detected |
+| `categories` | List of detected sensitive data categories |
+| `argument_detections` | Detections in tool call arguments |
+| `response_detections` | Detections in tool call responses |
+
+Filter activity by sensitive data:
+
+```bash
+# Show only activity with detected sensitive data
+mcpproxy activity list --has-sensitive-data
+
+# Filter by specific category
+mcpproxy activity list --sensitive-category api_key
+
+# REST API
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?has_sensitive_data=true"
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?sensitive_category=api_key"
+```
+
+See [Sensitive Data Detection](/features/sensitive-data-detection) for details on detection categories, configuration options, and compliance use cases.
+
 Filter by intent type:
 
 ```bash
