@@ -964,3 +964,697 @@ func TestKeywordContextPatterns(t *testing.T) {
 		})
 	}
 }
+
+// TestLLMKeysInJSONContext tests detection of LLM API keys in JSON configuration
+func TestLLMKeysInJSONContext(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		patternName string
+		wantMatch   bool
+	}{
+		// Google AI in JSON
+		{
+			name:        "Google AI key in JSON config",
+			input:       `{"google_api_key": "` + buildGoogleAIKey() + `"}`,
+			patternName: "google_ai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Google AI key in nested JSON",
+			input:       `{"providers": {"gemini": {"api_key": "` + buildGoogleAIKey() + `"}}}`,
+			patternName: "google_ai_key",
+			wantMatch:   true,
+		},
+		// xAI in JSON
+		{
+			name:        "xAI key in JSON config",
+			input:       `{"xai_api_key": "` + buildXAIKey() + `"}`,
+			patternName: "xai_key",
+			wantMatch:   true,
+		},
+		// Groq in JSON
+		{
+			name:        "Groq key in JSON config",
+			input:       `{"groq": {"api_key": "` + buildGroqKey() + `"}}`,
+			patternName: "groq_key",
+			wantMatch:   true,
+		},
+		// Hugging Face in JSON
+		{
+			name:        "HuggingFace token in JSON",
+			input:       `{"hf_token": "` + buildHuggingFaceToken() + `"}`,
+			patternName: "huggingface_token",
+			wantMatch:   true,
+		},
+		// Replicate in JSON
+		{
+			name:        "Replicate key in JSON",
+			input:       `{"replicate_api_token": "` + buildReplicateKey() + `"}`,
+			patternName: "replicate_key",
+			wantMatch:   true,
+		},
+		// Perplexity in JSON
+		{
+			name:        "Perplexity key in JSON",
+			input:       `{"perplexity_api_key": "` + buildPerplexityKey() + `"}`,
+			patternName: "perplexity_key",
+			wantMatch:   true,
+		},
+		// Fireworks in JSON
+		{
+			name:        "Fireworks key in JSON",
+			input:       `{"fireworks_api_key": "` + buildFireworksKey() + `"}`,
+			patternName: "fireworks_key",
+			wantMatch:   true,
+		},
+		// Anyscale in JSON
+		{
+			name:        "Anyscale key in JSON",
+			input:       `{"anyscale_api_key": "` + buildAnyscaleKey() + `"}`,
+			patternName: "anyscale_key",
+			wantMatch:   true,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// TestLLMKeysInYAMLContext tests detection of LLM API keys in YAML configuration
+func TestLLMKeysInYAMLContext(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		patternName string
+		wantMatch   bool
+	}{
+		{
+			name:        "Google AI key in YAML",
+			input:       "google_api_key: " + buildGoogleAIKey(),
+			patternName: "google_ai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "xAI key in YAML",
+			input:       "xai_api_key: " + buildXAIKey(),
+			patternName: "xai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Groq key in YAML",
+			input:       "groq_api_key: " + buildGroqKey(),
+			patternName: "groq_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "HuggingFace token in YAML",
+			input:       "hf_token: " + buildHuggingFaceToken(),
+			patternName: "huggingface_token",
+			wantMatch:   true,
+		},
+		{
+			name:        "Replicate key in YAML",
+			input:       "replicate_api_token: " + buildReplicateKey(),
+			patternName: "replicate_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Perplexity key in YAML",
+			input:       "perplexity_api_key: " + buildPerplexityKey(),
+			patternName: "perplexity_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Fireworks key in YAML",
+			input:       "fireworks_api_key: " + buildFireworksKey(),
+			patternName: "fireworks_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Anyscale key in YAML",
+			input:       "anyscale_api_key: " + buildAnyscaleKey(),
+			patternName: "anyscale_key",
+			wantMatch:   true,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// TestLLMKeysInCodeSnippets tests detection of LLM API keys in code examples
+func TestLLMKeysInCodeSnippets(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		patternName string
+		wantMatch   bool
+	}{
+		// Python code snippets
+		{
+			name:        "Google AI key in Python",
+			input:       `genai.configure(api_key="` + buildGoogleAIKey() + `")`,
+			patternName: "google_ai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Groq key in Python",
+			input:       `client = Groq(api_key="` + buildGroqKey() + `")`,
+			patternName: "groq_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "HuggingFace token in Python",
+			input:       `login(token="` + buildHuggingFaceToken() + `")`,
+			patternName: "huggingface_token",
+			wantMatch:   true,
+		},
+		// JavaScript/TypeScript snippets
+		{
+			name:        "xAI key in JavaScript",
+			input:       `const client = new XAI({ apiKey: "` + buildXAIKey() + `" });`,
+			patternName: "xai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Replicate key in JavaScript",
+			input:       `const replicate = new Replicate({ auth: "` + buildReplicateKey() + `" });`,
+			patternName: "replicate_key",
+			wantMatch:   true,
+		},
+		// Shell/Bash snippets
+		{
+			name:        "Perplexity key in curl command",
+			input:       `curl -H "Authorization: Bearer ` + buildPerplexityKey() + `"`,
+			patternName: "perplexity_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Fireworks key in export",
+			input:       `export FIREWORKS_API_KEY=` + buildFireworksKey(),
+			patternName: "fireworks_key",
+			wantMatch:   true,
+		},
+		// Multi-line code
+		{
+			name: "Anyscale key in multi-line Python",
+			input: `import anyscale
+client = anyscale.Client(
+    api_key="` + buildAnyscaleKey() + `"
+)`,
+			patternName: "anyscale_key",
+			wantMatch:   true,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// TestLLMKeysFalsePositivePrevention tests that patterns don't match false positives
+func TestLLMKeysFalsePositivePrevention(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		patternName string
+		wantMatch   bool
+	}{
+		// Google AI - wrong prefix variations
+		{
+			name:        "Not Google AI - wrong second char",
+			input:       "AIzaXy" + strings.Repeat("a", 33),
+			patternName: "google_ai_key",
+			wantMatch:   false,
+		},
+		{
+			name:        "Not Google AI - too short",
+			input:       "AIzaSy" + strings.Repeat("a", 20),
+			patternName: "google_ai_key",
+			wantMatch:   false,
+		},
+		// xAI - similar prefixes
+		{
+			name:        "Not xAI - xai without hyphen",
+			input:       "xai" + strings.Repeat("a", 48),
+			patternName: "xai_key",
+			wantMatch:   false,
+		},
+		{
+			name:        "Not xAI - too short after prefix",
+			input:       "xai-" + strings.Repeat("a", 30),
+			patternName: "xai_key",
+			wantMatch:   false,
+		},
+		// Groq - similar prefixes
+		{
+			name:        "Not Groq - gsk without underscore",
+			input:       "gsk" + strings.Repeat("a", 48),
+			patternName: "groq_key",
+			wantMatch:   false,
+		},
+		{
+			name:        "Not Groq - wrong length",
+			input:       "gsk_" + strings.Repeat("a", 30),
+			patternName: "groq_key",
+			wantMatch:   false,
+		},
+		// HuggingFace - similar patterns
+		{
+			name:        "Not HuggingFace - hf without underscore",
+			input:       "hf" + strings.Repeat("a", 34),
+			patternName: "huggingface_token",
+			wantMatch:   false,
+		},
+		{
+			name:        "Not HuggingFace - wrong length",
+			input:       "hf_" + strings.Repeat("a", 20),
+			patternName: "huggingface_token",
+			wantMatch:   false,
+		},
+		// Replicate - similar prefixes
+		{
+			name:        "Not Replicate - r8 without underscore",
+			input:       "r8" + strings.Repeat("a", 37),
+			patternName: "replicate_key",
+			wantMatch:   false,
+		},
+		{
+			name:        "Not Replicate - wrong length",
+			input:       "r8_" + strings.Repeat("a", 20),
+			patternName: "replicate_key",
+			wantMatch:   false,
+		},
+		// Perplexity - similar patterns
+		{
+			name:        "Not Perplexity - pplx without hyphen",
+			input:       "pplx" + strings.Repeat("a", 48),
+			patternName: "perplexity_key",
+			wantMatch:   false,
+		},
+		{
+			name:        "Not Perplexity - wrong length",
+			input:       "pplx-" + strings.Repeat("a", 30),
+			patternName: "perplexity_key",
+			wantMatch:   false,
+		},
+		// Fireworks - edge cases
+		{
+			name:        "Not Fireworks - fw without underscore",
+			input:       "fw" + strings.Repeat("a", 24),
+			patternName: "fireworks_key",
+			wantMatch:   false,
+		},
+		// Anyscale - edge cases
+		{
+			name:        "Not Anyscale - esecret without underscore",
+			input:       "esecret" + strings.Repeat("a", 24),
+			patternName: "anyscale_key",
+			wantMatch:   false,
+		},
+		// Random strings that should not match
+		{
+			name:        "Random UUID should not match Google AI",
+			input:       "550e8400-e29b-41d4-a716-446655440000",
+			patternName: "google_ai_key",
+			wantMatch:   false,
+		},
+		{
+			name:        "Random base64 should not match Groq",
+			input:       "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkw",
+			patternName: "groq_key",
+			wantMatch:   false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// Helper functions to build mixed alphanumeric keys dynamically
+func buildMixedGoogleAIKey() string {
+	return "AIzaSy" + "AbCdEf" + "GhIjKl" + "MnOpQr" + "StUvWx" + "Yz12345" + "67"
+}
+
+func buildMixedXAIKey() string {
+	return "xai-" + "AbCdEf" + "GhIjKl" + "MnOpQr" + "StUvWx" + "Yz1234" + "567890" + "abcdef" + "ghij12"
+}
+
+func buildMixedGroqKey() string {
+	return "gsk_" + "AbCdEf" + "GhIjKl" + "MnOpQr" + "StUvWx" + "Yz1234" + "567890" + "abcdef" + "gh1234"
+}
+
+func buildMixedHuggingFaceToken() string {
+	return "hf_" + "AbCdEf" + "GhIjKl" + "MnOpQr" + "StUvWx" + "Yz1234" + "5678"
+}
+
+func buildMixedReplicateKey() string {
+	return "r8_" + "AbCdEf" + "GhIjKl" + "MnOpQr" + "StUvWx" + "Yz1234" + "567890a"
+}
+
+func buildMixedPerplexityKey() string {
+	return "pplx-" + "AbCdEf" + "GhIjKl" + "MnOpQr" + "StUvWx" + "Yz1234" + "567890" + "abcdef" + "gh1234"
+}
+
+func buildMixedFireworksKey() string {
+	return "fw_" + "AbCdEf" + "GhIjKl" + "MnOpQr" + "1234"
+}
+
+func buildMixedAnyscaleKey() string {
+	return "esecret_" + "AbCdEf" + "GhIjKl" + "MnOpQr" + "1234"
+}
+
+// TestLLMKeysWithMixedAlphanumeric tests keys with realistic mixed character patterns
+func TestLLMKeysWithMixedAlphanumeric(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		patternName string
+		wantMatch   bool
+	}{
+		// Google AI with mixed case
+		{
+			name:        "Google AI key with mixed alphanumeric",
+			input:       buildMixedGoogleAIKey(),
+			patternName: "google_ai_key",
+			wantMatch:   true,
+		},
+		// xAI with mixed case
+		{
+			name:        "xAI key with mixed alphanumeric",
+			input:       buildMixedXAIKey(),
+			patternName: "xai_key",
+			wantMatch:   true,
+		},
+		// Groq with mixed case
+		{
+			name:        "Groq key with mixed alphanumeric",
+			input:       buildMixedGroqKey(),
+			patternName: "groq_key",
+			wantMatch:   true,
+		},
+		// HuggingFace with mixed case
+		{
+			name:        "HuggingFace token with mixed alphanumeric",
+			input:       buildMixedHuggingFaceToken(),
+			patternName: "huggingface_token",
+			wantMatch:   true,
+		},
+		// Replicate with mixed case
+		{
+			name:        "Replicate key with mixed alphanumeric",
+			input:       buildMixedReplicateKey(),
+			patternName: "replicate_key",
+			wantMatch:   true,
+		},
+		// Perplexity with mixed case
+		{
+			name:        "Perplexity key with mixed alphanumeric",
+			input:       buildMixedPerplexityKey(),
+			patternName: "perplexity_key",
+			wantMatch:   true,
+		},
+		// Fireworks with mixed case
+		{
+			name:        "Fireworks key with mixed alphanumeric",
+			input:       buildMixedFireworksKey(),
+			patternName: "fireworks_key",
+			wantMatch:   true,
+		},
+		// Anyscale with mixed case
+		{
+			name:        "Anyscale key with mixed alphanumeric",
+			input:       buildMixedAnyscaleKey(),
+			patternName: "anyscale_key",
+			wantMatch:   true,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// TestLLMKeysInLogOutput tests detection in log/error messages
+func TestLLMKeysInLogOutput(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		patternName string
+		wantMatch   bool
+	}{
+		{
+			name:        "Google AI key in error log",
+			input:       `ERROR: Invalid API key: ` + buildGoogleAIKey() + ` - please check your credentials`,
+			patternName: "google_ai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Groq key in debug log",
+			input:       `[DEBUG] Using API key: ` + buildGroqKey(),
+			patternName: "groq_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "HuggingFace token in warning",
+			input:       `Warning: Token ` + buildHuggingFaceToken() + ` is about to expire`,
+			patternName: "huggingface_token",
+			wantMatch:   true,
+		},
+		{
+			name:        "xAI key in stack trace",
+			input:       `at authenticate(key="` + buildXAIKey() + `")`,
+			patternName: "xai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Replicate key in HTTP response",
+			input:       `{"error": "Invalid token", "token": "` + buildReplicateKey() + `"}`,
+			patternName: "replicate_key",
+			wantMatch:   true,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// TestOpenAIAnthropicImprovedPatterns tests the improved OpenAI and Anthropic patterns
+func TestOpenAIAnthropicImprovedPatterns(t *testing.T) {
+	// Helper to build OpenAI keys dynamically
+	buildOpenAIKey := func(prefix string) string {
+		return prefix + strings.Repeat("a", 40)
+	}
+
+	// Helper to build Anthropic keys dynamically
+	buildAnthropicKey := func(variant string) string {
+		return "sk-ant-" + variant + "-" + strings.Repeat("a", 30)
+	}
+
+	tests := []struct {
+		name        string
+		input       string
+		patternName string
+		wantMatch   bool
+	}{
+		// OpenAI variants
+		{
+			name:        "OpenAI legacy key",
+			input:       buildOpenAIKey("sk-"),
+			patternName: "openai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "OpenAI project key",
+			input:       buildOpenAIKey("sk-proj-"),
+			patternName: "openai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "OpenAI service account key",
+			input:       buildOpenAIKey("sk-svcacct-"),
+			patternName: "openai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "OpenAI admin key",
+			input:       buildOpenAIKey("sk-admin-"),
+			patternName: "openai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "OpenAI key in JSON",
+			input:       `{"openai_api_key": "` + buildOpenAIKey("sk-proj-") + `"}`,
+			patternName: "openai_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "OpenAI key in env",
+			input:       "OPENAI_API_KEY=" + buildOpenAIKey("sk-"),
+			patternName: "openai_key",
+			wantMatch:   true,
+		},
+		// Anthropic variants
+		{
+			name:        "Anthropic api03 key",
+			input:       buildAnthropicKey("api03"),
+			patternName: "anthropic_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Anthropic admin01 key",
+			input:       buildAnthropicKey("admin01"),
+			patternName: "anthropic_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Anthropic key in JSON",
+			input:       `{"anthropic_api_key": "` + buildAnthropicKey("api03") + `"}`,
+			patternName: "anthropic_key",
+			wantMatch:   true,
+		},
+		{
+			name:        "Anthropic key in env",
+			input:       "ANTHROPIC_API_KEY=" + buildAnthropicKey("api03"),
+			patternName: "anthropic_key",
+			wantMatch:   true,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Skipf("%s pattern not implemented yet", tt.patternName)
+				return
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}
+
+// TestAllLLMPatternsExist verifies all expected LLM patterns are registered
+func TestAllLLMPatternsExist(t *testing.T) {
+	expectedPatterns := []string{
+		"openai_key",
+		"anthropic_key",
+		"google_ai_key",
+		"xai_key",
+		"groq_key",
+		"huggingface_token",
+		"huggingface_org_token",
+		"replicate_key",
+		"perplexity_key",
+		"fireworks_key",
+		"anyscale_key",
+		"mistral_key",
+		"cohere_key",
+		"deepseek_key",
+		"together_key",
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, name := range expectedPatterns {
+		t.Run(name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, name)
+			assert.NotNil(t, pattern, "pattern %s should exist", name)
+		})
+	}
+}
