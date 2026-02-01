@@ -504,7 +504,7 @@
                 Sensitive Data Detected
               </h4>
               <div class="alert" :class="selectedActivity.max_severity === 'critical' ? 'alert-error' : 'alert-warning'">
-                <div class="flex flex-col gap-2 w-full">
+                <div class="flex flex-col gap-2 w-full text-inherit">
                   <div class="flex items-center gap-2">
                     <span class="font-semibold">Severity:</span>
                     <span class="badge" :class="getSeverityBadgeClass(selectedActivity.max_severity)">
@@ -517,7 +517,7 @@
                       <span
                         v-for="dtype in selectedActivity.detection_types"
                         :key="dtype"
-                        class="badge badge-sm badge-outline"
+                        class="badge badge-sm bg-base-100/20 border-current text-inherit"
                       >
                         {{ dtype }}
                       </span>
@@ -529,13 +529,13 @@
                       <div
                         v-for="(detection, idx) in (selectedActivity.metadata.sensitive_data_detection.detections || [])"
                         :key="idx"
-                        class="flex items-center gap-2 bg-base-200 rounded px-2 py-1"
+                        class="flex items-center gap-2 bg-base-100/20 rounded px-2 py-1"
                       >
                         <span class="badge badge-xs" :class="getSeverityBadgeClass(detection.severity)">
                           {{ detection.severity }}
                         </span>
-                        <span class="font-mono text-xs">{{ detection.type }}</span>
-                        <span class="text-base-content/60 text-xs">in {{ detection.location }}</span>
+                        <span class="font-mono text-xs text-inherit">{{ detection.type }}</span>
+                        <span class="text-inherit/70 text-xs">in {{ detection.location }}</span>
                         <span v-if="detection.is_likely_example" class="badge badge-xs badge-ghost">example</span>
                       </div>
                     </div>
