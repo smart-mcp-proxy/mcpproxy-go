@@ -86,6 +86,20 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.ExcludeCallToolSuccess = false
 	}
 
+	// Sensitive data detection filters (Spec 026)
+	if sensitiveDataStr := q.Get("sensitive_data"); sensitiveDataStr != "" {
+		sensitiveData := sensitiveDataStr == "true"
+		filter.SensitiveData = &sensitiveData
+	}
+
+	if detectionType := q.Get("detection_type"); detectionType != "" {
+		filter.DetectionType = detectionType
+	}
+
+	if severity := q.Get("severity"); severity != "" {
+		filter.Severity = severity
+	}
+
 	filter.Validate()
 	return filter
 }
@@ -104,6 +118,9 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param intent_type query string false "Filter by intent operation type (Spec 018)" Enums(read, write, destructive)
 // @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
 // @Param include_call_tool query bool false "Include successful call_tool_* internal tool calls (default: false, excluded to avoid duplicates)"
+// @Param sensitive_data query bool false "Filter by sensitive data detection (true=has detections, false=no detections)"
+// @Param detection_type query string false "Filter by specific detection type (e.g., 'aws_access_key', 'credit_card')"
+// @Param severity query string false "Filter by severity level" Enums(critical, high, medium, low)
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"
@@ -183,6 +200,8 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 
 // storageToContractActivity converts a storage ActivityRecord to a contracts ActivityRecord.
 func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityRecord {
+	hasSensitiveData, detectionTypes, maxSeverity := extractSensitiveDataInfo(a)
+
 	return contracts.ActivityRecord{
 		ID:                a.ID,
 		Type:              contracts.ActivityType(a.Type),
@@ -199,12 +218,87 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		SessionID:         a.SessionID,
 		RequestID:         a.RequestID,
 		Metadata:          a.Metadata,
+		// Sensitive data detection fields (Spec 026)
+		HasSensitiveData: hasSensitiveData,
+		DetectionTypes:   detectionTypes,
+		MaxSeverity:      maxSeverity,
 	}
+}
+
+// extractSensitiveDataInfo extracts sensitive data detection info from activity metadata.
+// Returns (hasSensitiveData bool, detectionTypes []string, maxSeverity string).
+func extractSensitiveDataInfo(a *storage.ActivityRecord) (bool, []string, string) {
+	if a.Metadata == nil {
+		return false, nil, ""
+	}
+
+	detection, ok := a.Metadata["sensitive_data_detection"].(map[string]interface{})
+	if !ok {
+		return false, nil, ""
+	}
+
+	detected, _ := detection["detected"].(bool)
+	if !detected {
+		return false, nil, ""
+	}
+
+	// Extract unique detection types
+	var detectionTypes []string
+	typeSet := make(map[string]struct{})
+
+	if detections, ok := detection["detections"].([]interface{}); ok {
+		for _, d := range detections {
+			if det, ok := d.(map[string]interface{}); ok {
+				if dtype, ok := det["type"].(string); ok {
+					if _, exists := typeSet[dtype]; !exists {
+						typeSet[dtype] = struct{}{}
+						detectionTypes = append(detectionTypes, dtype)
+					}
+				}
+			}
+		}
+	}
+
+	// Calculate max severity
+	maxSeverity := calculateMaxSeverity(detection)
+
+	return detected, detectionTypes, maxSeverity
+}
+
+// calculateMaxSeverity determines the highest severity from detection results.
+// Severity order: critical > high > medium > low
+func calculateMaxSeverity(detection map[string]interface{}) string {
+	severityOrder := map[string]int{
+		"critical": 4,
+		"high":     3,
+		"medium":   2,
+		"low":      1,
+	}
+
+	maxLevel := 0
+	maxSeverity := ""
+
+	if detections, ok := detection["detections"].([]interface{}); ok {
+		for _, d := range detections {
+			if det, ok := d.(map[string]interface{}); ok {
+				if sev, ok := det["severity"].(string); ok {
+					if level, exists := severityOrder[sev]; exists && level > maxLevel {
+						maxLevel = level
+						maxSeverity = sev
+					}
+				}
+			}
+		}
+	}
+
+	return maxSeverity
 }
 
 // storageToContractActivityForExport converts a storage ActivityRecord to a contracts ActivityRecord
 // with optional inclusion of request/response bodies for export.
 func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies bool) contracts.ActivityRecord {
+	hasSensitiveData, detectionTypes, maxSeverity := extractSensitiveDataInfo(a)
+
 	record := contracts.ActivityRecord{
 		ID:                a.ID,
 		Type:              contracts.ActivityType(a.Type),
@@ -219,6 +313,10 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		SessionID:         a.SessionID,
 		RequestID:         a.RequestID,
 		Metadata:          a.Metadata,
+		// Sensitive data detection fields (Spec 026)
+		HasSensitiveData: hasSensitiveData,
+		DetectionTypes:   detectionTypes,
+		MaxSeverity:      maxSeverity,
 	}
 
 	// Only include request/response bodies when explicitly requested

@@ -38,6 +38,10 @@ const (
 	EventTypeActivityInternalToolCall EventType = "activity.internal_tool_call.completed"
 	// EventTypeActivityConfigChange is emitted when configuration changes (server add/remove/update).
 	EventTypeActivityConfigChange EventType = "activity.config_change"
+
+	// Spec 026: Sensitive data detection event
+	// EventTypeSensitiveDataDetected is emitted when sensitive data is detected in a tool call.
+	EventTypeSensitiveDataDetected EventType = "sensitive_data.detected"
 )
 
 // Event is a typed notification published by the runtime event bus.

@@ -17,7 +17,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2026-01-12T21:16:48.553309+02:00"
+      "updated": "2025-09-23T10:13:46.357736+03:00"
     }
   ],
   "top_k": 10,
@@ -49,7 +49,7 @@
     "compress": true,
     "json_format": false
   },
-  "api_key": "c4eecdd97874603f7c0dec8a499154ca60d852b5cc85f5318fbb1c756b317d1d",
+  "api_key": "15152abefac37127746d2bb27a4157da95d13ff4a6036abb1f40be3a343dddaa",
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,
@@ -187,5 +187,21 @@
   "activity_cleanup_interval_min": 60,
   "intent_declaration": {
     "strict_server_validation": true
+  },
+  "sensitive_data_detection": {
+    "enabled": true,
+    "scan_requests": true,
+    "scan_responses": true,
+    "max_payload_size_kb": 1024,
+    "entropy_threshold": 4.5,
+    "categories": {
+      "cloud_credentials": true,
+      "private_key": true,
+      "api_token": true,
+      "database_credential": true,
+      "credit_card": true,
+      "high_entropy": true,
+      "sensitive_file": true
+    }
   }
 }

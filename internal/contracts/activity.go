@@ -47,6 +47,11 @@ type ActivityRecord struct {
 	SessionID         string                 `json:"session_id,omitempty"`                            // MCP session ID for correlation
 	RequestID         string                 `json:"request_id,omitempty"`                            // HTTP request ID for correlation
 	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`         // Additional context-specific data
+
+	// Sensitive data detection fields (Spec 026)
+	HasSensitiveData bool     `json:"has_sensitive_data"`             // Whether sensitive data was detected
+	DetectionTypes   []string `json:"detection_types,omitempty"`      // List of detection types found
+	MaxSeverity      string   `json:"max_severity,omitempty"`         // Highest severity level detected (critical, high, medium, low)
 }
 
 // ActivityListResponse is the response for GET /api/v1/activity

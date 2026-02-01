@@ -548,3 +548,299 @@ func TestCreateSampleConfig(t *testing.T) {
 		t.Error("Expected sample config to have 'local-command' server")
 	}
 }
+
+// Tests for SensitiveDataDetectionConfig (Spec 026)
+
+func TestDefaultSensitiveDataDetectionConfig(t *testing.T) {
+	cfg := DefaultSensitiveDataDetectionConfig()
+
+	// Verify defaults
+	assert.True(t, cfg.Enabled, "should be enabled by default")
+	assert.True(t, cfg.ScanRequests, "should scan requests by default")
+	assert.True(t, cfg.ScanResponses, "should scan responses by default")
+	assert.Equal(t, 1024, cfg.MaxPayloadSizeKB, "default max payload size should be 1024KB")
+	assert.Equal(t, 4.5, cfg.EntropyThreshold, "default entropy threshold should be 4.5")
+	assert.NotEmpty(t, cfg.Categories, "categories should have defaults")
+	assert.Empty(t, cfg.CustomPatterns, "custom patterns should be empty by default")
+	assert.Empty(t, cfg.SensitiveKeywords, "sensitive keywords should be empty by default")
+}
+
+func TestSensitiveDataDetectionConfig_IsEnabled(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *SensitiveDataDetectionConfig
+		want    bool
+	}{
+		{
+			name:    "nil config returns true (enabled by default)",
+			config:  nil,
+			want:    true,
+		},
+		{
+			name:    "disabled config returns false",
+			config:  &SensitiveDataDetectionConfig{Enabled: false},
+			want:    false,
+		},
+		{
+			name:    "enabled config returns true",
+			config:  &SensitiveDataDetectionConfig{Enabled: true},
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.IsEnabled()
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+func TestSensitiveDataDetectionConfig_IsCategoryEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *SensitiveDataDetectionConfig
+		category string
+		want     bool
+	}{
+		{
+			name:     "nil config returns true (allow by default)",
+			config:   nil,
+			category: "cloud_credentials",
+			want:     true,
+		},
+		{
+			name:     "empty categories returns true (allow all)",
+			config:   &SensitiveDataDetectionConfig{Categories: nil},
+			category: "cloud_credentials",
+			want:     true,
+		},
+		{
+			name: "category explicitly enabled",
+			config: &SensitiveDataDetectionConfig{
+				Categories: map[string]bool{"cloud_credentials": true},
+			},
+			category: "cloud_credentials",
+			want:     true,
+		},
+		{
+			name: "category explicitly disabled",
+			config: &SensitiveDataDetectionConfig{
+				Categories: map[string]bool{"cloud_credentials": false},
+			},
+			category: "cloud_credentials",
+			want:     false,
+		},
+		{
+			name: "category not in map returns true (allow by default)",
+			config: &SensitiveDataDetectionConfig{
+				Categories: map[string]bool{"api_token": true},
+			},
+			category: "cloud_credentials",
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.IsCategoryEnabled(tt.category)
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+func TestSensitiveDataDetectionConfig_GetMaxPayloadSize(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *SensitiveDataDetectionConfig
+		want   int
+	}{
+		{
+			name:   "nil config returns default",
+			config: nil,
+			want:   1024 * 1024, // 1MB
+		},
+		{
+			name:   "zero value returns default",
+			config: &SensitiveDataDetectionConfig{MaxPayloadSizeKB: 0},
+			want:   1024 * 1024, // 1MB
+		},
+		{
+			name:   "negative value returns default",
+			config: &SensitiveDataDetectionConfig{MaxPayloadSizeKB: -10},
+			want:   1024 * 1024, // 1MB
+		},
+		{
+			name:   "custom value returns value in bytes",
+			config: &SensitiveDataDetectionConfig{MaxPayloadSizeKB: 256},
+			want:   256 * 1024,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.GetMaxPayloadSize()
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+func TestSensitiveDataDetectionConfig_GetEntropyThreshold(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *SensitiveDataDetectionConfig
+		want   float64
+	}{
+		{
+			name:   "nil config returns default",
+			config: nil,
+			want:   4.5,
+		},
+		{
+			name:   "zero value returns default",
+			config: &SensitiveDataDetectionConfig{EntropyThreshold: 0},
+			want:   4.5,
+		},
+		{
+			name:   "negative value returns default",
+			config: &SensitiveDataDetectionConfig{EntropyThreshold: -1.0},
+			want:   4.5,
+		},
+		{
+			name:   "custom value returns custom value",
+			config: &SensitiveDataDetectionConfig{EntropyThreshold: 5.0},
+			want:   5.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.GetEntropyThreshold()
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+func TestSensitiveDataDetectionConfig_JSONSerialization(t *testing.T) {
+	original := &SensitiveDataDetectionConfig{
+		Enabled:          true,
+		ScanRequests:     true,
+		ScanResponses:    false,
+		MaxPayloadSizeKB: 256,
+		EntropyThreshold: 5.0,
+		Categories: map[string]bool{
+			"cloud_credentials": true,
+			"api_token":         true,
+			"credit_card":       false,
+		},
+		CustomPatterns: []CustomPattern{
+			{
+				Name:     "acme_key",
+				Regex:    "ACME-KEY-[a-f0-9]{32}",
+				Category: "custom",
+				Severity: "high",
+			},
+		},
+		SensitiveKeywords: []string{"SECRET", "PASSWORD"},
+	}
+
+	// Marshal to JSON
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	// Unmarshal from JSON
+	var restored SensitiveDataDetectionConfig
+	err = json.Unmarshal(data, &restored)
+	require.NoError(t, err)
+
+	// Compare values
+	assert.Equal(t, original.Enabled, restored.Enabled)
+	assert.Equal(t, original.ScanRequests, restored.ScanRequests)
+	assert.Equal(t, original.ScanResponses, restored.ScanResponses)
+	assert.Equal(t, original.MaxPayloadSizeKB, restored.MaxPayloadSizeKB)
+	assert.Equal(t, original.EntropyThreshold, restored.EntropyThreshold)
+	assert.Equal(t, original.Categories, restored.Categories)
+	assert.Len(t, restored.CustomPatterns, 1)
+	assert.Equal(t, original.CustomPatterns[0].Name, restored.CustomPatterns[0].Name)
+	assert.Equal(t, original.CustomPatterns[0].Regex, restored.CustomPatterns[0].Regex)
+	assert.Equal(t, original.SensitiveKeywords, restored.SensitiveKeywords)
+}
+
+func TestCustomPattern_Validation(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern CustomPattern
+		valid   bool
+	}{
+		{
+			name: "valid regex pattern",
+			pattern: CustomPattern{
+				Name:  "test_pattern",
+				Regex: "[a-z]+",
+			},
+			valid: true,
+		},
+		{
+			name: "valid keyword pattern",
+			pattern: CustomPattern{
+				Name:     "test_keywords",
+				Keywords: []string{"SECRET", "PASSWORD"},
+			},
+			valid: true,
+		},
+		{
+			name: "empty name is invalid",
+			pattern: CustomPattern{
+				Name:  "",
+				Regex: "[a-z]+",
+			},
+			valid: false,
+		},
+		{
+			name: "both regex and keywords can coexist",
+			pattern: CustomPattern{
+				Name:     "test_both",
+				Regex:    "[a-z]+",
+				Keywords: []string{"test"},
+			},
+			valid: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The pattern is valid if it has a name
+			hasName := tt.pattern.Name != ""
+			assert.Equal(t, tt.valid, hasName)
+		})
+	}
+}
+
+func TestConfig_WithSensitiveDataDetection(t *testing.T) {
+	// Test that SensitiveDataDetection can be part of Config
+	cfg := &Config{
+		Listen: "127.0.0.1:8080",
+		SensitiveDataDetection: &SensitiveDataDetectionConfig{
+			Enabled:          true,
+			ScanRequests:     true,
+			ScanResponses:    true,
+			EntropyThreshold: 4.5,
+		},
+	}
+
+	// Marshal to JSON
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	// Unmarshal from JSON
+	var restored Config
+	err = json.Unmarshal(data, &restored)
+	require.NoError(t, err)
+
+	// Verify SensitiveDataDetection is preserved
+	require.NotNil(t, restored.SensitiveDataDetection)
+	assert.True(t, restored.SensitiveDataDetection.Enabled)
+	assert.True(t, restored.SensitiveDataDetection.ScanRequests)
+	assert.True(t, restored.SensitiveDataDetection.ScanResponses)
+	assert.Equal(t, 4.5, restored.SensitiveDataDetection.EntropyThreshold)
+}

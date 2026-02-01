@@ -26,6 +26,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -164,6 +165,15 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	// Initialize activity service for logging tool calls and events
 	activityService := NewActivityService(storageManager, logger)
+
+	// Initialize sensitive data detector if configured (Spec 026)
+	if cfg.SensitiveDataDetection != nil && cfg.SensitiveDataDetection.IsEnabled() {
+		detector := security.NewDetector(cfg.SensitiveDataDetection)
+		activityService.SetDetector(detector)
+		logger.Info("Sensitive data detection enabled",
+			zap.Bool("scan_requests", cfg.SensitiveDataDetection.ScanRequests),
+			zap.Bool("scan_responses", cfg.SensitiveDataDetection.ScanResponses))
+	}
 
 	rt := &Runtime{
 		cfg:             cfg,
@@ -451,6 +461,11 @@ func (r *Runtime) CacheManager() *cache.Manager {
 // Truncator exposes the truncator utility.
 func (r *Runtime) Truncator() *truncate.Truncator {
 	return r.truncator
+}
+
+// ActivityService exposes the activity service for testing.
+func (r *Runtime) ActivityService() *ActivityService {
+	return r.activityService
 }
 
 // AppContext returns the long-lived runtime context.

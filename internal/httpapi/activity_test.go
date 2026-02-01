@@ -266,3 +266,361 @@ func TestActivityRequest_InvalidID(t *testing.T) {
 	assert.Empty(t, req.URL.Query().Get("id")) // No query param
 	_ = rr // Would check response after handler call
 }
+
+// =============================================================================
+// Spec 026: Sensitive Data Detection Filter Tests
+// =============================================================================
+
+func TestParseActivityFilters_SensitiveDataFilters(t *testing.T) {
+	tests := []struct {
+		name            string
+		query           string
+		wantSensitive   *bool
+		wantDetType     string
+		wantSeverity    string
+	}{
+		{
+			name:          "sensitive_data=true filter",
+			query:         "sensitive_data=true",
+			wantSensitive: boolPtr(true),
+		},
+		{
+			name:          "sensitive_data=false filter",
+			query:         "sensitive_data=false",
+			wantSensitive: boolPtr(false),
+		},
+		{
+			name:        "detection_type filter",
+			query:       "detection_type=aws_access_key",
+			wantDetType: "aws_access_key",
+		},
+		{
+			name:         "severity filter",
+			query:        "severity=critical",
+			wantSeverity: "critical",
+		},
+		{
+			name:          "combined sensitive data filters",
+			query:         "sensitive_data=true&detection_type=credit_card&severity=high",
+			wantSensitive: boolPtr(true),
+			wantDetType:   "credit_card",
+			wantSeverity:  "high",
+		},
+		{
+			name:          "no sensitive data filters - nil values",
+			query:         "type=tool_call",
+			wantSensitive: nil,
+			wantDetType:   "",
+			wantSeverity:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/v1/activity?"+tt.query, nil)
+			filter := parseActivityFilters(req)
+
+			// Check sensitive data pointer
+			if tt.wantSensitive == nil {
+				assert.Nil(t, filter.SensitiveData, "SensitiveData should be nil")
+			} else {
+				require.NotNil(t, filter.SensitiveData, "SensitiveData should not be nil")
+				assert.Equal(t, *tt.wantSensitive, *filter.SensitiveData)
+			}
+
+			assert.Equal(t, tt.wantDetType, filter.DetectionType)
+			assert.Equal(t, tt.wantSeverity, filter.Severity)
+		})
+	}
+}
+
+func TestStorageToContractActivity_SensitiveDataFields(t *testing.T) {
+	t.Run("activity with sensitive data detection", func(t *testing.T) {
+		storageRecord := &storage.ActivityRecord{
+			ID:         "test-sensitive-1",
+			Type:       storage.ActivityTypeToolCall,
+			ServerName: "github",
+			ToolName:   "create_issue",
+			Status:     "success",
+			Timestamp:  time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+			Metadata: map[string]interface{}{
+				"sensitive_data_detection": map[string]interface{}{
+					"detected": true,
+					"detections": []interface{}{
+						map[string]interface{}{
+							"type":     "aws_access_key",
+							"severity": "critical",
+							"location": "arguments.api_key",
+						},
+						map[string]interface{}{
+							"type":     "credit_card",
+							"severity": "high",
+							"location": "arguments.card",
+						},
+					},
+				},
+			},
+		}
+
+		result := storageToContractActivity(storageRecord)
+
+		assert.True(t, result.HasSensitiveData, "HasSensitiveData should be true")
+		assert.Contains(t, result.DetectionTypes, "aws_access_key")
+		assert.Contains(t, result.DetectionTypes, "credit_card")
+		assert.Len(t, result.DetectionTypes, 2)
+		assert.Equal(t, "critical", result.MaxSeverity, "MaxSeverity should be critical (highest)")
+	})
+
+	t.Run("activity without sensitive data detection", func(t *testing.T) {
+		storageRecord := &storage.ActivityRecord{
+			ID:         "test-no-sensitive",
+			Type:       storage.ActivityTypeToolCall,
+			ServerName: "github",
+			ToolName:   "get_repo",
+			Status:     "success",
+			Timestamp:  time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+			Metadata:   map[string]interface{}{"key": "value"},
+		}
+
+		result := storageToContractActivity(storageRecord)
+
+		assert.False(t, result.HasSensitiveData, "HasSensitiveData should be false")
+		assert.Nil(t, result.DetectionTypes, "DetectionTypes should be nil")
+		assert.Empty(t, result.MaxSeverity, "MaxSeverity should be empty")
+	})
+
+	t.Run("activity with detection but detected=false", func(t *testing.T) {
+		storageRecord := &storage.ActivityRecord{
+			ID:         "test-not-detected",
+			Type:       storage.ActivityTypeToolCall,
+			ServerName: "github",
+			ToolName:   "get_repo",
+			Status:     "success",
+			Timestamp:  time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+			Metadata: map[string]interface{}{
+				"sensitive_data_detection": map[string]interface{}{
+					"detected":   false,
+					"detections": []interface{}{},
+				},
+			},
+		}
+
+		result := storageToContractActivity(storageRecord)
+
+		assert.False(t, result.HasSensitiveData, "HasSensitiveData should be false when detected=false")
+		assert.Nil(t, result.DetectionTypes, "DetectionTypes should be nil")
+		assert.Empty(t, result.MaxSeverity, "MaxSeverity should be empty")
+	})
+
+	t.Run("activity with nil metadata", func(t *testing.T) {
+		storageRecord := &storage.ActivityRecord{
+			ID:         "test-nil-metadata",
+			Type:       storage.ActivityTypeToolCall,
+			ServerName: "github",
+			ToolName:   "get_repo",
+			Status:     "success",
+			Timestamp:  time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+			Metadata:   nil,
+		}
+
+		result := storageToContractActivity(storageRecord)
+
+		assert.False(t, result.HasSensitiveData, "HasSensitiveData should be false for nil metadata")
+		assert.Nil(t, result.DetectionTypes)
+		assert.Empty(t, result.MaxSeverity)
+	})
+}
+
+func TestExtractSensitiveDataInfo(t *testing.T) {
+	t.Run("extracts all detection types without duplicates", func(t *testing.T) {
+		record := &storage.ActivityRecord{
+			Metadata: map[string]interface{}{
+				"sensitive_data_detection": map[string]interface{}{
+					"detected": true,
+					"detections": []interface{}{
+						map[string]interface{}{"type": "aws_access_key", "severity": "critical"},
+						map[string]interface{}{"type": "aws_access_key", "severity": "critical"}, // duplicate
+						map[string]interface{}{"type": "github_token", "severity": "high"},
+					},
+				},
+			},
+		}
+
+		detected, types, severity := extractSensitiveDataInfo(record)
+
+		assert.True(t, detected)
+		assert.Len(t, types, 2, "Should deduplicate detection types")
+		assert.Contains(t, types, "aws_access_key")
+		assert.Contains(t, types, "github_token")
+		assert.Equal(t, "critical", severity)
+	})
+
+	t.Run("calculates max severity correctly", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			severities  []string
+			expectedMax string
+		}{
+			{
+				name:        "critical is highest",
+				severities:  []string{"low", "medium", "high", "critical"},
+				expectedMax: "critical",
+			},
+			{
+				name:        "high without critical",
+				severities:  []string{"low", "medium", "high"},
+				expectedMax: "high",
+			},
+			{
+				name:        "medium without higher",
+				severities:  []string{"low", "medium"},
+				expectedMax: "medium",
+			},
+			{
+				name:        "only low",
+				severities:  []string{"low"},
+				expectedMax: "low",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				detections := make([]interface{}, len(tt.severities))
+				for i, sev := range tt.severities {
+					detections[i] = map[string]interface{}{
+						"type":     "test_type",
+						"severity": sev,
+					}
+				}
+
+				record := &storage.ActivityRecord{
+					Metadata: map[string]interface{}{
+						"sensitive_data_detection": map[string]interface{}{
+							"detected":   true,
+							"detections": detections,
+						},
+					},
+				}
+
+				_, _, maxSeverity := extractSensitiveDataInfo(record)
+				assert.Equal(t, tt.expectedMax, maxSeverity)
+			})
+		}
+	})
+}
+
+func TestCalculateMaxSeverity(t *testing.T) {
+	tests := []struct {
+		name       string
+		detection  map[string]interface{}
+		wantMax    string
+	}{
+		{
+			name: "mixed severities - critical wins",
+			detection: map[string]interface{}{
+				"detections": []interface{}{
+					map[string]interface{}{"severity": "low"},
+					map[string]interface{}{"severity": "critical"},
+					map[string]interface{}{"severity": "medium"},
+				},
+			},
+			wantMax: "critical",
+		},
+		{
+			name: "high is max",
+			detection: map[string]interface{}{
+				"detections": []interface{}{
+					map[string]interface{}{"severity": "low"},
+					map[string]interface{}{"severity": "high"},
+				},
+			},
+			wantMax: "high",
+		},
+		{
+			name: "empty detections",
+			detection: map[string]interface{}{
+				"detections": []interface{}{},
+			},
+			wantMax: "",
+		},
+		{
+			name:    "nil detections",
+			detection: map[string]interface{}{},
+			wantMax: "",
+		},
+		{
+			name: "unknown severity ignored",
+			detection: map[string]interface{}{
+				"detections": []interface{}{
+					map[string]interface{}{"severity": "unknown"},
+					map[string]interface{}{"severity": "low"},
+				},
+			},
+			wantMax: "low",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := calculateMaxSeverity(tt.detection)
+			assert.Equal(t, tt.wantMax, result)
+		})
+	}
+}
+
+func TestActivityListResponse_SensitiveDataFields_JSON(t *testing.T) {
+	response := contracts.ActivityListResponse{
+		Activities: []contracts.ActivityRecord{
+			{
+				ID:               "activity-with-sensitive",
+				Type:             contracts.ActivityTypeToolCall,
+				ServerName:       "github",
+				Status:           "success",
+				Timestamp:        time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+				HasSensitiveData: true,
+				DetectionTypes:   []string{"aws_access_key", "github_token"},
+				MaxSeverity:      "critical",
+			},
+			{
+				ID:               "activity-without-sensitive",
+				Type:             contracts.ActivityTypeToolCall,
+				ServerName:       "github",
+				Status:           "success",
+				Timestamp:        time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+				HasSensitiveData: false,
+				DetectionTypes:   nil,
+				MaxSeverity:      "",
+			},
+		},
+		Total:  2,
+		Limit:  50,
+		Offset: 0,
+	}
+
+	data, err := json.Marshal(response)
+	require.NoError(t, err)
+
+	var parsed contracts.ActivityListResponse
+	err = json.Unmarshal(data, &parsed)
+	require.NoError(t, err)
+
+	assert.Len(t, parsed.Activities, 2)
+
+	// Check activity with sensitive data
+	sensitiveActivity := parsed.Activities[0]
+	assert.True(t, sensitiveActivity.HasSensitiveData)
+	assert.Contains(t, sensitiveActivity.DetectionTypes, "aws_access_key")
+	assert.Contains(t, sensitiveActivity.DetectionTypes, "github_token")
+	assert.Equal(t, "critical", sensitiveActivity.MaxSeverity)
+
+	// Check activity without sensitive data
+	normalActivity := parsed.Activities[1]
+	assert.False(t, normalActivity.HasSensitiveData)
+	assert.Nil(t, normalActivity.DetectionTypes)
+	assert.Empty(t, normalActivity.MaxSeverity)
+}
+
+// Helper function to create bool pointer
+func boolPtr(b bool) *bool {
+	return &b
+}

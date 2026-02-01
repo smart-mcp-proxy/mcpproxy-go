@@ -116,6 +116,9 @@ type Config struct {
 
 	// Intent declaration settings (Spec 018)
 	IntentDeclaration *IntentDeclarationConfig `json:"intent_declaration,omitempty" mapstructure:"intent-declaration"`
+
+	// Sensitive data detection settings (Spec 026)
+	SensitiveDataDetection *SensitiveDataDetectionConfig `json:"sensitive_data_detection,omitempty" mapstructure:"sensitive-data-detection"`
 }
 
 // TLSConfig represents TLS configuration
@@ -307,6 +310,84 @@ func (d *DockerRecoveryConfig) GetMaxRetries() int {
 		return 0 // Unlimited by default
 	}
 	return d.MaxRetries
+}
+
+// SensitiveDataDetectionConfig represents sensitive data detection settings (Spec 026)
+type SensitiveDataDetectionConfig struct {
+	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                           // Enable sensitive data detection (default: true)
+	ScanRequests      bool              `json:"scan_requests" mapstructure:"scan-requests"`               // Scan tool call arguments (default: true)
+	ScanResponses     bool              `json:"scan_responses" mapstructure:"scan-responses"`             // Scan tool responses (default: true)
+	MaxPayloadSizeKB  int               `json:"max_payload_size_kb" mapstructure:"max-payload-size-kb"`   // Max size to scan before truncating (default: 1024)
+	EntropyThreshold  float64           `json:"entropy_threshold" mapstructure:"entropy-threshold"`       // Shannon entropy threshold for high-entropy detection (default: 4.5)
+	Categories        map[string]bool   `json:"categories,omitempty" mapstructure:"categories"`           // Enable/disable specific detection categories
+	CustomPatterns    []CustomPattern   `json:"custom_patterns,omitempty" mapstructure:"custom-patterns"` // User-defined detection patterns
+	SensitiveKeywords []string          `json:"sensitive_keywords,omitempty" mapstructure:"sensitive-keywords"` // Keywords to flag
+}
+
+// CustomPattern represents a user-defined detection pattern
+type CustomPattern struct {
+	Name     string   `json:"name" mapstructure:"name"`                 // Unique identifier for this pattern
+	Regex    string   `json:"regex,omitempty" mapstructure:"regex"`     // Regex pattern (mutually exclusive with Keywords)
+	Keywords []string `json:"keywords,omitempty" mapstructure:"keywords"` // Keywords to match (mutually exclusive with Regex)
+	Severity string   `json:"severity" mapstructure:"severity"`         // Risk level: critical, high, medium, low
+	Category string   `json:"category,omitempty" mapstructure:"category"` // Category (defaults to "custom")
+}
+
+// DefaultSensitiveDataDetectionConfig returns the default configuration for sensitive data detection
+func DefaultSensitiveDataDetectionConfig() *SensitiveDataDetectionConfig {
+	return &SensitiveDataDetectionConfig{
+		Enabled:          true,
+		ScanRequests:     true,
+		ScanResponses:    true,
+		MaxPayloadSizeKB: 1024,
+		EntropyThreshold: 4.5,
+		Categories: map[string]bool{
+			"cloud_credentials":   true,
+			"private_key":         true,
+			"api_token":           true,
+			"auth_token":          true,
+			"sensitive_file":      true,
+			"database_credential": true,
+			"high_entropy":        true,
+			"credit_card":         true,
+		},
+	}
+}
+
+// IsEnabled returns true if sensitive data detection is enabled (default: true)
+func (c *SensitiveDataDetectionConfig) IsEnabled() bool {
+	if c == nil {
+		return true // Enabled by default
+	}
+	return c.Enabled
+}
+
+// IsCategoryEnabled returns true if the specified category is enabled
+func (c *SensitiveDataDetectionConfig) IsCategoryEnabled(category string) bool {
+	if c == nil || c.Categories == nil {
+		return true // All categories enabled by default
+	}
+	enabled, exists := c.Categories[category]
+	if !exists {
+		return true // Categories not in the map are enabled by default
+	}
+	return enabled
+}
+
+// GetMaxPayloadSize returns the max payload size in bytes
+func (c *SensitiveDataDetectionConfig) GetMaxPayloadSize() int {
+	if c == nil || c.MaxPayloadSizeKB <= 0 {
+		return 1024 * 1024 // 1MB default
+	}
+	return c.MaxPayloadSizeKB * 1024
+}
+
+// GetEntropyThreshold returns the entropy threshold (default: 4.5)
+func (c *SensitiveDataDetectionConfig) GetEntropyThreshold() float64 {
+	if c == nil || c.EntropyThreshold <= 0 {
+		return 4.5
+	}
+	return c.EntropyThreshold
 }
 
 // RegistryEntry represents a registry in the configuration
@@ -530,6 +611,9 @@ func DefaultConfig() *Config {
 
 		// Default Docker isolation settings
 		DockerIsolation: DefaultDockerIsolationConfig(),
+
+		// Default sensitive data detection settings (enabled by default for security)
+		SensitiveDataDetection: DefaultSensitiveDataDetectionConfig(),
 
 		// Default registries for MCP server discovery
 		Registries: []RegistryEntry{

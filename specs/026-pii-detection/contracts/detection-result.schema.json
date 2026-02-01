@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.io/schemas/detection-result.schema.json",
+  "title": "SensitiveDataDetectionResult",
+  "description": "Result of sensitive data detection scan stored in ActivityRecord.metadata",
+  "type": "object",
+  "required": ["detected", "scan_duration_ms"],
+  "properties": {
+    "detected": {
+      "type": "boolean",
+      "description": "True if any sensitive data was found"
+    },
+    "detections": {
+      "type": "array",
+      "description": "List of sensitive data findings",
+      "items": {
+        "$ref": "#/$defs/Detection"
+      },
+      "default": []
+    },
+    "scan_duration_ms": {
+      "type": "integer",
+      "description": "Time taken to scan in milliseconds",
+      "minimum": 0
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "True if payload exceeded max size and was truncated",
+      "default": false
+    }
+  },
+  "$defs": {
+    "Detection": {
+      "type": "object",
+      "required": ["type", "category", "severity", "location"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Pattern name that matched (e.g., 'aws_access_key')",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "category": {
+          "type": "string",
+          "description": "Detection category",
+          "enum": [
+            "cloud_credentials",
+            "private_key",
+            "api_token",
+            "auth_token",
+            "sensitive_file",
+            "database_credential",
+            "high_entropy",
+            "credit_card",
+            "custom"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "description": "Risk level",
+          "enum": ["critical", "high", "medium", "low"]
+        },
+        "location": {
+          "type": "string",
+          "description": "JSON path where match was found (e.g., 'arguments.api_key')"
+        },
+        "is_likely_example": {
+          "type": "boolean",
+          "description": "True if match is a known test/example value",
+          "default": false
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "detected": true,
+      "detections": [
+        {
+          "type": "aws_access_key",
+          "category": "cloud_credentials",
+          "severity": "critical",
+          "location": "arguments.credentials.access_key",
+          "is_likely_example": false
+        },
+        {
+          "type": "stripe_key",
+          "category": "api_token",
+          "severity": "high",
+          "location": "arguments.payment_key",
+          "is_likely_example": false
+        }
+      ],
+      "scan_duration_ms": 12,
+      "truncated": false
+    },
+    {
+      "detected": false,
+      "detections": [],
+      "scan_duration_ms": 3,
+      "truncated": false
+    }
+  ]
+}

@@ -613,3 +613,250 @@ func TestListActivities_Order(t *testing.T) {
 	assert.True(t, records[0].Timestamp.After(records[1].Timestamp))
 	assert.True(t, records[1].Timestamp.After(records[2].Timestamp))
 }
+
+// =============================================================================
+// Spec 026: Sensitive Data Detection Filter Tests
+// =============================================================================
+
+func TestActivityFilter_Matches_SensitiveData(t *testing.T) {
+	recordWithDetection := &ActivityRecord{
+		Type:       ActivityTypeToolCall,
+		ServerName: "github",
+		ToolName:   "create_secret",
+		Status:     "success",
+		Timestamp:  time.Now().UTC(),
+		Metadata: map[string]interface{}{
+			"sensitive_data_detection": map[string]interface{}{
+				"detected": true,
+				"detections": []interface{}{
+					map[string]interface{}{
+						"type":     "aws_access_key",
+						"severity": "critical",
+						"location": "arguments.key",
+					},
+					map[string]interface{}{
+						"type":     "credit_card",
+						"severity": "medium",
+						"location": "arguments.card",
+					},
+				},
+			},
+		},
+	}
+
+	recordWithoutDetection := &ActivityRecord{
+		Type:       ActivityTypeToolCall,
+		ServerName: "github",
+		ToolName:   "get_repo",
+		Status:     "success",
+		Timestamp:  time.Now().UTC(),
+		Metadata: map[string]interface{}{
+			"sensitive_data_detection": map[string]interface{}{
+				"detected":   false,
+				"detections": []interface{}{},
+			},
+		},
+	}
+
+	recordNoMetadata := &ActivityRecord{
+		Type:       ActivityTypeToolCall,
+		ServerName: "github",
+		ToolName:   "list_repos",
+		Status:     "success",
+		Timestamp:  time.Now().UTC(),
+		Metadata:   nil,
+	}
+
+	t.Run("sensitive_data=true matches record with detections", func(t *testing.T) {
+		sensitiveTrue := true
+		filter := ActivityFilter{SensitiveData: &sensitiveTrue}
+		assert.True(t, filter.Matches(recordWithDetection))
+	})
+
+	t.Run("sensitive_data=true does not match record without detections", func(t *testing.T) {
+		sensitiveTrue := true
+		filter := ActivityFilter{SensitiveData: &sensitiveTrue}
+		assert.False(t, filter.Matches(recordWithoutDetection))
+	})
+
+	t.Run("sensitive_data=true does not match record with nil metadata", func(t *testing.T) {
+		sensitiveTrue := true
+		filter := ActivityFilter{SensitiveData: &sensitiveTrue}
+		assert.False(t, filter.Matches(recordNoMetadata))
+	})
+
+	t.Run("sensitive_data=false matches record without detections", func(t *testing.T) {
+		sensitiveFalse := false
+		filter := ActivityFilter{SensitiveData: &sensitiveFalse}
+		assert.True(t, filter.Matches(recordWithoutDetection))
+	})
+
+	t.Run("sensitive_data=false does not match record with detections", func(t *testing.T) {
+		sensitiveFalse := false
+		filter := ActivityFilter{SensitiveData: &sensitiveFalse}
+		assert.False(t, filter.Matches(recordWithDetection))
+	})
+
+	t.Run("sensitive_data=nil matches all records", func(t *testing.T) {
+		filter := ActivityFilter{SensitiveData: nil}
+		assert.True(t, filter.Matches(recordWithDetection))
+		assert.True(t, filter.Matches(recordWithoutDetection))
+		assert.True(t, filter.Matches(recordNoMetadata))
+	})
+
+	t.Run("detection_type filter matches specific type", func(t *testing.T) {
+		filter := ActivityFilter{DetectionType: "aws_access_key"}
+		assert.True(t, filter.Matches(recordWithDetection))
+	})
+
+	t.Run("detection_type filter does not match different type", func(t *testing.T) {
+		filter := ActivityFilter{DetectionType: "github_token"}
+		assert.False(t, filter.Matches(recordWithDetection))
+	})
+
+	t.Run("severity filter matches highest severity", func(t *testing.T) {
+		filter := ActivityFilter{Severity: "critical"}
+		assert.True(t, filter.Matches(recordWithDetection))
+	})
+
+	t.Run("severity filter does not match when max is different", func(t *testing.T) {
+		filter := ActivityFilter{Severity: "high"}
+		assert.False(t, filter.Matches(recordWithDetection))
+	})
+
+	t.Run("combined sensitive data filters", func(t *testing.T) {
+		sensitiveTrue := true
+		filter := ActivityFilter{
+			SensitiveData: &sensitiveTrue,
+			DetectionType: "aws_access_key",
+			Severity:      "critical",
+		}
+		assert.True(t, filter.Matches(recordWithDetection))
+
+		// Change severity to not match
+		filter.Severity = "high"
+		assert.False(t, filter.Matches(recordWithDetection))
+	})
+}
+
+func TestExtractSensitiveDataInfo_Storage(t *testing.T) {
+	t.Run("extracts info from record with detections", func(t *testing.T) {
+		record := &ActivityRecord{
+			Metadata: map[string]interface{}{
+				"sensitive_data_detection": map[string]interface{}{
+					"detected": true,
+					"detections": []interface{}{
+						map[string]interface{}{"type": "stripe_key", "severity": "high"},
+						map[string]interface{}{"type": "aws_secret_key", "severity": "critical"},
+					},
+				},
+			},
+		}
+
+		detected, types, maxSeverity := extractSensitiveDataInfo(record)
+
+		assert.True(t, detected)
+		assert.Len(t, types, 2)
+		assert.Contains(t, types, "stripe_key")
+		assert.Contains(t, types, "aws_secret_key")
+		assert.Equal(t, "critical", maxSeverity)
+	})
+
+	t.Run("returns empty for nil metadata", func(t *testing.T) {
+		record := &ActivityRecord{Metadata: nil}
+		detected, types, maxSeverity := extractSensitiveDataInfo(record)
+
+		assert.False(t, detected)
+		assert.Nil(t, types)
+		assert.Empty(t, maxSeverity)
+	})
+
+	t.Run("returns empty for detected=false", func(t *testing.T) {
+		record := &ActivityRecord{
+			Metadata: map[string]interface{}{
+				"sensitive_data_detection": map[string]interface{}{
+					"detected":   false,
+					"detections": []interface{}{},
+				},
+			},
+		}
+
+		detected, types, maxSeverity := extractSensitiveDataInfo(record)
+
+		assert.False(t, detected)
+		assert.Nil(t, types)
+		assert.Empty(t, maxSeverity)
+	})
+
+	t.Run("deduplicates detection types", func(t *testing.T) {
+		record := &ActivityRecord{
+			Metadata: map[string]interface{}{
+				"sensitive_data_detection": map[string]interface{}{
+					"detected": true,
+					"detections": []interface{}{
+						map[string]interface{}{"type": "aws_access_key", "severity": "critical"},
+						map[string]interface{}{"type": "aws_access_key", "severity": "critical"},
+						map[string]interface{}{"type": "aws_access_key", "severity": "critical"},
+					},
+				},
+			},
+		}
+
+		_, types, _ := extractSensitiveDataInfo(record)
+		assert.Len(t, types, 1)
+		assert.Equal(t, "aws_access_key", types[0])
+	})
+}
+
+func TestCalculateMaxSeverity_Storage(t *testing.T) {
+	tests := []struct {
+		name       string
+		severities []string
+		expected   string
+	}{
+		{
+			name:       "critical is highest",
+			severities: []string{"low", "medium", "high", "critical"},
+			expected:   "critical",
+		},
+		{
+			name:       "high without critical",
+			severities: []string{"low", "medium", "high"},
+			expected:   "high",
+		},
+		{
+			name:       "medium without higher",
+			severities: []string{"low", "medium"},
+			expected:   "medium",
+		},
+		{
+			name:       "only low",
+			severities: []string{"low"},
+			expected:   "low",
+		},
+		{
+			name:       "empty returns empty",
+			severities: []string{},
+			expected:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detections := make([]interface{}, len(tt.severities))
+			for i, sev := range tt.severities {
+				detections[i] = map[string]interface{}{
+					"type":     "test",
+					"severity": sev,
+				}
+			}
+
+			detection := map[string]interface{}{
+				"detections": detections,
+			}
+
+			result := calculateMaxSeverity(detection)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

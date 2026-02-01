@@ -854,3 +854,342 @@ func TestOutputActivityError_TableFormat(t *testing.T) {
 	assert.Contains(t, output, "Error: test error message")
 	assert.Contains(t, output, "Hint:")
 }
+
+// =============================================================================
+// Sensitive Data Detection Tests (Spec 026)
+// =============================================================================
+
+func TestFormatSensitiveDataIndicator(t *testing.T) {
+	tests := []struct {
+		name        string
+		activity    map[string]interface{}
+		noIcons     bool
+		expected    string
+	}{
+		{
+			name:     "no metadata",
+			activity: map[string]interface{}{},
+			expected: "-",
+		},
+		{
+			name: "no sensitive_data_detection in metadata",
+			activity: map[string]interface{}{
+				"metadata": map[string]interface{}{},
+			},
+			expected: "-",
+		},
+		{
+			name: "detected is false",
+			activity: map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"sensitive_data_detection": map[string]interface{}{
+						"detected": false,
+					},
+				},
+			},
+			expected: "-",
+		},
+		{
+			name: "detected is true - with icons",
+			activity: map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"sensitive_data_detection": map[string]interface{}{
+						"detected": true,
+					},
+				},
+			},
+			noIcons:  false,
+			expected: "⚠️",
+		},
+		{
+			name: "detected is true - no icons",
+			activity: map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"sensitive_data_detection": map[string]interface{}{
+						"detected": true,
+					},
+				},
+			},
+			noIcons:  true,
+			expected: "SENSITIVE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set the no-icons flag
+			oldNoIcons := activityNoIcons
+			activityNoIcons = tt.noIcons
+			defer func() { activityNoIcons = oldNoIcons }()
+
+			result := formatSensitiveDataIndicator(tt.activity)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestGetSensitiveDataDetection(t *testing.T) {
+	tests := []struct {
+		name     string
+		activity map[string]interface{}
+		hasData  bool
+	}{
+		{
+			name:     "no metadata",
+			activity: map[string]interface{}{},
+			hasData:  false,
+		},
+		{
+			name: "no sensitive_data_detection",
+			activity: map[string]interface{}{
+				"metadata": map[string]interface{}{},
+			},
+			hasData: false,
+		},
+		{
+			name: "has sensitive_data_detection",
+			activity: map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"sensitive_data_detection": map[string]interface{}{
+						"detected":   true,
+						"detections": []interface{}{},
+					},
+				},
+			},
+			hasData: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getSensitiveDataDetection(tt.activity)
+			if tt.hasData {
+				assert.NotNil(t, result)
+			} else {
+				assert.Nil(t, result)
+			}
+		})
+	}
+}
+
+func TestGetMaxSeverity(t *testing.T) {
+	tests := []struct {
+		name       string
+		detections []interface{}
+		expected   string
+	}{
+		{
+			name:       "empty detections",
+			detections: []interface{}{},
+			expected:   "",
+		},
+		{
+			name: "single detection",
+			detections: []interface{}{
+				map[string]interface{}{"severity": "high"},
+			},
+			expected: "high",
+		},
+		{
+			name: "critical is highest",
+			detections: []interface{}{
+				map[string]interface{}{"severity": "low"},
+				map[string]interface{}{"severity": "critical"},
+				map[string]interface{}{"severity": "high"},
+			},
+			expected: "critical",
+		},
+		{
+			name: "high is higher than medium",
+			detections: []interface{}{
+				map[string]interface{}{"severity": "medium"},
+				map[string]interface{}{"severity": "high"},
+				map[string]interface{}{"severity": "low"},
+			},
+			expected: "high",
+		},
+		{
+			name: "all low",
+			detections: []interface{}{
+				map[string]interface{}{"severity": "low"},
+				map[string]interface{}{"severity": "low"},
+			},
+			expected: "low",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getMaxSeverity(tt.detections)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestActivityFilter_Validate_SeverityValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		severity    string
+		shouldError bool
+	}{
+		{"critical is valid", "critical", false},
+		{"high is valid", "high", false},
+		{"medium is valid", "medium", false},
+		{"low is valid", "low", false},
+		{"empty is valid", "", false},
+		{"invalid severity", "extreme", true},
+		{"unknown severity", "unknown", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter := &ActivityFilter{Severity: tt.severity}
+			err := filter.Validate()
+			if tt.shouldError {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid severity")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestActivityFilter_ToQueryParams_SensitiveDataFilters(t *testing.T) {
+	tests := []struct {
+		name           string
+		filter         ActivityFilter
+		expectedParams map[string]string
+	}{
+		{
+			name: "sensitive_data true",
+			filter: ActivityFilter{
+				SensitiveData: boolPtr(true),
+			},
+			expectedParams: map[string]string{
+				"sensitive_data": "true",
+			},
+		},
+		{
+			name: "sensitive_data false",
+			filter: ActivityFilter{
+				SensitiveData: boolPtr(false),
+			},
+			expectedParams: map[string]string{
+				"sensitive_data": "false",
+			},
+		},
+		{
+			name: "detection_type only",
+			filter: ActivityFilter{
+				DetectionType: "aws_access_key",
+			},
+			expectedParams: map[string]string{
+				"detection_type": "aws_access_key",
+			},
+		},
+		{
+			name: "severity only",
+			filter: ActivityFilter{
+				Severity: "critical",
+			},
+			expectedParams: map[string]string{
+				"severity": "critical",
+			},
+		},
+		{
+			name: "all sensitive data filters",
+			filter: ActivityFilter{
+				SensitiveData: boolPtr(true),
+				DetectionType: "stripe_key",
+				Severity:      "high",
+			},
+			expectedParams: map[string]string{
+				"sensitive_data": "true",
+				"detection_type": "stripe_key",
+				"severity":       "high",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := tt.filter.ToQueryParams()
+
+			for key, expectedValue := range tt.expectedParams {
+				assert.Equal(t, expectedValue, params.Get(key), "param %s", key)
+			}
+		})
+	}
+}
+
+func TestActivityListCmd_SensitiveDataFlags(t *testing.T) {
+	cmd := activityListCmd
+
+	// Check new sensitive data flags exist
+	sensitiveDataFlag := cmd.Flags().Lookup("sensitive-data")
+	assert.NotNil(t, sensitiveDataFlag, "sensitive-data flag should exist")
+	assert.Equal(t, "false", sensitiveDataFlag.DefValue)
+
+	detectionTypeFlag := cmd.Flags().Lookup("detection-type")
+	assert.NotNil(t, detectionTypeFlag, "detection-type flag should exist")
+
+	severityFlag := cmd.Flags().Lookup("severity")
+	assert.NotNil(t, severityFlag, "severity flag should exist")
+}
+
+func TestFormatSeverityWithColor(t *testing.T) {
+	tests := []struct {
+		name     string
+		severity string
+		noIcons  bool
+		contains string
+	}{
+		{
+			name:     "critical with icons",
+			severity: "critical",
+			noIcons:  false,
+			contains: "critical",
+		},
+		{
+			name:     "high with icons",
+			severity: "high",
+			noIcons:  false,
+			contains: "high",
+		},
+		{
+			name:     "medium with icons",
+			severity: "medium",
+			noIcons:  false,
+			contains: "medium",
+		},
+		{
+			name:     "low with icons",
+			severity: "low",
+			noIcons:  false,
+			contains: "low",
+		},
+		{
+			name:     "critical no icons",
+			severity: "critical",
+			noIcons:  true,
+			contains: "critical",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldNoIcons := activityNoIcons
+			activityNoIcons = tt.noIcons
+			defer func() { activityNoIcons = oldNoIcons }()
+
+			result := formatSeverityWithColor(tt.severity)
+			assert.Contains(t, result, tt.contains)
+		})
+	}
+}
+
+// Helper function to create bool pointer
+func boolPtr(b bool) *bool {
+	return &b
+}

@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 )
 
 // TestEmitActivitySystemStart verifies system_start event emission (Spec 024)
@@ -283,5 +285,186 @@ func TestEmitActivityConfigChange(t *testing.T) {
 		assert.NotNil(t, evt.Payload["new_values"])
 	case <-time.After(2 * time.Second):
 		t.Fatal("Did not receive activity.config_change event within timeout")
+	}
+}
+
+// TestEmitSensitiveDataDetected verifies sensitive_data.detected event emission (Spec 026)
+func TestEmitSensitiveDataDetected(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	rt := &Runtime{
+		logger:    logger,
+		eventSubs: make(map[chan Event]struct{}),
+	}
+
+	// Subscribe to events
+	eventChan := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(eventChan)
+
+	done := make(chan Event, 1)
+
+	// Listen for sensitive_data.detected event
+	go func() {
+		select {
+		case evt := <-eventChan:
+			if evt.Type == EventTypeSensitiveDataDetected {
+				done <- evt
+			}
+		case <-time.After(2 * time.Second):
+			t.Log("Timeout waiting for sensitive_data.detected event")
+		}
+	}()
+
+	// Emit sensitive data detected event
+	detectionTypes := []string{"credit_card", "api_key"}
+	rt.EmitSensitiveDataDetected(
+		"activity-123",
+		3,
+		"high",
+		detectionTypes,
+	)
+
+	// Wait for event
+	select {
+	case evt := <-done:
+		assert.Equal(t, EventTypeSensitiveDataDetected, evt.Type, "Event type should be sensitive_data.detected")
+		assert.NotNil(t, evt.Payload, "Event payload should not be nil")
+		assert.Equal(t, "activity-123", evt.Payload["activity_id"], "Event should contain activity_id")
+		assert.Equal(t, 3, evt.Payload["detection_count"], "Event should contain detection_count")
+		assert.Equal(t, "high", evt.Payload["max_severity"], "Event should contain max_severity")
+		assert.NotNil(t, evt.Payload["detection_types"], "Event should contain detection_types")
+		types := evt.Payload["detection_types"].([]string)
+		assert.Equal(t, 2, len(types), "Should have 2 detection types")
+		assert.Contains(t, types, "credit_card", "Should contain credit_card")
+		assert.Contains(t, types, "api_key", "Should contain api_key")
+		assert.NotZero(t, evt.Timestamp, "Event should have a timestamp")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Did not receive sensitive_data.detected event within timeout")
+	}
+}
+
+// TestActivityService_ExtractMaxSeverity verifies severity ordering logic (Spec 026)
+func TestActivityService_ExtractMaxSeverity(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	svc := NewActivityService(nil, logger)
+
+	tests := []struct {
+		name       string
+		detections []security.Detection
+		expected   string
+	}{
+		{
+			name:       "empty detections",
+			detections: []security.Detection{},
+			expected:   "",
+		},
+		{
+			name: "single low severity",
+			detections: []security.Detection{
+				{Type: "test", Severity: "low"},
+			},
+			expected: "low",
+		},
+		{
+			name: "critical highest",
+			detections: []security.Detection{
+				{Type: "test1", Severity: "low"},
+				{Type: "test2", Severity: "critical"},
+				{Type: "test3", Severity: "medium"},
+			},
+			expected: "critical",
+		},
+		{
+			name: "high beats medium and low",
+			detections: []security.Detection{
+				{Type: "test1", Severity: "low"},
+				{Type: "test2", Severity: "medium"},
+				{Type: "test3", Severity: "high"},
+			},
+			expected: "high",
+		},
+		{
+			name: "medium beats low",
+			detections: []security.Detection{
+				{Type: "test1", Severity: "low"},
+				{Type: "test2", Severity: "medium"},
+			},
+			expected: "medium",
+		},
+		{
+			name: "unknown severity fallback",
+			detections: []security.Detection{
+				{Type: "test", Severity: "unknown"},
+			},
+			expected: "unknown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := svc.extractMaxSeverity(tt.detections)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestActivityService_ExtractDetectionTypes verifies unique type extraction (Spec 026)
+func TestActivityService_ExtractDetectionTypes(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	svc := NewActivityService(nil, logger)
+
+	tests := []struct {
+		name       string
+		detections []security.Detection
+		expected   []string
+	}{
+		{
+			name:       "empty detections",
+			detections: []security.Detection{},
+			expected:   []string{},
+		},
+		{
+			name: "single type",
+			detections: []security.Detection{
+				{Type: "credit_card", Severity: "high"},
+			},
+			expected: []string{"credit_card"},
+		},
+		{
+			name: "multiple unique types",
+			detections: []security.Detection{
+				{Type: "credit_card", Severity: "high"},
+				{Type: "api_key", Severity: "critical"},
+				{Type: "ssh_private_key", Severity: "critical"},
+			},
+			expected: []string{"credit_card", "api_key", "ssh_private_key"},
+		},
+		{
+			name: "duplicate types filtered",
+			detections: []security.Detection{
+				{Type: "credit_card", Severity: "high"},
+				{Type: "credit_card", Severity: "high"},
+				{Type: "api_key", Severity: "critical"},
+			},
+			expected: []string{"credit_card", "api_key"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := svc.extractDetectionTypes(tt.detections)
+			assert.Equal(t, len(tt.expected), len(result))
+			for _, expectedType := range tt.expected {
+				assert.Contains(t, result, expectedType)
+			}
+		})
 	}
 }

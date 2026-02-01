@@ -32,3 +32,10 @@
 ## Security & Configuration Tips
 - Never hardcode secrets; load them via the tray secure store or environment lookups in `internal/secret`.
 - When editing configs, prefer `runtime.SaveConfiguration()` flows so disk state and in-memory state stay aligned; regenerated files land in `~/.mcpproxy/`.
+
+## Active Technologies
+- Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), regexp (stdlib), existing ActivityService (026-pii-detection)
+- BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord.Metadata extension (026-pii-detection)
+
+## Recent Changes
+- 026-pii-detection: Added Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), regexp (stdlib), existing ActivityService

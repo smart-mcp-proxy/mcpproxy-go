@@ -125,6 +125,32 @@
             </select>
           </div>
 
+          <!-- Sensitive Data Filter (Spec 026) -->
+          <div class="form-control min-w-[140px]">
+            <label class="label py-1">
+              <span class="label-text text-xs">Sensitive Data</span>
+            </label>
+            <select v-model="filterSensitiveData" class="select select-bordered select-sm">
+              <option value="">All</option>
+              <option value="true">⚠️ Detected</option>
+              <option value="false">Clean</option>
+            </select>
+          </div>
+
+          <!-- Severity Filter (Spec 026) -->
+          <div v-if="filterSensitiveData === 'true'" class="form-control min-w-[120px]">
+            <label class="label py-1">
+              <span class="label-text text-xs">Severity</span>
+            </label>
+            <select v-model="filterSeverity" class="select select-bordered select-sm">
+              <option value="">All</option>
+              <option value="critical">☢️ Critical</option>
+              <option value="high">⚠️ High</option>
+              <option value="medium">⚡ Medium</option>
+              <option value="low">ℹ️ Low</option>
+            </select>
+          </div>
+
           <!-- Session Filter -->
           <div class="form-control min-w-[180px]">
             <label class="label py-1">
@@ -203,6 +229,10 @@
           </span>
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
+          <span v-if="filterSensitiveData" class="badge badge-sm badge-outline">
+            Sensitive: {{ filterSensitiveData === 'true' ? '⚠️ Detected' : 'Clean' }}
+          </span>
+          <span v-if="filterSeverity" class="badge badge-sm badge-outline">Severity: {{ filterSeverity }}</span>
           <span v-if="filterSession" class="badge badge-sm badge-outline">Session: {{ getSessionLabel(filterSession) }}</span>
           <span v-if="filterStartDate" class="badge badge-sm badge-outline">From: {{ new Date(filterStartDate).toLocaleString() }}</span>
           <span v-if="filterEndDate" class="badge badge-sm badge-outline">To: {{ new Date(filterEndDate).toLocaleString() }}</span>
@@ -251,6 +281,7 @@
                   Server {{ getSortIndicator('server_name') }}
                 </th>
                 <th>Details</th>
+                <th>Sensitive</th>
                 <th>Intent</th>
                 <th class="cursor-pointer hover:bg-base-200" @click="sortBy('status')">
                   Status {{ getSortIndicator('status') }}
@@ -300,6 +331,20 @@
                     </span>
                     <span v-else class="text-base-content/40">-</span>
                   </div>
+                </td>
+                <!-- Sensitive Data column (Spec 026) -->
+                <td>
+                  <div
+                    v-if="activity.has_sensitive_data"
+                    class="tooltip tooltip-top"
+                    :data-tip="(activity.detection_types || []).join(', ')"
+                  >
+                    <span class="badge badge-sm gap-1" :class="getSeverityBadgeClass(activity.max_severity)">
+                      {{ getSeverityIcon(activity.max_severity) }}
+                      {{ activity.detection_types?.length || 0 }}
+                    </span>
+                  </div>
+                  <span v-else class="text-base-content/40">-</span>
                 </td>
                 <!-- Intent column (Spec 024: US5) -->
                 <td>
@@ -452,6 +497,53 @@
               </div>
             </div>
 
+            <!-- Sensitive Data Detection (Spec 026) -->
+            <div v-if="selectedActivity.has_sensitive_data">
+              <h4 class="font-semibold mb-2 text-warning flex items-center gap-2">
+                <span>{{ getSeverityIcon(selectedActivity.max_severity) }}</span>
+                Sensitive Data Detected
+              </h4>
+              <div class="alert" :class="selectedActivity.max_severity === 'critical' ? 'alert-error' : 'alert-warning'">
+                <div class="flex flex-col gap-2 w-full">
+                  <div class="flex items-center gap-2">
+                    <span class="font-semibold">Severity:</span>
+                    <span class="badge" :class="getSeverityBadgeClass(selectedActivity.max_severity)">
+                      {{ getSeverityIcon(selectedActivity.max_severity) }} {{ selectedActivity.max_severity || 'unknown' }}
+                    </span>
+                  </div>
+                  <div v-if="selectedActivity.detection_types && selectedActivity.detection_types.length > 0" class="flex flex-col gap-1">
+                    <span class="font-semibold">Detection Types:</span>
+                    <div class="flex flex-wrap gap-1">
+                      <span
+                        v-for="dtype in selectedActivity.detection_types"
+                        :key="dtype"
+                        class="badge badge-sm badge-outline"
+                      >
+                        {{ dtype }}
+                      </span>
+                    </div>
+                  </div>
+                  <div v-if="selectedActivity.metadata?.sensitive_data_detection" class="flex flex-col gap-1">
+                    <span class="font-semibold">Detections:</span>
+                    <div class="text-sm space-y-1">
+                      <div
+                        v-for="(detection, idx) in (selectedActivity.metadata.sensitive_data_detection.detections || [])"
+                        :key="idx"
+                        class="flex items-center gap-2 bg-base-200 rounded px-2 py-1"
+                      >
+                        <span class="badge badge-xs" :class="getSeverityBadgeClass(detection.severity)">
+                          {{ detection.severity }}
+                        </span>
+                        <span class="font-mono text-xs">{{ detection.type }}</span>
+                        <span class="text-base-content/60 text-xs">in {{ detection.location }}</span>
+                        <span v-if="detection.is_likely_example" class="badge badge-xs badge-ghost">example</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- Policy Decision Details (for blocked activities) -->
             <div v-if="selectedActivity.type === 'policy_decision' || selectedActivity.status === 'blocked'">
               <h4 class="font-semibold mb-2 text-warning flex items-center gap-2">
@@ -569,6 +661,8 @@ const selectedTypes = ref<string[]>([])
 const filterServer = ref('')
 const filterSession = ref('')
 const filterStatus = ref('')
+const filterSensitiveData = ref('') // Spec 026: '' | 'true' | 'false'
+const filterSeverity = ref('') // Spec 026: '' | 'critical' | 'high' | 'medium' | 'low'
 const filterStartDate = ref('')
 const filterEndDate = ref('')
 
@@ -638,7 +732,7 @@ const getSessionLabel = (sessionId: string): string => {
 }
 
 const hasActiveFilters = computed(() => {
-  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterStartDate.value || filterEndDate.value
+  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterStartDate.value || filterEndDate.value
 })
 
 const filteredActivities = computed(() => {
@@ -657,6 +751,16 @@ const filteredActivities = computed(() => {
   }
   if (filterStatus.value) {
     result = result.filter(a => a.status === filterStatus.value)
+  }
+  // Spec 026: Sensitive data filter
+  if (filterSensitiveData.value === 'true') {
+    result = result.filter(a => a.has_sensitive_data === true)
+  } else if (filterSensitiveData.value === 'false') {
+    result = result.filter(a => !a.has_sensitive_data)
+  }
+  // Spec 026: Severity filter (only when sensitive data filter is active)
+  if (filterSeverity.value && filterSensitiveData.value === 'true') {
+    result = result.filter(a => a.max_severity === filterSeverity.value)
   }
   if (filterStartDate.value) {
     const startTime = new Date(filterStartDate.value).getTime()
@@ -740,6 +844,8 @@ const clearFilters = () => {
   filterServer.value = ''
   filterSession.value = ''
   filterStatus.value = ''
+  filterSensitiveData.value = ''
+  filterSeverity.value = ''
   filterStartDate.value = ''
   filterEndDate.value = ''
   currentPage.value = 1
@@ -919,6 +1025,27 @@ const parseResponseData = (response: string | object): unknown => {
   }
 }
 
+// Spec 026: Sensitive data severity helpers
+const getSeverityIcon = (severity?: string): string => {
+  const icons: Record<string, string> = {
+    'critical': '☢️',
+    'high': '⚠️',
+    'medium': '⚡',
+    'low': 'ℹ️'
+  }
+  return icons[severity || ''] || '⚠️'
+}
+
+const getSeverityBadgeClass = (severity?: string): string => {
+  const classes: Record<string, string> = {
+    'critical': 'badge-error',
+    'high': 'badge-warning',
+    'medium': 'badge-info',
+    'low': 'badge-ghost'
+  }
+  return classes[severity || ''] || 'badge-warning'
+}
+
 const getIntentIcon = (operationType: string): string => {
   const icons: Record<string, string> = {
     'read': '📖',
@@ -965,7 +1092,7 @@ const getAdditionalMetadata = (activity: ActivityRecord): Record<string, unknown
 }
 
 // Reset page when filters change
-watch([selectedTypes, filterServer, filterStatus, filterStartDate, filterEndDate], () => {
+watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterStartDate, filterEndDate], () => {
   currentPage.value = 1
 }, { deep: true })
 
