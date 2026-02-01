@@ -1,0 +1,151 @@
+# OpenAPI Extensions for Sensitive Data Detection
+# These paths extend the existing oas/swagger.yaml
+
+paths:
+  /api/v1/activity:
+    get:
+      summary: List activity records with sensitive data filtering
+      parameters:
+        # Existing parameters...
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: server
+          in: query
+          schema:
+            type: string
+        - name: request_id
+          in: query
+          schema:
+            type: string
+        # NEW: Sensitive data filters
+        - name: sensitive_data
+          in: query
+          description: Filter by sensitive data detection (true = only records with detections)
+          schema:
+            type: boolean
+        - name: detection_type
+          in: query
+          description: Filter by specific detection type (e.g., 'aws_access_key', 'private_key')
+          schema:
+            type: string
+        - name: severity
+          in: query
+          description: Filter by minimum severity level
+          schema:
+            type: string
+            enum: [critical, high, medium, low]
+      responses:
+        '200':
+          description: List of activity records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  records:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ActivityRecordWithDetection'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+
+components:
+  schemas:
+    ActivityRecordWithDetection:
+      allOf:
+        - $ref: '#/components/schemas/ActivityRecord'
+        - type: object
+          properties:
+            has_sensitive_data:
+              type: boolean
+              description: Quick indicator for list view
+            detection_types:
+              type: array
+              items:
+                type: string
+              description: List of detection types found (for list view)
+            max_severity:
+              type: string
+              enum: [critical, high, medium, low]
+              description: Highest severity detection found
+
+    SensitiveDataDetectionResult:
+      type: object
+      required:
+        - detected
+        - scan_duration_ms
+      properties:
+        detected:
+          type: boolean
+        detections:
+          type: array
+          items:
+            $ref: '#/components/schemas/Detection'
+        scan_duration_ms:
+          type: integer
+        truncated:
+          type: boolean
+
+    Detection:
+      type: object
+      required:
+        - type
+        - category
+        - severity
+        - location
+      properties:
+        type:
+          type: string
+          example: aws_access_key
+        category:
+          type: string
+          enum:
+            - cloud_credentials
+            - private_key
+            - api_token
+            - auth_token
+            - sensitive_file
+            - database_credential
+            - high_entropy
+            - credit_card
+            - custom
+        severity:
+          type: string
+          enum: [critical, high, medium, low]
+        location:
+          type: string
+          example: arguments.api_key
+        is_likely_example:
+          type: boolean
+          default: false
+
+# SSE Event Schema Extension
+events:
+  sensitive_data.detected:
+    description: Emitted when sensitive data is detected in a tool call
+    payload:
+      type: object
+      properties:
+        activity_id:
+          type: string
+        server:
+          type: string
+        tool:
+          type: string
+        detections:
+          type: array
+          items:
+            $ref: '#/components/schemas/Detection'
+        timestamp:
+          type: string
+          format: date-time

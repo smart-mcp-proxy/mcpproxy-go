@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.io/schemas/sensitive-data-config.schema.json",
+  "title": "SensitiveDataDetectionConfig",
+  "description": "Configuration for sensitive data detection in mcp_config.json",
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "description": "Enable/disable sensitive data detection",
+      "default": true
+    },
+    "scan_requests": {
+      "type": "boolean",
+      "description": "Scan tool call arguments",
+      "default": true
+    },
+    "scan_responses": {
+      "type": "boolean",
+      "description": "Scan tool responses",
+      "default": true
+    },
+    "max_payload_size_kb": {
+      "type": "integer",
+      "description": "Maximum payload size to scan before truncating",
+      "minimum": 1,
+      "maximum": 10240,
+      "default": 1024
+    },
+    "entropy_threshold": {
+      "type": "number",
+      "description": "Shannon entropy threshold for high-entropy string detection",
+      "minimum": 0,
+      "maximum": 8,
+      "default": 4.5
+    },
+    "categories": {
+      "type": "object",
+      "description": "Enable/disable specific detection categories",
+      "additionalProperties": {
+        "type": "boolean"
+      },
+      "default": {
+        "cloud_credentials": true,
+        "private_key": true,
+        "api_token": true,
+        "auth_token": true,
+        "sensitive_file": true,
+        "database_credential": true,
+        "high_entropy": true,
+        "credit_card": true
+      }
+    },
+    "custom_patterns": {
+      "type": "array",
+      "description": "User-defined detection patterns",
+      "items": {
+        "$ref": "#/$defs/CustomPattern"
+      },
+      "default": []
+    },
+    "sensitive_keywords": {
+      "type": "array",
+      "description": "Exact strings to flag as sensitive",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    }
+  },
+  "$defs": {
+    "CustomPattern": {
+      "type": "object",
+      "required": ["name", "severity"],
+      "oneOf": [
+        {
+          "required": ["regex"],
+          "properties": {
+            "regex": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "required": ["keywords"],
+          "properties": {
+            "keywords": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          }
+        }
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique identifier for this pattern",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "regex": {
+          "type": "string",
+          "description": "Regular expression pattern (mutually exclusive with keywords)"
+        },
+        "keywords": {
+          "type": "array",
+          "description": "Exact strings to match (mutually exclusive with regex)",
+          "items": {
+            "type": "string"
+          }
+        },
+        "severity": {
+          "type": "string",
+          "description": "Risk level for matches",
+          "enum": ["critical", "high", "medium", "low"]
+        },
+        "category": {
+          "type": "string",
+          "description": "Category for grouping (defaults to 'custom')",
+          "default": "custom"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "enabled": true,
+      "scan_requests": true,
+      "scan_responses": true,
+      "max_payload_size_kb": 1024,
+      "entropy_threshold": 4.5,
+      "categories": {
+        "cloud_credentials": true,
+        "private_key": true,
+        "api_token": true,
+        "auth_token": true,
+        "sensitive_file": true,
+        "database_credential": true,
+        "high_entropy": true,
+        "credit_card": true
+      },
+      "custom_patterns": [
+        {
+          "name": "acme_api_key",
+          "regex": "ACME-KEY-[a-f0-9]{32}",
+          "severity": "high",
+          "category": "custom"
+        },
+        {
+          "name": "internal_confidential",
+          "keywords": ["internal-only", "confidential", "do-not-share"],
+          "severity": "medium"
+        }
+      ],
+      "sensitive_keywords": []
+    }
+  ]
+}
