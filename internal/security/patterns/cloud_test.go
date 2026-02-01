@@ -178,21 +178,39 @@ func TestAWSSecretKeyPattern(t *testing.T) {
 		wantExample bool
 	}{
 		{
-			name:        "example secret key",
+			name:        "standalone secret key - no context, should not match",
 			input:       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-			wantMatch:   true,
-			wantExample: true,
+			wantMatch:   false, // Now requires context
+			wantExample: false,
 		},
 		{
-			name:        "secret key in context",
+			name:        "secret key with aws_secret_access_key context",
 			input:       `aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`,
 			wantMatch:   true,
 			wantExample: true,
 		},
 		{
-			name:        "random 40 char base64-like",
-			input:       "abcdefghij1234567890ABCDEFGHIJ1234567890",
+			name:        "secret key with AWS_SECRET_KEY context",
+			input:       `AWS_SECRET_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"`,
 			wantMatch:   true,
+			wantExample: true,
+		},
+		{
+			name:        "secret key with secretAccessKey JSON context",
+			input:       `"secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"`,
+			wantMatch:   true,
+			wantExample: true,
+		},
+		{
+			name:        "random 40 char base64-like without context - no match",
+			input:       "abcdefghij1234567890ABCDEFGHIJ1234567890",
+			wantMatch:   false, // Now requires context
+			wantExample: false,
+		},
+		{
+			name:        "RSA private key content - should not match",
+			input:       "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8Pb",
+			wantMatch:   false, // No AWS context
 			wantExample: false,
 		},
 		{
@@ -325,23 +343,33 @@ func TestAzureClientSecretPattern(t *testing.T) {
 		wantMatch bool
 	}{
 		{
-			name:      "Azure client secret format 1",
+			name:      "standalone secret - no context, should not match",
 			input:     "7c9~abcdefghijklmnopqrstuvwxyz1234",
-			wantMatch: true,
+			wantMatch: false, // Now requires context
 		},
 		{
-			name:      "Azure client secret format 2",
+			name:      "standalone secret format 2 - no context, should not match",
 			input:     "abc.defghijklmnopqrstuvwxyz123456~",
-			wantMatch: true,
+			wantMatch: false, // Now requires context
 		},
 		{
-			name:      "Azure client secret in config",
+			name:      "Azure client secret with AZURE_CLIENT_SECRET context",
 			input:     `AZURE_CLIENT_SECRET=7c9~abcdefghijklmnopqrstuvwxyz1234`,
 			wantMatch: true,
 		},
 		{
-			name:      "too short",
-			input:     "7c9~abc",
+			name:      "Azure client secret with client_secret context",
+			input:     `client_secret: "7c9~abcdefghijklmnopqrstuvwxyz1234"`,
+			wantMatch: true,
+		},
+		{
+			name:      "Azure client secret with clientSecret JSON context",
+			input:     `"clientSecret": "abc.defghijklmnopqrstuvwxyz123456~"`,
+			wantMatch: true,
+		},
+		{
+			name:      "too short even with context",
+			input:     `AZURE_CLIENT_SECRET=7c9~abc`,
 			wantMatch: false,
 		},
 	}

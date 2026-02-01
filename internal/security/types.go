@@ -69,8 +69,14 @@ func NewResult() *Result {
 	}
 }
 
-// AddDetection adds a detection to the result
+// AddDetection adds a detection to the result, avoiding duplicates
 func (r *Result) AddDetection(d Detection) {
+	// Check for duplicate (same type + location)
+	for _, existing := range r.Detections {
+		if existing.Type == d.Type && existing.Location == d.Location {
+			return // Already have this detection
+		}
+	}
 	r.Detections = append(r.Detections, d)
 	r.Detected = true
 }

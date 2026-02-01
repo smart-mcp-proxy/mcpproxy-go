@@ -38,33 +38,18 @@ func awsAccessKeyPattern() *Pattern {
 }
 
 // AWS Secret Key pattern
-// Base64-encoded 40-character string
+// Requires keyword context to avoid false positives on random base64 strings
 func awsSecretKeyPattern() *Pattern {
+	// Pattern requires keyword context like: aws_secret_access_key=, AWS_SECRET_KEY:, "secretAccessKey":
+	// Handles formats: key=value, key: value, "key": "value"
 	return NewPattern("aws_secret_key").
-		WithRegex(`[A-Za-z0-9/+=]{40}`).
+		WithRegex(`(?i)(?:aws[_-]?secret[_-]?(?:access[_-]?)?key|secret[_-]?access[_-]?key|secretAccessKey)["']?\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})["']?`).
 		WithCategory(CategoryCloudCredentials).
 		WithSeverity(SeverityCritical).
 		WithDescription("AWS secret access key").
 		WithKnownExamples(
 			"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", // AWS documentation example
 		).
-		WithValidator(func(match string) bool {
-			// Must contain at least one lowercase, one uppercase, and one digit/special
-			hasLower := false
-			hasUpper := false
-			hasOther := false
-			for _, c := range match {
-				switch {
-				case c >= 'a' && c <= 'z':
-					hasLower = true
-				case c >= 'A' && c <= 'Z':
-					hasUpper = true
-				case (c >= '0' && c <= '9') || c == '/' || c == '+' || c == '=':
-					hasOther = true
-				}
-			}
-			return hasLower && hasUpper && hasOther
-		}).
 		Build()
 }
 
@@ -91,22 +76,15 @@ func gcpServiceAccountPattern() *Pattern {
 }
 
 // Azure Client Secret pattern
-// Typically 34+ characters with special characters
+// Requires keyword context to avoid false positives
 func azureClientSecretPattern() *Pattern {
+	// Pattern requires keyword context like: AZURE_CLIENT_SECRET=, client_secret:, "clientSecret":
+	// Handles formats: key=value, key: value, "key": "value"
 	return NewPattern("azure_client_secret").
-		WithRegex(`[a-zA-Z0-9~._-]{34,}`).
+		WithRegex(`(?i)(?:azure[_-]?client[_-]?secret|client[_-]?secret|clientSecret|AZURE_SECRET)["']?\s*[:=]\s*["']?([a-zA-Z0-9~._-]{34,})["']?`).
 		WithCategory(CategoryCloudCredentials).
 		WithSeverity(SeverityHigh).
 		WithDescription("Azure client secret / app password").
-		WithValidator(func(match string) bool {
-			// Must contain at least one special character (~ . _ -)
-			for _, c := range match {
-				if c == '~' || c == '.' || c == '_' || c == '-' {
-					return true
-				}
-			}
-			return false
-		}).
 		Build()
 }
 

@@ -1,6 +1,7 @@
 package security
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -140,6 +141,24 @@ func TestResult_AddDetection(t *testing.T) {
 func TestResult_AddDetection_Multiple(t *testing.T) {
 	result := NewResult()
 
+	// Add different types - all should be added
+	for i := 0; i < 5; i++ {
+		result.AddDetection(Detection{
+			Type:     fmt.Sprintf("test_type_%d", i),
+			Category: "test_category",
+			Severity: "medium",
+			Location: "arguments",
+		})
+	}
+
+	assert.True(t, result.Detected)
+	assert.Len(t, result.Detections, 5)
+}
+
+func TestResult_AddDetection_Deduplication(t *testing.T) {
+	result := NewResult()
+
+	// Add same type+location multiple times - should only store once
 	for i := 0; i < 5; i++ {
 		result.AddDetection(Detection{
 			Type:     "test_type",
@@ -150,7 +169,16 @@ func TestResult_AddDetection_Multiple(t *testing.T) {
 	}
 
 	assert.True(t, result.Detected)
-	assert.Len(t, result.Detections, 5)
+	assert.Len(t, result.Detections, 1, "duplicate detections should be deduplicated")
+
+	// Add same type but different location - should add both
+	result.AddDetection(Detection{
+		Type:     "test_type",
+		Category: "test_category",
+		Severity: "medium",
+		Location: "response",
+	})
+	assert.Len(t, result.Detections, 2, "same type with different location should be added")
 }
 
 // Integration tests for pattern detection
