@@ -906,6 +906,19 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 		return fmt.Errorf("failed to reload configuration: %w", err)
 	}
 
+	// When disabling a server, remove its tools from the search index
+	// This ensures disabled server tools don't appear in search results
+	if !enabled && r.indexManager != nil {
+		if err := r.indexManager.DeleteServerTools(serverName); err != nil {
+			r.logger.Warn("Failed to remove disabled server tools from index",
+				zap.String("server", serverName),
+				zap.Error(err))
+		} else {
+			r.logger.Info("Removed disabled server tools from search index",
+				zap.String("server", serverName))
+		}
+	}
+
 	// Wait for the server to start connecting (LoadConfiguredServers spawns goroutines)
 	// This ensures callers don't race with connection establishment
 	// The goroutine needs time to spawn and then AddServer needs to initiate connection
