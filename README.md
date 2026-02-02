@@ -4,7 +4,8 @@
 
 ### **📚 [Read the Documentation](https://docs.mcpproxy.app/)**
 
-[![MCPProxy Demo](https://img.youtube.com/vi/l4hh6WOuSFM/0.jpg)](https://youtu.be/l4hh6WOuSFM)
+<!-- Old video: https://youtu.be/l4hh6WOuSFM -->
+[![MCPProxy Demo](https://img.youtube.com/vi/2aKrgJnbbcw/0.jpg)](https://youtu.be/2aKrgJnbbcw)
 
 <a href="https://mcpproxy.app" target="_blank" rel="noopener">🌐 Visit mcpproxy.app</a>
 
