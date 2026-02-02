@@ -1138,14 +1138,19 @@ func (r *Runtime) RestartServer(serverName string) error {
 
 	r.logger.Info("Successfully restarted server", zap.String("server", serverName))
 
-	// Trigger tool reindexing asynchronously
+	// Trigger tool reindexing asynchronously and emit SSE event AFTER completion
+	// to ensure frontend receives accurate tool counts (fixes stale stats race condition)
 	go func() {
 		if err := r.DiscoverAndIndexTools(r.AppContext()); err != nil {
 			r.logger.Error("Failed to reindex tools after restart", zap.Error(err))
 		}
-	}()
 
-	r.emitServersChanged("restart", map[string]any{"server": serverName})
+		// Emit event AFTER tool discovery completes so frontend gets fresh stats
+		r.emitServersChanged("restart", map[string]any{
+			"server": serverName,
+			"reason": "tool_discovery_complete",
+		})
+	}()
 
 	return nil
 }
@@ -1182,16 +1187,26 @@ func (r *Runtime) HandleUpstreamServerChange(ctx context.Context) {
 	}
 
 	r.logger.Info("Upstream server configuration changed, triggering comprehensive update")
+
+	phase := r.CurrentStatus().Phase
+	r.UpdatePhase(phase, "Upstream servers updated")
+
+	// Tool discovery runs in background goroutine, and SSE event is emitted
+	// AFTER discovery completes to ensure frontend receives accurate tool counts.
+	// This fixes the race condition where stale stats were returned because
+	// the event was emitted before StateView was updated.
 	go func() {
 		if err := r.DiscoverAndIndexTools(ctx); err != nil {
 			r.logger.Error("Failed to update tool index after upstream change", zap.Error(err))
 		}
 		r.cleanupOrphanedIndexEntries()
-	}()
 
-	phase := r.CurrentStatus().Phase
-	r.UpdatePhase(phase, "Upstream servers updated")
-	r.emitServersChanged("upstream_change", map[string]any{"phase": phase})
+		// Emit event AFTER tool discovery completes so frontend gets fresh stats
+		r.emitServersChanged("tools_indexed", map[string]any{
+			"phase":  phase,
+			"reason": "tool_discovery_complete",
+		})
+	}()
 }
 
 func (r *Runtime) cleanupOrphanedIndexEntries() {
