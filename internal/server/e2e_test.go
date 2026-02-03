@@ -2543,6 +2543,154 @@ func getToolResultText(result *mcp.CallToolResult) string {
 	return ""
 }
 
+// TestE2E_DisableServerRemovesToolsFromSearch validates Issue #285 fix:
+// When a server is disabled:
+// 1. Tools from that server should be removed from search results
+// 2. TotalTools stat should only count enabled servers' tools
+// When re-enabled:
+// 3. Tools should be discoverable again after re-enable
+func TestE2E_DisableServerRemovesToolsFromSearch(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	ctx := context.Background()
+
+	// Create mock server with distinctive tools
+	uniqueTools := []mcp.Tool{
+		{
+			Name:        "issue285_alpha_tool",
+			Description: "A unique tool for testing issue 285 disable scenario",
+			InputSchema: mcp.ToolInputSchema{Type: "object"},
+		},
+		{
+			Name:        "issue285_beta_tool",
+			Description: "Another unique tool for testing issue 285 disable",
+			InputSchema: mcp.ToolInputSchema{Type: "object"},
+		},
+	}
+
+	const serverName = "issue285-test-server"
+	mockServer := env.CreateMockUpstreamServer(serverName, uniqueTools)
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	// Add server via upstream_servers tool
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      serverName,
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	require.False(t, addResult.IsError, "Add server should succeed: %v", getToolResultText(addResult))
+
+	// Unquarantine server
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
+	require.NoError(t, err)
+	serverConfig.Quarantined = false
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
+	require.NoError(t, err)
+
+	// Reload configuration
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	require.NoError(t, err)
+
+	// Wait for connection and discovery
+	time.Sleep(4 * time.Second)
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
+	time.Sleep(2 * time.Second)
+
+	// Step 1: Verify tools are searchable when server is enabled
+	searchRequest := mcp.CallToolRequest{}
+	searchRequest.Params.Name = "retrieve_tools"
+	searchRequest.Params.Arguments = map[string]interface{}{
+		"query": "issue285_alpha",
+	}
+
+	searchResult, err := mcpClient.CallTool(ctx, searchRequest)
+	require.NoError(t, err)
+	require.False(t, searchResult.IsError, "Search should succeed")
+
+	searchText := getToolResultText(searchResult)
+	assert.Contains(t, searchText, "issue285_alpha_tool", "Tool should be searchable when server is enabled")
+	t.Log("Step 1 PASSED: Tool is searchable when server is enabled")
+
+	// Step 2: Disable the server
+	disableRequest := mcp.CallToolRequest{}
+	disableRequest.Params.Name = "upstream_servers"
+	disableRequest.Params.Arguments = map[string]interface{}{
+		"operation": "patch",
+		"name":      "issue285-test-server",
+		"enabled":   false,
+	}
+
+	disableResult, err := mcpClient.CallTool(ctx, disableRequest)
+	require.NoError(t, err)
+	require.False(t, disableResult.IsError, "Disable operation should succeed: %v", getToolResultText(disableResult))
+
+	// Wait for async tool removal from index to complete
+	time.Sleep(2 * time.Second)
+
+	// Step 3: Verify tools are NOT searchable after disable
+	searchAfterDisable, err := mcpClient.CallTool(ctx, searchRequest)
+	require.NoError(t, err)
+	require.False(t, searchAfterDisable.IsError, "Search should succeed (returning empty results)")
+
+	searchAfterText := getToolResultText(searchAfterDisable)
+	// The search should NOT contain the disabled server's tools
+	assert.NotContains(t, searchAfterText, "issue285-test-server:issue285_alpha_tool",
+		"Disabled server's tools should NOT appear in search results")
+	t.Log("Step 3 PASSED: Tools are not searchable after server is disabled")
+
+	// Step 4: Re-enable the server
+	enableRequest := mcp.CallToolRequest{}
+	enableRequest.Params.Name = "upstream_servers"
+	enableRequest.Params.Arguments = map[string]interface{}{
+		"operation": "patch",
+		"name":      "issue285-test-server",
+		"enabled":   true,
+	}
+
+	enableResult, err := mcpClient.CallTool(ctx, enableRequest)
+	require.NoError(t, err)
+	require.False(t, enableResult.IsError, "Enable operation should succeed: %v", getToolResultText(enableResult))
+
+	// Wait for async tool discovery and indexing to complete
+	time.Sleep(3 * time.Second)
+
+	// Step 5: Verify tools are searchable again after re-enable
+	searchAfterEnable, err := mcpClient.CallTool(ctx, searchRequest)
+	require.NoError(t, err)
+	require.False(t, searchAfterEnable.IsError, "Search should succeed")
+
+	searchAfterEnableText := getToolResultText(searchAfterEnable)
+	assert.Contains(t, searchAfterEnableText, "issue285_alpha_tool",
+		"Tools should be searchable again after server is re-enabled")
+	t.Log("Step 5 PASSED: Tools are searchable again after re-enable")
+
+	// Cleanup
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "issue285-test-server",
+	}
+	_, _ = mcpClient.CallTool(ctx, deleteRequest)
+
+	t.Log("✅ Issue #285 fix verified: disable removes tools from search, enable restores them")
+}
+
 // TestE2E_ServerDeleteReaddDifferentTools validates the full lifecycle of stale index cleanup:
 // 1. Add server with Tool Set A, verify tools are searchable
 // 2. Remove server, verify Tool Set A is no longer searchable

@@ -283,7 +283,10 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// Extract numeric fields
 		if toolCount, ok := srvRaw["tool_count"].(int); ok {
 			srv.ToolCount = toolCount
-			stats.TotalTools += toolCount
+			// Only count tools from enabled servers in the total
+			if srv.Enabled {
+				stats.TotalTools += toolCount
+			}
 		}
 		if retryCount, ok := srvRaw["retry_count"].(int); ok {
 			srv.ReconnectCount = retryCount

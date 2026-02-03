@@ -388,6 +388,55 @@ func TestToolCacheInvalidation_MultipleServers(t *testing.T) {
 	assert.Contains(t, names2, "tool_y")
 }
 
+// TestToolCacheInvalidation_DisableServerRemovesTools tests that disabling a server
+// removes its tools from the search index (Issue #285 fix).
+// This ensures disabled servers' tools don't appear in search results.
+func TestToolCacheInvalidation_DisableServerRemovesTools(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:           tempDir,
+		Listen:            "127.0.0.1:0",
+		ToolResponseLimit: 0,
+		Servers:           []*config.ServerConfig{},
+	}
+
+	rt, err := New(cfg, "", zap.NewNop())
+	require.NoError(t, err)
+	defer func() {
+		_ = rt.Close()
+	}()
+
+	// Setup: Index tools for a server
+	initialTools := []*config.ToolMetadata{
+		{ServerName: "test-server", Name: "tool_a", Description: "Tool A", Hash: "hash_a"},
+		{ServerName: "test-server", Name: "tool_b", Description: "Tool B", Hash: "hash_b"},
+		{ServerName: "test-server", Name: "tool_c", Description: "Tool C", Hash: "hash_c"},
+	}
+
+	err = rt.indexManager.BatchIndexTools(initialTools)
+	require.NoError(t, err)
+
+	// Verify tools are indexed
+	indexedTools, err := rt.indexManager.GetToolsByServer("test-server")
+	require.NoError(t, err)
+	assert.Len(t, indexedTools, 3, "Should have 3 tools before disable")
+
+	// Simulate disabling server by calling DeleteServerTools directly
+	// (This is what EnableServer does when enabled=false)
+	err = rt.indexManager.DeleteServerTools("test-server")
+	require.NoError(t, err)
+
+	// Verify all tools are removed
+	indexedToolsAfter, err := rt.indexManager.GetToolsByServer("test-server")
+	require.NoError(t, err)
+	assert.Len(t, indexedToolsAfter, 0, "All tools should be removed when server is disabled")
+
+	// Verify server is no longer in indexed servers list
+	indexedServers, err := rt.indexManager.GetAllIndexedServerNames()
+	require.NoError(t, err)
+	assert.NotContains(t, indexedServers, "test-server", "Disabled server should not be in indexed list")
+}
+
 // TestToolCacheInvalidation_OrphanCleanup tests that orphaned index entries are cleaned up
 // when a server is removed from the config but its tools remain in the index.
 func TestToolCacheInvalidation_OrphanCleanup(t *testing.T) {

@@ -29,8 +29,11 @@ export const useServersStore = defineStore('servers', () => {
     servers.value.filter(s => s.quarantined)
   )
 
+  // Only count tools from enabled servers (Issue #285 fix)
   const totalTools = computed(() =>
-    servers.value.reduce((sum, server) => sum + server.tool_count, 0)
+    servers.value
+      .filter(s => s.enabled)
+      .reduce((sum, server) => sum + server.tool_count, 0)
   )
 
   // Helper: Smart merge servers to preserve object references and avoid full re-renders

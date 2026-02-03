@@ -123,6 +123,61 @@ func TestListServers(t *testing.T) {
 		assert.Equal(t, 1, stats.QuarantinedServers)
 	})
 
+	// T094: Test that TotalTools only counts enabled servers' tools (Issue #285 fix)
+	t.Run("TotalTools excludes disabled servers", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":          "server1",
+				"name":        "enabled-server",
+				"enabled":     true,
+				"connected":   true,
+				"quarantined": false,
+				"tool_count":  30,
+			},
+			{
+				"id":          "server2",
+				"name":        "disabled-server",
+				"enabled":     false,
+				"connected":   false,
+				"quarantined": false,
+				"tool_count":  20, // This should NOT be counted in TotalTools
+			},
+			{
+				"id":          "server3",
+				"name":        "another-enabled-server",
+				"enabled":     true,
+				"connected":   true,
+				"quarantined": false,
+				"tool_count":  10,
+			},
+		}
+
+		svc := NewService(runtime, cfg, emitter, nil, logger)
+		servers, stats, err := svc.ListServers(context.Background())
+
+		require.NoError(t, err)
+		assert.Len(t, servers, 3)
+		assert.Equal(t, 3, stats.TotalServers)
+		assert.Equal(t, 2, stats.ConnectedServers)
+
+		// CRITICAL: TotalTools should only count enabled servers (30 + 10 = 40)
+		// If TotalTools is 60 (30 + 20 + 10), the fix is broken
+		assert.Equal(t, 40, stats.TotalTools, "TotalTools should only count enabled servers' tools")
+
+		// Verify individual server tool counts are preserved
+		for _, srv := range servers {
+			switch srv.Name {
+			case "enabled-server":
+				assert.Equal(t, 30, srv.ToolCount)
+			case "disabled-server":
+				assert.Equal(t, 20, srv.ToolCount)
+			case "another-enabled-server":
+				assert.Equal(t, 10, srv.ToolCount)
+			}
+		}
+	})
+
 	t.Run("runtime error", func(t *testing.T) {
 		runtime := newMockRuntime()
 		runtime.getAllError = fmt.Errorf("runtime error")
