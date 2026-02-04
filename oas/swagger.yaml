@@ -1,5 +1,16 @@
 components:
   schemas:
+    config.ClassificationConfig:
+      properties:
+        default_unknown:
+          description: 'Treatment of unknown: "internal" or "external" (default: "internal")'
+          type: string
+        server_overrides:
+          additionalProperties:
+            type: string
+          description: server name → classification override
+          type: object
+      type: object
     config.Config:
       properties:
         activity_cleanup_interval_min:
@@ -82,6 +93,8 @@ components:
             $ref: '#/components/schemas/config.RegistryEntry'
           type: array
           uniqueItems: false
+        security:
+          $ref: '#/components/schemas/config.SecurityConfig'
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
         tls:
@@ -230,6 +243,59 @@ components:
           description: UI features
           type: boolean
       type: object
+    config.FlowPolicyConfig:
+      properties:
+        internal_to_external:
+          description: 'Action: allow/warn/ask/deny (default: "ask")'
+          type: string
+        require_justification:
+          description: Require justification for external flows
+          type: boolean
+        sensitive_data_external:
+          description: 'Action for sensitive data (default: "deny")'
+          type: string
+        suspicious_endpoints:
+          description: Always-deny endpoints
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        tool_overrides:
+          additionalProperties:
+            type: string
+          description: Per-tool action overrides
+          type: object
+      type: object
+    config.FlowTrackingConfig:
+      properties:
+        enabled:
+          description: 'Enable flow tracking (default: true)'
+          type: boolean
+        hash_min_length:
+          description: 'Min string length for per-field hashing (default: 20)'
+          type: integer
+        max_origins_per_session:
+          description: 'Max origins before eviction (default: 10000)'
+          type: integer
+        max_response_hash_bytes:
+          description: 'Max response size for hashing (default: 65536)'
+          type: integer
+        session_timeout_minutes:
+          description: 'Inactivity timeout (default: 30)'
+          type: integer
+      type: object
+    config.HooksConfig:
+      properties:
+        correlation_ttl_seconds:
+          description: 'TTL for pending correlations (default: 5)'
+          type: integer
+        enabled:
+          description: 'Enable hook support (default: true)'
+          type: boolean
+        fail_open:
+          description: 'Fail open when daemon unreachable (default: true)'
+          type: boolean
+      type: object
     config.IntentDeclarationConfig:
       description: Intent declaration settings (Spec 018)
       properties:
@@ -343,6 +409,18 @@ components:
           uniqueItems: false
         url:
           type: string
+      type: object
+    config.SecurityConfig:
+      description: Data flow security settings (Spec 027)
+      properties:
+        classification:
+          $ref: '#/components/schemas/config.ClassificationConfig'
+        flow_policy:
+          $ref: '#/components/schemas/config.FlowPolicyConfig'
+        flow_tracking:
+          $ref: '#/components/schemas/config.FlowTrackingConfig'
+        hooks:
+          $ref: '#/components/schemas/config.HooksConfig'
       type: object
     config.SensitiveDataDetectionConfig:
       description: Sensitive data detection settings (Spec 026)
@@ -642,6 +720,9 @@ components:
       - ActivityTypePolicyDecision
       - ActivityTypeQuarantineChange
       - ActivityTypeServerChange
+      - ActivityTypeHookEvaluation
+      - ActivityTypeFlowSummary
+      - ActivityTypeAuditorFinding
     contracts.ConfigApplyResult:
       properties:
         applied_immediately:
@@ -695,6 +776,11 @@ components:
             $ref: '#/components/schemas/contracts.OAuthRequirement'
           type: array
           uniqueItems: false
+        recommendations:
+          items:
+            $ref: '#/components/schemas/contracts.Recommendation'
+          type: array
+          uniqueItems: false
         runtime_warnings:
           items:
             type: string
@@ -704,33 +790,11 @@ components:
           type: string
         total_issues:
           type: integer
-        recommendations:
-          description: Suggested actions to improve system configuration (Spec 027)
-          items:
-            $ref: '#/components/schemas/contracts.Recommendation'
-          type: array
-          uniqueItems: false
         upstream_errors:
           items:
             $ref: '#/components/schemas/contracts.UpstreamError'
           type: array
           uniqueItems: false
-      type: object
-    contracts.Recommendation:
-      description: Suggested action to improve system configuration
-      properties:
-        id:
-          type: string
-        category:
-          type: string
-        title:
-          type: string
-        description:
-          type: string
-        command:
-          type: string
-        priority:
-          type: string
       type: object
     contracts.DockerStatus:
       properties:
@@ -1116,6 +1180,21 @@ components:
         success:
           description: Always true for successful start
           type: boolean
+      type: object
+    contracts.Recommendation:
+      properties:
+        category:
+          type: string
+        command:
+          type: string
+        description:
+          type: string
+        id:
+          type: string
+        priority:
+          type: string
+        title:
+          type: string
       type: object
     contracts.Registry:
       properties:
@@ -1539,6 +1618,81 @@ components:
         data:
           $ref: '#/components/schemas/contracts.InfoResponse'
       type: object
+    flow.FlowType:
+      description: Detected flow direction
+      type: string
+      x-enum-comments:
+        FlowExternalToExternal: Safe
+        FlowExternalToInternal: Safe (ingestion)
+        FlowInternalToExternal: CRITICAL (exfiltration)
+        FlowInternalToInternal: Safe
+      x-enum-varnames:
+      - FlowInternalToInternal
+      - FlowExternalToExternal
+      - FlowExternalToInternal
+      - FlowInternalToExternal
+    flow.HookEvaluateRequest:
+      properties:
+        event:
+          description: '"PreToolUse" or "PostToolUse"'
+          type: string
+        session_id:
+          description: Agent session identifier
+          type: string
+        tool_input:
+          additionalProperties: {}
+          description: Tool input arguments
+          type: object
+        tool_name:
+          description: Tool being called
+          type: string
+        tool_response:
+          description: Response (PostToolUse only)
+          type: string
+      type: object
+    flow.HookEvaluateResponse:
+      properties:
+        activity_id:
+          description: Activity log record ID
+          type: string
+        decision:
+          $ref: '#/components/schemas/flow.PolicyAction'
+        flow_type:
+          $ref: '#/components/schemas/flow.FlowType'
+        reason:
+          description: Explanation
+          type: string
+        risk_level:
+          $ref: '#/components/schemas/flow.RiskLevel'
+      type: object
+    flow.PolicyAction:
+      description: allow/warn/ask/deny
+      type: string
+      x-enum-comments:
+        PolicyAllow: Allow, log only
+        PolicyAsk: Return "ask" (user confirmation)
+        PolicyDeny: Block the call
+        PolicyWarn: Allow, log warning
+      x-enum-varnames:
+      - PolicyAllow
+      - PolicyWarn
+      - PolicyAsk
+      - PolicyDeny
+    flow.RiskLevel:
+      description: Assessed risk
+      type: string
+      x-enum-comments:
+        RiskCritical: internal→external with sensitive data
+        RiskHigh: internal→external, no justification
+        RiskLow: Log only
+        RiskMedium: internal→external, no sensitive data
+        RiskNone: Safe flow types
+      x-enum-varnames:
+      - RiskNone
+      - RiskLow
+      - RiskMedium
+      - RiskHigh
+      - RiskCritical
     httpapi.AddServerRequest:
       properties:
         args:
@@ -1794,7 +1948,7 @@ paths:
       description: Returns paginated list of activity records with optional filtering
       parameters:
       - description: Filter by activity type(s), comma-separated for multiple (Spec
-          024)
+          024, 027)
         in: query
         name: type
         schema:
@@ -2347,76 +2501,22 @@ paths:
       - diagnostics
   /api/v1/hooks/evaluate:
     post:
-      description: Evaluates a tool call from an agent hook for data flow security analysis.
-        Classifies the tool, tracks data origins, detects flow patterns, and returns
-        a policy decision (allow/warn/ask/deny).
+      description: Evaluates a tool call from an agent hook for data flow security
+        analysis. Classifies the tool, tracks data origins, detects flow patterns,
+        and returns a policy decision (allow/warn/ask/deny).
       requestBody:
         content:
           application/json:
             schema:
-              properties:
-                event:
-                  description: Hook event type
-                  enum:
-                  - PreToolUse
-                  - PostToolUse
-                  type: string
-                session_id:
-                  description: Agent session identifier
-                  type: string
-                tool_name:
-                  description: Name of the tool being called
-                  type: string
-                tool_input:
-                  description: Tool input arguments
-                  type: object
-                tool_response:
-                  description: Tool response (PostToolUse only)
-                  type: string
-              required:
-              - event
-              - session_id
-              - tool_name
-              type: object
+              $ref: '#/components/schemas/flow.HookEvaluateRequest'
+        description: Hook evaluation request
         required: true
       responses:
         "200":
           content:
             application/json:
               schema:
-                properties:
-                  decision:
-                    description: Policy decision
-                    enum:
-                    - allow
-                    - warn
-                    - ask
-                    - deny
-                    type: string
-                  reason:
-                    description: Explanation for the decision
-                    type: string
-                  risk_level:
-                    description: Assessed risk level
-                    enum:
-                    - none
-                    - low
-                    - medium
-                    - high
-                    - critical
-                    type: string
-                  flow_type:
-                    description: Detected data flow direction
-                    enum:
-                    - internal_to_internal
-                    - internal_to_external
-                    - external_to_internal
-                    - external_to_external
-                    type: string
-                  activity_id:
-                    description: Activity log record ID
-                    type: string
-                type: object
+                $ref: '#/components/schemas/flow.HookEvaluateResponse'
           description: Hook evaluation result
         "400":
           content:
@@ -3701,8 +3801,7 @@ paths:
   /api/v1/status:
     get:
       description: Get comprehensive server status including running state, listen
-        address, upstream statistics, timestamp, security_coverage (proxy_only or full),
-        and hooks_active (boolean) fields for Spec 027 data flow security
+        address, upstream statistics, and timestamp
       responses:
         "200":
           content:

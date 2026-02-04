@@ -130,6 +130,8 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param sensitive_data query bool false "Filter by sensitive data detection (true=has detections, false=no detections)"
 // @Param detection_type query string false "Filter by specific detection type (e.g., 'aws_access_key', 'credit_card')"
 // @Param severity query string false "Filter by severity level" Enums(critical, high, medium, low)
+// @Param flow_type query string false "Filter by flow type (Spec 027)" Enums(internal_to_internal, internal_to_external, external_to_internal, external_to_external)
+// @Param risk_level query string false "Filter by minimum risk level (Spec 027, >= comparison)" Enums(none, low, medium, high, critical)
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"

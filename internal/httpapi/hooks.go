@@ -7,8 +7,20 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 )
 
-// handleHookEvaluate handles POST /api/v1/hooks/evaluate
-// This endpoint evaluates tool calls from agent hooks for data flow security.
+// handleHookEvaluate godoc
+// @Summary Evaluate tool call for data flow security
+// @Description Evaluates a tool call from an agent hook for data flow security analysis. Classifies the tool, tracks data origins, detects flow patterns, and returns a policy decision (allow/warn/ask/deny).
+// @Tags hooks
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param request body flow.HookEvaluateRequest true "Hook evaluation request"
+// @Success 200 {object} flow.HookEvaluateResponse "Hook evaluation result"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request - missing required fields"
+// @Failure 401 {object} contracts.ErrorResponse "Unauthorized - missing or invalid API key"
+// @Failure 500 {object} contracts.ErrorResponse "Hook evaluation failed"
+// @Router /api/v1/hooks/evaluate [post]
 func (s *Server) handleHookEvaluate(w http.ResponseWriter, r *http.Request) {
 	var req flow.HookEvaluateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
