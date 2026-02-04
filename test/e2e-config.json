@@ -1,5 +1,5 @@
 {
-  "listen": ":8081",
+  "listen": ":8099",
   "enable_socket": true,
   "data_dir": "./test-data",
   "enable_tray": false,
@@ -17,7 +17,7 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-09-23T10:13:46.357736+03:00"
+      "updated": "2026-02-04T20:09:48.434154+02:00"
     }
   ],
   "top_k": 10,
@@ -49,7 +49,7 @@
     "compress": true,
     "json_format": false
   },
-  "api_key": "15152abefac37127746d2bb27a4157da95d13ff4a6036abb1f40be3a343dddaa",
+  "api_key": "a49e43e8ada82e71076141709b2e7ebcc5ecdef17e804ca83330f7000df2bec6",
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,
@@ -195,12 +195,13 @@
     "max_payload_size_kb": 1024,
     "entropy_threshold": 4.5,
     "categories": {
-      "cloud_credentials": true,
-      "private_key": true,
       "api_token": true,
-      "database_credential": true,
+      "auth_token": true,
+      "cloud_credentials": true,
       "credit_card": true,
+      "database_credential": true,
       "high_entropy": true,
+      "private_key": true,
       "sensitive_file": true
     }
   }

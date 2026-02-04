@@ -207,6 +207,7 @@ func main() {
 	rootCmd.AddCommand(securityCmd)
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
+	rootCmd.AddCommand(hookCmd)
 
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added

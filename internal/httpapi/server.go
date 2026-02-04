@@ -20,6 +20,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
@@ -143,6 +144,10 @@ type ServerController interface {
 	// successfully called this mcpproxy. Returns FirstMCPClientEver and
 	// MCPClientsSeenEver from the activation bucket.
 	GetActivationFirstMCPClient() (firstEver bool, seen []string)
+
+	// Spec 027: Flow security
+	IsHooksActive() bool
+	EvaluateHook(ctx context.Context, req *flow.HookEvaluateRequest) (*flow.HookEvaluateResponse, error)
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -619,6 +624,9 @@ func (s *Server) setupRoutes() {
 		r.Get("/registries", s.handleListRegistries)
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
 
+		// Hook evaluation (Spec 027)
+		r.Post("/hooks/evaluate", s.handleHookEvaluate)
+
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
 		r.Get("/activity/summary", s.handleActivitySummary)
@@ -850,6 +858,15 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	// sidecar with its 1h TTL; nil on Linux / tray not running / malformed.
 	response["launch_source"] = string(telemetry.DetectLaunchSourceOnce())
 	response["autostart_enabled"] = telemetry.DefaultAutostartReader().Read()
+
+	// Spec 027: Add security coverage information
+	hooksActive := s.controller.IsHooksActive()
+	if hooksActive {
+		response["security_coverage"] = "full"
+	} else {
+		response["security_coverage"] = "proxy_only"
+	}
+	response["hooks_active"] = hooksActive
 
 	s.writeSuccess(w, response)
 }

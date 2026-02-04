@@ -30,6 +30,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -83,6 +84,7 @@ type Runtime struct {
 	telemetryService  *telemetry.Service    // Anonymous usage telemetry (Spec 036)
 	managementService interface{}           // Initialized later to avoid import cycle
 	activityService   *ActivityService      // Activity logging service
+	flowService       *flow.FlowService     // Spec 027: Data flow security
 
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
@@ -198,9 +200,10 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	activityService := NewActivityService(storageManager, logger)
 
 	// Initialize sensitive data detector if configured (Spec 026)
+	var sensitiveDetector *security.Detector
 	if cfg.SensitiveDataDetection != nil && cfg.SensitiveDataDetection.IsEnabled() {
-		detector := security.NewDetector(cfg.SensitiveDataDetection)
-		activityService.SetDetector(detector)
+		sensitiveDetector = security.NewDetector(cfg.SensitiveDataDetection)
+		activityService.SetDetector(sensitiveDetector)
 		logger.Info("Sensitive data detection enabled",
 			zap.Bool("scan_requests", cfg.SensitiveDataDetection.ScanRequests),
 			zap.Bool("scan_responses", cfg.SensitiveDataDetection.ScanResponses))
@@ -232,6 +235,41 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		}
 	}
 
+	// Initialize data flow security service (Spec 027)
+	var flowService *flow.FlowService
+	secCfg := cfg.GetDataFlowSecurityConfig()
+	if secCfg.IsFlowTrackingEnabled() {
+		flowCfg := secCfg.GetFlowTracking()
+		classCfg := secCfg.GetClassification()
+		policyCfg := secCfg.GetFlowPolicy()
+
+		classifier := flow.NewClassifier(classCfg.ServerOverrides)
+		tracker := flow.NewFlowTracker(&flow.TrackerConfig{
+			SessionTimeoutMin:    flowCfg.SessionTimeoutMin,
+			MaxOriginsPerSession: flowCfg.MaxOriginsPerSession,
+			HashMinLength:        flowCfg.HashMinLength,
+			MaxResponseHashBytes: flowCfg.MaxResponseHashBytes,
+		})
+		policy := flow.NewPolicyEvaluator(&flow.PolicyConfig{
+			InternalToExternal:    flow.PolicyAction(policyCfg.InternalToExternal),
+			SensitiveDataExternal: flow.PolicyAction(policyCfg.SensitiveDataExternal),
+			RequireJustification:  policyCfg.RequireJustification,
+			SuspiciousEndpoints:   policyCfg.SuspiciousEndpoints,
+			ToolOverrides:         convertToolOverrides(policyCfg.ToolOverrides),
+		})
+
+		var det flow.SensitiveDataDetector
+		if sensitiveDetector != nil {
+			det = flow.NewDetectorAdapter(sensitiveDetector)
+		}
+
+		correlator := flow.NewCorrelator(5 * time.Second)
+		flowService = flow.NewFlowService(classifier, tracker, policy, det, correlator)
+		logger.Info("Data flow security enabled (Spec 027)",
+			zap.Int("session_timeout_min", flowCfg.SessionTimeoutMin),
+			zap.Int("max_origins", flowCfg.MaxOriginsPerSession))
+	}
+
 	rt := &Runtime{
 		cfg:             cfg,
 		cfgPath:         cfgPath,
@@ -246,6 +284,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		tokenizer:       tokenizer,
 		refreshManager:  refreshManager,
 		activityService: activityService,
+		flowService:     flowService,
 		supervisor:      supervisorInstance,
 		appCtx:          appCtx,
 		appCancel:       appCancel,
@@ -266,6 +305,18 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	rt.coalescer.start(appCtx)
 
 	return rt, nil
+}
+
+// convertToolOverrides converts string-valued overrides to PolicyAction-valued overrides.
+func convertToolOverrides(overrides map[string]string) map[string]flow.PolicyAction {
+	if len(overrides) == 0 {
+		return nil
+	}
+	result := make(map[string]flow.PolicyAction, len(overrides))
+	for k, v := range overrides {
+		result[k] = flow.PolicyAction(v)
+	}
+	return result
 }
 
 // Config returns the underlying configuration pointer.
@@ -529,6 +580,11 @@ func (r *Runtime) Truncator() *truncate.Truncator {
 // ActivityService exposes the activity service for testing.
 func (r *Runtime) ActivityService() *ActivityService {
 	return r.activityService
+}
+
+// FlowService exposes the data flow security service (Spec 027).
+func (r *Runtime) FlowService() *flow.FlowService {
+	return r.flowService
 }
 
 // AppContext returns the long-lived runtime context.

@@ -32,6 +32,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
@@ -144,6 +145,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	)
 
 	server.mcpProxy = mcpProxy
+
+	// Spec 027: Inject flow service if available
+	if fs := rt.FlowService(); fs != nil {
+		mcpProxy.SetFlowService(fs)
+	}
 
 	go server.forwardRuntimeStatus()
 	go server.listenForRoutingModeRefresh()
@@ -2678,4 +2684,64 @@ func (p *configServerInfoProvider) IsConnected(serverName string) bool {
 		return false
 	}
 	return serverStatus.Connected
+}
+
+// IsHooksActive returns true if any agent hook sessions are active (Spec 027).
+// Currently always returns false since hook integration (Phase 6+) is not yet implemented.
+func (s *Server) IsHooksActive() bool {
+	return false
+}
+
+// EvaluateHook evaluates a tool call via the data flow security service (Spec 027).
+// Logs the evaluation as a hook_evaluation activity record and emits flow.alert for high/critical risks.
+func (s *Server) EvaluateHook(ctx context.Context, req *flow.HookEvaluateRequest) (*flow.HookEvaluateResponse, error) {
+	fs := s.runtime.FlowService()
+	if fs == nil {
+		// Flow service not initialized — allow by default
+		return &flow.HookEvaluateResponse{
+			Decision: flow.PolicyAllow,
+			Reason:   "flow service not available",
+		}, nil
+	}
+
+	resp := fs.Evaluate(req)
+
+	// Determine classification for the tool
+	classification := ""
+	if req.ToolName != "" {
+		classResult := fs.ClassifyTool("", req.ToolName)
+		classification = string(classResult)
+	}
+
+	// Emit hook_evaluation activity event (Spec 027 T101/T104)
+	s.runtime.EmitActivityHookEvaluation(
+		req.ToolName,
+		req.SessionID,
+		req.Event,
+		classification,
+		string(resp.FlowType),
+		string(resp.RiskLevel),
+		string(resp.Decision),
+		resp.Reason,
+		"full", // Hook evaluations always have full coverage
+	)
+
+	// Emit flow.alert SSE event for high/critical risk decisions (Spec 027 T104)
+	if resp.RiskLevel == flow.RiskHigh || resp.RiskLevel == flow.RiskCritical {
+		hasSensitiveData := false
+		// Check if the flow involves sensitive data by inspecting edges
+		if resp.FlowType == flow.FlowInternalToExternal {
+			hasSensitiveData = resp.RiskLevel == flow.RiskCritical
+		}
+		s.runtime.EmitFlowAlert(
+			resp.ActivityID,
+			req.SessionID,
+			string(resp.FlowType),
+			string(resp.RiskLevel),
+			req.ToolName,
+			hasSensitiveData,
+		)
+	}
+
+	return resp, nil
 }
