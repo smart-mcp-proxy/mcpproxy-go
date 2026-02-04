@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // TestEmitActivitySystemStart verifies system_start event emission (Spec 024)
@@ -411,6 +412,306 @@ func TestActivityService_ExtractMaxSeverity(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestEmitActivityHookEvaluation verifies hook_evaluation event emission (Spec 027)
+func TestEmitActivityHookEvaluation(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	rt := &Runtime{
+		logger:    logger,
+		eventSubs: make(map[chan Event]struct{}),
+	}
+
+	// Subscribe to events
+	eventChan := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(eventChan)
+
+	done := make(chan Event, 1)
+
+	// Listen for activity.hook_evaluation.completed event
+	go func() {
+		select {
+		case evt := <-eventChan:
+			if evt.Type == EventTypeActivityHookEvaluation {
+				done <- evt
+			}
+		case <-time.After(2 * time.Second):
+			t.Log("Timeout waiting for activity.hook_evaluation.completed event")
+		}
+	}()
+
+	// Emit hook evaluation event
+	rt.EmitActivityHookEvaluation(
+		"WebFetch",
+		"hook-session-123",
+		"PreToolUse",
+		"external",
+		"internal_to_external",
+		"high",
+		"deny",
+		"sensitive data flowing to external tool",
+		"full",
+	)
+
+	// Wait for event
+	select {
+	case evt := <-done:
+		assert.Equal(t, EventTypeActivityHookEvaluation, evt.Type)
+		assert.NotNil(t, evt.Payload)
+		assert.Equal(t, "WebFetch", evt.Payload["tool_name"])
+		assert.Equal(t, "hook-session-123", evt.Payload["session_id"])
+		assert.Equal(t, "PreToolUse", evt.Payload["event"])
+		assert.Equal(t, "external", evt.Payload["classification"])
+		assert.Equal(t, "internal_to_external", evt.Payload["flow_type"])
+		assert.Equal(t, "high", evt.Payload["risk_level"])
+		assert.Equal(t, "deny", evt.Payload["policy_decision"])
+		assert.Equal(t, "sensitive data flowing to external tool", evt.Payload["policy_reason"])
+		assert.Equal(t, "full", evt.Payload["coverage_mode"])
+		assert.NotZero(t, evt.Timestamp)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Did not receive activity.hook_evaluation.completed event within timeout")
+	}
+}
+
+// TestEmitFlowAlert verifies flow.alert event emission for high/critical risk (Spec 027)
+func TestEmitFlowAlert(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	rt := &Runtime{
+		logger:    logger,
+		eventSubs: make(map[chan Event]struct{}),
+	}
+
+	// Subscribe to events
+	eventChan := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(eventChan)
+
+	done := make(chan Event, 1)
+
+	// Listen for flow.alert event
+	go func() {
+		select {
+		case evt := <-eventChan:
+			if evt.Type == EventTypeFlowAlert {
+				done <- evt
+			}
+		case <-time.After(2 * time.Second):
+			t.Log("Timeout waiting for flow.alert event")
+		}
+	}()
+
+	// Emit flow alert
+	rt.EmitFlowAlert("activity-456", "hook-session-789", "internal_to_external", "critical", "WebFetch", true)
+
+	// Wait for event
+	select {
+	case evt := <-done:
+		assert.Equal(t, EventTypeFlowAlert, evt.Type)
+		assert.Equal(t, "activity-456", evt.Payload["activity_id"])
+		assert.Equal(t, "hook-session-789", evt.Payload["session_id"])
+		assert.Equal(t, "internal_to_external", evt.Payload["flow_type"])
+		assert.Equal(t, "critical", evt.Payload["risk_level"])
+		assert.Equal(t, "WebFetch", evt.Payload["tool_name"])
+		assert.Equal(t, true, evt.Payload["has_sensitive_data"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Did not receive flow.alert event within timeout")
+	}
+}
+
+// TestHandleHookEvaluation verifies handleHookEvaluation creates correct activity record (Spec 027)
+func TestHandleHookEvaluation(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	// Create a test storage manager
+	tmpDir := t.TempDir()
+	sm, err := newTestStorageManager(tmpDir, logger)
+	require.NoError(t, err)
+	defer sm.Close()
+
+	svc := NewActivityService(sm, logger)
+
+	// Create a hook evaluation event
+	evt := newEvent(EventTypeActivityHookEvaluation, map[string]any{
+		"tool_name":       "WebFetch",
+		"session_id":      "hook-sess-001",
+		"event":           "PreToolUse",
+		"classification":  "external",
+		"flow_type":       "internal_to_external",
+		"risk_level":      "critical",
+		"policy_decision": "deny",
+		"policy_reason":   "sensitive data exfiltration detected",
+		"coverage_mode":   "full",
+	})
+
+	// Handle the event
+	svc.handleEvent(evt)
+
+	// Verify the activity record was saved
+	filter := storage.DefaultActivityFilter()
+	filter.Types = []string{"hook_evaluation"}
+	records, total, err := sm.ListActivities(filter)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, records, 1)
+
+	record := records[0]
+	assert.Equal(t, storage.ActivityTypeHookEvaluation, record.Type)
+	assert.Equal(t, "WebFetch", record.ToolName)
+	assert.Equal(t, "hook-sess-001", record.SessionID)
+	assert.Equal(t, "deny", record.Status)
+
+	// Verify metadata
+	require.NotNil(t, record.Metadata)
+	assert.Equal(t, "PreToolUse", record.Metadata["event"])
+	assert.Equal(t, "external", record.Metadata["classification"])
+	assert.Equal(t, "full", record.Metadata["coverage_mode"])
+
+	// Verify flow_analysis nested object
+	flowAnalysis, ok := record.Metadata["flow_analysis"].(map[string]interface{})
+	require.True(t, ok, "metadata should contain flow_analysis map")
+	assert.Equal(t, "internal_to_external", flowAnalysis["flow_type"])
+	assert.Equal(t, "critical", flowAnalysis["risk_level"])
+	assert.Equal(t, "deny", flowAnalysis["policy_decision"])
+	assert.Equal(t, "sensitive data exfiltration detected", flowAnalysis["policy_reason"])
+}
+
+// TestHandleHookEvaluation_AllowDecision verifies allow decisions are recorded (Spec 027)
+func TestHandleHookEvaluation_AllowDecision(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	tmpDir := t.TempDir()
+	sm, err := newTestStorageManager(tmpDir, logger)
+	require.NoError(t, err)
+	defer sm.Close()
+
+	svc := NewActivityService(sm, logger)
+
+	evt := newEvent(EventTypeActivityHookEvaluation, map[string]any{
+		"tool_name":       "Read",
+		"session_id":      "hook-sess-002",
+		"event":           "PostToolUse",
+		"classification":  "internal",
+		"flow_type":       "",
+		"risk_level":      "none",
+		"policy_decision": "allow",
+		"policy_reason":   "origin recorded",
+		"coverage_mode":   "full",
+	})
+
+	svc.handleEvent(evt)
+
+	filter := storage.DefaultActivityFilter()
+	filter.Types = []string{"hook_evaluation"}
+	records, total, err := sm.ListActivities(filter)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	assert.Equal(t, "allow", records[0].Status)
+	assert.Equal(t, "Read", records[0].ToolName)
+}
+
+// TestActivityFilter_FlowType verifies flow_type filter (Spec 027)
+func TestActivityFilter_FlowType(t *testing.T) {
+	// Build a record with flow_analysis metadata
+	record := &storage.ActivityRecord{
+		Type:   storage.ActivityTypeHookEvaluation,
+		Status: "deny",
+		Metadata: map[string]interface{}{
+			"flow_analysis": map[string]interface{}{
+				"flow_type":  "internal_to_external",
+				"risk_level": "critical",
+			},
+		},
+	}
+
+	// Should match internal_to_external
+	filter := storage.DefaultActivityFilter()
+	filter.FlowType = "internal_to_external"
+	assert.True(t, filter.Matches(record))
+
+	// Should not match internal_to_internal
+	filter.FlowType = "internal_to_internal"
+	assert.False(t, filter.Matches(record))
+
+	// Empty flow_type should match everything
+	filter.FlowType = ""
+	filter.RiskLevel = ""
+	assert.True(t, filter.Matches(record))
+}
+
+// TestActivityFilter_RiskLevel verifies risk_level >= filter (Spec 027)
+func TestActivityFilter_RiskLevel(t *testing.T) {
+	// Record with critical risk
+	record := &storage.ActivityRecord{
+		Type:   storage.ActivityTypeHookEvaluation,
+		Status: "deny",
+		Metadata: map[string]interface{}{
+			"flow_analysis": map[string]interface{}{
+				"flow_type":  "internal_to_external",
+				"risk_level": "critical",
+			},
+		},
+	}
+
+	// Filter for high should match critical (critical >= high)
+	filter := storage.DefaultActivityFilter()
+	filter.RiskLevel = "high"
+	assert.True(t, filter.Matches(record))
+
+	// Filter for critical should match critical
+	filter.RiskLevel = "critical"
+	assert.True(t, filter.Matches(record))
+
+	// Record with low risk
+	lowRecord := &storage.ActivityRecord{
+		Type:   storage.ActivityTypeHookEvaluation,
+		Status: "allow",
+		Metadata: map[string]interface{}{
+			"flow_analysis": map[string]interface{}{
+				"flow_type":  "internal_to_internal",
+				"risk_level": "low",
+			},
+		},
+	}
+
+	// Filter for high should NOT match low
+	filter.RiskLevel = "high"
+	assert.False(t, filter.Matches(lowRecord))
+
+	// Filter for low should match low
+	filter.RiskLevel = "low"
+	assert.True(t, filter.Matches(lowRecord))
+}
+
+// TestActivityFilter_HookEvaluationType verifies type=hook_evaluation filter (Spec 027)
+func TestActivityFilter_HookEvaluationType(t *testing.T) {
+	hookRecord := &storage.ActivityRecord{
+		Type:   storage.ActivityTypeHookEvaluation,
+		Status: "deny",
+	}
+	toolCallRecord := &storage.ActivityRecord{
+		Type:   storage.ActivityTypeToolCall,
+		Status: "success",
+	}
+
+	filter := storage.DefaultActivityFilter()
+	filter.Types = []string{"hook_evaluation"}
+
+	assert.True(t, filter.Matches(hookRecord))
+	assert.False(t, filter.Matches(toolCallRecord))
+}
+
+// newTestStorageManager creates a temporary storage manager for testing
+func newTestStorageManager(dir string, logger *zap.Logger) (*storage.Manager, error) {
+	return storage.NewManager(dir, logger.Sugar())
 }
 
 // TestActivityService_ExtractDetectionTypes verifies unique type extraction (Spec 026)

@@ -42,6 +42,14 @@ const (
 	// Spec 026: Sensitive data detection event
 	// EventTypeSensitiveDataDetected is emitted when sensitive data is detected in a tool call.
 	EventTypeSensitiveDataDetected EventType = "sensitive_data.detected"
+
+	// Spec 027: Data flow security events
+	// EventTypeActivityHookEvaluation is emitted when a hook-based security evaluation completes.
+	EventTypeActivityHookEvaluation EventType = "activity.hook_evaluation.completed"
+	// EventTypeFlowAlert is emitted when a high or critical risk data flow is detected.
+	EventTypeFlowAlert EventType = "flow.alert"
+	// EventTypeActivityFlowSummary is emitted when a flow session expires and a summary is generated.
+	EventTypeActivityFlowSummary EventType = "activity.flow_summary.completed"
 )
 
 // Event is a typed notification published by the runtime event bus.

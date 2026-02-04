@@ -202,6 +202,10 @@ func (s *ActivityService) handleEvent(evt Event) {
 		s.handleInternalToolCall(evt)
 	case EventTypeActivityConfigChange:
 		s.handleConfigChange(evt)
+	case EventTypeActivityHookEvaluation:
+		s.handleHookEvaluation(evt)
+	case EventTypeActivityFlowSummary:
+		s.handleFlowSummary(evt)
 	default:
 		// Ignore other event types
 	}
@@ -527,6 +531,106 @@ func (s *ActivityService) handleConfigChange(evt Event) {
 			zap.String("id", record.ID),
 			zap.String("action", action),
 			zap.String("affected_entity", affectedEntity))
+	}
+}
+
+// handleHookEvaluation persists a hook evaluation event (Spec 027).
+func (s *ActivityService) handleHookEvaluation(evt Event) {
+	toolName := getStringPayload(evt.Payload, "tool_name")
+	sessionID := getStringPayload(evt.Payload, "session_id")
+	eventType := getStringPayload(evt.Payload, "event")
+	classification := getStringPayload(evt.Payload, "classification")
+	flowType := getStringPayload(evt.Payload, "flow_type")
+	riskLevel := getStringPayload(evt.Payload, "risk_level")
+	policyDecision := getStringPayload(evt.Payload, "policy_decision")
+	policyReason := getStringPayload(evt.Payload, "policy_reason")
+	coverageMode := getStringPayload(evt.Payload, "coverage_mode")
+
+	metadata := map[string]interface{}{
+		"event":          eventType,
+		"classification": classification,
+		"coverage_mode":  coverageMode,
+		"flow_analysis": map[string]interface{}{
+			"flow_type":       flowType,
+			"risk_level":      riskLevel,
+			"policy_decision": policyDecision,
+			"policy_reason":   policyReason,
+		},
+	}
+
+	record := &storage.ActivityRecord{
+		Type:      storage.ActivityTypeHookEvaluation,
+		Source:    storage.ActivitySourceAPI,
+		ToolName:  toolName,
+		Status:    policyDecision,
+		Metadata:  metadata,
+		Timestamp: evt.Timestamp,
+		SessionID: sessionID,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save hook evaluation activity",
+			zap.Error(err),
+			zap.String("tool_name", toolName),
+			zap.String("session_id", sessionID))
+	} else {
+		s.logger.Debug("Hook evaluation activity recorded",
+			zap.String("id", record.ID),
+			zap.String("tool_name", toolName),
+			zap.String("policy_decision", policyDecision),
+			zap.String("risk_level", riskLevel))
+	}
+}
+
+// handleFlowSummary persists a flow session summary on expiry (Spec 027).
+func (s *ActivityService) handleFlowSummary(evt Event) {
+	sessionID := getStringPayload(evt.Payload, "session_id")
+	coverageMode := getStringPayload(evt.Payload, "coverage_mode")
+	durationMinutes := getInt64Payload(evt.Payload, "duration_minutes")
+	totalOrigins := getInt64Payload(evt.Payload, "total_origins")
+	totalFlows := getInt64Payload(evt.Payload, "total_flows")
+	hasSensitiveFlows := getBoolPayload(evt.Payload, "has_sensitive_flows")
+
+	metadata := map[string]interface{}{
+		"coverage_mode":     coverageMode,
+		"duration_minutes":  durationMinutes,
+		"total_origins":     totalOrigins,
+		"total_flows":       totalFlows,
+		"has_sensitive_flows": hasSensitiveFlows,
+	}
+
+	// Add distribution maps if present
+	if ftd := getMapPayload(evt.Payload, "flow_type_distribution"); ftd != nil {
+		metadata["flow_type_distribution"] = ftd
+	}
+	if rld := getMapPayload(evt.Payload, "risk_level_distribution"); rld != nil {
+		metadata["risk_level_distribution"] = rld
+	}
+	if lms := getSlicePayload(evt.Payload, "linked_mcp_sessions"); len(lms) > 0 {
+		metadata["linked_mcp_sessions"] = lms
+	}
+	if tu := getSlicePayload(evt.Payload, "tools_used"); len(tu) > 0 {
+		metadata["tools_used"] = tu
+	}
+
+	record := &storage.ActivityRecord{
+		Type:      storage.ActivityTypeFlowSummary,
+		Source:    storage.ActivitySourceAPI,
+		Status:    "completed",
+		Metadata:  metadata,
+		Timestamp: evt.Timestamp,
+		SessionID: sessionID,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save flow summary activity",
+			zap.Error(err),
+			zap.String("session_id", sessionID))
+	} else {
+		s.logger.Debug("Flow summary activity recorded",
+			zap.String("id", record.ID),
+			zap.String("session_id", sessionID),
+			zap.String("coverage_mode", coverageMode))
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
@@ -262,6 +263,12 @@ func (m *MockServerController) StreamActivities(_ storage.ActivityFilter) <-chan
 	ch := make(chan *storage.ActivityRecord)
 	close(ch)
 	return ch
+}
+
+// Spec 027: Flow security
+func (m *MockServerController) IsHooksActive() bool { return false }
+func (m *MockServerController) EvaluateHook(_ context.Context, _ *flow.HookEvaluateRequest) (*flow.HookEvaluateResponse, error) {
+	return &flow.HookEvaluateResponse{Decision: flow.PolicyAllow}, nil
 }
 
 // Configuration management methods

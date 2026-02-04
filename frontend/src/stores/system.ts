@@ -54,6 +54,10 @@ export const useSystemStore = defineStore('system', () => {
     themes.find(t => t.name === currentTheme.value) || themes[0]
   )
 
+  // Spec 027: Security coverage information
+  const securityCoverage = computed(() => status.value?.security_coverage ?? 'proxy_only')
+  const hooksActive = computed(() => status.value?.hooks_active ?? false)
+
   // Version information
   const version = computed(() => info.value?.version ?? '')
   const updateAvailable = computed(() => info.value?.update?.available ?? false)
@@ -365,6 +369,8 @@ export const useSystemStore = defineStore('system', () => {
     listenAddr,
     upstreamStats,
     currentThemeConfig,
+    securityCoverage,
+    hooksActive,
     version,
     updateAvailable,
     latestVersion,

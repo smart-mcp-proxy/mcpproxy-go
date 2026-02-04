@@ -100,6 +100,15 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.Severity = severity
 	}
 
+	// Spec 027: Data flow security filters
+	if flowType := q.Get("flow_type"); flowType != "" {
+		filter.FlowType = flowType
+	}
+
+	if riskLevel := q.Get("risk_level"); riskLevel != "" {
+		filter.RiskLevel = riskLevel
+	}
+
 	filter.Validate()
 	return filter
 }
@@ -110,7 +119,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Tags Activity
 // @Accept json
 // @Produce json
-// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change)
+// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024, 027)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change, hook_evaluation, flow_summary)
 // @Param server query string false "Filter by server name"
 // @Param tool query string false "Filter by tool name"
 // @Param session_id query string false "Filter by MCP session ID"
