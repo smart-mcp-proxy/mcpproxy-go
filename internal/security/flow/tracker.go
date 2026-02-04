@@ -1,7 +1,6 @@
 package flow
 
 import (
-	"encoding/json"
 	"sync"
 	"time"
 )
@@ -315,37 +314,3 @@ func assessRisk(flowType FlowType, hasSensitiveData bool) RiskLevel {
 	}
 }
 
-// extractNormalizedArgHashes extracts normalized hashes for fuzzy matching.
-func extractNormalizedArgHashes(argsJSON string, minLength int) map[string]bool {
-	hashes := make(map[string]bool)
-
-	// Try to parse as JSON and extract string values
-	var parsed any
-	if err := json.Unmarshal([]byte(argsJSON), &parsed); err != nil {
-		// Not JSON — hash normalized full content
-		if len(argsJSON) >= minLength {
-			hashes[HashContentNormalized(argsJSON)] = true
-		}
-		return hashes
-	}
-
-	extractNormalizedStrings(parsed, minLength, hashes)
-	return hashes
-}
-
-func extractNormalizedStrings(v any, minLength int, hashes map[string]bool) {
-	switch val := v.(type) {
-	case string:
-		if len(val) >= minLength {
-			hashes[HashContentNormalized(val)] = true
-		}
-	case map[string]any:
-		for _, fieldVal := range val {
-			extractNormalizedStrings(fieldVal, minLength, hashes)
-		}
-	case []any:
-		for _, elem := range val {
-			extractNormalizedStrings(elem, minLength, hashes)
-		}
-	}
-}
