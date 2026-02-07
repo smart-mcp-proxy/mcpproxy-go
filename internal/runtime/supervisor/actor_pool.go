@@ -279,9 +279,11 @@ func (p *ActorPoolSimple) emitEvent(event Event) {
 		select {
 		case ch <- event:
 		default:
-			p.logger.Warn("Event channel full, dropping event",
+			p.logger.Warn("⚠️ Event channel full, DROPPING event (stateview may become stale)",
 				zap.String("event_type", string(event.Type)),
-				zap.String("server", event.ServerName))
+				zap.String("server", event.ServerName),
+				zap.Any("connected", event.Payload["connected"]),
+				zap.Any("title", event.Payload["title"]))
 		}
 	}
 }

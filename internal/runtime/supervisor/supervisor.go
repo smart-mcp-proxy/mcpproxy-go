@@ -247,13 +247,29 @@ func (s *Supervisor) exemptionCleanupLoop() {
 // reconcile compares desired vs actual state and takes corrective actions.
 // Phase 6 Fix: Made fully async to prevent blocking HTTP server startup.
 func (s *Supervisor) reconcile(configSnapshot *configsvc.Snapshot) error {
+	// IMPORTANT: Fetch ALL manager-dependent data BEFORE acquiring stateMu.Lock().
+	// GetAllStates() and IsUserLoggedOut() call manager.GetClient() which needs manager.mu.RLock().
+	// If we held stateMu.Lock() first while a concurrent goroutine holds manager.mu.Lock()
+	// (e.g., during AddServerConfig), the event processing channel fills up and events are dropped,
+	// causing the stateview to permanently show stale "Connecting..." status.
+	actualStates := s.upstream.GetAllStates()
+
+	// Pre-fetch user logout status for all servers
+	userLoggedOut := make(map[string]bool)
+	for _, srv := range configSnapshot.Config.Servers {
+		if srv != nil {
+			userLoggedOut[srv.Name] = s.upstream.IsUserLoggedOut(srv.Name)
+		}
+	}
+
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 
 	s.logger.Debug("Starting reconciliation",
-		zap.Int("desired_servers", configSnapshot.ServerCount()))
+		zap.Int("desired_servers", configSnapshot.ServerCount()),
+		zap.Int("actual_states", len(actualStates)))
 
-	plan := s.computeReconcilePlan(configSnapshot)
+	plan := s.computeReconcilePlan(configSnapshot, actualStates, userLoggedOut)
 
 	// Phase 6 Fix: Execute actions asynchronously to prevent blocking
 	// Each action runs in its own goroutine with timeout
@@ -264,6 +280,10 @@ func (s *Supervisor) reconcile(configSnapshot *configsvc.Snapshot) error {
 		}
 
 		actionCount++
+		s.logger.Debug("Dispatching reconcile action",
+			zap.String("server", serverName),
+			zap.String("action", string(action)))
+
 		// Launch each action in a goroutine - no waiting!
 		go func(name string, act ReconcileAction, snapshot *configsvc.Snapshot) {
 			if err := s.executeAction(name, act, snapshot); err != nil {
@@ -279,8 +299,8 @@ func (s *Supervisor) reconcile(configSnapshot *configsvc.Snapshot) error {
 		}(serverName, action, configSnapshot)
 	}
 
-	// Update state snapshot immediately (actions run in background)
-	s.updateSnapshot(configSnapshot)
+	// Update state snapshot immediately using actual states from manager
+	s.updateSnapshot(configSnapshot, actualStates)
 
 	s.logger.Debug("Reconciliation dispatched",
 		zap.Int("actions_dispatched", actionCount),
@@ -290,7 +310,8 @@ func (s *Supervisor) reconcile(configSnapshot *configsvc.Snapshot) error {
 }
 
 // computeReconcilePlan determines what actions need to be taken.
-func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot) *ReconcilePlan {
+// actualStates and userLoggedOut are pre-fetched OUTSIDE stateMu.Lock() to prevent lock ordering issues.
+func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot, actualStates map[string]*ServerState, userLoggedOut map[string]bool) *ReconcilePlan {
 	plan := &ReconcilePlan{
 		Actions:   make(map[string]ReconcileAction),
 		Timestamp: time.Now(),
@@ -309,6 +330,12 @@ func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot) *R
 		name := desiredServer.Name
 		currentState, exists := currentSnapshot.Servers[name]
 
+		// Use actual connection state from manager (more reliable than snapshot which depends on events)
+		actuallyConnected := false
+		if actual, ok := actualStates[name]; ok {
+			actuallyConnected = actual.Connected
+		}
+
 		if !exists {
 			// New server needs to be added
 			if desiredServer.Enabled && (!desiredServer.Quarantined || s.IsInspectionExempted(name)) {
@@ -320,15 +347,15 @@ func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot) *R
 			// Existing server - check if config changed
 			if s.configChanged(currentState.Config, desiredServer) {
 				plan.Actions[name] = ActionReconnect
-			} else if desiredServer.Enabled && (!desiredServer.Quarantined || s.IsInspectionExempted(name)) && !currentState.Connected {
+			} else if desiredServer.Enabled && (!desiredServer.Quarantined || s.IsInspectionExempted(name)) && !actuallyConnected {
 				// Should be connected but isn't (or has inspection exemption)
 				// BUT: Don't auto-reconnect if user explicitly logged out
-				if s.upstream.IsUserLoggedOut(name) {
+				if userLoggedOut[name] {
 					plan.Actions[name] = ActionNone
 				} else {
 					plan.Actions[name] = ActionConnect
 				}
-			} else if (!desiredServer.Enabled || (desiredServer.Quarantined && !s.IsInspectionExempted(name))) && currentState.Connected {
+			} else if (!desiredServer.Enabled || (desiredServer.Quarantined && !s.IsInspectionExempted(name))) && actuallyConnected {
 				// Shouldn't be connected but is (or exemption expired)
 				plan.Actions[name] = ActionDisconnect
 			} else {
@@ -458,19 +485,17 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 }
 
 // updateSnapshot updates the current state snapshot.
-// Phase 7.1 FIX: Removed GetAllStates() call to prevent blocking on slow servers.
-// State updates now happen via events only, keeping this method fast and non-blocking.
-func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot) {
+// actualStates is pre-fetched from the manager OUTSIDE stateMu.Lock() to prevent lock ordering issues
+// and to ensure we always have the latest connection state (not dependent on event delivery).
+func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualStates map[string]*ServerState) {
 	s.version++
 
-	// Phase 7.1 FIX: Don't call GetAllStates() here! It blocks on ListTools() for all servers.
-	// Instead, rely on existing state and event-driven updates.
-	// Get actual state from existing snapshot (non-blocking)
+	// Get existing snapshot for data that's only available from events (tools, last seen, etc.)
 	currentSnapshot := s.CurrentSnapshot()
-	actualStates := make(map[string]*ServerState)
+	existingStates := make(map[string]*ServerState)
 	if currentSnapshot != nil {
 		for name, state := range currentSnapshot.Servers {
-			actualStates[name] = state
+			existingStates[name] = state
 		}
 	}
 
@@ -496,13 +521,21 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot) {
 			LastReconcile:  time.Now(),
 		}
 
-		// Merge with actual state if available
-		if actualState, ok := actualStates[srv.Name]; ok {
-			state.Connected = actualState.Connected
-			state.ConnectionInfo = actualState.ConnectionInfo
-			state.LastSeen = actualState.LastSeen
-			state.ToolCount = actualState.ToolCount
-			state.Tools = actualState.Tools // Phase 7.1: Copy tools for caching
+		// Use ACTUAL state from manager (authoritative, not dependent on events)
+		if actual, ok := actualStates[srv.Name]; ok {
+			state.Connected = actual.Connected
+			state.ConnectionInfo = actual.ConnectionInfo
+			state.ToolCount = actual.ToolCount
+		}
+
+		// Merge with existing snapshot for data only available from events
+		if existing, ok := existingStates[srv.Name]; ok {
+			state.LastSeen = existing.LastSeen
+			state.Tools = existing.Tools // Tools come from background discovery
+			// If actual state didn't have tool count but existing does, keep it
+			if state.ToolCount == 0 && existing.ToolCount > 0 {
+				state.ToolCount = existing.ToolCount
+			}
 		}
 
 		newSnapshot.Servers[srv.Name] = state
@@ -525,6 +558,7 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot) {
 // updateStateView updates the stateview with current server state.
 func (s *Supervisor) updateStateView(name string, state *ServerState) {
 	s.stateView.UpdateServer(name, func(status *stateview.ServerStatus) {
+		oldState := status.State
 		status.Config = state.Config
 		status.Enabled = state.Enabled
 		status.Quarantined = state.Quarantined
@@ -613,6 +647,16 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 				status.Metadata = make(map[string]interface{})
 			}
 			status.Metadata["connection_info"] = state.ConnectionInfo
+		}
+
+		// Debug: log state transitions during reconcile
+		if oldState != status.State {
+			s.logger.Debug("🔄 StateView updated via reconcile",
+				zap.String("server", name),
+				zap.String("old_state", oldState),
+				zap.String("new_state", status.State),
+				zap.Bool("connected", state.Connected),
+				zap.Bool("has_conn_info", state.ConnectionInfo != nil))
 		}
 	})
 }
@@ -727,6 +771,12 @@ func (s *Supervisor) forwardUpstreamEvents(upstreamEvents <-chan Event) {
 				return
 			}
 
+			s.logger.Debug("📨 Upstream event received",
+				zap.String("server", event.ServerName),
+				zap.String("type", string(event.Type)),
+				zap.Any("connected", event.Payload["connected"]),
+				zap.Any("title", event.Payload["title"]))
+
 			// Forward to supervisor listeners
 			s.emitEvent(event)
 
@@ -772,16 +822,25 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 
 			// Update stateview
 			s.stateView.UpdateServer(event.ServerName, func(status *stateview.ServerStatus) {
+				oldState := status.State
 				status.Connected = connected
 
 				// Use detailed state from ConnectionInfo if available
+				// Normalize to lowercase to match health calculator expectations
 				if connInfo != nil && connInfo.State != types.StateDisconnected {
-					status.State = connInfo.State.String()
+					status.State = strings.ToLower(connInfo.State.String())
 				} else if connected {
 					status.State = "connected"
 				} else {
 					status.State = "disconnected"
 				}
+
+				s.logger.Debug("📡 StateView updated via event",
+					zap.String("server", event.ServerName),
+					zap.String("old_state", oldState),
+					zap.String("new_state", status.State),
+					zap.Bool("connected", connected),
+					zap.Bool("has_conn_info", connInfo != nil))
 
 				if connected {
 					t := event.Timestamp
