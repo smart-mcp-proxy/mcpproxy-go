@@ -39,6 +39,11 @@ type Client struct {
 	listToolsInProgress bool
 	listToolsCancel     context.CancelFunc
 
+	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
+	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
+	connectMu     sync.Mutex
+	connectCancel context.CancelFunc
+
 	// Background monitoring
 	stopMonitoring       chan struct{}
 	monitoringWG         sync.WaitGroup
@@ -116,13 +121,17 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 	return mc, nil
 }
 
-// Connect establishes connection with state management
+// Connect establishes connection with state management.
+// IMPORTANT: mc.mu is only held briefly for state checks/transitions, NOT during the
+// potentially slow coreClient.Connect() call (which may involve OAuth flows taking minutes).
+// This prevents blocking Disconnect, SetConfig, GetConfig, and other callers.
 func (mc *Client) Connect(ctx context.Context) error {
+	// Phase 1: Acquire lock, check state, prepare for connection
 	mc.mu.Lock()
-	defer mc.mu.Unlock()
 
 	// Check if already connecting or connected
 	if mc.StateManager.IsConnecting() || mc.StateManager.IsReady() {
+		mc.mu.Unlock()
 		return fmt.Errorf("connection already in progress or established (state: %s)", mc.StateManager.GetState().String())
 	}
 
@@ -150,41 +159,63 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// Transition to connecting state
 	mc.StateManager.TransitionTo(types.StateConnecting)
 
-	// Connect core client
+	// Release lock BEFORE the slow coreClient.Connect() call
+	mc.mu.Unlock()
+
+	// Phase 2: Create cancellable context for Disconnect() to abort in-flight Connect
+	connectCtx, cancel := context.WithCancel(ctx)
+	mc.connectMu.Lock()
+	mc.connectCancel = cancel
+	mc.connectMu.Unlock()
+
+	defer func() {
+		mc.connectMu.Lock()
+		mc.connectCancel = nil
+		mc.connectMu.Unlock()
+	}()
+
+	// Phase 3: Execute the actual connection (potentially slow - OAuth, MCP initialize)
+	// mc.mu is NOT held here, so Disconnect/SetConfig/GetConfig won't block
 	mc.logger.Debug("Invoking core client Connect for managed client",
 		zap.String("server", mc.Config.Name))
-	if err := mc.coreClient.Connect(ctx); err != nil {
+	connectErr := mc.coreClient.Connect(connectCtx)
+
+	// Phase 4: Re-acquire lock to update state based on result
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	if connectErr != nil {
 		// Check if this is a deferred OAuth requirement (pending user action)
-		if core.IsOAuthPending(err) {
+		if core.IsOAuthPending(connectErr) {
 			mc.logger.Info("⏳ OAuth authentication pending user action",
 				zap.String("server", mc.Config.Name))
 			// Transition to PendingAuth state instead of Error
 			mc.StateManager.TransitionTo(types.StatePendingAuth)
-			mc.StateManager.SetError(err)
-			return fmt.Errorf("OAuth authentication pending: %w", err)
+			mc.StateManager.SetError(connectErr)
+			return fmt.Errorf("OAuth authentication pending: %w", connectErr)
 		}
 		// Check if this is an OAuth authorization requirement (not an error)
-		if mc.isOAuthAuthorizationRequired(err) {
+		if mc.isOAuthAuthorizationRequired(connectErr) {
 			// Check if this is a token refresh scenario vs full re-auth
-			isRefreshScenario := mc.isTokenRefreshScenario(err)
+			isRefreshScenario := mc.isTokenRefreshScenario(connectErr)
 			mc.logger.Info("🎯 OAuth authorization required during MCP initialization",
 				zap.String("server", mc.Config.Name),
 				zap.Bool("token_refresh_scenario", isRefreshScenario))
 			// Don't apply backoff for OAuth authorization requirement
-			mc.StateManager.SetError(err)
-			return fmt.Errorf("OAuth authorization during MCP init failed: %w", err)
-		} else if mc.isOAuthError(err) {
+			mc.StateManager.SetError(connectErr)
+			return fmt.Errorf("OAuth authorization during MCP init failed: %w", connectErr)
+		} else if mc.isOAuthError(connectErr) {
 			// Check if this is a token refresh scenario vs full re-auth
-			isRefreshScenario := mc.isTokenRefreshScenario(err)
+			isRefreshScenario := mc.isTokenRefreshScenario(connectErr)
 			mc.logger.Warn("OAuth authentication failed, applying extended backoff",
 				zap.String("server", mc.Config.Name),
 				zap.Bool("token_refresh_scenario", isRefreshScenario),
-				zap.Error(err))
-			mc.StateManager.SetOAuthError(err)
+				zap.Error(connectErr))
+			mc.StateManager.SetOAuthError(connectErr)
 		} else {
-			mc.StateManager.SetError(err)
+			mc.StateManager.SetError(connectErr)
 		}
-		return fmt.Errorf("core client connection failed: %w", err)
+		return fmt.Errorf("core client connection failed: %w", connectErr)
 	}
 
 	mc.logger.Debug("Core client Connect returned successfully",
@@ -234,6 +265,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 // Disconnect closes the connection and stops monitoring
 func (mc *Client) Disconnect() error {
 	mc.cancelInFlightListTools()
+	mc.cancelInFlightConnect()
 
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
@@ -520,6 +552,23 @@ func (mc *Client) cancelInFlightListTools() {
 		zap.String("server", mc.Config.Name))
 }
 
+// cancelInFlightConnect cancels any in-flight Connect() operation.
+// This is called from Disconnect() BEFORE acquiring mc.mu, so Disconnect()
+// doesn't block on a Connect() that holds mc.mu during slow OAuth flows.
+func (mc *Client) cancelInFlightConnect() {
+	mc.connectMu.Lock()
+	cancel := mc.connectCancel
+	mc.connectMu.Unlock()
+
+	if cancel == nil {
+		return
+	}
+
+	mc.logger.Debug("Cancelling in-flight Connect operation",
+		zap.String("server", mc.Config.Name))
+	cancel()
+}
+
 // onStateChange handles state transition events
 func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
 	mc.logger.Info("State transition",
@@ -787,7 +836,8 @@ func (mc *Client) tryReconnect() {
 		zap.String("current_state", mc.StateManager.GetState().String()))
 
 	// First, disconnect the current client to clean up any broken connections
-	// We don't need to hold the mutex here as Disconnect() already handles it
+	// Cancel any in-flight connect/listTools before attempting reconnection
+	mc.cancelInFlightConnect()
 	mc.cancelInFlightListTools()
 	if err := mc.coreClient.Disconnect(); err != nil {
 		mc.logger.Warn("Failed to disconnect during reconnection attempt",
