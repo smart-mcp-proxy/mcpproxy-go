@@ -400,6 +400,7 @@ func (c *Client) isOAuthRelatedError(err error) bool {
 		"oauth timeout",
 		"oauth error",
 		"authorization required",
+		"all authentication strategies failed",
 	}
 
 	for _, oauthErr := range oauthErrors {

@@ -1559,6 +1559,11 @@ func (c *Client) markOAuthComplete() {
 		zap.String("server", c.config.Name),
 		zap.Time("completion_time", c.lastOAuthTimestamp))
 
+	// Persist DCR credentials from handler to storage for proactive token refresh
+	// This is necessary because mcp-go stores ClientID in-memory during DCR,
+	// but we need it persisted to refresh tokens without re-authenticating
+	c.persistDCRCredentials()
+
 	// Notify global token manager so the running process (daemon) can trigger
 	// an immediate reconnect. Also persist a DB event when possible so other
 	// processes can detect completion without polling.
@@ -1587,6 +1592,54 @@ func (c *Client) markOAuthComplete() {
 				zap.Error(err))
 		}
 	}
+}
+
+// persistDCRCredentials saves the ClientID and ClientSecret from the OAuth handler
+// to persistent storage. This enables proactive token refresh to use stored credentials
+// when the handler's config is not populated (common with DCR flows).
+func (c *Client) persistDCRCredentials() {
+	if c.storage == nil {
+		return
+	}
+
+	handler := c.GetOAuthHandler()
+	if handler == nil {
+		return
+	}
+
+	clientID := handler.GetClientID()
+	clientSecret := handler.GetClientSecret()
+
+	if clientID == "" {
+		c.logger.Debug("No ClientID in OAuth handler to persist",
+			zap.String("server", c.config.Name))
+		return
+	}
+
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+	record, err := c.storage.GetOAuthToken(serverKey)
+	if err != nil {
+		c.logger.Warn("Failed to get token record for credential persistence",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+		return
+	}
+
+	record.ClientID = clientID
+	record.ClientSecret = clientSecret
+	record.Updated = time.Now()
+
+	if err := c.storage.SaveOAuthToken(record); err != nil {
+		c.logger.Error("Failed to persist DCR credentials",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+		return
+	}
+
+	c.logger.Info("DCR credentials persisted for proactive token refresh",
+		zap.String("server", c.config.Name),
+		zap.String("client_id_prefix", clientID[:min(8, len(clientID))]+"..."),
+		zap.Bool("has_client_secret", clientSecret != ""))
 }
 
 // wasOAuthRecentlyCompleted checks if OAuth was completed recently to prevent retry loops

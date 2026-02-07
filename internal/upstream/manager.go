@@ -2385,11 +2385,24 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 		return fmt.Errorf("server does not use OAuth: %s", serverName)
 	}
 
-	// Force a reconnection which will trigger token refresh via mcp-go's
-	// automatic token refresh when TokenStore provides a refresh token
-	client.ForceReconnect("oauth_token_refresh")
+	// Use direct token refresh to bypass ForceReconnect's early return when connected.
+	// ForceReconnect returns early if client is already connected, but we need to
+	// refresh the token proactively before it expires.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	m.logger.Info("OAuth token refresh requested",
+	err := client.RefreshOAuthTokenDirect(ctx)
+	if err != nil {
+		m.logger.Warn("Direct OAuth refresh failed, falling back to reconnect",
+			zap.String("server", serverName),
+			zap.Error(err))
+		// Fall back to reconnect for cases where direct refresh isn't available
+		// (e.g., server not connected, no OAuth handler)
+		client.ForceReconnect("oauth_token_refresh_fallback")
+		return err
+	}
+
+	m.logger.Info("OAuth token refresh completed successfully",
 		zap.String("server", serverName),
 		zap.Bool("has_static_oauth", hasStaticOAuth),
 		zap.Bool("has_stored_tokens", hasStoredTokens))

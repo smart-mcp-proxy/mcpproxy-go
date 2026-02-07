@@ -723,7 +723,7 @@ func runAuthLoginStandalone(ctx context.Context, serverName string) error {
 	fmt.Printf("🌐 Starting manual OAuth flow...\n")
 	fmt.Printf("⚠️  This will open your browser for authentication.\n\n")
 
-	if err := cliClient.TriggerManualOAuth(ctx); err != nil {
+	if err := cliClient.TriggerManualOAuthWithForce(ctx, true); err != nil {
 		fmt.Printf("❌ OAuth authentication failed: %v\n", err)
 		return fmt.Errorf("OAuth authentication failed: %w", err)
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -13,12 +15,14 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
 	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 )
@@ -526,6 +530,196 @@ func (c *Client) GetStderr() io.Reader {
 // GetEnvManager returns the environment manager for testing purposes
 func (c *Client) GetEnvManager() interface{} {
 	return c.envManager
+}
+
+// GetOAuthHandler returns the OAuth handler if the transport supports OAuth.
+// Returns nil if no OAuth handler is configured or transport doesn't support OAuth.
+func (c *Client) GetOAuthHandler() *transport.OAuthHandler {
+	c.mu.RLock()
+	mcpClient := c.client
+	c.mu.RUnlock()
+
+	if mcpClient == nil {
+		return nil
+	}
+
+	// Both StreamableHTTP and SSE transports implement GetOAuthHandler()
+	type oauthTransport interface {
+		GetOAuthHandler() *transport.OAuthHandler
+	}
+
+	t := mcpClient.GetTransport()
+	if ot, ok := t.(oauthTransport); ok {
+		return ot.GetOAuthHandler()
+	}
+	return nil
+}
+
+// RefreshOAuthTokenDirect forces an OAuth token refresh without reconnecting.
+// This is used by the RefreshManager for proactive token refresh.
+// Unlike ForceReconnect (which returns early when already connected),
+// this directly calls the OAuth handler's RefreshToken method, bypassing
+// the IsExpired() check that would prevent refresh of still-valid tokens.
+//
+// For servers using Dynamic Client Registration (DCR), the handler may not have
+// client credentials populated. In that case, we fall back to manual refresh
+// using stored credentials from the OAuthTokenRecord.
+func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
+	handler := c.GetOAuthHandler()
+	if handler == nil {
+		return fmt.Errorf("no OAuth handler available for %s", c.config.Name)
+	}
+
+	if c.storage == nil {
+		return fmt.Errorf("no storage available for token refresh")
+	}
+
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+	record, err := c.storage.GetOAuthToken(serverKey)
+	if err != nil {
+		return fmt.Errorf("failed to get stored token for %s: %w", c.config.Name, err)
+	}
+	if record.RefreshToken == "" {
+		return fmt.Errorf("no refresh token available for %s", c.config.Name)
+	}
+
+	handlerClientID := handler.GetClientID()
+	hasHandlerCredentials := handlerClientID != ""
+
+	c.logger.Info("Executing direct OAuth token refresh",
+		zap.String("server", c.config.Name),
+		zap.Time("current_expiry", record.ExpiresAt),
+		zap.Bool("handler_has_credentials", hasHandlerCredentials),
+		zap.Bool("storage_has_credentials", record.ClientID != ""))
+
+	// If handler has credentials, use mcp-go's RefreshToken
+	if hasHandlerCredentials {
+		_, err = handler.RefreshToken(ctx, record.RefreshToken)
+		if err != nil {
+			c.logger.Error("Direct OAuth token refresh via handler failed",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+			return fmt.Errorf("OAuth refresh failed for %s: %w", c.config.Name, err)
+		}
+		c.logger.Info("Direct OAuth token refresh completed successfully via handler",
+			zap.String("server", c.config.Name))
+		return nil
+	}
+
+	// Handler doesn't have credentials - use stored DCR credentials
+	if record.ClientID == "" {
+		return fmt.Errorf("no client credentials available for %s (neither in handler nor storage)", c.config.Name)
+	}
+
+	c.logger.Info("Using stored DCR credentials for token refresh",
+		zap.String("server", c.config.Name),
+		zap.String("client_id", record.ClientID[:min(8, len(record.ClientID))]+"..."))
+
+	metadata, err := handler.GetServerMetadata(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, err)
+	}
+	if metadata.TokenEndpoint == "" {
+		return fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name)
+	}
+
+	newToken, err := c.refreshTokenWithStoredCredentials(ctx, metadata.TokenEndpoint, record)
+	if err != nil {
+		c.logger.Error("Manual OAuth token refresh failed",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+		return fmt.Errorf("OAuth refresh failed for %s: %w", c.config.Name, err)
+	}
+
+	// Update storage with new token
+	record.AccessToken = newToken.AccessToken
+	if newToken.RefreshToken != "" {
+		record.RefreshToken = newToken.RefreshToken
+	}
+	record.ExpiresAt = newToken.ExpiresAt
+	record.Updated = time.Now()
+
+	if err := c.storage.SaveOAuthToken(record); err != nil {
+		c.logger.Error("Failed to save refreshed token",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+		return fmt.Errorf("failed to save refreshed token for %s: %w", c.config.Name, err)
+	}
+
+	c.logger.Info("Direct OAuth token refresh completed successfully via stored credentials",
+		zap.String("server", c.config.Name),
+		zap.Time("new_expiry", newToken.ExpiresAt))
+
+	return nil
+}
+
+// oauthTokenResponse represents the token response from an OAuth server
+type oauthTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+}
+
+// refreshTokenWithStoredCredentials performs a token refresh using credentials from storage
+func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEndpoint string, record *storage.OAuthTokenRecord) (*storage.OAuthTokenRecord, error) {
+	data := url.Values{}
+	data.Set("grant_type", "refresh_token")
+	data.Set("refresh_token", record.RefreshToken)
+	data.Set("client_id", record.ClientID)
+	if record.ClientSecret != "" {
+		data.Set("client_secret", record.ClientSecret)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create refresh request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send refresh request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp oauthTokenResponse
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	}
+
+	var expiresAt time.Time
+	if tokenResp.ExpiresIn > 0 {
+		expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	} else {
+		// Default to 1 hour if server doesn't specify (consistent with mcp-go behavior)
+		expiresAt = time.Now().Add(1 * time.Hour)
+	}
+
+	return &storage.OAuthTokenRecord{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		TokenType:    tokenResp.TokenType,
+		ExpiresAt:    expiresAt,
+	}, nil
+}
+
+// GetConfig returns the server configuration
+func (c *Client) GetConfig() *config.ServerConfig {
+	return c.config
 }
 
 // SetOnToolsChangedCallback sets the callback invoked when a notifications/tools/list_changed
