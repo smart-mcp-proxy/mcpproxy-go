@@ -740,6 +740,21 @@ func (s *Supervisor) forwardUpstreamEvents(upstreamEvents <-chan Event) {
 
 // updateSnapshotFromEvent updates the snapshot based on an upstream event.
 func (s *Supervisor) updateSnapshotFromEvent(event Event) {
+	// IMPORTANT: Fetch server state BEFORE acquiring stateMu to prevent lock ordering issues.
+	// GetServerState() needs manager.mu.RLock(), and if we hold stateMu.Lock() first while
+	// a concurrent goroutine holds manager.mu.Lock() (e.g. during AddServerConfig/reconciliation),
+	// we create a blocking chain that permanently stalls the reconciliation loop.
+	var toolCount int
+	var connInfo *types.ConnectionInfo
+	if actualState, err := s.upstream.GetServerState(event.ServerName); err == nil {
+		toolCount = actualState.ToolCount
+		connInfo = actualState.ConnectionInfo
+	} else {
+		s.logger.Warn("Failed to get server state for tool count",
+			zap.String("server", event.ServerName),
+			zap.Error(err))
+	}
+
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 
@@ -750,19 +765,9 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			state.Connected = connected
 			state.LastSeen = event.Timestamp
 
-			// Phase 7.1 FIX: Don't fetch tools on connect events - let background indexing handle it
-			// Just update the cached tool count and connection info from the client (non-blocking)
-			var toolCount int
-			var connInfo *types.ConnectionInfo
-			if actualState, err := s.upstream.GetServerState(event.ServerName); err == nil {
-				toolCount = actualState.ToolCount
-				// Update ConnectionInfo for error propagation to UI
-				state.ConnectionInfo = actualState.ConnectionInfo
-				connInfo = actualState.ConnectionInfo
-			} else {
-				s.logger.Warn("Failed to get server state for tool count",
-					zap.String("server", event.ServerName),
-					zap.Error(err))
+			// Update ConnectionInfo from pre-fetched server state
+			if connInfo != nil {
+				state.ConnectionInfo = connInfo
 			}
 
 			// Update stateview

@@ -494,6 +494,55 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 			c.logger.Info("✅ MCP initialization successful after OAuth authorization",
 				zap.String("server", c.config.Name))
+		} else if c.isServerSideError(err) && !skipBrowserFlow {
+			// Server returned 5xx (e.g., 500) during MCP initialize.
+			// Some servers (e.g., Cloudflare Workers) crash with 500 instead of returning
+			// 401 when they receive an invalid/revoked/stale token. Clear the stored token
+			// and attempt a fresh browser OAuth flow.
+			c.logger.Warn("⚠️ Server returned 5xx during MCP init - stored token may be invalid, attempting fresh OAuth",
+				zap.String("server", c.config.Name),
+				zap.Error(err))
+
+			// Clear the stored token so a fresh one can be obtained
+			if tokenStore, ok := oauthConfig.TokenStore.(interface{ ClearToken() error }); ok {
+				if clearErr := tokenStore.ClearToken(); clearErr != nil {
+					c.logger.Warn("Failed to clear stored token",
+						zap.String("server", c.config.Name),
+						zap.Error(clearErr))
+				}
+			}
+
+			c.clearOAuthState()
+
+			// For daemon mode, defer to background retry
+			if c.isDeferOAuthForTray(ctx) {
+				c.logger.Info("⏳ Deferring fresh OAuth to background after server 5xx error",
+					zap.String("server", c.config.Name))
+				return &ErrOAuthPending{
+					ServerName: c.config.Name,
+					ServerURL:  c.config.URL,
+					Message:    "server error with stored token - re-login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
+				}
+			}
+
+			// Handle fresh OAuth authorization
+			if handleErr := c.handleOAuthAuthorization(ctx, err, oauthConfig, extraParams); handleErr != nil {
+				c.clearOAuthState()
+				oauthErr = fmt.Errorf("OAuth re-authorization after server 5xx failed: %w", handleErr)
+				return oauthErr
+			}
+
+			// Retry MCP initialization with fresh token
+			if retryErr := c.initialize(ctx); retryErr != nil {
+				c.logger.Error("❌ MCP initialization failed after fresh OAuth (server may be down)",
+					zap.String("server", c.config.Name),
+					zap.Error(retryErr))
+				oauthErr = fmt.Errorf("MCP initialize failed after fresh OAuth: %w", retryErr)
+				return oauthErr
+			}
+
+			c.logger.Info("✅ MCP initialization successful after fresh OAuth re-authorization",
+				zap.String("server", c.config.Name))
 		} else {
 			oauthErr = fmt.Errorf("MCP initialize failed during OAuth strategy: %w", err)
 			return oauthErr
