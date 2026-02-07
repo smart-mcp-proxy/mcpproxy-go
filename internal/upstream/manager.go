@@ -1261,8 +1261,13 @@ func (m *Manager) GetStats() map[string]interface{} {
 			status["server_version"] = connectionInfo.ServerVersion
 		}
 
-		if serverInfo := client.GetServerInfo(); serverInfo != nil && serverInfo.ProtocolVersion != "" {
-			status["protocol_version"] = serverInfo.ProtocolVersion
+		// Only call GetServerInfo() for connected clients.
+		// GetServerInfo() acquires core.Client.mu.RLock() which blocks if Connect() holds
+		// core.Client.mu.Lock() during slow OAuth flows — preventing HTTP server startup.
+		if connectionInfo.State == types.StateReady {
+			if serverInfo := client.GetServerInfo(); serverInfo != nil && serverInfo.ProtocolVersion != "" {
+				status["protocol_version"] = serverInfo.ProtocolVersion
+			}
 		}
 
 		serverStatus[id] = status

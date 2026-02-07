@@ -2,9 +2,11 @@ package storage
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -1416,12 +1418,28 @@ func (m *Manager) CleanupOrphanedOAuthTokens(validServerNames []string) (int, er
 			orphanedKeys = append(orphanedKeys, token.ServerName)
 			continue
 		}
-		if !validServers[serverName] {
-			orphanedKeys = append(orphanedKeys, token.ServerName)
-			m.logger.Infow("Found orphaned OAuth token",
-				"storage_key", token.ServerName,
-				"display_name", serverName)
+
+		// Check if the server name matches a valid server
+		if validServers[serverName] {
+			continue
 		}
+
+		// For legacy tokens without DisplayName, GetServerName() returns the storage key
+		// (e.g., "cloudflare-observability_8753c4ae5a2f60a6") instead of the server name.
+		// Try extracting the server name prefix from the storage key before classifying as orphaned.
+		if token.DisplayName == "" {
+			if prefix := extractServerNameFromKey(token.ServerName); prefix != "" && validServers[prefix] {
+				m.logger.Infow("Legacy OAuth token matched by key prefix (missing DisplayName)",
+					"storage_key", token.ServerName,
+					"extracted_name", prefix)
+				continue
+			}
+		}
+
+		orphanedKeys = append(orphanedKeys, token.ServerName)
+		m.logger.Infow("Found orphaned OAuth token",
+			"storage_key", token.ServerName,
+			"display_name", serverName)
 	}
 
 	if len(orphanedKeys) == 0 {
@@ -1447,4 +1465,25 @@ func (m *Manager) CleanupOrphanedOAuthTokens(validServerNames []string) (int, er
 		"deleted", deleted)
 
 	return deleted, nil
+}
+
+// extractServerNameFromKey extracts the server name prefix from a storage key.
+// Storage keys have the format "serverName_<16 hex chars>" (e.g., "my-server_8753c4ae5a2f60a6").
+// Returns empty string if the key doesn't match this format.
+func extractServerNameFromKey(key string) string {
+	lastUnderscore := strings.LastIndex(key, "_")
+	if lastUnderscore <= 0 || lastUnderscore >= len(key)-1 {
+		return ""
+	}
+
+	suffix := key[lastUnderscore+1:]
+	// Storage keys use exactly 16 hex characters as the hash suffix
+	if len(suffix) != 16 {
+		return ""
+	}
+	if _, err := hex.DecodeString(suffix); err != nil {
+		return ""
+	}
+
+	return key[:lastUnderscore]
 }

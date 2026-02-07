@@ -539,6 +539,17 @@ func (c *Client) GetOAuthHandler() *transport.OAuthHandler {
 	mcpClient := c.client
 	c.mu.RUnlock()
 
+	return extractOAuthHandler(mcpClient)
+}
+
+// getOAuthHandlerLocked returns the OAuth handler without acquiring c.mu.
+// MUST only be called when c.mu is already held by the caller (e.g., from Connect()).
+func (c *Client) getOAuthHandlerLocked() *transport.OAuthHandler {
+	return extractOAuthHandler(c.client)
+}
+
+// extractOAuthHandler extracts the OAuth handler from an MCP client's transport.
+func extractOAuthHandler(mcpClient *client.Client) *transport.OAuthHandler {
 	if mcpClient == nil {
 		return nil
 	}
@@ -631,13 +642,21 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 		return fmt.Errorf("OAuth refresh failed for %s: %w", c.config.Name, err)
 	}
 
-	// Update storage with new token
+	// Update storage with new token.
+	// No in-memory sync needed: mcp-go's OAuthHandler calls TokenStore.GetToken() on each
+	// request, and PersistentTokenStore reads from BBolt, so it picks up the updated token.
 	record.AccessToken = newToken.AccessToken
 	if newToken.RefreshToken != "" {
 		record.RefreshToken = newToken.RefreshToken
 	}
 	record.ExpiresAt = newToken.ExpiresAt
 	record.Updated = time.Now()
+
+	// Ensure DisplayName is set for legacy tokens that predate the DisplayName field.
+	// Without this, CleanupOrphanedOAuthTokens could misclassify the token as orphaned.
+	if record.DisplayName == "" {
+		record.DisplayName = c.config.Name
+	}
 
 	if err := c.storage.SaveOAuthToken(record); err != nil {
 		c.logger.Error("Failed to save refreshed token",

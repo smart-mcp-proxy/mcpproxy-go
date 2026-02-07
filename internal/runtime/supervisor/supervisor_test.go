@@ -97,10 +97,11 @@ func (m *MockUpstreamAdapter) GetServerState(name string) (*ServerState, error) 
 func (m *MockUpstreamAdapter) GetAllStates() map[string]*ServerState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Return a copy to prevent data races
+	// Return deep copies to prevent data races with concurrent goroutines
 	statesCopy := make(map[string]*ServerState, len(m.states))
 	for k, v := range m.states {
-		statesCopy[k] = v
+		stateCopy := *v // Deep copy the struct
+		statesCopy[k] = &stateCopy
 	}
 	return statesCopy
 }

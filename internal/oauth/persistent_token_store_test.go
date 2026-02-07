@@ -322,6 +322,70 @@ func TestPersistentTokenStoreShortLivedToken(t *testing.T) {
 	}
 }
 
+// TestPersistentTokenStore_PreservesDCRCredentials verifies that SaveToken preserves
+// existing DCR credentials (ClientID, ClientSecret, CallbackPort, RedirectURI) that
+// were saved by UpdateOAuthClientCredentials during the Dynamic Client Registration flow.
+func TestPersistentTokenStore_PreservesDCRCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := zap.NewNop().Sugar()
+	db, err := storage.NewBoltDB(tmpDir, logger)
+	if err != nil {
+		t.Fatalf("Failed to create BoltDB: %v", err)
+	}
+	defer db.Close()
+
+	serverName := "dcr-server"
+	serverURL := "https://dcr.example.com/mcp"
+	serverKey := GenerateServerKey(serverName, serverURL)
+
+	// Step 1: Simulate DCR saving credentials (as UpdateOAuthClientCredentials does)
+	err = db.UpdateOAuthClientCredentials(serverKey, "dcr-client-id-123", "dcr-secret-456", 54321)
+	if err != nil {
+		t.Fatalf("Failed to save DCR credentials: %v", err)
+	}
+
+	// Step 2: Simulate mcp-go calling SaveToken after token exchange
+	tokenStore := NewPersistentTokenStore(serverName, serverURL, db)
+	token := &client.Token{
+		AccessToken:  "new-access-token",
+		RefreshToken: "new-refresh-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+		Scope:        "mcp.read",
+	}
+	err = tokenStore.SaveToken(context.Background(), token)
+	if err != nil {
+		t.Fatalf("Failed to save token: %v", err)
+	}
+
+	// Step 3: Verify DCR credentials are preserved in the stored record
+	record, err := db.GetOAuthToken(serverKey)
+	if err != nil {
+		t.Fatalf("Failed to get token record: %v", err)
+	}
+
+	if record.ClientID != "dcr-client-id-123" {
+		t.Errorf("ClientID lost after SaveToken: got %q, want %q", record.ClientID, "dcr-client-id-123")
+	}
+	if record.ClientSecret != "dcr-secret-456" {
+		t.Errorf("ClientSecret lost after SaveToken: got %q, want %q", record.ClientSecret, "dcr-secret-456")
+	}
+	if record.CallbackPort != 54321 {
+		t.Errorf("CallbackPort lost after SaveToken: got %d, want %d", record.CallbackPort, 54321)
+	}
+
+	// Also verify token fields are correct
+	if record.AccessToken != "new-access-token" {
+		t.Errorf("AccessToken mismatch: got %q, want %q", record.AccessToken, "new-access-token")
+	}
+	if record.RefreshToken != "new-refresh-token" {
+		t.Errorf("RefreshToken mismatch: got %q, want %q", record.RefreshToken, "new-refresh-token")
+	}
+	if record.DisplayName != serverName {
+		t.Errorf("DisplayName mismatch: got %q, want %q", record.DisplayName, serverName)
+	}
+}
+
 func TestPersistentTokenStoreSameNameDifferentURL(t *testing.T) {
 	// Create a temporary directory for test database
 	tmpDir := t.TempDir()

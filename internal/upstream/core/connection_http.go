@@ -312,3 +312,19 @@ func (c *Client) isDeprecatedEndpointError(err error) bool {
 
 	return false
 }
+
+// isServerSideError checks if error indicates a server-side error (HTTP 5xx).
+// Some servers crash with 500 instead of returning 401 when they receive
+// an invalid/revoked token, so 5xx during OAuth strategy may indicate
+// a stale token rather than a genuine server error.
+func (c *Client) isServerSideError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return containsAny(errStr, []string{
+		"status 500",
+		"status 502",
+		"status 503",
+	})
+}
