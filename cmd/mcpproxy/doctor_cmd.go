@@ -417,6 +417,17 @@ func displaySecurityFeaturesStatus() {
 		fmt.Println("  ✗ Sensitive Data Detection: disabled")
 		fmt.Println("    Enable: set sensitive_data_detection.enabled = true in config")
 	}
+
+	// Data Flow Security status (Spec 027)
+	secCfg := cfg.GetSecurityConfig()
+	if secCfg.IsFlowTrackingEnabled() {
+		fmt.Println("  ✓ Data Flow Security: enabled")
+		fmt.Println("    Coverage: proxy_only (hooks not installed)")
+		fmt.Println("    Upgrade:  mcpproxy hook install --agent claude-code")
+	} else {
+		fmt.Println("  ✗ Data Flow Security: disabled")
+		fmt.Println("    Enable: set security.flow_tracking.enabled = true in config")
+	}
 }
 
 // formatCategoryList formats a list of categories for display, truncating if too long.

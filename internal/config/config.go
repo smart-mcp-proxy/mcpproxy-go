@@ -119,6 +119,9 @@ type Config struct {
 
 	// Sensitive data detection settings (Spec 026)
 	SensitiveDataDetection *SensitiveDataDetectionConfig `json:"sensitive_data_detection,omitempty" mapstructure:"sensitive-data-detection"`
+
+	// Data flow security settings (Spec 027)
+	Security *SecurityConfig `json:"security,omitempty" mapstructure:"security"`
 }
 
 // TLSConfig represents TLS configuration
@@ -388,6 +391,153 @@ func (c *SensitiveDataDetectionConfig) GetEntropyThreshold() float64 {
 		return 4.5
 	}
 	return c.EntropyThreshold
+}
+
+// SecurityConfig represents the data flow security settings (Spec 027)
+type SecurityConfig struct {
+	FlowTracking   *FlowTrackingConfig   `json:"flow_tracking,omitempty" mapstructure:"flow-tracking"`
+	Classification *ClassificationConfig `json:"classification,omitempty" mapstructure:"classification"`
+	FlowPolicy     *FlowPolicyConfig     `json:"flow_policy,omitempty" mapstructure:"flow-policy"`
+	Hooks          *HooksConfig          `json:"hooks,omitempty" mapstructure:"hooks"`
+}
+
+// FlowTrackingConfig configures the flow tracking subsystem.
+type FlowTrackingConfig struct {
+	Enabled              bool `json:"enabled" mapstructure:"enabled"`                                         // Enable flow tracking (default: true)
+	SessionTimeoutMin    int  `json:"session_timeout_minutes,omitempty" mapstructure:"session-timeout-minutes"` // Inactivity timeout (default: 30)
+	MaxOriginsPerSession int  `json:"max_origins_per_session,omitempty" mapstructure:"max-origins-per-session"` // Max origins before eviction (default: 10000)
+	HashMinLength        int  `json:"hash_min_length,omitempty" mapstructure:"hash-min-length"`                // Min string length for per-field hashing (default: 20)
+	MaxResponseHashBytes int  `json:"max_response_hash_bytes,omitempty" mapstructure:"max-response-hash-bytes"` // Max response size for hashing (default: 65536)
+}
+
+// ClassificationConfig configures server/tool classification.
+type ClassificationConfig struct {
+	DefaultUnknown  string            `json:"default_unknown,omitempty" mapstructure:"default-unknown"`     // Treatment of unknown: "internal" or "external" (default: "internal")
+	ServerOverrides map[string]string `json:"server_overrides,omitempty" mapstructure:"server-overrides"` // server name → classification override
+}
+
+// FlowPolicyConfig configures policy enforcement for data flows.
+type FlowPolicyConfig struct {
+	InternalToExternal    string            `json:"internal_to_external,omitempty" mapstructure:"internal-to-external"`         // Action: allow/warn/ask/deny (default: "ask")
+	SensitiveDataExternal string            `json:"sensitive_data_external,omitempty" mapstructure:"sensitive-data-external"`   // Action for sensitive data (default: "deny")
+	RequireJustification  bool              `json:"require_justification,omitempty" mapstructure:"require-justification"`       // Require justification for external flows
+	SuspiciousEndpoints   []string          `json:"suspicious_endpoints,omitempty" mapstructure:"suspicious-endpoints"`         // Always-deny endpoints
+	ToolOverrides         map[string]string `json:"tool_overrides,omitempty" mapstructure:"tool-overrides"`                     // Per-tool action overrides
+}
+
+// HooksConfig configures agent hook integration.
+type HooksConfig struct {
+	Enabled            bool `json:"enabled" mapstructure:"enabled"`                                       // Enable hook support (default: true)
+	FailOpen           bool `json:"fail_open" mapstructure:"fail-open"`                                   // Fail open when daemon unreachable (default: true)
+	CorrelationTTLSecs int  `json:"correlation_ttl_seconds,omitempty" mapstructure:"correlation-ttl-seconds"` // TTL for pending correlations (default: 5)
+}
+
+// DefaultSecurityConfig returns the default security configuration for Spec 027.
+func DefaultSecurityConfig() *SecurityConfig {
+	return &SecurityConfig{
+		FlowTracking: &FlowTrackingConfig{
+			Enabled:              true,
+			SessionTimeoutMin:    30,
+			MaxOriginsPerSession: 10000,
+			HashMinLength:        20,
+			MaxResponseHashBytes: 65536,
+		},
+		Classification: &ClassificationConfig{
+			DefaultUnknown: "internal",
+		},
+		FlowPolicy: &FlowPolicyConfig{
+			InternalToExternal:    "ask",
+			SensitiveDataExternal: "deny",
+			RequireJustification:  true,
+			SuspiciousEndpoints: []string{
+				"webhook.site",
+				"requestbin.com",
+				"pipedream.net",
+				"hookbin.com",
+				"beeceptor.com",
+			},
+		},
+		Hooks: &HooksConfig{
+			Enabled:            true,
+			FailOpen:           true,
+			CorrelationTTLSecs: 5,
+		},
+	}
+}
+
+// GetFlowTracking returns flow tracking config with defaults.
+func (c *SecurityConfig) GetFlowTracking() *FlowTrackingConfig {
+	if c == nil || c.FlowTracking == nil {
+		return DefaultSecurityConfig().FlowTracking
+	}
+	ft := c.FlowTracking
+	if ft.SessionTimeoutMin <= 0 {
+		ft.SessionTimeoutMin = 30
+	}
+	if ft.MaxOriginsPerSession <= 0 {
+		ft.MaxOriginsPerSession = 10000
+	}
+	if ft.HashMinLength <= 0 {
+		ft.HashMinLength = 20
+	}
+	if ft.MaxResponseHashBytes <= 0 {
+		ft.MaxResponseHashBytes = 65536
+	}
+	return ft
+}
+
+// GetClassification returns classification config with defaults.
+func (c *SecurityConfig) GetClassification() *ClassificationConfig {
+	if c == nil || c.Classification == nil {
+		return DefaultSecurityConfig().Classification
+	}
+	if c.Classification.DefaultUnknown == "" {
+		c.Classification.DefaultUnknown = "internal"
+	}
+	return c.Classification
+}
+
+// GetFlowPolicy returns flow policy config with defaults.
+func (c *SecurityConfig) GetFlowPolicy() *FlowPolicyConfig {
+	if c == nil || c.FlowPolicy == nil {
+		return DefaultSecurityConfig().FlowPolicy
+	}
+	fp := c.FlowPolicy
+	if fp.InternalToExternal == "" {
+		fp.InternalToExternal = "ask"
+	}
+	if fp.SensitiveDataExternal == "" {
+		fp.SensitiveDataExternal = "deny"
+	}
+	return fp
+}
+
+// GetHooks returns hooks config with defaults.
+func (c *SecurityConfig) GetHooks() *HooksConfig {
+	if c == nil || c.Hooks == nil {
+		return DefaultSecurityConfig().Hooks
+	}
+	h := c.Hooks
+	if h.CorrelationTTLSecs <= 0 {
+		h.CorrelationTTLSecs = 5
+	}
+	return h
+}
+
+// IsFlowTrackingEnabled returns true if flow tracking is enabled (default: true).
+func (c *SecurityConfig) IsFlowTrackingEnabled() bool {
+	if c == nil || c.FlowTracking == nil {
+		return true
+	}
+	return c.FlowTracking.Enabled
+}
+
+// GetSecurityConfig returns the security configuration, or defaults if nil.
+func (c *Config) GetSecurityConfig() *SecurityConfig {
+	if c.Security != nil {
+		return c.Security
+	}
+	return DefaultSecurityConfig()
 }
 
 // RegistryEntry represents a registry in the configuration

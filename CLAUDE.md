@@ -61,6 +61,17 @@ mcpproxy doctor                     # Run health checks
 
 See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
 
+### Hook Integration CLI (Spec 027)
+```bash
+mcpproxy hook install --agent claude-code          # Install hooks (project scope)
+mcpproxy hook install --agent claude-code --scope user  # Install hooks (user scope)
+mcpproxy hook uninstall --agent claude-code         # Remove hooks
+mcpproxy hook status --agent claude-code            # Check hook installation status
+mcpproxy hook evaluate --event PreToolUse           # Evaluate tool call (reads JSON from stdin)
+```
+
+Hooks enable full data flow security by intercepting agent-internal tool calls (Read, Write, Bash, etc.) that the MCP proxy cannot see directly.
+
 ### Activity Log CLI
 ```bash
 mcpproxy activity list              # List recent activity
@@ -105,6 +116,7 @@ See [docs/cli-output-formatting.md](docs/cli-output-formatting.md) for complete 
 | `internal/storage/` | BBolt database |
 | `internal/management/` | Centralized server management |
 | `internal/oauth/` | OAuth 2.1 with PKCE |
+| `internal/security/flow/` | Data flow security: classification, tracking, policy |
 | `internal/logs/` | Structured logging with per-server files |
 
 See [docs/architecture.md](docs/architecture.md) for diagrams and details.
@@ -194,6 +206,7 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `POST /api/v1/servers/{name}/enable` | Enable/disable server |
 | `POST /api/v1/servers/{name}/quarantine` | Quarantine/unquarantine server |
 | `GET /api/v1/tools` | Search tools across servers |
+| `POST /api/v1/hooks/evaluate` | Evaluate tool call for data flow security |
 | `GET /api/v1/activity` | List activity records with filtering |
 | `GET /api/v1/activity/{id}` | Get activity record details |
 | `GET /api/v1/activity/export` | Export activity records (JSON/CSV) |
@@ -379,6 +392,63 @@ mcpproxy activity export --sensitive-data --output audit.jsonl  # Export for com
 
 See [docs/features/sensitive-data-detection.md](docs/features/sensitive-data-detection.md) for complete reference.
 
+## Data Flow Security (Spec 027)
+
+Detects data exfiltration patterns by tracking how data flows between internal tools (Read, databases) and external tools (WebFetch, Slack). Operates in two modes:
+
+- **Proxy-only mode**: Monitors MCP tool calls through the proxy (universal, any agent)
+- **Full mode**: Also intercepts agent-internal tools via hooks (requires hook installation)
+
+### Key Concepts
+
+- **Classification**: Tools/servers classified as internal, external, hybrid, or unknown
+- **Flow Types**: internal→internal (safe), internal→external (critical), external→internal, external→external
+- **Content Hashing**: SHA256 per-field hashing to detect data movement without storing content
+- **Session Correlation**: Links agent hook sessions to MCP proxy sessions via argument hash matching
+
+### Configuration
+
+```json
+{
+  "security": {
+    "flow_tracking": {
+      "enabled": true,
+      "session_timeout_minutes": 30,
+      "max_origins_per_session": 10000,
+      "hash_min_length": 20
+    },
+    "classification": {
+      "server_overrides": {
+        "my-private-slack": "internal"
+      }
+    },
+    "flow_policy": {
+      "internal_to_external": "ask",
+      "sensitive_data_external": "deny",
+      "suspicious_endpoints": ["pastebin.com", "webhook.site"]
+    },
+    "hooks": {
+      "enabled": true,
+      "fail_open": true,
+      "correlation_ttl_seconds": 5
+    }
+  }
+}
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `internal/security/flow/classifier.go` | Server/tool classification (internal/external) |
+| `internal/security/flow/tracker.go` | Flow session and origin tracking |
+| `internal/security/flow/hasher.go` | Content hashing for flow detection |
+| `internal/security/flow/service.go` | Flow service orchestrator |
+| `internal/security/flow/correlator.go` | Session correlation (hook↔MCP) |
+| `internal/security/flow/policy.go` | Policy evaluation engine |
+| `internal/httpapi/hooks.go` | POST /api/v1/hooks/evaluate endpoint |
+| `cmd/mcpproxy/hook_cmd.go` | Hook CLI commands (install/uninstall/status/evaluate) |
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -471,6 +541,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord model (024-expand-activity-log)
 - Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), regexp (stdlib), existing ActivityService (026-pii-detection)
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord.Metadata extension (026-pii-detection)
+- Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), mcp-go (MCP protocol), regexp (stdlib), crypto/sha256 (stdlib), existing `security.Detector` (027-data-flow-security)
+- BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord.Metadata extension for hook_evaluation type. Flow sessions are in-memory only (not persisted). (027-data-flow-security)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

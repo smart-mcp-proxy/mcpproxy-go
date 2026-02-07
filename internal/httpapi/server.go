@@ -16,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
@@ -116,6 +117,10 @@ type ServerController interface {
 	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
 	GetActivity(id string) (*storage.ActivityRecord, error)
 	StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord
+
+	// Spec 027: Flow security
+	IsHooksActive() bool
+	EvaluateHook(ctx context.Context, req *flow.HookEvaluateRequest) (*flow.HookEvaluateResponse, error)
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -411,6 +416,9 @@ func (s *Server) setupRoutes() {
 		r.Get("/registries", s.handleListRegistries)
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
 
+		// Hook evaluation (Spec 027)
+		r.Post("/hooks/evaluate", s.handleHookEvaluate)
+
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
 		r.Get("/activity/summary", s.handleActivitySummary)
@@ -555,6 +563,15 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 		"status":         s.controller.GetStatus(),
 		"timestamp":      time.Now().Unix(),
 	}
+
+	// Spec 027: Add security coverage information
+	hooksActive := s.controller.IsHooksActive()
+	if hooksActive {
+		response["security_coverage"] = "full"
+	} else {
+		response["security_coverage"] = "proxy_only"
+	}
+	response["hooks_active"] = hooksActive
 
 	s.writeSuccess(w, response)
 }

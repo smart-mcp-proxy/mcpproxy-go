@@ -311,7 +311,18 @@ type Diagnostics struct {
 	MissingSecrets  []MissingSecretInfo `json:"missing_secrets"`       // Renamed to avoid conflict
 	RuntimeWarnings []string            `json:"runtime_warnings"`
 	DockerStatus    *DockerStatus       `json:"docker_status,omitempty"`
+	Recommendations []Recommendation   `json:"recommendations,omitempty"`
 	Timestamp       time.Time           `json:"timestamp"`
+}
+
+// Recommendation represents a suggested action to improve system configuration.
+type Recommendation struct {
+	ID          string `json:"id"`
+	Category    string `json:"category"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Command     string `json:"command,omitempty"`
+	Priority    string `json:"priority"`
 }
 
 // UpstreamError represents a connection or runtime error from an upstream MCP server.

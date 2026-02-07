@@ -27,6 +27,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
 	"errors"
@@ -79,6 +80,9 @@ type MCPProxyServer struct {
 
 	// MCP session tracking
 	sessionStore *SessionStore
+
+	// Spec 027: Data flow security
+	flowService *flow.FlowService
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -224,6 +228,11 @@ func NewMCPProxyServer(
 	}
 
 	return proxy
+}
+
+// SetFlowService injects the data flow security service (Spec 027).
+func (p *MCPProxyServer) SetFlowService(fs *flow.FlowService) {
+	p.flowService = fs
 }
 
 // Close gracefully shuts down the MCP proxy server and releases resources
@@ -1203,6 +1212,39 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Emit activity started event with determined source
 	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, args)
 
+	// Spec 027: Correlate hook sessions with MCP sessions via argument hashing
+	if p.flowService != nil && sessionID != "" {
+		argsJSONForCorrelation, _ := json.Marshal(args)
+		correlationHash := flow.CorrelationArgsHash(toolName, string(argsJSONForCorrelation))
+		p.flowService.LinkSessions(correlationHash, sessionID)
+	}
+
+	// Spec 027: Check data flow security for write/destructive calls (proxy-only mode)
+	if p.flowService != nil && sessionID != "" &&
+		(toolVariant == contracts.ToolVariantWrite || toolVariant == contracts.ToolVariantDestructive) {
+		argsBytes, _ := json.Marshal(args)
+		edges := p.flowService.CheckFlowProxy(sessionID, serverName, actualToolName, string(argsBytes))
+		if len(edges) > 0 {
+			action, reason := p.flowService.EvaluatePolicy(edges, "proxy_only")
+			if action == flow.PolicyDeny {
+				p.logger.Warn("Flow security: tool call blocked",
+					zap.String("tool", actualToolName),
+					zap.String("server", serverName),
+					zap.String("reason", reason),
+					zap.String("session_id", sessionID))
+				p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", "Flow security: "+reason)
+				return mcp.NewToolResultError(fmt.Sprintf("Blocked by data flow security: %s", reason)), nil
+			}
+			if action == flow.PolicyWarn {
+				p.logger.Warn("Flow security: potential data exfiltration detected",
+					zap.String("tool", actualToolName),
+					zap.String("server", serverName),
+					zap.String("reason", reason),
+					zap.String("session_id", sessionID))
+			}
+		}
+	}
+
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
 	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
@@ -1326,6 +1368,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	response := string(jsonResult)
+
+	// Spec 027: Record data origin for read responses (proxy-only mode, async)
+	if p.flowService != nil && sessionID != "" && toolVariant == contracts.ToolVariantRead {
+		go p.flowService.RecordOriginProxy(sessionID, serverName, actualToolName, response)
+	}
 
 	// Apply truncation if configured
 	if p.truncator.ShouldTruncate(response) {

@@ -16,6 +16,12 @@ const (
 	ActivityTypeQuarantineChange ActivityType = "quarantine_change"
 	// ActivityTypeServerChange represents a server configuration change
 	ActivityTypeServerChange ActivityType = "server_change"
+	// ActivityTypeHookEvaluation represents a hook-based security evaluation (Spec 027)
+	ActivityTypeHookEvaluation ActivityType = "hook_evaluation"
+	// ActivityTypeFlowSummary represents a flow session summary on expiry (Spec 027)
+	ActivityTypeFlowSummary ActivityType = "flow_summary"
+	// ActivityTypeAuditorFinding is reserved for future auditor agent findings (Spec 027)
+	ActivityTypeAuditorFinding ActivityType = "auditor_finding"
 )
 
 // ActivitySource indicates how the activity was triggered

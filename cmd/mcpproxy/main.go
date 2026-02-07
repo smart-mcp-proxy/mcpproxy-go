@@ -170,6 +170,7 @@ func main() {
 	rootCmd.AddCommand(upstreamCmd)
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(activityCmd)
+	rootCmd.AddCommand(hookCmd)
 
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added
