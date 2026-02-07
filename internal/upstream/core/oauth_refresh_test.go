@@ -242,6 +242,38 @@ func TestRefreshTokenWithStoredCredentials_ContextCancelled(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to send refresh request")
 }
 
+// TestRefreshTokenWithStoredCredentials_MissingExpiresIn verifies that the
+// default 1-hour expiry is applied when the token endpoint omits expires_in.
+func TestRefreshTokenWithStoredCredentials_MissingExpiresIn(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Response without expires_in field
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "new-token",
+			"token_type":   "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+
+	c := &Client{
+		config: &config.ServerConfig{Name: "no-expiry-server"},
+		logger: zap.NewNop(),
+	}
+
+	record := &storage.OAuthTokenRecord{
+		RefreshToken: "refresh-token",
+		ClientID:     "some-client",
+	}
+
+	result, err := c.refreshTokenWithStoredCredentials(context.Background(), tokenServer.URL, record)
+	require.NoError(t, err)
+	assert.Equal(t, "new-token", result.AccessToken)
+	// Default expiry should be approximately 1 hour from now (within a 5-second tolerance)
+	expectedExpiry := time.Now().Add(1 * time.Hour)
+	assert.WithinDuration(t, expectedExpiry, result.ExpiresAt, 5*time.Second,
+		"Missing expires_in should default to 1 hour")
+}
+
 // TestPersistDCRCredentials_NilStorage verifies that persistDCRCredentials
 // is a no-op when storage is nil (graceful degradation).
 func TestPersistDCRCredentials_NilStorage(t *testing.T) {

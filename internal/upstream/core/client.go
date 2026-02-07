@@ -619,6 +619,9 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, err)
 	}
+	if metadata.TokenEndpoint == "" {
+		return fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name)
+	}
 
 	newToken, err := c.refreshTokenWithStoredCredentials(ctx, metadata.TokenEndpoint, record)
 	if err != nil {
@@ -677,7 +680,8 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send refresh request: %w", err)
 	}
