@@ -539,6 +539,17 @@ func (c *Client) GetOAuthHandler() *transport.OAuthHandler {
 	mcpClient := c.client
 	c.mu.RUnlock()
 
+	return extractOAuthHandler(mcpClient)
+}
+
+// getOAuthHandlerLocked returns the OAuth handler without acquiring c.mu.
+// MUST only be called when c.mu is already held by the caller (e.g., from Connect()).
+func (c *Client) getOAuthHandlerLocked() *transport.OAuthHandler {
+	return extractOAuthHandler(c.client)
+}
+
+// extractOAuthHandler extracts the OAuth handler from an MCP client's transport.
+func extractOAuthHandler(mcpClient *client.Client) *transport.OAuthHandler {
 	if mcpClient == nil {
 		return nil
 	}

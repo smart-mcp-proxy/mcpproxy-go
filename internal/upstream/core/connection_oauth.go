@@ -1648,12 +1648,16 @@ func (c *Client) markOAuthComplete() {
 // when the handler's config is not populated (common with DCR flows).
 // Uses UpdateOAuthClientCredentials (the canonical DCR persistence path) rather than
 // SaveOAuthToken to keep a single code path for credential updates.
+//
+// IMPORTANT: This is called from markOAuthComplete() which runs inside Connect() while
+// c.mu is held. We must NOT call GetOAuthHandler() which acquires c.mu.RLock() — that
+// would deadlock (Go's RWMutex is not reentrant). Instead, access c.client directly.
 func (c *Client) persistDCRCredentials() {
 	if c.storage == nil {
 		return
 	}
 
-	handler := c.GetOAuthHandler()
+	handler := c.getOAuthHandlerLocked()
 	if handler == nil {
 		return
 	}
