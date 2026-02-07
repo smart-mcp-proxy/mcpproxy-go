@@ -631,13 +631,21 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 		return fmt.Errorf("OAuth refresh failed for %s: %w", c.config.Name, err)
 	}
 
-	// Update storage with new token
+	// Update storage with new token.
+	// No in-memory sync needed: mcp-go's OAuthHandler calls TokenStore.GetToken() on each
+	// request, and PersistentTokenStore reads from BBolt, so it picks up the updated token.
 	record.AccessToken = newToken.AccessToken
 	if newToken.RefreshToken != "" {
 		record.RefreshToken = newToken.RefreshToken
 	}
 	record.ExpiresAt = newToken.ExpiresAt
 	record.Updated = time.Now()
+
+	// Ensure DisplayName is set for legacy tokens that predate the DisplayName field.
+	// Without this, CleanupOrphanedOAuthTokens could misclassify the token as orphaned.
+	if record.DisplayName == "" {
+		record.DisplayName = c.config.Name
+	}
 
 	if err := c.storage.SaveOAuthToken(record); err != nil {
 		c.logger.Error("Failed to save refreshed token",

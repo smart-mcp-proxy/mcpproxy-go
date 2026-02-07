@@ -1597,6 +1597,8 @@ func (c *Client) markOAuthComplete() {
 // persistDCRCredentials saves the ClientID and ClientSecret from the OAuth handler
 // to persistent storage. This enables proactive token refresh to use stored credentials
 // when the handler's config is not populated (common with DCR flows).
+// Uses UpdateOAuthClientCredentials (the canonical DCR persistence path) rather than
+// SaveOAuthToken to keep a single code path for credential updates.
 func (c *Client) persistDCRCredentials() {
 	if c.storage == nil {
 		return
@@ -1617,19 +1619,14 @@ func (c *Client) persistDCRCredentials() {
 	}
 
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-	record, err := c.storage.GetOAuthToken(serverKey)
-	if err != nil {
-		c.logger.Warn("Failed to get token record for credential persistence",
-			zap.String("server", c.config.Name),
-			zap.Error(err))
-		return
+
+	// Preserve existing callbackPort from the record (set during the DCR flow)
+	callbackPort := 0
+	if record, err := c.storage.GetOAuthToken(serverKey); err == nil {
+		callbackPort = record.CallbackPort
 	}
 
-	record.ClientID = clientID
-	record.ClientSecret = clientSecret
-	record.Updated = time.Now()
-
-	if err := c.storage.SaveOAuthToken(record); err != nil {
+	if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
 			zap.String("server", c.config.Name),
 			zap.Error(err))

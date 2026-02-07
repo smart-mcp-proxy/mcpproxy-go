@@ -176,6 +176,56 @@ func TestManager_CleanupOrphanedOAuthTokens(t *testing.T) {
 	require.Error(t, err, "Orphaned token 2 should be deleted")
 }
 
+// TestManager_CleanupOrphanedOAuthTokens_LegacyWithoutDisplayName verifies that cleanup
+// correctly preserves legacy tokens that lack DisplayName by extracting the server name
+// from the storage key prefix.
+func TestManager_CleanupOrphanedOAuthTokens_LegacyWithoutDisplayName(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "storage-cleanup-legacy-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+
+	mgr, err := storage.NewManager(tmpDir, zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	validServer := "cloudflare-observability"
+	orphanedServer := "removed-server"
+
+	// Generate storage keys (serverName_16hexchars format)
+	validKey := oauth.GenerateServerKey(validServer, "https://cloudflare.example.com")
+	orphanedKey := oauth.GenerateServerKey(orphanedServer, "https://removed.example.com")
+
+	// Save tokens WITHOUT DisplayName (simulating legacy tokens from before DisplayName was added)
+	err = mgr.GetBoltDB().SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName:  validKey,
+		AccessToken: "valid-legacy-token",
+		// DisplayName intentionally omitted - legacy format
+	})
+	require.NoError(t, err)
+
+	err = mgr.GetBoltDB().SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName:  orphanedKey,
+		AccessToken: "orphan-legacy-token",
+		// DisplayName intentionally omitted - legacy format
+	})
+	require.NoError(t, err)
+
+	// Cleanup should preserve the valid server's token via key prefix matching
+	validServers := []string{validServer}
+	deleted, err := mgr.CleanupOrphanedOAuthTokens(validServers)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted, "Should delete only the orphaned token, not the valid legacy token")
+
+	// Verify valid legacy token still exists
+	token, err := mgr.GetBoltDB().GetOAuthToken(validKey)
+	require.NoError(t, err)
+	require.Equal(t, "valid-legacy-token", token.AccessToken)
+
+	// Verify orphaned token is deleted
+	_, err = mgr.GetBoltDB().GetOAuthToken(orphanedKey)
+	require.Error(t, err, "Orphaned legacy token should be deleted")
+}
+
 // TestBoltDB_ClearOAuthClientCredentials_PreservesToken verifies that ClearOAuthClientCredentials
 // clears DCR fields but preserves token data (Spec 022).
 func TestBoltDB_ClearOAuthClientCredentials_PreservesToken(t *testing.T) {
