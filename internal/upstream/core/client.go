@@ -570,6 +570,10 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 		return fmt.Errorf("no OAuth handler available for %s", c.config.Name)
 	}
 
+	if c.storage == nil {
+		return fmt.Errorf("no storage available for token refresh")
+	}
+
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 	record, err := c.storage.GetOAuthToken(serverKey)
 	if err != nil {
@@ -693,7 +697,13 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
-	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	var expiresAt time.Time
+	if tokenResp.ExpiresIn > 0 {
+		expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	} else {
+		// Default to 1 hour if server doesn't specify (consistent with mcp-go behavior)
+		expiresAt = time.Now().Add(1 * time.Hour)
+	}
 
 	return &storage.OAuthTokenRecord{
 		AccessToken:  tokenResp.AccessToken,
