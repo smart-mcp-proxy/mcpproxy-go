@@ -13,12 +13,14 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
 	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 )
@@ -526,6 +528,72 @@ func (c *Client) GetStderr() io.Reader {
 // GetEnvManager returns the environment manager for testing purposes
 func (c *Client) GetEnvManager() interface{} {
 	return c.envManager
+}
+
+// GetOAuthHandler returns the OAuth handler if the transport supports OAuth.
+// Returns nil if no OAuth handler is configured or transport doesn't support OAuth.
+func (c *Client) GetOAuthHandler() *transport.OAuthHandler {
+	c.mu.RLock()
+	mcpClient := c.client
+	c.mu.RUnlock()
+
+	if mcpClient == nil {
+		return nil
+	}
+
+	// Both StreamableHTTP and SSE transports implement GetOAuthHandler()
+	type oauthTransport interface {
+		GetOAuthHandler() *transport.OAuthHandler
+	}
+
+	t := mcpClient.GetTransport()
+	if ot, ok := t.(oauthTransport); ok {
+		return ot.GetOAuthHandler()
+	}
+	return nil
+}
+
+// RefreshOAuthTokenDirect forces an OAuth token refresh without reconnecting.
+// This is used by the RefreshManager for proactive token refresh.
+// Unlike ForceReconnect (which returns early when already connected),
+// this directly calls the OAuth handler's RefreshToken method, bypassing
+// the IsExpired() check that would prevent refresh of still-valid tokens.
+func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
+	handler := c.GetOAuthHandler()
+	if handler == nil {
+		return fmt.Errorf("no OAuth handler available for %s", c.config.Name)
+	}
+
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+	record, err := c.storage.GetOAuthToken(serverKey)
+	if err != nil {
+		return fmt.Errorf("failed to get stored token for %s: %w", c.config.Name, err)
+	}
+	if record.RefreshToken == "" {
+		return fmt.Errorf("no refresh token available for %s", c.config.Name)
+	}
+
+	c.logger.Info("Executing direct OAuth token refresh",
+		zap.String("server", c.config.Name),
+		zap.Time("current_expiry", record.ExpiresAt))
+
+	_, err = handler.RefreshToken(ctx, record.RefreshToken)
+	if err != nil {
+		c.logger.Error("Direct OAuth token refresh failed",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+		return fmt.Errorf("OAuth refresh failed for %s: %w", c.config.Name, err)
+	}
+
+	c.logger.Info("Direct OAuth token refresh completed successfully",
+		zap.String("server", c.config.Name))
+
+	return nil
+}
+
+// GetConfig returns the server configuration
+func (c *Client) GetConfig() *config.ServerConfig {
+	return c.config
 }
 
 // SetOnToolsChangedCallback sets the callback invoked when a notifications/tools/list_changed
