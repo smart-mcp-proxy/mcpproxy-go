@@ -927,7 +927,7 @@ jobs:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '84efd51b-c11c-4a85-82e6-7c3b1157d7ca'
           project-slug: 'mcpproxy-go'
-          signing-policy-slug: 'test-signing'
+          signing-policy-slug: 'release-signing'
           artifact-configuration-slug: 'initial'
           github-artifact-id: '${{ steps.reupload.outputs.artifact-id }}'
           wait-for-completion: true
