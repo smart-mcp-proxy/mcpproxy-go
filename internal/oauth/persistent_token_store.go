@@ -203,6 +203,25 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		scopes = strings.Split(token.Scope, " ")
 	}
 
+	// Read existing record to preserve DCR credentials (ClientID, ClientSecret,
+	// CallbackPort, RedirectURI) that were saved by UpdateOAuthClientCredentials
+	// during the Dynamic Client Registration flow. Without this, SaveOAuthToken
+	// overwrites the entire record and DCR credentials are lost, making token
+	// refresh impossible after restart.
+	var clientID, clientSecret, redirectURI string
+	var callbackPort int
+	var created time.Time
+	if existing, err := p.storage.GetOAuthToken(p.serverKey); err == nil {
+		clientID = existing.ClientID
+		clientSecret = existing.ClientSecret
+		callbackPort = existing.CallbackPort
+		redirectURI = existing.RedirectURI
+		created = existing.Created
+	}
+	if created.IsZero() {
+		created = now
+	}
+
 	record := &storage.OAuthTokenRecord{
 		ServerName:   p.serverKey,  // Storage key (for bucket lookup)
 		DisplayName:  p.serverName, // Actual server name (for RefreshManager)
@@ -211,7 +230,11 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		TokenType:    token.TokenType,
 		ExpiresAt:    token.ExpiresAt,
 		Scopes:       scopes,
-		Created:      now,
+		ClientID:     clientID,     // Preserve DCR credentials
+		ClientSecret: clientSecret, // Preserve DCR credentials
+		CallbackPort: callbackPort, // Preserve DCR callback port
+		RedirectURI:  redirectURI,  // Preserve DCR redirect URI
+		Created:      created,
 		Updated:      now,
 	}
 
