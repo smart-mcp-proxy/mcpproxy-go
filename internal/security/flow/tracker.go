@@ -77,8 +77,8 @@ func (ft *FlowTracker) CheckFlow(sessionID string, toolName, serverName string, 
 		return nil, nil
 	}
 
-	session.mu.RLock()
-	defer session.mu.RUnlock()
+	session.mu.Lock()
+	defer session.mu.Unlock()
 
 	var edges []*FlowEdge
 	matched := make(map[string]bool) // Avoid duplicate edges for same content hash

@@ -241,6 +241,24 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		phaseMachine: newPhaseMachine(PhaseInitializing),
 	}
 
+	// Register flow expiry callback now that rt is available (Spec 027)
+	if rt.flowService != nil {
+		rt.flowService.SetExpiryCallback(func(summary *flow.FlowSummary) {
+			rt.EmitActivityFlowSummary(
+				summary.SessionID,
+				summary.CoverageMode,
+				summary.DurationMinutes,
+				summary.TotalOrigins,
+				summary.TotalFlows,
+				summary.FlowTypeDistribution,
+				summary.RiskLevelDistribution,
+				summary.LinkedMCPSessions,
+				summary.ToolsUsed,
+				summary.HasSensitiveFlows,
+			)
+		})
+	}
+
 	return rt, nil
 }
 
@@ -548,6 +566,14 @@ func (r *Runtime) Close() error {
 		r.refreshManager.Stop()
 		if r.logger != nil {
 			r.logger.Info("OAuth refresh manager stopped")
+		}
+	}
+
+	// Stop flow service to halt session expiry and correlation goroutines
+	if r.flowService != nil {
+		r.flowService.Stop()
+		if r.logger != nil {
+			r.logger.Info("Flow service stopped")
 		}
 	}
 

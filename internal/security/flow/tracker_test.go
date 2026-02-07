@@ -501,3 +501,121 @@ func TestFlowTracker_ToolsUsedTracking(t *testing.T) {
 	require.NotNil(t, session)
 	assert.True(t, session.ToolsUsed["Read"], "Read should be tracked in ToolsUsed")
 }
+
+// TestFlowTracker_CheckFlow_ConcurrentRace is a regression test for the race condition
+// fix where CheckFlow used RLock but modified session fields (LastActivity, ToolsUsed, Flows).
+// The fix changed line 80 from RLock to Lock to properly synchronize write access.
+func TestFlowTracker_CheckFlow_ConcurrentRace(t *testing.T) {
+	tracker := NewFlowTracker(newTestTrackerConfig())
+	defer tracker.Stop()
+
+	sessionID := "concurrent-race-session"
+
+	// Record multiple origins with different content to create potential flow edges
+	origins := []string{
+		"database record one with sufficient length for hashing",
+		"database record two with sufficient length for hashing",
+		"database record three with sufficient length for hashing",
+		"database record four with sufficient length for hashing",
+		"database record five with sufficient length for hashing",
+	}
+
+	for i, data := range origins {
+		origin := &DataOrigin{
+			ContentHash:    HashContent(data),
+			ToolName:       fmt.Sprintf("Read-%d", i),
+			Classification: ClassInternal,
+			Timestamp:      time.Now(),
+		}
+		tracker.RecordOrigin(sessionID, origin)
+	}
+
+	// Prepare test cases with concurrent CheckFlow calls
+	testCases := []struct {
+		toolName  string
+		data      string
+		shouldHit bool
+	}{
+		{"WebFetch-1", origins[0], true},
+		{"WebFetch-2", origins[1], true},
+		{"WebFetch-3", origins[2], true},
+		{"WebFetch-4", "unrelated data that does not match", false},
+		{"WebFetch-5", origins[3], true},
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(testCases)*3+5)
+
+	// Spawn concurrent CheckFlow goroutines (3 iterations per test case)
+	for _, tc := range testCases {
+		for iteration := 0; iteration < 3; iteration++ {
+			wg.Add(1)
+			go func(toolName, data string, shouldHit bool) {
+				defer wg.Done()
+				argsJSON := fmt.Sprintf(`{"payload": %q}`, data)
+				edges, err := tracker.CheckFlow(sessionID, toolName, "", ClassExternal, argsJSON)
+				if err != nil {
+					errChan <- fmt.Errorf("CheckFlow error for %s: %w", toolName, err)
+					return
+				}
+				if shouldHit && len(edges) == 0 {
+					errChan <- fmt.Errorf("expected flow edge for %s but got none", toolName)
+					return
+				}
+				if !shouldHit && len(edges) > 0 {
+					errChan <- fmt.Errorf("unexpected flow edge for %s", toolName)
+					return
+				}
+			}(tc.toolName, tc.data, tc.shouldHit)
+		}
+	}
+
+	// Also spawn concurrent RecordOrigin goroutines to increase contention
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			newData := fmt.Sprintf("concurrent origin data number %d with sufficient length", idx)
+			origin := &DataOrigin{
+				ContentHash:    HashContent(newData),
+				ToolName:       fmt.Sprintf("ConcurrentTool-%d", idx),
+				Classification: ClassInternal,
+				Timestamp:      time.Now(),
+			}
+			tracker.RecordOrigin(sessionID, origin)
+		}(i)
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+	close(errChan)
+
+	// Check for errors
+	var errors []error
+	for err := range errChan {
+		errors = append(errors, err)
+	}
+	require.Empty(t, errors, "concurrent operations should not produce errors: %v", errors)
+
+	// Verify session state is consistent
+	session := tracker.GetSession(sessionID)
+	require.NotNil(t, session, "session should exist after concurrent operations")
+
+	// Verify origins are recorded (initial 5 + concurrent 5)
+	assert.GreaterOrEqual(t, len(session.Origins), 5, "should have at least initial origins")
+
+	// Verify flows were detected
+	assert.Greater(t, len(session.Flows), 0, "should have detected some flows")
+
+	// Verify ToolsUsed is populated (this field is modified by CheckFlow)
+	assert.NotEmpty(t, session.ToolsUsed, "ToolsUsed should be populated")
+	for _, tc := range testCases {
+		if tc.shouldHit {
+			assert.True(t, session.ToolsUsed[tc.toolName], "%s should be in ToolsUsed", tc.toolName)
+		}
+	}
+
+	// Verify LastActivity was updated (this field is modified by CheckFlow)
+	assert.False(t, session.LastActivity.IsZero(), "LastActivity should be set")
+	assert.True(t, time.Since(session.LastActivity) < 2*time.Second, "LastActivity should be recent")
+}

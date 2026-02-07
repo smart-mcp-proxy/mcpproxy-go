@@ -574,3 +574,89 @@ func TestCorrelation_StaleCorrelation_Ignored(t *testing.T) {
 	hookID := svc.correlator.MatchAndConsume(argsHash)
 	assert.Empty(t, hookID, "stale correlation should not match")
 }
+
+// === Additional Service Tests (Stop and Expiry) ===
+
+// TestFlowService_Stop_Idempotent tests that calling Stop() multiple times is safe.
+func TestFlowService_Stop_Idempotent(t *testing.T) {
+	classifier := NewClassifier(nil)
+	trackerCfg := &TrackerConfig{
+		SessionTimeoutMin:    30,
+		MaxOriginsPerSession: 10000,
+		HashMinLength:        20,
+		MaxResponseHashBytes: 65536,
+	}
+	tracker := NewFlowTracker(trackerCfg)
+	policyCfg := &PolicyConfig{
+		InternalToExternal:    PolicyAsk,
+		SensitiveDataExternal: PolicyDeny,
+	}
+	policy := NewPolicyEvaluator(policyCfg)
+	correlator := NewCorrelator(5 * time.Second)
+
+	svc := NewFlowService(classifier, tracker, policy, nil, correlator)
+
+	// Call Stop() twice — should not panic
+	svc.Stop()
+	svc.Stop()
+
+	// Verify tracker and correlator stop channels are closed
+	// (can't directly verify channel closure, but calling Stop again shouldn't panic)
+	assert.NotPanics(t, func() {
+		svc.Stop()
+	}, "multiple Stop() calls should be safe")
+}
+
+// TestFlowService_ExpiryCallback_EmitsSummary tests that session expiry triggers the callback
+// with a correct FlowSummary.
+func TestFlowService_ExpiryCallback_EmitsSummary(t *testing.T) {
+	classifier := NewClassifier(nil)
+	trackerCfg := &TrackerConfig{
+		SessionTimeoutMin:    0, // Will use manual expiry
+		MaxOriginsPerSession: 10000,
+		HashMinLength:        20,
+		MaxResponseHashBytes: 65536,
+	}
+	tracker := NewFlowTracker(trackerCfg)
+	policyCfg := &PolicyConfig{
+		InternalToExternal:    PolicyAsk,
+		SensitiveDataExternal: PolicyDeny,
+	}
+	policy := NewPolicyEvaluator(policyCfg)
+	correlator := NewCorrelator(5 * time.Second)
+
+	svc := NewFlowService(classifier, tracker, policy, &mockDetector{}, correlator)
+	defer svc.Stop()
+
+	// Channel to receive the callback
+	summaryReceived := make(chan *FlowSummary, 1)
+
+	// Register expiry callback
+	svc.SetExpiryCallback(func(summary *FlowSummary) {
+		summaryReceived <- summary
+	})
+
+	// Create a session and record an origin
+	sessionID := "expiry-test-session"
+	svc.RecordOriginProxy(sessionID, "postgres", "query", "test data for expiry callback verification")
+
+	// Force session to look expired by setting LastActivity in the past
+	session := tracker.GetSession(sessionID)
+	require.NotNil(t, session)
+	session.mu.Lock()
+	session.LastActivity = time.Now().Add(-2 * time.Hour)
+	session.mu.Unlock()
+
+	// Manually trigger expiry
+	tracker.expireSessions()
+
+	// Wait for callback with timeout
+	select {
+	case summary := <-summaryReceived:
+		assert.Equal(t, sessionID, summary.SessionID, "summary should have correct session ID")
+		assert.Greater(t, summary.TotalOrigins, 0, "summary should have origins recorded")
+		assert.NotEmpty(t, summary.CoverageMode, "summary should have coverage mode set")
+	case <-time.After(1 * time.Second):
+		t.Fatal("expiry callback was not called within timeout")
+	}
+}
