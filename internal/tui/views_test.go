@@ -1,0 +1,358 @@
+package tui
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestRenderView(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(client, 5*time.Second)
+	m.width = 80
+	m.height = 24
+
+	view := m.View()
+	assert.NotEmpty(t, view)
+	assert.Contains(t, view, "MCPProxy TUI")
+}
+
+func TestRenderTabs(t *testing.T) {
+	tests := []struct {
+		name     string
+		active   tab
+		wantServers bool
+		wantActivity bool
+	}{
+		{
+			name:     "Servers tab active",
+			active:   tabServers,
+			wantServers: true,
+		},
+		{
+			name:     "Activity tab active",
+			active:   tabActivity,
+			wantActivity: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := renderTabs(tt.active)
+			assert.NotEmpty(t, result)
+			assert.Contains(t, result, "Servers")
+			assert.Contains(t, result, "Activity")
+		})
+	}
+}
+
+func TestRenderServers(t *testing.T) {
+	tests := []struct {
+		name         string
+		servers      []serverInfo
+		cursor       int
+		maxHeight    int
+		wantRows     int
+		wantSelected bool
+	}{
+		{
+			name:      "empty servers",
+			servers:   []serverInfo{},
+			maxHeight: 10,
+			wantRows:  0,
+		},
+		{
+			name: "single server healthy",
+			servers: []serverInfo{
+				{
+					Name:          "github",
+					HealthLevel:   "healthy",
+					HealthSummary: "Connected (12 tools)",
+					ToolCount:     12,
+				},
+			},
+			cursor:        0,
+			maxHeight:     10,
+			wantRows:      1,
+			wantSelected:  true,
+		},
+		{
+			name: "multiple servers with different health",
+			servers: []serverInfo{
+				{
+					Name:          "github",
+					HealthLevel:   "healthy",
+					HealthSummary: "Connected (12 tools)",
+					ToolCount:     12,
+				},
+				{
+					Name:          "pagerduty",
+					HealthLevel:   "degraded",
+					HealthSummary: "Token expiring in 2h",
+					ToolCount:     5,
+				},
+				{
+					Name:          "broken-api",
+					HealthLevel:   "unhealthy",
+					HealthSummary: "Connection failed",
+					ToolCount:     0,
+				},
+			},
+			cursor:        1,
+			maxHeight:     10,
+			wantRows:      3,
+			wantSelected:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(client, 5*time.Second)
+			m.servers = tt.servers
+			m.cursor = tt.cursor
+			m.width = 120
+
+			result := renderServers(m, tt.maxHeight)
+			assert.NotEmpty(t, result)
+
+			if len(tt.servers) == 0 {
+				// Empty case shows message
+				assert.Contains(t, result, "No servers")
+			} else {
+				// Should contain server names
+				for _, s := range tt.servers {
+					assert.Contains(t, result, s.Name)
+				}
+
+				// Should contain health indicators
+				assert.Contains(t, result, "●") // healthy
+				if len(tt.servers) > 1 {
+					assert.Contains(t, result, "◐") // degraded
+				}
+			}
+		})
+	}
+}
+
+func TestRenderActivity(t *testing.T) {
+	tests := []struct {
+		name      string
+		activities []activityInfo
+		cursor     int
+		maxHeight int
+		wantRows  int
+	}{
+		{
+			name:       "empty activity",
+			activities: []activityInfo{},
+			maxHeight:  10,
+			wantRows:   0,
+		},
+		{
+			name: "single activity",
+			activities: []activityInfo{
+				{
+					ID:         "act-123",
+					Type:       "tool_call",
+					ServerName: "github",
+					ToolName:   "list_repositories",
+					Status:     "success",
+					Timestamp:  "2026-02-09T15:00:00Z",
+					DurationMs: "145ms",
+				},
+			},
+			cursor:       0,
+			maxHeight:    10,
+			wantRows:     1,
+		},
+		{
+			name: "multiple activities with different status",
+			activities: []activityInfo{
+				{
+					Type:       "tool_call",
+					ServerName: "github",
+					ToolName:   "get_user",
+					Status:     "success",
+					DurationMs: "50ms",
+				},
+				{
+					Type:       "tool_call",
+					ServerName: "stripe",
+					ToolName:   "create_invoice",
+					Status:     "error",
+					DurationMs: "200ms",
+				},
+				{
+					Type:       "policy_decision",
+					ServerName: "mcpproxy",
+					ToolName:   "quarantine_check",
+					Status:     "blocked",
+					DurationMs: "10ms",
+				},
+			},
+			cursor:       2,
+			maxHeight:    10,
+			wantRows:     3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(client, 5*time.Second)
+			m.activities = tt.activities
+			m.cursor = tt.cursor
+			m.width = 120
+
+			result := renderActivity(m, tt.maxHeight)
+			assert.NotEmpty(t, result)
+
+			if len(tt.activities) > 0 {
+				for _, a := range tt.activities {
+					// Type might be truncated, check first few chars
+					assert.Contains(t, result, a.Type[:min(len(a.Type), 3)])
+					assert.Contains(t, result, a.ServerName)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatTokenExpiry(t *testing.T) {
+	tests := []struct {
+		name      string
+		expiresAt string
+		want      string
+	}{
+		{
+			name:      "empty expiry",
+			expiresAt: "",
+			want:      "-",
+		},
+		{
+			name:      "expired token",
+			expiresAt: "2026-01-01T00:00:00Z",
+			want:      "EXPIRED",
+		},
+		{
+			name:      "token expiring soon",
+			expiresAt: time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			want:      "1h",
+		},
+		{
+			name:      "token expires in 2+ hours",
+			expiresAt: time.Now().Add(3 * time.Hour).Format(time.RFC3339),
+			want:      "3h",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatTokenExpiry(tt.expiresAt)
+			if tt.want == "EXPIRED" {
+				assert.Contains(t, result, "EXPIRED")
+			} else if tt.want == "-" {
+				assert.Equal(t, tt.want, result)
+			} else {
+				// For durations, just check it's not empty and matches roughly
+				assert.NotEmpty(t, result)
+			}
+		})
+	}
+}
+
+func TestFormatTimestamp(t *testing.T) {
+	tests := []struct {
+		name      string
+		timestamp string
+		valid     bool
+	}{
+		{
+			name:      "valid RFC3339",
+			timestamp: "2026-02-09T15:30:45Z",
+			valid:     true,
+		},
+		{
+			name:      "valid RFC3339Nano",
+			timestamp: "2026-02-09T15:30:45.123456789Z",
+			valid:     true,
+		},
+		{
+			name:      "invalid timestamp",
+			timestamp: "invalid",
+			valid:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatTimestamp(tt.timestamp)
+			assert.NotEmpty(t, result)
+			if tt.valid {
+				// Should be formatted as HH:MM:SS
+				assert.Regexp(t, `\d{2}:\d{2}:\d{2}`, result)
+			}
+		})
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		want     string
+	}{
+		{
+			name:     "less than minute",
+			duration: 30 * time.Second,
+			want:     "30s",
+		},
+		{
+			name:     "less than hour",
+			duration: 5 * time.Minute,
+			want:     "5m",
+		},
+		{
+			name:     "less than day",
+			duration: 2 * time.Hour,
+			want:     "2h0m",
+		},
+		{
+			name:     "multiple days",
+			duration: 3 * 24 * time.Hour,
+			want:     "3d",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatDuration(tt.duration)
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+func TestHealthIndicator(t *testing.T) {
+	tests := []struct {
+		name  string
+		level string
+		want  string
+	}{
+		{name: "healthy", level: "healthy", want: "●"},
+		{name: "degraded", level: "degraded", want: "◐"},
+		{name: "unhealthy", level: "unhealthy", want: "○"},
+		{name: "unknown", level: "unknown", want: "○"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Just verify it returns a non-empty string with the indicator
+			result := healthIndicator(tt.level)
+			assert.NotEmpty(t, result)
+			// The actual character might be wrapped in color codes
+			assert.Contains(t, result, tt.want)
+		})
+	}
+}
