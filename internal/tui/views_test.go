@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -356,4 +357,29 @@ func TestHealthIndicator(t *testing.T) {
 			assert.Contains(t, result, tt.want)
 		})
 	}
+}
+
+func TestRenderHelpers(t *testing.T) {
+	t.Run("RenderTitle", func(t *testing.T) {
+		result := RenderTitle("Test Title")
+		assert.Contains(t, result, "Test Title")
+		assert.NotEmpty(t, result)
+	})
+
+	t.Run("RenderError with error", func(t *testing.T) {
+		result := RenderError(fmt.Errorf("something failed"))
+		assert.Contains(t, result, "something failed")
+		assert.Contains(t, result, "Error:")
+	})
+
+	t.Run("RenderError with nil", func(t *testing.T) {
+		result := RenderError(nil)
+		assert.Empty(t, result)
+	})
+
+	t.Run("RenderHelp", func(t *testing.T) {
+		result := RenderHelp("q: quit  r: refresh")
+		assert.Contains(t, result, "q: quit")
+		assert.Contains(t, result, "r: refresh")
+	})
 }

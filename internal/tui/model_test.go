@@ -495,6 +495,28 @@ func TestRefreshCommand(t *testing.T) {
 	assert.NotNil(t, resultModel)
 }
 
+func TestRefreshAllOAuthTokens(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(client, 5*time.Second)
+	m.servers = []serverInfo{
+		{Name: "server-1", HealthAction: "login", HealthLevel: "unhealthy"},
+		{Name: "server-2", HealthAction: "", HealthLevel: "healthy"},
+		{Name: "server-3", HealthAction: "login", HealthLevel: "degraded"},
+	}
+
+	// 'L' should trigger OAuth login for servers with action="login"
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}}
+	_, cmd := m.Update(msg)
+	assert.NotNil(t, cmd, "L key should produce batch command for servers needing login")
+
+	// When no servers need login, cmd should be nil
+	m.servers = []serverInfo{
+		{Name: "server-1", HealthAction: "", HealthLevel: "healthy"},
+	}
+	_, cmd = m.Update(msg)
+	assert.Nil(t, cmd, "L key should produce nil cmd when no servers need login")
+}
+
 // Test error constants for consistency
 var (
 	ErrConnectionFailed = assert.AnError

@@ -12,8 +12,7 @@ func renderView(m model) string {
 	var b strings.Builder
 
 	// Title bar
-	title := titleStyle.Render(" MCPProxy TUI ")
-	b.WriteString(title)
+	b.WriteString(RenderTitle(" MCPProxy TUI "))
 	b.WriteString("\n\n")
 
 	// Tabs
@@ -36,7 +35,7 @@ func renderView(m model) string {
 	// Error display
 	if m.err != nil {
 		b.WriteString("\n")
-		b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+		b.WriteString(RenderError(m.err))
 		b.WriteString("\n")
 	}
 
@@ -75,7 +74,7 @@ func renderTabs(active tab) string {
 
 func renderServers(m model, maxHeight int) string {
 	if len(m.servers) == 0 {
-		return mutedStyle.Render("  No servers configured")
+		return MutedStyle.Render("  No servers configured")
 	}
 
 	var b strings.Builder
@@ -83,7 +82,7 @@ func renderServers(m model, maxHeight int) string {
 	// Header
 	header := fmt.Sprintf("  %-3s %-24s %-10s %-6s %-36s %s",
 		"", "NAME", "STATE", "TOOLS", "STATUS", "TOKEN EXPIRES")
-	b.WriteString(headerStyle.Render(header))
+	b.WriteString(HeaderStyle.Render(header))
 	b.WriteString("\n")
 
 	// Server rows
@@ -125,14 +124,14 @@ func renderServers(m model, maxHeight int) string {
 			indicator, name, state, tools, summary, tokenExpiry)
 
 		if i == m.cursor {
-			b.WriteString(selectedStyle.Render(row))
+			b.WriteString(SelectedStyle.Render(row))
 		} else {
 			stateStyle := healthStyle(s.HealthLevel)
 			// Apply health coloring to summary portion
 			prefix := fmt.Sprintf("  %s %-24s %-10s %-6s ", indicator, name, state, tools)
-			b.WriteString(normalStyle.Render(prefix))
+			b.WriteString(BaseStyle.Render(prefix))
 			b.WriteString(stateStyle.Render(fmt.Sprintf("%-36s", summary)))
-			b.WriteString(mutedStyle.Render(fmt.Sprintf(" %s", tokenExpiry)))
+			b.WriteString(MutedStyle.Render(fmt.Sprintf(" %s", tokenExpiry)))
 		}
 		b.WriteString("\n")
 	}
@@ -142,7 +141,7 @@ func renderServers(m model, maxHeight int) string {
 
 func renderActivity(m model, maxHeight int) string {
 	if len(m.activities) == 0 {
-		return mutedStyle.Render("  No recent activity")
+		return MutedStyle.Render("  No recent activity")
 	}
 
 	var b strings.Builder
@@ -150,7 +149,7 @@ func renderActivity(m model, maxHeight int) string {
 	// Header
 	header := fmt.Sprintf("  %-12s %-16s %-28s %-10s %-10s %s",
 		"TYPE", "SERVER", "TOOL", "STATUS", "DURATION", "TIME")
-	b.WriteString(headerStyle.Render(header))
+	b.WriteString(HeaderStyle.Render(header))
 	b.WriteString("\n")
 
 	visible := maxHeight - 2
@@ -189,7 +188,7 @@ func renderActivity(m model, maxHeight int) string {
 			actType, server, tool, status, duration, ts)
 
 		if i == m.cursor {
-			b.WriteString(selectedStyle.Render(row))
+			b.WriteString(SelectedStyle.Render(row))
 		} else {
 			var statusStyle lipgloss.Style
 			switch a.Status {
@@ -200,13 +199,13 @@ func renderActivity(m model, maxHeight int) string {
 			case "blocked":
 				statusStyle = degradedStyle
 			default:
-				statusStyle = normalStyle
+				statusStyle = BaseStyle
 			}
 
 			prefix := fmt.Sprintf("  %-12s %-16s %-28s ", actType, server, tool)
-			b.WriteString(normalStyle.Render(prefix))
+			b.WriteString(BaseStyle.Render(prefix))
 			b.WriteString(statusStyle.Render(fmt.Sprintf("%-10s", status)))
-			b.WriteString(mutedStyle.Render(fmt.Sprintf(" %-10s %s", duration, ts)))
+			b.WriteString(MutedStyle.Render(fmt.Sprintf(" %-10s %s", duration, ts)))
 		}
 		b.WriteString("\n")
 	}
@@ -227,18 +226,18 @@ func renderStatusBar(m model) string {
 	}
 
 	bar := left + strings.Repeat(" ", gap) + right
-	return statusBarStyle.Width(m.width).Render(bar)
+	return StatusBarStyle.Width(m.width).Render(bar)
 }
 
 func renderHelp(active tab) string {
-	common := "q: quit  tab: switch  r: refresh"
+	common := "q: quit  tab: switch  r: refresh  L: login all"
 	switch active {
 	case tabServers:
-		return helpStyle.Render(" " + common + "  e: enable  d: disable  R: restart  l: login")
+		return RenderHelp(" " + common + "  e: enable  d: disable  R: restart  l: login")
 	case tabActivity:
-		return helpStyle.Render(" " + common + "  j/k: navigate")
+		return RenderHelp(" " + common + "  j/k: navigate")
 	}
-	return helpStyle.Render(" " + common)
+	return RenderHelp(" " + common)
 }
 
 func formatTokenExpiry(expiresAt string) string {

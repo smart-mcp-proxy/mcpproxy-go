@@ -299,6 +299,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+
+	case "L":
+		// Refresh all OAuth tokens: trigger login for every server needing it
+		var cmds []tea.Cmd
+		for _, s := range m.servers {
+			if s.HealthAction == "login" {
+				name := s.Name
+				cmds = append(cmds, func() tea.Msg {
+					_ = m.client.TriggerOAuthLogin(m.ctx, name)
+					return nil
+				})
+			}
+		}
+		if len(cmds) > 0 {
+			cmds = append(cmds, func() tea.Msg { return tickMsg(time.Now()) })
+			return m, tea.Batch(cmds...)
+		}
 	}
 
 	return m, nil
