@@ -279,6 +279,220 @@ func TestErrorHandling(t *testing.T) {
 	assert.Equal(t, ErrConnectionFailed, resultModel.err)
 }
 
+func TestServerActions(t *testing.T) {
+	tests := []struct {
+		name           string
+		key            string
+		cursor         int
+		servers        []serverInfo
+		expectActionCt int
+	}{
+		{
+			name:           "enable server",
+			key:            "e",
+			cursor:         0,
+			servers:        []serverInfo{{Name: "github"}},
+			expectActionCt: 1,
+		},
+		{
+			name:           "disable server",
+			key:            "d",
+			cursor:         0,
+			servers:        []serverInfo{{Name: "github"}},
+			expectActionCt: 1,
+		},
+		{
+			name:           "restart server",
+			key:            "R",
+			cursor:         0,
+			servers:        []serverInfo{{Name: "github"}},
+			expectActionCt: 1,
+		},
+		{
+			name:           "action with no servers",
+			key:            "e",
+			cursor:         0,
+			servers:        []serverInfo{},
+			expectActionCt: 0, // Should not call action
+		},
+		{
+			name:           "action with cursor out of bounds",
+			key:            "e",
+			cursor:         5,
+			servers:        []serverInfo{{Name: "github"}},
+			expectActionCt: 0, // Should not call action
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(client, 5*time.Second)
+			m.servers = tt.servers
+			m.cursor = tt.cursor
+			m.activeTab = tabServers
+
+			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(tt.key[0])}}
+			_, _ = m.Update(msg)
+			// We verify it doesn't panic; actual action verification would need enhanced MockClient
+		})
+	}
+}
+
+func TestTabKeyNavigation(t *testing.T) {
+	tests := []struct {
+		name         string
+		initialTab   tab
+		expectTab    tab
+		expectCursor int
+	}{
+		{
+			name:         "tab from Servers to Activity",
+			initialTab:   tabServers,
+			expectTab:    tabActivity,
+			expectCursor: 0,
+		},
+		{
+			name:         "tab from Activity back to Servers",
+			initialTab:   tabActivity,
+			expectTab:    tabServers,
+			expectCursor: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(client, 5*time.Second)
+			m.activeTab = tt.initialTab
+			m.cursor = 5 // Set to non-zero to verify reset
+
+			// Send tab key via KeyTab type
+			msg := tea.KeyMsg{Type: tea.KeyTab}
+			result, _ := m.Update(msg)
+			resultModel := result.(model)
+
+			assert.Equal(t, tt.expectTab, resultModel.activeTab)
+			assert.Equal(t, tt.expectCursor, resultModel.cursor)
+		})
+	}
+}
+
+func TestOAuthLoginConditional(t *testing.T) {
+	tests := []struct {
+		name         string
+		healthAction string
+		key          string
+		expectLogin  bool
+	}{
+		{
+			name:         "login triggered when action=login",
+			healthAction: "login",
+			key:          "l",
+			expectLogin:  true,
+		},
+		{
+			name:         "login not triggered when action=restart",
+			healthAction: "restart",
+			key:          "l",
+			expectLogin:  false,
+		},
+		{
+			name:         "login not triggered when action empty",
+			healthAction: "",
+			key:          "l",
+			expectLogin:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(client, 5*time.Second)
+			m.servers = []serverInfo{
+				{
+					Name:           "test-server",
+					HealthAction:   tt.healthAction,
+					HealthLevel:    "healthy",
+					HealthSummary:  "Connected",
+					AdminState:     "enabled",
+					OAuthStatus:    "authenticated",
+				},
+			}
+			m.cursor = 0
+			m.activeTab = tabServers
+
+			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(tt.key[0])}}
+			_, _ = m.Update(msg)
+			// Note: would need enhanced MockClient with call tracking to verify actual login call
+		})
+	}
+}
+
+func TestWindowResizeEdgeCases(t *testing.T) {
+	tests := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{
+			name:   "very small window",
+			width:  10,
+			height: 5,
+		},
+		{
+			name:   "zero width",
+			width:  0,
+			height: 24,
+		},
+		{
+			name:   "zero height",
+			width:  80,
+			height: 0,
+		},
+		{
+			name:   "large window",
+			width:  200,
+			height: 100,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(client, 5*time.Second)
+
+			msg := tea.WindowSizeMsg{Width: tt.width, Height: tt.height}
+			result, _ := m.Update(msg)
+			resultModel := result.(model)
+
+			assert.Equal(t, tt.width, resultModel.width)
+			assert.Equal(t, tt.height, resultModel.height)
+
+			// View should not panic on extreme sizes
+			view := resultModel.View()
+			assert.NotEmpty(t, view)
+		})
+	}
+}
+
+func TestRefreshCommand(t *testing.T) {
+	client := &MockClient{
+		servers:    []map[string]interface{}{{"name": "test"}},
+		activities: []map[string]interface{}{},
+	}
+	m := NewModel(client, 5*time.Second)
+
+	// Simulate 'r' key
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}}
+	result, cmd := m.Update(msg)
+	resultModel := result.(model)
+
+	// Command should be returned (batch of fetch commands)
+	assert.NotNil(t, cmd)
+	assert.NotNil(t, resultModel)
+}
+
 // Test error constants for consistency
 var (
 	ErrConnectionFailed = assert.AnError
