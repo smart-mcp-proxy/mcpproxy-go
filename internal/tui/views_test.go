@@ -251,11 +251,12 @@ func TestFormatTokenExpiry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := formatTokenExpiry(tt.expiresAt)
-			if tt.want == "EXPIRED" {
+			switch tt.want {
+			case "EXPIRED":
 				assert.Contains(t, result, "EXPIRED")
-			} else if tt.want == "-" {
+			case "-":
 				assert.Equal(t, tt.want, result)
-			} else {
+			default:
 				// For durations, just check it's not empty and matches roughly
 				assert.NotEmpty(t, result)
 			}
