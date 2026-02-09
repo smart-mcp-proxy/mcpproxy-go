@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -12,11 +13,19 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 )
 
-// MockClient mocks the Client interface for testing
+// MockClient mocks the Client interface for testing with call tracking
 type MockClient struct {
 	servers    []map[string]interface{}
 	activities []map[string]interface{}
 	err        error
+
+	// Call tracking
+	serverActionCalls []serverActionCall
+	oauthLoginCalls   []string
+}
+
+type serverActionCall struct {
+	Name, Action string
 }
 
 func (m *MockClient) GetServers(ctx context.Context) ([]map[string]interface{}, error) {
@@ -28,16 +37,18 @@ func (m *MockClient) ListActivities(ctx context.Context, filter cliclient.Activi
 }
 
 func (m *MockClient) ServerAction(ctx context.Context, name, action string) error {
+	m.serverActionCalls = append(m.serverActionCalls, serverActionCall{name, action})
 	return m.err
 }
 
 func (m *MockClient) TriggerOAuthLogin(ctx context.Context, name string) error {
+	m.oauthLoginCalls = append(m.oauthLoginCalls, name)
 	return m.err
 }
 
 func TestModelInit(t *testing.T) {
 	client := &MockClient{}
-	m := NewModel(client, 5*time.Second)
+	m := NewModel(context.Background(), client, 5*time.Second)
 
 	cmd := m.Init()
 	assert.NotNil(t, cmd)
@@ -102,7 +113,7 @@ func TestModelKeyboardHandling(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 			m.activeTab = tt.activeTab
 			m.cursor = tt.cursor
 			m.servers = tt.servers
@@ -186,7 +197,7 @@ func TestModelDataFetching(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{servers: tt.servers}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 
 			cmd := fetchServers(client, m.ctx)
 			assert.NotNil(t, cmd)
@@ -243,7 +254,7 @@ func TestModelMaxIndex(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 			m.servers = tt.servers
 			m.activities = tt.activity
 			m.activeTab = tt.tab
@@ -256,7 +267,7 @@ func TestModelMaxIndex(t *testing.T) {
 
 func TestWindowResize(t *testing.T) {
 	client := &MockClient{}
-	m := NewModel(client, 5*time.Second)
+	m := NewModel(context.Background(), client, 5*time.Second)
 	assert.Equal(t, 0, m.width)
 	assert.Equal(t, 0, m.height)
 
@@ -270,7 +281,7 @@ func TestWindowResize(t *testing.T) {
 
 func TestErrorHandling(t *testing.T) {
 	client := &MockClient{}
-	m := NewModel(client, 5*time.Second)
+	m := NewModel(context.Background(), client, 5*time.Second)
 	assert.Nil(t, m.err)
 
 	msg := errMsg{err: ErrConnectionFailed}
@@ -283,60 +294,77 @@ func TestErrorHandling(t *testing.T) {
 
 func TestServerActions(t *testing.T) {
 	tests := []struct {
-		name           string
-		key            string
-		cursor         int
-		servers        []serverInfo
-		expectActionCt int
+		name         string
+		key          string
+		cursor       int
+		servers      []serverInfo
+		wantAction   string
+		wantServer   string
+		wantCmdNil   bool
 	}{
 		{
-			name:           "enable server",
-			key:            "e",
-			cursor:         0,
-			servers:        []serverInfo{{Name: "github"}},
-			expectActionCt: 1,
+			name:       "enable server",
+			key:        "e",
+			cursor:     0,
+			servers:    []serverInfo{{Name: "github"}},
+			wantAction: "enable",
+			wantServer: "github",
 		},
 		{
-			name:           "disable server",
-			key:            "d",
-			cursor:         0,
-			servers:        []serverInfo{{Name: "github"}},
-			expectActionCt: 1,
+			name:       "disable server",
+			key:        "d",
+			cursor:     0,
+			servers:    []serverInfo{{Name: "github"}},
+			wantAction: "disable",
+			wantServer: "github",
 		},
 		{
-			name:           "restart server",
-			key:            "R",
-			cursor:         0,
-			servers:        []serverInfo{{Name: "github"}},
-			expectActionCt: 1,
+			name:       "restart server",
+			key:        "R",
+			cursor:     0,
+			servers:    []serverInfo{{Name: "github"}},
+			wantAction: "restart",
+			wantServer: "github",
 		},
 		{
-			name:           "action with no servers",
-			key:            "e",
-			cursor:         0,
-			servers:        []serverInfo{},
-			expectActionCt: 0, // Should not call action
+			name:       "action with no servers",
+			key:        "e",
+			cursor:     0,
+			servers:    []serverInfo{},
+			wantCmdNil: true,
 		},
 		{
-			name:           "action with cursor out of bounds",
-			key:            "e",
-			cursor:         5,
-			servers:        []serverInfo{{Name: "github"}},
-			expectActionCt: 0, // Should not call action
+			name:       "action with cursor out of bounds",
+			key:        "e",
+			cursor:     5,
+			servers:    []serverInfo{{Name: "github"}},
+			wantCmdNil: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 			m.servers = tt.servers
 			m.cursor = tt.cursor
 			m.activeTab = tabServers
 
 			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(tt.key[0])}}
-			_, _ = m.Update(msg)
-			// We verify it doesn't panic; actual action verification would need enhanced MockClient
+			_, cmd := m.Update(msg)
+
+			if tt.wantCmdNil {
+				assert.Nil(t, cmd)
+				return
+			}
+
+			// Execute the command to trigger the mock
+			require.NotNil(t, cmd)
+			cmd()
+
+			require.Len(t, client.serverActionCalls, 1)
+			assert.Equal(t, tt.wantServer, client.serverActionCalls[0].Name)
+			assert.Equal(t, tt.wantAction, client.serverActionCalls[0].Action)
 		})
 	}
 }
@@ -365,7 +393,7 @@ func TestTabKeyNavigation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 			m.activeTab = tt.initialTab
 			m.cursor = 5 // Set to non-zero to verify reset
 
@@ -410,23 +438,30 @@ func TestOAuthLoginConditional(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 			m.servers = []serverInfo{
 				{
-					Name:           "test-server",
-					HealthAction:   tt.healthAction,
-					HealthLevel:    "healthy",
-					HealthSummary:  "Connected",
-					AdminState:     "enabled",
-					OAuthStatus:    "authenticated",
+					Name:         "test-server",
+					HealthAction: tt.healthAction,
+					HealthLevel:  "healthy",
+					AdminState:   "enabled",
 				},
 			}
 			m.cursor = 0
 			m.activeTab = tabServers
 
 			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(tt.key[0])}}
-			_, _ = m.Update(msg)
-			// Note: would need enhanced MockClient with call tracking to verify actual login call
+			_, cmd := m.Update(msg)
+
+			if tt.expectLogin {
+				require.NotNil(t, cmd)
+				cmd()
+				require.Len(t, client.oauthLoginCalls, 1)
+				assert.Equal(t, "test-server", client.oauthLoginCalls[0])
+			} else {
+				assert.Nil(t, cmd)
+				assert.Empty(t, client.oauthLoginCalls)
+			}
 		})
 	}
 }
@@ -462,7 +497,7 @@ func TestWindowResizeEdgeCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 
 			msg := tea.WindowSizeMsg{Width: tt.width, Height: tt.height}
 			result, _ := m.Update(msg)
@@ -483,7 +518,7 @@ func TestRefreshCommand(t *testing.T) {
 		servers:    []map[string]interface{}{{"name": "test"}},
 		activities: []map[string]interface{}{},
 	}
-	m := NewModel(client, 5*time.Second)
+	m := NewModel(context.Background(), client, 5*time.Second)
 
 	// Simulate 'r' key
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}}
@@ -497,7 +532,7 @@ func TestRefreshCommand(t *testing.T) {
 
 func TestRefreshAllOAuthTokens(t *testing.T) {
 	client := &MockClient{}
-	m := NewModel(client, 5*time.Second)
+	m := NewModel(context.Background(), client, 5*time.Second)
 	m.servers = []serverInfo{
 		{Name: "server-1", HealthAction: "login", HealthLevel: "unhealthy"},
 		{Name: "server-2", HealthAction: "", HealthLevel: "healthy"},
@@ -515,6 +550,135 @@ func TestRefreshAllOAuthTokens(t *testing.T) {
 	}
 	_, cmd = m.Update(msg)
 	assert.Nil(t, cmd, "L key should produce nil cmd when no servers need login")
+}
+
+func TestTickMsgTriggersRefresh(t *testing.T) {
+	client := &MockClient{
+		servers:    []map[string]interface{}{{"name": "test"}},
+		activities: []map[string]interface{}{},
+	}
+	m := NewModel(context.Background(), client, 5*time.Second)
+
+	msg := tickMsg(time.Now())
+	_, cmd := m.Update(msg)
+
+	// tickMsg should return a batch of fetch commands + next tick
+	assert.NotNil(t, cmd)
+}
+
+func TestFetchActivitiesParsing(t *testing.T) {
+	client := &MockClient{
+		activities: []map[string]interface{}{
+			{
+				"id":          "act-001",
+				"type":        "tool_call",
+				"server_name": "github",
+				"tool_name":   "list_repos",
+				"status":      "success",
+				"timestamp":   "2026-02-09T12:00:00Z",
+				"duration_ms": 145.0,
+			},
+			{
+				"id":          "act-002",
+				"type":        "policy_decision",
+				"server_name": "stripe",
+				"tool_name":   "create_charge",
+				"status":      "blocked",
+				"timestamp":   "2026-02-09T12:01:00Z",
+			},
+		},
+	}
+	m := NewModel(context.Background(), client, 5*time.Second)
+
+	cmd := fetchActivities(client, m.ctx)
+	require.NotNil(t, cmd)
+	msg := cmd()
+
+	result, _ := m.Update(msg)
+	resultModel := result.(model)
+
+	require.Len(t, resultModel.activities, 2)
+
+	a := resultModel.activities[0]
+	assert.Equal(t, "act-001", a.ID)
+	assert.Equal(t, "tool_call", a.Type)
+	assert.Equal(t, "github", a.ServerName)
+	assert.Equal(t, "list_repos", a.ToolName)
+	assert.Equal(t, "success", a.Status)
+	assert.Equal(t, "145ms", a.DurationMs)
+
+	// Second activity has no duration_ms
+	a2 := resultModel.activities[1]
+	assert.Equal(t, "blocked", a2.Status)
+	assert.Empty(t, a2.DurationMs)
+}
+
+func TestArrowKeyNavigation(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(context.Background(), client, 5*time.Second)
+	m.activeTab = tabServers
+	m.servers = []serverInfo{{Name: "srv1"}, {Name: "srv2"}, {Name: "srv3"}}
+	m.cursor = 0
+
+	// Down arrow
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	resultModel := result.(model)
+	assert.Equal(t, 1, resultModel.cursor)
+
+	// Up arrow
+	result, _ = resultModel.Update(tea.KeyMsg{Type: tea.KeyUp})
+	resultModel = result.(model)
+	assert.Equal(t, 0, resultModel.cursor)
+
+	// Up arrow at top (no-op)
+	result, _ = resultModel.Update(tea.KeyMsg{Type: tea.KeyUp})
+	resultModel = result.(model)
+	assert.Equal(t, 0, resultModel.cursor)
+}
+
+func TestActionErrorSurfaced(t *testing.T) {
+	client := &MockClient{err: fmt.Errorf("connection refused")}
+	m := NewModel(context.Background(), client, 5*time.Second)
+	m.servers = []serverInfo{{Name: "github"}}
+	m.cursor = 0
+	m.activeTab = tabServers
+
+	// Press 'e' to enable — should return a command
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}}
+	_, cmd := m.Update(msg)
+	require.NotNil(t, cmd)
+
+	// Execute the command — should return errMsg since client returns error
+	resultMsg := cmd()
+	errResult, ok := resultMsg.(errMsg)
+	require.True(t, ok, "expected errMsg when action fails")
+	assert.Contains(t, errResult.err.Error(), "connection refused")
+	assert.Contains(t, errResult.err.Error(), "enable")
+}
+
+func TestRefreshAllOAuthTokensCallTracking(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(context.Background(), client, 5*time.Second)
+	m.servers = []serverInfo{
+		{Name: "server-a", HealthAction: "login"},
+		{Name: "server-b", HealthAction: ""},
+		{Name: "server-c", HealthAction: "login"},
+	}
+
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}}
+	_, cmd := m.Update(msg)
+	require.NotNil(t, cmd)
+
+	// Execute the batch — Bubble Tea Batch returns a single cmd that runs all
+	// We can't easily decompose a batch, but we can test individual oauthLoginCmd
+	loginCmd := oauthLoginCmd(client, m.ctx, "server-a")
+	loginCmd()
+	loginCmd2 := oauthLoginCmd(client, m.ctx, "server-c")
+	loginCmd2()
+
+	require.Len(t, client.oauthLoginCalls, 2)
+	assert.Equal(t, "server-a", client.oauthLoginCalls[0])
+	assert.Equal(t, "server-c", client.oauthLoginCalls[1])
 }
 
 // Test error constants for consistency

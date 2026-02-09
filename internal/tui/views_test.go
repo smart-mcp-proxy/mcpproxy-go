@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 
 func TestRenderView(t *testing.T) {
 	client := &MockClient{}
-	m := NewModel(client, 5*time.Second)
+	m := NewModel(context.Background(), client, 5*time.Second)
 	m.width = 80
 	m.height = 24
 
@@ -110,7 +111,7 @@ func TestRenderServers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 			m.servers = tt.servers
 			m.cursor = tt.cursor
 			m.width = 120
@@ -202,7 +203,7 @@ func TestRenderActivity(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &MockClient{}
-			m := NewModel(client, 5*time.Second)
+			m := NewModel(context.Background(), client, 5*time.Second)
 			m.activities = tt.activities
 			m.cursor = tt.cursor
 			m.width = 120
@@ -355,6 +356,29 @@ func TestHealthIndicator(t *testing.T) {
 			assert.NotEmpty(t, result)
 			// The actual character might be wrapped in color codes
 			assert.Contains(t, result, tt.want)
+		})
+	}
+}
+
+func TestTruncateString(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		max      int
+		want     string
+	}{
+		{"short string", "hello", 10, "hello"},
+		{"exact length", "hello", 5, "hello"},
+		{"needs truncation", "hello world", 8, "hello..."},
+		{"unicode safe", "日本語サーバー", 5, "日本..."},
+		{"emoji safe", "🔧🔨🔩🔪🔫", 4, "🔧..."},
+		{"very small max", "hello", 3, "hel"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := truncateString(tt.input, tt.max)
+			assert.Equal(t, tt.want, result)
 		})
 	}
 }

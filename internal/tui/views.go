@@ -101,10 +101,7 @@ func renderServers(m model, maxHeight int) string {
 		s := m.servers[i]
 
 		indicator := healthIndicator(s.HealthLevel)
-		name := s.Name
-		if len(name) > 24 {
-			name = name[:21] + "..."
-		}
+		name := truncateString(s.Name, 24)
 
 		state := s.AdminState
 		if state == "" {
@@ -113,10 +110,7 @@ func renderServers(m model, maxHeight int) string {
 
 		tools := fmt.Sprintf("%d", s.ToolCount)
 
-		summary := s.HealthSummary
-		if len(summary) > 36 {
-			summary = summary[:33] + "..."
-		}
+		summary := truncateString(s.HealthSummary, 36)
 
 		tokenExpiry := formatTokenExpiry(s.TokenExpiresAt)
 
@@ -165,20 +159,9 @@ func renderActivity(m model, maxHeight int) string {
 	for i := offset; i < offset+visible && i < len(m.activities); i++ {
 		a := m.activities[i]
 
-		actType := a.Type
-		if len(actType) > 12 {
-			actType = actType[:9] + "..."
-		}
-
-		server := a.ServerName
-		if len(server) > 16 {
-			server = server[:13] + "..."
-		}
-
-		tool := a.ToolName
-		if len(tool) > 28 {
-			tool = tool[:25] + "..."
-		}
+		actType := truncateString(a.Type, 12)
+		server := truncateString(a.ServerName, 16)
+		tool := truncateString(a.ToolName, 28)
 
 		status := a.Status
 		duration := a.DurationMs
@@ -284,4 +267,17 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// truncateString truncates s to maxRunes runes, appending "..." if truncated.
+// Uses []rune to avoid splitting multi-byte UTF-8 characters.
+func truncateString(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }

@@ -157,6 +157,24 @@ func tickCmd(d time.Duration) tea.Cmd {
 	})
 }
 
+func serverActionCmd(client Client, ctx context.Context, name, action string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.ServerAction(ctx, name, action); err != nil {
+			return errMsg{fmt.Errorf("%s %s: %w", action, name, err)}
+		}
+		return tickMsg(time.Now())
+	}
+}
+
+func oauthLoginCmd(client Client, ctx context.Context, name string) tea.Cmd {
+	return func() tea.Msg {
+		if err := client.TriggerOAuthLogin(ctx, name); err != nil {
+			return errMsg{fmt.Errorf("login %s: %w", name, err)}
+		}
+		return tickMsg(time.Now())
+	}
+}
+
 func strVal(m map[string]interface{}, key string) string {
 	if v, ok := m[key].(string); ok {
 		return v
@@ -164,11 +182,12 @@ func strVal(m map[string]interface{}, key string) string {
 	return ""
 }
 
-// NewModel creates a new TUI model
-func NewModel(client Client, refreshInterval time.Duration) model {
+// NewModel creates a new TUI model. The context controls the lifetime of all
+// API calls; cancel it to cleanly abort in-flight requests on shutdown.
+func NewModel(ctx context.Context, client Client, refreshInterval time.Duration) model {
 	return model{
 		client:          client,
-		ctx:             context.Background(),
+		ctx:             ctx,
 		activeTab:       tabServers,
 		refreshInterval: refreshInterval,
 	}
@@ -265,38 +284,26 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		if m.activeTab == tabServers && m.cursor < len(m.servers) {
 			name := m.servers[m.cursor].Name
-			return m, func() tea.Msg {
-				_ = m.client.ServerAction(m.ctx, name, "enable")
-				return tickMsg(time.Now())
-			}
+			return m, serverActionCmd(m.client, m.ctx, name, "enable")
 		}
 
 	case "d":
 		if m.activeTab == tabServers && m.cursor < len(m.servers) {
 			name := m.servers[m.cursor].Name
-			return m, func() tea.Msg {
-				_ = m.client.ServerAction(m.ctx, name, "disable")
-				return tickMsg(time.Now())
-			}
+			return m, serverActionCmd(m.client, m.ctx, name, "disable")
 		}
 
 	case "R":
 		if m.activeTab == tabServers && m.cursor < len(m.servers) {
 			name := m.servers[m.cursor].Name
-			return m, func() tea.Msg {
-				_ = m.client.ServerAction(m.ctx, name, "restart")
-				return tickMsg(time.Now())
-			}
+			return m, serverActionCmd(m.client, m.ctx, name, "restart")
 		}
 
 	case "l":
 		if m.activeTab == tabServers && m.cursor < len(m.servers) {
 			s := m.servers[m.cursor]
 			if s.HealthAction == "login" {
-				return m, func() tea.Msg {
-					_ = m.client.TriggerOAuthLogin(m.ctx, s.Name)
-					return tickMsg(time.Now())
-				}
+				return m, oauthLoginCmd(m.client, m.ctx, s.Name)
 			}
 		}
 
@@ -305,11 +312,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		for _, s := range m.servers {
 			if s.HealthAction == "login" {
-				name := s.Name
-				cmds = append(cmds, func() tea.Msg {
-					_ = m.client.TriggerOAuthLogin(m.ctx, name)
-					return nil
-				})
+				cmds = append(cmds, oauthLoginCmd(m.client, m.ctx, s.Name))
 			}
 		}
 		if len(cmds) > 0 {

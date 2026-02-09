@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -50,8 +51,11 @@ func GetTUICommand() *cobra.Command {
 
 			client := cliclient.NewClientWithAPIKey(endpoint, cfg.APIKey, logger.Sugar())
 
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
+
 			refreshInterval := time.Duration(refreshSeconds) * time.Second
-			m := tui.NewModel(client, refreshInterval)
+			m := tui.NewModel(ctx, client, refreshInterval)
 
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
