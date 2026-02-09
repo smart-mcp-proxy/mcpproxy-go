@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 )
 
 // tab represents TUI tabs
@@ -43,7 +45,7 @@ type activityInfo struct {
 // Client defines the interface for API operations
 type Client interface {
 	GetServers(ctx context.Context) ([]map[string]interface{}, error)
-	ListActivities(ctx context.Context, filter interface{}) ([]map[string]interface{}, int, error)
+	ListActivities(ctx context.Context, filter cliclient.ActivityFilterParams) ([]map[string]interface{}, int, error)
 	ServerAction(ctx context.Context, name, action string) error
 	TriggerOAuthLogin(ctx context.Context, name string) error
 }

@@ -8,6 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 )
 
 // MockClient mocks the Client interface for testing
@@ -21,7 +23,7 @@ func (m *MockClient) GetServers(ctx context.Context) ([]map[string]interface{}, 
 	return m.servers, m.err
 }
 
-func (m *MockClient) ListActivities(ctx context.Context, filter interface{}) ([]map[string]interface{}, int, error) {
+func (m *MockClient) ListActivities(ctx context.Context, filter cliclient.ActivityFilterParams) ([]map[string]interface{}, int, error) {
 	return m.activities, len(m.activities), m.err
 }
 
