@@ -240,13 +240,13 @@ func TestFormatTokenExpiry(t *testing.T) {
 		},
 		{
 			name:      "token expiring soon",
-			expiresAt: time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			expiresAt: time.Now().Add(90 * time.Minute).Format(time.RFC3339),
 			want:      "1h",
 		},
 		{
-			name:      "token expires in 2+ hours",
-			expiresAt: time.Now().Add(3 * time.Hour).Format(time.RFC3339),
-			want:      "3h",
+			name:      "token expires in 10+ hours",
+			expiresAt: time.Now().Add(10*time.Hour + 30*time.Minute).Format(time.RFC3339),
+			want:      "10h",
 		},
 	}
 
@@ -259,8 +259,10 @@ func TestFormatTokenExpiry(t *testing.T) {
 			case "-":
 				assert.Equal(t, tt.want, result)
 			default:
-				// For durations, just check it's not empty and matches roughly
+				// Duration result should contain the expected hour prefix
 				assert.NotEmpty(t, result)
+				assert.Contains(t, result, tt.want,
+					"expected duration hint %q in formatted output %q", tt.want, result)
 			}
 		})
 	}

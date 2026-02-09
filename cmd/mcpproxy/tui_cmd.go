@@ -55,6 +55,9 @@ func GetTUICommand() *cobra.Command {
 			defer cancel()
 
 			refreshInterval := time.Duration(refreshSeconds) * time.Second
+			if refreshInterval < 1*time.Second {
+				return fmt.Errorf("--refresh must be at least 1 (got %d)", refreshSeconds)
+			}
 			m := tui.NewModel(ctx, client, refreshInterval)
 
 			p := tea.NewProgram(m, tea.WithAltScreen())

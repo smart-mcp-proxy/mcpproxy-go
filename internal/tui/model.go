@@ -215,12 +215,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.servers = msg.servers
 		m.lastUpdate = time.Now()
 		m.err = nil
+		if m.activeTab == tabServers && len(m.servers) > 0 && m.cursor >= len(m.servers) {
+			m.cursor = len(m.servers) - 1
+		}
 		return m, nil
 
 	case activitiesMsg:
 		m.activities = msg.activities
 		m.lastUpdate = time.Now()
 		m.err = nil
+		if m.activeTab == tabActivity && len(m.activities) > 0 && m.cursor >= len(m.activities) {
+			m.cursor = len(m.activities) - 1
+		}
 		return m, nil
 
 	case errMsg:

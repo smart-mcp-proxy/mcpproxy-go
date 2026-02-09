@@ -50,8 +50,15 @@ func TestModelInit(t *testing.T) {
 	client := &MockClient{}
 	m := NewModel(context.Background(), client, 5*time.Second)
 
+	// Verify initial state
+	assert.Equal(t, tabServers, m.activeTab)
+	assert.Equal(t, 0, m.cursor)
+	assert.Nil(t, m.err)
+	assert.Empty(t, m.servers)
+	assert.Empty(t, m.activities)
+
 	cmd := m.Init()
-	assert.NotNil(t, cmd)
+	assert.NotNil(t, cmd, "Init should return a batch command")
 }
 
 func TestModelKeyboardHandling(t *testing.T) {
@@ -679,6 +686,122 @@ func TestRefreshAllOAuthTokensCallTracking(t *testing.T) {
 	require.Len(t, client.oauthLoginCalls, 2)
 	assert.Equal(t, "server-a", client.oauthLoginCalls[0])
 	assert.Equal(t, "server-c", client.oauthLoginCalls[1])
+}
+
+func TestQuitKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{
+			name: "q key quits",
+			msg:  tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}},
+		},
+		{
+			name: "ctrl+c quits",
+			msg:  tea.KeyMsg{Type: tea.KeyCtrlC},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(context.Background(), client, 5*time.Second)
+
+			_, cmd := m.Update(tt.msg)
+			require.NotNil(t, cmd, "quit key should return a command")
+
+			// tea.Quit returns a special quit message
+			msg := cmd()
+			_, ok := msg.(tea.QuitMsg)
+			assert.True(t, ok, "command should produce tea.QuitMsg")
+		})
+	}
+}
+
+func TestFetchServersError(t *testing.T) {
+	client := &MockClient{err: fmt.Errorf("connection refused")}
+	m := NewModel(context.Background(), client, 5*time.Second)
+
+	cmd := fetchServers(client, m.ctx)
+	require.NotNil(t, cmd)
+
+	msg := cmd()
+	errResult, ok := msg.(errMsg)
+	require.True(t, ok, "expected errMsg when GetServers fails")
+	assert.Contains(t, errResult.err.Error(), "connection refused")
+
+	// Feed the error into the model
+	result, _ := m.Update(errResult)
+	resultModel := result.(model)
+	assert.NotNil(t, resultModel.err)
+	assert.Contains(t, resultModel.err.Error(), "connection refused")
+}
+
+func TestFetchActivitiesError(t *testing.T) {
+	client := &MockClient{err: fmt.Errorf("timeout")}
+	m := NewModel(context.Background(), client, 5*time.Second)
+
+	cmd := fetchActivities(client, m.ctx)
+	require.NotNil(t, cmd)
+
+	msg := cmd()
+	errResult, ok := msg.(errMsg)
+	require.True(t, ok, "expected errMsg when ListActivities fails")
+	assert.Contains(t, errResult.err.Error(), "timeout")
+
+	// Feed the error into the model
+	result, _ := m.Update(errResult)
+	resultModel := result.(model)
+	assert.NotNil(t, resultModel.err)
+}
+
+func TestServerActionsIgnoredOnActivityTab(t *testing.T) {
+	keys := []string{"e", "d", "R", "l"}
+
+	for _, key := range keys {
+		t.Run(key+" on Activity tab", func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(context.Background(), client, 5*time.Second)
+			m.activeTab = tabActivity
+			m.servers = []serverInfo{{Name: "github", HealthAction: "login"}}
+			m.cursor = 0
+
+			var msg tea.KeyMsg
+			if key == "R" {
+				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}}
+			} else {
+				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(key[0])}}
+			}
+			_, cmd := m.Update(msg)
+			assert.Nil(t, cmd, "key %q should be no-op on Activity tab", key)
+			assert.Empty(t, client.serverActionCalls)
+			assert.Empty(t, client.oauthLoginCalls)
+		})
+	}
+}
+
+func TestCursorClampOnDataRefresh(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(context.Background(), client, 5*time.Second)
+	m.activeTab = tabServers
+	m.servers = []serverInfo{{Name: "a"}, {Name: "b"}, {Name: "c"}, {Name: "d"}}
+	m.cursor = 3 // last server
+
+	// Simulate refresh returning fewer servers
+	result, _ := m.Update(serversMsg{servers: []serverInfo{{Name: "a"}, {Name: "b"}}})
+	resultModel := result.(model)
+	assert.Equal(t, 1, resultModel.cursor, "cursor should clamp to last valid index")
+
+	// Same for activities tab
+	m2 := NewModel(context.Background(), client, 5*time.Second)
+	m2.activeTab = tabActivity
+	m2.activities = []activityInfo{{ID: "1"}, {ID: "2"}, {ID: "3"}}
+	m2.cursor = 2
+
+	result2, _ := m2.Update(activitiesMsg{activities: []activityInfo{{ID: "1"}}})
+	resultModel2 := result2.(model)
+	assert.Equal(t, 0, resultModel2.cursor, "cursor should clamp to last valid index")
 }
 
 // Test error constants for consistency

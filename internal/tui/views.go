@@ -213,12 +213,12 @@ func renderStatusBar(m model) string {
 }
 
 func renderHelp(active tab) string {
-	common := "q: quit  tab: switch  r: refresh  L: login all"
+	common := "q: quit  tab: switch  r: refresh  j/k: navigate  L: login all"
 	switch active {
 	case tabServers:
 		return RenderHelp(" " + common + "  e: enable  d: disable  R: restart  l: login")
 	case tabActivity:
-		return RenderHelp(" " + common + "  j/k: navigate")
+		return RenderHelp(" " + common)
 	}
 	return RenderHelp(" " + common)
 }
