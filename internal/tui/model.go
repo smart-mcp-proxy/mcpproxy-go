@@ -6,8 +6,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 )
 
 // tab represents TUI tabs
@@ -42,9 +40,17 @@ type activityInfo struct {
 	DurationMs string
 }
 
+// Client defines the interface for API operations
+type Client interface {
+	GetServers(ctx context.Context) ([]map[string]interface{}, error)
+	ListActivities(ctx context.Context, filter interface{}) ([]map[string]interface{}, int, error)
+	ServerAction(ctx context.Context, name, action string) error
+	TriggerOAuthLogin(ctx context.Context, name string) error
+}
+
 // model is the main Bubble Tea model
 type model struct {
-	client *cliclient.Client
+	client Client
 	ctx    context.Context
 
 	// UI state
@@ -81,7 +87,7 @@ type tickMsg time.Time
 
 // Commands
 
-func fetchServers(client *cliclient.Client, ctx context.Context) tea.Cmd {
+func fetchServers(client Client, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		rawServers, err := client.GetServers(ctx)
 		if err != nil {
@@ -116,7 +122,7 @@ func fetchServers(client *cliclient.Client, ctx context.Context) tea.Cmd {
 	}
 }
 
-func fetchActivities(client *cliclient.Client, ctx context.Context) tea.Cmd {
+func fetchActivities(client Client, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		rawActivities, _, err := client.ListActivities(ctx, nil)
 		if err != nil {
@@ -157,7 +163,7 @@ func strVal(m map[string]interface{}, key string) string {
 }
 
 // NewModel creates a new TUI model
-func NewModel(client *cliclient.Client, refreshInterval time.Duration) model {
+func NewModel(client Client, refreshInterval time.Duration) model {
 	return model{
 		client:          client,
 		ctx:             context.Background(),
