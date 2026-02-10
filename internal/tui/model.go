@@ -219,23 +219,6 @@ func strVal(m map[string]interface{}, key string) string {
 	return ""
 }
 
-// triggerOAuthRefresh triggers OAuth refresh for all servers
-func (m model) triggerOAuthRefresh() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		defer cancel()
-
-		// Trigger OAuth login for all servers needing auth
-		err := m.client.TriggerOAuthLogin(ctx, "")
-		if err != nil {
-			return errMsg{fmt.Errorf("oauth refresh failed: %w", err)}
-		}
-
-		// Refresh data after OAuth completes
-		return tickMsg(time.Now())
-	}
-}
-
 // NewModel creates a new TUI model. The context controls the lifetime of all
 // API calls; cancel it to cleanly abort in-flight requests on shutdown.
 func NewModel(ctx context.Context, client Client, refreshInterval time.Duration) model {

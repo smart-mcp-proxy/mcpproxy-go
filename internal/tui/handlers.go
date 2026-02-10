@@ -1,10 +1,6 @@
 package tui
 
 import (
-	"context"
-	"fmt"
-	"time"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
