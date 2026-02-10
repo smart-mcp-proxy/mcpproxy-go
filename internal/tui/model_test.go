@@ -927,7 +927,6 @@ func TestOAuthRefreshTriggersRefetch(t *testing.T) {
 // TestOAuthRefreshEmptyStringForAllServers verifies empty string is passed to trigger all
 func TestOAuthRefreshEmptyStringForAllServers(t *testing.T) {
 	client := &MockClient{}
-	m := NewModel(context.Background(), client, 5*time.Second)
 
 	// Manually call TriggerOAuthLogin with empty string to verify behavior
 	err := client.TriggerOAuthLogin(context.Background(), "")

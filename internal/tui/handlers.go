@@ -1,10 +1,6 @@
 package tui
 
 import (
-	"context"
-	"fmt"
-	"time"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -272,7 +268,6 @@ func (m model) handleHelpMode(key string) (model, tea.Cmd) {
 	}
 	return m, nil
 }
-
 
 // getFirstFilterKey returns the first available filter key for the current tab
 func (m *model) getFirstFilterKey() string {
