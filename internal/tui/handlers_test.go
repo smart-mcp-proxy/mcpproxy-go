@@ -582,6 +582,320 @@ func TestCursorBehaviorAtBoundaries(t *testing.T) {
 	}
 }
 
+// TestHandleFilterMode tests filter mode input handling
+func TestHandleFilterMode(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(context.Background(), client, 5*time.Second)
+	m.uiMode = ModeFilterEdit
+	m.activeTab = tabActivity
+	m.focusedFilter = "status"
+	m.activities = []activityInfo{
+		{Status: "success"},
+		{Status: "error"},
+		{Status: "blocked"},
+	}
+
+	tests := []struct {
+		name       string
+		key        string
+		wantMode   UIMode
+		wantFilter string
+	}{
+		{
+			name:      "esc exits filter mode",
+			key:       "esc",
+			wantMode:  ModeNormal,
+			wantFilter: "",
+		},
+		{
+			name:      "q exits filter mode",
+			key:       "q",
+			wantMode:  ModeNormal,
+			wantFilter: "",
+		},
+		{
+			name:      "enter applies and exits",
+			key:       "enter",
+			wantMode:  ModeNormal,
+			wantFilter: "",
+		},
+		{
+			name:       "text input adds to filter",
+			key:        "s",
+			wantMode:   ModeFilterEdit,
+			wantFilter: "s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m.filterQuery = ""
+			resultModel, _ := m.handleFilterMode(tt.key)
+			assert.Equal(t, tt.wantMode, resultModel.uiMode)
+			if tt.wantFilter != "" {
+				assert.Contains(t, resultModel.filterQuery, tt.wantFilter)
+			}
+		})
+	}
+}
+
+// TestHandleSortMode tests sort mode selection
+func TestHandleSortMode(t *testing.T) {
+	client := &MockClient{}
+
+	tests := []struct {
+		name       string
+		key        string
+		tab        tab
+		wantColumn string
+		wantMode   UIMode
+	}{
+		{
+			name:       "esc cancels sort mode",
+			key:        "esc",
+			tab:        tabActivity,
+			wantColumn: "timestamp", // should not change
+			wantMode:   ModeNormal,
+		},
+		{
+			name:       "t sorts by timestamp (activity)",
+			key:        "t",
+			tab:        tabActivity,
+			wantColumn: "timestamp",
+			wantMode:   ModeNormal,
+		},
+		{
+			name:       "y sorts by type",
+			key:        "y",
+			tab:        tabActivity,
+			wantColumn: "type",
+			wantMode:   ModeNormal,
+		},
+		{
+			name:       "s sorts by server (activity)",
+			key:        "s",
+			tab:        tabActivity,
+			wantColumn: "server_name",
+			wantMode:   ModeNormal,
+		},
+		{
+			name:       "d sorts by duration (activity)",
+			key:        "d",
+			tab:        tabActivity,
+			wantColumn: "duration_ms",
+			wantMode:   ModeNormal,
+		},
+		{
+			name:       "a sorts by status (activity)",
+			key:        "a",
+			tab:        tabActivity,
+			wantColumn: "status",
+			wantMode:   ModeNormal,
+		},
+		{
+			name:       "n sorts by name (servers)",
+			key:        "n",
+			tab:        tabServers,
+			wantColumn: "name",
+			wantMode:   ModeNormal,
+		},
+		{
+			name:       "h sorts by health (servers)",
+			key:        "h",
+			tab:        tabServers,
+			wantColumn: "health_level",
+			wantMode:   ModeNormal,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModel(context.Background(), client, 5*time.Second)
+			m.uiMode = ModeSortSelect
+			m.activeTab = tt.tab
+			m.sortState.Column = "timestamp" // Start state
+
+			resultModel, _ := m.handleSortMode(tt.key)
+
+			assert.Equal(t, tt.wantMode, resultModel.uiMode)
+			if tt.key != "esc" && tt.key != "q" {
+				assert.Equal(t, tt.wantColumn, resultModel.sortState.Column)
+			}
+		})
+	}
+}
+
+// TestHandleSearchMode tests search mode input handling
+func TestHandleSearchMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        string
+		wantMode   UIMode
+		wantQuery  string
+	}{
+		{
+			name:      "esc exits search mode",
+			key:       "esc",
+			wantMode:  ModeNormal,
+			wantQuery: "",
+		},
+		{
+			name:      "ctrl+c exits search mode",
+			key:       "ctrl+c",
+			wantMode:  ModeNormal,
+			wantQuery: "",
+		},
+		{
+			name:      "enter stays in search mode",
+			key:       "enter",
+			wantMode:  ModeSearch,
+			wantQuery: "",
+		},
+		{
+			name:      "backspace removes char",
+			key:       "backspace",
+			wantMode:  ModeSearch,
+			wantQuery: "",
+		},
+		{
+			name:      "letter added to query",
+			key:       "a",
+			wantMode:  ModeSearch,
+			wantQuery: "a",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(context.Background(), client, 5*time.Second)
+			m.uiMode = ModeSearch
+			m.filterQuery = ""
+
+			m, _ = m.handleSearchMode(tt.key)
+
+			assert.Equal(t, tt.wantMode, m.uiMode)
+			assert.Equal(t, tt.wantQuery, m.filterQuery)
+		})
+	}
+}
+
+// TestHandleHelpMode tests help mode input handling
+func TestHandleHelpMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		wantMode UIMode
+	}{
+		{
+			name:    "esc exits help",
+			key:    "esc",
+			wantMode: ModeNormal,
+		},
+		{
+			name:    "q exits help",
+			key:    "q",
+			wantMode: ModeNormal,
+		},
+		{
+			name:    "? exits help",
+			key:    "?",
+			wantMode: ModeNormal,
+		},
+		{
+			name:    "other key stays in help",
+			key:    "a",
+			wantMode: ModeHelp,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &MockClient{}
+			m := NewModel(context.Background(), client, 5*time.Second)
+			m.uiMode = ModeHelp
+
+			m, _ = m.handleHelpMode(tt.key)
+
+			assert.Equal(t, tt.wantMode, m.uiMode)
+		})
+	}
+}
+
+// TestFilterKeyNavigation tests filter navigation helpers
+func TestFilterKeyNavigation(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(context.Background(), client, 5*time.Second)
+	m.activeTab = tabActivity
+
+	t.Run("getFirstFilterKey Activity tab", func(t *testing.T) {
+		result := m.getFirstFilterKey()
+		assert.Equal(t, "status", result)
+	})
+
+	t.Run("getFilterKeysForTab Activity", func(t *testing.T) {
+		keys := m.getFilterKeysForTab()
+		assert.ElementsMatch(t, []string{"status", "server", "type"}, keys)
+	})
+
+	t.Run("getFilterKeysForTab Servers", func(t *testing.T) {
+		m.activeTab = tabServers
+		keys := m.getFilterKeysForTab()
+		assert.ElementsMatch(t, []string{"admin_state", "health_level"}, keys)
+	})
+
+	t.Run("getNextFilterKey wraps around", func(t *testing.T) {
+		m.activeTab = tabActivity
+		next := m.getNextFilterKey("type")
+		assert.Equal(t, "status", next) // wraps to first
+	})
+
+	t.Run("getPrevFilterKey wraps around", func(t *testing.T) {
+		m.activeTab = tabActivity
+		prev := m.getPrevFilterKey("status")
+		assert.Equal(t, "type", prev) // wraps to last
+	})
+}
+
+// TestHandleKeyNavigation tests key routing
+func TestHandleKeyNavigation(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(context.Background(), client, 5*time.Second)
+	m.servers = []serverInfo{
+		{Name: "srv1"},
+		{Name: "srv2"},
+	}
+
+	t.Run("c key clears filters", func(t *testing.T) {
+		m.filterState = filterState{"status": "error"}
+		keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}
+		result, _ := m.handleKey(keyMsg)
+		resultModel := result.(model)
+		assert.Empty(t, resultModel.filterState)
+	})
+
+	t.Run("f key enters filter mode", func(t *testing.T) {
+		keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}}
+		result, _ := m.handleKey(keyMsg)
+		resultModel := result.(model)
+		assert.Equal(t, ModeFilterEdit, resultModel.uiMode)
+	})
+
+	t.Run("s key enters sort mode", func(t *testing.T) {
+		keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+		result, _ := m.handleKey(keyMsg)
+		resultModel := result.(model)
+		assert.Equal(t, ModeSortSelect, resultModel.uiMode)
+	})
+
+	t.Run("/ key enters search mode", func(t *testing.T) {
+		keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
+		result, _ := m.handleKey(keyMsg)
+		resultModel := result.(model)
+		assert.Equal(t, ModeSearch, resultModel.uiMode)
+	})
+}
+
 // BenchmarkKeyboardInput measures keyboard input performance
 func BenchmarkKeyboardInput(b *testing.B) {
 	client := &MockClient{}

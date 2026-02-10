@@ -409,3 +409,131 @@ func TestRenderHelpers(t *testing.T) {
 		assert.Contains(t, result, "r: refresh")
 	})
 }
+
+func TestRenderFilterSummary(t *testing.T) {
+	tests := []struct {
+		name       string
+		filterState filterState
+		wantEmpty  bool
+		wantBadges []string
+	}{
+		{
+			name:        "No active filters",
+			filterState: filterState{},
+			wantEmpty:   true,
+		},
+		{
+			name:        "Single filter",
+			filterState: filterState{"status": "error"},
+			wantEmpty:   false,
+			wantBadges:  []string{"[Status: error ✕]", "[Clear]"},
+		},
+		{
+			name:        "Multiple filters",
+			filterState: filterState{"status": "error", "server": "glean"},
+			wantEmpty:   false,
+			wantBadges:  []string{"[Status: error ✕]", "[Server: glean ✕]", "[Clear]"},
+		},
+		{
+			name:        "Filter with empty value",
+			filterState: filterState{"status": ""},
+			wantEmpty:   true,
+		},
+		{
+			name:        "Non-string filter value",
+			filterState: filterState{"count": 5},
+			wantEmpty:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := model{filterState: tt.filterState}
+			result := renderFilterSummary(m)
+
+			if tt.wantEmpty {
+				assert.Empty(t, result)
+			} else {
+				assert.NotEmpty(t, result)
+				assert.Contains(t, result, "Filter:")
+				for _, badge := range tt.wantBadges {
+					assert.Contains(t, result, badge)
+				}
+			}
+		})
+	}
+}
+
+func TestGetSortMark(t *testing.T) {
+	tests := []struct {
+		name      string
+		descending bool
+		want      string
+	}{
+		{
+			name:       "Descending sort",
+			descending: true,
+			want:       "▼",
+		},
+		{
+			name:       "Ascending sort",
+			descending: false,
+			want:       "▲",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getSortMark(tt.descending)
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+func TestRenderHelp(t *testing.T) {
+	tests := []struct {
+		name    string
+		uiMode  UIMode
+		activeTab tab
+		wantText []string
+	}{
+		{
+			name:     "Normal mode help - servers tab",
+			uiMode:   ModeNormal,
+			activeTab: tabServers,
+			wantText: []string{"j/k", "f", "s", "q", "enable", "disable", "restart"},
+		},
+		{
+			name:     "Normal mode help - activity tab",
+			uiMode:   ModeNormal,
+			activeTab: tabActivity,
+			wantText: []string{"j/k", "f", "s", "q", "quit"},
+		},
+		{
+			name:      "Filter mode help",
+			uiMode:    ModeFilterEdit,
+			wantText: []string{"tab", "↑/↓", "esc: apply"},
+		},
+		{
+			name:     "Sort mode help",
+			uiMode:   ModeSortSelect,
+			wantText: []string{"SORT MODE", "esc: cancel"},
+		},
+		{
+			name:      "Default mode (not ModeHelp)",
+			uiMode:    ModeSearch,
+			wantText: []string{"quit", "tab"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := model{uiMode: tt.uiMode, activeTab: tt.activeTab}
+			result := renderHelp(m)
+			assert.NotEmpty(t, result)
+			for _, text := range tt.wantText {
+				assert.Contains(t, result, text, "help text should contain %s", text)
+			}
+		})
+	}
+}
