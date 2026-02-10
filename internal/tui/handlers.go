@@ -310,20 +310,3 @@ func (m *model) getFilterKeysForTab() []string {
 	}
 	return []string{"admin_state", "health_level"}
 }
-
-// triggerOAuthRefresh triggers non-blocking OAuth refresh for all servers
-func (m model) triggerOAuthRefresh() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		defer cancel()
-
-		// Trigger OAuth login for all servers needing auth (empty string means all)
-		err := m.client.TriggerOAuthLogin(ctx, "")
-		if err != nil {
-			return errMsg{fmt.Errorf("oauth refresh failed: %w", err)}
-		}
-
-		// Refresh data after OAuth completes
-		return tickMsg(time.Now())
-	}
-}
