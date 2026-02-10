@@ -348,7 +348,11 @@ func renderHelp(m model) string {
 		}
 
 	case ModeSortSelect:
-		modeHelp = "SORT MODE: t=type  y=type  s=server  d=duration  st=status  ts=timestamp  esc: cancel"
+		if m.activeTab == tabActivity {
+			modeHelp = "SORT MODE (Activity): t=timestamp  y=type  s=server  d=duration  a=status  esc: cancel"
+		} else {
+			modeHelp = "SORT MODE (Servers): n=name  s=state  t=tools  h=health  esc: cancel"
+		}
 
 	case ModeFilterEdit:
 		modeHelp = "FILTER MODE: tab/shift+tab=move  ↑/↓=cycle  esc: apply  c: clear"
