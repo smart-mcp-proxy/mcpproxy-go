@@ -45,7 +45,7 @@ func renderView(m model) string {
 	b.WriteString("\n")
 
 	// Help
-	b.WriteString(renderHelp(m.activeTab))
+	b.WriteString(renderHelp(m))
 
 	return b.String()
 }
@@ -79,14 +79,40 @@ func renderServers(m model, maxHeight int) string {
 
 	var b strings.Builder
 
-	// Header
+	// Filter summary line (if any filters active)
+	filterSummary := renderFilterSummary(m)
+	if filterSummary != "" {
+		b.WriteString(MutedStyle.Render(filterSummary))
+		b.WriteString("\n")
+	}
+
+	// Sort line (if not default sort)
+	if m.sortState.Column != "name" {
+		sortMark := "▼"
+		if !m.sortState.Descending {
+			sortMark = "▲"
+		}
+		b.WriteString(MutedStyle.Render(fmt.Sprintf("Sort: %s %s", m.sortState.Column, sortMark)))
+		b.WriteString("\n")
+	}
+
+	// Header with sort indicators
+	sortMark := getSortMark(m.sortState.Descending)
 	header := fmt.Sprintf("  %-3s %-24s %-10s %-6s %-36s %s",
-		"", "NAME", "STATE", "TOOLS", "STATUS", "TOKEN EXPIRES")
+		"",
+		addSortMark("NAME", m.sortState.Column, "name", sortMark),
+		addSortMark("STATE", m.sortState.Column, "admin_state", sortMark),
+		addSortMark("TOOLS", m.sortState.Column, "tool_count", sortMark),
+		addSortMark("STATUS", m.sortState.Column, "health_level", sortMark),
+		addSortMark("TOKEN EXPIRES", m.sortState.Column, "token_expires_at", sortMark))
 	b.WriteString(HeaderStyle.Render(header))
 	b.WriteString("\n")
 
 	// Server rows
-	visible := maxHeight - 2 // header + spacing
+	visible := maxHeight - 4 // header + spacing + filter summary (if present)
+	if filterSummary != "" {
+		visible = maxHeight - 5
+	}
 	if visible > len(m.servers) {
 		visible = len(m.servers)
 	}
@@ -140,13 +166,39 @@ func renderActivity(m model, maxHeight int) string {
 
 	var b strings.Builder
 
-	// Header
+	// Filter summary line (if any filters active)
+	filterSummary := renderFilterSummary(m)
+	if filterSummary != "" {
+		b.WriteString(MutedStyle.Render(filterSummary))
+		b.WriteString("\n")
+	}
+
+	// Sort line (if not default sort)
+	if m.sortState.Column != "timestamp" {
+		sortMark := "▼"
+		if !m.sortState.Descending {
+			sortMark = "▲"
+		}
+		b.WriteString(MutedStyle.Render(fmt.Sprintf("Sort: %s %s", m.sortState.Column, sortMark)))
+		b.WriteString("\n")
+	}
+
+	// Header with sort indicators
+	sortMark := getSortMark(m.sortState.Descending)
 	header := fmt.Sprintf("  %-12s %-16s %-28s %-10s %-10s %s",
-		"TYPE", "SERVER", "TOOL", "STATUS", "DURATION", "TIME")
+		addSortMark("TYPE", m.sortState.Column, "type", sortMark),
+		addSortMark("SERVER", m.sortState.Column, "server_name", sortMark),
+		addSortMark("TOOL", m.sortState.Column, "tool_name", sortMark),
+		addSortMark("STATUS", m.sortState.Column, "status", sortMark),
+		addSortMark("DURATION", m.sortState.Column, "duration_ms", sortMark),
+		addSortMark("TIME", m.sortState.Column, "timestamp", sortMark))
 	b.WriteString(HeaderStyle.Render(header))
 	b.WriteString("\n")
 
-	visible := maxHeight - 2
+	visible := maxHeight - 4
+	if filterSummary != "" {
+		visible = maxHeight - 5
+	}
 	if visible > len(m.activities) {
 		visible = len(m.activities)
 	}
@@ -197,30 +249,103 @@ func renderActivity(m model, maxHeight int) string {
 }
 
 func renderStatusBar(m model) string {
-	left := fmt.Sprintf(" %d servers", len(m.servers))
-	right := ""
+	// Left side: current tab and item count
+	var left string
+	if m.activeTab == tabServers {
+		left = fmt.Sprintf(" [Servers] %d servers", len(m.servers))
+	} else {
+		left = fmt.Sprintf(" [Activity] %d activities", len(m.activities))
+	}
+
+	// Center: sort, filter, and mode info
+	var center []string
+
+	// Add sort status
+	if m.sortState.Column != "" {
+		sortDir := "↑"
+		if m.sortState.Descending {
+			sortDir = "↓"
+		}
+		center = append(center, fmt.Sprintf("Sort: %s %s", m.sortState.Column, sortDir))
+	}
+
+	// Add filter count
+	filterCount := 0
+	for _, v := range m.filterState {
+		if str, ok := v.(string); ok && str != "" {
+			filterCount++
+		}
+	}
+	if filterCount > 0 {
+		center = append(center, fmt.Sprintf("Filters: %d", filterCount))
+	}
+
+	// Add mode indicator
+	if m.uiMode != ModeNormal {
+		center = append(center, fmt.Sprintf("Mode: %s", m.uiMode))
+	}
+
+	centerStr := strings.Join(center, " | ")
+
+	// Right side: last update time and cursor position
+	var right string
+	if m.activeTab == tabServers {
+		right = fmt.Sprintf("Row %d/%d  ", m.cursor+1, len(m.servers))
+	} else {
+		right = fmt.Sprintf("Row %d/%d  ", m.cursor+1, len(m.activities))
+	}
+
 	if !m.lastUpdate.IsZero() {
-		right = fmt.Sprintf("Updated %s ago ", formatDuration(time.Since(m.lastUpdate)))
+		right = fmt.Sprintf("%sUpdated %s ago ", right, formatDuration(time.Since(m.lastUpdate)))
 	}
 
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 0 {
-		gap = 0
+	// Calculate gaps
+	leftWidth := lipgloss.Width(left)
+	centerWidth := lipgloss.Width(centerStr)
+	rightWidth := lipgloss.Width(right)
+
+	// Try to fit center in the middle
+	availableWidth := m.width - leftWidth - rightWidth
+	if availableWidth >= centerWidth {
+		gap1 := (availableWidth - centerWidth) / 2
+		gap2 := availableWidth - centerWidth - gap1
+		bar := left + strings.Repeat(" ", gap1) + centerStr + strings.Repeat(" ", gap2) + right
+		return StatusBarStyle.Width(m.width).Render(bar)
 	}
 
-	bar := left + strings.Repeat(" ", gap) + right
+	// Fallback: left + center + right with minimal spacing
+	gap := m.width - leftWidth - centerWidth - rightWidth
+	if gap < 1 {
+		gap = 1
+	}
+	bar := left + strings.Repeat(" ", gap) + centerStr + right
 	return StatusBarStyle.Width(m.width).Render(bar)
 }
 
-func renderHelp(active tab) string {
-	common := "q: quit  tab: switch  r: refresh  j/k: navigate  L: login all"
-	switch active {
-	case tabServers:
-		return RenderHelp(" " + common + "  e: enable  d: disable  R: restart  l: login")
-	case tabActivity:
-		return RenderHelp(" " + common)
+func renderHelp(m model) string {
+	common := "q: quit  1/2: tabs  r: refresh  o: oauth  j/k: nav  s: sort  f: filter  c: clear  ?: help"
+
+	var modeHelp string
+	switch m.uiMode {
+	case ModeNormal:
+		switch m.activeTab {
+		case tabServers:
+			modeHelp = common + "  e: enable  d: disable  R: restart  l: login"
+		case tabActivity:
+			modeHelp = common
+		}
+
+	case ModeSortSelect:
+		modeHelp = "SORT MODE: t=type  y=type  s=server  d=duration  st=status  ts=timestamp  esc: cancel"
+
+	case ModeFilterEdit:
+		modeHelp = "FILTER MODE: tab/shift+tab=move  ↑/↓=cycle  esc: apply  c: clear"
+
+	default:
+		modeHelp = common
 	}
-	return RenderHelp(" " + common)
+
+	return RenderHelp(" " + modeHelp)
 }
 
 func formatTokenExpiry(expiresAt string) string {
@@ -280,4 +405,41 @@ func truncateString(s string, maxRunes int) string {
 		return string(runes[:maxRunes])
 	}
 	return string(runes[:maxRunes-3]) + "..."
+}
+
+// addSortMark appends a sort indicator to a column label if it's the active sort column
+func addSortMark(label, currentCol, colKey, sortMark string) string {
+	if currentCol != colKey {
+		return label
+	}
+	return label + " " + sortMark
+}
+
+// getSortMark returns the appropriate sort indicator based on direction
+func getSortMark(descending bool) string {
+	if descending {
+		return "▼"
+	}
+	return "▲"
+}
+
+// renderFilterSummary returns a string showing active filters as badges
+func renderFilterSummary(m model) string {
+	if !m.filterState.hasActiveFilters() {
+		return ""
+	}
+
+	var parts []string
+	for key, val := range m.filterState {
+		if str, ok := val.(string); ok && str != "" {
+			badge := fmt.Sprintf("[%s: %s ✕]", strings.Title(key), str)
+			parts = append(parts, badge)
+		}
+	}
+
+	if len(parts) > 0 {
+		parts = append(parts, "[Clear]")
+		return "Filter: " + strings.Join(parts, " ")
+	}
+	return ""
 }
