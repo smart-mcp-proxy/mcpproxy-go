@@ -77,6 +77,12 @@ func renderServers(m model, maxHeight int) string {
 		return MutedStyle.Render("  No servers configured")
 	}
 
+	// Apply filters and sorting
+	servers := m.getVisibleServers()
+	if len(servers) == 0 {
+		return MutedStyle.Render("  No servers match current filters")
+	}
+
 	var b strings.Builder
 
 	// Filter summary line (if any filters active)
@@ -113,8 +119,8 @@ func renderServers(m model, maxHeight int) string {
 	if filterSummary != "" {
 		visible = maxHeight - 5
 	}
-	if visible > len(m.servers) {
-		visible = len(m.servers)
+	if visible > len(servers) {
+		visible = len(servers)
 	}
 
 	// Scroll offset
@@ -123,8 +129,8 @@ func renderServers(m model, maxHeight int) string {
 		offset = m.cursor - visible + 1
 	}
 
-	for i := offset; i < offset+visible && i < len(m.servers); i++ {
-		s := m.servers[i]
+	for i := offset; i < offset+visible && i < len(servers); i++ {
+		s := servers[i]
 
 		indicator := healthIndicator(s.HealthLevel)
 		name := truncateString(s.Name, 24)
@@ -164,6 +170,12 @@ func renderActivity(m model, maxHeight int) string {
 		return MutedStyle.Render("  No recent activity")
 	}
 
+	// Apply filters and sorting
+	activities := m.getVisibleActivities()
+	if len(activities) == 0 {
+		return MutedStyle.Render("  No activities match current filters")
+	}
+
 	var b strings.Builder
 
 	// Filter summary line (if any filters active)
@@ -199,8 +211,8 @@ func renderActivity(m model, maxHeight int) string {
 	if filterSummary != "" {
 		visible = maxHeight - 5
 	}
-	if visible > len(m.activities) {
-		visible = len(m.activities)
+	if visible > len(activities) {
+		visible = len(activities)
 	}
 
 	offset := 0
@@ -208,8 +220,8 @@ func renderActivity(m model, maxHeight int) string {
 		offset = m.cursor - visible + 1
 	}
 
-	for i := offset; i < offset+visible && i < len(m.activities); i++ {
-		a := m.activities[i]
+	for i := offset; i < offset+visible && i < len(activities); i++ {
+		a := activities[i]
 
 		actType := truncateString(a.Type, 12)
 		server := truncateString(a.ServerName, 16)
