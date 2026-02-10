@@ -443,7 +443,7 @@ func TestInvalidKeysIgnored(t *testing.T) {
 			m.activeTab = tabServers
 
 			key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(keyStr[0])}}
-			result, cmd := m.Update(key)
+			result, _ := m.Update(key)
 
 			// Should not crash, just be a no-op or have minimal effect
 			assert.NotNil(t, result)
