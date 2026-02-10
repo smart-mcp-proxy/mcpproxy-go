@@ -195,21 +195,32 @@ func oauthLoginCmd(client Client, ctx context.Context, name string) tea.Cmd {
 	}
 }
 
-// triggerOAuthRefresh triggers OAuth refresh for all servers
+// triggerOAuthRefresh triggers OAuth refresh for all servers needing auth
 func (m model) triggerOAuthRefresh() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		defer cancel()
+	return tea.Batch(
+		func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+			defer cancel()
 
-		// Trigger OAuth login for all servers needing auth
-		err := m.client.TriggerOAuthLogin(ctx, "")
-		if err != nil {
-			return errMsg{fmt.Errorf("oauth refresh failed: %w", err)}
-		}
+			// Trigger OAuth login for each server that needs auth
+			var lastErr error
+			for _, s := range m.servers {
+				if s.HealthAction == "login" {
+					err := m.client.TriggerOAuthLogin(ctx, s.Name)
+					if err != nil {
+						lastErr = err
+					}
+				}
+			}
 
-		// Refresh data after OAuth completes
-		return tickMsg(time.Now())
-	}
+			if lastErr != nil {
+				return errMsg{fmt.Errorf("oauth refresh failed: %w", lastErr)}
+			}
+
+			// Refresh data after OAuth completes
+			return tickMsg(time.Now())
+		},
+	)
 }
 
 func strVal(m map[string]interface{}, key string) string {
