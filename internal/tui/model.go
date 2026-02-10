@@ -18,6 +18,17 @@ const (
 	tabActivity
 )
 
+// UIMode represents the current interaction mode
+type UIMode string
+
+const (
+	ModeNormal     UIMode = "normal"       // Navigate table
+	ModeFilterEdit UIMode = "filter_edit"  // Edit filters
+	ModeSortSelect UIMode = "sort_select"  // Choose sort column
+	ModeSearch     UIMode = "search"       // Text search
+	ModeHelp       UIMode = "help"         // Show keybindings
+)
+
 // serverInfo holds parsed server data for display
 type serverInfo struct {
 	Name           string
@@ -60,12 +71,21 @@ type model struct {
 	cursor    int
 	width     int
 	height    int
+	uiMode    UIMode
 
 	// Data
 	servers    []serverInfo
 	activities []activityInfo
 	lastUpdate time.Time
 	err        error
+
+	// Sorting
+	sortState sortState
+
+	// Filtering
+	filterState   filterState
+	focusedFilter string // Which filter is currently being edited
+	filterQuery   string // Temporary text input for filters
 
 	// Refresh
 	refreshInterval time.Duration
@@ -190,6 +210,9 @@ func NewModel(ctx context.Context, client Client, refreshInterval time.Duration)
 		ctx:             ctx,
 		activeTab:       tabServers,
 		refreshInterval: refreshInterval,
+		uiMode:          ModeNormal,
+		sortState:       newServerSortState(),
+		filterState:     newFilterState(),
 	}
 }
 
@@ -245,11 +268,67 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+
+	// Global shortcuts work in all modes
+	switch key {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 
-	case "tab":
+	case "o", "O":
+		return m, m.triggerOAuthRefresh()
+
+	case "1":
+		m.activeTab = tabServers
+		m.cursor = 0
+		m.uiMode = ModeNormal
+		m.sortState = newServerSortState()
+		return m, nil
+
+	case "2":
+		m.activeTab = tabActivity
+		m.cursor = 0
+		m.uiMode = ModeNormal
+		m.sortState = newActivitySortState()
+		return m, nil
+
+	case "?":
+		m.uiMode = ModeHelp
+		return m, nil
+
+	case "space":
+		// Manual refresh
+		return m, tea.Batch(
+			fetchServers(m.client, m.ctx),
+			fetchActivities(m.client, m.ctx),
+		)
+	}
+
+	// Mode-specific handling
+	switch m.uiMode {
+	case ModeNormal:
+		return m.handleKeyNormal(key)
+	case ModeFilterEdit:
+		m, cmd := m.handleFilterMode(key)
+		return m, cmd
+	case ModeSortSelect:
+		m, cmd := m.handleSortMode(key)
+		return m, cmd
+	case ModeSearch:
+		m, cmd := m.handleSearchMode(key)
+		return m, cmd
+	case ModeHelp:
+		m, cmd := m.handleHelpMode(key)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+// handleKeyNormal handles normal mode navigation and actions
+func (m model) handleKeyNormal(key string) (tea.Model, tea.Cmd) {
+	// Tab switching
+	if key == "tab" {
 		if m.activeTab == tabServers {
 			m.activeTab = tabActivity
 		} else {
@@ -257,17 +336,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.cursor = 0
 		return m, nil
+	}
 
-	case "1":
-		m.activeTab = tabServers
-		m.cursor = 0
-		return m, nil
-
-	case "2":
-		m.activeTab = tabActivity
-		m.cursor = 0
-		return m, nil
-
+	// Navigation
+	switch key {
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -327,7 +399,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m, nil
+	// Delegate to mode-specific handler for extended features (sort, filter, etc)
+	m, cmd := m.handleNormalMode(key)
+	return m, cmd
 }
 
 func (m model) maxIndex() int {

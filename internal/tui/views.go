@@ -432,7 +432,9 @@ func renderFilterSummary(m model) string {
 	var parts []string
 	for key, val := range m.filterState {
 		if str, ok := val.(string); ok && str != "" {
-			badge := fmt.Sprintf("[%s: %s ✕]", strings.Title(key), str)
+			// Capitalize first letter of filter key
+			keyDisplay := strings.ToUpper(string(key[0])) + key[1:]
+			badge := fmt.Sprintf("[%s: %s ✕]", keyDisplay, str)
 			parts = append(parts, badge)
 		}
 	}
