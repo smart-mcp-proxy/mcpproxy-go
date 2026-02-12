@@ -334,6 +334,48 @@ goose> Help me search for files related to authentication
 
 ---
 
+### 🚀 Google Antigravity
+
+Google Antigravity is an AI-powered IDE built on VS Code with deep Gemini integration and built-in MCP support.
+
+**⚠️ Important:** Antigravity uses `serverUrl` (not `url`) for HTTP-based MCP servers. Using `url` will cause a connection error.
+
+**Config file location:**
+
+| Platform | Path |
+|----------|------|
+| macOS | `~/.gemini/antigravity/mcp_config.json` |
+| Linux | `~/.gemini/antigravity/mcp_config.json` |
+| Windows | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` |
+
+**Setup via UI:**
+
+1. Open the Agent Panel (right sidebar)
+2. Click **"..."** (More Options) → **MCP Servers** → **Manage MCP Servers**
+3. Click **"View raw config"**
+4. Add the MCPProxy configuration (see below)
+5. Click **Refresh** to apply changes
+
+**Setup via Configuration File:**
+
+Edit your `mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mcpproxy": {
+      "serverUrl": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+**📝 Note:** MCPProxy's MCP endpoint does not require API key authentication, so no `headers` block is needed. Antigravity does not support `${workspaceFolder}` — use absolute paths in any server configuration.
+
+**📚 Reference:** [Antigravity MCP Documentation](https://antigravity.google/docs/mcp)
+
+---
+
 ## Optional HTTPS Setup
 
 MCPProxy supports secure HTTPS connections with automatic certificate generation. **HTTP is enabled by default** for immediate compatibility, but HTTPS provides enhanced security for production use.
