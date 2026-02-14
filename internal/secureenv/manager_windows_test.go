@@ -177,8 +177,13 @@ func TestManagerBuildSecureEnvironmentWithRegistryPaths(t *testing.T) {
 	// Simulate minimal PATH scenario
 	os.Setenv("PATH", `C:\Windows\System32`)
 
-	// Create manager and build environment
-	manager := NewManager(nil)
+	// Create manager with EnhancePath enabled (matches production: core/client.go sets this)
+	manager := NewManager(&EnvConfig{
+		InheritSystemSafe: true,
+		AllowedSystemVars: DefaultEnvConfig().AllowedSystemVars,
+		CustomVars:        make(map[string]string),
+		EnhancePath:       true,
+	})
 	env := manager.BuildSecureEnvironment()
 
 	// Extract PATH from environment

@@ -298,12 +298,9 @@ func (m *Manager) buildEnhancedPath(existingPath string) string {
 		}
 	}
 
-	// Enhance PATH when it's minimal and missing common tool directories.
-	// On macOS: requires explicit EnhancePath opt-in (targets Launchd scenarios).
-	// On Windows: always enhance when minimal, since installer/service launches
-	// inherit minimal PATH and registry-discovered paths are the canonical source.
-	shouldEnhance := !hasCommonToolDirs && len(pathParts) <= 2 &&
-		(m.config.EnhancePath || runtime.GOOS == osWindows)
+	// Only enhance if explicitly enabled AND we're missing common tool directories AND the path is minimal
+	// This specifically targets Launchd scenarios while preserving normal behavior by default
+	shouldEnhance := m.config.EnhancePath && !hasCommonToolDirs && len(pathParts) <= 2
 	if shouldEnhance {
 		// Start with discovered paths for better tool discovery
 		enhancedParts := make([]string, 0, len(m.pathDiscovery.DiscoveredPaths)+len(pathParts))
