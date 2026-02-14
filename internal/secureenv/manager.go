@@ -165,19 +165,45 @@ func (m *Manager) discoverUnixPaths() []string {
 
 // discoverWindowsPaths discovers common Windows tool paths
 func (m *Manager) discoverWindowsPaths() []string {
-	commonPaths := []string{
-		`C:\Windows\System32`,
-		`C:\Windows`,
-		`C:\Program Files\Docker\Docker\resources\bin`,
-		`C:\Program Files\Git\bin`,
-		`C:\Program Files\nodejs`,
+	// CRITICAL FIX for Issue #302:
+	// Try to read PATH from Windows registry first.
+	// This is necessary because when mcpproxy is launched via installer/service,
+	// it doesn't inherit the user's PATH environment variable.
+	// The registry is the source of truth for Windows PATH configuration.
+	if registryPaths := discoverWindowsPathsFromRegistry(); len(registryPaths) > 0 {
+		return registryPaths
 	}
 
-	// Add user-specific paths
-	if homeDir, err := os.UserHomeDir(); err == nil {
+	// Fallback to hardcoded discovery if registry read fails
+	// This expanded list includes more common tool locations
+	homeDir, _ := os.UserHomeDir()
+
+	commonPaths := []string{
+		// System paths
+		`C:\Windows\System32`,
+		`C:\Windows`,
+
+		// Common development tools
+		`C:\Program Files\Docker\Docker\resources\bin`,
+		`C:\Program Files\Git\bin`,
+		`C:\Program Files\Git\cmd`,
+		`C:\Program Files\nodejs`,
+		`C:\Program Files\Go\bin`,
+
+		// User-specific tool paths (if homeDir is available)
+	}
+
+	if homeDir != "" {
 		commonPaths = append(commonPaths,
-			homeDir+`\AppData\Local\Programs\Python\Python311\Scripts`,
-			homeDir+`\AppData\Roaming\npm`,
+			homeDir+`\.cargo\bin`,                                    // Rust tools (cargo, uv)
+			homeDir+`\.local\bin`,                                    // Python user scripts
+			homeDir+`\go\bin`,                                        // Go binaries
+			homeDir+`\AppData\Roaming\npm`,                           // npm globals
+			homeDir+`\scoop\shims`,                                   // Scoop packages
+			homeDir+`\AppData\Local\Programs\Python\Python313\Scripts`, // Python 3.13
+			homeDir+`\AppData\Local\Programs\Python\Python312\Scripts`, // Python 3.12
+			homeDir+`\AppData\Local\Programs\Python\Python311\Scripts`, // Python 3.11
+			homeDir+`\AppData\Local\Programs\Python\Python310\Scripts`, // Python 3.10
 		)
 	}
 

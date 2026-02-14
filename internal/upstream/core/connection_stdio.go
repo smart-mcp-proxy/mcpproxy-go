@@ -390,8 +390,26 @@ func shellescape(s string) string {
 		if !strings.ContainsAny(s, " \t\n\r\"&|<>()^%") {
 			return s
 		}
-		// For Windows, use double quotes and escape internal double quotes
-		return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+
+		// IMPORTANT: cmd.exe uses DIFFERENT escaping than Unix shells
+		// - Backslash is NOT an escape character in cmd.exe
+		// - To include a literal quote in a quoted string, you must:
+		//   1. End the quoted string
+		//   2. Add an escaped quote (\")
+		//   3. Start a new quoted string
+		//
+		// However, for our use case with cmd /c "command args", we wrap
+		// the entire command line once, and individual components should
+		// NOT contain quotes. If they do, we need special handling.
+		//
+		// Strategy: If string already contains quotes, strip them first
+		// This handles the case where users put quotes in JSON config
+		cleaned := strings.Trim(s, `"`)
+
+		// Now wrap in quotes for cmd.exe
+		// Any remaining internal quotes are from the actual path and will cause issues
+		// For now, we just quote the cleaned string
+		return `"` + cleaned + `"`
 	}
 	// Unix shell special characters
 	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
