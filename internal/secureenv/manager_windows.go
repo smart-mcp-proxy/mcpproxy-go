@@ -9,6 +9,17 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+// expandWindowsEnvVars expands Windows-style %VAR% environment variables.
+// os.ExpandEnv only handles $VAR/${VAR} syntax, NOT Windows %VAR%.
+// registry.ExpandString calls the Windows ExpandEnvironmentStrings API.
+func expandWindowsEnvVars(s string) string {
+	expanded, err := registry.ExpandString(s)
+	if err != nil {
+		return s // fallback to unexpanded
+	}
+	return expanded
+}
+
 // readWindowsRegistryPath reads the PATH environment variable from Windows registry
 // This is necessary because when mcpproxy is launched via installer/service,
 // it doesn't inherit the user's PATH environment variable.
@@ -25,10 +36,9 @@ func readWindowsRegistryPath() (string, error) {
 
 		userPath, _, err := userKey.GetStringValue("Path")
 		if err == nil && userPath != "" {
-			// CRITICAL: Expand environment variables like %USERPROFILE%, %APPDATA%
-			// Registry stores paths as REG_EXPAND_SZ with embedded variables
-			expandedUserPath := os.ExpandEnv(userPath)
-			paths = append(paths, expandedUserPath)
+			// CRITICAL: Expand Windows %VAR% environment variables
+			// Registry stores paths as REG_EXPAND_SZ with embedded %USERPROFILE% etc.
+			paths = append(paths, expandWindowsEnvVars(userPath))
 		}
 	}
 
@@ -42,9 +52,7 @@ func readWindowsRegistryPath() (string, error) {
 
 		systemPath, _, err := sysKey.GetStringValue("Path")
 		if err == nil && systemPath != "" {
-			// Expand environment variables
-			expandedSystemPath := os.ExpandEnv(systemPath)
-			paths = append(paths, expandedSystemPath)
+			paths = append(paths, expandWindowsEnvVars(systemPath))
 		}
 	}
 

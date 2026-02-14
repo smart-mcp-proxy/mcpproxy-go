@@ -114,7 +114,7 @@ func TestWindowsPathExpansion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			expanded := os.ExpandEnv(tt.input)
+			expanded := expandWindowsEnvVars(tt.input)
 
 			// Should not contain % after expansion
 			assert.NotContains(t, expanded, "%",
