@@ -847,17 +847,26 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 		}
 
 		// Look up tool annotations and derive recommended call_with variant (Spec 018)
-		// Parse tool name to get just the tool part (format: server:tool)
-		parts := strings.SplitN(result.Tool.Name, ":", 2)
-		if len(parts) == 2 {
-			annotations := p.lookupToolAnnotations(parts[0], parts[1])
+		// Use ServerName directly - result.Tool.Name may or may not have "server:" prefix
+		// depending on how tools were indexed (Issue #306)
+		serverName := result.Tool.ServerName
+		toolName := result.Tool.Name
+		if serverName == "" {
+			// Fallback: try to extract from "server:tool" format
+			if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
+				serverName = parts[0]
+				toolName = parts[1]
+			}
+		}
+
+		if serverName != "" {
+			annotations := p.lookupToolAnnotations(serverName, toolName)
 			if annotations != nil {
 				mcpTool["annotations"] = annotations
 			}
 			// Add call_with recommendation based on annotations
 			mcpTool["call_with"] = contracts.DeriveCallWith(annotations)
 		} else {
-			// Fallback for tools without server prefix (shouldn't happen normally)
 			mcpTool["call_with"] = contracts.ToolVariantRead // Default to read - safest option
 		}
 
@@ -3984,7 +3993,9 @@ func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *con
 	}
 
 	for _, tool := range serverStatus.Tools {
-		if tool.Name == toolName {
+		// tool.Name may be in "server:tool" format (from ToolMetadata.Name),
+		// while toolName is just the tool part. Match both formats.
+		if tool.Name == toolName || tool.Name == serverName+":"+toolName {
 			return tool.Annotations
 		}
 	}
