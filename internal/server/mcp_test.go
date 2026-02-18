@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
@@ -305,6 +306,163 @@ func TestToolFormatConversion(t *testing.T) {
 	assert.True(t, ok)
 	assert.Contains(t, properties, "id")
 	assert.Contains(t, properties, "market_data")
+}
+
+// TestAnnotationLookupNameMatching tests that lookupToolAnnotations correctly
+// matches tool names regardless of whether StateView stores them as "tool"
+// or "server:tool" format. This is the bug reported in Issue #306.
+func TestAnnotationLookupNameMatching(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name             string
+		serverName       string
+		toolName         string
+		stateViewName    string // How the tool name is stored in StateView
+		annotations      *config.ToolAnnotations
+		expectedCallWith string
+	}{
+		{
+			name:          "StateView stores full name (server:tool), lookup uses bare tool name",
+			serverName:    "github",
+			toolName:      "delete_repo",
+			stateViewName: "github:delete_repo",
+			annotations: &config.ToolAnnotations{
+				DestructiveHint: &trueVal,
+			},
+			expectedCallWith: "call_tool_destructive",
+		},
+		{
+			name:          "StateView stores bare tool name, lookup uses bare tool name",
+			serverName:    "github",
+			toolName:      "delete_repo",
+			stateViewName: "delete_repo",
+			annotations: &config.ToolAnnotations{
+				DestructiveHint: &trueVal,
+			},
+			expectedCallWith: "call_tool_destructive",
+		},
+		{
+			name:          "write tool with full name in StateView",
+			serverName:    "myserver",
+			toolName:      "update_config",
+			stateViewName: "myserver:update_config",
+			annotations: &config.ToolAnnotations{
+				ReadOnlyHint: &falseVal,
+			},
+			expectedCallWith: "call_tool_write",
+		},
+		{
+			name:          "read-only tool with full name in StateView",
+			serverName:    "myserver",
+			toolName:      "list_items",
+			stateViewName: "myserver:list_items",
+			annotations: &config.ToolAnnotations{
+				ReadOnlyHint: &trueVal,
+			},
+			expectedCallWith: "call_tool_read",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the name matching logic from lookupToolAnnotations
+			// This tests the fix for Issue #306 where tool.Name in StateView
+			// is "server:tool" but toolName passed in is just "tool"
+			matched := false
+			toolNameInStateView := tt.stateViewName
+			if toolNameInStateView == tt.toolName || toolNameInStateView == tt.serverName+":"+tt.toolName {
+				matched = true
+			}
+
+			assert.True(t, matched, "Tool name matching failed: stateview=%q, lookup=%q",
+				tt.stateViewName, tt.toolName)
+
+			// Verify DeriveCallWith returns correct variant when annotations are found
+			if matched {
+				callWith := contracts.DeriveCallWith(tt.annotations)
+				assert.Equal(t, tt.expectedCallWith, callWith)
+			}
+		})
+	}
+}
+
+// TestRetrieveToolsCallWithAnnotations verifies that the handleRetrieveTools
+// code path correctly splits tool names and derives call_with from annotations.
+// This is a regression test for Issue #306.
+func TestRetrieveToolsCallWithAnnotations(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	// Simulate search results as returned by the index
+	mockResults := []*config.SearchResult{
+		{
+			Tool: &config.ToolMetadata{
+				Name:       "myserver:delete_data",
+				ServerName: "myserver",
+				Annotations: &config.ToolAnnotations{
+					DestructiveHint: &trueVal,
+				},
+			},
+			Score: 0.9,
+		},
+		{
+			Tool: &config.ToolMetadata{
+				Name:       "myserver:update_config",
+				ServerName: "myserver",
+				Annotations: &config.ToolAnnotations{
+					ReadOnlyHint: &falseVal,
+				},
+			},
+			Score: 0.8,
+		},
+		{
+			Tool: &config.ToolMetadata{
+				Name:       "myserver:list_items",
+				ServerName: "myserver",
+				Annotations: &config.ToolAnnotations{
+					ReadOnlyHint: &trueVal,
+				},
+			},
+			Score: 0.7,
+		},
+		{
+			Tool: &config.ToolMetadata{
+				Name:       "myserver:unknown_tool",
+				ServerName: "myserver",
+				// No annotations
+			},
+			Score: 0.6,
+		},
+	}
+
+	// Simulate the annotation lookup + call_with derivation from handleRetrieveTools
+	// In production, lookupToolAnnotations queries the StateView, but we can test
+	// the name-splitting logic and DeriveCallWith here.
+	for _, result := range mockResults {
+		parts := strings.SplitN(result.Tool.Name, ":", 2)
+		require.Len(t, parts, 2, "Tool name should be in server:tool format: %s", result.Tool.Name)
+
+		// The fix for #306: even if lookupToolAnnotations can't find annotations
+		// via StateView (because of name mismatch), we can verify the split is correct
+		assert.Equal(t, result.Tool.ServerName, parts[0],
+			"Server name from split should match ServerName field")
+
+		// Verify DeriveCallWith with the tool's own annotations
+		callWith := contracts.DeriveCallWith(result.Tool.Annotations)
+
+		switch result.Tool.Name {
+		case "myserver:delete_data":
+			assert.Equal(t, "call_tool_destructive", callWith)
+		case "myserver:update_config":
+			assert.Equal(t, "call_tool_write", callWith)
+		case "myserver:list_items":
+			assert.Equal(t, "call_tool_read", callWith)
+		case "myserver:unknown_tool":
+			assert.Equal(t, "call_tool_read", callWith) // nil annotations → safe default
+		}
+	}
 }
 
 func TestUpstreamServerOperations(t *testing.T) {

@@ -3010,3 +3010,173 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	t.Log("Phase 3 & 4 Complete: ONLY Tool Set B (new_tool_gamma) searchable and callable")
 	t.Log("SUCCESS: Stale index entries cleaned up correctly on server re-add")
 }
+
+// Test: retrieve_tools returns correct annotations and call_with based on tool hints (Issue #306)
+func TestE2E_RetrieveToolsAnnotationsAndCallWith(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	trueVal := true
+	falseVal := false
+
+	// Create mock upstream server with tools that have different annotation hints
+	mockTools := []mcp.Tool{
+		{
+			Name:        "delete_records",
+			Description: "Delete records from the database permanently",
+			InputSchema: mcp.ToolInputSchema{
+				Type:       "object",
+				Properties: map[string]interface{}{},
+			},
+			Annotations: mcp.ToolAnnotation{
+				DestructiveHint: &trueVal,
+				ReadOnlyHint:    &falseVal,
+			},
+		},
+		{
+			Name:        "update_config",
+			Description: "Update server configuration settings",
+			InputSchema: mcp.ToolInputSchema{
+				Type:       "object",
+				Properties: map[string]interface{}{},
+			},
+			Annotations: mcp.ToolAnnotation{
+				ReadOnlyHint: &falseVal,
+			},
+		},
+		{
+			Name:        "list_items",
+			Description: "List all items in the inventory",
+			InputSchema: mcp.ToolInputSchema{
+				Type:       "object",
+				Properties: map[string]interface{}{},
+			},
+			Annotations: mcp.ToolAnnotation{
+				ReadOnlyHint: &trueVal,
+			},
+		},
+	}
+
+	mockServer := env.CreateMockUpstreamServer("annotated", mockTools)
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Add and unquarantine the server
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "annotated",
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	result, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("annotated")
+	require.NoError(t, err)
+	serverConfig.Quarantined = false
+	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
+	require.NoError(t, err)
+
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	require.NoError(t, err)
+
+	// Wait for connection and trigger tool discovery
+	time.Sleep(4 * time.Second)
+	err = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
+	require.NoError(t, err)
+	time.Sleep(2 * time.Second)
+
+	// Do a broad search to find all annotated tools
+	searchRequest := mcp.CallToolRequest{}
+	searchRequest.Params.Name = "retrieve_tools"
+	searchRequest.Params.Arguments = map[string]interface{}{
+		"query": "delete update list records config items",
+		"limit": 20,
+	}
+	searchResult, err := mcpClient.CallTool(ctx, searchRequest)
+	require.NoError(t, err)
+	assert.False(t, searchResult.IsError)
+
+	require.Greater(t, len(searchResult.Content), 0)
+	contentBytes, err := json.Marshal(searchResult.Content[0])
+	require.NoError(t, err)
+	var contentMap map[string]interface{}
+	err = json.Unmarshal(contentBytes, &contentMap)
+	require.NoError(t, err)
+	contentText, ok := contentMap["text"].(string)
+	require.True(t, ok)
+
+	var searchResponse map[string]interface{}
+	err = json.Unmarshal([]byte(contentText), &searchResponse)
+	require.NoError(t, err)
+
+	tools, ok := searchResponse["tools"].([]interface{})
+	require.True(t, ok, "tools should be an array")
+	t.Logf("Found %d tools in search", len(tools))
+	for _, toolRaw := range tools {
+		if tool, ok := toolRaw.(map[string]interface{}); ok {
+			t.Logf("  Tool: name=%v, server=%v, call_with=%v, annotations=%v",
+				tool["name"], tool["server"], tool["call_with"], tool["annotations"])
+		}
+	}
+	require.GreaterOrEqual(t, len(tools), 3, "Should find all 3 annotated tools")
+
+	// Verify call_with for each tool
+	// Note: tool names may be bare ("delete_records") or prefixed ("annotated:delete_records")
+	// depending on how they were indexed. Match by bare name + server field.
+	expectedCallWith := map[string]string{
+		"delete_records": "call_tool_destructive",
+		"update_config":  "call_tool_write",
+		"list_items":     "call_tool_read",
+	}
+
+	for _, toolRaw := range tools {
+		tool, ok := toolRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		toolName, _ := tool["name"].(string)
+		serverField, _ := tool["server"].(string)
+
+		// Strip server prefix if present for matching
+		bareName := toolName
+		if parts := strings.SplitN(toolName, ":", 2); len(parts) == 2 {
+			bareName = parts[1]
+		}
+
+		expected, isOurs := expectedCallWith[bareName]
+		if !isOurs || serverField != "annotated" {
+			continue
+		}
+
+		callWith, ok := tool["call_with"].(string)
+		assert.True(t, ok, "call_with should be a string for %s", toolName)
+		assert.Equal(t, expected, callWith,
+			"call_with mismatch for %s: expected %s, got %s",
+			toolName, expected, callWith)
+
+		// Verify annotations are present for destructive/write tools
+		if expected != "call_tool_read" {
+			assert.NotNil(t, tool["annotations"],
+				"annotations should be present for %s", toolName)
+		}
+
+		delete(expectedCallWith, bareName)
+	}
+
+	assert.Empty(t, expectedCallWith, "Not all expected tools were found: %v", expectedCallWith)
+}
