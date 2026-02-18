@@ -42,6 +42,8 @@ var (
 	activityNoIcons       bool   // Disable emoji icons in output
 	activityDetectionType string // Spec 026: Filter by detection type (e.g., "aws_access_key")
 	activitySeverity      string // Spec 026: Filter by severity level (critical, high, medium, low)
+	activityFlowType      string // Spec 027: Filter by flow type (e.g., "internal_to_external")
+	activityRiskLevel     string // Spec 027: Filter by risk level (e.g., "critical", "high")
 
 	// Show command flags
 	activityIncludeResponse bool
@@ -72,6 +74,8 @@ type ActivityFilter struct {
 	SensitiveData *bool  // Spec 026: Filter by sensitive data detection
 	DetectionType string // Spec 026: Filter by detection type
 	Severity      string // Spec 026: Filter by severity level
+	FlowType      string // Spec 027: Filter by flow type
+	RiskLevel     string // Spec 027: Filter by risk level
 }
 
 // Validate validates the filter options
@@ -81,6 +85,8 @@ func (f *ActivityFilter) Validate() error {
 		validTypes := []string{
 			"tool_call", "policy_decision", "quarantine_change", "server_change",
 			"system_start", "system_stop", "internal_tool_call", "config_change", // Spec 024: new types
+			"hook_evaluation", // Spec 027: hook evaluation events
+			"flow_summary",    // Spec 027: flow session summaries
 		}
 		// Split by comma for multi-type support
 		types := strings.Split(f.Type, ",")
@@ -141,6 +147,36 @@ func (f *ActivityFilter) Validate() error {
 		}
 		if !valid {
 			return fmt.Errorf("invalid severity '%s': must be one of %v", f.Severity, validSeverities)
+		}
+	}
+
+	// Validate flow_type (Spec 027)
+	if f.FlowType != "" {
+		validFlowTypes := []string{"internal_to_internal", "internal_to_external", "external_to_internal", "external_to_external"}
+		valid := false
+		for _, ft := range validFlowTypes {
+			if f.FlowType == ft {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid flow-type '%s': must be one of %v", f.FlowType, validFlowTypes)
+		}
+	}
+
+	// Validate risk_level (Spec 027)
+	if f.RiskLevel != "" {
+		validRiskLevels := []string{"none", "low", "medium", "high", "critical"}
+		valid := false
+		for _, rl := range validRiskLevels {
+			if f.RiskLevel == rl {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid risk-level '%s': must be one of %v", f.RiskLevel, validRiskLevels)
 		}
 	}
 
@@ -212,6 +248,13 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	}
 	if f.Severity != "" {
 		q.Set("severity", f.Severity)
+	}
+	// Spec 027: Add data flow security filters
+	if f.FlowType != "" {
+		q.Set("flow_type", f.FlowType)
+	}
+	if f.RiskLevel != "" {
+		q.Set("risk_level", f.RiskLevel)
 	}
 	return q
 }
@@ -706,7 +749,7 @@ func init() {
 	activityCmd.AddCommand(activityExportCmd)
 
 	// List command flags
-	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
+	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, hook_evaluation, flow_summary")
 	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked")
@@ -722,6 +765,9 @@ func init() {
 	activityListCmd.Flags().Bool("sensitive-data", false, "Filter to show only activities with sensitive data detected")
 	activityListCmd.Flags().StringVar(&activityDetectionType, "detection-type", "", "Filter by detection type (e.g., aws_access_key, stripe_key)")
 	activityListCmd.Flags().StringVar(&activitySeverity, "severity", "", "Filter by severity level: critical, high, medium, low")
+	// Spec 027: Data flow security filters
+	activityListCmd.Flags().StringVar(&activityFlowType, "flow-type", "", "Filter by data flow type: internal_to_internal, internal_to_external, external_to_internal, external_to_external")
+	activityListCmd.Flags().StringVar(&activityRiskLevel, "risk-level", "", "Filter by risk level (>= comparison): none, low, medium, high, critical")
 
 	// Watch command flags
 	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
@@ -816,6 +862,8 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		SensitiveData: sensitiveDataPtr,
 		DetectionType: activityDetectionType,
 		Severity:      activitySeverity,
+		FlowType:      activityFlowType,
+		RiskLevel:     activityRiskLevel,
 	}
 
 	if err := filter.Validate(); err != nil {

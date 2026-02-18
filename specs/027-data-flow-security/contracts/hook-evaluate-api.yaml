@@ -1,0 +1,245 @@
+# OpenAPI Extensions for Data Flow Security Hook Evaluation
+# These paths extend the existing oas/swagger.yaml
+
+paths:
+  /api/v1/hooks/evaluate:
+    post:
+      summary: Evaluate a tool call from an agent hook
+      description: |
+        Accepts hook event payloads from agent systems (Claude Code, etc.),
+        evaluates the tool call against flow tracking and policy rules,
+        and returns a security decision.
+      tags:
+        - Hooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HookEvaluateRequest'
+      responses:
+        '200':
+          description: Hook evaluation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HookEvaluateResponse'
+        '400':
+          description: Malformed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/activity:
+    get:
+      summary: List activity records with flow tracking filters
+      parameters:
+        # Existing parameters...
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: server
+          in: query
+          schema:
+            type: string
+        # NEW: Flow tracking filters
+        - name: flow_type
+          in: query
+          description: "Filter by flow type (e.g., 'internal→external')"
+          schema:
+            type: string
+            enum:
+              - "internal→internal"
+              - "external→external"
+              - "external→internal"
+              - "internal→external"
+        - name: risk_level
+          in: query
+          description: Filter by minimum risk level
+          schema:
+            type: string
+            enum: [none, low, medium, high, critical]
+
+components:
+  schemas:
+    HookEvaluateRequest:
+      type: object
+      required:
+        - event
+        - session_id
+        - tool_name
+        - tool_input
+      properties:
+        event:
+          type: string
+          enum: [PreToolUse, PostToolUse]
+          description: Hook event type
+        session_id:
+          type: string
+          description: Agent session identifier (consistent across session)
+        tool_name:
+          type: string
+          description: "Name of the tool being called (e.g., 'Read', 'WebFetch', 'mcp__mcpproxy__call_tool_read')"
+        tool_input:
+          type: object
+          description: Tool input arguments (varies by tool)
+          additionalProperties: true
+        tool_response:
+          type: string
+          description: Tool response content (only present for PostToolUse events)
+
+    HookEvaluateResponse:
+      type: object
+      required:
+        - decision
+      properties:
+        decision:
+          type: string
+          enum: [allow, deny, ask]
+          description: Security decision for the tool call
+        reason:
+          type: string
+          description: Human-readable explanation of the decision
+        risk_level:
+          type: string
+          enum: [none, low, medium, high, critical]
+          description: Assessed risk level of the data flow
+        flow_type:
+          type: string
+          description: "Detected flow direction (e.g., 'internal→external')"
+        activity_id:
+          type: string
+          description: Activity log record ID for this evaluation
+
+    ClassificationResult:
+      type: object
+      required:
+        - classification
+        - confidence
+        - method
+      properties:
+        classification:
+          type: string
+          enum: [internal, external, hybrid, unknown]
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        method:
+          type: string
+          enum: [heuristic, config, annotation]
+        reason:
+          type: string
+          description: Human-readable explanation
+        can_exfiltrate:
+          type: boolean
+          description: Whether this tool can send data externally
+        can_read_data:
+          type: boolean
+          description: Whether this tool can access private data
+
+    FlowAnalysis:
+      type: object
+      properties:
+        flows_detected:
+          type: integer
+          description: Number of data flow edges detected in this evaluation
+        flow_type:
+          type: string
+          description: "Direction of the detected flow (e.g., 'internal→external')"
+        risk_level:
+          type: string
+          enum: [none, low, medium, high, critical]
+        has_sensitive_data:
+          type: boolean
+        sensitive_types:
+          type: array
+          items:
+            type: string
+          description: Types of sensitive data detected in the flow
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        request_id:
+          type: string
+
+# SSE Event Schema Extension
+events:
+  flow.alert:
+    description: Emitted when a suspicious data flow is detected
+    payload:
+      type: object
+      properties:
+        activity_id:
+          type: string
+        session_id:
+          type: string
+        flow_type:
+          type: string
+        risk_level:
+          type: string
+        tool_name:
+          type: string
+        has_sensitive_data:
+          type: boolean
+        timestamp:
+          type: string
+          format: date-time
+
+# Claude Code Hook Protocol (stdout format for mcpproxy hook evaluate)
+# Not OpenAPI - documented as reference for CLI output format
+x-claude-code-hook-protocol:
+  PreToolUse:
+    description: |
+      When mcpproxy hook evaluate runs for a PreToolUse event,
+      it outputs JSON to stdout in the Claude Code hook protocol format.
+    output_schema:
+      type: object
+      properties:
+        jsonrpc:
+          type: string
+          const: "2.0"
+        id:
+          type: string
+        result:
+          type: object
+          properties:
+            decision:
+              type: string
+              enum: [approve, block, ask]
+              description: |
+                Maps from internal decision:
+                  allow → approve
+                  deny  → block
+                  ask   → ask (user confirmation required)
+            reason:
+              type: string
+              description: Explanation shown to user when decision is block or ask
+  PostToolUse:
+    description: |
+      PostToolUse events are processed asynchronously. The CLI always
+      outputs an approve decision and exits immediately.
+    output_schema:
+      type: object
+      properties:
+        jsonrpc:
+          type: string
+          const: "2.0"
+        id:
+          type: string
+        result:
+          type: object
+          properties:
+            decision:
+              type: string
+              const: approve

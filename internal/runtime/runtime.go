@@ -27,6 +27,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -77,6 +78,7 @@ type Runtime struct {
 	updateChecker     *updatecheck.Checker     // Background version checking
 	managementService interface{}              // Initialized later to avoid import cycle
 	activityService   *ActivityService         // Activity logging service
+	flowService       *flow.FlowService        // Spec 027: Data flow security
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
@@ -167,12 +169,48 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	activityService := NewActivityService(storageManager, logger)
 
 	// Initialize sensitive data detector if configured (Spec 026)
+	var sensitiveDetector *security.Detector
 	if cfg.SensitiveDataDetection != nil && cfg.SensitiveDataDetection.IsEnabled() {
-		detector := security.NewDetector(cfg.SensitiveDataDetection)
-		activityService.SetDetector(detector)
+		sensitiveDetector = security.NewDetector(cfg.SensitiveDataDetection)
+		activityService.SetDetector(sensitiveDetector)
 		logger.Info("Sensitive data detection enabled",
 			zap.Bool("scan_requests", cfg.SensitiveDataDetection.ScanRequests),
 			zap.Bool("scan_responses", cfg.SensitiveDataDetection.ScanResponses))
+	}
+
+	// Initialize data flow security service (Spec 027)
+	var flowService *flow.FlowService
+	secCfg := cfg.GetSecurityConfig()
+	if secCfg.IsFlowTrackingEnabled() {
+		flowCfg := secCfg.GetFlowTracking()
+		classCfg := secCfg.GetClassification()
+		policyCfg := secCfg.GetFlowPolicy()
+
+		classifier := flow.NewClassifier(classCfg.ServerOverrides)
+		tracker := flow.NewFlowTracker(&flow.TrackerConfig{
+			SessionTimeoutMin:    flowCfg.SessionTimeoutMin,
+			MaxOriginsPerSession: flowCfg.MaxOriginsPerSession,
+			HashMinLength:        flowCfg.HashMinLength,
+			MaxResponseHashBytes: flowCfg.MaxResponseHashBytes,
+		})
+		policy := flow.NewPolicyEvaluator(&flow.PolicyConfig{
+			InternalToExternal:    flow.PolicyAction(policyCfg.InternalToExternal),
+			SensitiveDataExternal: flow.PolicyAction(policyCfg.SensitiveDataExternal),
+			RequireJustification:  policyCfg.RequireJustification,
+			SuspiciousEndpoints:   policyCfg.SuspiciousEndpoints,
+			ToolOverrides:         convertToolOverrides(policyCfg.ToolOverrides),
+		})
+
+		var det flow.SensitiveDataDetector
+		if sensitiveDetector != nil {
+			det = flow.NewDetectorAdapter(sensitiveDetector)
+		}
+
+		correlator := flow.NewCorrelator(5 * time.Second)
+		flowService = flow.NewFlowService(classifier, tracker, policy, det, correlator)
+		logger.Info("Data flow security enabled (Spec 027)",
+			zap.Int("session_timeout_min", flowCfg.SessionTimeoutMin),
+			zap.Int("max_origins", flowCfg.MaxOriginsPerSession))
 	}
 
 	rt := &Runtime{
@@ -189,6 +227,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		tokenizer:       tokenizer,
 		refreshManager:  refreshManager,
 		activityService: activityService,
+		flowService:     flowService,
 		supervisor:      supervisorInstance,
 		appCtx:          appCtx,
 		appCancel:       appCancel,
@@ -202,7 +241,37 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		phaseMachine: newPhaseMachine(PhaseInitializing),
 	}
 
+	// Register flow expiry callback now that rt is available (Spec 027)
+	if rt.flowService != nil {
+		rt.flowService.SetExpiryCallback(func(summary *flow.FlowSummary) {
+			rt.EmitActivityFlowSummary(
+				summary.SessionID,
+				summary.CoverageMode,
+				summary.DurationMinutes,
+				summary.TotalOrigins,
+				summary.TotalFlows,
+				summary.FlowTypeDistribution,
+				summary.RiskLevelDistribution,
+				summary.LinkedMCPSessions,
+				summary.ToolsUsed,
+				summary.HasSensitiveFlows,
+			)
+		})
+	}
+
 	return rt, nil
+}
+
+// convertToolOverrides converts string-valued overrides to PolicyAction-valued overrides.
+func convertToolOverrides(overrides map[string]string) map[string]flow.PolicyAction {
+	if len(overrides) == 0 {
+		return nil
+	}
+	result := make(map[string]flow.PolicyAction, len(overrides))
+	for k, v := range overrides {
+		result[k] = flow.PolicyAction(v)
+	}
+	return result
 }
 
 // Config returns the underlying configuration pointer.
@@ -468,6 +537,11 @@ func (r *Runtime) ActivityService() *ActivityService {
 	return r.activityService
 }
 
+// FlowService exposes the data flow security service (Spec 027).
+func (r *Runtime) FlowService() *flow.FlowService {
+	return r.flowService
+}
+
 // AppContext returns the long-lived runtime context.
 func (r *Runtime) AppContext() context.Context {
 	r.mu.RLock()
@@ -492,6 +566,14 @@ func (r *Runtime) Close() error {
 		r.refreshManager.Stop()
 		if r.logger != nil {
 			r.logger.Info("OAuth refresh manager stopped")
+		}
+	}
+
+	// Stop flow service to halt session expiry and correlation goroutines
+	if r.flowService != nil {
+		r.flowService.Stop()
+		if r.logger != nil {
+			r.logger.Info("Flow service stopped")
 		}
 	}
 

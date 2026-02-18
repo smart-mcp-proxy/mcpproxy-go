@@ -232,6 +232,54 @@ func (r *Runtime) EmitActivityConfigChange(action, affectedEntity, source string
 	r.publishEvent(newEvent(EventTypeActivityConfigChange, payload))
 }
 
+// EmitActivityHookEvaluation emits an event when a hook evaluation completes (Spec 027).
+// This creates an activity record of type "hook_evaluation" in the activity log.
+func (r *Runtime) EmitActivityHookEvaluation(toolName, sessionID, event, classification, flowType, riskLevel, policyDecision, policyReason, coverageMode string) {
+	payload := map[string]any{
+		"tool_name":       toolName,
+		"session_id":      sessionID,
+		"event":           event,
+		"classification":  classification,
+		"flow_type":       flowType,
+		"risk_level":      riskLevel,
+		"policy_decision": policyDecision,
+		"policy_reason":   policyReason,
+		"coverage_mode":   coverageMode,
+	}
+	r.publishEvent(newEvent(EventTypeActivityHookEvaluation, payload))
+}
+
+// EmitActivityFlowSummary emits an event when a flow session expires with aggregate statistics (Spec 027).
+func (r *Runtime) EmitActivityFlowSummary(sessionID, coverageMode string, durationMinutes, totalOrigins, totalFlows int, flowTypeDistribution, riskLevelDistribution map[string]int, linkedMCPSessions, toolsUsed []string, hasSensitiveFlows bool) {
+	payload := map[string]any{
+		"session_id":              sessionID,
+		"coverage_mode":           coverageMode,
+		"duration_minutes":        durationMinutes,
+		"total_origins":           totalOrigins,
+		"total_flows":             totalFlows,
+		"flow_type_distribution":  flowTypeDistribution,
+		"risk_level_distribution": riskLevelDistribution,
+		"linked_mcp_sessions":     linkedMCPSessions,
+		"tools_used":              toolsUsed,
+		"has_sensitive_flows":     hasSensitiveFlows,
+	}
+	r.publishEvent(newEvent(EventTypeActivityFlowSummary, payload))
+}
+
+// EmitFlowAlert emits a flow.alert SSE event when risk is high or critical (Spec 027).
+// This enables real-time monitoring of dangerous data flows.
+func (r *Runtime) EmitFlowAlert(activityID, sessionID, flowType, riskLevel, toolName string, hasSensitiveData bool) {
+	payload := map[string]any{
+		"activity_id":        activityID,
+		"session_id":         sessionID,
+		"flow_type":          flowType,
+		"risk_level":         riskLevel,
+		"tool_name":          toolName,
+		"has_sensitive_data": hasSensitiveData,
+	}
+	r.publishEvent(newEvent(EventTypeFlowAlert, payload))
+}
+
 // EmitSensitiveDataDetected emits an event when sensitive data is detected in a tool call (Spec 026).
 // activityID is the ID of the activity record where sensitive data was detected.
 // detectionCount is the number of sensitive data detections found.

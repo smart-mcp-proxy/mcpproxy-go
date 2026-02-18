@@ -842,6 +842,40 @@ const dashboardHints = computed<Hint[]>(() => {
     })
   }
 
+  // Spec 027: Show security coverage hint when hooks are not active
+  if (systemStore.securityCoverage === 'proxy_only') {
+    hints.push({
+      icon: '🛡',
+      title: 'Improve Security Coverage',
+      description: 'MCPProxy is running in proxy-only mode. Install agent hooks to detect data exfiltration patterns across all tool calls, including agent-internal tools like Read, Write, and Bash.',
+      sections: [
+        {
+          title: 'Install hooks for Claude Code',
+          codeBlock: {
+            language: 'bash',
+            code: `# Install MCPProxy security hooks\nmcpproxy hook install`
+          }
+        },
+        {
+          title: 'Check hook status',
+          codeBlock: {
+            language: 'bash',
+            code: `# Verify hooks are active\nmcpproxy hook status`
+          }
+        },
+        {
+          title: 'What hooks detect',
+          list: [
+            'Data flowing from internal tools (Read, databases) to external tools (WebFetch, Bash)',
+            'Sensitive credentials being passed to communication channels',
+            'Suspicious endpoint URLs in tool arguments',
+            'Full audit trail of all tool calls with flow analysis'
+          ]
+        }
+      ]
+    })
+  }
+
   // Always show general CLI hints
   hints.push({
     icon: '💡',

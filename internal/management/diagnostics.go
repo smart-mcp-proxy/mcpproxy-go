@@ -141,6 +141,9 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		diag.DockerStatus = s.checkDockerDaemon()
 	}
 
+	// Spec 027: Add security coverage recommendation if hooks not active
+	diag.Recommendations = s.generateSecurityRecommendations()
+
 	// Calculate total issues
 	diag.TotalIssues = len(diag.UpstreamErrors) + len(diag.OAuthRequired) +
 		len(diag.OAuthIssues) + len(diag.MissingSecrets) + len(diag.RuntimeWarnings)
@@ -155,6 +158,24 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	return diag, nil
 }
 
+
+// generateSecurityRecommendations produces security-related recommendations (Spec 027).
+func (s *service) generateSecurityRecommendations() []contracts.Recommendation {
+	var recs []contracts.Recommendation
+
+	// Recommend hook installation when hooks are not active
+	// For now, hooks are not yet implemented (Phase 6+), so always recommend
+	recs = append(recs, contracts.Recommendation{
+		ID:          "install-hooks",
+		Category:    "security",
+		Title:       "Install agent hooks for full security coverage",
+		Description: "MCPProxy is running in proxy-only mode. Installing agent hooks enables detection of exfiltration via agent-internal tool chains (e.g., Read → WebFetch). Without hooks, only MCP proxy-level flows are tracked.",
+		Command:     "mcpproxy hook install --agent claude-code",
+		Priority:    "medium",
+	})
+
+	return recs
+}
 
 // checkDockerDaemon checks if Docker daemon is available and returns status.
 // This implements T042: helper for checking Docker availability.

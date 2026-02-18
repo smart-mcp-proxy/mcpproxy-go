@@ -29,6 +29,12 @@ const (
 	ActivityTypeInternalToolCall ActivityType = "internal_tool_call"
 	// ActivityTypeConfigChange represents configuration changes like server add/remove/update (Spec 024)
 	ActivityTypeConfigChange ActivityType = "config_change"
+	// ActivityTypeHookEvaluation represents a hook-based security evaluation (Spec 027)
+	ActivityTypeHookEvaluation ActivityType = "hook_evaluation"
+	// ActivityTypeFlowSummary represents a flow session summary written on expiry (Spec 027)
+	ActivityTypeFlowSummary ActivityType = "flow_summary"
+	// ActivityTypeAuditorFinding is reserved for future auditor agent findings (Spec 027)
+	ActivityTypeAuditorFinding ActivityType = "auditor_finding"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -41,6 +47,8 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeSystemStop),
 	string(ActivityTypeInternalToolCall),
 	string(ActivityTypeConfigChange),
+	string(ActivityTypeHookEvaluation),
+	string(ActivityTypeFlowSummary),
 }
 
 // ActivitySource indicates how the activity was triggered
@@ -102,6 +110,10 @@ type ActivityFilter struct {
 	SensitiveData *bool  // Filter by sensitive data detection (nil=no filter, true=has detections, false=no detections)
 	DetectionType string // Filter by specific detection type (e.g., "aws_access_key", "credit_card")
 	Severity      string // Filter by severity level (critical, high, medium, low)
+
+	// Spec 027: Data flow security filters
+	FlowType  string // Filter by flow type (e.g., "internal_to_external")
+	RiskLevel string // Filter by risk level (e.g., "critical", "high")
 
 	// ExcludeCallToolSuccess filters out successful call_tool_* internal tool calls.
 	// These appear as duplicates since the actual upstream tool call is also logged.
@@ -197,6 +209,19 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 			record.Status == "success" &&
 			strings.HasPrefix(record.ToolName, "call_tool_") {
 			return false
+		}
+	}
+
+	// Check flow_type and risk_level filters (Spec 027)
+	if f.FlowType != "" || f.RiskLevel != "" {
+		recordFlowType, recordRiskLevel := extractFlowInfo(record)
+		if f.FlowType != "" && recordFlowType != f.FlowType {
+			return false
+		}
+		if f.RiskLevel != "" {
+			if !matchesRiskLevel(recordRiskLevel, f.RiskLevel) {
+				return false
+			}
 		}
 	}
 
@@ -335,4 +360,43 @@ func extractIntentType(record *ActivityRecord) string {
 	}
 
 	return ""
+}
+
+// extractFlowInfo extracts flow_type and risk_level from hook_evaluation metadata.
+func extractFlowInfo(record *ActivityRecord) (flowType, riskLevel string) {
+	if record.Metadata == nil {
+		return "", ""
+	}
+	if fa, ok := record.Metadata["flow_analysis"].(map[string]interface{}); ok {
+		flowType, _ = fa["flow_type"].(string)
+		riskLevel, _ = fa["risk_level"].(string)
+	}
+	// Also check top-level metadata (direct fields)
+	if flowType == "" {
+		flowType, _ = record.Metadata["flow_type"].(string)
+	}
+	if riskLevel == "" {
+		riskLevel, _ = record.Metadata["risk_level"].(string)
+	}
+	return flowType, riskLevel
+}
+
+// riskLevelSeverity returns numeric severity for a risk level string.
+var riskLevelSeverity = map[string]int{
+	"none":     0,
+	"low":      1,
+	"medium":   2,
+	"high":     3,
+	"critical": 4,
+}
+
+// matchesRiskLevel returns true if the record risk level is >= the filter risk level.
+// e.g., filtering for "high" matches "high" and "critical".
+func matchesRiskLevel(recordLevel, filterLevel string) bool {
+	recordSev, ok1 := riskLevelSeverity[recordLevel]
+	filterSev, ok2 := riskLevelSeverity[filterLevel]
+	if !ok1 || !ok2 {
+		return recordLevel == filterLevel
+	}
+	return recordSev >= filterSev
 }
