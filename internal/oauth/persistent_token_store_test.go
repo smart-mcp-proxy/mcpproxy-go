@@ -480,3 +480,35 @@ func TestPersistentTokenStoreSameNameDifferentURL(t *testing.T) {
 		t.Errorf("Server2 token should still exist: got %s, want token-for-server2-url", retrievedToken2Again.AccessToken)
 	}
 }
+
+// TestGetToken_DCROnlyRecord_ReturnsError reproduces GitHub issue #305:
+// After DCR saves client credentials (but no access token), GetToken() should
+// return ErrNoToken — not a non-nil token with empty AccessToken. Returning a
+// non-nil token causes scanForNewTokens() to trigger reconnect loops.
+func TestGetToken_DCROnlyRecord_ReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := zap.NewNop().Sugar()
+	db, err := storage.NewBoltDB(tmpDir, logger)
+	if err != nil {
+		t.Fatalf("Failed to create BoltDB: %v", err)
+	}
+	defer db.Close()
+
+	serverName := "oauth-server"
+	serverURL := "https://oauth.example.com/mcp"
+	serverKey := GenerateServerKey(serverName, serverURL)
+
+	// Simulate DCR saving only client credentials (no access token yet)
+	err = db.UpdateOAuthClientCredentials(serverKey, "dcr-client-id", "dcr-secret", 12345)
+	if err != nil {
+		t.Fatalf("Failed to save DCR credentials: %v", err)
+	}
+
+	// GetToken should return an error for DCR-only records (no access token)
+	tokenStore := NewPersistentTokenStore(serverName, serverURL, db)
+	tok, err := tokenStore.GetToken(context.Background())
+	if err == nil {
+		t.Errorf("GetToken() should return error for DCR-only record (no access token), got token with AccessToken=%q ExpiresAt=%v",
+			tok.AccessToken, tok.ExpiresAt)
+	}
+}
