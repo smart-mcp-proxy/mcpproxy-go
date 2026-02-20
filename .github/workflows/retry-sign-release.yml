@@ -1,0 +1,265 @@
+name: Retry Sign & Release
+
+# Use this workflow when the main Release workflow fails due to SignPath
+# signing timeout (missed manual approval). It downloads unsigned artifacts
+# from the failed run, re-submits for signing, and creates the release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.2.3)'
+        required: true
+        type: string
+      run_id:
+        description: 'Failed Release workflow run ID (from Actions URL)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  GITHUB_ENVIRONMENT: production
+
+jobs:
+  sign-windows:
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Download unsigned installer from original run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p unsigned
+          echo "Downloading unsigned-installer-windows-${{ matrix.arch }} from run ${{ inputs.run_id }}..."
+          gh run download ${{ inputs.run_id }} \
+            --repo ${{ github.repository }} \
+            --name unsigned-installer-windows-${{ matrix.arch }} \
+            --dir unsigned
+          echo "Downloaded files:"
+          ls -la unsigned/
+
+      - name: Re-upload for SignPath
+        id: reupload
+        uses: actions/upload-artifact@v4
+        with:
+          name: signpath-input-windows-${{ matrix.arch }}
+          path: unsigned/*.exe
+
+      - name: Submit to SignPath for signing
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '84efd51b-c11c-4a85-82e6-7c3b1157d7ca'
+          project-slug: 'mcpproxy-go'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'initial'
+          github-artifact-id: '${{ steps.reupload.outputs.artifact-id }}'
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed
+
+      - name: Prepare signed installer
+        run: |
+          VERSION="${{ inputs.tag }}"
+          ARCH="${{ matrix.arch }}"
+          TARGET="mcpproxy-setup-${VERSION}-${ARCH}.exe"
+
+          echo "Preparing signed installer..."
+          cd signed
+          ls -la
+
+          if [ -f "$TARGET" ]; then
+            echo "Signed installer already named correctly: $TARGET"
+          else
+            SIGNED_EXE=$(find . -name "*.exe" -type f | head -1)
+            if [ -n "$SIGNED_EXE" ]; then
+              mv "$SIGNED_EXE" "$TARGET"
+              echo "Renamed to: $TARGET"
+            else
+              echo "No signed .exe found in SignPath output"
+              exit 1
+            fi
+          fi
+
+      - name: Upload signed Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows-${{ matrix.arch }}
+          path: signed/mcpproxy-setup-${{ inputs.tag }}-${{ matrix.arch }}.exe
+
+  release:
+    needs: sign-windows
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Download all artifacts from original run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          echo "Downloading all artifacts from run ${{ inputs.run_id }}..."
+
+          # Download all artifacts except unsigned/signpath ones (we have fresh signed ones)
+          gh run download ${{ inputs.run_id }} \
+            --repo ${{ github.repository }} \
+            --dir dist \
+            --pattern 'archive-*' || echo "No archive artifacts found"
+
+          gh run download ${{ inputs.run_id }} \
+            --repo ${{ github.repository }} \
+            --dir dist \
+            --pattern 'installers-*' || echo "No installer artifacts found"
+
+          gh run download ${{ inputs.run_id }} \
+            --repo ${{ github.repository }} \
+            --dir dist \
+            --pattern 'release-notes' || echo "No release notes artifact found"
+
+          echo "Downloaded artifacts:"
+          find dist -type f | head -50
+
+      - name: Download signed Windows installers
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: installer-windows-*
+
+      - name: Reorganize files
+        run: |
+          VERSION="${{ inputs.tag }}"
+          mkdir -p release-files
+
+          # Copy archives (tar.gz and zip files)
+          find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
+            filename=$(basename "$file")
+            cp "$file" "release-files/$filename"
+          done
+
+          # Copy Windows installer files (.exe)
+          find dist -path "*/installer-windows-*" -name "*.exe" | while read installer_file; do
+            filename=$(basename "$installer_file")
+            echo "Found Windows installer: $filename"
+            cp "$installer_file" "release-files/$filename"
+          done
+
+          # Handle installer files (DMG)
+          mkdir -p pending-notarizations
+          find dist -path "*/installers-*" -name "*.dmg" | while read installer_file; do
+            filename=$(basename "$installer_file")
+            submission_id_file="${installer_file}.submission_id"
+            if [ -f "$submission_id_file" ]; then
+              SUBMISSION_ID=$(cat "$submission_id_file")
+              if [ -n "$SUBMISSION_ID" ] && [ "$SUBMISSION_ID" != "null" ] && [ ${#SUBMISSION_ID} -gt 10 ]; then
+                echo "Found valid pending notarization for $filename (ID: $SUBMISSION_ID)"
+                cp "$installer_file" "release-files/$filename"
+                cat > "pending-notarizations/${filename}.pending" << EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "file_name": "$filename",
+            "version": "$VERSION",
+            "submitted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+              else
+                cp "$installer_file" "release-files/$filename"
+              fi
+            else
+              cp "$installer_file" "release-files/$filename"
+            fi
+          done
+
+      - name: List files for upload
+        run: |
+          echo "Files to upload:"
+          ls -la release-files/
+          echo "Pending notarizations:"
+          ls -la pending-notarizations/ || echo "No pending notarizations"
+
+      - name: Set version variable
+        run: |
+          VERSION="${{ inputs.tag }}"
+          # Strip leading 'v' for CLEAN_VERSION
+          echo "CLEAN_VERSION=${VERSION#v}" >> $GITHUB_ENV
+
+      - name: Generate release notes
+        id: notes
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          VERSION="${{ inputs.tag }}"
+
+          # Try to use notes from original run
+          NOTES_FILE=$(find dist -name "RELEASE_NOTES-*.md" -type f | head -1)
+          if [ -n "$NOTES_FILE" ]; then
+            echo "Using release notes from original run"
+            NOTES=$(cat "$NOTES_FILE")
+          else
+            # Fallback: generate from commit history
+            PREV_TAG=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || echo "")
+            if [ -n "$PREV_TAG" ]; then
+              COMMITS=$(git log "${PREV_TAG}..${VERSION}" --pretty=format:"- %s" --no-merges | head -50)
+            else
+              COMMITS=$(git log --pretty=format:"- %s" --no-merges | head -50)
+            fi
+            NOTES="## Changes
+
+          ${COMMITS}"
+          fi
+
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create release with binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: release-files/*
+          body: |
+            ${{ steps.notes.outputs.notes }}
+
+            ---
+
+            ## Download Installers
+
+            | Platform | Download | Notes |
+            |----------|----------|-------|
+            | **macOS (Apple Silicon)** | [**Download DMG**](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-arm64-installer.dmg) | Signed & Notarized - Recommended for M1/M2/M3/M4 |
+            | **macOS (Intel)** | [**Download DMG**](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64-installer.dmg) | Signed & Notarized |
+            | **Windows (64-bit)** | [**Download Setup**](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/mcpproxy-setup-${{ inputs.tag }}-amd64.exe) | Setup wizard |
+            | **Windows (ARM64)** | [**Download Setup**](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/mcpproxy-setup-${{ inputs.tag }}-arm64.exe) | For ARM Windows devices |
+            | **Linux (AMD64)** | [**Download tar.gz**](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz) | Binary package |
+            | **Linux (ARM64)** | [**Download tar.gz**](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-arm64.tar.gz) | For ARM Linux |
+
+            **Homebrew (macOS/Linux):**
+            ```bash
+            brew install smart-mcp-proxy/mcpproxy/mcpproxy
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload pending notarizations
+        if: hashFiles('pending-notarizations/*.pending') != ''
+        run: |
+          for pending_file in pending-notarizations/*.pending; do
+            if [ -f "$pending_file" ]; then
+              echo "Uploading pending notarization: $(basename "$pending_file")"
+              gh release upload "${{ inputs.tag }}" "$pending_file" --clobber
+            fi
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
