@@ -87,6 +87,17 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 		return nil, transport.ErrNoToken
 	}
 
+	// DCR (Dynamic Client Registration) creates a minimal record with only
+	// client credentials but no access token. Treat these as "no token" to
+	// prevent scanForNewTokens() from triggering reconnect loops (issue #305).
+	if record.AccessToken == "" {
+		p.logger.Debug("⏳ OAuth record exists but has no access token (DCR-only), treating as no token",
+			zap.String("server_name", p.serverName),
+			zap.String("server_key", p.serverKey),
+			zap.Bool("has_client_id", record.ClientID != ""))
+		return nil, transport.ErrNoToken
+	}
+
 	now := time.Now()
 	timeUntilExpiry := record.ExpiresAt.Sub(now)
 	isExpired := now.After(record.ExpiresAt)
