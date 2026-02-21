@@ -73,6 +73,9 @@ type Options struct {
 	RequirePKCE              bool // Default: true
 	RequireResourceIndicator bool // RFC 8707: Require resource parameter (default: false)
 
+	// Compatibility modes
+	RunlayerMode bool // Mimic Runlayer's strict validation with Pydantic-style 422 errors
+
 	// Error injection
 	ErrorMode ErrorMode
 

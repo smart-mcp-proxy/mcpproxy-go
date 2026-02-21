@@ -45,6 +45,9 @@ func main() {
 	requirePKCE := flag.Bool("require-pkce", true, "Require PKCE for authorization code flow (RFC 7636)")
 	requireResource := flag.Bool("require-resource", false, "Require RFC 8707 resource indicator")
 
+	// Compatibility modes
+	runlayerMode := flag.Bool("runlayer-mode", false, "Mimic Runlayer's strict validation (implies -require-resource, returns Pydantic-style 422 errors)")
+
 	// Detection mode
 	detectionMode := flag.String("detection", "both", "OAuth detection mode: discovery, www-authenticate, explicit, both")
 
@@ -92,6 +95,9 @@ func main() {
 		errMode.AuthInvalidRequest = true
 	}
 
+	// Runlayer mode implies require-resource
+	effectiveRequireResource := *requireResource || *runlayerMode
+
 	opts := oauthserver.Options{
 		// Feature toggles (inverted from no-* flags)
 		EnableAuthCode:          !*noAuthCode,
@@ -102,7 +108,10 @@ func main() {
 
 		// Security
 		RequirePKCE:              *requirePKCE,
-		RequireResourceIndicator: *requireResource,
+		RequireResourceIndicator: effectiveRequireResource,
+
+		// Compatibility modes
+		RunlayerMode: *runlayerMode,
 
 		// Detection
 		DetectionMode: dm,
@@ -163,6 +172,7 @@ func main() {
 	fmt.Printf("  Refresh Token:   %s\n", boolToEnabled(opts.EnableRefreshToken))
 	fmt.Printf("  PKCE Required:   %s (RFC 7636)\n", boolToEnabled(opts.RequirePKCE))
 	fmt.Printf("  Resource Req:    %s (RFC 8707)\n", boolToEnabled(opts.RequireResourceIndicator))
+	fmt.Printf("  Runlayer Mode:   %s (Pydantic 422 errors)\n", boolToEnabled(opts.RunlayerMode))
 	fmt.Printf("  Detection Mode:  %s\n", *detectionMode)
 	fmt.Println("")
 	fmt.Println("Test Credentials:  testuser / testpass")

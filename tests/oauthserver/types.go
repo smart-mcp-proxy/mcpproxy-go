@@ -148,6 +148,20 @@ type OAuthError struct {
 	ErrorDescription string `json:"error_description,omitempty"`
 }
 
+// PydanticValidationError represents a Pydantic-style validation error response.
+// Used in Runlayer mode to mimic FastAPI/Pydantic 422 responses.
+type PydanticValidationError struct {
+	Detail []PydanticErrorDetail `json:"detail"`
+}
+
+// PydanticErrorDetail represents a single validation error detail.
+type PydanticErrorDetail struct {
+	Type  string   `json:"type"`            // Error type, e.g., "missing", "value_error"
+	Loc   []string `json:"loc"`             // Location path, e.g., ["query", "resource"]
+	Msg   string   `json:"msg"`             // Human-readable message
+	Input any      `json:"input,omitempty"` // The input value that caused the error
+}
+
 // RefreshTokenData stores refresh token information.
 type RefreshTokenData struct {
 	Token     string
