@@ -712,6 +712,56 @@ func TestCalculateHealth_RefreshStatePriority(t *testing.T) {
 		assert.Equal(t, ActionRestart, result.Action)
 	})
 
+	t.Run("offline HTTP server with OAuth wrapping shows restart not login", func(t *testing.T) {
+		// Issue #242: When an HTTP server is offline, mcp-go wraps the connection error
+		// inside "authentication strategies failed", which incorrectly triggers OAuth detection.
+		// The health calculator should recognize the underlying connection error and suggest restart.
+		input := HealthCalculatorInput{
+			Name:          "local-chatgpt-app",
+			Enabled:       true,
+			State:         "error",
+			OAuthRequired: true,
+			LastError:     "failed to connect: all authentication strategies failed, last error: OAuth authentication required for local-chatgpt-app: dial tcp 127.0.0.1:3000: connect: connection refused",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, LevelUnhealthy, result.Level)
+		assert.Equal(t, ActionRestart, result.Action, "Should suggest restart, not login, for connection refused")
+		assert.NotEqual(t, "Authentication required", result.Summary)
+	})
+
+	t.Run("offline HTTP server with no such host shows restart not login", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:          "remote-server",
+			Enabled:       true,
+			State:         "disconnected",
+			OAuthRequired: true,
+			LastError:     "authentication strategies failed: dial tcp: lookup example.invalid: no such host",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, LevelUnhealthy, result.Level)
+		assert.Equal(t, ActionRestart, result.Action, "Should suggest restart, not login, for DNS failure")
+	})
+
+	t.Run("genuine OAuth error still suggests login", func(t *testing.T) {
+		input := HealthCalculatorInput{
+			Name:          "oauth-server",
+			Enabled:       true,
+			State:         "error",
+			OAuthRequired: true,
+			LastError:     "authentication strategies failed: invalid_grant: token has been revoked",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, LevelUnhealthy, result.Level)
+		assert.Equal(t, ActionLogin, result.Action, "Genuine OAuth error should suggest login")
+		assert.Equal(t, "Authentication required", result.Summary)
+	})
+
 	t.Run("OAuth expired takes priority over refresh retrying", func(t *testing.T) {
 		input := HealthCalculatorInput{
 			Name:          "test-server",
