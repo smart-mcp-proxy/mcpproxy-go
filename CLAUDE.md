@@ -214,7 +214,8 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `GET /api/v1/status` | Server status and statistics |
 | `GET /api/v1/servers` | List all upstream servers |
 | `POST /api/v1/servers/{name}/enable` | Enable/disable server |
-| `POST /api/v1/servers/{name}/quarantine` | Quarantine/unquarantine server |
+| `POST /api/v1/servers/{name}/quarantine` | Quarantine a server |
+| `POST /api/v1/servers/{name}/unquarantine` | Unquarantine a server |
 | `GET /api/v1/tools` | Search tools across servers |
 | `GET /api/v1/activity` | List activity records with filtering |
 | `GET /api/v1/activity/{id}` | Get activity record details |

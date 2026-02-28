@@ -677,6 +677,38 @@ func (c *Client) GetServerTools(serverName string) ([]Tool, error) {
 	return result, nil
 }
 
+// QuarantineServer places a server in quarantine
+func (c *Client) QuarantineServer(serverName string) error {
+	endpoint := fmt.Sprintf("/api/v1/servers/%s/quarantine", serverName)
+
+	resp, err := c.makeRequest("POST", endpoint, nil)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("API error: %s", resp.Error)
+	}
+
+	return nil
+}
+
+// UnquarantineServer removes a server from quarantine
+func (c *Client) UnquarantineServer(serverName string) error {
+	endpoint := fmt.Sprintf("/api/v1/servers/%s/unquarantine", serverName)
+
+	resp, err := c.makeRequest("POST", endpoint, nil)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("API error: %s", resp.Error)
+	}
+
+	return nil
+}
+
 // SearchTools searches for tools
 // GetInfo fetches server information from /api/v1/info endpoint
 func (c *Client) GetInfo() (map[string]interface{}, error) {

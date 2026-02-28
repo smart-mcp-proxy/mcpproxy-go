@@ -177,14 +177,11 @@ Disable a server.
 
 #### POST /api/v1/servers/{name}/quarantine
 
-Set quarantine status.
+Place a server in quarantine to prevent tool execution. No request body required.
 
-**Request Body:**
-```json
-{
-  "quarantined": true
-}
-```
+#### POST /api/v1/servers/{name}/unquarantine
+
+Remove a server from quarantine to allow tool execution. No request body required.
 
 #### POST /api/v1/servers/{name}/restart
 

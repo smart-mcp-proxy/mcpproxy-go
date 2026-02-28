@@ -16,6 +16,8 @@ type ClientInterface interface {
 	GetServers() ([]Server, error)
 	GetInfo() (map[string]interface{}, error)
 	EnableServer(serverName string, enabled bool) error
+	QuarantineServer(serverName string) error
+	UnquarantineServer(serverName string) error
 	TriggerOAuthLogin(serverName string) error
 	StatusChannel() <-chan StatusUpdate
 }
@@ -210,9 +212,7 @@ func (a *ServerAdapter) GetQuarantinedServers() ([]map[string]interface{}, error
 
 // UnquarantineServer removes a server from quarantine
 func (a *ServerAdapter) UnquarantineServer(serverName string) error {
-	// This functionality is not available in the current API
-	// Would need to be added to the API first
-	return fmt.Errorf("UnquarantineServer not yet supported via API for %s", serverName)
+	return a.client.UnquarantineServer(serverName)
 }
 
 // EnableServer enables or disables a server
@@ -222,9 +222,10 @@ func (a *ServerAdapter) EnableServer(serverName string, enabled bool) error {
 
 // QuarantineServer sets quarantine status for a server
 func (a *ServerAdapter) QuarantineServer(serverName string, quarantined bool) error {
-	// This functionality is not available in the current API
-	// Would need to be added to the API first
-	return fmt.Errorf("QuarantineServer not yet supported via API for %s (quarantined=%t)", serverName, quarantined)
+	if quarantined {
+		return a.client.QuarantineServer(serverName)
+	}
+	return a.client.UnquarantineServer(serverName)
 }
 
 // GetAllServers returns all servers
