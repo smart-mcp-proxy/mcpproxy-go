@@ -101,10 +101,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize management service and set it on runtime
 	secretResolver := secret.NewResolver()
 	mgmtService := management.NewService(
-		rt,            // RuntimeOperations
-		cfg,           // Config
-		rt,            // EventEmitter
-		secretResolver, // SecretResolver
+		rt,                // RuntimeOperations
+		cfg,               // Config
+		rt.ConfigPath(),   // Config file path for deprecation checks
+		rt,                // EventEmitter
+		secretResolver,    // SecretResolver
 		logger.Sugar(),
 	)
 	rt.SetManagementService(mgmtService)

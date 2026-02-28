@@ -89,9 +89,6 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	}
 
 	// Tool limits (can be hot-reloaded)
-	if oldCfg.TopK != newCfg.TopK {
-		result.ChangedFields = append(result.ChangedFields, "top_k")
-	}
 	if oldCfg.ToolsLimit != newCfg.ToolsLimit {
 		result.ChangedFields = append(result.ChangedFields, "tools_limit")
 	}
@@ -110,11 +107,6 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	// Docker isolation configuration (can be hot-reloaded for new servers)
 	if !reflect.DeepEqual(oldCfg.DockerIsolation, newCfg.DockerIsolation) {
 		result.ChangedFields = append(result.ChangedFields, "docker_isolation")
-	}
-
-	// Feature flags (can be hot-reloaded)
-	if !reflect.DeepEqual(oldCfg.Features, newCfg.Features) {
-		result.ChangedFields = append(result.ChangedFields, "features")
 	}
 
 	// Registries (can be hot-reloaded)

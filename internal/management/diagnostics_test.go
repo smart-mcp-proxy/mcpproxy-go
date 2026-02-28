@@ -32,7 +32,7 @@ func TestDoctor(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		require.NoError(t, err)
@@ -59,7 +59,7 @@ func TestDoctor(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestDoctor(t *testing.T) {
 		runtime := newMockRuntime()
 		runtime.getAllError = fmt.Errorf("runtime failure")
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		assert.Error(t, err)
@@ -111,7 +111,7 @@ func TestDoctorOAuthDetection(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		require.NoError(t, err)
@@ -144,7 +144,7 @@ func TestDoctorOAuthDetection(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		require.NoError(t, err)
@@ -180,7 +180,7 @@ func TestDoctorMissingSecrets(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		require.NoError(t, err)
@@ -211,7 +211,7 @@ func TestDoctorMissingSecrets(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		require.NoError(t, err)
@@ -234,7 +234,7 @@ func TestDoctorDockerStatus(t *testing.T) {
 		runtime := newMockRuntime()
 		runtime.servers = []map[string]interface{}{}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		require.NoError(t, err)
@@ -249,7 +249,7 @@ func TestDoctorDockerStatus(t *testing.T) {
 		runtime := newMockRuntime()
 		runtime.servers = []map[string]interface{}{}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		diag, err := svc.Doctor(context.Background())
 
 		require.NoError(t, err)

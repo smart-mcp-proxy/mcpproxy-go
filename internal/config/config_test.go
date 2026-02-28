@@ -17,9 +17,7 @@ func TestDefaultConfig(t *testing.T) {
 	// Test default values
 	assert.Equal(t, "127.0.0.1:8080", config.Listen)
 	assert.Equal(t, "", config.DataDir)
-	assert.True(t, config.EnableTray)
 	assert.False(t, config.DebugSearch)
-	assert.Equal(t, 5, config.TopK)
 	assert.Equal(t, 15, config.ToolsLimit)
 	assert.Equal(t, 20000, config.ToolResponseLimit)
 
@@ -49,19 +47,6 @@ func TestConfigValidation(t *testing.T) {
 			},
 			expected: &Config{
 				Listen:            "127.0.0.1:8080",
-				TopK:              5,
-				ToolsLimit:        15,
-				ToolResponseLimit: 0,
-			},
-		},
-		{
-			name: "zero TopK defaults to 5",
-			config: &Config{
-				TopK: 0,
-			},
-			expected: &Config{
-				Listen:            "127.0.0.1:8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 0,
 			},
@@ -73,7 +58,6 @@ func TestConfigValidation(t *testing.T) {
 			},
 			expected: &Config{
 				Listen:            "127.0.0.1:8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 0,
 			},
@@ -85,7 +69,6 @@ func TestConfigValidation(t *testing.T) {
 			},
 			expected: &Config{
 				Listen:            "127.0.0.1:8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 0,
 			},
@@ -97,7 +80,6 @@ func TestConfigValidation(t *testing.T) {
 			err := tt.config.Validate()
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected.Listen, tt.config.Listen)
-			assert.Equal(t, tt.expected.TopK, tt.config.TopK)
 			assert.Equal(t, tt.expected.ToolsLimit, tt.config.ToolsLimit)
 			assert.Equal(t, tt.expected.ToolResponseLimit, tt.config.ToolResponseLimit)
 		})
@@ -436,8 +418,8 @@ func TestSaveAndLoadConfig(t *testing.T) {
 		t.Errorf("Expected Listen %s, got %s", cfg.Listen, loaded.Listen)
 	}
 
-	if loaded.TopK != cfg.TopK {
-		t.Errorf("Expected TopK %d, got %d", cfg.TopK, loaded.TopK)
+	if loaded.ToolsLimit != cfg.ToolsLimit {
+		t.Errorf("Expected ToolsLimit %d, got %d", cfg.ToolsLimit, loaded.ToolsLimit)
 	}
 }
 
@@ -491,8 +473,6 @@ func TestLoadEmptyConfigFile(t *testing.T) {
 
 			// Verify the config still has default values
 			assert.Equal(t, "127.0.0.1:8080", cfg.Listen, "Default listen address should be preserved")
-			assert.True(t, cfg.EnableTray, "Default EnableTray should be preserved")
-			assert.Equal(t, 5, cfg.TopK, "Default TopK should be preserved")
 		})
 	}
 }

@@ -144,6 +144,7 @@ type RuntimeOperations interface {
 type service struct {
 	runtime        RuntimeOperations
 	config         *config.Config
+	configPath     string
 	eventEmitter   EventEmitter
 	secretResolver *secret.Resolver
 	logger         *zap.SugaredLogger
@@ -154,6 +155,7 @@ type service struct {
 func NewService(
 	runtime RuntimeOperations,
 	cfg *config.Config,
+	configPath string,
 	eventEmitter EventEmitter,
 	secretResolver *secret.Resolver,
 	logger *zap.SugaredLogger,
@@ -161,6 +163,7 @@ func NewService(
 	return &service{
 		runtime:        runtime,
 		config:         cfg,
+		configPath:     configPath,
 		eventEmitter:   eventEmitter,
 		secretResolver: secretResolver,
 		logger:         logger,

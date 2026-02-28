@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
@@ -134,6 +135,18 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			SecretName: secretName,
 			UsedBy:     servers,
 		})
+	}
+
+	// Check for deprecated configuration fields
+	if s.configPath != "" {
+		deprecated := config.CheckDeprecatedFields(s.configPath)
+		for _, df := range deprecated {
+			diag.DeprecatedConfigs = append(diag.DeprecatedConfigs, contracts.DeprecatedConfigWarning{
+				Field:       df.JSONKey,
+				Message:     df.Message,
+				Replacement: df.Replacement,
+			})
+		}
 	}
 
 	// Check Docker status if isolation is enabled

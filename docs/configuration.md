@@ -70,7 +70,6 @@ MCPProxy looks for configuration in these locations (in order):
 
 ```json
 {
-  "enable_tray": true,
   "enable_socket": true,
   "tray_endpoint": ""
 }
@@ -78,7 +77,6 @@ MCPProxy looks for configuration in these locations (in order):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enable_tray` | boolean | `true` | Enable system tray application |
 | `enable_socket` | boolean | `true` | Enable Unix socket (macOS/Linux) or named pipe (Windows) for secure local IPC between tray and core |
 | `tray_endpoint` | string | `""` | Override socket/pipe path (advanced, usually not needed) |
 
@@ -86,7 +84,6 @@ MCPProxy looks for configuration in these locations (in order):
 
 ```json
 {
-  "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
   "call_tool_timeout": "2m"
@@ -95,7 +92,6 @@ MCPProxy looks for configuration in these locations (in order):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `top_k` | integer | `5` | Number of top search results to return (1-100) |
 | `tools_limit` | integer | `15` | Maximum number of tools to return per request (1-1000) |
 | `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited) |
 | `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
@@ -667,7 +663,6 @@ See [Code Execution Documentation](code_execution/overview.md) for complete deta
     "enable_caching": true,
     "enable_async_storage": true,
     "enable_web_ui": true,
-    "enable_tray": true,
     "enable_debug_logging": false,
     "enable_contract_tests": false
   }
@@ -728,10 +723,8 @@ Here's a complete configuration example with all major sections:
 {
   "listen": "127.0.0.1:8080",
   "data_dir": "~/.mcpproxy",
-  "enable_tray": true,
   "enable_socket": true,
   "api_key": "",
-  "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
   "call_tool_timeout": "2m",
@@ -832,7 +825,7 @@ Many configuration options can be overridden via environment variables:
 | `HEADLESS` | - | Run in headless mode |
 
 **Prefix rules:**
-- General settings also accept the `MCPP_` prefix (hyphens become underscores), e.g., `MCPP_TOP_K`, `MCPP_TOOLS_LIMIT`, `MCPP_ENABLE_PROMPTS`.
+- General settings also accept the `MCPP_` prefix (hyphens become underscores), e.g., `MCPP_TOOLS_LIMIT`, `MCPP_ENABLE_PROMPTS`.
 - TLS/listen/data have additional convenience overrides with the `MCPPROXY_` prefix as listed above.
 
 **Priority:** Environment variables > Config file > Defaults
@@ -844,7 +837,6 @@ Many configuration options can be overridden via environment variables:
 MCPProxy validates configuration on startup. Common validation errors:
 
 - **Invalid listen address**: Must be `host:port` or `:port` format
-- **Invalid top_k**: Must be between 1 and 100
 - **Invalid tools_limit**: Must be between 1 and 1000
 - **Missing server name**: Each server must have a unique name
 - **Invalid protocol**: Must be `stdio`, `http`, `sse`, `streamable-http`, or `auto`

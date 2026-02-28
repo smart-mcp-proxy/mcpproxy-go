@@ -175,6 +175,27 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 			zap.Bool("scan_responses", cfg.SensitiveDataDetection.ScanResponses))
 	}
 
+	// Wire activity retention config from config file
+	if cfg.ActivityRetentionDays > 0 || cfg.ActivityMaxRecords > 0 || cfg.ActivityCleanupIntervalMin > 0 {
+		maxAge := time.Duration(cfg.ActivityRetentionDays) * 24 * time.Hour
+		checkInterval := time.Duration(cfg.ActivityCleanupIntervalMin) * time.Minute
+		activityService.SetRetentionConfig(maxAge, cfg.ActivityMaxRecords, checkInterval)
+		logger.Info("Activity retention config applied",
+			zap.Int("retention_days", cfg.ActivityRetentionDays),
+			zap.Int("max_records", cfg.ActivityMaxRecords),
+			zap.Int("cleanup_interval_min", cfg.ActivityCleanupIntervalMin))
+	}
+
+	// Log warnings for deprecated config fields
+	if deprecated := config.CheckDeprecatedFields(cfgPath); len(deprecated) > 0 {
+		for _, df := range deprecated {
+			logger.Warn("Deprecated config field",
+				zap.String("field", df.JSONKey),
+				zap.String("message", df.Message),
+				zap.String("replacement", df.Replacement))
+		}
+	}
+
 	rt := &Runtime{
 		cfg:             cfg,
 		cfgPath:         cfgPath,

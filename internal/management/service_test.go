@@ -75,7 +75,7 @@ func TestCheckWriteGates(t *testing.T) {
 				ReadOnlyMode:      tt.readOnlyMode,
 			}
 
-			svc := NewService(nil, cfg, &mockEventEmitter{}, nil, logger).(*service)
+			svc := NewService(nil, cfg, "", &mockEventEmitter{}, nil, logger).(*service)
 			err := svc.checkWriteGates()
 
 			if tt.expectError {
@@ -113,7 +113,7 @@ func TestListServers(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		servers, stats, err := svc.ListServers(context.Background())
 
 		require.NoError(t, err)
@@ -153,7 +153,7 @@ func TestListServers(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		servers, stats, err := svc.ListServers(context.Background())
 
 		require.NoError(t, err)
@@ -182,7 +182,7 @@ func TestListServers(t *testing.T) {
 		runtime := newMockRuntime()
 		runtime.getAllError = fmt.Errorf("runtime error")
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		servers, stats, err := svc.ListServers(context.Background())
 
 		assert.Error(t, err)
@@ -210,7 +210,7 @@ func TestListServers(t *testing.T) {
 			},
 		}
 
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 		servers, stats, err := svc.ListServers(context.Background())
 
 		require.NoError(t, err)
@@ -238,7 +238,7 @@ func TestEnableServer(t *testing.T) {
 	t.Run("blocks when disable_management is true", func(t *testing.T) {
 		cfg := &config.Config{DisableManagement: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		err := svc.EnableServer(context.Background(), "test-server", true)
 
@@ -250,7 +250,7 @@ func TestEnableServer(t *testing.T) {
 	t.Run("blocks when read_only_mode is true", func(t *testing.T) {
 		cfg := &config.Config{ReadOnlyMode: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		err := svc.EnableServer(context.Background(), "test-server", true)
 
@@ -263,7 +263,7 @@ func TestEnableServer(t *testing.T) {
 		cfg := &config.Config{}
 		emitter := &mockEventEmitter{}
 		runtime := newMockRuntime()
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		err := svc.EnableServer(context.Background(), "test-server", true)
 
@@ -281,7 +281,7 @@ func TestRestartServer(t *testing.T) {
 	t.Run("blocks when disable_management is true", func(t *testing.T) {
 		cfg := &config.Config{DisableManagement: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		err := svc.RestartServer(context.Background(), "test-server")
 
@@ -293,7 +293,7 @@ func TestRestartServer(t *testing.T) {
 	t.Run("blocks when read_only_mode is true", func(t *testing.T) {
 		cfg := &config.Config{ReadOnlyMode: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		err := svc.RestartServer(context.Background(), "test-server")
 
@@ -306,7 +306,7 @@ func TestRestartServer(t *testing.T) {
 		cfg := &config.Config{}
 		emitter := &mockEventEmitter{}
 		runtime := newMockRuntime()
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		err := svc.RestartServer(context.Background(), "test-server")
 
@@ -452,7 +452,7 @@ func TestRestartAll(t *testing.T) {
 	t.Run("blocks when disable_management is true", func(t *testing.T) {
 		cfg := &config.Config{DisableManagement: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		result, err := svc.RestartAll(context.Background())
 
@@ -465,7 +465,7 @@ func TestRestartAll(t *testing.T) {
 	t.Run("blocks when read_only_mode is true", func(t *testing.T) {
 		cfg := &config.Config{ReadOnlyMode: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		result, err := svc.RestartAll(context.Background())
 
@@ -484,7 +484,7 @@ func TestRestartAll(t *testing.T) {
 			{"name": "server2"},
 			{"name": "server3"},
 		}
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		result, err := svc.RestartAll(context.Background())
 
@@ -512,7 +512,7 @@ func TestRestartAll(t *testing.T) {
 		// Configure mock to fail on server2
 		runtime.restartError = fmt.Errorf("restart failed")
 		runtime.failOnServer = "server2"
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		result, err := svc.RestartAll(context.Background())
 
@@ -530,7 +530,7 @@ func TestRestartAll(t *testing.T) {
 		emitter := &mockEventEmitter{}
 		runtime := newMockRuntime()
 		runtime.servers = []map[string]interface{}{}
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		result, err := svc.RestartAll(context.Background())
 
@@ -550,7 +550,7 @@ func TestEnableAll(t *testing.T) {
 	t.Run("blocks when disable_management is true", func(t *testing.T) {
 		cfg := &config.Config{DisableManagement: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		result, err := svc.EnableAll(context.Background())
 
@@ -563,7 +563,7 @@ func TestEnableAll(t *testing.T) {
 	t.Run("blocks when read_only_mode is true", func(t *testing.T) {
 		cfg := &config.Config{ReadOnlyMode: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		result, err := svc.EnableAll(context.Background())
 
@@ -582,7 +582,7 @@ func TestEnableAll(t *testing.T) {
 			{"name": "server2"},
 			{"name": "server3"},
 		}
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		result, err := svc.EnableAll(context.Background())
 
@@ -610,7 +610,7 @@ func TestEnableAll(t *testing.T) {
 		}
 		runtime.enableError = fmt.Errorf("enable failed")
 		runtime.failOnServer = "server2"
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		result, err := svc.EnableAll(context.Background())
 
@@ -631,7 +631,7 @@ func TestDisableAll(t *testing.T) {
 	t.Run("blocks when disable_management is true", func(t *testing.T) {
 		cfg := &config.Config{DisableManagement: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		result, err := svc.DisableAll(context.Background())
 
@@ -644,7 +644,7 @@ func TestDisableAll(t *testing.T) {
 	t.Run("blocks when read_only_mode is true", func(t *testing.T) {
 		cfg := &config.Config{ReadOnlyMode: true}
 		emitter := &mockEventEmitter{}
-		svc := NewService(nil, cfg, emitter, nil, logger)
+		svc := NewService(nil, cfg, "", emitter, nil, logger)
 
 		result, err := svc.DisableAll(context.Background())
 
@@ -663,7 +663,7 @@ func TestDisableAll(t *testing.T) {
 			{"name": "server2"},
 			{"name": "server3"},
 		}
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		result, err := svc.DisableAll(context.Background())
 
@@ -691,7 +691,7 @@ func TestDisableAll(t *testing.T) {
 		}
 		runtime.enableError = fmt.Errorf("disable failed")
 		runtime.failOnServer = "server3"
-		svc := NewService(runtime, cfg, emitter, nil, logger)
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
 
 		result, err := svc.DisableAll(context.Background())
 
@@ -712,7 +712,7 @@ func TestGetServerTools_ValidServer(t *testing.T) {
 	emitter := &mockEventEmitter{}
 	runtime := newMockRuntime()
 
-	svc := NewService(runtime, cfg, emitter, nil, logger)
+	svc := NewService(runtime, cfg, "", emitter, nil, logger)
 	tools, err := svc.GetServerTools(context.Background(), "test-server")
 
 	require.NoError(t, err)
@@ -728,7 +728,7 @@ func TestGetServerTools_EmptyServerName(t *testing.T) {
 	emitter := &mockEventEmitter{}
 	runtime := newMockRuntime()
 
-	svc := NewService(runtime, cfg, emitter, nil, logger)
+	svc := NewService(runtime, cfg, "", emitter, nil, logger)
 	tools, err := svc.GetServerTools(context.Background(), "")
 
 	require.Error(t, err)
@@ -744,7 +744,7 @@ func TestGetServerTools_NonexistentServer(t *testing.T) {
 	runtime := newMockRuntime()
 	runtime.failOnServer = "nonexistent"
 
-	svc := NewService(runtime, cfg, emitter, nil, logger)
+	svc := NewService(runtime, cfg, "", emitter, nil, logger)
 	tools, err := svc.GetServerTools(context.Background(), "nonexistent")
 
 	require.Error(t, err)
@@ -759,7 +759,7 @@ func TestTriggerOAuthLogin_ValidServer(t *testing.T) {
 	emitter := &mockEventEmitter{}
 	runtime := newMockRuntime()
 
-	svc := NewService(runtime, cfg, emitter, nil, logger)
+	svc := NewService(runtime, cfg, "", emitter, nil, logger)
 	err := svc.TriggerOAuthLogin(context.Background(), "test-server")
 
 	require.NoError(t, err)
@@ -772,7 +772,7 @@ func TestTriggerOAuthLogin_DisableManagement(t *testing.T) {
 	emitter := &mockEventEmitter{}
 	runtime := newMockRuntime()
 
-	svc := NewService(runtime, cfg, emitter, nil, logger)
+	svc := NewService(runtime, cfg, "", emitter, nil, logger)
 	err := svc.TriggerOAuthLogin(context.Background(), "test-server")
 
 	require.Error(t, err)
@@ -787,7 +787,7 @@ func TestTriggerOAuthLogin_ReadOnly(t *testing.T) {
 	emitter := &mockEventEmitter{}
 	runtime := newMockRuntime()
 
-	svc := NewService(runtime, cfg, emitter, nil, logger)
+	svc := NewService(runtime, cfg, "", emitter, nil, logger)
 	err := svc.TriggerOAuthLogin(context.Background(), "test-server")
 
 	require.Error(t, err)
@@ -802,7 +802,7 @@ func TestTriggerOAuthLogin_EmptyServerName(t *testing.T) {
 	emitter := &mockEventEmitter{}
 	runtime := newMockRuntime()
 
-	svc := NewService(runtime, cfg, emitter, nil, logger)
+	svc := NewService(runtime, cfg, "", emitter, nil, logger)
 	err := svc.TriggerOAuthLogin(context.Background(), "")
 
 	require.Error(t, err)

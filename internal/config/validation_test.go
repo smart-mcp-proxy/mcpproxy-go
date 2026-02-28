@@ -18,7 +18,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "valid config",
 			config: &Config{
 				Listen:            "127.0.0.1:8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000), // 1 minute
@@ -28,34 +27,9 @@ func TestValidateDetailed(t *testing.T) {
 			errorFields:    []string{},
 		},
 		{
-			name: "invalid listen address",
-			config: &Config{
-				Listen:            "", // Will fail validation (empty not valid unless it's truly empty)
-				TopK:              0,  // Will fail validation
-				ToolsLimit:        15,
-				ToolResponseLimit: 1000,
-				CallToolTimeout:   Duration(60000000000), // Add valid timeout
-			},
-			expectedErrors: 1, // Only top_k error (empty listen is actually not validated as error)
-			errorFields:    []string{"top_k"},
-		},
-		{
-			name: "TopK out of range",
-			config: &Config{
-				Listen:            ":8080",
-				TopK:              101, // Too high
-				ToolsLimit:        15,
-				ToolResponseLimit: 1000,
-				CallToolTimeout:   Duration(60000000000), // Add valid timeout
-			},
-			expectedErrors: 1,
-			errorFields:    []string{"top_k"},
-		},
-		{
 			name: "ToolsLimit out of range",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        0, // Too low
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000), // Add valid timeout
@@ -67,7 +41,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "negative ToolResponseLimit",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: -100,                  // Negative
 				CallToolTimeout:   Duration(60000000000), // Add valid timeout
@@ -79,7 +52,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "invalid timeout",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(0), // Zero
@@ -91,7 +63,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "server missing name",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -110,7 +81,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "duplicate server names",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -134,7 +104,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "invalid protocol",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -153,7 +122,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "stdio server missing command",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -172,7 +140,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "http server missing url",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -191,7 +158,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "invalid log level",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -206,7 +172,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "oauth with empty client_id (DCR mode)",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -229,7 +194,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "oauth with only scopes and pkce",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -252,7 +216,6 @@ func TestValidateDetailed(t *testing.T) {
 			name: "oauth with client_id provided",
 			config: &Config{
 				Listen:            ":8080",
-				TopK:              5,
 				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   Duration(60000000000),
@@ -329,7 +292,6 @@ func TestValidateWithDefaults(t *testing.T) {
 	// Test that Validate applies defaults before validation
 	cfg := &Config{
 		Listen:            "", // Should default to 127.0.0.1:8080
-		TopK:              0,  // Should default to 5
 		ToolsLimit:        0,  // Should default to 15
 		ToolResponseLimit: -1, // Should default to 0
 		CallToolTimeout:   0,  // Should default to 2 minutes
@@ -340,7 +302,6 @@ func TestValidateWithDefaults(t *testing.T) {
 	require.NoError(t, err, "Validation should succeed after applying defaults")
 
 	assert.Equal(t, "127.0.0.1:8080", cfg.Listen)
-	assert.Equal(t, 5, cfg.TopK)
 	assert.Equal(t, 15, cfg.ToolsLimit)
 	assert.Equal(t, 0, cfg.ToolResponseLimit)
 	assert.Greater(t, cfg.CallToolTimeout.Duration().Seconds(), 0.0)

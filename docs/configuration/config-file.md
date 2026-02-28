@@ -27,7 +27,6 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "data_dir": "~/.mcpproxy",
   "api_key": "your-secret-api-key",
   "enable_socket": true,
-  "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
   "enable_code_execution": false,
@@ -62,7 +61,6 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `top_k` | integer | `5` | Number of top results for tool search |
 | `tools_limit` | integer | `15` | Maximum tools to return in a single request |
 | `tool_response_limit` | integer | `20000` | Maximum characters in tool response |
 

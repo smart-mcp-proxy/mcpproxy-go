@@ -71,7 +71,6 @@ Repository detection is enabled by default in new configurations:
 {
   "listen": ":8080",
   "data_dir": "",
-  "enable_tray": true,
   "debug_search": false,
   "check_server_repo": true,
   "mcpServers": [],

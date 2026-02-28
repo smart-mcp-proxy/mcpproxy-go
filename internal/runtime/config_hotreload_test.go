@@ -14,7 +14,6 @@ func TestDetectConfigChanges(t *testing.T) {
 		Listen:            "127.0.0.1:8080",
 		DataDir:           "/test/data",
 		APIKey:            "test-key",
-		TopK:              5,
 		ToolsLimit:        15,
 		ToolResponseLimit: 1000,
 		CallToolTimeout:   config.Duration(60 * time.Second),
@@ -50,8 +49,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            ":9090", // Changed
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-				TopK:              5,
-				ToolsLimit:        15,
+		ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -69,8 +67,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/different/data", // Changed
 				APIKey:            "test-key",
-				TopK:              5,
-				ToolsLimit:        15,
+		ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -88,8 +85,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "new-key", // Changed
-				TopK:              5,
-				ToolsLimit:        15,
+		ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -107,8 +103,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-				TopK:              5,
-				ToolsLimit:        15,
+		ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -123,35 +118,13 @@ func TestDetectConfigChanges(t *testing.T) {
 			expectChangedFields:   []string{"tls"},
 		},
 		{
-			name:      "hot-reloadable: TopK changed",
-			oldConfig: baseConfig,
-			newConfig: &config.Config{
-				Listen:            "127.0.0.1:8080",
-				DataDir:           "/test/data",
-				APIKey:            "test-key",
-				TopK:              10, // Changed
-				ToolsLimit:        15,
-				ToolResponseLimit: 1000,
-				CallToolTimeout:   config.Duration(60 * time.Second),
-				Servers:           []*config.ServerConfig{},
-				TLS: &config.TLSConfig{
-					Enabled: false,
-				},
-			},
-			expectSuccess:         true,
-			expectAppliedNow:      true,
-			expectRequiresRestart: false,
-			expectChangedFields:   []string{"top_k"},
-		},
-		{
 			name:      "hot-reloadable: ToolsLimit changed",
 			oldConfig: baseConfig,
 			newConfig: &config.Config{
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-				TopK:              5,
-				ToolsLimit:        20, // Changed
+		ToolsLimit:        20, // Changed
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -171,8 +144,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-				TopK:              5,
-				ToolsLimit:        15,
+		ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers: []*config.ServerConfig{ // Changed
@@ -199,7 +171,6 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-				TopK:              10,                                 // Changed
 				ToolsLimit:        20,                                 // Changed
 				ToolResponseLimit: 2000,                               // Changed
 				CallToolTimeout:   config.Duration(120 * time.Second), // Changed
@@ -211,7 +182,7 @@ func TestDetectConfigChanges(t *testing.T) {
 			expectSuccess:         true,
 			expectAppliedNow:      true,
 			expectRequiresRestart: false,
-			expectChangedFields:   []string{"top_k", "tools_limit", "tool_response_limit", "call_tool_timeout"},
+			expectChangedFields:   []string{"tools_limit", "tool_response_limit", "call_tool_timeout"},
 		},
 	}
 

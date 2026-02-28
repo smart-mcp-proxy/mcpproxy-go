@@ -54,12 +54,8 @@ components:
         enable_socket:
           description: 'Enable Unix socket/named pipe for local IPC (default: true)'
           type: boolean
-        enable_tray:
-          type: boolean
         environment:
           $ref: '#/components/schemas/secureenv.EnvConfig'
-        features:
-          $ref: '#/components/schemas/config.FeatureFlags'
         intent_declaration:
           $ref: '#/components/schemas/config.IntentDeclarationConfig'
         listen:
@@ -91,8 +87,6 @@ components:
         tool_response_limit:
           type: integer
         tools_limit:
-          type: integer
-        top_k:
           type: integer
         tray_endpoint:
           description: Tray endpoint override (unix:// or npipe://)
@@ -223,8 +217,6 @@ components:
         enable_sse:
           type: boolean
         enable_tracing:
-          type: boolean
-        enable_tray:
           type: boolean
         enable_web_ui:
           description: UI features
