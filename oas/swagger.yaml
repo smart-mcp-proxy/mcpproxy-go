@@ -54,8 +54,14 @@ components:
         enable_socket:
           description: 'Enable Unix socket/named pipe for local IPC (default: true)'
           type: boolean
+        enable_tray:
+          description: 'Deprecated: EnableTray is unused and has no runtime effect.
+            Kept for backward compatibility.'
+          type: boolean
         environment:
           $ref: '#/components/schemas/secureenv.EnvConfig'
+        features:
+          $ref: '#/components/schemas/config.FeatureFlags'
         intent_declaration:
           $ref: '#/components/schemas/config.IntentDeclarationConfig'
         listen:
@@ -87,6 +93,10 @@ components:
         tool_response_limit:
           type: integer
         tools_limit:
+          type: integer
+        top_k:
+          description: 'Deprecated: TopK is superseded by ToolsLimit and has no runtime
+            effect. Kept for backward compatibility.'
           type: integer
         tray_endpoint:
           description: Tray endpoint override (unix:// or npipe://)
@@ -181,7 +191,8 @@ components:
           type: boolean
       type: object
     config.FeatureFlags:
-      description: Feature flags for modular functionality
+      description: 'Deprecated: Features flags are unused and have no runtime effect.
+        Kept for backward compatibility.'
       properties:
         enable_async_storage:
           type: boolean
@@ -217,6 +228,8 @@ components:
         enable_sse:
           type: boolean
         enable_tracing:
+          type: boolean
+        enable_tray:
           type: boolean
         enable_web_ui:
           description: UI features
@@ -666,8 +679,23 @@ components:
         success:
           type: boolean
       type: object
+    contracts.DeprecatedConfigWarning:
+      properties:
+        field:
+          type: string
+        message:
+          type: string
+        replacement:
+          type: string
+      type: object
     contracts.Diagnostics:
       properties:
+        deprecated_configs:
+          description: Deprecated config fields found
+          items:
+            $ref: '#/components/schemas/contracts.DeprecatedConfigWarning'
+          type: array
+          uniqueItems: false
         docker_status:
           $ref: '#/components/schemas/contracts.DockerStatus'
         missing_secrets:
