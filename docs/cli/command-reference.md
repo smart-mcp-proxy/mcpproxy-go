@@ -196,20 +196,20 @@ mcpproxy upstream disable <server-name>
 
 ## Configuration Import
 
-### import
+### upstream import
 
 Import MCP server configurations from other AI tools:
 
 ```bash
-mcpproxy import [flags]
+mcpproxy upstream import <path> [flags]
 ```
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--path` | Path to configuration file | - |
+| `--server, -s` | Import only a specific server by name | all |
 | `--format` | Force format (claude-desktop, claude-code, cursor, codex, gemini) | auto-detect |
-| `--servers` | Comma-separated list of server names to import | all |
-| `--preview` | Preview without importing | `false` |
+| `--dry-run` | Preview import without making changes | `false` |
+| `--no-quarantine` | Don't quarantine imported servers (use with caution) | `false` |
 
 **Supported Formats:**
 
@@ -225,19 +225,22 @@ mcpproxy import [flags]
 
 ```bash
 # Import from Claude Desktop config
-mcpproxy import --path ~/Library/Application\ Support/Claude/claude_desktop_config.json
+mcpproxy upstream import ~/Library/Application\ Support/Claude/claude_desktop_config.json
 
 # Import from Claude Code config
-mcpproxy import --path ~/.claude.json
+mcpproxy upstream import ~/.claude.json
 
 # Preview without importing
-mcpproxy import --path config.json --preview
+mcpproxy upstream import --dry-run config.json
 
 # Import with format hint (if auto-detect fails)
-mcpproxy import --path config.json --format claude-desktop
+mcpproxy upstream import --format claude-desktop config.json
 
-# Import only specific servers
-mcpproxy import --path config.json --servers "github-server,filesystem"
+# Import only a specific server
+mcpproxy upstream import --server github-server config.json
+
+# Import without quarantine (trusted configs)
+mcpproxy upstream import --no-quarantine ~/Library/Application\ Support/Claude/claude_desktop_config.json
 ```
 
 **Canonical Config Paths:**
@@ -251,7 +254,7 @@ mcpproxy import --path config.json --servers "github-server,filesystem"
 | Gemini CLI | `~/.gemini/settings.json` | `~/.gemini/settings.json` | `~/.gemini/settings.json` |
 
 :::note Imported servers are quarantined
-For security, all imported servers are quarantined by default. Review and approve them before enabling.
+For security, all imported servers are quarantined by default. Use `--no-quarantine` to skip quarantine for configs you trust.
 :::
 
 See [Configuration Import](/features/config-import) for Web UI and REST API documentation.

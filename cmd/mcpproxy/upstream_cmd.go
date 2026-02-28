@@ -134,6 +134,7 @@ Supported formats:
   - Gemini CLI: ~/.gemini/settings.json
 
 The format is auto-detected from file content. Imported servers are quarantined by default.
+Use --no-quarantine to skip quarantine for trusted configs.
 
 Examples:
   # Import all servers from Claude Desktop config
@@ -146,7 +147,10 @@ Examples:
   mcpproxy upstream import --server github ~/.cursor/mcp.json
 
   # Force format detection
-  mcpproxy upstream import --format claude-desktop config.json`,
+  mcpproxy upstream import --format claude-desktop config.json
+
+  # Import without quarantine (trusted configs)
+  mcpproxy upstream import --no-quarantine ~/Library/Application\ Support/Claude/claude_desktop_config.json`,
 		Args: cobra.ExactArgs(1),
 		RunE: runUpstreamImport,
 	}
@@ -173,9 +177,10 @@ Examples:
 	upstreamRemoveIfExists bool
 
 	// Import command flags
-	upstreamImportServer string
-	upstreamImportFormat string
-	upstreamImportDryRun bool
+	upstreamImportServer       string
+	upstreamImportFormat       string
+	upstreamImportDryRun       bool
+	upstreamImportNoQuarantine bool
 )
 
 // GetUpstreamCommand returns the upstream command for adding to the root command.
@@ -236,6 +241,7 @@ func init() {
 	upstreamImportCmd.Flags().StringVarP(&upstreamImportServer, "server", "s", "", "Import only a specific server by name")
 	upstreamImportCmd.Flags().StringVar(&upstreamImportFormat, "format", "", "Force format (claude-desktop, claude-code, cursor, codex, gemini)")
 	upstreamImportCmd.Flags().BoolVar(&upstreamImportDryRun, "dry-run", false, "Preview import without making changes")
+	upstreamImportCmd.Flags().BoolVar(&upstreamImportNoQuarantine, "no-quarantine", false, "Don't quarantine imported servers (use with caution)")
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
@@ -1345,8 +1351,9 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 
 	// Build import options
 	opts := &configimport.ImportOptions{
-		Preview: upstreamImportDryRun,
-		Now:     time.Now(),
+		Preview:        upstreamImportDryRun,
+		SkipQuarantine: upstreamImportNoQuarantine,
+		Now:            time.Now(),
 	}
 
 	// Parse format hint if provided
@@ -1398,7 +1405,7 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 		return outputImportResultStructured(result, outputFormat)
 	}
 
-	return outputImportResultTable(result, upstreamImportDryRun, globalConfig)
+	return outputImportResultTable(result, upstreamImportDryRun, upstreamImportNoQuarantine, globalConfig)
 }
 
 // parseImportFormat converts a format string to ConfigFormat
@@ -1456,6 +1463,8 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 			"url":            s.Server.URL,
 			"command":        s.Server.Command,
 			"args":           s.Server.Args,
+			"enabled":        s.Server.Enabled,
+			"quarantined":    s.Server.Quarantined,
 			"source_format":  s.SourceFormat,
 			"original_name":  s.OriginalName,
 			"fields_skipped": s.FieldsSkipped,
@@ -1466,7 +1475,7 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 }
 
 // outputImportResultTable outputs the import result in table format
-func outputImportResultTable(result *configimport.ImportResult, dryRun bool, globalConfig *config.Config) error {
+func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQuarantine bool, globalConfig *config.Config) error {
 	// Header
 	if dryRun {
 		fmt.Println("🔍 DRY RUN - No changes will be made")
@@ -1554,7 +1563,11 @@ func outputImportResultTable(result *configimport.ImportResult, dryRun bool, glo
 		if err != nil {
 			return err
 		}
-		fmt.Println("🔒 New servers are quarantined by default. Approve them in the web UI.")
+		if noQuarantine {
+			fmt.Println("✅ Servers imported without quarantine. They are ready to use.")
+		} else {
+			fmt.Println("🔒 New servers are quarantined by default. Approve them in the web UI.")
+		}
 	}
 
 	return nil
@@ -1593,8 +1606,8 @@ func applyImportedServersDaemonMode(ctx context.Context, dataDir string, importe
 			Protocol:   s.Server.Protocol,
 		}
 
-		// All imported servers are quarantined
-		quarantined := true
+		// Use the quarantine state from the import result (controlled by --no-quarantine flag)
+		quarantined := s.Server.Quarantined
 		req.Quarantined = &quarantined
 
 		_, err := client.AddServer(ctx, req)

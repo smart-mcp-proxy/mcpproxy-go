@@ -155,6 +155,10 @@ type ImportOptions struct {
 	// ExistingServers is used to check for duplicates
 	ExistingServers []string
 
+	// SkipQuarantine if true, imported servers are not quarantined.
+	// By default, all imported servers are quarantined for security review.
+	SkipQuarantine bool
+
 	// Now is the timestamp to use for Created field (default: time.Now())
 	Now time.Time
 }
