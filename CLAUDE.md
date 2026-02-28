@@ -2,6 +2,28 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+
+## Autonomous Operation Constraints
+When operating to complete a task, adhere strictly to the following constraints to ensure zero-interruption execution:
+
+### Must-Do (Defaults & Assumptions)
+- **Zero Interruption Policy**: If a decision is needed and no explicit instruction exists, you MUST make an informed, safe assumption based on idiomatic Go best practices and document it in the PR/commit. Do NOT ask for human clarification mid-task.
+- **Test-Driven Progress**: You must write a failing Go test (`_test.go`) for every sub-task before implementing the feature. 
+- **Graceful Fallbacks**: If an API or dependency lacks documentation, use mock interfaces or a simplified implementation rather than blocking the task.
+- **Continuous Logging**: Document every step completed in an `execution_log.md` within the current working directory to maintain state.
+
+### Must-Nots
+- **Do NOT ask for plan approval**: Once a plan/spec is generated, begin execution immediately.
+- **Do NOT stop for code style choices**: Run `gofmt` or `goimports` and strictly follow standard Go conventions.
+
+### Escalation Triggers (Stop Conditions)
+Only halt execution and ask a human IF:
+1. You need to perform destructive data operations or delete core proxy logic that cannot be mocked.
+2. A required environment variable is missing from `.env` and cannot be mocked for the scope of the task.
+3. You are stuck in an error loop for the same `go test` failing after 5 consecutive attempts.
+
+
+
 ## Project Overview
 
 MCPProxy is a Go-based desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
