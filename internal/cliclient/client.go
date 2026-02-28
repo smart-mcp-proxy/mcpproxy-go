@@ -409,6 +409,7 @@ func (c *Client) ServerAction(ctx context.Context, serverName, action string) er
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -731,6 +732,7 @@ func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
