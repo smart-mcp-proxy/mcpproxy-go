@@ -304,14 +304,22 @@ type DiagnosticsResponse struct {
 // Diagnostics represents aggregated health information from all MCPProxy components.
 // This is the new unified diagnostics format for the management service.
 type Diagnostics struct {
-	TotalIssues     int                 `json:"total_issues"`
-	UpstreamErrors  []UpstreamError     `json:"upstream_errors"`
-	OAuthRequired   []OAuthRequirement  `json:"oauth_required"`
-	OAuthIssues     []OAuthIssue        `json:"oauth_issues"`          // OAuth parameter mismatches
-	MissingSecrets  []MissingSecretInfo `json:"missing_secrets"`       // Renamed to avoid conflict
-	RuntimeWarnings []string            `json:"runtime_warnings"`
-	DockerStatus    *DockerStatus       `json:"docker_status,omitempty"`
-	Timestamp       time.Time           `json:"timestamp"`
+	TotalIssues       int                        `json:"total_issues"`
+	UpstreamErrors    []UpstreamError            `json:"upstream_errors"`
+	OAuthRequired     []OAuthRequirement         `json:"oauth_required"`
+	OAuthIssues       []OAuthIssue               `json:"oauth_issues"`               // OAuth parameter mismatches
+	MissingSecrets    []MissingSecretInfo         `json:"missing_secrets"`             // Renamed to avoid conflict
+	RuntimeWarnings   []string                    `json:"runtime_warnings"`
+	DeprecatedConfigs []DeprecatedConfigWarning   `json:"deprecated_configs,omitempty"` // Deprecated config fields found
+	DockerStatus      *DockerStatus               `json:"docker_status,omitempty"`
+	Timestamp         time.Time                   `json:"timestamp"`
+}
+
+// DeprecatedConfigWarning represents a deprecated configuration field found in the config file.
+type DeprecatedConfigWarning struct {
+	Field       string `json:"field"`
+	Message     string `json:"message"`
+	Replacement string `json:"replacement,omitempty"`
 }
 
 // UpstreamError represents a connection or runtime error from an upstream MCP server.

@@ -86,14 +86,12 @@ curl -H "X-API-Key: your-key" \
 
 ```json
 {
-  "top_k": 5,
   "tools_limit": 15
 }
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `top_k` | integer | `5` | Default number of results |
 | `tools_limit` | integer | `15` | Maximum results per query |
 
 ### Index Location
@@ -225,8 +223,8 @@ mcpproxy serve
 AI clients typically use MCPProxy's search in two ways:
 
 1. **Direct Tool Call**: AI calls `retrieve_tools` to find relevant tools
-2. **Automatic Discovery**: MCPProxy returns top-K tools matching the task context
+2. **Automatic Discovery**: MCPProxy returns matching tools based on the task context
 
-The `top_k` setting controls how many tools are suggested to the AI, balancing between:
+The `tools_limit` setting controls how many tools are suggested to the AI, balancing between:
 - More tools = better coverage but higher token usage
 - Fewer tools = faster responses but may miss relevant tools

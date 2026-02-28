@@ -51,10 +51,12 @@ type Config struct {
 	TrayEndpoint      string          `json:"tray_endpoint,omitempty" mapstructure:"tray-endpoint"`       // Tray endpoint override (unix:// or npipe://)
 	EnableSocket      bool            `json:"enable_socket" mapstructure:"enable-socket"`                 // Enable Unix socket/named pipe for local IPC (default: true)
 	DataDir           string          `json:"data_dir" mapstructure:"data-dir"`
-	EnableTray        bool            `json:"enable_tray" mapstructure:"tray"`
+	// Deprecated: EnableTray is unused and has no runtime effect. Kept for backward compatibility.
+	EnableTray        bool            `json:"enable_tray,omitempty" mapstructure:"tray"`
 	DebugSearch       bool            `json:"debug_search" mapstructure:"debug-search"`
 	Servers           []*ServerConfig `json:"mcpServers" mapstructure:"servers"`
-	TopK              int             `json:"top_k" mapstructure:"top-k"`
+	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
+	TopK              int             `json:"top_k,omitempty" mapstructure:"top-k"`
 	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
 	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
 	CallToolTimeout   Duration        `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
@@ -90,7 +92,7 @@ type Config struct {
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
 
-	// Feature flags for modular functionality
+	// Deprecated: Features flags are unused and have no runtime effect. Kept for backward compatibility.
 	Features *FeatureFlags `json:"features,omitempty" mapstructure:"features"`
 
 	// TLS configuration
@@ -573,10 +575,8 @@ func DefaultConfig() *Config {
 		Listen:            defaultPort,
 		EnableSocket:      true, // Enable Unix socket/named pipe by default for local IPC
 		DataDir:           "", // Will be set to ~/.mcpproxy by loader
-		EnableTray:        true,
 		DebugSearch:       false,
 		Servers:           []*ServerConfig{},
-		TopK:              5,
 		ToolsLimit:        15,
 		ToolResponseLimit: 20000,                     // Default 20000 characters
 		CallToolTimeout:   Duration(2 * time.Minute), // Default 2 minutes for tool calls
@@ -783,14 +783,6 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		}
 	}
 
-	// Validate TopK range
-	if c.TopK < 1 || c.TopK > 100 {
-		errors = append(errors, ValidationError{
-			Field:   "top_k",
-			Message: "must be between 1 and 100",
-		})
-	}
-
 	// Validate ToolsLimit range
 	if c.ToolsLimit < 1 || c.ToolsLimit > 1000 {
 		errors = append(errors, ValidationError{
@@ -951,9 +943,6 @@ func (c *Config) Validate() error {
 	if c.Listen == "" {
 		c.Listen = defaultPort
 	}
-	if c.TopK <= 0 {
-		c.TopK = 5
-	}
 	if c.ToolsLimit <= 0 {
 		c.ToolsLimit = 15
 	}
@@ -997,16 +986,6 @@ func (c *Config) Validate() error {
 	// Ensure DockerIsolation config is not nil
 	if c.DockerIsolation == nil {
 		c.DockerIsolation = DefaultDockerIsolationConfig()
-	}
-
-	// Ensure Features config is not nil and validate dependencies
-	if c.Features == nil {
-		flags := DefaultFeatureFlags()
-		c.Features = &flags
-	} else {
-		if err := c.Features.ValidateFeatureFlags(); err != nil {
-			return fmt.Errorf("feature flag validation failed: %w", err)
-		}
 	}
 
 	// Ensure TLS config is not nil

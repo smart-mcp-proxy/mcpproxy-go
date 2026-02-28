@@ -92,10 +92,8 @@ MCPProxy looks for configuration in these locations (in order):
 {
   "listen": ":8080",
   "data_dir": "~/.mcpproxy",
-  "enable_tray": true,
 
   // Search & tool limits
-  "top_k": 5,
   "tools_limit": 15,
   "tool_response_limit": 20000,
 
@@ -748,7 +746,6 @@ tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 
 ```json
 {
-  "top_k": 10, // More search results
   "tools_limit": 25, // More tools per request
   "tool_response_limit": 50000 // Larger response limit
 }

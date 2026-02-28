@@ -56,9 +56,6 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set default values if not present (config from API may be incomplete)
-	if currentConfig.TopK == 0 {
-		currentConfig.TopK = 5
-	}
 	if currentConfig.ToolsLimit == 0 {
 		currentConfig.ToolsLimit = 15
 	}

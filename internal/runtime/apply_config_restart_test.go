@@ -69,7 +69,7 @@ func TestApplyConfig_HotReloadableChange(t *testing.T) {
 	initialCfg := config.DefaultConfig()
 	initialCfg.Listen = "127.0.0.1:8080"
 	initialCfg.DataDir = tmpDir
-	initialCfg.TopK = 5
+	initialCfg.ToolsLimit = 15
 
 	// Save initial config
 	err := config.SaveConfig(initialCfg, cfgPath)
@@ -82,26 +82,26 @@ func TestApplyConfig_HotReloadableChange(t *testing.T) {
 		_ = rt.Close()
 	}()
 
-	// Create new config with different TopK (hot-reloadable)
+	// Create new config with different ToolsLimit (hot-reloadable)
 	newCfg := config.DefaultConfig()
 	newCfg.Listen = "127.0.0.1:8080" // Same listen address
 	newCfg.DataDir = tmpDir
-	newCfg.TopK = 10 // Changed TopK
+	newCfg.ToolsLimit = 20 // Changed ToolsLimit
 
 	// Apply the new config
 	result, err := rt.ApplyConfig(newCfg, cfgPath)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// Verify that restart is NOT required (TopK is hot-reloadable)
-	assert.False(t, result.RequiresRestart, "TopK change should not require restart")
-	assert.True(t, result.AppliedImmediately, "TopK change should be applied immediately")
+	// Verify that restart is NOT required (ToolsLimit is hot-reloadable)
+	assert.False(t, result.RequiresRestart, "ToolsLimit change should not require restart")
+	assert.True(t, result.AppliedImmediately, "ToolsLimit change should be applied immediately")
 
 	// Verify config was saved to disk
 	savedCfg, err := config.LoadFromFile(cfgPath)
 	require.NoError(t, err)
 
-	assert.Equal(t, 10, savedCfg.TopK, "Config file should be updated with new TopK value")
+	assert.Equal(t, 20, savedCfg.ToolsLimit, "Config file should be updated with new ToolsLimit value")
 }
 
 // TestApplyConfig_SaveFailure tests handling of save errors

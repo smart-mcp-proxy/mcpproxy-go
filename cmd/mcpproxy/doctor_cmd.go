@@ -160,6 +160,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 			fmt.Println("✅ All systems operational! No issues detected.")
 			fmt.Println()
 
+			// Show deprecated config warnings even when no issues
+			displayDeprecatedConfigs(diag)
+
 			// Display security features status even when no issues
 			fmt.Println("🔒 Security Features")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -317,6 +320,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 			fmt.Println()
 		}
 
+		// Deprecated Configuration warnings
+		displayDeprecatedConfigs(diag)
+
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println()
 		fmt.Println("For more details, run: mcpproxy doctor --output=json")
@@ -379,6 +385,31 @@ func sortArrayByServerName(arr []interface{}) {
 		jName := getStringField(jMap, "server_name")
 		return iName < jName
 	})
+}
+
+// displayDeprecatedConfigs shows deprecated configuration warnings in the doctor output.
+func displayDeprecatedConfigs(diag map[string]interface{}) {
+	deprecatedConfigs := getArrayField(diag, "deprecated_configs")
+	if len(deprecatedConfigs) == 0 {
+		return
+	}
+
+	fmt.Println("⚠️  Deprecated Configuration")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	for _, item := range deprecatedConfigs {
+		if cfgMap, ok := item.(map[string]interface{}); ok {
+			field := getStringField(cfgMap, "field")
+			message := getStringField(cfgMap, "message")
+			replacement := getStringField(cfgMap, "replacement")
+
+			fmt.Printf("\n  • %s\n", field)
+			fmt.Printf("    %s\n", message)
+			if replacement != "" {
+				fmt.Printf("    Suggestion: %s\n", replacement)
+			}
+		}
+	}
+	fmt.Println()
 }
 
 // displaySecurityFeaturesStatus shows the status of security features in the doctor output.
