@@ -113,6 +113,11 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 		// Map to ServerConfig
 		serverConfig, skipped, warnings := MapToServerConfig(parsed, opts.Now)
 
+		// Override quarantine if SkipQuarantine is set
+		if opts.SkipQuarantine {
+			serverConfig.Quarantined = false
+		}
+
 		// Create imported server
 		imported := &ImportedServer{
 			Server:        serverConfig,

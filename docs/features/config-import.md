@@ -62,23 +62,26 @@ For quick imports without file access:
 
 ```bash
 # Import from Claude Desktop config
-mcpproxy import --path ~/Library/Application\ Support/Claude/claude_desktop_config.json
+mcpproxy upstream import ~/Library/Application\ Support/Claude/claude_desktop_config.json
 
 # Import from Claude Code config
-mcpproxy import --path ~/.claude.json
+mcpproxy upstream import ~/.claude.json
 
 # Import with format hint (if auto-detect fails)
-mcpproxy import --path config.json --format claude-desktop
+mcpproxy upstream import --format claude-desktop config.json
 
 # Preview without importing
-mcpproxy import --path config.json --preview
+mcpproxy upstream import --dry-run config.json
+
+# Import without quarantine (trusted configs)
+mcpproxy upstream import --no-quarantine ~/Library/Application\ Support/Claude/claude_desktop_config.json
 ```
 
 ### Import Specific Servers
 
 ```bash
-# Import only specific servers by name
-mcpproxy import --path config.json --servers "github-server,filesystem"
+# Import only a specific server by name
+mcpproxy upstream import --server github-server config.json
 ```
 
 ## REST API

@@ -247,6 +247,53 @@ func TestGetAvailableServerNames(t *testing.T) {
 	}
 }
 
+func TestImport_SkipQuarantine(t *testing.T) {
+	now := time.Date(2026, 1, 17, 12, 0, 0, 0, time.UTC)
+
+	t.Run("default_quarantined", func(t *testing.T) {
+		content, err := os.ReadFile("testdata/claude_desktop.json")
+		if err != nil {
+			t.Fatalf("failed to read test file: %v", err)
+		}
+
+		result, err := Import(content, &ImportOptions{Now: now})
+		if err != nil {
+			t.Fatalf("Import() error = %v", err)
+		}
+
+		for _, s := range result.Imported {
+			if !s.Server.Quarantined {
+				t.Errorf("server %s should be quarantined by default", s.Server.Name)
+			}
+		}
+	})
+
+	t.Run("skip_quarantine", func(t *testing.T) {
+		content, err := os.ReadFile("testdata/claude_desktop.json")
+		if err != nil {
+			t.Fatalf("failed to read test file: %v", err)
+		}
+
+		result, err := Import(content, &ImportOptions{
+			SkipQuarantine: true,
+			Now:            now,
+		})
+		if err != nil {
+			t.Fatalf("Import() error = %v", err)
+		}
+
+		if result.Summary.Imported == 0 {
+			t.Fatal("expected at least one imported server")
+		}
+
+		for _, s := range result.Imported {
+			if s.Server.Quarantined {
+				t.Errorf("server %s should NOT be quarantined when SkipQuarantine=true", s.Server.Name)
+			}
+		}
+	})
+}
+
 func TestImport_DuplicateWithinSameImport(t *testing.T) {
 	// Create a config with duplicate names that would result after sanitization
 	content := []byte(`{
