@@ -1,29 +1,23 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 )
 
-// filterState represents active filter values
-type filterState map[string]interface{}
+// filterState represents active filter values as string key-value pairs
+type filterState map[string]string
 
 // newFilterState creates an empty filter state
 func newFilterState() filterState {
-	return make(map[string]interface{})
+	return make(filterState)
 }
 
 // hasActiveFilters returns true if any filters are set
 func (f filterState) hasActiveFilters() bool {
 	for _, v := range f {
-		switch val := v.(type) {
-		case string:
-			if val != "" {
-				return true
-			}
-		case []string:
-			if len(val) > 0 {
-				return true
-			}
+		if v != "" {
+			return true
 		}
 	}
 	return false
@@ -40,43 +34,35 @@ func (m *model) matchesAllFilters(a activityInfo) bool {
 }
 
 // matchesActivityFilter checks if activity matches a single filter
-func (m *model) matchesActivityFilter(a activityInfo, key string, value interface{}) bool {
+func (m *model) matchesActivityFilter(a activityInfo, key, value string) bool {
+	if value == "" {
+		return true
+	}
 	switch key {
 	case "status":
-		if status, ok := value.(string); ok && status != "" {
-			return a.Status == status
-		}
+		return a.Status == value
 	case "server":
-		if server, ok := value.(string); ok && server != "" {
-			return strings.Contains(strings.ToLower(a.ServerName), strings.ToLower(server))
-		}
+		return strings.Contains(strings.ToLower(a.ServerName), strings.ToLower(value))
 	case "type":
-		if typeVal, ok := value.(string); ok && typeVal != "" {
-			return strings.Contains(strings.ToLower(a.Type), strings.ToLower(typeVal))
-		}
+		return strings.Contains(strings.ToLower(a.Type), strings.ToLower(value))
 	case "tool":
-		if tool, ok := value.(string); ok && tool != "" {
-			return strings.Contains(strings.ToLower(a.ToolName), strings.ToLower(tool))
-		}
+		return strings.Contains(strings.ToLower(a.ToolName), strings.ToLower(value))
 	}
-	return true // No filter means match all
+	return true
 }
 
 // matchesServerFilter checks if server matches a single filter
-func (m *model) matchesServerFilter(s serverInfo, key string, value interface{}) bool {
+func (m *model) matchesServerFilter(s serverInfo, key, value string) bool {
+	if value == "" {
+		return true
+	}
 	switch key {
 	case "admin_state":
-		if state, ok := value.(string); ok && state != "" {
-			return s.AdminState == state
-		}
+		return s.AdminState == value
 	case "health_level":
-		if level, ok := value.(string); ok && level != "" {
-			return s.HealthLevel == level
-		}
+		return s.HealthLevel == value
 	case "oauth_status":
-		if status, ok := value.(string); ok && status != "" {
-			return s.OAuthStatus == status
-		}
+		return s.OAuthStatus == value
 	}
 	return true
 }
@@ -123,34 +109,20 @@ func (m *model) filterServers() []serverInfo {
 
 // getVisibleActivities returns filtered and sorted activities
 func (m *model) getVisibleActivities() []activityInfo {
-	// Filter first
 	filtered := m.filterActivities()
-
-	// Then sort (using a copy to avoid modifying original)
 	result := make([]activityInfo, len(filtered))
 	copy(result, filtered)
-	sliceModel := &model{
-		activities: result,
-		sortState:  m.sortState,
-	}
-	sliceModel.sortActivities()
-	return sliceModel.activities
+	sortActivitiesByState(result, m.sortState)
+	return result
 }
 
 // getVisibleServers returns filtered and sorted servers
 func (m *model) getVisibleServers() []serverInfo {
-	// Filter first
 	filtered := m.filterServers()
-
-	// Then sort
 	result := make([]serverInfo, len(filtered))
 	copy(result, filtered)
-	sliceModel := &model{
-		servers:   result,
-		sortState: m.sortState,
-	}
-	sliceModel.sortServers()
-	return sliceModel.servers
+	sortServersByState(result, m.sortState)
+	return result
 }
 
 // clearFilters resets all filters and sort to defaults
@@ -164,7 +136,7 @@ func (m *model) clearFilters() {
 	m.cursor = 0
 }
 
-// getAvailableFilterValues returns possible values for a given filter
+// getAvailableFilterValues returns possible values for a given filter, sorted deterministically
 func (m *model) getAvailableFilterValues(filterKey string) []string {
 	values := make(map[string]bool)
 
@@ -205,5 +177,6 @@ func (m *model) getAvailableFilterValues(filterKey string) []string {
 	for v := range values {
 		result = append(result, v)
 	}
+	slices.Sort(result)
 	return result
 }

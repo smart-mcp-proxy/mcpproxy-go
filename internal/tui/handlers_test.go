@@ -235,10 +235,18 @@ func TestSortingKeys(t *testing.T) {
 			m := NewModel(context.Background(), client, 5*time.Second)
 			m.activeTab = tabActivity
 
-			// Note: This assumes 's' enters sort mode, then the column key is pressed
-			// Implementation detail depends on how sort mode is triggered
-			// For now, we test that sort state can be modified
-			assert.NotEmpty(t, tt.expectedColumn)
+			// Enter sort mode
+			result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+			m = result.(model)
+			assert.Equal(t, ModeSortSelect, m.uiMode)
+
+			// Press the sort column key
+			result, _ = m.Update(tt.key)
+			m = result.(model)
+
+			assert.Equal(t, ModeNormal, m.uiMode, "should return to normal mode")
+			assert.Equal(t, tt.expectedColumn, m.sortState.Column)
+			assert.Equal(t, tt.expectedDescending, m.sortState.Descending)
 		})
 	}
 }
@@ -407,6 +415,35 @@ func TestServerActionKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestServerActionTargetsVisibleServer verifies that action keys target the
+// server shown at the cursor position (sorted/filtered), not the raw list.
+func TestServerActionTargetsVisibleServer(t *testing.T) {
+	client := &MockClient{}
+	m := NewModel(context.Background(), client, 5*time.Second)
+	m.activeTab = tabServers
+
+	// Raw order: zebra, alpha, middle.
+	// Sorted by name ascending (default): alpha, middle, zebra.
+	m.servers = []serverInfo{
+		{Name: "zebra", AdminState: "enabled"},
+		{Name: "alpha", AdminState: "enabled"},
+		{Name: "middle", AdminState: "enabled"},
+	}
+	m.sortState = newServerSortState() // name ascending
+	m.cursor = 0                       // Should target "alpha" (first in sorted order)
+
+	// Press "d" to disable
+	key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}
+	_, cmd := m.Update(key)
+	require.NotNil(t, cmd, "d should produce command")
+
+	// Execute the command to get the statusMsg
+	msg := cmd()
+	status, ok := msg.(statusMsg)
+	require.True(t, ok, "expected statusMsg, got %T", msg)
+	assert.Contains(t, string(status), "alpha", "should target alpha (visible[0]), not zebra (raw[0])")
 }
 
 // TestCursorBoundsAfterDataChange tests cursor clamping

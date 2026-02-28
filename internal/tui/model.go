@@ -78,6 +78,8 @@ type model struct {
 	activities []activityInfo
 	lastUpdate time.Time
 	err        error
+	status     string    // Transient status message (e.g. "Disabled github")
+	statusTime time.Time // When status was set (auto-clears after 3s)
 
 	// Sorting
 	sortState sortState
@@ -104,6 +106,8 @@ type activitiesMsg struct {
 type errMsg struct {
 	err error
 }
+
+type statusMsg string
 
 type tickMsg time.Time
 
@@ -182,7 +186,7 @@ func serverActionCmd(client Client, ctx context.Context, name, action string) te
 		if err := client.ServerAction(ctx, name, action); err != nil {
 			return errMsg{fmt.Errorf("%s %s: %w", action, name, err)}
 		}
-		return tickMsg(time.Now())
+		return statusMsg(fmt.Sprintf("%s: %s", name, action))
 	}
 }
 
@@ -191,36 +195,39 @@ func oauthLoginCmd(client Client, ctx context.Context, name string) tea.Cmd {
 		if err := client.TriggerOAuthLogin(ctx, name); err != nil {
 			return errMsg{fmt.Errorf("login %s: %w", name, err)}
 		}
-		return tickMsg(time.Now())
+		return statusMsg(fmt.Sprintf("%s: login started", name))
 	}
 }
 
 // triggerOAuthRefresh triggers OAuth refresh for all servers needing auth
 func (m model) triggerOAuthRefresh() tea.Cmd {
-	return tea.Batch(
-		func() tea.Msg {
-			ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-			defer cancel()
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		defer cancel()
 
-			// Trigger OAuth login for each server that needs auth
-			var lastErr error
-			for _, s := range m.servers {
-				if s.HealthAction == "login" {
-					err := m.client.TriggerOAuthLogin(ctx, s.Name)
-					if err != nil {
-						lastErr = err
-					}
+		// Trigger OAuth login for each server that needs auth
+		var count int
+		var lastErr error
+		for _, s := range m.servers {
+			if s.HealthAction == "login" {
+				count++
+				err := m.client.TriggerOAuthLogin(ctx, s.Name)
+				if err != nil {
+					lastErr = err
 				}
 			}
+		}
 
-			if lastErr != nil {
-				return errMsg{fmt.Errorf("oauth refresh failed: %w", lastErr)}
-			}
+		if lastErr != nil {
+			return errMsg{fmt.Errorf("oauth refresh failed: %w", lastErr)}
+		}
 
-			// Refresh data after OAuth completes
-			return tickMsg(time.Now())
-		},
-	)
+		if count == 0 {
+			return statusMsg("No servers need OAuth login")
+		}
+
+		return statusMsg(fmt.Sprintf("OAuth login started for %d server(s)", count))
+	}
 }
 
 func strVal(m map[string]interface{}, key string) string {
@@ -265,24 +272,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case serversMsg:
 		m.servers = msg.servers
 		m.lastUpdate = time.Now()
-		m.err = nil
-		if m.activeTab == tabServers && len(m.servers) > 0 && m.cursor >= len(m.servers) {
-			m.cursor = len(m.servers) - 1
+		// Only clear errors after they've been visible for at least 3s
+		if m.err != nil && time.Since(m.statusTime) > 3*time.Second {
+			m.err = nil
+		}
+		// Auto-clear status after 3s
+		if m.status != "" && time.Since(m.statusTime) > 3*time.Second {
+			m.status = ""
+		}
+		if m.activeTab == tabServers {
+			visible := m.getVisibleServers()
+			if len(visible) > 0 && m.cursor >= len(visible) {
+				m.cursor = len(visible) - 1
+			}
 		}
 		return m, nil
 
 	case activitiesMsg:
 		m.activities = msg.activities
 		m.lastUpdate = time.Now()
-		m.err = nil
-		if m.activeTab == tabActivity && len(m.activities) > 0 && m.cursor >= len(m.activities) {
-			m.cursor = len(m.activities) - 1
+		if m.err != nil && time.Since(m.statusTime) > 3*time.Second {
+			m.err = nil
+		}
+		if m.status != "" && time.Since(m.statusTime) > 3*time.Second {
+			m.status = ""
+		}
+		if m.activeTab == tabActivity {
+			visible := m.getVisibleActivities()
+			if len(visible) > 0 && m.cursor >= len(visible) {
+				m.cursor = len(visible) - 1
+			}
 		}
 		return m, nil
 
 	case errMsg:
 		m.err = msg.err
+		m.status = ""
+		m.statusTime = time.Now()
 		return m, nil
+
+	case statusMsg:
+		m.status = string(msg)
+		m.statusTime = time.Now()
+		m.err = nil
+		// Trigger an immediate data refresh
+		return m, tea.Batch(
+			fetchServers(m.client, m.ctx),
+			fetchActivities(m.client, m.ctx),
+		)
 
 	case tickMsg:
 		return m, tea.Batch(
@@ -298,44 +335,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global shortcuts work in all modes
-	switch key {
-	case "q", "ctrl+c":
+	// ctrl+c always quits regardless of mode
+	if key == "ctrl+c" {
 		return m, tea.Quit
-
-	case "o", "O":
-		return m, m.triggerOAuthRefresh()
-
-	case "1":
-		m.activeTab = tabServers
-		m.cursor = 0
-		m.uiMode = ModeNormal
-		m.sortState = newServerSortState()
-		return m, nil
-
-	case "2":
-		m.activeTab = tabActivity
-		m.cursor = 0
-		m.uiMode = ModeNormal
-		m.sortState = newActivitySortState()
-		return m, nil
-
-	case "?":
-		m.uiMode = ModeHelp
-		return m, nil
-
-	case "space":
-		// Manual refresh
-		return m, tea.Batch(
-			fetchServers(m.client, m.ctx),
-			fetchActivities(m.client, m.ctx),
-		)
 	}
 
-	// Mode-specific handling
+	// Dispatch to mode-specific handler
 	switch m.uiMode {
 	case ModeNormal:
-		return m.handleKeyNormal(key)
+		m, cmd := m.handleNormalMode(key)
+		return m, cmd
 	case ModeFilterEdit:
 		m, cmd := m.handleFilterMode(key)
 		return m, cmd
@@ -353,97 +362,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleKeyNormal handles normal mode navigation and actions
-func (m model) handleKeyNormal(key string) (tea.Model, tea.Cmd) {
-	// Tab switching
-	if key == "tab" {
-		if m.activeTab == tabServers {
-			m.activeTab = tabActivity
-		} else {
-			m.activeTab = tabServers
-		}
-		m.cursor = 0
-		return m, nil
-	}
-
-	// Navigation
-	switch key {
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-		return m, nil
-
-	case "down", "j":
-		maxIdx := m.maxIndex()
-		if m.cursor < maxIdx {
-			m.cursor++
-		}
-		return m, nil
-
-	case "r":
-		return m, tea.Batch(
-			fetchServers(m.client, m.ctx),
-			fetchActivities(m.client, m.ctx),
-		)
-
-	case "e":
-		if m.activeTab == tabServers && m.cursor < len(m.servers) {
-			name := m.servers[m.cursor].Name
-			return m, serverActionCmd(m.client, m.ctx, name, "enable")
-		}
-
-	case "d":
-		if m.activeTab == tabServers && m.cursor < len(m.servers) {
-			name := m.servers[m.cursor].Name
-			return m, serverActionCmd(m.client, m.ctx, name, "disable")
-		}
-
-	case "R":
-		if m.activeTab == tabServers && m.cursor < len(m.servers) {
-			name := m.servers[m.cursor].Name
-			return m, serverActionCmd(m.client, m.ctx, name, "restart")
-		}
-
-	case "l":
-		if m.activeTab == tabServers && m.cursor < len(m.servers) {
-			s := m.servers[m.cursor]
-			if s.HealthAction == "login" {
-				return m, oauthLoginCmd(m.client, m.ctx, s.Name)
-			}
-		}
-
-	case "L":
-		// Refresh all OAuth tokens: trigger login for every server needing it
-		var cmds []tea.Cmd
-		for _, s := range m.servers {
-			if s.HealthAction == "login" {
-				cmds = append(cmds, oauthLoginCmd(m.client, m.ctx, s.Name))
-			}
-		}
-		if len(cmds) > 0 {
-			cmds = append(cmds, func() tea.Msg { return tickMsg(time.Now()) })
-			return m, tea.Batch(cmds...)
-		}
-	}
-
-	// Delegate to mode-specific handler for extended features (sort, filter, etc)
-	m, cmd := m.handleNormalMode(key)
-	return m, cmd
-}
-
 func (m model) maxIndex() int {
 	switch m.activeTab {
 	case tabServers:
-		if len(m.servers) == 0 {
+		visible := m.getVisibleServers()
+		if len(visible) == 0 {
 			return 0
 		}
-		return len(m.servers) - 1
+		return len(visible) - 1
 	case tabActivity:
-		if len(m.activities) == 0 {
+		visible := m.getVisibleActivities()
+		if len(visible) == 0 {
 			return 0
 		}
-		return len(m.activities) - 1
+		return len(visible) - 1
 	}
 	return 0
 }

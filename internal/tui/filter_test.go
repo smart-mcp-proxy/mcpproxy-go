@@ -36,20 +36,6 @@ func TestFilterStateBasics(t *testing.T) {
 			expectActive: true,
 		},
 		{
-			name: "filter with empty string list is not active",
-			filterState: filterState{
-				"types": []string{},
-			},
-			expectActive: false,
-		},
-		{
-			name: "filter with non-empty string list is active",
-			filterState: filterState{
-				"types": []string{"tool_call", "server_event"},
-			},
-			expectActive: true,
-		},
-		{
 			name: "multiple active filters",
 			filterState: filterState{
 				"status": "error",

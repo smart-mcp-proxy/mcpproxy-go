@@ -439,11 +439,6 @@ func TestRenderFilterSummary(t *testing.T) {
 			filterState: filterState{"status": ""},
 			wantEmpty:   true,
 		},
-		{
-			name:        "Non-string filter value",
-			filterState: filterState{"count": 5},
-			wantEmpty:   true,
-		},
 	}
 
 	for _, tt := range tests {

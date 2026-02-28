@@ -51,6 +51,10 @@ var (
 			Foreground(colorUnhealthy).
 			Bold(true)
 
+	// SuccessStyle renders success/status messages
+	SuccessStyle = lipgloss.NewStyle().
+			Foreground(colorHealthy)
+
 	// Health-level styles
 	healthyStyle   = lipgloss.NewStyle().Foreground(colorHealthy)
 	degradedStyle  = lipgloss.NewStyle().Foreground(colorDegraded)

@@ -32,11 +32,13 @@ func renderView(m model) string {
 		b.WriteString(renderActivity(m, contentHeight))
 	}
 
-	// Error display
+	// Status / error display
 	if m.err != nil {
 		b.WriteString("\n")
 		b.WriteString(RenderError(m.err))
+	} else if m.status != "" {
 		b.WriteString("\n")
+		b.WriteString(SuccessStyle.Render(fmt.Sprintf(" %s ", m.status)))
 	}
 
 	// Status bar
@@ -284,7 +286,7 @@ func renderStatusBar(m model) string {
 	// Add filter count
 	filterCount := 0
 	for _, v := range m.filterState {
-		if str, ok := v.(string); ok && str != "" {
+		if v != "" {
 			filterCount++
 		}
 	}
@@ -302,9 +304,11 @@ func renderStatusBar(m model) string {
 	// Right side: last update time and cursor position
 	var right string
 	if m.activeTab == tabServers {
-		right = fmt.Sprintf("Row %d/%d  ", m.cursor+1, len(m.servers))
+		visible := m.getVisibleServers()
+		right = fmt.Sprintf("Row %d/%d  ", m.cursor+1, len(visible))
 	} else {
-		right = fmt.Sprintf("Row %d/%d  ", m.cursor+1, len(m.activities))
+		visible := m.getVisibleActivities()
+		right = fmt.Sprintf("Row %d/%d  ", m.cursor+1, len(visible))
 	}
 
 	if !m.lastUpdate.IsZero() {
@@ -447,10 +451,9 @@ func renderFilterSummary(m model) string {
 
 	var parts []string
 	for key, val := range m.filterState {
-		if str, ok := val.(string); ok && str != "" {
-			// Capitalize first letter of filter key
+		if val != "" {
 			keyDisplay := strings.ToUpper(string(key[0])) + key[1:]
-			badge := fmt.Sprintf("[%s: %s ✕]", keyDisplay, str)
+			badge := fmt.Sprintf("[%s: %s ✕]", keyDisplay, val)
 			parts = append(parts, badge)
 		}
 	}

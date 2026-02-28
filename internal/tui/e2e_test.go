@@ -350,8 +350,7 @@ func TestE2EQuitCommand(t *testing.T) {
 	client := &MockClient{}
 	m := NewModel(context.Background(), client, 5*time.Second)
 
-	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	m = result.(model)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 
 	assert.NotNil(t, cmd, "should issue a command")
 	// The exact command will be tea.Quit() which is checked by Bubble Tea framework
@@ -379,9 +378,10 @@ func TestE2EHelpDisplay(t *testing.T) {
 
 	// Step 2: Switch to activity tab
 	m.activeTab = tabActivity
-	help = renderHelp(m)
+	activityHelp := renderHelp(m)
+	assert.Contains(t, activityHelp, "quit", "activity tab should show quit help")
 	// Activity tab should not have enable/disable
-	// (this will depend on renderHelp implementation)
+	assert.NotContains(t, activityHelp, "enable", "activity tab should not show enable")
 }
 
 // TestE2ERefreshCommand tests refresh key (r) triggers data update:

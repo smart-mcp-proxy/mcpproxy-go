@@ -1,12 +1,70 @@
 package tui
 
 import (
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// handleNormalMode handles input when in normal navigation mode
+// handleNormalMode handles all input when in normal navigation mode
 func (m model) handleNormalMode(key string) (model, tea.Cmd) {
 	switch key {
+	// Quit
+	case "q":
+		return m, tea.Quit
+
+	// OAuth refresh
+	case "o", "O":
+		return m, m.triggerOAuthRefresh()
+
+	// Tab switching
+	case "1":
+		m.activeTab = tabServers
+		m.cursor = 0
+		m.sortState = newServerSortState()
+		return m, nil
+
+	case "2":
+		m.activeTab = tabActivity
+		m.cursor = 0
+		m.sortState = newActivitySortState()
+		return m, nil
+
+	case "tab":
+		if m.activeTab == tabServers {
+			m.activeTab = tabActivity
+		} else {
+			m.activeTab = tabServers
+		}
+		m.cursor = 0
+		return m, nil
+
+	// Help
+	case "?":
+		m.uiMode = ModeHelp
+		return m, nil
+
+	// Manual refresh
+	case "space", "r":
+		return m, tea.Batch(
+			fetchServers(m.client, m.ctx),
+			fetchActivities(m.client, m.ctx),
+		)
+
+	// Navigation
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+		return m, nil
+
+	case "down", "j":
+		maxIdx := m.maxIndex()
+		if m.cursor < maxIdx {
+			m.cursor++
+		}
+		return m, nil
+
 	case "g":
 		m.cursor = 0
 		return m, nil
@@ -34,28 +92,69 @@ func (m model) handleNormalMode(key string) (model, tea.Cmd) {
 		}
 		return m, nil
 
+	// Mode switching
 	case "f", "F":
-		// Enter filter mode
 		m.uiMode = ModeFilterEdit
 		m.focusedFilter = m.getFirstFilterKey()
 		m.filterQuery = ""
 		return m, nil
 
 	case "s":
-		// Enter sort mode
 		m.uiMode = ModeSortSelect
 		return m, nil
 
 	case "/":
-		// Enter search mode
 		m.uiMode = ModeSearch
 		m.filterQuery = ""
 		return m, nil
 
 	case "c", "C":
-		// Clear all filters and reset sort
 		m.clearFilters()
 		return m, nil
+
+	// Server actions (Servers tab only)
+	// Use getVisibleServers() so cursor matches the displayed (sorted/filtered) list.
+	case "e":
+		visible := m.getVisibleServers()
+		if m.activeTab == tabServers && m.cursor < len(visible) {
+			name := visible[m.cursor].Name
+			return m, serverActionCmd(m.client, m.ctx, name, "enable")
+		}
+
+	case "d":
+		visible := m.getVisibleServers()
+		if m.activeTab == tabServers && m.cursor < len(visible) {
+			name := visible[m.cursor].Name
+			return m, serverActionCmd(m.client, m.ctx, name, "disable")
+		}
+
+	case "R":
+		visible := m.getVisibleServers()
+		if m.activeTab == tabServers && m.cursor < len(visible) {
+			name := visible[m.cursor].Name
+			return m, serverActionCmd(m.client, m.ctx, name, "restart")
+		}
+
+	case "l":
+		visible := m.getVisibleServers()
+		if m.activeTab == tabServers && m.cursor < len(visible) {
+			s := visible[m.cursor]
+			if s.HealthAction == "login" {
+				return m, oauthLoginCmd(m.client, m.ctx, s.Name)
+			}
+		}
+
+	case "L":
+		var cmds []tea.Cmd
+		for _, s := range m.servers {
+			if s.HealthAction == "login" {
+				cmds = append(cmds, oauthLoginCmd(m.client, m.ctx, s.Name))
+			}
+		}
+		if len(cmds) > 0 {
+			cmds = append(cmds, func() tea.Msg { return tickMsg(time.Now()) })
+			return m, tea.Batch(cmds...)
+		}
 	}
 
 	return m, nil
@@ -65,7 +164,6 @@ func (m model) handleNormalMode(key string) (model, tea.Cmd) {
 func (m model) handleFilterMode(key string) (model, tea.Cmd) {
 	switch key {
 	case "esc", "q":
-		// Exit filter mode and return to normal
 		m.uiMode = ModeNormal
 		m.focusedFilter = ""
 		m.filterQuery = ""
@@ -73,22 +171,19 @@ func (m model) handleFilterMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "tab":
-		// Move to next filter
 		m.focusedFilter = m.getNextFilterKey(m.focusedFilter)
 		m.filterQuery = ""
 		return m, nil
 
 	case "shift+tab":
-		// Move to previous filter
 		m.focusedFilter = m.getPrevFilterKey(m.focusedFilter)
 		m.filterQuery = ""
 		return m, nil
 
 	case "up", "k":
-		// Cycle to previous filter value
 		values := m.getAvailableFilterValues(m.focusedFilter)
 		if len(values) > 0 {
-			current, _ := m.filterState[m.focusedFilter].(string)
+			current := m.filterState[m.focusedFilter]
 			for i, v := range values {
 				if v == current {
 					if i > 0 {
@@ -101,10 +196,9 @@ func (m model) handleFilterMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "down", "j":
-		// Cycle to next filter value
 		values := m.getAvailableFilterValues(m.focusedFilter)
 		if len(values) > 0 {
-			current, _ := m.filterState[m.focusedFilter].(string)
+			current := m.filterState[m.focusedFilter]
 			for i, v := range values {
 				if v == current {
 					if i < len(values)-1 {
@@ -117,7 +211,6 @@ func (m model) handleFilterMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
-		// Apply and exit filter mode
 		m.uiMode = ModeNormal
 		m.focusedFilter = ""
 		m.filterQuery = ""
@@ -125,16 +218,15 @@ func (m model) handleFilterMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "backspace":
-		// Clear current filter value
 		if len(m.filterQuery) > 0 {
-			m.filterQuery = m.filterQuery[:len(m.filterQuery)-1]
+			runes := []rune(m.filterQuery)
+			m.filterQuery = string(runes[:len(runes)-1])
 		} else {
 			delete(m.filterState, m.focusedFilter)
 		}
 		return m, nil
 
 	default:
-		// Text input for filter search
 		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
 			m.filterQuery += key
 			m.filterState[m.focusedFilter] = m.filterQuery
@@ -147,12 +239,10 @@ func (m model) handleFilterMode(key string) (model, tea.Cmd) {
 func (m model) handleSortMode(key string) (model, tea.Cmd) {
 	switch key {
 	case "esc", "q":
-		// Cancel, return to normal mode without changing sort
 		m.uiMode = ModeNormal
 		return m, nil
 
 	case "t":
-		// Sort by timestamp (activity only)
 		if m.activeTab == tabActivity {
 			m.sortState.Column = "timestamp"
 			m.sortState.Descending = true
@@ -162,7 +252,6 @@ func (m model) handleSortMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "y":
-		// Sort by type
 		m.sortState.Column = "type"
 		m.sortState.Descending = false
 		m.uiMode = ModeNormal
@@ -170,7 +259,6 @@ func (m model) handleSortMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "s":
-		// Sort by server (activity) or state (servers)
 		if m.activeTab == tabActivity {
 			m.sortState.Column = "server_name"
 		} else {
@@ -182,7 +270,6 @@ func (m model) handleSortMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "d":
-		// Sort by duration (activity only)
 		if m.activeTab == tabActivity {
 			m.sortState.Column = "duration_ms"
 			m.sortState.Descending = true
@@ -192,7 +279,6 @@ func (m model) handleSortMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "a":
-		// Sort by status/admin_state
 		if m.activeTab == tabActivity {
 			m.sortState.Column = "status"
 		} else {
@@ -204,7 +290,6 @@ func (m model) handleSortMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "n":
-		// Sort by name (servers only)
 		if m.activeTab == tabServers {
 			m.sortState.Column = "name"
 			m.sortState.Descending = false
@@ -214,7 +299,6 @@ func (m model) handleSortMode(key string) (model, tea.Cmd) {
 		return m, nil
 
 	case "h":
-		// Sort by health (servers only)
 		if m.activeTab == tabServers {
 			m.sortState.Column = "health_level"
 			m.sortState.Descending = false
@@ -231,26 +315,23 @@ func (m model) handleSortMode(key string) (model, tea.Cmd) {
 func (m model) handleSearchMode(key string) (model, tea.Cmd) {
 	switch key {
 	case "esc", "ctrl+c":
-		// Cancel search, return to normal
 		m.uiMode = ModeNormal
 		m.filterQuery = ""
 		m.cursor = 0
 		return m, nil
 
 	case "enter":
-		// Apply search as filter, stay in search mode for refinement
 		m.cursor = 0
 		return m, nil
 
 	case "backspace":
-		// Remove last character from search
 		if len(m.filterQuery) > 0 {
-			m.filterQuery = m.filterQuery[:len(m.filterQuery)-1]
+			runes := []rune(m.filterQuery)
+			m.filterQuery = string(runes[:len(runes)-1])
 		}
 		return m, nil
 
 	default:
-		// Add character to search
 		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
 			m.filterQuery += key
 		}
@@ -262,7 +343,6 @@ func (m model) handleSearchMode(key string) (model, tea.Cmd) {
 func (m model) handleHelpMode(key string) (model, tea.Cmd) {
 	switch key {
 	case "esc", "q", "?":
-		// Exit help, return to normal
 		m.uiMode = ModeNormal
 		return m, nil
 	}
