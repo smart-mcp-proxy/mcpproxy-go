@@ -497,10 +497,8 @@ mcpproxy upstream list
 # 🔒 notion  http  0  Pending approval  Approve in Web UI
 
 # Approve in web UI or via API:
-curl -X POST "http://localhost:8080/api/v1/servers/notion/quarantine" \
-  -H "X-API-Key: your-key" \
-  -H "Content-Type: application/json" \
-  -d '{"quarantined": false}'
+curl -X POST "http://localhost:8080/api/v1/servers/notion/unquarantine" \
+  -H "X-API-Key: your-key"
 ```
 
 ### Bulk Operations Warning

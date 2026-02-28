@@ -102,9 +102,7 @@ mcpproxy upstream list
 ```bash
 curl -X POST \
   -H "X-API-Key: your-key" \
-  -H "Content-Type: application/json" \
-  -d '{"quarantined": false}' \
-  http://127.0.0.1:8080/api/v1/servers/server-name/quarantine
+  http://127.0.0.1:8080/api/v1/servers/server-name/unquarantine
 ```
 
 **Config File:**
@@ -132,8 +130,6 @@ If you need to quarantine a previously approved server:
 ```bash
 curl -X POST \
   -H "X-API-Key: your-key" \
-  -H "Content-Type: application/json" \
-  -d '{"quarantined": true}' \
   http://127.0.0.1:8080/api/v1/servers/server-name/quarantine
 ```
 
