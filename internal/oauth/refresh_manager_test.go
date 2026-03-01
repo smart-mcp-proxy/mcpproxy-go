@@ -647,6 +647,10 @@ func TestClassifyRefreshError(t *testing.T) {
 		{"context deadline exceeded", errors.New("context deadline exceeded"), "failed_network"},
 		{"generic error", errors.New("unknown server error"), "failed_other"},
 		{"server_error", errors.New("OAuth server_error"), "failed_other"},
+		// Terminal errors: server gone
+		{"server not found", errors.New("server not found: gcw2"), "failed_server_gone"},
+		{"server not found wrapped", errors.New("failed to refresh OAuth token: server not found: myserver"), "failed_server_gone"},
+		{"server does not use OAuth", errors.New("server does not use OAuth: gcw2"), "failed_server_gone"},
 	}
 
 	for _, tt := range tests {
@@ -655,4 +659,167 @@ func TestClassifyRefreshError(t *testing.T) {
 			assert.Equal(t, tt.expected, result, "Error classification mismatch for: %v", tt.err)
 		})
 	}
+}
+
+// Test that calculateBackoff never returns zero or negative for any retry count (overflow protection).
+func TestRefreshManager_BackoffOverflowProtection(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	manager := NewRefreshManager(nil, nil, nil, logger)
+
+	// Specific boundary cases that triggered the original bug
+	boundaryTests := []struct {
+		retryCount int
+		desc       string
+	}{
+		{30, "overflow boundary on 64-bit (10s * 2^30 overflows nanoseconds)"},
+		{63, "1<<63 is min int64, duration becomes 0 or negative"},
+		{64, "1<<64 wraps to 0 on 64-bit"},
+		{100, "well beyond overflow"},
+		{1000, "extreme retry count"},
+		{23158728, "actual retry count from issue #310"},
+	}
+
+	for _, tt := range boundaryTests {
+		t.Run(tt.desc, func(t *testing.T) {
+			backoff := manager.calculateBackoff(tt.retryCount)
+			assert.Greater(t, backoff, time.Duration(0),
+				"Backoff must be positive at retryCount=%d", tt.retryCount)
+			assert.LessOrEqual(t, backoff, MaxRetryBackoff,
+				"Backoff must not exceed MaxRetryBackoff at retryCount=%d", tt.retryCount)
+		})
+	}
+
+	// Exhaustive check: no retry count from 0 to 10000 produces zero or negative backoff
+	for i := 0; i <= 10000; i++ {
+		backoff := manager.calculateBackoff(i)
+		if backoff <= 0 || backoff > MaxRetryBackoff {
+			t.Fatalf("calculateBackoff(%d) = %v, want positive and <= %v", i, backoff, MaxRetryBackoff)
+		}
+	}
+}
+
+// Test that "server not found" is treated as terminal (no retry).
+func TestRefreshManager_ServerNotFoundIsTerminal(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+	emitter := &mockEventEmitter{}
+
+	manager := NewRefreshManager(store, nil, nil, logger)
+	runtime := &mockRuntime{
+		refreshErr: errors.New("failed to refresh OAuth token: server not found: gcw2"),
+	}
+	manager.SetRuntime(runtime)
+	manager.SetEventEmitter(emitter)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Create a schedule and trigger refresh
+	expiresAt := time.Now().Add(1 * time.Hour)
+	manager.OnTokenSaved("gcw2", expiresAt)
+	time.Sleep(50 * time.Millisecond)
+
+	// Execute refresh which will fail with "server not found"
+	manager.executeRefresh("gcw2")
+	time.Sleep(50 * time.Millisecond)
+
+	// Should be in failed state (not retrying)
+	schedule := manager.GetSchedule("gcw2")
+	require.NotNil(t, schedule)
+	assert.Equal(t, RefreshStateFailed, schedule.RefreshState,
+		"Server not found should immediately fail, not retry")
+	assert.Equal(t, 1, schedule.RetryCount, "Should have exactly 1 attempt")
+
+	// Failure event should be emitted
+	assert.Equal(t, 1, emitter.GetFailedEvents(),
+		"Should emit failure event for terminal server-not-found error")
+}
+
+// Test that max retry limit stops retries.
+func TestRefreshManager_MaxRetryLimit(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+	emitter := &mockEventEmitter{}
+
+	config := &RefreshManagerConfig{
+		Threshold:  0.1,
+		MaxRetries: 5, // Low limit for testing
+	}
+
+	manager := NewRefreshManager(store, nil, config, logger)
+	runtime := &mockRuntime{
+		refreshErr: errors.New("some transient error"),
+	}
+	manager.SetRuntime(runtime)
+	manager.SetEventEmitter(emitter)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Create a schedule
+	expiresAt := time.Now().Add(1 * time.Hour)
+	manager.OnTokenSaved("test-server", expiresAt)
+	time.Sleep(50 * time.Millisecond)
+
+	// Simulate failures beyond max retries
+	for i := 0; i < 7; i++ {
+		manager.executeRefresh("test-server")
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// After exceeding max retries, should be in failed state
+	schedule := manager.GetSchedule("test-server")
+	require.NotNil(t, schedule)
+	assert.Equal(t, RefreshStateFailed, schedule.RefreshState,
+		"Should transition to failed after max retries exceeded")
+
+	// Failure event should be emitted
+	assert.GreaterOrEqual(t, emitter.GetFailedEvents(), 1,
+		"Should emit failure event when max retries exceeded")
+}
+
+// Test that DefaultMaxRetries is now non-zero.
+func TestDefaultMaxRetries_IsNonZero(t *testing.T) {
+	assert.Greater(t, DefaultMaxRetries, 0,
+		"DefaultMaxRetries must be non-zero to prevent infinite retry loops")
+}
+
+// Test that rescheduleAfterDelay enforces minimum delay.
+func TestRefreshManager_MinimumDelayEnforced(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := newMockTokenStore()
+
+	manager := NewRefreshManager(store, nil, nil, logger)
+	runtime := &mockRuntime{}
+	manager.SetRuntime(runtime)
+
+	ctx := context.Background()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Create a schedule first
+	expiresAt := time.Now().Add(1 * time.Hour)
+	manager.OnTokenSaved("test-server", expiresAt)
+	time.Sleep(50 * time.Millisecond)
+
+	// Call rescheduleAfterDelay with zero delay
+	manager.rescheduleAfterDelay("test-server", 0)
+
+	schedule := manager.GetSchedule("test-server")
+	require.NotNil(t, schedule)
+	assert.GreaterOrEqual(t, schedule.RetryBackoff, MinRefreshInterval,
+		"Delay should be at least MinRefreshInterval even when 0 is passed")
+
+	// Call rescheduleAfterDelay with negative delay
+	manager.rescheduleAfterDelay("test-server", -5*time.Second)
+
+	schedule = manager.GetSchedule("test-server")
+	require.NotNil(t, schedule)
+	assert.GreaterOrEqual(t, schedule.RetryBackoff, MinRefreshInterval,
+		"Delay should be at least MinRefreshInterval even when negative is passed")
 }

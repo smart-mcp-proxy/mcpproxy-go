@@ -20,9 +20,10 @@ const (
 	// 0.75 means refresh at 75% of lifetime for long-lived tokens.
 	DefaultRefreshThreshold = 0.75
 
-	// DefaultMaxRetries is the maximum number of refresh attempts before giving up.
-	// Set to 0 for unlimited retries until token expiration (FR-009).
-	DefaultMaxRetries = 0
+	// DefaultMaxRetries is the maximum number of consecutive refresh attempts before giving up.
+	// Acts as a circuit breaker to prevent infinite retry loops (issue #310).
+	// With exponential backoff (10s base, 5min cap), 50 retries spans ~2+ hours.
+	DefaultMaxRetries = 50
 
 	// MinRefreshInterval prevents too-frequent refresh attempts.
 	MinRefreshInterval = 5 * time.Second
@@ -672,7 +673,8 @@ func (m *RefreshManager) handleRefreshSuccess(serverName string) {
 }
 
 // handleRefreshFailure handles a failed token refresh with exponential backoff retry.
-// Per FR-009: Retries continue until token expiration (unlimited retries), not a fixed count.
+// Terminal errors (invalid_grant, server not found) stop immediately.
+// Transient errors retry with exponential backoff up to maxRetries.
 func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 	m.mu.Lock()
 	schedule := m.schedules[serverName]
@@ -715,8 +717,48 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 		return
 	}
 
-	// Check if we should continue retrying (unlimited retries until token expiration per FR-009)
-	// Only stop if the access token has completely expired AND no more time remains
+	// Check if the server is gone (removed from config or not OAuth).
+	// No amount of retrying will fix this - stop immediately.
+	if errorType == "failed_server_gone" {
+		m.logger.Error("OAuth refresh stopped - server no longer available",
+			zap.String("server", serverName),
+			zap.Error(err))
+
+		m.mu.Lock()
+		if schedule := m.schedules[serverName]; schedule != nil {
+			schedule.RefreshState = RefreshStateFailed
+			schedule.LastError = err.Error()
+		}
+		m.mu.Unlock()
+
+		if m.eventEmitter != nil {
+			m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
+		}
+		return
+	}
+
+	// Check if max retries exceeded (circuit breaker to prevent infinite loops).
+	if m.maxRetries > 0 && retryCount >= m.maxRetries {
+		m.logger.Error("OAuth token refresh failed - max retries exceeded",
+			zap.String("server", serverName),
+			zap.Int("max_retries", m.maxRetries),
+			zap.Int("retry_count", retryCount))
+
+		m.mu.Lock()
+		if schedule := m.schedules[serverName]; schedule != nil {
+			schedule.RefreshState = RefreshStateFailed
+			schedule.LastError = "Max retries exceeded - re-authentication required"
+		}
+		m.mu.Unlock()
+
+		if m.eventEmitter != nil {
+			m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
+		}
+		return
+	}
+
+	// Check if we should continue retrying based on token expiration.
+	// Only stop if the access token has completely expired AND no more time remains.
 	now := time.Now()
 	if !expiresAt.IsZero() && now.After(expiresAt) {
 		// Token has already expired - check if we should give up
@@ -748,13 +790,25 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 }
 
 // classifyRefreshError categorizes a refresh error for metrics and error handling.
-// Returns one of: "failed_network", "failed_invalid_grant", "failed_other".
+// Returns one of: "failed_network", "failed_invalid_grant", "failed_server_gone", "failed_other".
 func classifyRefreshError(err error) string {
 	if err == nil {
 		return "success"
 	}
 
 	errStr := err.Error()
+
+	// Check for terminal server-gone errors (server removed from config or not OAuth).
+	// These should never be retried because the server no longer exists or doesn't use OAuth.
+	serverGoneErrors := []string{
+		"server not found",
+		"server does not use OAuth",
+	}
+	for _, pattern := range serverGoneErrors {
+		if stringutil.ContainsIgnoreCase(errStr, pattern) {
+			return "failed_server_gone"
+		}
+	}
 
 	// Check for permanent OAuth errors (refresh token invalid/expired)
 	permanentErrors := []string{
@@ -789,15 +843,29 @@ func classifyRefreshError(err error) string {
 	return "failed_other"
 }
 
+// maxBackoffExponent is the maximum shift exponent that won't overflow when
+// multiplied by RetryBackoffBase (10s = 10_000_000_000 ns). On 64-bit systems,
+// 1<<30 * 10e9 overflows int64. We cap at 25 which gives 10s * 2^25 = 335,544,320s
+// — well above MaxRetryBackoff (300s), so the cap applies naturally.
+const maxBackoffExponent = 25
+
 // calculateBackoff calculates the exponential backoff duration for a given retry count.
 // The formula is: base * 2^retryCount, capped at MaxRetryBackoff (5 minutes).
 // Sequence: 10s → 20s → 40s → 80s → 160s → 300s (cap).
+//
+// The exponent is capped at maxBackoffExponent to prevent integer overflow
+// that caused issue #310 (0s delay at high retry counts leading to infinite loops).
 func (m *RefreshManager) calculateBackoff(retryCount int) time.Duration {
 	if retryCount < 0 {
 		retryCount = 0
 	}
+	// Cap the exponent to prevent integer overflow.
+	// Beyond this exponent, the result would exceed MaxRetryBackoff anyway.
+	if retryCount > maxBackoffExponent {
+		return MaxRetryBackoff
+	}
 	backoff := RetryBackoffBase * time.Duration(1<<uint(retryCount))
-	if backoff > MaxRetryBackoff {
+	if backoff <= 0 || backoff > MaxRetryBackoff {
 		backoff = MaxRetryBackoff
 	}
 	return backoff
@@ -814,7 +882,13 @@ func (m *RefreshManager) isRateLimited(schedule *RefreshSchedule) bool {
 }
 
 // rescheduleAfterDelay reschedules a refresh attempt after a delay.
+// The delay is enforced to be at least MinRefreshInterval to prevent tight loops.
 func (m *RefreshManager) rescheduleAfterDelay(serverName string, delay time.Duration) {
+	// Enforce minimum delay to prevent tight retry loops (defense-in-depth for issue #310).
+	if delay < MinRefreshInterval {
+		delay = MinRefreshInterval
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
