@@ -161,6 +161,9 @@ func main() {
 	// Add TUI command
 	tuiCmd := GetTUICommand()
 
+	// Add status command
+	statusCmd := GetStatusCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
@@ -174,6 +177,7 @@ func main() {
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(activityCmd)
 	rootCmd.AddCommand(tuiCmd)
+	rootCmd.AddCommand(statusCmd)
 
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added

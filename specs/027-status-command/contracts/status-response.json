@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StatusCommandOutput",
+  "description": "JSON output schema for `mcpproxy status -o json`",
+  "type": "object",
+  "required": ["state", "listen_addr", "api_key", "web_ui_url"],
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": ["Running", "Not running"],
+      "description": "Whether the MCPProxy daemon is currently running"
+    },
+    "listen_addr": {
+      "type": "string",
+      "description": "Listen address (actual if running, configured if not)",
+      "examples": ["127.0.0.1:8080"]
+    },
+    "uptime": {
+      "type": "string",
+      "description": "Human-readable uptime (only present when running)",
+      "examples": ["2h 15m"]
+    },
+    "uptime_seconds": {
+      "type": "number",
+      "description": "Uptime in seconds (only present when running, for machine parsing)",
+      "examples": [8100]
+    },
+    "api_key": {
+      "type": "string",
+      "description": "API key (masked by default, full with --show-key)",
+      "examples": ["a1b2****gh78", "a1b2c3d4e5f6..."]
+    },
+    "web_ui_url": {
+      "type": "string",
+      "description": "Full Web UI URL with embedded API key",
+      "examples": ["http://127.0.0.1:8080/ui/?apikey=a1b2c3d4..."]
+    },
+    "servers": {
+      "type": "object",
+      "description": "Server counts (only present when running)",
+      "properties": {
+        "connected": { "type": "integer" },
+        "quarantined": { "type": "integer" },
+        "total": { "type": "integer" }
+      }
+    },
+    "socket_path": {
+      "type": "string",
+      "description": "Unix socket or named pipe path",
+      "examples": ["/Users/user/.mcpproxy/mcpproxy.sock"]
+    },
+    "config_path": {
+      "type": "string",
+      "description": "Path to config file",
+      "examples": ["/Users/user/.mcpproxy/mcp_config.json"]
+    },
+    "version": {
+      "type": "string",
+      "description": "MCPProxy version (only present when running)",
+      "examples": ["v1.2.0"]
+    }
+  }
+}

@@ -42,6 +42,7 @@ const sidebars = {
         'cli/management-commands',
         'cli/activity-commands',
         'cli/sensitive-data-commands',
+        'cli/status-command',
       ],
     },
     {
