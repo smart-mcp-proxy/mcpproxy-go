@@ -66,25 +66,54 @@ func NewOAuthTransportWrapper(transport http.RoundTripper, extraParams map[strin
 // 2. Clones the request to avoid modifying the original
 // 3. Injects extra parameters into query string (authorization) or body (token)
 // 4. Delegates to the wrapped transport for actual HTTP execution
-// 5. Logs parameter injection at DEBUG level for observability
+// 5. Normalizes HTTP 201 responses to 200 for token requests (some providers like Supabase return 201)
+// 6. Logs parameter injection at DEBUG level for observability
 func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Skip if no extra params configured
-	if len(w.extraParams) == 0 {
-		return w.inner.RoundTrip(req)
+	tokenReq := isTokenRequest(req)
+
+	if len(w.extraParams) > 0 {
+		// Clone request to avoid modifying original
+		clonedReq := req.Clone(req.Context())
+
+		// Detect OAuth endpoint type and inject params appropriately
+		if isAuthorizationRequest(req) {
+			w.injectQueryParams(clonedReq)
+		} else if tokenReq {
+			w.injectFormParams(clonedReq)
+		}
+
+		resp, err := w.inner.RoundTrip(clonedReq)
+		if err != nil {
+			return resp, err
+		}
+
+		// Normalize 201 Created to 200 OK for token responses.
+		// Some OAuth providers (e.g., Supabase) return 201 for token exchange,
+		// but mcp-go only accepts 200.
+		if tokenReq && resp.StatusCode == http.StatusCreated {
+			w.logger.Debug("Normalized token response status 201→200",
+				zap.String("url", req.URL.String()))
+			resp.StatusCode = http.StatusOK
+			resp.Status = "200 OK"
+		}
+
+		return resp, nil
 	}
 
-	// Clone request to avoid modifying original
-	clonedReq := req.Clone(req.Context())
-
-	// Detect OAuth endpoint type and inject params appropriately
-	if isAuthorizationRequest(req) {
-		w.injectQueryParams(clonedReq)
-	} else if isTokenRequest(req) {
-		w.injectFormParams(clonedReq)
+	resp, err := w.inner.RoundTrip(req)
+	if err != nil {
+		return resp, err
 	}
 
-	// Delegate to wrapped transport
-	return w.inner.RoundTrip(clonedReq)
+	// Normalize 201 Created to 200 OK for token responses even without extra params.
+	if tokenReq && resp.StatusCode == http.StatusCreated {
+		w.logger.Debug("Normalized token response status 201→200",
+			zap.String("url", req.URL.String()))
+		resp.StatusCode = http.StatusOK
+		resp.Status = "200 OK"
+	}
+
+	return resp, nil
 }
 
 // isAuthorizationRequest detects if this is an OAuth authorization request

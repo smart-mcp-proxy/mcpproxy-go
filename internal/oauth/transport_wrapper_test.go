@@ -344,6 +344,70 @@ func TestInjectFormParams_EmptyBody(t *testing.T) {
 	assert.Equal(t, "https://example.com/mcp", actualParams.Get("resource"))
 }
 
+func TestRoundTrip_Normalizes201ToOKForTokenRequests(t *testing.T) {
+	tests := []struct {
+		name           string
+		method         string
+		url            string
+		statusCode     int
+		extraParams    map[string]string
+		expectedStatus int
+	}{
+		{
+			name:           "201 token response normalized to 200 with extra params",
+			method:         "POST",
+			url:            "https://provider.com/token",
+			statusCode:     http.StatusCreated,
+			extraParams:    map[string]string{"resource": "https://example.com"},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "201 token response normalized to 200 without extra params",
+			method:         "POST",
+			url:            "https://provider.com/token",
+			statusCode:     http.StatusCreated,
+			extraParams:    nil,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "200 token response unchanged",
+			method:         "POST",
+			url:            "https://provider.com/token",
+			statusCode:     http.StatusOK,
+			extraParams:    nil,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "201 non-token response not normalized",
+			method:         "GET",
+			url:            "https://provider.com/authorize",
+			statusCode:     http.StatusCreated,
+			extraParams:    nil,
+			expectedStatus: http.StatusCreated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := &mockRoundTripper{
+				response: &http.Response{
+					StatusCode: tt.statusCode,
+					Status:     http.StatusText(tt.statusCode),
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":"test"}`)),
+					Header:     make(http.Header),
+				},
+			}
+			wrapper := NewOAuthTransportWrapper(inner, tt.extraParams, zap.NewNop())
+			req := httptest.NewRequest(tt.method, tt.url, strings.NewReader("grant_type=authorization_code"))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+			resp, err := wrapper.RoundTrip(req)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedStatus, resp.StatusCode)
+		})
+	}
+}
+
 func TestRoundTrip_PreservesOriginalRequest(t *testing.T) {
 	inner := &mockRoundTripper{}
 	extraParams := map[string]string{"resource": "https://example.com/mcp"}

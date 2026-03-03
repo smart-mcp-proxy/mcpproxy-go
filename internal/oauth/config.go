@@ -870,27 +870,20 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.String("storage", "memory"))
 	}
 
-	// Create HTTP client with transport wrapper to inject extra params into token requests
-	// extraParams may contain auto-detected resource (RFC 8707) or manual config params
-	var httpClient *http.Client
-
+	// Create HTTP client with transport wrapper for all OAuth servers.
+	// The wrapper injects extra params (if any) and normalizes non-standard
+	// token response status codes (e.g., 201 Created from Supabase → 200 OK).
 	if len(extraParams) > 0 {
-		// Log extra params with selective masking for security
 		masked := maskExtraParams(extraParams)
 		logger.Debug("OAuth extra parameters will be injected into token requests",
 			zap.String("server", serverConfig.Name),
 			zap.Any("extra_params", masked))
+	}
 
-		// Create HTTP client with wrapper to inject extra params into token exchange/refresh
-		wrapper := NewOAuthTransportWrapper(http.DefaultTransport, extraParams, logger)
-		httpClient = &http.Client{
-			Transport: wrapper,
-			Timeout:   30 * time.Second,
-		}
-
-		logger.Info("✅ Created OAuth HTTP client with extra params wrapper for token requests",
-			zap.String("server", serverConfig.Name),
-			zap.Int("extra_params_count", len(extraParams)))
+	wrapper := NewOAuthTransportWrapper(http.DefaultTransport, extraParams, logger)
+	httpClient := &http.Client{
+		Transport: wrapper,
+		Timeout:   30 * time.Second,
 	}
 
 	// Check if static OAuth credentials are provided in config
@@ -946,7 +939,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		TokenStore:            tokenStore,            // Shared token store for this server
 		PKCEEnabled:           true,                  // Always enable PKCE for security
 		AuthServerMetadataURL: authServerMetadataURL, // Explicit metadata URL for proper discovery
-		HTTPClient:            httpClient,            // Custom HTTP client with extra params wrapper (if configured)
+		HTTPClient:            httpClient,            // Custom HTTP client with transport wrapper (extra params + status normalization)
 	}
 
 	logger.Info("OAuth config created successfully",
