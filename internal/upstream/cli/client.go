@@ -382,21 +382,41 @@ func (c *Client) GetOAuthStatus() (string, error) {
 	return "not_required", nil
 }
 
-// isOAuthRelatedError checks if an error is OAuth-related
+// isOAuthRelatedError checks if an error is OAuth-related.
+// Connection errors take precedence — when a server is offline, mcp-go may wrap
+// the connection error inside "authentication strategies failed".
 func (c *Client) isOAuthRelatedError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	errStr := err.Error()
+	errStr := strings.ToLower(err.Error())
+
+	// Connection errors take precedence - these are NOT OAuth issues
+	connectionPatterns := []string{
+		"connection refused",
+		"connection reset",
+		"no such host",
+		"network is unreachable",
+		"dial tcp",
+		"i/o timeout",
+		"context deadline exceeded",
+		"no route to host",
+	}
+	for _, pattern := range connectionPatterns {
+		if strings.Contains(errStr, pattern) {
+			return false
+		}
+	}
+
 	oauthErrors := []string{
 		"invalid_token",
 		"invalid_grant",
 		"access_denied",
 		"unauthorized",
 		"401", // HTTP 401 Unauthorized
-		"Missing or invalid access token",
-		"OAuth authentication failed",
+		"missing or invalid access token",
+		"oauth authentication failed",
 		"oauth timeout",
 		"oauth error",
 		"authorization required",
@@ -404,7 +424,7 @@ func (c *Client) isOAuthRelatedError(err error) bool {
 	}
 
 	for _, oauthErr := range oauthErrors {
-		if strings.Contains(strings.ToLower(errStr), strings.ToLower(oauthErr)) {
+		if strings.Contains(errStr, oauthErr) {
 			return true
 		}
 	}

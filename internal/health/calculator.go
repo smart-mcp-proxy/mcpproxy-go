@@ -378,9 +378,29 @@ func formatRefreshRetryDetail(retryCount int, nextAttempt *time.Time, lastError 
 }
 
 // isOAuthRelatedError checks if the error message indicates an OAuth issue.
+// Connection errors take precedence — when a server is simply offline,
+// the mcp-go client wraps the connection error inside "authentication strategies failed",
+// which would incorrectly trigger OAuth-related detection.
 func isOAuthRelatedError(err string) bool {
 	if err == "" {
 		return false
+	}
+	// Connection errors take precedence - these are NOT OAuth issues
+	// even if the error message also contains OAuth-related text
+	connectionPatterns := []string{
+		"connection refused",
+		"connection reset",
+		"no such host",
+		"network is unreachable",
+		"dial tcp",
+		"i/o timeout",
+		"context deadline exceeded",
+		"no route to host",
+	}
+	for _, pattern := range connectionPatterns {
+		if stringutil.ContainsIgnoreCase(err, pattern) {
+			return false
+		}
 	}
 	// Check for common OAuth-related error patterns
 	oauthPatterns := []string{
