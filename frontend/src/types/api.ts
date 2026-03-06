@@ -385,6 +385,35 @@ export interface ActivitySummaryResponse {
   end_time: string
 }
 
+// Agent Token types (Spec 028)
+
+export interface AgentTokenInfo {
+  name: string
+  token_prefix: string
+  allowed_servers: string[]
+  permissions: string[]
+  expires_at: string
+  created_at: string
+  last_used_at: string | null
+  revoked: boolean
+}
+
+export interface CreateAgentTokenRequest {
+  name: string
+  allowed_servers: string[]
+  permissions: string[]
+  expires_in?: string
+}
+
+export interface CreateAgentTokenResponse {
+  name: string
+  token: string
+  allowed_servers: string[]
+  permissions: string[]
+  expires_at: string
+  created_at: string
+}
+
 // Import server configuration types
 
 export interface ImportSummary {
