@@ -15,6 +15,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // --- Mock token store ---
@@ -170,6 +171,20 @@ func doRequest(t *testing.T, srv *Server, method, path string, body interface{})
 	return w
 }
 
+// decodeSuccess unwraps the {success, data} envelope and decodes data into target.
+func decodeSuccess(t *testing.T, w *httptest.ResponseRecorder, target interface{}) {
+	t.Helper()
+	var envelope contracts.APIResponse
+	err := json.NewDecoder(w.Body).Decode(&envelope)
+	require.NoError(t, err)
+	require.True(t, envelope.Success, "expected success=true, got error: %s", envelope.Error)
+	// Re-encode Data and decode into target
+	data, err := json.Marshal(envelope.Data)
+	require.NoError(t, err)
+	err = json.Unmarshal(data, target)
+	require.NoError(t, err)
+}
+
 // --- Tests ---
 
 func TestCreateToken_Success(t *testing.T) {
@@ -188,8 +203,7 @@ func TestCreateToken_Success(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code, "Expected 201 Created")
 
 	var resp createTokenResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
+	decodeSuccess(t, w, &resp)
 
 	assert.Equal(t, "my-agent", resp.Name)
 	assert.NotEmpty(t, resp.Token, "Token secret should be returned")
@@ -219,8 +233,7 @@ func TestCreateToken_DefaultPermissions(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 
 	var resp createTokenResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
+	decodeSuccess(t, w, &resp)
 
 	assert.Equal(t, []string{"read"}, resp.Permissions)
 	assert.Equal(t, []string{"*"}, resp.AllowedServers)
@@ -240,8 +253,7 @@ func TestCreateToken_DefaultExpiry(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 
 	var resp createTokenResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
+	decodeSuccess(t, w, &resp)
 
 	// Should be approximately 30 days from now
 	expectedExpiry := time.Now().UTC().Add(30 * 24 * time.Hour)
@@ -400,8 +412,7 @@ func TestCreateToken_ValidExpiry(t *testing.T) {
 			assert.Equal(t, http.StatusCreated, w.Code, "Expected 201 for expiry %q", tt.expiresIn)
 
 			var resp createTokenResponse
-			err := json.NewDecoder(w.Body).Decode(&resp)
-			require.NoError(t, err)
+			decodeSuccess(t, w, &resp)
 
 			expectedExpiry := time.Now().UTC().Add(tt.expectedOffset)
 			assert.WithinDuration(t, expectedExpiry, resp.ExpiresAt, 5*time.Second)
@@ -455,13 +466,14 @@ func TestListTokens(t *testing.T) {
 	w := doRequest(t, srv, http.MethodGet, "/api/v1/tokens", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var tokens []tokenInfoResponse
-	err := json.NewDecoder(w.Body).Decode(&tokens)
-	require.NoError(t, err)
-	assert.Len(t, tokens, 2)
+	var listResp struct {
+		Tokens []tokenInfoResponse `json:"tokens"`
+	}
+	decodeSuccess(t, w, &listResp)
+	assert.Len(t, listResp.Tokens, 2)
 
 	// Verify no token secrets are exposed
-	for _, token := range tokens {
+	for _, token := range listResp.Tokens {
 		assert.NotEmpty(t, token.Name)
 		assert.NotEmpty(t, token.TokenPrefix)
 		// tokenInfoResponse doesn't have a Token field so secrets can't leak
@@ -475,10 +487,11 @@ func TestListTokens_Empty(t *testing.T) {
 	w := doRequest(t, srv, http.MethodGet, "/api/v1/tokens", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var tokens []tokenInfoResponse
-	err := json.NewDecoder(w.Body).Decode(&tokens)
-	require.NoError(t, err)
-	assert.Len(t, tokens, 0)
+	var listResp struct {
+		Tokens []tokenInfoResponse `json:"tokens"`
+	}
+	decodeSuccess(t, w, &listResp)
+	assert.Len(t, listResp.Tokens, 0)
 }
 
 func TestGetToken(t *testing.T) {
@@ -498,8 +511,7 @@ func TestGetToken(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var token tokenInfoResponse
-	err := json.NewDecoder(w.Body).Decode(&token)
-	require.NoError(t, err)
+	decodeSuccess(t, w, &token)
 	assert.Equal(t, "get-me", token.Name)
 	assert.Equal(t, []string{"read", "write"}, token.Permissions)
 }
@@ -556,8 +568,7 @@ func TestRegenerateToken(t *testing.T) {
 	require.Equal(t, http.StatusCreated, w.Code)
 
 	var createResp createTokenResponse
-	err := json.NewDecoder(w.Body).Decode(&createResp)
-	require.NoError(t, err)
+	decodeSuccess(t, w, &createResp)
 	oldToken := createResp.Token
 
 	// Regenerate
@@ -565,8 +576,7 @@ func TestRegenerateToken(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var regenResp regenerateTokenResponse
-	err = json.NewDecoder(w.Body).Decode(&regenResp)
-	require.NoError(t, err)
+	decodeSuccess(t, w, &regenResp)
 
 	assert.Equal(t, "regen-me", regenResp.Name)
 	assert.NotEmpty(t, regenResp.Token)
