@@ -146,12 +146,27 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 //
 // For agent tokens (mcp_agt_ prefix), it validates the token and sets an agent
 // AuthContext with server/permission scopes. For the global API key, it sets an
-// admin AuthContext. If no token is provided, no AuthContext is set (backward
-// compatible -- existing unprotected MCP behavior is preserved).
+// admin AuthContext.
+//
+// When config.RequireMCPAuth is true, unauthenticated requests are rejected with
+// 401 Unauthorized. When false (default), unauthenticated requests get admin
+// context for backward compatibility. Tray connections always bypass auth.
 func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := httpapi.ExtractToken(r)
 		if token == "" {
+			// Check if MCP auth is required
+			if cfg := s.runtime.Config(); cfg != nil && cfg.RequireMCPAuth {
+				// Tray connections are always trusted, even with require_mcp_auth
+				source := transport.GetConnectionSource(r.Context())
+				if source == transport.ConnectionSourceTray {
+					ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+				http.Error(w, `{"error":"Authentication required. Provide an API key or agent token."}`, http.StatusUnauthorized)
+				return
+			}
 			// No token provided — preserve existing unprotected MCP behavior.
 			// Treat as admin (backward compatibility for MCP clients without auth).
 			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
@@ -227,9 +242,13 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Token provided but doesn't match anything — still allow through for backward
-		// compatibility (MCP endpoint was previously unprotected), but set admin context
-		// since the caller did provide something (may be a legacy client).
+		// Token provided but doesn't match anything
+		if cfg := s.runtime.Config(); cfg != nil && cfg.RequireMCPAuth {
+			// When auth is required, reject unrecognized tokens
+			http.Error(w, `{"error":"Invalid authentication token"}`, http.StatusUnauthorized)
+			return
+		}
+		// Backward compatibility: allow through with admin context
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

@@ -61,6 +61,7 @@ var (
 	logDir            string
 
 	// Security flags
+	requireMCPAuth    bool
 	readOnlyMode      bool
 	disableManagement bool
 	allowServerAdd    bool
@@ -122,6 +123,7 @@ func main() {
 	serverCmd.Flags().BoolVar(&enableSocket, "enable-socket", true, "Enable Unix socket/named pipe for local IPC (default: true)")
 	serverCmd.Flags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	serverCmd.Flags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
+	serverCmd.Flags().BoolVar(&requireMCPAuth, "require-mcp-auth", false, "Require authentication on /mcp endpoint (agent tokens or API key)")
 	serverCmd.Flags().BoolVar(&readOnlyMode, "read-only", false, "Enable read-only mode")
 	serverCmd.Flags().BoolVar(&disableManagement, "disable-management", false, "Disable management features")
 	serverCmd.Flags().BoolVar(&allowServerAdd, "allow-server-add", true, "Allow adding new servers")
@@ -388,6 +390,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
 	cmdDebugSearch, _ := cmd.Flags().GetBool("debug-search")
 	cmdToolResponseLimit, _ := cmd.Flags().GetInt("tool-response-limit")
+	cmdRequireMCPAuth, _ := cmd.Flags().GetBool("require-mcp-auth")
 	cmdReadOnlyMode, _ := cmd.Flags().GetBool("read-only")
 	cmdDisableManagement, _ := cmd.Flags().GetBool("disable-management")
 	cmdAllowServerAdd, _ := cmd.Flags().GetBool("allow-server-add")
@@ -477,6 +480,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Apply security settings from command line ONLY if explicitly set
+	if cmd.Flags().Changed("require-mcp-auth") {
+		cfg.RequireMCPAuth = cmdRequireMCPAuth
+	}
 	if cmd.Flags().Changed("read-only") {
 		cfg.ReadOnlyMode = cmdReadOnlyMode
 	}
@@ -496,6 +502,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	logger.Info("Configuration loaded",
 		zap.String("data_dir", cfg.DataDir),
 		zap.Int("servers_count", len(cfg.Servers)),
+		zap.Bool("require_mcp_auth", cfg.RequireMCPAuth),
 		zap.Bool("read_only_mode", cfg.ReadOnlyMode),
 		zap.Bool("disable_management", cfg.DisableManagement),
 		zap.Bool("allow_server_add", cfg.AllowServerAdd),

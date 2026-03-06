@@ -96,6 +96,17 @@ mcpproxy activity export --output audit.jsonl  # Export for compliance
 
 See [docs/cli/activity-commands.md](docs/cli/activity-commands.md) for complete reference.
 
+### Agent Token CLI
+```bash
+mcpproxy token create --name deploy-bot --servers github,gitlab --permissions read,write
+mcpproxy token list                    # List all agent tokens
+mcpproxy token show deploy-bot         # Show token details
+mcpproxy token revoke deploy-bot       # Revoke a token
+mcpproxy token regenerate deploy-bot   # Regenerate token secret
+```
+
+See [docs/features/agent-tokens.md](docs/features/agent-tokens.md) for complete reference.
+
 ### CLI Output Formatting
 ```bash
 mcpproxy upstream list -o json      # JSON output for scripting
@@ -153,6 +164,7 @@ See [docs/socket-communication.md](docs/socket-communication.md) for details.
 {
   "listen": "127.0.0.1:8080",
   "api_key": "your-secret-api-key-here",
+  "require_mcp_auth": false,
   "enable_socket": true,
   "enable_web_ui": true,
   "mcpServers": [
@@ -220,6 +232,11 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `GET /api/v1/activity` | List activity records with filtering |
 | `GET /api/v1/activity/{id}` | Get activity record details |
 | `GET /api/v1/activity/export` | Export activity records (JSON/CSV) |
+| `POST /api/v1/tokens` | Create agent token |
+| `GET /api/v1/tokens` | List agent tokens |
+| `GET /api/v1/tokens/{name}` | Get agent token details |
+| `DELETE /api/v1/tokens/{name}` | Revoke agent token |
+| `POST /api/v1/tokens/{name}/regenerate` | Regenerate agent token secret |
 | `GET /events` | SSE stream for live updates |
 
 **Authentication**: Use `X-API-Key` header or `?apikey=` query parameter.
@@ -322,10 +339,12 @@ See `docs/code_execution/` for complete guides:
 
 - **Localhost-only by default**: Core server binds to `127.0.0.1:8080`
 - **API key always required**: Auto-generated if not provided
+- **Agent tokens**: Scoped credentials for AI agents with server and permission restrictions (`mcp_agt_` prefix, HMAC-SHA256 hashed)
+- **`require_mcp_auth`**: When enabled, `/mcp` endpoint rejects unauthenticated requests (default: false for backward compatibility)
 - **Quarantine system**: New servers quarantined until manually approved
 - **Tool Poisoning Attack (TPA) protection**: Automatic detection of malicious descriptions
 
-See [docs/features/security-quarantine.md](docs/features/security-quarantine.md) for details.
+See [docs/features/agent-tokens.md](docs/features/agent-tokens.md) and [docs/features/security-quarantine.md](docs/features/security-quarantine.md) for details.
 
 ## Sensitive Data Detection
 
