@@ -230,14 +230,47 @@
             <label class="label">
               <span class="label-text font-medium">Allowed Servers</span>
             </label>
-            <input
-              v-model="createForm.allowedServers"
-              type="text"
-              placeholder="e.g., github, slack or * for all"
-              class="input input-bordered w-full"
-            />
-            <label class="label">
-              <span class="label-text-alt">Comma-separated server names, or * for all servers</span>
+            <label class="flex items-center gap-2 cursor-pointer mb-2 px-1">
+              <input
+                type="checkbox"
+                :checked="createForm.allServers"
+                @change="toggleAllServers"
+                class="checkbox checkbox-sm checkbox-primary"
+              />
+              <span class="text-sm font-medium">All servers</span>
+              <span class="badge badge-ghost badge-xs">wildcard</span>
+            </label>
+            <div
+              v-if="!createForm.allServers"
+              class="border border-base-300 rounded-lg p-3 max-h-48 overflow-y-auto space-y-1"
+            >
+              <div v-if="availableServers.length === 0" class="text-sm text-base-content/50 py-2 text-center">
+                No servers configured
+              </div>
+              <label
+                v-for="server in availableServers"
+                :key="server.name"
+                class="flex items-center gap-2 cursor-pointer hover:bg-base-200 rounded px-2 py-1"
+              >
+                <input
+                  type="checkbox"
+                  :value="server.name"
+                  v-model="createForm.selectedServers"
+                  class="checkbox checkbox-sm"
+                />
+                <span class="text-sm">{{ server.name }}</span>
+                <span
+                  v-if="server.connected"
+                  class="badge badge-success badge-xs ml-auto"
+                >connected</span>
+                <span
+                  v-else
+                  class="badge badge-ghost badge-xs ml-auto"
+                >offline</span>
+              </label>
+            </div>
+            <label class="label" v-if="!createForm.allServers && createFormErrors.servers">
+              <span class="label-text-alt text-error">{{ createFormErrors.servers }}</span>
             </label>
           </div>
 
@@ -308,9 +341,11 @@
 import { ref, computed, onMounted } from 'vue'
 import apiClient from '@/services/api'
 import { useSystemStore } from '@/stores/system'
-import type { AgentTokenInfo } from '@/types'
+import { useServersStore } from '@/stores/servers'
+import type { AgentTokenInfo, Server } from '@/types'
 
 const systemStore = useSystemStore()
+const serversStore = useServersStore()
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -323,13 +358,30 @@ const createDialog = ref<HTMLDialogElement | null>(null)
 
 const createForm = ref({
   name: '',
-  allowedServers: '*',
+  allServers: true,
+  selectedServers: [] as string[],
   permWrite: false,
   permDestructive: false,
   expiresIn: '720h',
 })
 
-const createFormErrors = ref<{ name?: string }>({})
+const createFormErrors = ref<{ name?: string; servers?: string }>({})
+
+// Available servers for the checkbox list
+const availableServers = computed(() => {
+  return serversStore.servers.map((s: Server) => ({
+    name: s.name,
+    connected: s.enabled && s.tool_count > 0,
+  })).sort((a, b) => a.name.localeCompare(b.name))
+})
+
+function toggleAllServers(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  createForm.value.allServers = checked
+  if (checked) {
+    createForm.value.selectedServers = []
+  }
+}
 
 // Computed stats
 const activeCount = computed(() => {
@@ -399,12 +451,17 @@ const refreshTokens = loadTokens
 function openCreateDialog() {
   createForm.value = {
     name: '',
-    allowedServers: '*',
+    allServers: true,
+    selectedServers: [],
     permWrite: false,
     permDestructive: false,
     expiresIn: '720h',
   }
   createFormErrors.value = {}
+  // Ensure servers are loaded for the checkbox list
+  if (serversStore.servers.length === 0) {
+    serversStore.fetchServers()
+  }
   createDialog.value?.showModal()
 }
 
@@ -427,13 +484,18 @@ async function handleCreate() {
     return
   }
 
+  // Validate servers
+  if (!createForm.value.allServers && createForm.value.selectedServers.length === 0) {
+    createFormErrors.value.servers = 'Select at least one server or choose "All servers"'
+    return
+  }
+
   creating.value = true
 
   try {
-    const allowedServers = createForm.value.allowedServers
-      .split(',')
-      .map(s => s.trim())
-      .filter(s => s.length > 0)
+    const allowedServers = createForm.value.allServers
+      ? ['*']
+      : [...createForm.value.selectedServers]
 
     const permissions: string[] = ['read']
     if (createForm.value.permWrite) permissions.push('write')

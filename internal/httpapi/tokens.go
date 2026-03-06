@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // TokenStore defines the storage interface for agent token CRUD operations.
@@ -192,7 +193,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      now,
 	}
 
-	s.writeJSON(w, http.StatusCreated, resp)
+	s.writeJSON(w, http.StatusCreated, contracts.NewSuccessResponse(resp))
 }
 
 // handleListTokens handles GET /api/v1/tokens
@@ -216,7 +217,7 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		result = append(result, tokenToInfoResponse(t))
 	}
 
-	s.writeJSON(w, http.StatusOK, result)
+	s.writeSuccess(w, map[string]interface{}{"tokens": result})
 }
 
 // handleGetToken handles GET /api/v1/tokens/{name}
@@ -245,7 +246,7 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, tokenToInfoResponse(*token))
+	s.writeSuccess(w, tokenToInfoResponse(*token))
 }
 
 // handleRevokeToken handles DELETE /api/v1/tokens/{name}
@@ -323,7 +324,7 @@ func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 		Token: newRawToken,
 	}
 
-	s.writeJSON(w, http.StatusOK, resp)
+	s.writeSuccess(w, resp)
 }
 
 // --- Validation helpers (T021) ---
