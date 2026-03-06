@@ -42,6 +42,8 @@ var (
 	activityNoIcons       bool   // Disable emoji icons in output
 	activityDetectionType string // Spec 026: Filter by detection type (e.g., "aws_access_key")
 	activitySeverity      string // Spec 026: Filter by severity level (critical, high, medium, low)
+	activityAgent         string // Spec 028: Filter by agent token name
+	activityAuthType      string // Spec 028: Filter by auth type (admin, agent)
 
 	// Show command flags
 	activityIncludeResponse bool
@@ -72,6 +74,8 @@ type ActivityFilter struct {
 	SensitiveData *bool  // Spec 026: Filter by sensitive data detection
 	DetectionType string // Spec 026: Filter by detection type
 	Severity      string // Spec 026: Filter by severity level
+	AgentName     string // Spec 028: Filter by agent token name
+	AuthType      string // Spec 028: Filter by auth type (admin, agent)
 }
 
 // Validate validates the filter options
@@ -144,6 +148,21 @@ func (f *ActivityFilter) Validate() error {
 		}
 	}
 
+	// Validate auth_type (Spec 028)
+	if f.AuthType != "" {
+		validAuthTypes := []string{"admin", "agent"}
+		valid := false
+		for _, at := range validAuthTypes {
+			if f.AuthType == at {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid auth-type '%s': must be one of %v", f.AuthType, validAuthTypes)
+		}
+	}
+
 	// Validate time formats
 	if f.StartTime != "" {
 		if _, err := time.Parse(time.RFC3339, f.StartTime); err != nil {
@@ -212,6 +231,13 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	}
 	if f.Severity != "" {
 		q.Set("severity", f.Severity)
+	}
+	// Spec 028: Agent token identity filters
+	if f.AgentName != "" {
+		q.Set("agent", f.AgentName)
+	}
+	if f.AuthType != "" {
+		q.Set("auth_type", f.AuthType)
 	}
 	return q
 }
@@ -722,6 +748,9 @@ func init() {
 	activityListCmd.Flags().Bool("sensitive-data", false, "Filter to show only activities with sensitive data detected")
 	activityListCmd.Flags().StringVar(&activityDetectionType, "detection-type", "", "Filter by detection type (e.g., aws_access_key, stripe_key)")
 	activityListCmd.Flags().StringVar(&activitySeverity, "severity", "", "Filter by severity level: critical, high, medium, low")
+	// Spec 028: Agent token identity filters
+	activityListCmd.Flags().StringVar(&activityAgent, "agent", "", "Filter by agent token name")
+	activityListCmd.Flags().StringVar(&activityAuthType, "auth-type", "", "Filter by auth type: admin, agent")
 
 	// Watch command flags
 	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
@@ -816,6 +845,8 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		SensitiveData: sensitiveDataPtr,
 		DetectionType: activityDetectionType,
 		Severity:      activitySeverity,
+		AgentName:     activityAgent,
+		AuthType:      activityAuthType,
 	}
 
 	if err := filter.Validate(); err != nil {

@@ -103,6 +103,10 @@ type ActivityFilter struct {
 	DetectionType string // Filter by specific detection type (e.g., "aws_access_key", "credit_card")
 	Severity      string // Filter by severity level (critical, high, medium, low)
 
+	// Agent token identity filters (Spec 028)
+	AgentName string // Filter by agent token name in metadata
+	AuthType  string // Filter by auth type: "admin" or "agent"
+
 	// ExcludeCallToolSuccess filters out successful call_tool_* internal tool calls.
 	// These appear as duplicates since the actual upstream tool call is also logged.
 	// Failed call_tool_* calls are still shown (no corresponding tool_call entry).
@@ -236,7 +240,35 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		}
 	}
 
+	// Check agent identity filters (Spec 028)
+	if f.AgentName != "" {
+		recordAgentName := extractAuthMetadataField(record, "_auth_agent_name")
+		if recordAgentName != f.AgentName {
+			return false
+		}
+	}
+	if f.AuthType != "" {
+		recordAuthType := extractAuthMetadataField(record, "_auth_auth_type")
+		if recordAuthType != f.AuthType {
+			return false
+		}
+	}
+
 	return true
+}
+
+// extractAuthMetadataField extracts an auth metadata field from the activity record's arguments.
+// Auth metadata fields are stored with "_auth_" prefix in the Arguments map (Spec 028).
+func extractAuthMetadataField(record *ActivityRecord, key string) string {
+	if record.Arguments == nil {
+		return ""
+	}
+	if val, ok := record.Arguments[key]; ok {
+		if s, ok := val.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // extractSensitiveDataInfo extracts sensitive data detection info from activity metadata.

@@ -239,6 +239,39 @@ func (p *MCPProxyServer) Close() error {
 	return nil
 }
 
+// getAuthMetadata extracts auth identity metadata from context for activity logging (Spec 028).
+// Returns nil if no auth context is present.
+func getAuthMetadata(ctx context.Context) map[string]string {
+	authCtx := auth.AuthContextFromContext(ctx)
+	if authCtx == nil {
+		return nil
+	}
+	meta := map[string]string{
+		"auth_type": authCtx.Type,
+	}
+	if authCtx.Type == auth.AuthTypeAgent {
+		meta["agent_name"] = authCtx.AgentName
+		meta["token_prefix"] = authCtx.TokenPrefix
+	}
+	return meta
+}
+
+// injectAuthMetadata merges auth identity metadata into an activity arguments map (Spec 028).
+// Uses "_auth_" prefix to clearly separate auth metadata from tool arguments.
+func injectAuthMetadata(ctx context.Context, args map[string]interface{}) map[string]interface{} {
+	authMeta := getAuthMetadata(ctx)
+	if authMeta == nil {
+		return args
+	}
+	if args == nil {
+		args = make(map[string]interface{})
+	}
+	for k, v := range authMeta {
+		args["_auth_"+k] = v
+	}
+	return args
+}
+
 // emitActivityEvent safely emits an activity event if runtime is available
 // source indicates how the call was triggered: "mcp", "cli", or "api"
 func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, source string, args map[string]any) {
@@ -938,6 +971,9 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 		}
 	}
 
+	// Spec 028: Inject auth identity into activity metadata
+	args = injectAuthMetadata(ctx, args)
+
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
 		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil)
@@ -1194,6 +1230,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+
+	// Spec 028: Inject auth identity into activity metadata
+	args = injectAuthMetadata(ctx, args)
 
 	// Check if server is quarantined before calling tool
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
@@ -1577,6 +1616,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+
+	// Spec 028: Inject auth identity into activity metadata
+	args = injectAuthMetadata(ctx, args)
 
 	// Check if server is quarantined before calling tool
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
