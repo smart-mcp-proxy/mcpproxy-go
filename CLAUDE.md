@@ -496,6 +496,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord.Metadata extension (026-pii-detection)
 - Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), Zap (logging), existing cliclient, socket detection, config loader (027-status-command)
 - `~/.mcpproxy/mcp_config.json` (config file), `~/.mcpproxy/config.db` (BBolt - not directly used) (027-status-command)
+- Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), BBolt (storage), Zap (logging), mcp-go (MCP protocol), crypto/hmac + crypto/sha256 (token hashing) (028-agent-tokens)
+- BBolt database (`~/.mcpproxy/config.db`) — new `agent_tokens` bucket (028-agent-tokens)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
