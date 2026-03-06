@@ -319,12 +319,6 @@ func ExtractToken(r *http.Request) string {
 	return ""
 }
 
-// validateAPIKey checks if the request contains a valid API key
-func (s *Server) validateAPIKey(r *http.Request, expectedKey string) bool {
-	token := ExtractToken(r)
-	return token != "" && token == expectedKey
-}
-
 // correlationIDMiddleware injects correlation ID and request source into context
 func (s *Server) correlationIDMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

@@ -21,7 +21,6 @@ import (
 
 // testTokenStore is a mock TokenStore for testing agent token auth.
 type testTokenStore struct {
-	tokens       map[string]*auth.AgentToken // keyed by hash
 	validateFunc func(rawToken string, hmacKey []byte) (*auth.AgentToken, error)
 }
 
