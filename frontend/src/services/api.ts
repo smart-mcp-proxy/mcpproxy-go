@@ -186,6 +186,12 @@ class APIService {
         throw new Error(errorMsg)
       }
 
+      // Handle 204 No Content (e.g., DELETE responses)
+      if (response.status === 204) {
+        console.log(`API request to ${endpoint} succeeded (204 No Content)`)
+        return { success: true } as APIResponse<T>
+      }
+
       const data = await response.json()
       console.log(`API request to ${endpoint} succeeded`)
       return data as APIResponse<T>

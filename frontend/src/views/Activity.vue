@@ -125,6 +125,31 @@
             </select>
           </div>
 
+          <!-- Auth Type Filter (Spec 028) -->
+          <div class="form-control min-w-[120px]">
+            <label class="label py-1">
+              <span class="label-text text-xs">Auth</span>
+            </label>
+            <select v-model="filterAuthType" class="select select-bordered select-sm">
+              <option value="">All</option>
+              <option value="admin">🔑 Admin</option>
+              <option value="agent">🤖 Agent</option>
+            </select>
+          </div>
+
+          <!-- Agent Name Filter (Spec 028) -->
+          <div v-if="filterAuthType === 'agent'" class="form-control min-w-[150px]">
+            <label class="label py-1">
+              <span class="label-text text-xs">Agent</span>
+            </label>
+            <select v-model="filterAgentName" class="select select-bordered select-sm">
+              <option value="">All Agents</option>
+              <option v-for="agent in availableAgents" :key="agent" :value="agent">
+                {{ agent }}
+              </option>
+            </select>
+          </div>
+
           <!-- Sensitive Data Filter (Spec 026) -->
           <div class="form-control min-w-[140px]">
             <label class="label py-1">
@@ -229,6 +254,8 @@
           </span>
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
+          <span v-if="filterAuthType" class="badge badge-sm badge-outline">Auth: {{ filterAuthType === 'admin' ? '🔑 Admin' : '🤖 Agent' }}</span>
+          <span v-if="filterAgentName" class="badge badge-sm badge-outline">Agent: {{ filterAgentName }}</span>
           <span v-if="filterSensitiveData" class="badge badge-sm badge-outline">
             Sensitive: {{ filterSensitiveData === 'true' ? '⚠️ Detected' : 'Clean' }}
           </span>
@@ -663,6 +690,8 @@ const filterSession = ref('')
 const filterStatus = ref('')
 const filterSensitiveData = ref('') // Spec 026: '' | 'true' | 'false'
 const filterSeverity = ref('') // Spec 026: '' | 'critical' | 'high' | 'medium' | 'low'
+const filterAuthType = ref('') // Spec 028: '' | 'admin' | 'agent'
+const filterAgentName = ref('') // Spec 028: filter by agent token name
 const filterStartDate = ref('')
 const filterEndDate = ref('')
 
@@ -695,6 +724,16 @@ const availableServers = computed(() => {
     if (a.server_name) servers.add(a.server_name)
   })
   return Array.from(servers).sort()
+})
+
+// Spec 028: Extract unique agent names from activity metadata
+const availableAgents = computed(() => {
+  const agents = new Set<string>()
+  activities.value.forEach(a => {
+    const name = a.metadata?._auth_agent_name
+    if (name) agents.add(name as string)
+  })
+  return Array.from(agents).sort()
 })
 
 // Available sessions with client name and session_id suffix (Spec 024)
@@ -732,7 +771,7 @@ const getSessionLabel = (sessionId: string): string => {
 }
 
 const hasActiveFilters = computed(() => {
-  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterStartDate.value || filterEndDate.value
+  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value
 })
 
 const filteredActivities = computed(() => {
@@ -761,6 +800,14 @@ const filteredActivities = computed(() => {
   // Spec 026: Severity filter (only when sensitive data filter is active)
   if (filterSeverity.value && filterSensitiveData.value === 'true') {
     result = result.filter(a => a.max_severity === filterSeverity.value)
+  }
+  // Spec 028: Auth type filter
+  if (filterAuthType.value) {
+    result = result.filter(a => a.metadata?._auth_auth_type === filterAuthType.value)
+  }
+  // Spec 028: Agent name filter
+  if (filterAgentName.value) {
+    result = result.filter(a => a.metadata?._auth_agent_name === filterAgentName.value)
   }
   if (filterStartDate.value) {
     const startTime = new Date(filterStartDate.value).getTime()
@@ -846,6 +893,8 @@ const clearFilters = () => {
   filterStatus.value = ''
   filterSensitiveData.value = ''
   filterSeverity.value = ''
+  filterAuthType.value = ''
+  filterAgentName.value = ''
   filterStartDate.value = ''
   filterEndDate.value = ''
   currentPage.value = 1
@@ -1092,9 +1141,14 @@ const getAdditionalMetadata = (activity: ActivityRecord): Record<string, unknown
 }
 
 // Reset page when filters change
-watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterStartDate, filterEndDate], () => {
+watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterStartDate, filterEndDate], () => {
   currentPage.value = 1
 }, { deep: true })
+
+// Clear agent name filter when auth type changes away from "agent"
+watch(filterAuthType, (val) => {
+  if (val !== 'agent') filterAgentName.value = ''
+})
 
 // Keyboard handler for closing drawer
 const handleKeydown = (event: KeyboardEvent) => {

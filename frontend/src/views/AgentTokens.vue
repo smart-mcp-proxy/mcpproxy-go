@@ -186,10 +186,10 @@
         <h3 class="font-bold">Save this token now!</h3>
         <p class="text-sm mb-2">This token cannot be retrieved again after you dismiss this message.</p>
         <div class="flex items-center gap-2">
-          <code class="text-sm bg-base-200 px-3 py-2 rounded font-mono break-all">{{ newTokenSecret }}</code>
+          <code class="text-sm bg-neutral text-neutral-content px-3 py-2 rounded font-mono break-all">{{ newTokenSecret }}</code>
           <button
             @click="copyToken"
-            class="btn btn-sm btn-outline shrink-0"
+            class="btn btn-sm btn-neutral shrink-0"
             :class="{ 'btn-success': copied }"
           >
             {{ copied ? 'Copied!' : 'Copy' }}
