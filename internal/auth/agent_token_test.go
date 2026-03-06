@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -238,11 +239,13 @@ func TestGetOrCreateHMACKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, key1, 32, "key should be 32 bytes")
 
-	// Verify file exists with correct permissions
+	// Verify file exists with correct permissions (skip on Windows — no Unix perms)
 	keyPath := filepath.Join(tmpDir, hmacKeyFile)
 	info, err := os.Stat(keyPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "key file should have 0600 permissions")
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "key file should have 0600 permissions")
+	}
 
 	// Second call: returns the same key
 	key2, err := GetOrCreateHMACKey(tmpDir)
