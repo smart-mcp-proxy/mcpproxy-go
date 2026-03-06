@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -22,6 +23,30 @@ func TestGetTokenCommand(t *testing.T) {
 	assert.True(t, names["list"], "should have 'list' subcommand")
 	assert.True(t, names["show"], "should have 'show' subcommand")
 	assert.True(t, names["revoke"], "should have 'revoke' subcommand")
+	assert.True(t, names["regenerate"], "should have 'regenerate' subcommand")
+}
+
+func TestGetTokenCommand_IncludesRegenerate(t *testing.T) {
+	cmd := GetTokenCommand()
+
+	// Find the regenerate subcommand
+	var regenCmd *cobra.Command
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "regenerate" {
+			regenCmd = sub
+			break
+		}
+	}
+
+	assert.NotNil(t, regenCmd, "regenerate subcommand must exist")
+	assert.Equal(t, "regenerate <name>", regenCmd.Use)
+	assert.Contains(t, regenCmd.Short, "Regenerate")
+	assert.NotEmpty(t, regenCmd.Long)
+
+	// Verify it requires exactly 1 argument
+	assert.Error(t, regenCmd.Args(regenCmd, []string{}), "should reject zero args")
+	assert.NoError(t, regenCmd.Args(regenCmd, []string{"my-token"}), "should accept one arg")
+	assert.Error(t, regenCmd.Args(regenCmd, []string{"a", "b"}), "should reject two args")
 }
 
 func TestSplitAndTrim(t *testing.T) {

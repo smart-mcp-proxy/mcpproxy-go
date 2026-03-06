@@ -48,6 +48,7 @@ Examples:
 	tokenCmd.AddCommand(newTokenListCmd())
 	tokenCmd.AddCommand(newTokenShowCmd())
 	tokenCmd.AddCommand(newTokenRevokeCmd())
+	tokenCmd.AddCommand(newTokenRegenerateCmd())
 
 	return tokenCmd
 }
@@ -375,6 +376,76 @@ func runTokenRevoke(_ *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Token %q has been revoked.\n", name)
+	return nil
+}
+
+func newTokenRegenerateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "regenerate <name>",
+		Short: "Regenerate an agent token secret",
+		Long: `Regenerate the secret for an existing agent token.
+
+The old token secret is immediately invalidated and a new one is generated.
+The new token is displayed once and cannot be retrieved again.
+
+Examples:
+  mcpproxy token regenerate deploy-bot
+  mcpproxy token regenerate deploy-bot -o json`,
+		Args: cobra.ExactArgs(1),
+		RunE: runTokenRegenerate,
+	}
+}
+
+func runTokenRegenerate(_ *cobra.Command, args []string) error {
+	client, _, err := newTokenCLIClient()
+	if err != nil {
+		return err
+	}
+
+	name := args[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/tokens/"+name+"/regenerate", nil)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate token: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("token %q not found", name)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseAPIError(respBody, resp.StatusCode, "regenerate token")
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	format := ResolveOutputFormat()
+	if format == "json" {
+		formatted, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(formatted))
+		return nil
+	}
+
+	// Table output — highlight the new token since it's only shown once
+	fmt.Printf("Token %q regenerated successfully.\n", name)
+	fmt.Println()
+	if token, ok := result["token"].(string); ok {
+		fmt.Printf("  Token: %s\n", token)
+		fmt.Println()
+		fmt.Println("  IMPORTANT: Save this token now. It cannot be retrieved again.")
+		fmt.Println()
+	}
+
 	return nil
 }
 
