@@ -100,6 +100,14 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.Severity = severity
 	}
 
+	// Agent token identity filters (Spec 028)
+	if agent := q.Get("agent"); agent != "" {
+		filter.AgentName = agent
+	}
+	if authType := q.Get("auth_type"); authType != "" {
+		filter.AuthType = authType
+	}
+
 	filter.Validate()
 	return filter
 }
@@ -121,6 +129,8 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param sensitive_data query bool false "Filter by sensitive data detection (true=has detections, false=no detections)"
 // @Param detection_type query string false "Filter by specific detection type (e.g., 'aws_access_key', 'credit_card')"
 // @Param severity query string false "Filter by severity level" Enums(critical, high, medium, low)
+// @Param agent query string false "Filter by agent token name (Spec 028)"
+// @Param auth_type query string false "Filter by auth type (Spec 028)" Enums(admin, agent)
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"

@@ -68,7 +68,8 @@ type Config struct {
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
 
 	// Security settings
-	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"` // API key for REST API authentication
+	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"`                    // API key for REST API authentication
+	RequireMCPAuth    bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"`            // Require authentication on /mcp endpoint (default: false)
 	ReadOnlyMode      bool   `json:"read_only_mode" mapstructure:"read-only-mode"`
 	DisableManagement bool   `json:"disable_management" mapstructure:"disable-management"`
 	AllowServerAdd    bool   `json:"allow_server_add" mapstructure:"allow-server-add"`
@@ -598,6 +599,7 @@ func DefaultConfig() *Config {
 		},
 
 		// Security defaults - permissive by default for compatibility
+		RequireMCPAuth:    false, // MCP endpoint is unprotected by default for backward compatibility
 		ReadOnlyMode:      false,
 		DisableManagement: false,
 		AllowServerAdd:    true,

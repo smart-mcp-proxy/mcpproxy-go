@@ -75,6 +75,7 @@ const menuItems = [
   { name: 'Dashboard', path: '/' },
   { name: 'Servers', path: '/servers' },
   { name: 'Secrets', path: '/secrets' },
+  { name: 'Agent Tokens', path: '/tokens' },
   { name: 'Search', path: '/search' },
   { name: 'Activity Log', path: '/activity' },
   { name: 'Repositories', path: '/repositories' },

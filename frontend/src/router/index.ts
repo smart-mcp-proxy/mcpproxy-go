@@ -78,6 +78,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/tokens',
+      name: 'tokens',
+      component: () => import('@/views/AgentTokens.vue'),
+      meta: {
+        title: 'Agent Tokens',
+      },
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'not-found',
       component: () => import('@/views/NotFound.vue'),

@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
@@ -125,6 +126,8 @@ type Server struct {
 	httpLogger    *zap.Logger // Separate logger for HTTP requests
 	router        *chi.Mux
 	observability *observability.Manager
+	tokenStore    TokenStore // Agent token CRUD (T022)
+	dataDir       string     // Data directory for HMAC key (T022)
 }
 
 // NewServer creates a new HTTP API server
@@ -148,8 +151,17 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 	return s
 }
 
-// apiKeyAuthMiddleware creates middleware for API key authentication
-// Connections from Unix socket/named pipe (tray) are trusted and skip API key validation
+// SetTokenStore configures agent token management on the server.
+// This must be called after NewServer and before serving requests
+// to enable the /api/v1/tokens endpoints.
+func (s *Server) SetTokenStore(store TokenStore, dataDir string) {
+	s.tokenStore = store
+	s.dataDir = dataDir
+}
+
+// apiKeyAuthMiddleware creates middleware for API key authentication.
+// Connections from Unix socket/named pipe (tray) are trusted and skip API key validation.
+// Supports both global API key (admin) and agent tokens (mcp_agt_ prefix) with scope enforcement.
 func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +173,8 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr),
 					zap.String("source", string(source)))
-				next.ServeHTTP(w, r)
+				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 
@@ -191,36 +204,119 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// TCP connections require API key validation
-			if !s.validateAPIKey(r, cfg.APIKey) {
-				s.logger.Warn("TCP connection with invalid API key",
+			// Extract token from request
+			token := ExtractToken(r)
+			if token == "" {
+				s.logger.Warn("TCP connection with missing API key",
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 				return
 			}
 
-			s.logger.Debug("TCP connection with valid API key",
+			// Check if this is an agent token (mcp_agt_ prefix)
+			if strings.HasPrefix(token, auth.TokenPrefixStr) {
+				s.handleAgentTokenAuth(w, r, next, token)
+				return
+			}
+
+			// Check if the token matches the global API key (admin)
+			if token == cfg.APIKey {
+				s.logger.Debug("TCP connection with valid API key",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr))
+				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// Token doesn't match anything
+			s.logger.Warn("TCP connection with invalid API key",
 				zap.String("path", r.URL.Path),
 				zap.String("remote_addr", r.RemoteAddr))
-			next.ServeHTTP(w, r)
+			s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 		})
 	}
 }
 
-// validateAPIKey checks if the request contains a valid API key
-func (s *Server) validateAPIKey(r *http.Request, expectedKey string) bool {
-	// Check X-API-Key header
+// handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
+func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, token string) {
+	if s.tokenStore == nil || s.dataDir == "" {
+		s.logger.Warn("Agent token presented but token store not configured",
+			zap.String("path", r.URL.Path),
+			zap.String("remote_addr", r.RemoteAddr))
+		s.writeError(w, r, http.StatusUnauthorized, "Agent tokens are not configured on this server")
+		return
+	}
+
+	hmacKey, err := auth.GetOrCreateHMACKey(s.dataDir)
+	if err != nil {
+		s.logger.Error("Failed to get HMAC key for agent token validation", zap.Error(err))
+		s.writeError(w, r, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	agentToken, err := s.tokenStore.ValidateAgentToken(token, hmacKey)
+	if err != nil {
+		s.logger.Warn("Agent token validation failed",
+			zap.String("path", r.URL.Path),
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("error", err.Error()))
+		s.writeError(w, r, http.StatusUnauthorized, fmt.Sprintf("Agent token invalid: %s", err.Error()))
+		return
+	}
+
+	// Update last-used timestamp in background
+	go func() {
+		if updateErr := s.tokenStore.UpdateAgentTokenLastUsed(agentToken.Name); updateErr != nil {
+			s.logger.Warn("Failed to update agent token last-used timestamp",
+				zap.String("name", agentToken.Name),
+				zap.Error(updateErr))
+		}
+	}()
+
+	authCtx := &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      agentToken.Name,
+		TokenPrefix:    agentToken.TokenPrefix,
+		AllowedServers: agentToken.AllowedServers,
+		Permissions:    agentToken.Permissions,
+	}
+	ctx := auth.WithAuthContext(r.Context(), authCtx)
+
+	s.logger.Debug("Agent token authenticated",
+		zap.String("agent_name", agentToken.Name),
+		zap.String("token_prefix", agentToken.TokenPrefix),
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+
+	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// ExtractToken extracts the authentication token from the request.
+// It checks (in order): X-API-Key header, Authorization: Bearer header, ?apikey= query param.
+// Returns an empty string if no token is found.
+func ExtractToken(r *http.Request) string {
+	// 1. Check X-API-Key header
 	if key := r.Header.Get("X-API-Key"); key != "" {
-		return key == expectedKey
+		return key
 	}
 
-	// Check query parameter (for SSE and Web UI initial load)
+	// 2. Check Authorization: Bearer header
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			if token := strings.TrimPrefix(authHeader, "Bearer "); token != "" {
+				return token
+			}
+		}
+	}
+
+	// 3. Check query parameter (for SSE and Web UI initial load)
 	if key := r.URL.Query().Get("apikey"); key != "" {
-		return key == expectedKey
+		return key
 	}
 
-	return false
+	return ""
 }
 
 // correlationIDMiddleware injects correlation ID and request source into context
@@ -416,6 +512,17 @@ func (s *Server) setupRoutes() {
 		r.Get("/activity/summary", s.handleActivitySummary)
 		r.Get("/activity/export", s.handleExportActivity)
 		r.Get("/activity/{id}", s.handleGetActivityDetail)
+
+		// Agent token management (Spec 028)
+		r.Route("/tokens", func(r chi.Router) {
+			r.Post("/", s.handleCreateToken)
+			r.Get("/", s.handleListTokens)
+			r.Route("/{name}", func(r chi.Router) {
+				r.Get("/", s.handleGetToken)
+				r.Delete("/", s.handleRevokeToken)
+				r.Post("/regenerate", s.handleRegenerateToken)
+			})
+		})
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD

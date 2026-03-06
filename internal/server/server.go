@@ -18,6 +18,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
@@ -29,6 +30,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 	"github.com/smart-mcp-proxy/mcpproxy-go/web"
@@ -135,6 +137,121 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
+}
+
+// mcpAuthMiddleware wraps the MCP endpoint handler to inject AuthContext into the
+// request context. The MCP endpoint is not behind the REST API key middleware, so
+// this middleware extracts tokens from the request and creates the appropriate
+// AuthContext for downstream MCP tool handlers to enforce scope restrictions.
+//
+// For agent tokens (mcp_agt_ prefix), it validates the token and sets an agent
+// AuthContext with server/permission scopes. For the global API key, it sets an
+// admin AuthContext.
+//
+// When config.RequireMCPAuth is true, unauthenticated requests are rejected with
+// 401 Unauthorized. When false (default), unauthenticated requests get admin
+// context for backward compatibility. Tray connections always bypass auth.
+func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := httpapi.ExtractToken(r)
+		if token == "" {
+			// Check if MCP auth is required
+			if cfg := s.runtime.Config(); cfg != nil && cfg.RequireMCPAuth {
+				// Tray connections are always trusted, even with require_mcp_auth
+				source := transport.GetConnectionSource(r.Context())
+				if source == transport.ConnectionSourceTray {
+					ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+				http.Error(w, `{"error":"Authentication required. Provide an API key or agent token."}`, http.StatusUnauthorized)
+				return
+			}
+			// No token provided — preserve existing unprotected MCP behavior.
+			// Treat as admin (backward compatibility for MCP clients without auth).
+			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Check if this is an agent token
+		if strings.HasPrefix(token, auth.TokenPrefixStr) {
+			cfg := s.runtime.Config()
+			if cfg == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			hmacKey, err := auth.GetOrCreateHMACKey(cfg.DataDir)
+			if err != nil {
+				s.logger.Error("Failed to get HMAC key for agent token validation", zap.Error(err))
+				http.Error(w, `{"error":"Internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+
+			storageManager := s.runtime.StorageManager()
+			if storageManager == nil {
+				s.logger.Error("Storage manager not available for agent token validation")
+				http.Error(w, `{"error":"Internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+
+			agentToken, err := storageManager.ValidateAgentToken(token, hmacKey)
+			if err != nil {
+				s.logger.Warn("Agent token validation failed on MCP endpoint",
+					zap.String("error", err.Error()),
+					zap.String("remote_addr", r.RemoteAddr))
+				http.Error(w, fmt.Sprintf(`{"error":"Agent token invalid: %s"}`, err.Error()), http.StatusUnauthorized)
+				return
+			}
+
+			// Update last-used timestamp in background
+			go func() {
+				if updateErr := storageManager.UpdateAgentTokenLastUsed(agentToken.Name); updateErr != nil {
+					s.logger.Warn("Failed to update agent token last-used timestamp",
+						zap.String("name", agentToken.Name),
+						zap.Error(updateErr))
+				}
+			}()
+
+			authCtx := &auth.AuthContext{
+				Type:           auth.AuthTypeAgent,
+				AgentName:      agentToken.Name,
+				TokenPrefix:    agentToken.TokenPrefix,
+				AllowedServers: agentToken.AllowedServers,
+				Permissions:    agentToken.Permissions,
+			}
+			ctx := auth.WithAuthContext(r.Context(), authCtx)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Check if it matches the global API key — treat as admin
+		cfg := s.runtime.Config()
+		if cfg != nil && cfg.APIKey != "" && token == cfg.APIKey {
+			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Tray connections are trusted
+		source := transport.GetConnectionSource(r.Context())
+		if source == transport.ConnectionSourceTray {
+			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Token provided but doesn't match anything
+		if cfg := s.runtime.Config(); cfg != nil && cfg.RequireMCPAuth {
+			// When auth is required, reject unrecognized tokens
+			http.Error(w, `{"error":"Invalid authentication token"}`, http.StatusUnauthorized)
+			return
+		}
+		// Backward compatibility: allow through with admin context
+		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // createSelectiveWebUIProtectedHandler serves the Web UI without authentication.
@@ -1343,16 +1460,27 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	}
 
 	// Standard MCP endpoint according to the specification
-	mux.Handle("/mcp", loggingHandler(streamableServer))
-	mux.Handle("/mcp/", loggingHandler(streamableServer)) // Handle trailing slash
+	// Wrap with auth middleware to inject AuthContext for agent token scope enforcement
+	mcpHandler := s.mcpAuthMiddleware(loggingHandler(streamableServer))
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/mcp/", mcpHandler) // Handle trailing slash
 
 	// Legacy endpoints for backward compatibility
-	mux.Handle("/v1/tool_code", loggingHandler(streamableServer))
-	mux.Handle("/v1/tool-code", loggingHandler(streamableServer)) // Alias for python client
+	mux.Handle("/v1/tool_code", mcpHandler)
+	mux.Handle("/v1/tool-code", mcpHandler) // Alias for python client
 
 	// API v1 endpoints with chi router for REST API and SSE
 	// TODO: Add observability manager integration
 	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), nil)
+	// Wire agent token management (Spec 028)
+	if sm := s.runtime.StorageManager(); sm != nil {
+		cfg := s.runtime.Config()
+		dataDir := ""
+		if cfg != nil {
+			dataDir = cfg.DataDir
+		}
+		httpAPIServer.SetTokenStore(sm, dataDir)
+	}
 	mux.Handle("/api/", httpAPIServer)
 	mux.Handle("/events", httpAPIServer)
 

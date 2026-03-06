@@ -84,6 +84,9 @@ components:
             $ref: '#/components/schemas/config.RegistryEntry'
           type: array
           uniqueItems: false
+        require_mcp_auth:
+          description: 'Require authentication on /mcp endpoint (default: false)'
+          type: boolean
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
         tls:
@@ -1870,6 +1873,19 @@ paths:
           - high
           - medium
           - low
+          type: string
+      - description: Filter by agent token name (Spec 028)
+        in: query
+        name: agent
+        schema:
+          type: string
+      - description: Filter by auth type (Spec 028)
+        in: query
+        name: auth_type
+        schema:
+          enum:
+          - admin
+          - agent
           type: string
       - description: Filter activities after this time (RFC3339)
         in: query

@@ -110,6 +110,27 @@ func NewClientWithAPIKey(endpoint, apiKey string, logger *zap.SugaredLogger) *Cl
 	}
 }
 
+// DoRaw performs a raw HTTP request to the API and returns the response.
+// The caller is responsible for closing the response body.
+// The body parameter can be nil for methods that don't require a request body.
+func (c *Client) DoRaw(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+
+	reqURL := c.baseURL + path
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	c.prepareRequest(ctx, req)
+
+	return c.httpClient.Do(req)
+}
+
 // prepareRequest adds common headers to a request (correlation ID, API key, etc.)
 func (c *Client) prepareRequest(ctx context.Context, req *http.Request) {
 	if correlationID := reqcontext.GetCorrelationID(ctx); correlationID != "" {

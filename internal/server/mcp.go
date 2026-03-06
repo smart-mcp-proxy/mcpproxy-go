@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -236,6 +237,39 @@ func (p *MCPProxyServer) Close() error {
 		p.logger.Info("JavaScript runtime pool closed successfully")
 	}
 	return nil
+}
+
+// getAuthMetadata extracts auth identity metadata from context for activity logging (Spec 028).
+// Returns nil if no auth context is present.
+func getAuthMetadata(ctx context.Context) map[string]string {
+	authCtx := auth.AuthContextFromContext(ctx)
+	if authCtx == nil {
+		return nil
+	}
+	meta := map[string]string{
+		"auth_type": authCtx.Type,
+	}
+	if authCtx.Type == auth.AuthTypeAgent {
+		meta["agent_name"] = authCtx.AgentName
+		meta["token_prefix"] = authCtx.TokenPrefix
+	}
+	return meta
+}
+
+// injectAuthMetadata merges auth identity metadata into an activity arguments map (Spec 028).
+// Uses "_auth_" prefix to clearly separate auth metadata from tool arguments.
+func injectAuthMetadata(ctx context.Context, args map[string]interface{}) map[string]interface{} {
+	authMeta := getAuthMetadata(ctx)
+	if authMeta == nil {
+		return args
+	}
+	if args == nil {
+		args = make(map[string]interface{})
+	}
+	for k, v := range authMeta {
+		args["_auth_"+k] = v
+	}
+	return args
 }
 
 // emitActivityEvent safely emits an activity event if runtime is available
@@ -815,6 +849,24 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
 	}
 
+	// Spec 028: Filter results to only include tools from servers the agent can access
+	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+		var filtered []*config.SearchResult
+		for _, result := range results {
+			serverName := result.Tool.ServerName
+			if serverName == "" {
+				// Fallback: try to extract from "server:tool" format
+				if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
+					serverName = parts[0]
+				}
+			}
+			if authCtx.CanAccessServer(serverName) {
+				filtered = append(filtered, result)
+			}
+		}
+		results = filtered
+	}
+
 	// Convert results to MCP tool format for LLM compatibility
 	var mcpTools []map[string]interface{}
 	for _, result := range results {
@@ -918,6 +970,9 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 			}
 		}
 	}
+
+	// Spec 028: Inject auth identity into activity metadata
+	args = injectAuthMetadata(ctx, args)
 
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
@@ -1108,6 +1163,31 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
 	}
 
+	// Spec 028: Enforce agent token scope restrictions
+	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+		// Check server scope
+		if !authCtx.CanAccessServer(serverName) {
+			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+		// Check permission scope — map tool variant to required permission
+		var requiredPerm string
+		switch toolVariant {
+		case contracts.ToolVariantRead:
+			requiredPerm = auth.PermRead
+		case contracts.ToolVariantWrite:
+			requiredPerm = auth.PermWrite
+		case contracts.ToolVariantDestructive:
+			requiredPerm = auth.PermDestructive
+		}
+		if requiredPerm != "" && !authCtx.HasPermission(requiredPerm) {
+			errMsg := fmt.Sprintf("Insufficient permissions: '%s' requires '%s' permission", toolVariant, requiredPerm)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+	}
+
 	p.logger.Debug("handleCallToolVariant: processing request",
 		zap.String("tool_variant", toolVariant),
 		zap.String("tool_name", toolName),
@@ -1150,6 +1230,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+
+	// Spec 028: Inject auth identity into activity metadata
+	args = injectAuthMetadata(ctx, args)
 
 	// Check if server is quarantined before calling tool
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
@@ -1534,6 +1617,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
 
+	// Spec 028: Inject auth identity into activity metadata
+	args = injectAuthMetadata(ctx, args)
+
 	// Check if server is quarantined before calling tool
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
 	if err == nil && serverConfig.Quarantined {
@@ -1894,6 +1980,16 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		}
 	}
 
+	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block all write operations
+	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+		switch operation {
+		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart":
+			errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
+			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+	}
+
 	// Execute operation and track result
 	var result *mcp.CallToolResult
 	var opErr error
@@ -1972,6 +2068,13 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		args["name"] = name
 	}
 
+	// Spec 028: Agent tokens cannot perform quarantine operations
+	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+		errMsg := "Agent tokens cannot perform quarantine security operations"
+		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil)
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
 	// Security checks
 	if p.config.ReadOnlyMode {
 		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil)
@@ -2024,10 +2127,21 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	return result, opErr
 }
 
-func (p *MCPProxyServer) handleListUpstreams(_ context.Context) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallToolResult, error) {
 	servers, err := p.storage.ListUpstreamServers()
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
+	}
+
+	// Spec 028: Filter servers to only those the agent token can access
+	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+		var filtered []*config.ServerConfig
+		for _, s := range servers {
+			if authCtx.CanAccessServer(s.Name) {
+				filtered = append(filtered, s)
+			}
+		}
+		servers = filtered
 	}
 
 	// Check Docker availability only if Docker isolation is globally enabled

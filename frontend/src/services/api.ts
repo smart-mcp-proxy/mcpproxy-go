@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse } from '@/types'
+import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -184,6 +184,12 @@ class APIService {
         }
 
         throw new Error(errorMsg)
+      }
+
+      // Handle 204 No Content (e.g., DELETE responses)
+      if (response.status === 204) {
+        console.log(`API request to ${endpoint} succeeded (204 No Content)`)
+        return { success: true } as APIResponse<T>
       }
 
       const data = await response.json()
@@ -625,6 +631,30 @@ class APIService {
         format: params.format,
         server_names: params.server_names
       })
+    })
+  }
+
+  // Agent Token Management (Spec 028)
+  async listAgentTokens(): Promise<APIResponse<{ tokens: AgentTokenInfo[] }>> {
+    return this.request<{ tokens: AgentTokenInfo[] }>('/api/v1/tokens')
+  }
+
+  async createAgentToken(req: CreateAgentTokenRequest): Promise<APIResponse<CreateAgentTokenResponse>> {
+    return this.request<CreateAgentTokenResponse>('/api/v1/tokens', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    })
+  }
+
+  async revokeAgentToken(name: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/tokens/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  async regenerateAgentToken(name: string): Promise<APIResponse<{ name: string; token: string }>> {
+    return this.request<{ name: string; token: string }>(`/api/v1/tokens/${encodeURIComponent(name)}/regenerate`, {
+      method: 'POST',
     })
   }
 

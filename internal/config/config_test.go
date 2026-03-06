@@ -22,6 +22,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, 20000, config.ToolResponseLimit)
 
 	// Test security defaults (permissive)
+	assert.False(t, config.RequireMCPAuth)
 	assert.False(t, config.ReadOnlyMode)
 	assert.False(t, config.DisableManagement)
 	assert.True(t, config.AllowServerAdd)
@@ -96,6 +97,7 @@ func TestConfigJSONSerialization(t *testing.T) {
 		ToolsLimit:        20,
 		ToolResponseLimit: 50000,
 		CallToolTimeout:   Duration(5 * time.Minute),
+		RequireMCPAuth:    true,
 		ReadOnlyMode:      true,
 		DisableManagement: true,
 		AllowServerAdd:    false,
@@ -130,6 +132,7 @@ func TestConfigJSONSerialization(t *testing.T) {
 	assert.Equal(t, original.ToolsLimit, restored.ToolsLimit)
 	assert.Equal(t, original.ToolResponseLimit, restored.ToolResponseLimit)
 	assert.Equal(t, original.CallToolTimeout, restored.CallToolTimeout)
+	assert.Equal(t, original.RequireMCPAuth, restored.RequireMCPAuth)
 	assert.Equal(t, original.ReadOnlyMode, restored.ReadOnlyMode)
 	assert.Equal(t, original.DisableManagement, restored.DisableManagement)
 	assert.Equal(t, original.AllowServerAdd, restored.AllowServerAdd)
@@ -137,6 +140,21 @@ func TestConfigJSONSerialization(t *testing.T) {
 	assert.Equal(t, original.EnablePrompts, restored.EnablePrompts)
 	assert.Len(t, restored.Servers, 1)
 	assert.Equal(t, original.Servers[0].Name, restored.Servers[0].Name)
+}
+
+func TestConfigJSON_RequireMCPAuth(t *testing.T) {
+	jsonData := `{"require_mcp_auth": true, "listen": "127.0.0.1:8080"}`
+	var cfg Config
+	err := json.Unmarshal([]byte(jsonData), &cfg)
+	require.NoError(t, err)
+	assert.True(t, cfg.RequireMCPAuth)
+
+	// Default should be false
+	jsonData = `{"listen": "127.0.0.1:8080"}`
+	var cfg2 Config
+	err = json.Unmarshal([]byte(jsonData), &cfg2)
+	require.NoError(t, err)
+	assert.False(t, cfg2.RequireMCPAuth)
 }
 
 func TestServerConfig(t *testing.T) {
