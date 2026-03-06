@@ -1,0 +1,265 @@
+openapi: 3.0.3
+info:
+  title: MCPProxy Agent Tokens API
+  version: 1.0.0
+  description: REST API for managing scoped agent tokens
+
+paths:
+  /api/v1/tokens:
+    get:
+      summary: List all agent tokens
+      description: Returns metadata for all agent tokens. Token secrets are never returned.
+      operationId: listAgentTokens
+      security:
+        - apiKey: []
+      responses:
+        '200':
+          description: List of agent tokens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AgentTokenInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      summary: Create a new agent token
+      description: Creates a scoped agent token. The token secret is returned once in the response and cannot be retrieved again.
+      operationId: createAgentToken
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentTokenRequest'
+      responses:
+        '201':
+          description: Token created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateAgentTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Token with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/tokens/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Agent token name
+
+    get:
+      summary: Get agent token details
+      description: Returns metadata for a specific agent token. Token secret is never returned.
+      operationId: getAgentToken
+      security:
+        - apiKey: []
+      responses:
+        '200':
+          description: Agent token details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentTokenInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Revoke an agent token
+      description: Immediately revokes the agent token. Any subsequent requests using this token will be rejected.
+      operationId: revokeAgentToken
+      security:
+        - apiKey: []
+      responses:
+        '204':
+          description: Token revoked successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/tokens/{name}/regenerate:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Agent token name
+
+    post:
+      summary: Regenerate agent token secret
+      description: Generates a new secret for the token while preserving its configuration. The old secret immediately stops working.
+      operationId: regenerateAgentToken
+      security:
+        - apiKey: []
+      responses:
+        '200':
+          description: Token regenerated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegenerateAgentTokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Global API key (required for token management)
+
+  schemas:
+    CreateAgentTokenRequest:
+      type: object
+      required:
+        - name
+        - allowed_servers
+        - permissions
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+          description: Unique human-readable name for the token
+          example: openClaw-coding
+        allowed_servers:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: List of upstream server names the token can access, or ["*"] for all
+          example: ["github", "filesystem"]
+        permissions:
+          type: array
+          items:
+            type: string
+            enum: [read, write, destructive]
+          minItems: 1
+          description: Permission tiers the token can use. "read" is always required.
+          example: ["read", "write"]
+        expires_in:
+          type: string
+          description: Duration until expiry (e.g., "30d", "720h", "24h"). Default 30d, max 365d.
+          default: "30d"
+          example: "30d"
+
+    CreateAgentTokenResponse:
+      type: object
+      properties:
+        name:
+          type: string
+          example: openClaw-coding
+        token:
+          type: string
+          description: The token secret. Shown once — save it immediately.
+          example: mcp_agt_a8f3c2d1e4b5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1
+        allowed_servers:
+          type: array
+          items:
+            type: string
+          example: ["github", "filesystem"]
+        permissions:
+          type: array
+          items:
+            type: string
+          example: ["read", "write"]
+        expires_at:
+          type: string
+          format: date-time
+          example: "2026-04-05T12:00:00Z"
+        created_at:
+          type: string
+          format: date-time
+
+    AgentTokenInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          example: openClaw-coding
+        token_prefix:
+          type: string
+          description: First 12 characters of the token for identification
+          example: mcp_agt_a8f3
+        allowed_servers:
+          type: array
+          items:
+            type: string
+          example: ["github", "filesystem"]
+        permissions:
+          type: array
+          items:
+            type: string
+          example: ["read", "write"]
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked:
+          type: boolean
+
+    RegenerateAgentTokenResponse:
+      type: object
+      properties:
+        name:
+          type: string
+        token:
+          type: string
+          description: The new token secret. Shown once — save it immediately.
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        request_id:
+          type: string
+
+  responses:
+    Unauthorized:
+      description: Invalid or missing API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    BadRequest:
+      description: Invalid request parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Token not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
