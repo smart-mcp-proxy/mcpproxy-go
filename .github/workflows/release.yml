@@ -225,21 +225,21 @@ jobs:
             cgo: "1"
             name: mcpproxy-darwin-arm64
             archive_format: tar.gz
-          # Teams edition (Linux only)
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            cgo: "0"
-            name: mcpproxy-teams-linux-amd64
-            archive_format: tar.gz
-            edition: teams
-          - os: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            cgo: "0"
-            name: mcpproxy-teams-linux-arm64
-            archive_format: tar.gz
-            edition: teams
+          # Teams edition (Linux only) — uncomment when teams MVP is ready
+          # - os: ubuntu-latest
+          #   goos: linux
+          #   goarch: amd64
+          #   cgo: "0"
+          #   name: mcpproxy-teams-linux-amd64
+          #   archive_format: tar.gz
+          #   edition: teams
+          # - os: ubuntu-latest
+          #   goos: linux
+          #   goarch: arm64
+          #   cgo: "0"
+          #   name: mcpproxy-teams-linux-arm64
+          #   archive_format: tar.gz
+          #   edition: teams
 
     runs-on: ${{ matrix.os }}
 
@@ -988,7 +988,8 @@ jobs:
   build-docker:
     runs-on: ubuntu-latest
     needs: [build]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Disabled until teams MVP is ready — uncomment to enable
+    if: false && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
       packages: write
@@ -1013,7 +1014,7 @@ jobs:
             ghcr.io/smart-mcp-proxy/mcpproxy-teams:latest
 
   release:
-    needs: [build, sign-windows, generate-notes, build-docker]
+    needs: [build, sign-windows, generate-notes]  # add build-docker when teams MVP is ready
     runs-on: ubuntu-latest
     environment: production
 
