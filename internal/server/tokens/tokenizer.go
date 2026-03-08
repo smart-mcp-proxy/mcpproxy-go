@@ -36,16 +36,22 @@ type DefaultTokenizer struct {
 	enabled         bool
 }
 
-// NewTokenizer creates a new tokenizer instance
+// NewTokenizer creates a new tokenizer instance.
+// When enabled=false, encoding validation is skipped so that a disabled
+// tokenizer can always be created (even with a corrupted tiktoken cache).
+// See issue #318.
 func NewTokenizer(defaultEncoding string, logger *zap.SugaredLogger, enabled bool) (*DefaultTokenizer, error) {
 	if defaultEncoding == "" {
 		defaultEncoding = DefaultEncoding
 	}
 
-	// Validate encoding exists
-	_, err := tiktoken.GetEncoding(defaultEncoding)
-	if err != nil {
-		return nil, fmt.Errorf("invalid encoding %q: %w", defaultEncoding, err)
+	// Only validate encoding when tokenizer is enabled.
+	// A disabled tokenizer never calls tiktoken, so a corrupted cache is harmless.
+	if enabled {
+		_, err := tiktoken.GetEncoding(defaultEncoding)
+		if err != nil {
+			return nil, fmt.Errorf("invalid encoding %q: %w", defaultEncoding, err)
+		}
 	}
 
 	return &DefaultTokenizer{
@@ -190,4 +196,20 @@ func (t *DefaultTokenizer) GetDefaultEncoding() string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.defaultEncoding
+}
+
+// SafeGetDefaultEncoding extracts the default encoding from a Tokenizer interface
+// without risking a panic. Handles nil interface, nil underlying *DefaultTokenizer,
+// and non-DefaultTokenizer implementations. Returns DefaultEncoding as fallback.
+// See issue #318: a nil *DefaultTokenizer assigned to a Tokenizer interface creates
+// a non-nil interface with nil concrete value, causing panics on type assertion.
+func SafeGetDefaultEncoding(t Tokenizer) string {
+	if t == nil {
+		return DefaultEncoding
+	}
+	dt, ok := t.(*DefaultTokenizer)
+	if !ok || dt == nil {
+		return DefaultEncoding
+	}
+	return dt.GetDefaultEncoding()
 }
