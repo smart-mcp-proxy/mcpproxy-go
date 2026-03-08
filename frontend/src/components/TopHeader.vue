@@ -38,7 +38,7 @@
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
           </svg>
-          <span class="hidden sm:inline ml-2">Add Server</span>
+          <span class="hidden sm:inline ml-2">{{ addServerLabel }}</span>
         </button>
       </div>
 
@@ -95,11 +95,15 @@ import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
+import { useAuthStore } from '@/stores/auth'
 import AddServerModal from './AddServerModal.vue'
 
 const router = useRouter()
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
+const authStore = useAuthStore()
+
+const addServerLabel = computed(() => authStore.isTeamsEdition ? 'Add Personal Server' : 'Add Server')
 
 const searchQuery = ref('')
 const copyTooltip = ref('Copy MCP address')

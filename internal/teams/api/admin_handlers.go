@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/multiuser"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/users"
@@ -28,6 +30,7 @@ type AdminHandlers struct {
 	sharedServers  []*config.ServerConfig
 	config         *config.Config
 	configPath     string
+	managementSvc  interface{} // management.Service - kept as interface{} to avoid circular imports
 	logger         *zap.SugaredLogger
 }
 
@@ -40,6 +43,7 @@ func NewAdminHandlers(
 	sharedServers []*config.ServerConfig,
 	cfg *config.Config,
 	configPath string,
+	managementSvc interface{},
 	logger *zap.SugaredLogger,
 ) *AdminHandlers {
 	return &AdminHandlers{
@@ -50,6 +54,7 @@ func NewAdminHandlers(
 		sharedServers:  sharedServers,
 		config:         cfg,
 		configPath:     configPath,
+		managementSvc:  managementSvc,
 		logger:         logger,
 	}
 }
@@ -65,6 +70,9 @@ func (h *AdminHandlers) RegisterRoutes(r chi.Router) {
 	r.Get("/admin/dashboard", h.getDashboard)
 	r.Get("/admin/servers", h.listAdminServers)
 	r.Post("/admin/servers/{name}/shared", h.toggleSharedServer)
+	r.Post("/admin/servers/{name}/enable", h.enableAdminServer)
+	r.Post("/admin/servers/{name}/disable", h.disableAdminServer)
+	r.Post("/admin/servers/{name}/restart", h.restartAdminServer)
 }
 
 // RegisterRoutesWithPrefix registers admin routes with a path prefix.
@@ -77,6 +85,9 @@ func (h *AdminHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 	r.Get(prefix+"/admin/dashboard", h.getDashboard)
 	r.Get(prefix+"/admin/servers", h.listAdminServers)
 	r.Post(prefix+"/admin/servers/{name}/shared", h.toggleSharedServer)
+	r.Post(prefix+"/admin/servers/{name}/enable", h.enableAdminServer)
+	r.Post(prefix+"/admin/servers/{name}/disable", h.disableAdminServer)
+	r.Post(prefix+"/admin/servers/{name}/restart", h.restartAdminServer)
 }
 
 // --- Response types ---
@@ -472,12 +483,149 @@ func (h *AdminHandlers) toggleSharedServer(w http.ResponseWriter, r *http.Reques
 }
 
 // listAdminServers returns all configured servers for admin management.
+// When the management service is available, it returns live connection status and stats.
 func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, h.config.Servers)
+	type lister interface {
+		ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
+	}
+	mgmt, ok := h.managementSvc.(lister)
+	if !ok {
+		// Fallback to config-only listing when management service is not available.
+		writeJSON(w, http.StatusOK, h.config.Servers)
+		return
+	}
+
+	servers, stats, err := mgmt.ListServers(r.Context())
+	if err != nil {
+		h.logger.Errorw("failed to list servers via management service", "error", err)
+		// Fallback to config-only listing on error.
+		writeJSON(w, http.StatusOK, h.config.Servers)
+		return
+	}
+
+	// Build a lookup for the shared flag from config (contracts.Server doesn't have it).
+	sharedMap := make(map[string]bool, len(h.config.Servers))
+	for _, sc := range h.config.Servers {
+		sharedMap[sc.Name] = sc.Shared
+	}
+
+	// Enrich the response with the shared flag.
+	type enrichedServer struct {
+		*contracts.Server
+		Shared bool `json:"shared"`
+	}
+	enriched := make([]*enrichedServer, len(servers))
+	for i, s := range servers {
+		enriched[i] = &enrichedServer{Server: s, Shared: sharedMap[s.Name]}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"servers": enriched,
+		"stats":   stats,
+	})
+}
+
+// enableAdminServer enables an upstream server via the management service.
+func (h *AdminHandlers) enableAdminServer(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "Server name is required")
+		return
+	}
+
+	type enabler interface {
+		EnableServer(ctx context.Context, name string, enabled bool) error
+	}
+	mgmt, ok := h.managementSvc.(enabler)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	if err := mgmt.EnableServer(r.Context(), name, true); err != nil {
+		h.logger.Errorw("failed to enable server", "server", name, "error", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
+		return
+	}
+
+	h.logger.Infow("admin enabled server", "server", name)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"server": name, "action": "enable", "success": true,
+	})
+}
+
+// disableAdminServer disables an upstream server via the management service.
+func (h *AdminHandlers) disableAdminServer(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "Server name is required")
+		return
+	}
+
+	type enabler interface {
+		EnableServer(ctx context.Context, name string, enabled bool) error
+	}
+	mgmt, ok := h.managementSvc.(enabler)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	if err := mgmt.EnableServer(r.Context(), name, false); err != nil {
+		h.logger.Errorw("failed to disable server", "server", name, "error", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
+		return
+	}
+
+	h.logger.Infow("admin disabled server", "server", name)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"server": name, "action": "disable", "success": true,
+	})
+}
+
+// restartAdminServer restarts an upstream server via the management service.
+func (h *AdminHandlers) restartAdminServer(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "Server name is required")
+		return
+	}
+
+	type restarter interface {
+		RestartServer(ctx context.Context, name string) error
+	}
+	mgmt, ok := h.managementSvc.(restarter)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "Management service not available")
+		return
+	}
+
+	if err := mgmt.RestartServer(r.Context(), name); err != nil {
+		h.logger.Errorw("failed to restart server", "server", name, "error", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
+		return
+	}
+
+	h.logger.Infow("admin restarted server", "server", name)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"server": name, "action": "restart", "success": true,
+	})
 }
 
 // --- Helpers ---

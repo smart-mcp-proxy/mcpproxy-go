@@ -42,6 +42,7 @@ type AgentToken struct {
 	CreatedAt      time.Time `json:"created_at"`
 	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`
 	Revoked        bool      `json:"revoked"`
+	UserID         string    `json:"user_id,omitempty"` // Owner user ID (teams edition)
 }
 
 // IsExpired returns true if the token has passed its expiry time.

@@ -156,6 +156,7 @@ const personalMenu = [
 const teamsUserMenu = [
   { name: 'My Servers', path: '/my/servers' },
   { name: 'My Activity', path: '/my/activity' },
+  { name: 'Agent Tokens', path: '/my/tokens' },
   { name: 'Diagnostics', path: '/my/diagnostics' },
   { name: 'Search', path: '/search' },
 ]
@@ -163,11 +164,10 @@ const teamsUserMenu = [
 // Teams edition: items visible only to admins
 const teamsAdminMenu = [
   { name: 'Dashboard', path: '/admin/dashboard' },
-  { name: 'Servers', path: '/admin/servers' },
+  { name: 'Server Management', path: '/admin/servers' },
   { name: 'Activity (All)', path: '/activity' },
   { name: 'Users', path: '/admin/users' },
   { name: 'Sessions', path: '/sessions' },
-  { name: 'Agent Tokens', path: '/tokens' },
   { name: 'Configuration', path: '/settings' },
 ]
 

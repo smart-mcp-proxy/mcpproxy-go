@@ -38,7 +38,7 @@ func testSetup(t *testing.T, sharedServers []*config.ServerConfig) (*UserHandler
 	require.NoError(t, store.EnsureBuckets())
 
 	logger := zap.NewNop().Sugar()
-	handlers := NewUserHandlers(store, sharedServers, logger)
+	handlers := NewUserHandlers(store, sharedServers, nil, nil, logger)
 
 	return handlers, store
 }

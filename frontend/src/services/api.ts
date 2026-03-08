@@ -663,6 +663,47 @@ class APIService {
     })
   }
 
+  // Admin server management (Teams)
+  async adminEnableServer(name: string): Promise<APIResponse<any>> {
+    return this.request(`/api/v1/admin/servers/${encodeURIComponent(name)}/enable`, { method: 'POST', credentials: 'include' } as RequestInit)
+  }
+
+  async adminDisableServer(name: string): Promise<APIResponse<any>> {
+    return this.request(`/api/v1/admin/servers/${encodeURIComponent(name)}/disable`, { method: 'POST', credentials: 'include' } as RequestInit)
+  }
+
+  async adminRestartServer(name: string): Promise<APIResponse<any>> {
+    return this.request(`/api/v1/admin/servers/${encodeURIComponent(name)}/restart`, { method: 'POST', credentials: 'include' } as RequestInit)
+  }
+
+  // User tokens (Teams)
+  async listUserTokens(): Promise<APIResponse<{ tokens: AgentTokenInfo[] }>> {
+    return this.request<{ tokens: AgentTokenInfo[] }>('/api/v1/user/tokens', { credentials: 'include' } as RequestInit)
+  }
+
+  async createUserToken(data: CreateAgentTokenRequest): Promise<APIResponse<CreateAgentTokenResponse>> {
+    return this.request<CreateAgentTokenResponse>('/api/v1/user/tokens', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    } as RequestInit)
+  }
+
+  async revokeUserToken(name: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/user/tokens/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    } as RequestInit)
+  }
+
+  async regenerateUserToken(name: string): Promise<APIResponse<{ name: string; token: string }>> {
+    return this.request<{ name: string; token: string }>(`/api/v1/user/tokens/${encodeURIComponent(name)}/regenerate`, {
+      method: 'POST',
+      credentials: 'include',
+    } as RequestInit)
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {

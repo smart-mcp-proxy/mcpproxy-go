@@ -112,6 +112,12 @@ const router = createRouter({
       component: () => import('@/views/teams/UserDiagnostics.vue'),
       meta: { title: 'Diagnostics', requiresAuth: true },
     },
+    {
+      path: '/my/tokens',
+      name: 'user-tokens',
+      component: () => import('@/views/teams/UserTokens.vue'),
+      meta: { title: 'Agent Tokens', requiresAuth: true },
+    },
     // Teams admin routes
     {
       path: '/admin/dashboard',

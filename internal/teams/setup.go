@@ -73,8 +73,8 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// Mounted outside the API key group so session cookies work.
 	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)
 	configPath := config.GetConfigPath(deps.Config.DataDir)
-	adminHandlers := teamsapi.NewAdminHandlers(userStore, nil, sessionManager, cfg.AdminEmails, sharedServers, deps.Config, configPath, deps.Logger)
-	userHandlers := teamsapi.NewUserHandlers(userStore, sharedServers, deps.Logger)
+	adminHandlers := teamsapi.NewAdminHandlers(userStore, nil, sessionManager, cfg.AdminEmails, sharedServers, deps.Config, configPath, deps.ManagementService, deps.Logger)
+	userHandlers := teamsapi.NewUserHandlers(userStore, sharedServers, deps.StorageManager, hmacKey, deps.Logger)
 	userActivityHandlers := teamsapi.NewUserActivityHandlers(nil, userStore, sharedServers, deps.Logger)
 
 	deps.Router.Group(func(r chi.Router) {

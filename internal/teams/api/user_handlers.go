@@ -22,14 +22,28 @@ type UserHandlers struct {
 	userStore     *users.UserStore
 	logger        *zap.SugaredLogger
 	sharedServers []*config.ServerConfig
+	tokenStore    tokenStore
+	hmacKey       []byte
+}
+
+// tokenStore defines the interface for agent token storage operations.
+// Implemented by *storage.Manager.
+type tokenStore interface {
+	CreateAgentToken(token auth.AgentToken, rawToken string, hmacKey []byte) error
+	ListAgentTokens() ([]auth.AgentToken, error)
+	GetAgentTokenByName(name string) (*auth.AgentToken, error)
+	RevokeAgentToken(name string) error
+	RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 }
 
 // NewUserHandlers creates a new UserHandlers instance.
-func NewUserHandlers(userStore *users.UserStore, sharedServers []*config.ServerConfig, logger *zap.SugaredLogger) *UserHandlers {
+func NewUserHandlers(userStore *users.UserStore, sharedServers []*config.ServerConfig, tokenStore tokenStore, hmacKey []byte, logger *zap.SugaredLogger) *UserHandlers {
 	return &UserHandlers{
 		userStore:     userStore,
 		logger:        logger,
 		sharedServers: sharedServers,
+		tokenStore:    tokenStore,
+		hmacKey:       hmacKey,
 	}
 }
 
@@ -43,6 +57,12 @@ func (h *UserHandlers) RegisterRoutes(r chi.Router) {
 		r.Delete("/{name}", h.deleteServer)
 		r.Post("/{name}/enable", h.enableServer)
 	})
+	r.Route("/user/tokens", func(r chi.Router) {
+		r.Get("/", h.listUserTokens)
+		r.Post("/", h.createUserToken)
+		r.Delete("/{name}", h.revokeUserToken)
+		r.Post("/{name}/regenerate", h.regenerateUserToken)
+	})
 }
 
 // RegisterRoutesWithPrefix registers user server routes with a path prefix.
@@ -53,6 +73,10 @@ func (h *UserHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 	r.Put(prefix+"/user/servers/{name}", h.updateServer)
 	r.Delete(prefix+"/user/servers/{name}", h.deleteServer)
 	r.Post(prefix+"/user/servers/{name}/enable", h.enableServer)
+	r.Get(prefix+"/user/tokens", h.listUserTokens)
+	r.Post(prefix+"/user/tokens", h.createUserToken)
+	r.Delete(prefix+"/user/tokens/{name}", h.revokeUserToken)
+	r.Post(prefix+"/user/tokens/{name}/regenerate", h.regenerateUserToken)
 }
 
 // --- Request/Response types ---
@@ -442,6 +466,259 @@ func (h *UserHandlers) enableServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, &ServerResponse{
 		ServerConfig: existing,
 		Ownership:    "personal",
+	})
+}
+
+// --- Token request/response types ---
+
+// CreateTokenRequest represents the request body for creating a user token.
+type CreateTokenRequest struct {
+	Name           string   `json:"name"`
+	AllowedServers []string `json:"allowed_servers,omitempty"`
+	Permissions    []string `json:"permissions"`
+	ExpiresIn      string   `json:"expires_in,omitempty"` // Duration string, e.g. "720h" for 30 days
+}
+
+// AgentTokenResponse represents a token in API responses.
+type AgentTokenResponse struct {
+	Name           string     `json:"name"`
+	TokenPrefix    string     `json:"token_prefix"`
+	AllowedServers []string   `json:"allowed_servers"`
+	Permissions    []string   `json:"permissions"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`
+	Revoked        bool       `json:"revoked"`
+	RawToken       string     `json:"token,omitempty"` // Only returned on create/regenerate
+}
+
+// --- Token handlers ---
+
+// listUserTokens returns all agent tokens owned by the authenticated user.
+func (h *UserHandlers) listUserTokens(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserID(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	if h.tokenStore == nil {
+		writeJSON(w, http.StatusOK, []AgentTokenResponse{})
+		return
+	}
+
+	allTokens, err := h.tokenStore.ListAgentTokens()
+	if err != nil {
+		h.logger.Errorw("failed to list agent tokens", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to list tokens")
+		return
+	}
+
+	// Filter to only tokens owned by this user.
+	var userTokens []AgentTokenResponse
+	for _, t := range allTokens {
+		if t.UserID != userID {
+			continue
+		}
+		userTokens = append(userTokens, AgentTokenResponse{
+			Name:           t.Name,
+			TokenPrefix:    t.TokenPrefix,
+			AllowedServers: t.AllowedServers,
+			Permissions:    t.Permissions,
+			ExpiresAt:      t.ExpiresAt,
+			CreatedAt:      t.CreatedAt,
+			LastUsedAt:     t.LastUsedAt,
+			Revoked:        t.Revoked,
+		})
+	}
+
+	if userTokens == nil {
+		userTokens = []AgentTokenResponse{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"tokens": userTokens})
+}
+
+// createUserToken creates a new agent token owned by the authenticated user.
+func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserID(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	if h.tokenStore == nil {
+		writeError(w, http.StatusInternalServerError, "Token store not available")
+		return
+	}
+
+	var req CreateTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "Token name is required")
+		return
+	}
+
+	if err := auth.ValidatePermissions(req.Permissions); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid permissions: %v", err))
+		return
+	}
+
+	// Parse expiry duration (default 30 days).
+	var expiresAt time.Time
+	if req.ExpiresIn != "" {
+		duration, err := time.ParseDuration(req.ExpiresIn)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid expires_in duration: %v", err))
+			return
+		}
+		expiresAt = time.Now().UTC().Add(duration)
+	} else {
+		expiresAt = time.Now().UTC().Add(30 * 24 * time.Hour) // 30 days default
+	}
+
+	rawToken, err := auth.GenerateToken()
+	if err != nil {
+		h.logger.Errorw("failed to generate token", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to generate token")
+		return
+	}
+
+	token := auth.AgentToken{
+		Name:           req.Name,
+		AllowedServers: req.AllowedServers,
+		Permissions:    req.Permissions,
+		ExpiresAt:      expiresAt,
+		CreatedAt:      time.Now().UTC(),
+		UserID:         userID,
+	}
+
+	if err := h.tokenStore.CreateAgentToken(token, rawToken, h.hmacKey); err != nil {
+		h.logger.Errorw("failed to create agent token", "user_id", userID, "name", req.Name, "error", err)
+		writeError(w, http.StatusConflict, fmt.Sprintf("Failed to create token: %v", err))
+		return
+	}
+
+	h.logger.Infow("user token created", "user_id", userID, "name", req.Name)
+	writeJSON(w, http.StatusCreated, AgentTokenResponse{
+		Name:           token.Name,
+		TokenPrefix:    auth.TokenPrefix(rawToken),
+		AllowedServers: token.AllowedServers,
+		Permissions:    token.Permissions,
+		ExpiresAt:      token.ExpiresAt,
+		CreatedAt:      token.CreatedAt,
+		RawToken:       rawToken,
+	})
+}
+
+// revokeUserToken revokes an agent token owned by the authenticated user.
+func (h *UserHandlers) revokeUserToken(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserID(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	if h.tokenStore == nil {
+		writeError(w, http.StatusInternalServerError, "Token store not available")
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "Token name is required")
+		return
+	}
+
+	// Verify the token belongs to this user.
+	existing, err := h.tokenStore.GetAgentTokenByName(name)
+	if err != nil {
+		h.logger.Errorw("failed to get token for revoke", "user_id", userID, "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get token")
+		return
+	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+		return
+	}
+	if existing.UserID != userID {
+		writeError(w, http.StatusForbidden, "Cannot revoke another user's token")
+		return
+	}
+
+	if err := h.tokenStore.RevokeAgentToken(name); err != nil {
+		h.logger.Errorw("failed to revoke token", "user_id", userID, "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to revoke token: %v", err))
+		return
+	}
+
+	h.logger.Infow("user token revoked", "user_id", userID, "name", name)
+	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("Token %q revoked", name)})
+}
+
+// regenerateUserToken regenerates an agent token owned by the authenticated user.
+func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserID(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	if h.tokenStore == nil {
+		writeError(w, http.StatusInternalServerError, "Token store not available")
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "Token name is required")
+		return
+	}
+
+	// Verify the token belongs to this user.
+	existing, err := h.tokenStore.GetAgentTokenByName(name)
+	if err != nil {
+		h.logger.Errorw("failed to get token for regenerate", "user_id", userID, "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get token")
+		return
+	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+		return
+	}
+	if existing.UserID != userID {
+		writeError(w, http.StatusForbidden, "Cannot regenerate another user's token")
+		return
+	}
+
+	newRawToken, err := auth.GenerateToken()
+	if err != nil {
+		h.logger.Errorw("failed to generate new token", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to generate new token")
+		return
+	}
+
+	updated, err := h.tokenStore.RegenerateAgentToken(name, newRawToken, h.hmacKey)
+	if err != nil {
+		h.logger.Errorw("failed to regenerate token", "user_id", userID, "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to regenerate token: %v", err))
+		return
+	}
+
+	h.logger.Infow("user token regenerated", "user_id", userID, "name", name)
+	writeJSON(w, http.StatusOK, AgentTokenResponse{
+		Name:           updated.Name,
+		TokenPrefix:    updated.TokenPrefix,
+		AllowedServers: updated.AllowedServers,
+		Permissions:    updated.Permissions,
+		ExpiresAt:      updated.ExpiresAt,
+		CreatedAt:      updated.CreatedAt,
+		RawToken:       newRawToken,
 	})
 }
 

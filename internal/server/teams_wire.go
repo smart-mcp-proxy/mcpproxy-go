@@ -25,11 +25,13 @@ func wireTeamsOAuth(s *Server, httpAPIServer *httpapi.Server) {
 	}
 
 	deps := teams.Dependencies{
-		Router:  httpAPIServer.Router(),
-		DB:      sm.GetDB(),
-		Logger:  s.logger.Sugar(),
-		Config:  cfg,
-		DataDir: cfg.DataDir,
+		Router:            httpAPIServer.Router(),
+		DB:                sm.GetDB(),
+		Logger:            s.logger.Sugar(),
+		Config:            cfg,
+		DataDir:           cfg.DataDir,
+		ManagementService: s.runtime.GetManagementService(),
+		StorageManager:    sm,
 	}
 
 	if err := teams.SetupAll(deps); err != nil {

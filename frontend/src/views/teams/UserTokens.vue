@@ -1,0 +1,547 @@
+<template>
+  <div class="p-4 max-w-6xl mx-auto">
+    <!-- Page Header -->
+    <div class="flex justify-between items-center mb-6">
+      <div>
+        <h1 class="text-2xl font-bold">Agent Tokens</h1>
+        <p class="text-sm text-base-content/60 mt-1">Create tokens for AI agents to act on your behalf</p>
+      </div>
+      <div class="flex gap-2">
+        <button @click="loadTokens" :disabled="loading" class="btn btn-ghost btn-sm">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+        </button>
+        <button @click="openCreateDialog" class="btn btn-primary btn-sm">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+          </svg>
+          Create Token
+        </button>
+      </div>
+    </div>
+
+    <!-- Stats row -->
+    <div class="grid grid-cols-3 gap-3 mb-6">
+      <div class="stat bg-base-100 rounded-lg shadow-sm p-3">
+        <div class="stat-title text-xs">Total Tokens</div>
+        <div class="stat-value text-lg">{{ tokens.length }}</div>
+      </div>
+      <div class="stat bg-base-100 rounded-lg shadow-sm p-3">
+        <div class="stat-title text-xs">Active</div>
+        <div class="stat-value text-lg text-success">{{ activeCount }}</div>
+      </div>
+      <div class="stat bg-base-100 rounded-lg shadow-sm p-3">
+        <div class="stat-title text-xs">Expired / Revoked</div>
+        <div class="stat-value text-lg text-warning">{{ expiredOrRevokedCount }}</div>
+      </div>
+    </div>
+
+    <!-- Token Secret Display (shown after creation or regeneration) -->
+    <div v-if="newTokenSecret" class="alert alert-warning shadow-lg mb-6">
+      <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+      </svg>
+      <div class="flex-1">
+        <h3 class="font-bold">Save this token now!</h3>
+        <p class="text-sm mb-2">This token cannot be retrieved again after you dismiss this message.</p>
+        <div class="flex items-center gap-2">
+          <code class="text-sm bg-neutral text-neutral-content px-3 py-2 rounded font-mono break-all">{{ newTokenSecret }}</code>
+          <button @click="copyToken" class="btn btn-sm btn-neutral shrink-0" :class="{ 'btn-success': copied }">
+            {{ copied ? 'Copied!' : 'Copy' }}
+          </button>
+        </div>
+      </div>
+      <button @click="dismissTokenSecret" class="btn btn-sm btn-ghost shrink-0">Dismiss</button>
+    </div>
+
+    <!-- Loading State -->
+    <div v-if="loading" class="flex justify-center py-8">
+      <span class="loading loading-spinner loading-lg"></span>
+    </div>
+
+    <!-- Error State -->
+    <div v-else-if="error" class="alert alert-error">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <div>
+        <h3 class="font-bold">Failed to load tokens</h3>
+        <div class="text-sm">{{ error }}</div>
+      </div>
+      <button @click="loadTokens" class="btn btn-sm">Try Again</button>
+    </div>
+
+    <!-- Empty State -->
+    <div v-else-if="tokens.length === 0" class="rounded-lg border border-base-300 bg-base-200/30 py-12 text-center">
+      <svg class="w-16 h-16 mx-auto mb-4 text-base-content/30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+      </svg>
+      <h3 class="text-lg font-semibold mb-2">No agent tokens yet</h3>
+      <p class="text-base-content/50 text-sm mb-4">Create scoped tokens for your AI agents and automated workflows.</p>
+      <button @click="openCreateDialog" class="btn btn-primary btn-sm">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+        </svg>
+        Create Your First Token
+      </button>
+    </div>
+
+    <!-- Token List Table -->
+    <div v-else class="overflow-x-auto">
+      <table class="table table-sm w-full">
+        <thead>
+          <tr class="text-xs uppercase text-base-content/50">
+            <th>Name</th>
+            <th>Prefix</th>
+            <th>Servers</th>
+            <th>Permissions</th>
+            <th>Expires</th>
+            <th>Last Used</th>
+            <th>Status</th>
+            <th class="text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="token in tokens" :key="token.name" class="hover:bg-base-200/50">
+            <td class="font-medium">{{ token.name }}</td>
+            <td>
+              <code class="text-xs bg-base-200 px-1.5 py-0.5 rounded">{{ token.token_prefix }}</code>
+            </td>
+            <td>
+              <div class="flex flex-wrap gap-1">
+                <span v-for="server in token.allowed_servers" :key="server" class="badge badge-outline badge-xs">
+                  {{ server }}
+                </span>
+              </div>
+            </td>
+            <td>
+              <div class="flex flex-wrap gap-1">
+                <span v-for="perm in token.permissions" :key="perm" class="badge badge-xs" :class="permissionBadgeClass(perm)">
+                  {{ perm }}
+                </span>
+              </div>
+            </td>
+            <td>
+              <span class="text-xs" :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) }">
+                {{ formatDate(token.expires_at) }}
+              </span>
+            </td>
+            <td>
+              <span v-if="token.last_used_at" class="text-xs">{{ formatDate(token.last_used_at) }}</span>
+              <span v-else class="text-base-content/40 text-xs">Never</span>
+            </td>
+            <td>
+              <span v-if="token.revoked" class="badge badge-error badge-xs">Revoked</span>
+              <span v-else-if="isExpired(token)" class="badge badge-warning badge-xs">Expired</span>
+              <span v-else class="badge badge-success badge-xs">Active</span>
+            </td>
+            <td class="text-right">
+              <div class="dropdown dropdown-end">
+                <label tabindex="0" class="btn btn-ghost btn-xs btn-square">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01" />
+                  </svg>
+                </label>
+                <ul tabindex="0" class="dropdown-content z-[1] menu p-1 shadow-lg bg-base-100 rounded-lg w-40 border border-base-300">
+                  <li><a @click="handleRegenerate(token.name)" :class="{ 'opacity-50 pointer-events-none': token.revoked }">
+                    Regenerate
+                  </a></li>
+                  <li class="border-t border-base-200 mt-1 pt-1"><a class="text-error" @click="handleRevoke(token.name)" :class="{ 'opacity-50 pointer-events-none': token.revoked }">
+                    Revoke
+                  </a></li>
+                </ul>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Create Token Dialog -->
+    <dialog class="modal" :class="{ 'modal-open': showCreateModal }">
+      <div class="modal-box">
+        <h3 class="font-bold text-lg mb-4">Create Agent Token</h3>
+
+        <div class="space-y-4">
+          <!-- Name -->
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-medium">Token Name</span>
+            </label>
+            <input
+              v-model="createForm.name"
+              type="text"
+              placeholder="e.g., ci-pipeline, dev-agent"
+              class="input input-bordered w-full"
+              :class="{ 'input-error': createFormErrors.name }"
+            />
+            <label class="label" v-if="createFormErrors.name">
+              <span class="label-text-alt text-error">{{ createFormErrors.name }}</span>
+            </label>
+            <label class="label" v-else>
+              <span class="label-text-alt">Alphanumeric, hyphens, and underscores only</span>
+            </label>
+          </div>
+
+          <!-- Allowed Servers -->
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-medium">Allowed Servers</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer mb-2 px-1">
+              <input
+                type="checkbox"
+                :checked="createForm.allServers"
+                @change="toggleAllServers"
+                class="checkbox checkbox-sm checkbox-primary"
+              />
+              <span class="text-sm font-medium">All servers</span>
+              <span class="badge badge-ghost badge-xs">wildcard</span>
+            </label>
+            <div
+              v-if="!createForm.allServers"
+              class="border border-base-300 rounded-lg p-3 max-h-48 overflow-y-auto space-y-1"
+            >
+              <div v-if="availableServers.length === 0" class="text-sm text-base-content/50 py-2 text-center">
+                No servers available
+              </div>
+              <label
+                v-for="server in availableServers"
+                :key="server.name"
+                class="flex items-center gap-2 cursor-pointer hover:bg-base-200 rounded px-2 py-1"
+              >
+                <input
+                  type="checkbox"
+                  :value="server.name"
+                  v-model="createForm.selectedServers"
+                  class="checkbox checkbox-sm"
+                />
+                <span class="text-sm">{{ server.name }}</span>
+              </label>
+            </div>
+            <label class="label" v-if="!createForm.allServers && createFormErrors.servers">
+              <span class="label-text-alt text-error">{{ createFormErrors.servers }}</span>
+            </label>
+          </div>
+
+          <!-- Permissions -->
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-medium">Permissions</span>
+            </label>
+            <div class="flex flex-col gap-2">
+              <label class="flex items-center gap-2 cursor-not-allowed">
+                <input type="checkbox" checked disabled class="checkbox checkbox-sm checkbox-info" />
+                <span class="text-sm">read</span>
+                <span class="badge badge-info badge-xs">always included</span>
+              </label>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input v-model="createForm.permWrite" type="checkbox" class="checkbox checkbox-sm checkbox-warning" />
+                <span class="text-sm">write</span>
+              </label>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input v-model="createForm.permDestructive" type="checkbox" class="checkbox checkbox-sm checkbox-error" />
+                <span class="text-sm">destructive</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Expiry -->
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-medium">Expires In</span>
+            </label>
+            <select v-model="createForm.expiresIn" class="select select-bordered w-full">
+              <option value="168h">7 days</option>
+              <option value="720h">30 days</option>
+              <option value="2160h">90 days</option>
+              <option value="8760h">365 days</option>
+            </select>
+          </div>
+        </div>
+
+        <div v-if="createError" class="alert alert-error mt-4 text-sm">{{ createError }}</div>
+
+        <div class="modal-action">
+          <button @click="closeCreateDialog" class="btn">Cancel</button>
+          <button @click="handleCreate" :disabled="creating" class="btn btn-primary">
+            <span v-if="creating" class="loading loading-spinner loading-sm"></span>
+            {{ creating ? 'Creating...' : 'Create Token' }}
+          </button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop" @click="closeCreateDialog"></form>
+    </dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+
+interface TokenInfo {
+  name: string
+  token_prefix: string
+  allowed_servers: string[]
+  permissions: string[]
+  expires_at: string
+  created_at: string
+  last_used_at: string | null
+  revoked: boolean
+}
+
+interface AvailableServer {
+  name: string
+}
+
+const loading = ref(true)
+const error = ref<string | null>(null)
+const tokens = ref<TokenInfo[]>([])
+const creating = ref(false)
+const createError = ref('')
+const newTokenSecret = ref<string | null>(null)
+const copied = ref(false)
+const showCreateModal = ref(false)
+const availableServers = ref<AvailableServer[]>([])
+
+const createForm = ref({
+  name: '',
+  allServers: true,
+  selectedServers: [] as string[],
+  permWrite: false,
+  permDestructive: false,
+  expiresIn: '720h',
+})
+
+const createFormErrors = ref<{ name?: string; servers?: string }>({})
+
+// Computed stats
+const activeCount = computed(() => tokens.value.filter(t => !t.revoked && !isExpired(t)).length)
+const expiredOrRevokedCount = computed(() => tokens.value.filter(t => t.revoked || isExpired(t)).length)
+
+// Helper functions
+function isExpired(token: TokenInfo): boolean {
+  return new Date(token.expires_at) < new Date()
+}
+
+function isExpiringSoon(token: TokenInfo): boolean {
+  if (token.revoked || isExpired(token)) return false
+  const expiresAt = new Date(token.expires_at)
+  const now = new Date()
+  const hoursLeft = (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60)
+  return hoursLeft < 72
+}
+
+function formatDate(dateStr: string): string {
+  const date = new Date(dateStr)
+  return date.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function permissionBadgeClass(perm: string): string {
+  switch (perm) {
+    case 'read': return 'badge-info'
+    case 'write': return 'badge-warning'
+    case 'destructive': return 'badge-error'
+    default: return 'badge-ghost'
+  }
+}
+
+function toggleAllServers(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  createForm.value.allServers = checked
+  if (checked) {
+    createForm.value.selectedServers = []
+  }
+}
+
+// Data loading
+async function loadTokens() {
+  loading.value = true
+  error.value = null
+  try {
+    const res = await fetch('/api/v1/user/tokens', { credentials: 'include' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    const data = await res.json()
+    tokens.value = data.tokens || []
+  } catch (err: any) {
+    error.value = err.message || 'Failed to load tokens'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadAvailableServers() {
+  try {
+    const res = await fetch('/api/v1/user/servers', { credentials: 'include' })
+    if (!res.ok) return
+    const data = await res.json()
+    const personal = (data.personal || []).map((s: any) => ({ name: s.name }))
+    const shared = (data.shared || []).map((s: any) => ({ name: s.name }))
+    availableServers.value = [...personal, ...shared].sort((a, b) => a.name.localeCompare(b.name))
+  } catch {
+    // Non-critical, leave empty
+  }
+}
+
+// Create token
+function openCreateDialog() {
+  createForm.value = {
+    name: '',
+    allServers: true,
+    selectedServers: [],
+    permWrite: false,
+    permDestructive: false,
+    expiresIn: '720h',
+  }
+  createFormErrors.value = {}
+  createError.value = ''
+  loadAvailableServers()
+  showCreateModal.value = true
+}
+
+function closeCreateDialog() {
+  showCreateModal.value = false
+}
+
+async function handleCreate() {
+  createFormErrors.value = {}
+  createError.value = ''
+  const name = createForm.value.name.trim()
+
+  if (!name) {
+    createFormErrors.value.name = 'Token name is required'
+    return
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    createFormErrors.value.name = 'Only alphanumeric characters, hyphens, and underscores allowed'
+    return
+  }
+
+  if (!createForm.value.allServers && createForm.value.selectedServers.length === 0) {
+    createFormErrors.value.servers = 'Select at least one server or choose "All servers"'
+    return
+  }
+
+  creating.value = true
+
+  try {
+    const allowedServers = createForm.value.allServers
+      ? ['*']
+      : [...createForm.value.selectedServers]
+
+    const permissions: string[] = ['read']
+    if (createForm.value.permWrite) permissions.push('write')
+    if (createForm.value.permDestructive) permissions.push('destructive')
+
+    const res = await fetch('/api/v1/user/tokens', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        allowed_servers: allowedServers,
+        permissions,
+        expires_in: createForm.value.expiresIn,
+      }),
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || data.message || `HTTP ${res.status}`)
+    }
+
+    const data = await res.json()
+    newTokenSecret.value = data.token
+    copied.value = false
+    closeCreateDialog()
+    await loadTokens()
+  } catch (err: any) {
+    createError.value = err.message || 'Failed to create token'
+  } finally {
+    creating.value = false
+  }
+}
+
+// Regenerate token
+async function handleRegenerate(name: string) {
+  if (!confirm(`Regenerate the secret for token "${name}"? The old secret will stop working immediately.`)) {
+    return
+  }
+
+  try {
+    const res = await fetch(`/api/v1/user/tokens/${encodeURIComponent(name)}/regenerate`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || data.message || `HTTP ${res.status}`)
+    }
+
+    const data = await res.json()
+    newTokenSecret.value = data.token
+    copied.value = false
+  } catch (err: any) {
+    error.value = err.message || 'Failed to regenerate token'
+  }
+}
+
+// Revoke token
+async function handleRevoke(name: string) {
+  if (!confirm(`Revoke token "${name}"? This action cannot be undone.`)) {
+    return
+  }
+
+  try {
+    const res = await fetch(`/api/v1/user/tokens/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || data.message || `HTTP ${res.status}`)
+    }
+
+    await loadTokens()
+  } catch (err: any) {
+    error.value = err.message || 'Failed to revoke token'
+  }
+}
+
+// Clipboard
+async function copyToken() {
+  if (!newTokenSecret.value) return
+  try {
+    await navigator.clipboard.writeText(newTokenSecret.value)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = newTokenSecret.value!
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  }
+}
+
+function dismissTokenSecret() {
+  newTokenSecret.value = null
+  copied.value = false
+}
+
+onMounted(() => {
+  loadTokens()
+})
+</script>
