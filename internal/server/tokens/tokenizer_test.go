@@ -328,3 +328,70 @@ func TestSupportedEncodings(t *testing.T) {
 	assert.Contains(t, encodings, "p50k_base")
 	assert.Contains(t, encodings, "r50k_base")
 }
+
+func TestNewTokenizerDisabledWithInvalidEncoding(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	// When disabled, NewTokenizer should succeed even with an invalid encoding
+	// (e.g., tiktoken cache is corrupted). This prevents the fallback path
+	// from also failing and leaving a nil tokenizer. See issue #318.
+	tokenizer, err := NewTokenizer("invalid_encoding_corrupted", logger, false)
+	require.NoError(t, err, "disabled tokenizer should not validate encoding")
+	require.NotNil(t, tokenizer, "disabled tokenizer should never be nil")
+	assert.False(t, tokenizer.IsEnabled())
+
+	// All methods should return zero without error when disabled
+	count, err := tokenizer.CountTokens("Hello, world!")
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+
+	count, err = tokenizer.CountTokensForModel("Hello", "gpt-4")
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+
+	count, err = tokenizer.CountTokensInJSON(map[string]string{"key": "value"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+func TestNilTokenizerInterfaceSafety(t *testing.T) {
+	// Simulates the scenario from issue #318 where a nil *DefaultTokenizer
+	// is assigned to a Tokenizer interface, creating a non-nil interface
+	// with a nil underlying value. SafeGetDefaultEncoding must handle this.
+	var nilTokenizer *DefaultTokenizer
+
+	// Assign nil concrete to interface — interface is non-nil but underlying is nil.
+	// In Go, the interface value itself is non-nil (it holds type info), but the
+	// concrete pointer inside is nil. This is the exact bug scenario.
+	var iface Tokenizer = nilTokenizer
+	_ = iface // used below
+
+	// Calling methods on this would panic — that's the bug.
+	// SafeGetDefaultEncoding should handle this safely without panic.
+	encoding := SafeGetDefaultEncoding(iface)
+	assert.Equal(t, DefaultEncoding, encoding, "should return default encoding for nil underlying")
+}
+
+func TestSafeGetDefaultEncoding(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	t.Run("valid DefaultTokenizer", func(t *testing.T) {
+		tokenizer, err := NewTokenizer("o200k_base", logger, true)
+		require.NoError(t, err)
+
+		encoding := SafeGetDefaultEncoding(tokenizer)
+		assert.Equal(t, "o200k_base", encoding)
+	})
+
+	t.Run("nil interface", func(t *testing.T) {
+		encoding := SafeGetDefaultEncoding(nil)
+		assert.Equal(t, DefaultEncoding, encoding)
+	})
+
+	t.Run("nil DefaultTokenizer in interface", func(t *testing.T) {
+		var nilDT *DefaultTokenizer
+		var iface Tokenizer = nilDT
+		encoding := SafeGetDefaultEncoding(iface)
+		assert.Equal(t, DefaultEncoding, encoding)
+	})
+}

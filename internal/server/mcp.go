@@ -1064,17 +1064,22 @@ func (p *MCPProxyServer) handleCallToolDestructive(ctx context.Context, request 
 }
 
 // handleCallToolVariant is the common handler for all call_tool_* variants (Spec 018)
-func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.CallToolRequest, toolVariant string) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.CallToolRequest, toolVariant string) (callResult *mcp.CallToolResult, callErr error) {
 	// Spec 024: Track start time and context for internal tool call logging
 	internalStartTime := time.Now()
 
-	// Add panic recovery to ensure server resilience
+	// Panic recovery with named return values to prevent returning (nil, nil).
+	// Issue #318: unnamed returns caused recover() to return zero values,
+	// triggering a second unrecovered panic in mcp-go when dereferencing nil *CallToolResult.
 	defer func() {
 		if r := recover(); r != nil {
 			p.logger.Error("Recovered from panic in handleCallToolVariant",
 				zap.Any("panic", r),
 				zap.String("tool_variant", toolVariant),
-				zap.Any("request", request))
+				zap.Any("request", request),
+				zap.Stack("stacktrace"))
+			callResult = mcp.NewToolResultError(fmt.Sprintf("Internal proxy error: recovered from panic: %v", r))
+			callErr = nil
 		}
 	}()
 
@@ -1326,15 +1331,21 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			tokenMetrics = &storage.TokenMetrics{
 				InputTokens: inputTokens,
 				Model:       model,
-				Encoding:    tokenizer.(*tokens.DefaultTokenizer).GetDefaultEncoding(),
+				Encoding:    tokens.SafeGetDefaultEncoding(tokenizer),
 			}
 		}
+	}
+
+	// Derive server ID safely (serverConfig may be nil if storage lookup failed)
+	var serverID string
+	if serverConfig != nil {
+		serverID = storage.GenerateServerID(serverConfig)
 	}
 
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
 		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
-		ServerID:         storage.GenerateServerID(serverConfig),
+		ServerID:         serverID,
 		ServerName:       serverName,
 		ToolName:         actualToolName,
 		Arguments:        args,
@@ -1493,13 +1504,16 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 }
 
 // handleCallTool is the LEGACY call_tool handler - returns error directing to new variants (Spec 018)
-func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Add panic recovery to ensure server resilience
+func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToolRequest) (callResult *mcp.CallToolResult, callErr error) {
+	// Panic recovery with named return values (issue #318).
 	defer func() {
 		if r := recover(); r != nil {
 			p.logger.Error("Recovered from panic in handleCallTool",
 				zap.Any("panic", r),
-				zap.Any("request", request))
+				zap.Any("request", request),
+				zap.Stack("stacktrace"))
+			callResult = mcp.NewToolResultError(fmt.Sprintf("Internal proxy error: recovered from panic: %v", r))
+			callErr = nil
 		}
 	}()
 
@@ -1705,15 +1719,21 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			tokenMetrics = &storage.TokenMetrics{
 				InputTokens: inputTokens,
 				Model:       model,
-				Encoding:    tokenizer.(*tokens.DefaultTokenizer).GetDefaultEncoding(),
+				Encoding:    tokens.SafeGetDefaultEncoding(tokenizer),
 			}
 		}
+	}
+
+	// Derive server ID safely (serverConfig may be nil if storage lookup failed)
+	var serverID string
+	if serverConfig != nil {
+		serverID = storage.GenerateServerID(serverConfig)
 	}
 
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
 		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
-		ServerID:         storage.GenerateServerID(serverConfig),
+		ServerID:         serverID,
 		ServerName:       serverName,
 		ToolName:         actualToolName,
 		Arguments:        args,
