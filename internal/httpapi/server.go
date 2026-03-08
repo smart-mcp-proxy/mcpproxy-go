@@ -657,6 +657,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	response := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
+		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": s.controller.GetUpstreamStats(),
 		"status":         s.controller.GetStatus(),
@@ -753,10 +754,23 @@ func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) str
 // buildVersion is set during build using -ldflags
 var buildVersion = "development"
 
+// editionValue identifies the MCPProxy edition (personal or teams).
+var editionValue = "personal"
+
 // GetBuildVersion returns the build version from build-time variables.
 // This should be set during build using -ldflags.
 func GetBuildVersion() string {
 	return buildVersion
+}
+
+// SetEdition sets the edition value (called from main during startup).
+func SetEdition(edition string) {
+	editionValue = edition
+}
+
+// GetEdition returns the current edition.
+func GetEdition() string {
+	return editionValue
 }
 
 // getSocketPath returns the socket path if socket communication is enabled

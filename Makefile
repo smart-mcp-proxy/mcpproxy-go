@@ -1,6 +1,6 @@
 # MCPProxy Makefile
 
-.PHONY: help build swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup docs-setup docs-dev docs-build docs-clean
+.PHONY: help build build-teams build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup docs-setup docs-dev docs-build docs-clean
 
 SWAGGER_BIN ?= $(HOME)/go/bin/swag
 SWAGGER_OUT ?= oas
@@ -22,6 +22,11 @@ help:
 	@echo "  make test-e2e-oauth  - Run OAuth E2E tests with Playwright"
 	@echo "  make lint            - Run linter"
 	@echo "  make dev-setup       - Install development dependencies (swag, frontend, Playwright)"
+	@echo ""
+	@echo "Teams Edition:"
+	@echo "  make build-teams     - Build Teams edition binary (with -tags teams)"
+	@echo "  make build-docker    - Build Teams Docker image"
+	@echo "  make build-deb       - Build Teams .deb package (TODO)"
 	@echo ""
 	@echo "Documentation Commands:"
 	@echo "  make docs-setup      - Install documentation dependencies"
@@ -86,10 +91,28 @@ backend-dev:
 	@echo "🚀 Run: ./mcpproxy-dev serve"
 	@echo "🌐 In dev mode, make sure frontend dev server is running on port 3000"
 
+# Build Teams edition
+build-teams: swagger frontend-build
+	@echo "🔨 Building Teams edition binary (version: $(VERSION))..."
+	go build -tags teams -ldflags "$(LDFLAGS)" -o mcpproxy-teams ./cmd/mcpproxy
+	@echo "✅ Teams build completed! Run: ./mcpproxy-teams serve"
+
+# Build Teams Docker image
+build-docker:
+	@echo "🐳 Building Teams Docker image (version: $(VERSION))..."
+	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_DATE=$(BUILD_DATE) -t mcpproxy-teams:$(VERSION) -t mcpproxy-teams:latest .
+	@echo "✅ Docker image built: mcpproxy-teams:$(VERSION)"
+
+# Build Teams .deb package (placeholder)
+build-deb:
+	@echo "📦 Building Teams .deb package..."
+	@echo "⚠️  TODO: Implement deb package build (nfpm or dpkg-deb)"
+	@echo "   See: https://nfpm.goreleaser.com/"
+
 # Clean build artifacts
 clean:
 	@echo "🧹 Cleaning build artifacts..."
-	rm -f mcpproxy mcpproxy-dev mcpproxy-tray
+	rm -f mcpproxy mcpproxy-dev mcpproxy-tray mcpproxy-teams
 	rm -rf frontend/dist frontend/node_modules web/frontend
 	go clean
 	@echo "✅ Cleanup completed"

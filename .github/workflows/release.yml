@@ -95,7 +95,7 @@ jobs:
           # Build the prompt
           PROMPT="Generate concise release notes for version ${VERSION} of MCPProxy (Smart MCP Proxy).
 
-          MCPProxy is a desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, token savings, and security quarantine for MCP servers.
+          MCPProxy is a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, token savings, and security quarantine for MCP servers. MCPProxy has two editions: Personal (desktop app) and Teams (multi-user server). Note which changes affect which edition if applicable.
 
           Commits since last release:
           ${COMMITS}
@@ -225,6 +225,21 @@ jobs:
             cgo: "1"
             name: mcpproxy-darwin-arm64
             archive_format: tar.gz
+          # Teams edition (Linux only) — uncomment when teams MVP is ready
+          # - os: ubuntu-latest
+          #   goos: linux
+          #   goarch: amd64
+          #   cgo: "0"
+          #   name: mcpproxy-teams-linux-amd64
+          #   archive_format: tar.gz
+          #   edition: teams
+          # - os: ubuntu-latest
+          #   goos: linux
+          #   goarch: arm64
+          #   cgo: "0"
+          #   name: mcpproxy-teams-linux-arm64
+          #   archive_format: tar.gz
+          #   edition: teams
 
     runs-on: ${{ matrix.os }}
 
@@ -371,18 +386,23 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/}
           LDFLAGS="-s -w -X main.version=${VERSION} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
 
-          # Determine clean binary name
-          if [ "${{ matrix.goos }}" = "windows" ]; then
+          # Determine clean binary name and build flags
+          EDITION="${{ matrix.edition }}"
+          BUILD_TAGS=""
+          if [ "$EDITION" = "teams" ]; then
+            CLEAN_BINARY="mcpproxy-teams"
+            BUILD_TAGS="-tags teams"
+          elif [ "${{ matrix.goos }}" = "windows" ]; then
             CLEAN_BINARY="mcpproxy.exe"
           else
             CLEAN_BINARY="mcpproxy"
           fi
 
           # Create clean core binary for archive
-          go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
+          go build ${BUILD_TAGS} -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
-          # Build tray binary for platforms with GUI support (macOS and Windows)
-          if [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; then
+          # Build tray binary for platforms with GUI support (macOS and Windows, personal only)
+          if [ "$EDITION" != "teams" ] && { [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; }; then
             echo "Building mcpproxy-tray for ${{ matrix.goos }}..."
 
             # Determine tray binary name
@@ -851,13 +871,13 @@ jobs:
       - name: Upload versioned archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: versioned-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: versioned-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
       - name: Upload latest archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: latest-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: latest-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
       - name: Upload macOS installer DMG
@@ -965,8 +985,36 @@ jobs:
           name: installer-windows-${{ matrix.arch }}
           path: signed/mcpproxy-setup-${{ github.ref_name }}-${{ matrix.arch }}.exe
 
+  build-docker:
+    runs-on: ubuntu-latest
+    needs: [build]
+    # Disabled until teams MVP is ready — uncomment to enable
+    if: false && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          tags: |
+            ghcr.io/smart-mcp-proxy/mcpproxy-teams:${{ github.ref_name }}
+            ghcr.io/smart-mcp-proxy/mcpproxy-teams:latest
+
   release:
-    needs: [build, sign-windows, generate-notes]
+    needs: [build, sign-windows, generate-notes]  # add build-docker when teams MVP is ready
     runs-on: ubuntu-latest
     environment: production
 
