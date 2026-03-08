@@ -16,19 +16,10 @@ func TestHandleCallToolVariant_PanicRecovery(t *testing.T) {
 	// the recover() block must return a proper error result, not (nil, nil).
 	// Returning (nil, nil) causes a second unrecovered panic in mcp-go's HandleMessage
 	// when it dereferences the nil *CallToolResult.
-	proxy := createTestMCPProxyServer(t)
 
-	// Create a request that will reach upstream call and trigger a panic.
-	// We use a server:tool format with a server that doesn't exist in upstream manager.
-	// The upstream manager's CallTool will be called, which may panic or error.
-	// To reliably trigger a panic, we'll test the recovery mechanism directly.
-	t.Run("panic returns error result not nil", func(t *testing.T) {
-		// Use a tool name with ":" to skip the "no server prefix" error path
-		// and reach the upstream call code. The upstream manager has no servers,
-		// so CallTool will error — but we want to test the panic path.
-		//
-		// We'll craft a scenario that causes a nil pointer dereference.
-		// An empty serverConfig from storage + GenerateServerID panics on nil.
+	t.Run("normal error path returns error result", func(t *testing.T) {
+		proxy := createTestMCPProxyServer(t)
+
 		request := mcp.CallToolRequest{}
 		request.Params.Arguments = map[string]interface{}{
 			"name": "nonexistent-server:some_tool",
@@ -36,37 +27,66 @@ func TestHandleCallToolVariant_PanicRecovery(t *testing.T) {
 
 		result, err := proxy.handleCallToolVariant(context.Background(), request, contracts.ToolVariantRead)
 
-		// After fix: must never return (nil, nil). Either result or err must be set.
-		if err != nil {
-			// An error is acceptable
-			return
+		// Must never return (nil, nil)
+		assert.True(t, result != nil || err != nil,
+			"handleCallToolVariant must never return (nil, nil)")
+		if result != nil {
+			assert.True(t, result.IsError, "error results should have IsError=true")
 		}
-		require.NotNil(t, result, "panic recovery must return a non-nil result, not (nil, nil)")
-		assert.True(t, result.IsError, "recovered panic should be an error result")
 	})
-}
 
-func TestHandleCallToolVariant_PanicRecoveryReturnsErrorResult(t *testing.T) {
-	// Directly test that the named return values mechanism works by verifying
-	// the function signature contract: on any internal panic, we get back a
-	// usable *CallToolResult (never nil).
-	proxy := createTestMCPProxyServer(t)
+	t.Run("panic in handler returns error result via recover", func(t *testing.T) {
+		proxy := createTestMCPProxyServer(t)
 
-	// Request a tool on a valid-looking but nonexistent server
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]interface{}{
-		"name": "fake:tool",
-	}
+		// Nil out storage to trigger a guaranteed nil pointer panic inside
+		// handleCallToolVariant at p.storage.GetUpstreamServer(). This exercises
+		// the actual recover() path — the function panics, the deferred recover
+		// catches it, and sets callResult via named return values.
+		proxy.storage = nil
 
-	result, err := proxy.handleCallToolVariant(context.Background(), request, contracts.ToolVariantWrite)
+		request := mcp.CallToolRequest{}
+		request.Params.Arguments = map[string]interface{}{
+			"name": "panic-server:panic_tool",
+		}
 
-	// The function must NEVER return (nil, nil)
-	assert.True(t, result != nil || err != nil,
-		"handleCallToolVariant must never return (nil, nil) — panic recovery must set named return values")
+		result, err := proxy.handleCallToolVariant(context.Background(), request, contracts.ToolVariantRead)
 
-	if result != nil && err == nil {
-		// If we got a result without error, it should be marked as an error result
-		// (either from normal error handling or from panic recovery)
-		assert.True(t, result.IsError, "error results should have IsError=true")
-	}
+		// Before fix: would return (nil, nil), crashing mcp-go.
+		// After fix: must return a proper error result.
+		require.NoError(t, err, "recovered panic should not return an error")
+		require.NotNil(t, result, "recovered panic must return a non-nil CallToolResult, not (nil, nil)")
+		assert.True(t, result.IsError, "recovered panic should be an error result")
+
+		// Verify the error message mentions the panic
+		if len(result.Content) > 0 {
+			if text, ok := result.Content[0].(mcp.TextContent); ok {
+				assert.Contains(t, text.Text, "Internal proxy error")
+				assert.Contains(t, text.Text, "recovered from panic")
+			}
+		}
+	})
+
+	t.Run("panic in legacy handleCallTool returns error result via recover", func(t *testing.T) {
+		proxy := createTestMCPProxyServer(t)
+
+		// Same approach: nil storage triggers panic in handleCallTool
+		proxy.storage = nil
+
+		request := mcp.CallToolRequest{}
+		request.Params.Arguments = map[string]interface{}{
+			"name": "panic-server:panic_tool",
+		}
+
+		result, err := proxy.handleCallTool(context.Background(), request)
+
+		require.NoError(t, err, "recovered panic should not return an error")
+		require.NotNil(t, result, "recovered panic must return a non-nil CallToolResult, not (nil, nil)")
+		assert.True(t, result.IsError, "recovered panic should be an error result")
+
+		if len(result.Content) > 0 {
+			if text, ok := result.Content[0].(mcp.TextContent); ok {
+				assert.Contains(t, text.Text, "Internal proxy error")
+			}
+		}
+	})
 }
