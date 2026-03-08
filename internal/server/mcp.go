@@ -253,6 +253,13 @@ func getAuthMetadata(ctx context.Context) map[string]string {
 		meta["agent_name"] = authCtx.AgentName
 		meta["token_prefix"] = authCtx.TokenPrefix
 	}
+	// Include user identity for teams session-based auth
+	if authCtx.UserID != "" {
+		meta["user_id"] = authCtx.UserID
+	}
+	if authCtx.Email != "" {
+		meta["user_email"] = authCtx.Email
+	}
 	return meta
 }
 

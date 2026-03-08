@@ -4,6 +4,14 @@ import Dashboard from '@/views/Dashboard.vue'
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
+    // Teams auth routes
+    {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/teams/Login.vue'),
+      meta: { title: 'Sign In', public: true },
+    },
+    // Existing routes (admin/personal)
     {
       path: '/',
       name: 'dashboard',
@@ -85,6 +93,45 @@ const router = createRouter({
         title: 'Agent Tokens',
       },
     },
+    // Teams user routes
+    {
+      path: '/my/servers',
+      name: 'user-servers',
+      component: () => import('@/views/teams/UserServers.vue'),
+      meta: { title: 'My Servers', requiresAuth: true },
+    },
+    {
+      path: '/my/activity',
+      name: 'user-activity',
+      component: () => import('@/views/teams/UserActivity.vue'),
+      meta: { title: 'My Activity', requiresAuth: true },
+    },
+    {
+      path: '/my/diagnostics',
+      name: 'user-diagnostics',
+      component: () => import('@/views/teams/UserDiagnostics.vue'),
+      meta: { title: 'Diagnostics', requiresAuth: true },
+    },
+    // Teams admin routes
+    {
+      path: '/admin/dashboard',
+      name: 'admin-dashboard',
+      component: () => import('@/views/teams/AdminDashboard.vue'),
+      meta: { title: 'Admin Dashboard', requiresAuth: true, requiresAdmin: true },
+    },
+    {
+      path: '/admin/users',
+      name: 'admin-users',
+      component: () => import('@/views/teams/AdminUsers.vue'),
+      meta: { title: 'Users', requiresAuth: true, requiresAdmin: true },
+    },
+    {
+      path: '/admin/servers',
+      name: 'admin-servers',
+      component: () => import('@/views/teams/AdminServers.vue'),
+      meta: { title: 'Servers', requiresAuth: true, requiresAdmin: true },
+    },
+    // 404 - keep at end
     {
       path: '/:pathMatch(.*)*',
       name: 'not-found',
@@ -96,8 +143,49 @@ const router = createRouter({
   ],
 })
 
-// Update document title based on route
-router.beforeEach((to) => {
+// Auth guard
+router.beforeEach(async (to) => {
+  const { useAuthStore } = await import('@/stores/auth')
+  const authStore = useAuthStore()
+
+  // Initialize auth state on first navigation
+  if (authStore.loading) {
+    await authStore.checkAuth()
+  }
+
+  // Skip auth checks for personal edition
+  if (!authStore.isTeamsEdition) {
+    // Don't show teams routes in personal edition
+    if (to.path === '/login' || to.path.startsWith('/my/') || to.path.startsWith('/admin/')) {
+      return { name: 'dashboard' }
+    }
+    // Update title for personal edition
+    const title = to.meta.title as string
+    if (title) {
+      document.title = `${title} - MCPProxy Control Panel`
+    }
+    return
+  }
+
+  // Public routes (login) - redirect to dashboard if already authenticated
+  if (to.meta.public) {
+    if (authStore.isAuthenticated) {
+      return { name: 'dashboard' }
+    }
+    return
+  }
+
+  // Require authentication for teams edition
+  if (!authStore.isAuthenticated) {
+    return { name: 'login' }
+  }
+
+  // Admin-only routes
+  if (to.meta.requiresAdmin && !authStore.isAdmin) {
+    return { name: 'dashboard' }
+  }
+
+  // Update title
   const title = to.meta.title as string
   if (title) {
     document.title = `${title} - MCPProxy Control Panel`

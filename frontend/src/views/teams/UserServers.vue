@@ -54,7 +54,7 @@
       </div>
       <div v-else class="space-y-2">
         <div v-for="server in servers.shared" :key="server.name"
-             class="card bg-base-100 shadow-sm opacity-80">
+             class="card bg-base-100 shadow-sm" :class="{ 'opacity-50': isSharedDisabled(server) }">
           <div class="card-body py-3 px-4 flex-row items-center justify-between">
             <div class="flex items-center gap-2 flex-wrap">
               <span class="font-medium">{{ server.name }}</span>
@@ -63,8 +63,14 @@
                 {{ healthLabel(server) }}
               </span>
               <span class="text-sm text-base-content/50">{{ server.protocol }}</span>
+              <span v-if="isSharedDisabled(server)" class="badge badge-sm badge-ghost">disabled by you</span>
             </div>
-            <div class="text-xs text-base-content/40">read-only</div>
+            <div class="flex gap-2 flex-shrink-0">
+              <button class="btn btn-ghost btn-xs" @click="toggleSharedServer(server)" :disabled="togglingServer === server.name">
+                <span v-if="togglingServer === server.name" class="loading loading-spinner loading-xs"></span>
+                {{ isSharedDisabled(server) ? 'Enable' : 'Disable' }}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -151,6 +157,7 @@ interface UserServer {
   enabled: boolean
   connected: boolean
   owner_type: 'personal' | 'shared'
+  user_enabled?: boolean | null
   health?: {
     level: string
     summary: string
@@ -207,12 +214,39 @@ async function fetchServers() {
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
     const data = await res.json()
     const personal = (data.personal || []).map((s: any) => ({ ...s, owner_type: 'personal' }))
-    const shared = (data.shared || []).map((s: any) => ({ ...s, owner_type: 'shared' }))
+    const shared = (data.shared || []).map((s: any) => ({ ...s, owner_type: 'shared', user_enabled: s.user_enabled ?? null }))
     allServers.value = [...personal, ...shared]
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to load servers'
   } finally {
     loading.value = false
+  }
+}
+
+function isSharedDisabled(server: UserServer): boolean {
+  return server.user_enabled === false
+}
+
+async function toggleSharedServer(server: UserServer) {
+  togglingServer.value = server.name
+  error.value = ''
+  try {
+    const newEnabled = isSharedDisabled(server) ? true : false
+    const res = await fetch(`/api/v1/user/servers/${encodeURIComponent(server.name)}/enable`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.message || `HTTP ${res.status}`)
+    }
+    await fetchServers()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to update server'
+  } finally {
+    togglingServer.value = ''
   }
 }
 

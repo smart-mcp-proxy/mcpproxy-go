@@ -163,7 +163,7 @@ const teamsUserMenu = [
 // Teams edition: items visible only to admins
 const teamsAdminMenu = [
   { name: 'Dashboard', path: '/admin/dashboard' },
-  { name: 'Servers', path: '/servers' },
+  { name: 'Servers', path: '/admin/servers' },
   { name: 'Activity (All)', path: '/activity' },
   { name: 'Users', path: '/admin/users' },
   { name: 'Sessions', path: '/sessions' },

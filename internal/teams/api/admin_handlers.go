@@ -3,7 +3,10 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,6 +26,8 @@ type AdminHandlers struct {
 	sessionManager *teamsauth.SessionManager
 	adminEmails    []string
 	sharedServers  []*config.ServerConfig
+	config         *config.Config
+	configPath     string
 	logger         *zap.SugaredLogger
 }
 
@@ -33,6 +38,8 @@ func NewAdminHandlers(
 	sessionManager *teamsauth.SessionManager,
 	adminEmails []string,
 	sharedServers []*config.ServerConfig,
+	cfg *config.Config,
+	configPath string,
 	logger *zap.SugaredLogger,
 ) *AdminHandlers {
 	return &AdminHandlers{
@@ -41,6 +48,8 @@ func NewAdminHandlers(
 		sessionManager: sessionManager,
 		adminEmails:    adminEmails,
 		sharedServers:  sharedServers,
+		config:         cfg,
+		configPath:     configPath,
 		logger:         logger,
 	}
 }
@@ -54,6 +63,8 @@ func (h *AdminHandlers) RegisterRoutes(r chi.Router) {
 	r.Get("/admin/activity", h.getActivity)
 	r.Get("/admin/sessions", h.listSessions)
 	r.Get("/admin/dashboard", h.getDashboard)
+	r.Get("/admin/servers", h.listAdminServers)
+	r.Post("/admin/servers/{name}/shared", h.toggleSharedServer)
 }
 
 // RegisterRoutesWithPrefix registers admin routes with a path prefix.
@@ -64,6 +75,8 @@ func (h *AdminHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 	r.Get(prefix+"/admin/activity", h.getActivity)
 	r.Get(prefix+"/admin/sessions", h.listSessions)
 	r.Get(prefix+"/admin/dashboard", h.getDashboard)
+	r.Get(prefix+"/admin/servers", h.listAdminServers)
+	r.Post(prefix+"/admin/servers/{name}/shared", h.toggleSharedServer)
 }
 
 // --- Response types ---
@@ -403,6 +416,68 @@ func (h *AdminHandlers) getDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// ToggleSharedRequest represents the request body for toggling shared status.
+type ToggleSharedRequest struct {
+	Shared bool `json:"shared"`
+}
+
+// toggleSharedServer toggles a server's shared status.
+func (h *AdminHandlers) toggleSharedServer(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "Server name is required")
+		return
+	}
+
+	var req ToggleSharedRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// Find the server in the config.
+	var found *config.ServerConfig
+	for _, sc := range h.config.Servers {
+		if strings.EqualFold(sc.Name, name) {
+			found = sc
+			break
+		}
+	}
+	if found == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Server %q not found", name))
+		return
+	}
+
+	found.Shared = req.Shared
+	found.Updated = time.Now().UTC()
+
+	// Save config.
+	if err := config.SaveConfig(h.config, h.configPath); err != nil {
+		h.logger.Errorw("failed to save config after toggling shared", "server", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to save configuration")
+		return
+	}
+
+	h.logger.Infow("server shared status toggled", "server", name, "shared", req.Shared)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": fmt.Sprintf("Server %q shared status set to %v", name, req.Shared),
+		"server":  found,
+	})
+}
+
+// listAdminServers returns all configured servers for admin management.
+func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+
+	writeJSON(w, http.StatusOK, h.config.Servers)
 }
 
 // --- Helpers ---

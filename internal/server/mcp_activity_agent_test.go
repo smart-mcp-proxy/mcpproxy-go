@@ -139,6 +139,85 @@ func TestInjectAuthMetadata_DoesNotMutateOriginal(t *testing.T) {
 	assert.False(t, hasAgentName, "original args must not contain _auth_ fields (issue #322)")
 }
 
+// TestGetAuthMetadata_UserWithIdentity verifies user context includes user_id and user_email.
+func TestGetAuthMetadata_UserWithIdentity(t *testing.T) {
+	userCtx := &auth.AuthContext{
+		Type:        auth.AuthTypeUser,
+		UserID:      "01HXYZ123ABC",
+		Email:       "alice@example.com",
+		DisplayName: "Alice",
+		Role:        "user",
+		Provider:    "google",
+	}
+	ctx := auth.WithAuthContext(context.Background(), userCtx)
+
+	meta := getAuthMetadata(ctx)
+	assert.NotNil(t, meta)
+	assert.Equal(t, "user", meta["auth_type"])
+	assert.Equal(t, "01HXYZ123ABC", meta["user_id"])
+	assert.Equal(t, "alice@example.com", meta["user_email"])
+	assert.Len(t, meta, 3, "user context should have auth_type, user_id, user_email")
+}
+
+// TestGetAuthMetadata_AdminUserWithIdentity verifies admin_user context includes user_id and user_email.
+func TestGetAuthMetadata_AdminUserWithIdentity(t *testing.T) {
+	adminUserCtx := &auth.AuthContext{
+		Type:        auth.AuthTypeAdminUser,
+		UserID:      "01HADMIN456",
+		Email:       "admin@example.com",
+		DisplayName: "Admin",
+		Role:        "admin",
+		Provider:    "github",
+	}
+	ctx := auth.WithAuthContext(context.Background(), adminUserCtx)
+
+	meta := getAuthMetadata(ctx)
+	assert.NotNil(t, meta)
+	assert.Equal(t, "admin_user", meta["auth_type"])
+	assert.Equal(t, "01HADMIN456", meta["user_id"])
+	assert.Equal(t, "admin@example.com", meta["user_email"])
+	assert.Len(t, meta, 3, "admin_user context should have auth_type, user_id, user_email")
+}
+
+// TestGetAuthMetadata_AgentNoUserIdentity verifies agent context does not include user_id/user_email.
+func TestGetAuthMetadata_AgentNoUserIdentity(t *testing.T) {
+	agentCtx := &auth.AuthContext{
+		Type:        auth.AuthTypeAgent,
+		AgentName:   "deploy-bot",
+		TokenPrefix: "mcp_abc123def",
+	}
+	ctx := auth.WithAuthContext(context.Background(), agentCtx)
+
+	meta := getAuthMetadata(ctx)
+	assert.NotNil(t, meta)
+	assert.Equal(t, "agent", meta["auth_type"])
+	_, hasUserID := meta["user_id"]
+	assert.False(t, hasUserID, "agent context should not have user_id")
+	_, hasEmail := meta["user_email"]
+	assert.False(t, hasEmail, "agent context should not have user_email")
+}
+
+// TestInjectAuthMetadata_UserIdentity verifies user identity is injected with _auth_ prefix.
+func TestInjectAuthMetadata_UserIdentity(t *testing.T) {
+	userCtx := &auth.AuthContext{
+		Type:   auth.AuthTypeUser,
+		UserID: "01HXYZ123ABC",
+		Email:  "alice@example.com",
+	}
+	ctx := auth.WithAuthContext(context.Background(), userCtx)
+
+	args := map[string]interface{}{
+		"query": "search term",
+	}
+
+	result := injectAuthMetadata(ctx, args)
+	assert.NotNil(t, result)
+	assert.Equal(t, "search term", result["query"])
+	assert.Equal(t, "user", result["_auth_auth_type"])
+	assert.Equal(t, "01HXYZ123ABC", result["_auth_user_id"])
+	assert.Equal(t, "alice@example.com", result["_auth_user_email"])
+}
+
 // TestInjectAuthMetadata_NoAuthContext verifies no injection when no auth context.
 func TestInjectAuthMetadata_NoAuthContext(t *testing.T) {
 	ctx := context.Background()

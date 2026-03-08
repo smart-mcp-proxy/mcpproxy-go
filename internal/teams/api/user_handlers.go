@@ -85,7 +85,8 @@ type EnableServerRequest struct {
 // ServerResponse wraps a ServerConfig with ownership information.
 type ServerResponse struct {
 	*config.ServerConfig
-	Ownership string `json:"ownership"` // "personal" or "shared"
+	Ownership   string `json:"ownership"`              // "personal" or "shared"
+	UserEnabled *bool  `json:"user_enabled,omitempty"` // Per-user preference for shared servers (nil = no preference, defaults to enabled)
 }
 
 // ServerListResponse contains personal and shared servers for a user.
@@ -119,12 +120,27 @@ func (h *UserHandlers) listServers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	shared := make([]*ServerResponse, 0, len(h.sharedServers))
+	// Load user's shared server preferences
+	sharedPrefs, err := h.userStore.GetSharedServerPrefs(userID)
+	if err != nil {
+		h.logger.Errorw("failed to load shared server prefs", "user_id", userID, "error", err)
+		// Non-fatal: proceed without preferences
+		sharedPrefs = make(map[string]*users.SharedServerPref)
+	}
+
+	shared := make([]*ServerResponse, 0)
 	for _, sc := range h.sharedServers {
-		shared = append(shared, &ServerResponse{
-			ServerConfig: sc,
-			Ownership:    "shared",
-		})
+		if sc.Shared {
+			resp := &ServerResponse{
+				ServerConfig: sc,
+				Ownership:    "shared",
+			}
+			// Apply user preference if set
+			if pref, ok := sharedPrefs[sc.Name]; ok {
+				resp.UserEnabled = &pref.Enabled
+			}
+			shared = append(shared, resp)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, ServerListResponse{
@@ -155,7 +171,7 @@ func (h *UserHandlers) createServer(w http.ResponseWriter, r *http.Request) {
 
 	// Check conflict with shared servers.
 	for _, shared := range h.sharedServers {
-		if strings.EqualFold(shared.Name, req.Name) {
+		if shared.Shared && strings.EqualFold(shared.Name, req.Name) {
 			writeError(w, http.StatusConflict, fmt.Sprintf("Server name %q conflicts with a shared server", req.Name))
 			return
 		}
@@ -230,7 +246,7 @@ func (h *UserHandlers) getServer(w http.ResponseWriter, r *http.Request) {
 
 	// Check shared servers.
 	for _, shared := range h.sharedServers {
-		if strings.EqualFold(shared.Name, name) {
+		if shared.Shared && strings.EqualFold(shared.Name, name) {
 			writeJSON(w, http.StatusOK, &ServerResponse{
 				ServerConfig: shared,
 				Ownership:    "shared",
@@ -258,7 +274,7 @@ func (h *UserHandlers) updateServer(w http.ResponseWriter, r *http.Request) {
 
 	// Reject updates to shared servers.
 	for _, shared := range h.sharedServers {
-		if strings.EqualFold(shared.Name, name) {
+		if shared.Shared && strings.EqualFold(shared.Name, name) {
 			writeError(w, http.StatusForbidden, "Cannot update a shared server")
 			return
 		}
@@ -332,7 +348,7 @@ func (h *UserHandlers) deleteServer(w http.ResponseWriter, r *http.Request) {
 
 	// Reject deletion of shared servers.
 	for _, shared := range h.sharedServers {
-		if strings.EqualFold(shared.Name, name) {
+		if shared.Shared && strings.EqualFold(shared.Name, name) {
 			writeError(w, http.StatusForbidden, "Cannot delete a shared server")
 			return
 		}
@@ -360,7 +376,8 @@ func (h *UserHandlers) deleteServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("Server %q deleted", name)})
 }
 
-// enableServer enables or disables a personal server.
+// enableServer enables or disables a personal or shared server.
+// For shared servers, a per-user preference is stored (does not modify the shared config).
 func (h *UserHandlers) enableServer(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserID(r)
 	if err != nil {
@@ -374,20 +391,33 @@ func (h *UserHandlers) enableServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject enable/disable of shared servers.
-	for _, shared := range h.sharedServers {
-		if strings.EqualFold(shared.Name, name) {
-			writeError(w, http.StatusForbidden, "Cannot modify a shared server")
-			return
-		}
-	}
-
 	var req EnableServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
+	// Check if this is a shared server
+	for _, shared := range h.sharedServers {
+		if shared.Shared && strings.EqualFold(shared.Name, name) {
+			// Store per-user preference for the shared server
+			if err := h.userStore.SetSharedServerPref(userID, shared.Name, req.Enabled); err != nil {
+				h.logger.Errorw("failed to set shared server pref", "user_id", userID, "name", name, "error", err)
+				writeError(w, http.StatusInternalServerError, "Failed to update preference")
+				return
+			}
+
+			h.logger.Infow("shared server user preference set", "user_id", userID, "name", name, "enabled", req.Enabled)
+			writeJSON(w, http.StatusOK, &ServerResponse{
+				ServerConfig: shared,
+				Ownership:    "shared",
+				UserEnabled:  &req.Enabled,
+			})
+			return
+		}
+	}
+
+	// Personal server: update directly
 	existing, err := h.userStore.GetUserServer(userID, name)
 	if err != nil {
 		h.logger.Errorw("failed to get user server for enable", "user_id", userID, "name", name, "error", err)

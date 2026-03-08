@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	teamsapi "github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/api"
 	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/users"
@@ -71,7 +72,8 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// All teams endpoints that require session cookie or JWT authentication.
 	// Mounted outside the API key group so session cookies work.
 	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)
-	adminHandlers := teamsapi.NewAdminHandlers(userStore, nil, sessionManager, cfg.AdminEmails, sharedServers, deps.Logger)
+	configPath := config.GetConfigPath(deps.Config.DataDir)
+	adminHandlers := teamsapi.NewAdminHandlers(userStore, nil, sessionManager, cfg.AdminEmails, sharedServers, deps.Config, configPath, deps.Logger)
 	userHandlers := teamsapi.NewUserHandlers(userStore, sharedServers, deps.Logger)
 	userActivityHandlers := teamsapi.NewUserActivityHandlers(nil, userStore, sharedServers, deps.Logger)
 

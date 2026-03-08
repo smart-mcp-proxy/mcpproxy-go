@@ -42,7 +42,7 @@ func adminTestSetup(t *testing.T, records []*storage.ActivityRecord) (*AdminHand
 	sessionManager := teamsauth.NewSessionManager(store, 24*time.Hour, false)
 	logger := zap.NewNop().Sugar()
 
-	handlers := NewAdminHandlers(store, activityFilter, sessionManager, []string{"admin@example.com"}, nil, logger)
+	handlers := NewAdminHandlers(store, activityFilter, sessionManager, []string{"admin@example.com"}, nil, nil, "", logger)
 	return handlers, store
 }
 

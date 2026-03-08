@@ -259,6 +259,16 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		Metadata:          metadata,
 	}
 
+	// Extract user identity from auth metadata injected into arguments (teams edition)
+	if arguments != nil {
+		if userID, ok := arguments["_auth_user_id"].(string); ok && userID != "" {
+			record.UserID = userID
+		}
+		if userEmail, ok := arguments["_auth_user_email"].(string); ok && userEmail != "" {
+			record.UserEmail = userEmail
+		}
+	}
+
 	if err := s.storage.SaveActivity(record); err != nil {
 		s.logger.Error("Failed to save activity record",
 			zap.Error(err),
@@ -464,6 +474,16 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		Timestamp:    evt.Timestamp,
 		SessionID:    sessionID,
 		RequestID:    requestID,
+	}
+
+	// Extract user identity from auth metadata injected into arguments (teams edition)
+	if arguments != nil {
+		if userID, ok := arguments["_auth_user_id"].(string); ok && userID != "" {
+			record.UserID = userID
+		}
+		if userEmail, ok := arguments["_auth_user_email"].(string); ok && userEmail != "" {
+			record.UserEmail = userEmail
+		}
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {

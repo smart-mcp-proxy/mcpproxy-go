@@ -2,11 +2,25 @@
 
 package teams
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/go-chi/chi/v5"
+	"go.etcd.io/bbolt"
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+)
 
 // Dependencies holds shared dependencies that teams features need.
+// These are provided by the server during initialization and passed
+// to each feature's Setup function.
 type Dependencies struct {
-	// Future: router, storage, logger, event bus, etc.
+	Router  chi.Router
+	DB      *bbolt.DB
+	Logger  *zap.SugaredLogger
+	Config  *config.Config
+	DataDir string
 }
 
 // Feature represents a teams feature module that self-registers.
