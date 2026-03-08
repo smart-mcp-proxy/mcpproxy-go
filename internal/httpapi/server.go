@@ -159,6 +159,13 @@ func (s *Server) SetTokenStore(store TokenStore, dataDir string) {
 	s.dataDir = dataDir
 }
 
+// Router returns the underlying chi.Mux for external route registration.
+// This is used by the teams edition to mount OAuth routes outside
+// the default API key authentication group.
+func (s *Server) Router() *chi.Mux {
+	return s.router
+}
+
 // apiKeyAuthMiddleware creates middleware for API key authentication.
 // Connections from Unix socket/named pipe (tray) are trusted and skip API key validation.
 // Supports both global API key (admin) and agent tokens (mcp_agt_ prefix) with scope enforcement.

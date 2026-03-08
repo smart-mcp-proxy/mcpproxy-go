@@ -204,6 +204,11 @@ class APIService {
     }
   }
 
+  // Status endpoint
+  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean }>> {
+    return this.request<{ edition: string; running: boolean }>('/api/v1/status')
+  }
+
   // Server endpoints
   async getServers(): Promise<APIResponse<{ servers: Server[] }>> {
     return this.request<{ servers: Server[] }>('/api/v1/servers')

@@ -242,6 +242,7 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		"Created":     true,
 		"Updated":     true, // Updated is set by saveServerSync, not copied
 		"Isolation":   true,
+		"Shared":      true, // Teams-only: persisted in JSON config, not in BBolt
 	}
 
 	// Get all fields from ServerConfig
@@ -267,6 +268,10 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 	for fieldName := range expectedFields {
 		if fieldName == "Name" {
 			// Name maps to both ID and Name in UpstreamRecord
+			continue
+		}
+		if fieldName == "Shared" {
+			// Teams-only field, persisted in JSON config not BBolt
 			continue
 		}
 		if !upstreamFields[fieldName] {

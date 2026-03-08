@@ -47,10 +47,12 @@ import ConnectionStatus from '@/components/ConnectionStatus.vue'
 import AuthErrorModal from '@/components/AuthErrorModal.vue'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
+import { useAuthStore } from '@/stores/auth'
 import api, { type APIAuthEvent } from '@/services/api'
 
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
+const authStore = useAuthStore()
 
 // Authentication modal state
 const authModal = reactive({
@@ -93,7 +95,10 @@ function handleAuthError(event: APIAuthEvent) {
   authModal.show = true
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // Initialize auth state (needed for teams edition role-based nav)
+  await authStore.checkAuth()
+
   // Set up API error listener
   removeAPIListener = api.addEventListener(handleAuthError)
 

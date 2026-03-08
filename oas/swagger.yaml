@@ -1,109 +1,6 @@
 components:
   schemas:
     config.Config:
-      properties:
-        activity_cleanup_interval_min:
-          description: 'Background cleanup interval in minutes (default: 60)'
-          type: integer
-        activity_max_records:
-          description: 'Max records before pruning (default: 100000)'
-          type: integer
-        activity_max_response_size:
-          description: 'Response truncation limit in bytes (default: 65536)'
-          type: integer
-        activity_retention_days:
-          description: Activity logging settings (RFC-003)
-          type: integer
-        allow_server_add:
-          type: boolean
-        allow_server_remove:
-          type: boolean
-        api_key:
-          description: Security settings
-          type: string
-        call_tool_timeout:
-          type: string
-        check_server_repo:
-          description: Repository detection settings
-          type: boolean
-        code_execution_max_tool_calls:
-          description: 'Max tool calls per execution (0 = unlimited, default: 0)'
-          type: integer
-        code_execution_pool_size:
-          description: 'JavaScript runtime pool size (default: 10)'
-          type: integer
-        code_execution_timeout_ms:
-          description: 'Timeout in milliseconds (default: 120000, max: 600000)'
-          type: integer
-        data_dir:
-          type: string
-        debug_search:
-          type: boolean
-        disable_management:
-          type: boolean
-        docker_isolation:
-          $ref: '#/components/schemas/config.DockerIsolationConfig'
-        docker_recovery:
-          $ref: '#/components/schemas/config.DockerRecoveryConfig'
-        enable_code_execution:
-          description: Code execution settings
-          type: boolean
-        enable_prompts:
-          description: Prompts settings
-          type: boolean
-        enable_socket:
-          description: 'Enable Unix socket/named pipe for local IPC (default: true)'
-          type: boolean
-        enable_tray:
-          description: 'Deprecated: EnableTray is unused and has no runtime effect.
-            Kept for backward compatibility.'
-          type: boolean
-        environment:
-          $ref: '#/components/schemas/secureenv.EnvConfig'
-        features:
-          $ref: '#/components/schemas/config.FeatureFlags'
-        intent_declaration:
-          $ref: '#/components/schemas/config.IntentDeclarationConfig'
-        listen:
-          type: string
-        logging:
-          $ref: '#/components/schemas/config.LogConfig'
-        mcpServers:
-          items:
-            $ref: '#/components/schemas/config.ServerConfig'
-          type: array
-          uniqueItems: false
-        oauth_expiry_warning_hours:
-          description: Health status settings
-          type: number
-        read_only_mode:
-          type: boolean
-        registries:
-          description: Registries configuration for MCP server discovery
-          items:
-            $ref: '#/components/schemas/config.RegistryEntry'
-          type: array
-          uniqueItems: false
-        require_mcp_auth:
-          description: 'Require authentication on /mcp endpoint (default: false)'
-          type: boolean
-        sensitive_data_detection:
-          $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
-        tls:
-          $ref: '#/components/schemas/config.TLSConfig'
-        tokenizer:
-          $ref: '#/components/schemas/config.TokenizerConfig'
-        tool_response_limit:
-          type: integer
-        tools_limit:
-          type: integer
-        top_k:
-          description: 'Deprecated: TopK is superseded by ToolsLimit and has no runtime
-            effect. Kept for backward compatibility.'
-          type: integer
-        tray_endpoint:
-          description: Tray endpoint override (unix:// or npipe://)
-          type: string
       type: object
     config.CustomPattern:
       properties:
@@ -423,6 +320,9 @@ components:
         quarantined:
           description: Security quarantine status
           type: boolean
+        shared:
+          description: 'Teams: shared with all users'
+          type: boolean
         updated:
           type: string
         url:
@@ -446,6 +346,24 @@ components:
         require_client_cert:
           description: Enable mTLS
           type: boolean
+      type: object
+    config.TeamsOAuthConfig:
+      properties:
+        allowed_domains:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        provider:
+          description: '"google", "github", "microsoft"'
+          type: string
+        tenant_id:
+          description: Microsoft only
+          type: string
       type: object
     config.TokenizerConfig:
       description: Tokenizer configuration for token counting

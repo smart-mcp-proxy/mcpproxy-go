@@ -1481,6 +1481,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		}
 		httpAPIServer.SetTokenStore(sm, dataDir)
 	}
+	// Wire teams multi-user OAuth (no-op in personal edition)
+	wireTeamsOAuth(s, httpAPIServer)
 	mux.Handle("/api/", httpAPIServer)
 	mux.Handle("/events", httpAPIServer)
 
