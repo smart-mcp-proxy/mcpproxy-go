@@ -28,6 +28,32 @@ Only halt execution and ask a human IF:
 
 MCPProxy is a Go-based desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
+## Editions (Personal & Teams)
+
+MCPProxy is built in two editions from the same codebase using Go build tags:
+
+| Edition | Build Command | Binary | Distribution |
+|---------|--------------|--------|-------------|
+| **Personal** (default) | `go build ./cmd/mcpproxy` | `mcpproxy` | macOS DMG, Windows installer, Linux tar.gz |
+| **Teams** | `go build -tags teams ./cmd/mcpproxy` | `mcpproxy-teams` | Docker image, .deb package, Linux tar.gz |
+
+### Key Directories
+
+| Directory | Purpose |
+|-----------|---------|
+| `cmd/mcpproxy/edition.go` | Default edition = "personal" |
+| `cmd/mcpproxy/edition_teams.go` | Build-tagged override for teams |
+| `cmd/mcpproxy/teams_register.go` | Teams feature registration entry point |
+| `internal/teams/` | Teams-only code (all files have `//go:build teams`) |
+| `native/macos/` | Future Swift tray app (placeholder) |
+| `native/windows/` | Future C# tray app (placeholder) |
+
+### Edition Detection
+
+The binary self-identifies its edition:
+- `mcpproxy version` → `MCPProxy v0.21.0 (personal) darwin/arm64`
+- `/api/v1/status` → `{"edition": "personal", ...}`
+
 ## Architecture: Core + Tray Split
 
 - **Core Server** (`mcpproxy`): Headless HTTP API server with MCP proxy functionality
@@ -39,9 +65,12 @@ MCPProxy is a Go-based desktop application that acts as a smart proxy for AI age
 
 ### Build
 ```bash
-go build -o mcpproxy ./cmd/mcpproxy                     # Core server
+go build -o mcpproxy ./cmd/mcpproxy                     # Core server (personal)
+go build -tags teams -o mcpproxy-teams ./cmd/mcpproxy   # Core server (teams)
 GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray app
-make build                                               # Frontend and backend
+make build                                               # Frontend and backend (personal)
+make build-teams                                         # Frontend and backend (teams)
+make build-docker                                        # Teams Docker image
 ./scripts/build.sh                                       # Cross-platform build
 ```
 

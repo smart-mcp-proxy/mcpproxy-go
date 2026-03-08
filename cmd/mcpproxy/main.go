@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -40,6 +41,7 @@ import (
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
@@ -96,6 +98,7 @@ func main() {
 		Short:   "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
 		Version: version,
 	}
+	rootCmd.SetVersionTemplate(fmt.Sprintf("MCPProxy %s (%s) %s/%s\n", version, Edition, runtime.GOOS, runtime.GOARCH))
 
 	// Add global flags
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Configuration file path")
@@ -469,8 +472,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	logger.Info("Starting mcpproxy",
 		zap.String("version", version),
+		zap.String("edition", Edition),
 		zap.String("log_level", cmdLogLevel),
 		zap.Bool("log_to_file", cmdLogToFile))
+
+	// Pass edition to httpapi for status endpoint
+	httpapi.SetEdition(Edition)
 
 	// Override other settings from command line
 	cfg.DebugSearch = cmdDebugSearch
