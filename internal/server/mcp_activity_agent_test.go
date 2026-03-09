@@ -110,6 +110,35 @@ func TestInjectAuthMetadata_NilArgs(t *testing.T) {
 	assert.Equal(t, "mcp_123", result["_auth_token_prefix"])
 }
 
+// TestInjectAuthMetadata_DoesNotMutateOriginal verifies the original args map is never modified.
+// This is the core fix for issue #322: _auth_* fields must not leak to upstream MCP servers.
+func TestInjectAuthMetadata_DoesNotMutateOriginal(t *testing.T) {
+	agentCtx := &auth.AuthContext{
+		Type:        auth.AuthTypeAgent,
+		AgentName:   "test-bot",
+		TokenPrefix: "mcp_xyz789abc",
+	}
+	ctx := auth.WithAuthContext(context.Background(), agentCtx)
+
+	args := map[string]interface{}{
+		"query": "search term",
+		"limit": 10,
+	}
+
+	result := injectAuthMetadata(ctx, args)
+
+	// Result should have auth metadata
+	assert.Equal(t, "agent", result["_auth_auth_type"])
+	assert.Equal(t, "test-bot", result["_auth_agent_name"])
+
+	// Original args must NOT be modified
+	assert.Len(t, args, 2, "original args should still have exactly 2 keys")
+	_, hasAuthType := args["_auth_auth_type"]
+	assert.False(t, hasAuthType, "original args must not contain _auth_ fields (issue #322)")
+	_, hasAgentName := args["_auth_agent_name"]
+	assert.False(t, hasAgentName, "original args must not contain _auth_ fields (issue #322)")
+}
+
 // TestInjectAuthMetadata_NoAuthContext verifies no injection when no auth context.
 func TestInjectAuthMetadata_NoAuthContext(t *testing.T) {
 	ctx := context.Background()
