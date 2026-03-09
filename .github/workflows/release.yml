@@ -225,21 +225,21 @@ jobs:
             cgo: "1"
             name: mcpproxy-darwin-arm64
             archive_format: tar.gz
-          # Teams edition (Linux only) — uncomment when teams MVP is ready
+          # Server edition (Linux only) — uncomment when server MVP is ready
           # - os: ubuntu-latest
           #   goos: linux
           #   goarch: amd64
           #   cgo: "0"
-          #   name: mcpproxy-teams-linux-amd64
+          #   name: mcpproxy-server-linux-amd64
           #   archive_format: tar.gz
-          #   edition: teams
+          #   edition: server
           # - os: ubuntu-latest
           #   goos: linux
           #   goarch: arm64
           #   cgo: "0"
-          #   name: mcpproxy-teams-linux-arm64
+          #   name: mcpproxy-server-linux-arm64
           #   archive_format: tar.gz
-          #   edition: teams
+          #   edition: server
 
     runs-on: ${{ matrix.os }}
 
@@ -389,9 +389,9 @@ jobs:
           # Determine clean binary name and build flags
           EDITION="${{ matrix.edition }}"
           BUILD_TAGS=""
-          if [ "$EDITION" = "teams" ]; then
-            CLEAN_BINARY="mcpproxy-teams"
-            BUILD_TAGS="-tags teams"
+          if [ "$EDITION" = "server" ]; then
+            CLEAN_BINARY="mcpproxy-server"
+            BUILD_TAGS="-tags server"
           elif [ "${{ matrix.goos }}" = "windows" ]; then
             CLEAN_BINARY="mcpproxy.exe"
           else
@@ -402,7 +402,7 @@ jobs:
           go build ${BUILD_TAGS} -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
           # Build tray binary for platforms with GUI support (macOS and Windows, personal only)
-          if [ "$EDITION" != "teams" ] && { [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; }; then
+          if [ "$EDITION" != "server" ] && { [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; }; then
             echo "Building mcpproxy-tray for ${{ matrix.goos }}..."
 
             # Determine tray binary name
@@ -988,7 +988,7 @@ jobs:
   build-docker:
     runs-on: ubuntu-latest
     needs: [build]
-    # Disabled until teams MVP is ready — uncomment to enable
+    # Disabled until server MVP is ready — uncomment to enable
     if: false && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
@@ -1010,11 +1010,11 @@ jobs:
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
           tags: |
-            ghcr.io/smart-mcp-proxy/mcpproxy-teams:${{ github.ref_name }}
-            ghcr.io/smart-mcp-proxy/mcpproxy-teams:latest
+            ghcr.io/smart-mcp-proxy/mcpproxy-server:${{ github.ref_name }}
+            ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
 
   release:
-    needs: [build, sign-windows, generate-notes]  # add build-docker when teams MVP is ready
+    needs: [build, sign-windows, generate-notes]  # add build-docker when server MVP is ready
     runs-on: ubuntu-latest
     environment: production
 

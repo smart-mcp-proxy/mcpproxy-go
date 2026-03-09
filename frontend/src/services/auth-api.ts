@@ -1,4 +1,4 @@
-// Auth API client for teams edition
+// Auth API client for server edition
 const API_BASE = '/api/v1'
 
 export interface UserProfile {

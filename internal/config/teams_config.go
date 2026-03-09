@@ -1,4 +1,4 @@
-//go:build teams
+//go:build server
 
 package config
 
@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TeamsConfig holds configuration for the teams edition multi-user features.
+// TeamsConfig holds configuration for the server edition multi-user features.
 type TeamsConfig struct {
 	Enabled              bool              `json:"enabled" mapstructure:"enabled"`
 	AdminEmails          []string          `json:"admin_emails" mapstructure:"admin-emails"`
@@ -19,7 +19,7 @@ type TeamsConfig struct {
 	MaxUserServers       int               `json:"max_user_servers,omitempty" mapstructure:"max-user-servers"`
 }
 
-// TeamsOAuthConfig holds OAuth identity provider configuration.
+// TeamsOAuthConfig holds OAuth identity provider configuration for the server edition.
 type TeamsOAuthConfig struct {
 	Provider       string   `json:"provider" mapstructure:"provider"` // "google", "github", "microsoft"
 	ClientID       string   `json:"client_id" mapstructure:"client-id"`

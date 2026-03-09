@@ -28,23 +28,30 @@ Only halt execution and ask a human IF:
 
 MCPProxy is a Go-based desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
-## Editions (Personal & Teams)
+## Editions (Personal & Server)
 
 MCPProxy is built in two editions from the same codebase using Go build tags:
 
 | Edition | Build Command | Binary | Distribution |
 |---------|--------------|--------|-------------|
 | **Personal** (default) | `go build ./cmd/mcpproxy` | `mcpproxy` | macOS DMG, Windows installer, Linux tar.gz |
-| **Teams** | `go build -tags teams ./cmd/mcpproxy` | `mcpproxy-teams` | Docker image, .deb package, Linux tar.gz |
+| **Server** | `go build -tags server ./cmd/mcpproxy` | `mcpproxy-server` | Docker image, .deb package, Linux tar.gz |
+
+> Every feature decision should ask: "Does this make the personal edition so good that developers tell their teammates about it?"
 
 ### Key Directories
 
 | Directory | Purpose |
 |-----------|---------|
 | `cmd/mcpproxy/edition.go` | Default edition = "personal" |
-| `cmd/mcpproxy/edition_teams.go` | Build-tagged override for teams |
-| `cmd/mcpproxy/teams_register.go` | Teams feature registration entry point |
-| `internal/teams/` | Teams-only code (all files have `//go:build teams`) |
+| `cmd/mcpproxy/edition_teams.go` | Build-tagged override for server edition |
+| `cmd/mcpproxy/teams_register.go` | Server feature registration entry point |
+| `internal/teams/` | Server-only code (all files have `//go:build server`) |
+| `internal/teams/auth/` | OAuth authentication, session management, JWT tokens, middleware |
+| `internal/teams/users/` | User/session models, BBolt store, user server management |
+| `internal/teams/workspace/` | Per-user workspace manager for personal upstream servers |
+| `internal/teams/multiuser/` | Multi-user router, tool filtering, activity isolation |
+| `internal/teams/api/` | Server REST API endpoints (user, admin, auth) |
 | `native/macos/` | Future Swift tray app (placeholder) |
 | `native/windows/` | Future C# tray app (placeholder) |
 
@@ -53,6 +60,66 @@ MCPProxy is built in two editions from the same codebase using Go build tags:
 The binary self-identifies its edition:
 - `mcpproxy version` → `MCPProxy v0.21.0 (personal) darwin/arm64`
 - `/api/v1/status` → `{"edition": "personal", ...}`
+
+## Server Multi-User Authentication (Spec 024)
+
+Server edition supports OAuth-based multi-user authentication with Google, GitHub, or Microsoft identity providers.
+
+### Server Configuration
+
+```json
+{
+  "teams": {
+    "enabled": true,
+    "admin_emails": ["admin@company.com"],
+    "oauth": {
+      "provider": "google",
+      "client_id": "xxx.apps.googleusercontent.com",
+      "client_secret": "GOCSPX-xxx",
+      "tenant_id": "",
+      "allowed_domains": ["company.com"]
+    },
+    "session_ttl": "24h",
+    "bearer_token_ttl": "24h",
+    "workspace_idle_timeout": "30m",
+    "max_user_servers": 20
+  }
+}
+```
+
+### Server API Endpoints
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /api/v1/auth/login` | Public | Initiate OAuth login flow |
+| `GET /api/v1/auth/callback` | Public | OAuth callback (creates session) |
+| `GET /api/v1/auth/me` | Session/JWT | Get current user profile |
+| `POST /api/v1/auth/token` | Session | Generate JWT bearer token for MCP |
+| `POST /api/v1/auth/logout` | Session | Invalidate session |
+| `GET /api/v1/user/servers` | Session/JWT | List user's servers (personal + shared) |
+| `POST /api/v1/user/servers` | Session/JWT | Add personal upstream server |
+| `GET /api/v1/user/activity` | Session/JWT | User's activity log |
+| `GET /api/v1/user/diagnostics` | Session/JWT | Server health for user's servers |
+| `GET /api/v1/admin/users` | Admin | List all users |
+| `POST /api/v1/admin/users/{id}/disable` | Admin | Disable a user |
+| `GET /api/v1/admin/activity` | Admin | All users' activity logs |
+| `GET /api/v1/admin/sessions` | Admin | List active sessions |
+
+### Server Architecture
+
+- **Auth flow**: OAuth 2.0 + PKCE → Session cookie (Web UI) + JWT bearer (MCP/API)
+- **Server types**: Shared (config file, single connection) + Personal (DB, per-user connections)
+- **Isolation**: Users see only shared + own personal servers. Activity logs user-scoped.
+- **Admin**: Identified by `admin_emails` config. Sees all activity, manages users.
+- **Build tag**: All server code behind `//go:build server`. Personal edition unaffected.
+
+### Server Testing
+
+```bash
+go test -tags server ./internal/teams/... -v -race  # All server unit + integration tests
+go build -tags server ./cmd/mcpproxy                # Build server edition
+go build ./cmd/mcpproxy                            # Verify personal edition unaffected
+```
 
 ## Architecture: Core + Tray Split
 
@@ -66,11 +133,11 @@ The binary self-identifies its edition:
 ### Build
 ```bash
 go build -o mcpproxy ./cmd/mcpproxy                     # Core server (personal)
-go build -tags teams -o mcpproxy-teams ./cmd/mcpproxy   # Core server (teams)
+go build -tags server -o mcpproxy-server ./cmd/mcpproxy   # Core server (server edition)
 GOOS=darwin CGO_ENABLED=1 go build -o mcpproxy-tray ./cmd/mcpproxy-tray  # Tray app
 make build                                               # Frontend and backend (personal)
-make build-teams                                         # Frontend and backend (teams)
-make build-docker                                        # Teams Docker image
+make build-server                                        # Frontend and backend (server)
+make build-docker                                        # Server Docker image
 ./scripts/build.sh                                       # Cross-platform build
 ```
 
@@ -546,6 +613,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - `~/.mcpproxy/mcp_config.json` (config file), `~/.mcpproxy/config.db` (BBolt - not directly used) (027-status-command)
 - Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), BBolt (storage), Zap (logging), mcp-go (MCP protocol), crypto/hmac + crypto/sha256 (token hashing) (028-agent-tokens)
 - BBolt database (`~/.mcpproxy/config.db`) — new `agent_tokens` bucket (028-agent-tokens)
+- Go 1.24 (toolchain go1.24.10) + TypeScript 5.9 / Vue 3.5 + Chi router, BBolt, Zap logging, mcp-go, golang-jwt/jwt/v5, Vue 3, Pinia, DaisyUI (024-teams-multiuser-oauth)
+- BBolt database (`~/.mcpproxy/config.db`) - new buckets for users, sessions, user servers (024-teams-multiuser-oauth)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

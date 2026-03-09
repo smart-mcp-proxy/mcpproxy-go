@@ -160,7 +160,7 @@ func (s *Server) SetTokenStore(store TokenStore, dataDir string) {
 }
 
 // Router returns the underlying chi.Mux for external route registration.
-// This is used by the teams edition to mount OAuth routes outside
+// This is used by the server edition to mount OAuth routes outside
 // the default API key authentication group.
 func (s *Server) Router() *chi.Mux {
 	return s.router

@@ -4,7 +4,7 @@ import Dashboard from '@/views/Dashboard.vue'
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    // Teams auth routes
+    // Server edition auth routes
     {
       path: '/login',
       name: 'login',
@@ -93,7 +93,7 @@ const router = createRouter({
         title: 'Agent Tokens',
       },
     },
-    // Teams user routes
+    // Server edition user routes
     {
       path: '/my/servers',
       name: 'user-servers',
@@ -118,7 +118,7 @@ const router = createRouter({
       component: () => import('@/views/teams/UserTokens.vue'),
       meta: { title: 'Agent Tokens', requiresAuth: true },
     },
-    // Teams admin routes
+    // Server edition admin routes
     {
       path: '/admin/dashboard',
       name: 'admin-dashboard',
@@ -161,7 +161,7 @@ router.beforeEach(async (to) => {
 
   // Skip auth checks for personal edition
   if (!authStore.isTeamsEdition) {
-    // Don't show teams routes in personal edition
+    // Don't show server routes in personal edition
     if (to.path === '/login' || to.path.startsWith('/my/') || to.path.startsWith('/admin/')) {
       return { name: 'dashboard' }
     }
@@ -181,7 +181,7 @@ router.beforeEach(async (to) => {
     return
   }
 
-  // Require authentication for teams edition
+  // Require authentication for server edition
   if (!authStore.isAuthenticated) {
     return { name: 'login' }
   }

@@ -1,4 +1,4 @@
-//go:build teams
+//go:build server
 
 package teams
 
@@ -13,7 +13,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
-// Dependencies holds shared dependencies that teams features need.
+// Dependencies holds shared dependencies that server edition features need.
 // These are provided by the server during initialization and passed
 // to each feature's Setup function.
 type Dependencies struct {
@@ -26,7 +26,7 @@ type Dependencies struct {
 	StorageManager    *storage.Manager // Shared storage manager for token operations
 }
 
-// Feature represents a teams feature module that self-registers.
+// Feature represents a server edition feature module that self-registers.
 type Feature struct {
 	Name  string
 	Setup func(deps Dependencies) error
@@ -34,17 +34,17 @@ type Feature struct {
 
 var features []Feature
 
-// Register adds a teams feature to the registry.
+// Register adds a server edition feature to the registry.
 // Called by feature packages in their init() functions.
 func Register(f Feature) {
 	features = append(features, f)
 }
 
-// SetupAll initializes all registered teams features.
+// SetupAll initializes all registered server edition features.
 func SetupAll(deps Dependencies) error {
 	for _, f := range features {
 		if err := f.Setup(deps); err != nil {
-			return fmt.Errorf("teams feature %s: %w", f.Name, err)
+			return fmt.Errorf("server feature %s: %w", f.Name, err)
 		}
 	}
 	return nil

@@ -1,4 +1,4 @@
-//go:build !teams
+//go:build !server
 
 package main
 

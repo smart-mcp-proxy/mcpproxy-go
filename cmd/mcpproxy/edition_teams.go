@@ -1,7 +1,7 @@
-//go:build teams
+//go:build server
 
 package main
 
 func init() {
-	Edition = "teams"
+	Edition = "server"
 }

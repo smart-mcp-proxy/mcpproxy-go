@@ -123,7 +123,7 @@ type Config struct {
 	// Sensitive data detection settings (Spec 026)
 	SensitiveDataDetection *SensitiveDataDetectionConfig `json:"sensitive_data_detection,omitempty" mapstructure:"sensitive-data-detection"`
 
-	// Teams edition multi-user configuration (only meaningful with -tags teams)
+	// Server edition multi-user configuration (only meaningful with -tags server)
 	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams" swaggerignore:"true"`
 }
 
@@ -169,7 +169,7 @@ type ServerConfig struct {
 	OAuth       *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
 	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
-	Shared      bool              `json:"shared,omitempty" mapstructure:"shared"` // Teams: shared with all users
+	Shared      bool              `json:"shared,omitempty" mapstructure:"shared"` // Server edition: shared with all users
 	Created     time.Time         `json:"created" mapstructure:"created"`
 	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
 	Isolation   *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings

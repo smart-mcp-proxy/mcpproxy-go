@@ -6,8 +6,8 @@ import "context"
 const (
 	AuthTypeAdmin     = "admin"      // API key admin (personal edition)
 	AuthTypeAgent     = "agent"      // Agent token authentication
-	AuthTypeUser      = "user"       // Regular OAuth-authenticated user (teams)
-	AuthTypeAdminUser = "admin_user" // OAuth-authenticated admin (teams)
+	AuthTypeUser      = "user"       // Regular OAuth-authenticated user (server edition)
+	AuthTypeAdminUser = "admin_user" // OAuth-authenticated admin (server edition)
 )
 
 // AuthContext carries authentication identity through request context.
@@ -18,7 +18,7 @@ type AuthContext struct {
 	AllowedServers []string // Servers this token can access (nil = all for admin)
 	Permissions    []string // Permission tiers (nil = all for admin)
 
-	// Multi-user OAuth fields (teams edition). Empty for non-user auth types.
+	// Multi-user OAuth fields (server edition). Empty for non-user auth types.
 	UserID      string // User's unique ULID identifier
 	Email       string // User's email from OAuth provider
 	DisplayName string // User's display name

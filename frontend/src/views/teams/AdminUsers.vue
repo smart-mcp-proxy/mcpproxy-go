@@ -4,7 +4,7 @@
     <div class="flex justify-between items-center">
       <div>
         <h1 class="text-2xl font-bold">Users</h1>
-        <p class="text-base-content/70 mt-1">Manage team members and their access</p>
+        <p class="text-base-content/70 mt-1">Manage users and their access</p>
       </div>
       <button @click="loadUsers" class="btn btn-sm btn-ghost" :disabled="loading">
         <svg class="w-4 h-4" :class="{ 'animate-spin': loading }" fill="none" stroke="currentColor" viewBox="0 0 24 24">

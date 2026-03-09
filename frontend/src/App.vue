@@ -96,7 +96,7 @@ function handleAuthError(event: APIAuthEvent) {
 }
 
 onMounted(async () => {
-  // Initialize auth state (needed for teams edition role-based nav)
+  // Initialize auth state (needed for server edition role-based nav)
   await authStore.checkAuth()
 
   // Set up API error listener

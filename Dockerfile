@@ -13,12 +13,12 @@ COPY . .
 RUN cd frontend && npm ci && npm run build
 RUN mkdir -p web/frontend && cp -r frontend/dist web/frontend/
 
-# Build teams binary
+# Build server edition binary
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 RUN CGO_ENABLED=0 go build \
-    -tags teams \
+    -tags server \
     -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION} -s -w" \
     -o /mcpproxy ./cmd/mcpproxy
 

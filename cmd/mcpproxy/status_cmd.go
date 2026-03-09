@@ -367,7 +367,7 @@ func printStatusTable(info *StatusInfo) {
 
 	if info.TeamsInfo != nil {
 		fmt.Println()
-		fmt.Println("Teams")
+		fmt.Println("Server Edition")
 		fmt.Printf("  %-12s %s\n", "OAuth:", info.TeamsInfo.OAuthProvider)
 		fmt.Printf("  %-12s %s\n", "Admins:", strings.Join(info.TeamsInfo.AdminEmails, ", "))
 	}
