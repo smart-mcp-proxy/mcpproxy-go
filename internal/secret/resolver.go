@@ -179,6 +179,120 @@ func (r *Resolver) expandValue(ctx context.Context, v reflect.Value) error {
 	return nil
 }
 
+// SecretExpansionError records a failure to resolve a single secret reference during struct expansion.
+type SecretExpansionError struct {
+	FieldPath string // e.g. "WorkingDir", "Isolation.WorkingDir", "Args[0]", "Env[MY_VAR]"
+	Reference string // the original unresolved reference pattern, e.g. "${env:HOME}"
+	Err       error
+}
+
+// ExpandStructSecretsCollectErrors expands secret references in all string fields of v.
+// Unlike ExpandStructSecrets, it does not fail fast: it collects all expansion errors and
+// continues processing remaining fields. On error, the field retains its original value.
+// v must be a non-nil pointer to a struct.
+func (r *Resolver) ExpandStructSecretsCollectErrors(ctx context.Context, v interface{}) []SecretExpansionError {
+	var errs []SecretExpansionError
+	r.expandValueCollectErrors(ctx, reflect.ValueOf(v), "", &errs)
+	return errs
+}
+
+// expandValueCollectErrors mirrors expandValue but tracks field paths and collects errors
+// instead of returning on the first failure. On resolution error the field is left unchanged.
+func (r *Resolver) expandValueCollectErrors(ctx context.Context, v reflect.Value, path string, errs *[]SecretExpansionError) {
+	if !v.IsValid() {
+		return
+	}
+
+	// Handle pointers
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return
+		}
+		r.expandValueCollectErrors(ctx, v.Elem(), path, errs)
+		return
+	}
+
+	switch v.Kind() {
+	case reflect.String:
+		if v.CanSet() {
+			original := v.String()
+			if IsSecretRef(original) {
+				expanded, err := r.ExpandSecretRefs(ctx, original)
+				if err != nil {
+					*errs = append(*errs, SecretExpansionError{
+						FieldPath: path,
+						Reference: original,
+						Err:       err,
+					})
+					// retain original value on failure — do not call SetString
+				} else {
+					v.SetString(expanded)
+				}
+			}
+		}
+
+	case reflect.Struct:
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Field(i)
+			if !field.CanInterface() {
+				continue
+			}
+			fieldType := t.Field(i)
+			if !fieldType.IsExported() {
+				continue
+			}
+			fieldName := fieldType.Name
+			newPath := fieldName
+			if path != "" {
+				newPath = path + "." + fieldName
+			}
+			r.expandValueCollectErrors(ctx, field, newPath, errs)
+		}
+
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			newPath := fmt.Sprintf("%s[%d]", path, i)
+			r.expandValueCollectErrors(ctx, v.Index(i), newPath, errs)
+		}
+
+	case reflect.Map:
+		for _, key := range v.MapKeys() {
+			keyStr := fmt.Sprintf("%v", key.Interface())
+			newPath := fmt.Sprintf("%s[%s]", path, keyStr)
+			mapValue := v.MapIndex(key)
+			if mapValue.Kind() == reflect.String && IsSecretRef(mapValue.String()) {
+				original := mapValue.String()
+				expanded, err := r.ExpandSecretRefs(ctx, original)
+				if err != nil {
+					*errs = append(*errs, SecretExpansionError{
+						FieldPath: newPath,
+						Reference: original,
+						Err:       err,
+					})
+				} else {
+					v.SetMapIndex(key, reflect.ValueOf(expanded))
+				}
+			} else if mapValue.Kind() == reflect.Interface {
+				actualValue := mapValue.Elem()
+				if actualValue.Kind() == reflect.String && IsSecretRef(actualValue.String()) {
+					original := actualValue.String()
+					expanded, err := r.ExpandSecretRefs(ctx, original)
+					if err != nil {
+						*errs = append(*errs, SecretExpansionError{
+							FieldPath: newPath,
+							Reference: original,
+							Err:       err,
+						})
+					} else {
+						v.SetMapIndex(key, reflect.ValueOf(expanded))
+					}
+				}
+			}
+		}
+	}
+}
+
 // ExtractConfigSecrets extracts all secret and environment references from a config structure
 func (r *Resolver) ExtractConfigSecrets(ctx context.Context, v interface{}) (*ConfigSecretsResponse, error) {
 	allRefs := []Ref{}
