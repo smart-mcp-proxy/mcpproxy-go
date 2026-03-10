@@ -11,13 +11,30 @@ keywords: [mcp, protocol, tools, proxy]
 
 MCPProxy implements the Model Context Protocol (MCP) specification, providing AI clients with unified access to multiple upstream MCP servers.
 
-## Endpoint
+## Endpoints
+
+### Default Endpoint
 
 ```
 http://127.0.0.1:8080/mcp
 ```
 
-**Note:** The MCP endpoint does not require API key authentication for client compatibility.
+Serves the routing mode configured in `routing_mode` (default: `retrieve_tools`).
+
+### Routing Mode Endpoints
+
+Each routing mode has a dedicated endpoint that is always available regardless of the configured default:
+
+| Endpoint | Mode | Description |
+|----------|------|-------------|
+| `/mcp` | *(configured)* | Default routing mode from config |
+| `/mcp/call` | `retrieve_tools` | BM25 search via `retrieve_tools` + `call_tool` variants |
+| `/mcp/all` | `direct` | All upstream tools as `serverName__toolName` |
+| `/mcp/code` | `code_execution` | JavaScript orchestration via `code_execution` tool |
+
+See [Routing Modes](../features/routing-modes.md) for details on each mode.
+
+**Note:** MCP endpoints do not require API key authentication for client compatibility.
 
 ## Built-in Tools
 

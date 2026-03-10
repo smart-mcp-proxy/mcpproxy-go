@@ -163,6 +163,16 @@ MCPProxy checks for these suspicious patterns:
 4. **Regular Audits**: Periodically review approved servers
 5. **Network Isolation**: Use Docker isolation with `network_mode: "none"` for untrusted servers
 
+## Tool-Level Quarantine
+
+In addition to server-level quarantine, MCPProxy provides **tool-level quarantine** that detects changes to individual tool descriptions and schemas using SHA256 hashing. This protects against "rug pull" attacks where a previously trusted server silently modifies tool behavior.
+
+See [Tool Quarantine](./tool-quarantine.md) for complete documentation on:
+- SHA256 hash-based tool approval
+- CLI commands: `mcpproxy upstream inspect` and `mcpproxy upstream approve`
+- Configuration: `quarantine_enabled` and `skip_quarantine`
+- REST API endpoints for tool approval management
+
 ## Disabling Quarantine
 
 **Not recommended**, but you can disable automatic quarantine:
@@ -175,4 +185,12 @@ MCPProxy checks for these suspicious patterns:
 }
 ```
 
-⚠️ **Warning**: Disabling quarantine exposes your system to Tool Poisoning Attacks.
+To disable tool-level quarantine separately:
+
+```json
+{
+  "quarantine_enabled": false
+}
+```
+
+Warning: Disabling quarantine exposes your system to Tool Poisoning Attacks.

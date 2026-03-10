@@ -139,8 +139,14 @@ mcpproxy serve [flags]
 Run health diagnostics:
 
 ```bash
-mcpproxy doctor
+mcpproxy doctor [flags]
 ```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--output, -o` | Output format: `pretty`, `json` | `pretty` |
+| `--log-level, -l` | Log level | `warn` |
+| `--config, -c` | Path to config file | auto-detect |
 
 Checks for:
 - Upstream server connection errors
@@ -148,6 +154,8 @@ Checks for:
 - Missing secrets
 - Runtime warnings
 - Docker isolation status
+- Tools pending quarantine approval (pending/changed counts per server)
+- Security features status (routing mode, sensitive data detection)
 
 ## Upstream Management
 
@@ -183,6 +191,54 @@ Restart a server:
 ```bash
 mcpproxy upstream restart <server-name>
 mcpproxy upstream restart --all
+```
+
+### upstream inspect
+
+Inspect tool approval status for a server (tool-level quarantine):
+
+```bash
+mcpproxy upstream inspect <server-name> [flags]
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--tool` | Inspect a specific tool by name | all tools |
+| `--output, -o` | Output format: table, json | `table` |
+
+**Examples:**
+
+```bash
+# Show all tool approvals for a server
+mcpproxy upstream inspect github-server
+
+# Inspect a specific tool (shows diff if changed)
+mcpproxy upstream inspect github-server --tool create_issue
+
+# JSON output for scripting
+mcpproxy upstream inspect github-server --output=json
+```
+
+See [Tool Quarantine](/features/tool-quarantine) for details.
+
+### upstream approve
+
+Approve quarantined tools for a server:
+
+```bash
+mcpproxy upstream approve <server-name> [tool-names...]
+```
+
+Without specific tool names, approves all pending/changed tools.
+
+**Examples:**
+
+```bash
+# Approve all pending/changed tools
+mcpproxy upstream approve github-server
+
+# Approve specific tools
+mcpproxy upstream approve github-server create_issue list_repos
 ```
 
 ### upstream enable/disable
@@ -344,7 +400,7 @@ mcpproxy call tool-destructive --tool-name=github:delete_repo --json_args='{"rep
 
 ### code exec
 
-Execute JavaScript code:
+Execute JavaScript or TypeScript code:
 
 ```bash
 mcpproxy code exec [flags]
@@ -352,16 +408,24 @@ mcpproxy code exec [flags]
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--code` | JavaScript code to execute | - |
-| `--file` | Path to JavaScript file (alternative to --code) | - |
+| `--code` | JavaScript or TypeScript code to execute | - |
+| `--file` | Path to JS/TS file (alternative to --code) | - |
+| `--language` | Source code language: `javascript`, `typescript` | `javascript` |
 | `--input` | JSON input data | `{}` |
 | `--input-file` | Path to JSON file containing input data | - |
 | `--max-tool-calls` | Maximum tool calls (0 = unlimited) | `0` |
 | `--allowed-servers` | Comma-separated list of allowed servers | - |
 
-**Example:**
+**Examples:**
 ```bash
+# JavaScript (default)
 mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}'
+
+# TypeScript with type annotations
+mcpproxy code exec --language typescript --code="const x: number = 42; ({ result: x })"
+
+# TypeScript from file
+mcpproxy code exec --language typescript --file=script.ts --input-file=params.json
 ```
 
 See [Code Execution](/features/code-execution) for detailed documentation.

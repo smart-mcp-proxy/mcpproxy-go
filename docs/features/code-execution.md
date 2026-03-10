@@ -3,13 +3,13 @@ id: code-execution
 title: Code Execution
 sidebar_label: Code Execution
 sidebar_position: 3
-description: Execute JavaScript to orchestrate multiple MCP tools
-keywords: [code, execution, javascript, orchestration]
+description: Execute JavaScript or TypeScript to orchestrate multiple MCP tools
+keywords: [code, execution, javascript, typescript, orchestration]
 ---
 
 # Code Execution
 
-The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES2020+).
+The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES2020+) or TypeScript.
 
 ## Overview
 
@@ -48,6 +48,12 @@ Enable code execution in your config:
 mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}'
 ```
 
+### TypeScript Execution
+
+```bash
+mcpproxy code exec --language typescript --code="const x: number = 42; ({ result: x })"
+```
+
 ### Tool Orchestration
 
 ```bash
@@ -60,7 +66,8 @@ mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user
 
 ```json
 {
-  "code": "string (required) - JavaScript code to execute",
+  "code": "string (required) - JavaScript or TypeScript code to execute",
+  "language": "string (optional) - 'javascript' (default) or 'typescript'",
   "input": "object (optional) - Input data available as 'input' variable"
 }
 ```
@@ -197,6 +204,36 @@ Verify the server and tool names:
 ```bash
 mcpproxy tools list --server=server-name
 ```
+
+## TypeScript Support
+
+Set `language: "typescript"` to write code with type annotations. TypeScript types are automatically stripped before execution using esbuild, with near-zero transpilation overhead (<5ms).
+
+### Supported Features
+
+- Type annotations: `const x: number = 42`
+- Interfaces: `interface User { name: string; age: number; }`
+- Type aliases: `type StringOrNumber = string | number`
+- Generics: `function identity<T>(arg: T): T { return arg; }`
+- Enums: `enum Direction { Up = "UP", Down = "DOWN" }`
+- Namespaces and type assertions
+
+### Example
+
+```bash
+mcpproxy code exec --language typescript \
+  --code="interface User { name: string; }
+const user: User = { name: input.username };
+({ greeting: 'Hello ' + user.name })" \
+  --input='{"username": "Alice"}'
+```
+
+### Important Notes
+
+- TypeScript support uses type-stripping only (no type checking or semantic validation)
+- Valid JavaScript is also valid TypeScript
+- Transpilation errors return the `TRANSPILE_ERROR` error code with line/column information
+- See [Code Execution Overview](../code_execution/overview.md#typescript-support) for comprehensive TypeScript documentation
 
 ## Best Practices
 

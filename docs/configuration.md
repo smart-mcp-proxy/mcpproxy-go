@@ -622,6 +622,70 @@ See [Docker Recovery Documentation](docker-recovery-phase3.md) for complete deta
 
 ---
 
+## Routing Mode
+
+Controls how upstream MCP tools are exposed to AI agents on the default `/mcp` endpoint.
+
+```json
+{
+  "routing_mode": "retrieve_tools"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `routing_mode` | string | `"retrieve_tools"` | How tools are exposed: `retrieve_tools`, `direct`, or `code_execution` |
+
+**Available modes:**
+
+| Mode | Description |
+|------|-------------|
+| `retrieve_tools` | BM25 search via `retrieve_tools` + `call_tool_read/write/destructive` (default, most token-efficient) |
+| `direct` | All upstream tools exposed directly as `serverName__toolName` |
+| `code_execution` | JavaScript orchestration via `code_execution` tool with tool catalog |
+
+All three modes are always available on dedicated endpoints regardless of config: `/mcp/all` (direct), `/mcp/code` (code_execution), `/mcp/call` (retrieve_tools).
+
+See [Routing Modes](features/routing-modes.md) for complete details.
+
+---
+
+## Tool-Level Quarantine
+
+SHA256 hash-based tool approval system that detects changes to tool descriptions and schemas.
+
+```json
+{
+  "quarantine_enabled": true
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `quarantine_enabled` | boolean | `true` | Enable tool-level quarantine globally |
+
+Per-server quarantine skip is configured on the server entry:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "trusted-server",
+      "command": "my-server",
+      "skip_quarantine": true
+    }
+  ]
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `skip_quarantine` | boolean | `false` | Skip tool-level quarantine for this server (auto-approve new tools) |
+
+See [Tool Quarantine](features/tool-quarantine.md) for complete details.
+
+---
+
 ## Code Execution
 
 ```json
@@ -635,10 +699,12 @@ See [Docker Recovery Documentation](docker-recovery-phase3.md) for complete deta
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enable_code_execution` | boolean | `false` | Enable JavaScript code execution tool (disabled by default for security) |
+| `enable_code_execution` | boolean | `false` | Enable JavaScript/TypeScript code execution tool (disabled by default for security) |
 | `code_execution_timeout_ms` | integer | `120000` | Default timeout in milliseconds (1-600000, max 10 minutes) |
 | `code_execution_max_tool_calls` | integer | `0` | Maximum tool calls per execution (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | Number of JavaScript VM instances in pool (1-100) |
+
+Code execution supports both JavaScript (ES2020+) and TypeScript. TypeScript code is automatically transpiled via esbuild before execution.
 
 See [Code Execution Documentation](code_execution/overview.md) for complete details.
 
@@ -731,19 +797,19 @@ Here's a complete configuration example with all major sections:
   "debug_search": false,
   "enable_prompts": true,
   "check_server_repo": true,
-  
+
   "tokenizer": {
     "enabled": true,
     "default_model": "gpt-4",
     "encoding": "cl100k_base"
   },
-  
+
   "tls": {
     "enabled": false,
     "require_client_cert": false,
     "hsts": true
   },
-  
+
   "logging": {
     "level": "info",
     "enable_file": false,
@@ -755,7 +821,7 @@ Here's a complete configuration example with all major sections:
     "compress": true,
     "json_format": false
   },
-  
+
   "mcpServers": [
     {
       "name": "everything",
@@ -776,30 +842,30 @@ Here's a complete configuration example with all major sections:
       "enabled": true
     }
   ],
-  
+
   "docker_isolation": {
     "enabled": false
   },
-  
+
   "docker_recovery": {
     "enabled": true,
     "notify_on_start": true,
     "notify_on_success": true,
     "notify_on_failure": true
   },
-  
+
   "environment": {
     "inherit_system_safe": true,
     "allowed_system_vars": ["PATH", "HOME", "TMPDIR"],
     "custom_vars": {},
     "enhance_path": false
   },
-  
+
   "enable_code_execution": false,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
-  
+
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,

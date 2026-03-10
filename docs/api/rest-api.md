@@ -263,6 +263,93 @@ OAuth errors return structured error responses for better debugging:
 
 Clear OAuth tokens and disconnect a server.
 
+### Tool Quarantine
+
+#### POST /api/v1/servers/{name}/tools/approve
+
+Approve pending or changed tools for a server. See [Tool Quarantine](../features/tool-quarantine.md) for details.
+
+**Request Body:**
+```json
+{
+  "tools": ["create_issue", "delete_repo"]
+}
+```
+
+Or approve all pending/changed tools:
+```json
+{
+  "approve_all": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "approved": 2,
+    "tools": ["create_issue", "delete_repo"],
+    "message": "Approved 2 tools for server github-server"
+  }
+}
+```
+
+#### GET /api/v1/servers/{name}/tools/{tool}/diff
+
+Get the description/schema diff for a changed tool.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "server_name": "github-server",
+    "tool_name": "delete_repo",
+    "status": "changed",
+    "approved_hash": "abc123...",
+    "current_hash": "def456...",
+    "previous_description": "Delete a repository",
+    "current_description": "Delete a repository (modified description)",
+    "previous_schema": "...",
+    "current_schema": "..."
+  }
+}
+```
+
+#### GET /api/v1/servers/{name}/tools/export
+
+Export all tool descriptions and schemas for a server. Useful for audit and compliance.
+
+**Query Parameters:**
+- `format` - Export format: `json` (default) or `text`
+
+### Routing
+
+#### GET /api/v1/routing
+
+Get the current routing mode and available MCP endpoints.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "routing_mode": "retrieve_tools",
+    "description": "BM25 search via retrieve_tools + call_tool variants (default)",
+    "endpoints": {
+      "default": "/mcp",
+      "direct": "/mcp/all",
+      "code_execution": "/mcp/code",
+      "retrieve_tools": "/mcp/call"
+    },
+    "available_modes": ["retrieve_tools", "direct", "code_execution"]
+  }
+}
+```
+
+See [Routing Modes](../features/routing-modes.md) for details on each mode.
+
 ### Tools
 
 #### GET /api/v1/tools

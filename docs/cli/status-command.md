@@ -50,6 +50,7 @@ MCPProxy Status
   Uptime:      2h 15m
   API Key:     a1b2****gh78
   Web UI:      http://127.0.0.1:8080/ui/?apikey=a1b2...gh78
+  Routing:     retrieve_tools
   Servers:     12 connected, 2 quarantined
   Socket:      /Users/you/.mcpproxy/mcpproxy.sock
   Config:      /Users/you/.mcpproxy/mcp_config.json
@@ -125,6 +126,7 @@ mcpproxy status -o json
   "uptime_seconds": 8100,
   "api_key": "a1b2****gh78",
   "web_ui_url": "http://127.0.0.1:8080/ui/?apikey=...",
+  "routing_mode": "retrieve_tools",
   "servers": {
     "connected": 12,
     "quarantined": 2,

@@ -428,7 +428,7 @@ mcpproxy code exec --language typescript \
 
 - TypeScript support uses type-stripping only (no type checking or semantic validation)
 - Valid JavaScript is also valid TypeScript, so you can always use `language: "typescript"` even for plain JS
-- The transpiled output runs in the same ES5.1+ goja sandbox with all existing capabilities
+- The transpiled output runs in the same ES2020+ goja sandbox with all existing capabilities
 - Transpilation errors return the `TRANSPILE_ERROR` error code with line/column information
 
 ## Best Practices
