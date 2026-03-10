@@ -300,3 +300,101 @@ func (p *MCPProxyServer) buildToolCatalogDescription(ctx context.Context) string
 
 	return sb.String()
 }
+
+// initRoutingModeServers creates separate MCP server instances for each routing mode.
+// Each server instance has its own set of tools registered appropriate for that mode.
+// The main "server" field remains the retrieve_tools mode server (default).
+func (p *MCPProxyServer) initRoutingModeServers() {
+	// Create direct mode server
+	p.directServer = mcpserver.NewMCPServer(
+		"mcpproxy-go",
+		"1.0.0",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithRecovery(),
+	)
+
+	// Create code execution mode server
+	p.codeExecServer = mcpserver.NewMCPServer(
+		"mcpproxy-go",
+		"1.0.0",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithRecovery(),
+	)
+
+	// Register tools for code execution mode (static tools that don't change)
+	codeExecTools := p.buildCodeExecModeTools()
+	for _, st := range codeExecTools {
+		p.codeExecServer.AddTool(st.Tool, st.Handler)
+	}
+
+	// Note: Direct mode tools are built lazily/on-demand via RefreshDirectModeTools
+	// because upstream servers may not be connected yet during initialization.
+	// The servers.changed event will trigger a refresh.
+
+	p.logger.Info("routing mode servers initialized",
+		zap.String("default_mode", p.config.RoutingMode))
+}
+
+// RefreshDirectModeTools rebuilds the direct mode server's tool set.
+// Should be called when upstream servers change (connect/disconnect/tool updates).
+func (p *MCPProxyServer) RefreshDirectModeTools() {
+	if p.directServer == nil {
+		return
+	}
+
+	directTools := p.buildDirectModeTools()
+
+	// Convert to the format needed by SetTools
+	serverTools := make([]mcpserver.ServerTool, len(directTools))
+	copy(serverTools, directTools)
+
+	// Replace all tools atomically
+	p.directServer.SetTools(serverTools...)
+
+	p.logger.Info("refreshed direct mode tools",
+		zap.Int("tool_count", len(directTools)))
+}
+
+// RefreshCodeExecModeTools rebuilds the code execution mode server's tool catalog description.
+// Should be called when upstream servers change to update the available tools listing.
+func (p *MCPProxyServer) RefreshCodeExecModeTools() {
+	if p.codeExecServer == nil {
+		return
+	}
+
+	codeExecTools := p.buildCodeExecModeTools()
+	serverTools := make([]mcpserver.ServerTool, len(codeExecTools))
+	copy(serverTools, codeExecTools)
+
+	p.codeExecServer.SetTools(serverTools...)
+
+	p.logger.Info("refreshed code execution mode tools",
+		zap.Int("tool_count", len(codeExecTools)))
+}
+
+// GetMCPServerForMode returns the MCP server instance for the given routing mode.
+// Falls back to the default retrieve_tools server for unknown modes.
+func (p *MCPProxyServer) GetMCPServerForMode(mode string) *mcpserver.MCPServer {
+	switch mode {
+	case config.RoutingModeDirect:
+		if p.directServer != nil {
+			return p.directServer
+		}
+	case config.RoutingModeCodeExecution:
+		if p.codeExecServer != nil {
+			return p.codeExecServer
+		}
+	}
+	// Default: retrieve_tools mode (the original server)
+	return p.server
+}
+
+// GetDirectServer returns the direct mode MCP server instance.
+func (p *MCPProxyServer) GetDirectServer() *mcpserver.MCPServer {
+	return p.directServer
+}
+
+// GetCodeExecServer returns the code execution mode MCP server instance.
+func (p *MCPProxyServer) GetCodeExecServer() *mcpserver.MCPServer {
+	return p.codeExecServer
+}

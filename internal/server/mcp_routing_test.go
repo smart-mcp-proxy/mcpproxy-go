@@ -3,6 +3,7 @@ package server
 import (
 	"testing"
 
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -147,4 +148,69 @@ func TestDirectToolNameRoundTrip(t *testing.T) {
 
 func TestDirectModeToolSeparator(t *testing.T) {
 	assert.Equal(t, "__", DirectModeToolSeparator)
+}
+
+func TestGetMCPServerForMode(t *testing.T) {
+	// Create a minimal MCPProxyServer with mock servers
+	proxy := &MCPProxyServer{}
+
+	// Create distinct server instances so we can verify identity
+	mainServer := mcpserver.NewMCPServer("main", "1.0.0", mcpserver.WithToolCapabilities(true))
+	directServer := mcpserver.NewMCPServer("direct", "1.0.0", mcpserver.WithToolCapabilities(true))
+	codeExecServer := mcpserver.NewMCPServer("code_exec", "1.0.0", mcpserver.WithToolCapabilities(true))
+
+	proxy.server = mainServer
+	proxy.directServer = directServer
+	proxy.codeExecServer = codeExecServer
+
+	tests := []struct {
+		name     string
+		mode     string
+		expected *mcpserver.MCPServer
+	}{
+		{
+			name:     "retrieve_tools returns main server",
+			mode:     "retrieve_tools",
+			expected: mainServer,
+		},
+		{
+			name:     "direct returns direct server",
+			mode:     "direct",
+			expected: directServer,
+		},
+		{
+			name:     "code_execution returns code exec server",
+			mode:     "code_execution",
+			expected: codeExecServer,
+		},
+		{
+			name:     "empty mode returns main server",
+			mode:     "",
+			expected: mainServer,
+		},
+		{
+			name:     "unknown mode returns main server",
+			mode:     "unknown",
+			expected: mainServer,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := proxy.GetMCPServerForMode(tt.mode)
+			assert.Same(t, tt.expected, got)
+		})
+	}
+}
+
+func TestGetMCPServerForMode_NilFallback(t *testing.T) {
+	// When routing mode servers are nil, should fall back to main server
+	mainServer := mcpserver.NewMCPServer("main", "1.0.0", mcpserver.WithToolCapabilities(true))
+	proxy := &MCPProxyServer{
+		server: mainServer,
+	}
+
+	assert.Same(t, mainServer, proxy.GetMCPServerForMode("direct"))
+	assert.Same(t, mainServer, proxy.GetMCPServerForMode("code_execution"))
+	assert.Same(t, mainServer, proxy.GetMCPServerForMode("retrieve_tools"))
 }
