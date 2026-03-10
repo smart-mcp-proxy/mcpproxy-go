@@ -61,6 +61,32 @@
       </router-link>
     </div>
 
+    <!-- Tools Pending Quarantine Approval Banner -->
+    <div
+      v-if="totalPendingTools > 0"
+      class="alert alert-warning"
+    >
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+      <div class="flex-1">
+        <h3 class="font-bold">{{ totalPendingTools }} tool{{ totalPendingTools !== 1 ? 's' : '' }} pending approval across {{ serversWithPendingTools.length }} server{{ serversWithPendingTools.length !== 1 ? 's' : '' }}</h3>
+        <div class="text-sm space-y-1 mt-1">
+          <div v-for="entry in serversWithPendingTools.slice(0, 5)" :key="entry.serverName" class="flex items-center gap-2">
+            <span class="text-warning">&#9679;</span>
+            <router-link :to="`/servers/${entry.serverName}`" class="font-medium link link-hover">{{ entry.serverName }}</router-link>
+            <span class="opacity-70">{{ entry.count }} tool{{ entry.count !== 1 ? 's' : '' }} pending</span>
+          </div>
+          <div v-if="serversWithPendingTools.length > 5" class="text-xs opacity-60">
+            ... and {{ serversWithPendingTools.length - 5 }} more server{{ serversWithPendingTools.length - 5 !== 1 ? 's' : '' }}
+          </div>
+        </div>
+      </div>
+      <router-link to="/servers" class="btn btn-sm">
+        Review Tools
+      </router-link>
+    </div>
+
     <!-- Token Savings and Distribution -->
     <div v-if="tokenSavingsData" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <!-- Token Savings -->
@@ -575,6 +601,57 @@ const triggerServerAction = async (serverName: string, action: string) => {
   }
 }
 
+// Quarantine tool approval data
+interface PendingToolEntry {
+  serverName: string
+  count: number
+}
+const pendingToolsByServer = ref<PendingToolEntry[]>([])
+const pendingToolsLoading = ref(false)
+
+const serversWithPendingTools = computed(() => {
+  return pendingToolsByServer.value.filter(entry => entry.count > 0)
+})
+
+const totalPendingTools = computed(() => {
+  return serversWithPendingTools.value.reduce((sum, entry) => sum + entry.count, 0)
+})
+
+// Load quarantine tool approval stats for all enabled servers
+const loadPendingTools = async () => {
+  pendingToolsLoading.value = true
+  try {
+    const enabledServers = serversStore.servers.filter(s => s.enabled)
+    const results: PendingToolEntry[] = []
+
+    // Fetch tool approvals for each server in parallel
+    const promises = enabledServers.map(async (server) => {
+      try {
+        const response = await api.getToolApprovals(server.name)
+        if (response.success && response.data?.tools) {
+          const pendingCount = response.data.tools.filter(
+            (t: any) => t.status === 'pending' || t.status === 'changed'
+          ).length
+          if (pendingCount > 0) {
+            results.push({ serverName: server.name, count: pendingCount })
+          }
+        }
+      } catch {
+        // Silently ignore per-server failures (server may not support quarantine)
+      }
+    })
+
+    await Promise.all(promises)
+    // Sort by count descending
+    results.sort((a, b) => b.count - a.count)
+    pendingToolsByServer.value = results
+  } catch {
+    // Silently fail - quarantine info is supplementary
+  } finally {
+    pendingToolsLoading.value = false
+  }
+}
+
 // Token Savings Data
 const tokenSavingsData = ref<any>(null)
 const tokenSavingsLoading = ref(false)
@@ -919,6 +996,8 @@ onMounted(() => {
   loadToolCalls()
   // Load sessions immediately
   loadSessions()
+  // Load pending quarantine tools after servers are available
+  serversStore.fetchServers().then(() => loadPendingTools())
 
   // Set up auto-refresh every 30 seconds
   refreshInterval = setInterval(() => {
@@ -926,6 +1005,7 @@ onMounted(() => {
     loadTokenSavings()
     loadToolCalls()
     loadSessions()
+    loadPendingTools()
   }, 30000)
 
   // Listen for SSE events to refresh diagnostics

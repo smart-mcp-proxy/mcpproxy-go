@@ -88,6 +88,13 @@ func shouldUseDoctorDaemon(dataDir string) bool {
 	return socket.IsSocketAvailable(socketPath)
 }
 
+// quarantineServerStats holds quarantine stats for a single server.
+type quarantineServerStats struct {
+	ServerName   string
+	PendingCount int
+	ChangedCount int
+}
+
 func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger) error {
 	socketPath := socket.DetectSocketPath(dataDir)
 	client := cliclient.NewClient(socketPath, logger.Sugar())
@@ -105,10 +112,63 @@ func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger
 		return fmt.Errorf("failed to get diagnostics from daemon: %w", err)
 	}
 
-	return outputDiagnostics(diag, info)
+	// Collect quarantine stats from servers
+	quarantineStats := collectQuarantineStats(ctx, client, logger)
+
+	return outputDiagnostics(diag, info, quarantineStats)
 }
 
-func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}) error {
+// collectQuarantineStats queries each server's tool approvals to find pending tools.
+func collectQuarantineStats(ctx context.Context, client *cliclient.Client, logger *zap.Logger) []quarantineServerStats {
+	servers, err := client.GetServers(ctx)
+	if err != nil {
+		logger.Debug("Failed to get servers for quarantine check", zap.Error(err))
+		return nil
+	}
+
+	var stats []quarantineServerStats
+	for _, srv := range servers {
+		name := getStringField(srv, "name")
+		enabled := getBoolField(srv, "enabled")
+		if name == "" || !enabled {
+			continue
+		}
+
+		approvals, err := client.GetToolApprovals(ctx, name)
+		if err != nil {
+			logger.Debug("Failed to get tool approvals", zap.String("server", name), zap.Error(err))
+			continue
+		}
+
+		pending := 0
+		changed := 0
+		for _, a := range approvals {
+			switch a.Status {
+			case "pending":
+				pending++
+			case "changed":
+				changed++
+			}
+		}
+
+		if pending > 0 || changed > 0 {
+			stats = append(stats, quarantineServerStats{
+				ServerName:   name,
+				PendingCount: pending,
+				ChangedCount: changed,
+			})
+		}
+	}
+
+	// Sort by server name for consistent output
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].ServerName < stats[j].ServerName
+	})
+
+	return stats
+}
+
+func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats) error {
 	switch doctorOutput {
 	case "json":
 		// Combine diagnostics with info for JSON output
@@ -117,6 +177,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 		}
 		if info != nil {
 			combined["info"] = info
+		}
+		if len(quarantineStats) > 0 {
+			combined["quarantine"] = quarantineStats
 		}
 		output, err := json.MarshalIndent(combined, "", "  ")
 		if err != nil {
@@ -159,6 +222,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 		if totalIssues == 0 {
 			fmt.Println("✅ All systems operational! No issues detected.")
 			fmt.Println()
+
+			// Show quarantine stats even when no other issues
+			displayQuarantineStats(quarantineStats)
 
 			// Show deprecated config warnings even when no issues
 			displayDeprecatedConfigs(diag)
@@ -319,6 +385,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{})
 			fmt.Println("  • Check server status: mcpproxy upstream list")
 			fmt.Println()
 		}
+
+		// 5. Tools Pending Quarantine Approval
+		displayQuarantineStats(quarantineStats)
 
 		// Deprecated Configuration warnings
 		displayDeprecatedConfigs(diag)
@@ -485,4 +554,51 @@ func joinStrings(items []string, sep string) string {
 		result += item
 	}
 	return result
+}
+
+// displayQuarantineStats shows tools pending quarantine approval in the doctor output.
+func displayQuarantineStats(stats []quarantineServerStats) {
+	if len(stats) == 0 {
+		return
+	}
+
+	totalPending := 0
+	totalChanged := 0
+	for _, s := range stats {
+		totalPending += s.PendingCount
+		totalChanged += s.ChangedCount
+	}
+
+	fmt.Println("⚠️  Tools Pending Quarantine Approval")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	for _, s := range stats {
+		total := s.PendingCount + s.ChangedCount
+		detail := ""
+		if s.PendingCount > 0 && s.ChangedCount > 0 {
+			detail = fmt.Sprintf(" (%d new, %d changed)", s.PendingCount, s.ChangedCount)
+		} else if s.ChangedCount > 0 {
+			detail = " (changed)"
+		}
+		fmt.Printf("  %s: %d tool%s pending%s\n", s.ServerName, total, pluralSuffix(total), detail)
+	}
+	fmt.Println()
+
+	totalTools := totalPending + totalChanged
+	fmt.Printf("  Total: %d tool%s across %d server%s\n",
+		totalTools, pluralSuffix(totalTools),
+		len(stats), pluralSuffix(len(stats)))
+	fmt.Println()
+	fmt.Println("💡 Remediation:")
+	fmt.Println("  • Review and approve tools in Web UI: Server Detail → Tools tab")
+	fmt.Println("  • Approve via CLI: mcpproxy upstream approve <server-name>")
+	fmt.Println("  • Inspect tools: mcpproxy upstream inspect <server-name>")
+	fmt.Println()
+}
+
+// pluralSuffix returns "s" if count != 1, "" otherwise.
+func pluralSuffix(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
 }
