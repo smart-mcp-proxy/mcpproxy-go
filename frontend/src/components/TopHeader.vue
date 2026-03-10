@@ -64,6 +64,12 @@
           <span class="text-xs opacity-60">Tools</span>
         </div>
 
+        <!-- Routing Mode -->
+        <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
+          <span class="text-xs opacity-60">Mode:</span>
+          <span class="font-medium">{{ routingModeLabel }}</span>
+        </div>
+
         <!-- Proxy Address with Copy -->
         <div v-if="systemStore.listenAddr" class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg">
           <span class="text-xs font-medium opacity-60">Proxy:</span>
@@ -104,6 +110,18 @@ const serversStore = useServersStore()
 const authStore = useAuthStore()
 
 const addServerLabel = computed(() => authStore.isTeamsEdition ? 'Add Personal Server' : 'Add Server')
+
+const routingModeLabel = computed(() => {
+  const mode = systemStore.routingMode
+  switch (mode) {
+    case 'direct':
+      return 'Direct'
+    case 'code_execution':
+      return 'Code Exec'
+    default:
+      return 'Retrieve'
+  }
+})
 
 const searchQuery = ref('')
 const copyTooltip = ref('Copy MCP address')

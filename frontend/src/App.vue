@@ -110,6 +110,9 @@ onMounted(async () => {
 
   // Fetch version info
   systemStore.fetchInfo()
+
+  // Fetch routing mode info
+  systemStore.fetchRouting()
 })
 
 onUnmounted(() => {
