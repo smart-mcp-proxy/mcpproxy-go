@@ -211,7 +211,7 @@ func (c *Client) CallTool(
 ) (*CallToolResult, error) {
 	// Build request body (REST API format)
 	reqBody := map[string]interface{}{
-		"tool_name":  toolName,
+		"tool_name": toolName,
 		"arguments": args,
 	}
 
@@ -1179,4 +1179,165 @@ func (c *Client) GetActivitySummary(ctx context.Context, period, groupBy string)
 	}
 
 	return apiResp.Data, nil
+}
+
+// ToolApprovalRecord represents a tool approval record from the API (Spec 032)
+type ToolApprovalRecord struct {
+	ServerName          string `json:"server_name"`
+	ToolName            string `json:"tool_name"`
+	Status              string `json:"status"`
+	ApprovedHash        string `json:"approved_hash"`
+	CurrentHash         string `json:"current_hash"`
+	Hash                string `json:"hash"`
+	Description         string `json:"description"`
+	PreviousDescription string `json:"previous_description,omitempty"`
+	CurrentDescription  string `json:"current_description,omitempty"`
+	PreviousSchema      string `json:"previous_schema,omitempty"`
+	CurrentSchema       string `json:"current_schema,omitempty"`
+	Schema              string `json:"schema,omitempty"`
+}
+
+// GetToolApprovals fetches tool approval records for a server (Spec 032).
+func (c *Client) GetToolApprovals(ctx context.Context, serverName string) ([]ToolApprovalRecord, error) {
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/export", c.baseURL, serverName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call tool approvals API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Tools []ToolApprovalRecord `json:"tools"`
+		} `json:"data"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return apiResp.Data.Tools, nil
+}
+
+// GetToolDiff fetches the diff for a changed tool (Spec 032).
+func (c *Client) GetToolDiff(ctx context.Context, serverName, toolName string) (*ToolApprovalRecord, error) {
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/%s/diff", c.baseURL, serverName, toolName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call tool diff API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success   bool               `json:"success"`
+		Data      ToolApprovalRecord `json:"data"`
+		Error     string             `json:"error"`
+		RequestID string             `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return &apiResp.Data, nil
+}
+
+// ApproveTools approves specific tools or all tools for a server (Spec 032).
+func (c *Client) ApproveTools(ctx context.Context, serverName string, toolNames []string, approveAll bool) (int, error) {
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/approve", c.baseURL, serverName)
+
+	reqBody := struct {
+		Tools      []string `json:"tools,omitempty"`
+		ApproveAll bool     `json:"approve_all,omitempty"`
+	}{
+		Tools:      toolNames,
+		ApproveAll: approveAll,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to call approve tools API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Approved int `json:"approved"`
+		} `json:"data"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return 0, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return 0, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return apiResp.Data.Approved, nil
 }
