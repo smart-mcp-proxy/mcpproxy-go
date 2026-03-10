@@ -75,6 +75,7 @@ type MCPProxyServer struct {
 	// Each instance has different tools registered for its routing mode.
 	directServer   *mcpserver.MCPServer // Direct mode: upstream tools with serverName__toolName naming
 	codeExecServer *mcpserver.MCPServer // Code execution mode: code_execution + retrieve_tools
+	callToolServer *mcpserver.MCPServer // Call tool mode: retrieve_tools + call_tool_read/write/destructive
 
 	// Docker availability cache
 	dockerAvailableCache *bool

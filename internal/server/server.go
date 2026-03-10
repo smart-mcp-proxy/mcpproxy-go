@@ -1511,8 +1511,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
-	// /mcp/call → retrieve_tools mode (explicit, same as default server)
-	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServer())
+	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
+	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools))
 	callToolHandler := s.mcpAuthMiddleware(loggingHandler(callToolStreamable))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)

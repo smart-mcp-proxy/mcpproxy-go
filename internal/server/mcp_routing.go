@@ -264,9 +264,12 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		})
 	}
 
-	// retrieve_tools for discovery
+	// retrieve_tools for discovery — instructs to use code_execution (NOT call_tool_*)
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. Use this to find tools before orchestrating them with code_execution. Use natural language to describe what you want to accomplish."),
+		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
+			"Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. "+
+			"Do NOT use call_tool_read/write/destructive — they are not available in this mode. "+
+			"Use natural language to describe what you want to accomplish."),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("query",
@@ -283,6 +286,142 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 	})
 
 	p.logger.Info("built code execution mode tools",
+		zap.Int("tool_count", len(tools)))
+
+	return tools
+}
+
+// buildCallToolModeTools builds the tool set for retrieve_tools routing mode (/mcp/call).
+// Includes: retrieve_tools (with call_tool_* instructions) + call_tool_read/write/destructive + read_cache.
+// Does NOT include code_execution or upstream_servers.
+func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
+	tools := make([]mcpserver.ServerTool, 0, 5)
+
+	// retrieve_tools — instructs to use call_tool_read/write/destructive
+	retrieveToolsTool := mcp.NewTool("retrieve_tools",
+		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
+			"WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results "+
+			"to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. "+
+			"Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation. "+
+			"Use natural language to describe what you want to accomplish."),
+		mcp.WithTitleAnnotation("Retrieve Tools"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Natural language description of what you want to accomplish. Be specific (e.g., 'create a new GitHub repository', 'get weather for London')."),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of tools to return (default: configured tools_limit, max: 100)"),
+		),
+		mcp.WithBoolean("include_stats",
+			mcp.Description("Include usage statistics for returned tools (default: false)"),
+		),
+		mcp.WithBoolean("debug",
+			mcp.Description("Enable debug mode with detailed scoring and ranking explanations (default: false)"),
+		),
+		mcp.WithString("explain_tool",
+			mcp.Description("When debug=true, explain why a specific tool was ranked low (format: 'server:tool')"),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    retrieveToolsTool,
+		Handler: p.handleRetrieveTools,
+	})
+
+	// call_tool_read
+	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
+		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. This is the DEFAULT choice when unsure."),
+		mcp.WithTitleAnnotation("Call Tool (Read)"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:get_user'). Use exact names from retrieve_tools results."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
+		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data: public, internal, private, or unknown."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this tool being called? Provide context."),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    callToolReadTool,
+		Handler: p.handleCallToolRead,
+	})
+
+	// call_tool_write
+	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
+		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit. Use only when explicitly modifying state."),
+		mcp.WithTitleAnnotation("Call Tool (Write)"),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_issue'). Use exact names from retrieve_tools results."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
+		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data: public, internal, private, or unknown."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this modification needed? Provide context."),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    callToolWriteTool,
+		Handler: p.handleCallToolWrite,
+	})
+
+	// call_tool_destructive
+	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
+		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, terminate. Use for irreversible or high-impact operations."),
+		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:delete_repo'). Use exact names from retrieve_tools results."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
+		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data: public, internal, private, or unknown."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this deletion needed? Provide justification."),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    callToolDestructiveTool,
+		Handler: p.handleCallToolDestructive,
+	})
+
+	// read_cache for paginated responses
+	readCacheTool := mcp.NewTool("read_cache",
+		mcp.WithDescription("Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages."),
+		mcp.WithTitleAnnotation("Read Cache"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("key",
+			mcp.Required(),
+			mcp.Description("Cache key provided by mcpproxy when a response was truncated."),
+		),
+		mcp.WithNumber("offset",
+			mcp.Description("Starting record offset for pagination (default: 0)"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of records to return per page (default: 50, max: 1000)"),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    readCacheTool,
+		Handler: p.handleReadCache,
+	})
+
+	p.logger.Info("built call tool mode tools",
 		zap.Int("tool_count", len(tools)))
 
 	return tools
@@ -340,10 +479,24 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		mcpserver.WithRecovery(),
 	)
 
+	// Create call tool mode server (/mcp/call)
+	p.callToolServer = mcpserver.NewMCPServer(
+		"mcpproxy-go",
+		"1.0.0",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithRecovery(),
+	)
+
 	// Register tools for code execution mode (static tools that don't change)
 	codeExecTools := p.buildCodeExecModeTools()
 	for _, st := range codeExecTools {
 		p.codeExecServer.AddTool(st.Tool, st.Handler)
+	}
+
+	// Register tools for call tool mode
+	callToolModeTools := p.buildCallToolModeTools()
+	for _, st := range callToolModeTools {
+		p.callToolServer.AddTool(st.Tool, st.Handler)
 	}
 
 	// Note: Direct mode tools are built lazily/on-demand via RefreshDirectModeTools
@@ -403,6 +556,10 @@ func (p *MCPProxyServer) GetMCPServerForMode(mode string) *mcpserver.MCPServer {
 		if p.codeExecServer != nil {
 			return p.codeExecServer
 		}
+	case config.RoutingModeRetrieveTools:
+		if p.callToolServer != nil {
+			return p.callToolServer
+		}
 	}
 	// Default: retrieve_tools mode (the original server)
 	return p.server
@@ -416,4 +573,9 @@ func (p *MCPProxyServer) GetDirectServer() *mcpserver.MCPServer {
 // GetCodeExecServer returns the code execution mode MCP server instance.
 func (p *MCPProxyServer) GetCodeExecServer() *mcpserver.MCPServer {
 	return p.codeExecServer
+}
+
+// GetCallToolServer returns the call tool mode MCP server instance.
+func (p *MCPProxyServer) GetCallToolServer() *mcpserver.MCPServer {
+	return p.callToolServer
 }
