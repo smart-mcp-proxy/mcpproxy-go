@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -84,6 +85,7 @@ func (b *BoltDB) initBuckets() error {
 			UpstreamsBucket,
 			ToolStatsBucket,
 			ToolHashBucket,
+			ToolApprovalBucket,
 			OAuthTokenBucket,
 			MetaBucket,
 			ActivityRecordsBucket,
@@ -303,6 +305,101 @@ func (b *BoltDB) DeleteToolHash(toolName string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolHashBucket))
 		return bucket.Delete([]byte(toolName))
+	})
+}
+
+// Tool approval operations (tool-level quarantine)
+
+// SaveToolApproval saves a tool approval record
+func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		data, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(record.Key()), data)
+	})
+}
+
+// GetToolApproval retrieves a tool approval record by server and tool name
+func (b *BoltDB) GetToolApproval(serverName, toolName string) (*ToolApprovalRecord, error) {
+	var record *ToolApprovalRecord
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		key := ToolApprovalKey(serverName, toolName)
+		data := bucket.Get([]byte(key))
+		if data == nil {
+			return fmt.Errorf("tool approval not found: %s", key)
+		}
+
+		record = &ToolApprovalRecord{}
+		return record.UnmarshalBinary(data)
+	})
+
+	return record, err
+}
+
+// ListToolApprovals returns all tool approval records for a server.
+// If serverName is empty, returns all records across all servers.
+func (b *BoltDB) ListToolApprovals(serverName string) ([]*ToolApprovalRecord, error) {
+	var records []*ToolApprovalRecord
+
+	prefix := ""
+	if serverName != "" {
+		prefix = serverName + ":"
+	}
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		return bucket.ForEach(func(k, v []byte) error {
+			if prefix != "" && !bytes.HasPrefix(k, []byte(prefix)) {
+				return nil
+			}
+
+			record := &ToolApprovalRecord{}
+			if err := record.UnmarshalBinary(v); err != nil {
+				return err
+			}
+			records = append(records, record)
+			return nil
+		})
+	})
+
+	return records, err
+}
+
+// DeleteToolApproval deletes a tool approval record
+func (b *BoltDB) DeleteToolApproval(serverName, toolName string) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		key := ToolApprovalKey(serverName, toolName)
+		return bucket.Delete([]byte(key))
+	})
+}
+
+// DeleteServerToolApprovals deletes all tool approval records for a server
+func (b *BoltDB) DeleteServerToolApprovals(serverName string) error {
+	prefix := serverName + ":"
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		var keysToDelete [][]byte
+		err := bucket.ForEach(func(k, _ []byte) error {
+			if bytes.HasPrefix(k, []byte(prefix)) {
+				keysToDelete = append(keysToDelete, k)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for _, key := range keysToDelete {
+			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
