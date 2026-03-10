@@ -1061,6 +1061,14 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 			zap.Error(err))
 	}
 
+	// Clean up tool approval records for the removed server
+	// This prevents orphaned approval records from accumulating
+	if err := storageManager.DeleteServerToolApprovals(serverName); err != nil {
+		s.logger.Warn("Failed to clear tool approvals for removed server",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
+
 	// Save configuration to file
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Warn("Failed to save configuration after removing server",
