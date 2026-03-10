@@ -20,6 +20,12 @@ export {
 // Import HealthStatus for use in this file
 import type { HealthStatus } from './contracts'
 
+// Quarantine stats for tool-level quarantine (Spec 032)
+export interface QuarantineStats {
+  pending_count: number
+  changed_count: number
+}
+
 // Server types
 export interface Server {
   name: string
@@ -43,6 +49,7 @@ export interface Server {
   token_expires_at?: string
   user_logged_out?: boolean // True if user explicitly logged out (prevents auto-reconnection)
   health?: HealthStatus // Unified health status calculated by the backend
+  quarantine?: QuarantineStats // Tool-level quarantine stats (Spec 032)
 }
 
 // Tool Annotation types

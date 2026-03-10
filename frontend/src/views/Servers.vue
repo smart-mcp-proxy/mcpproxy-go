@@ -139,7 +139,9 @@
           server.quarantined,
           server.tool_count,
           server.last_error,
-          server.authenticated
+          server.authenticated,
+          server.quarantine?.pending_count,
+          server.quarantine?.changed_count
         ]"
       />
     </TransitionGroup>
