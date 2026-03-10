@@ -228,21 +228,22 @@ func TestSaveServerSyncPreservesNilFields(t *testing.T) {
 func TestSaveServerSyncFieldCoverage(t *testing.T) {
 	// List of ServerConfig fields that ARE expected to be copied
 	expectedFields := map[string]bool{
-		"Name":        true,
-		"URL":         true,
-		"Protocol":    true,
-		"Command":     true,
-		"Args":        true,
-		"WorkingDir":  true,
-		"Env":         true,
-		"Headers":     true,
-		"OAuth":       true,
-		"Enabled":     true,
-		"Quarantined": true,
-		"Created":     true,
-		"Updated":     true, // Updated is set by saveServerSync, not copied
-		"Isolation":   true,
-		"Shared":      true, // Teams-only: persisted in JSON config, not in BBolt
+		"Name":           true,
+		"URL":            true,
+		"Protocol":       true,
+		"Command":        true,
+		"Args":           true,
+		"WorkingDir":     true,
+		"Env":            true,
+		"Headers":        true,
+		"OAuth":          true,
+		"Enabled":        true,
+		"Quarantined":    true,
+		"Created":        true,
+		"Updated":        true, // Updated is set by saveServerSync, not copied
+		"Isolation":      true,
+		"Shared":         true, // Teams-only: persisted in JSON config, not in BBolt
+		"SkipQuarantine": true, // Spec 032: runtime-only field, not persisted to BBolt
 	}
 
 	// Get all fields from ServerConfig
@@ -272,6 +273,10 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		}
 		if fieldName == "Shared" {
 			// Teams-only field, persisted in JSON config not BBolt
+			continue
+		}
+		if fieldName == "SkipQuarantine" {
+			// Spec 032: runtime-only field, not persisted to BBolt
 			continue
 		}
 		if !upstreamFields[fieldName] {

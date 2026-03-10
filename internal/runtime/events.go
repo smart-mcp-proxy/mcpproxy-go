@@ -42,6 +42,10 @@ const (
 	// Spec 026: Sensitive data detection event
 	// EventTypeSensitiveDataDetected is emitted when sensitive data is detected in a tool call.
 	EventTypeSensitiveDataDetected EventType = "sensitive_data.detected"
+
+	// Spec 032: Tool-level quarantine events
+	// EventTypeActivityToolQuarantineChange is emitted when a tool's quarantine status changes.
+	EventTypeActivityToolQuarantineChange EventType = "activity.tool_quarantine_change"
 )
 
 // Event is a typed notification published by the runtime event bus.

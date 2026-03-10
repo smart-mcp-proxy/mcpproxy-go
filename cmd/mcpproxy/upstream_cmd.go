@@ -121,6 +121,33 @@ Examples:
 		RunE: runUpstreamAddJSON,
 	}
 
+	upstreamInspectCmd = &cobra.Command{
+		Use:   "inspect <server-name>",
+		Short: "Inspect tool approval status for a server",
+		Long: `Show tool-level quarantine status for all tools on a server.
+Displays approval status, hashes, and any detected description/schema changes.
+
+Examples:
+  mcpproxy upstream inspect github
+  mcpproxy upstream inspect github --output=json
+  mcpproxy upstream inspect github --tool create_issue`,
+		Args: cobra.ExactArgs(1),
+		RunE: runUpstreamInspect,
+	}
+
+	upstreamApproveCmd = &cobra.Command{
+		Use:   "approve <server-name> [tool-names...]",
+		Short: "Approve quarantined tools for a server",
+		Long: `Approve pending or changed tools so they can be used by AI agents.
+Without specific tool names, approves all pending/changed tools.
+
+Examples:
+  mcpproxy upstream approve github                      # Approve all tools
+  mcpproxy upstream approve github create_issue list_repos  # Approve specific tools`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: runUpstreamApprove,
+	}
+
 	upstreamImportCmd = &cobra.Command{
 		Use:   "import <path>",
 		Short: "Import servers from external configuration file",
@@ -176,6 +203,9 @@ Examples:
 	upstreamRemoveYes      bool
 	upstreamRemoveIfExists bool
 
+	// Inspect command flags
+	upstreamInspectTool string
+
 	// Import command flags
 	upstreamImportServer       string
 	upstreamImportFormat       string
@@ -200,6 +230,8 @@ func init() {
 	upstreamCmd.AddCommand(upstreamAddCmd)
 	upstreamCmd.AddCommand(upstreamRemoveCmd)
 	upstreamCmd.AddCommand(upstreamAddJSONCmd)
+	upstreamCmd.AddCommand(upstreamInspectCmd)
+	upstreamCmd.AddCommand(upstreamApproveCmd)
 	upstreamCmd.AddCommand(upstreamImportCmd)
 
 	// Define flags (note: output format handled by global --output/-o flag from root command)
@@ -236,6 +268,9 @@ func init() {
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
 	upstreamRemoveCmd.Flags().BoolVarP(&upstreamRemoveYes, "y", "y", false, "Skip confirmation prompt (short form)")
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveIfExists, "if-exists", false, "Don't error if server doesn't exist")
+
+	// Inspect command flags
+	upstreamInspectCmd.Flags().StringVar(&upstreamInspectTool, "tool", "", "Show details for a specific tool")
 
 	// Import command flags
 	upstreamImportCmd.Flags().StringVarP(&upstreamImportServer, "server", "s", "", "Import only a specific server by name")
@@ -1430,13 +1465,13 @@ func parseImportFormat(format string) configimport.ConfigFormat {
 func outputImportResultStructured(result *configimport.ImportResult, format string) error {
 	// Build output structure
 	output := map[string]interface{}{
-		"format":       result.Format,
-		"format_name":  result.FormatDisplayName,
-		"summary":      result.Summary,
-		"imported":     buildImportedServersOutput(result.Imported),
-		"skipped":      result.Skipped,
-		"failed":       result.Failed,
-		"warnings":     result.Warnings,
+		"format":      result.Format,
+		"format_name": result.FormatDisplayName,
+		"summary":     result.Summary,
+		"imported":    buildImportedServersOutput(result.Imported),
+		"skipped":     result.Skipped,
+		"failed":      result.Failed,
+		"warnings":    result.Warnings,
 	}
 
 	formatter, err := GetOutputFormatter()
@@ -1615,6 +1650,199 @@ func applyImportedServersDaemonMode(ctx context.Context, dataDir string, importe
 			// Log error but continue with other servers
 			fmt.Fprintf(os.Stderr, "  ❌ Failed to add '%s': %v\n", s.Server.Name, err)
 		}
+	}
+
+	return nil
+}
+
+// runUpstreamInspect handles the 'upstream inspect' command (Spec 032)
+func runUpstreamInspect(_ *cobra.Command, args []string) error {
+	serverName := args[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		return outputError(output.NewStructuredError(output.ErrCodeConfigNotFound, err.Error()).
+			WithGuidance("Check that your config file exists and is valid").
+			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
+	}
+
+	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
+	}
+
+	logger, err := createUpstreamLogger("warn")
+	if err != nil {
+		return outputError(err, output.ErrCodeOperationFailed)
+	}
+
+	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	// If a specific tool is requested, show the diff
+	if upstreamInspectTool != "" {
+		record, err := client.GetToolDiff(ctx, serverName, upstreamInspectTool)
+		if err != nil {
+			return cliError("failed to get tool diff", err)
+		}
+
+		outputFormat := ResolveOutputFormat()
+		if outputFormat == "json" || outputFormat == "yaml" {
+			formatter, fmtErr := GetOutputFormatter()
+			if fmtErr != nil {
+				return fmtErr
+			}
+			result, fmtErr := formatter.Format(record)
+			if fmtErr != nil {
+				return fmtErr
+			}
+			fmt.Println(result)
+			return nil
+		}
+
+		// Table format: show detailed diff
+		fmt.Printf("Tool Diff: %s:%s\n", serverName, record.ToolName)
+		fmt.Printf("Status: %s\n\n", record.Status)
+		fmt.Printf("--- Previous Description ---\n%s\n\n", record.PreviousDescription)
+		fmt.Printf("+++ Current Description ---\n%s\n\n", record.CurrentDescription)
+		if record.PreviousSchema != "" || record.CurrentSchema != "" {
+			fmt.Printf("--- Previous Schema ---\n%s\n\n", record.PreviousSchema)
+			fmt.Printf("+++ Current Schema ---\n%s\n", record.CurrentSchema)
+		}
+		return nil
+	}
+
+	// List all tool approvals for this server
+	records, err := client.GetToolApprovals(ctx, serverName)
+	if err != nil {
+		return cliError("failed to get tool approvals", err)
+	}
+
+	if len(records) == 0 {
+		fmt.Printf("No tool approval records found for server '%s'\n", serverName)
+		return nil
+	}
+
+	outputFormat := ResolveOutputFormat()
+	if outputFormat == "json" || outputFormat == "yaml" {
+		formatter, fmtErr := GetOutputFormatter()
+		if fmtErr != nil {
+			return fmtErr
+		}
+		result, fmtErr := formatter.Format(records)
+		if fmtErr != nil {
+			return fmtErr
+		}
+		fmt.Println(result)
+		return nil
+	}
+
+	// Table format
+	headers := []string{"TOOL", "STATUS", "HASH", "DESCRIPTION"}
+	var rows [][]string
+	pendingCount, changedCount, approvedCount := 0, 0, 0
+	for _, r := range records {
+		status := r.Status
+		switch status {
+		case "pending":
+			pendingCount++
+		case "changed":
+			changedCount++
+		case "approved":
+			approvedCount++
+		}
+
+		desc := r.Description
+		if len(desc) > 60 {
+			desc = desc[:57] + "..."
+		}
+
+		hash := r.Hash
+		if len(hash) > 12 {
+			hash = hash[:12]
+		}
+
+		rows = append(rows, []string{r.ToolName, status, hash, desc})
+	}
+
+	formatter, fmtErr := GetOutputFormatter()
+	if fmtErr != nil {
+		return fmtErr
+	}
+	result, fmtErr := formatter.FormatTable(headers, rows)
+	if fmtErr != nil {
+		return fmtErr
+	}
+	fmt.Print(result)
+	fmt.Printf("\nSummary: %d approved, %d pending, %d changed (total: %d)\n", approvedCount, pendingCount, changedCount, len(records))
+
+	if pendingCount > 0 || changedCount > 0 {
+		fmt.Printf("\nTo approve all tools: mcpproxy upstream approve %s\n", serverName)
+		if changedCount > 0 {
+			fmt.Printf("To inspect changes:   mcpproxy upstream inspect %s --tool <name>\n", serverName)
+		}
+	}
+
+	return nil
+}
+
+// runUpstreamApprove handles the 'upstream approve' command (Spec 032)
+func runUpstreamApprove(_ *cobra.Command, args []string) error {
+	serverName := args[0]
+	toolNames := args[1:]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		return outputError(output.NewStructuredError(output.ErrCodeConfigNotFound, err.Error()).
+			WithGuidance("Check that your config file exists and is valid").
+			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
+	}
+
+	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
+	}
+
+	logger, err := createUpstreamLogger("warn")
+	if err != nil {
+		return outputError(err, output.ErrCodeOperationFailed)
+	}
+
+	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	approveAll := len(toolNames) == 0
+	count, err := client.ApproveTools(ctx, serverName, toolNames, approveAll)
+	if err != nil {
+		return cliError("failed to approve tools", err)
+	}
+
+	outputFormat := ResolveOutputFormat()
+	if outputFormat == "json" || outputFormat == "yaml" {
+		formatter, fmtErr := GetOutputFormatter()
+		if fmtErr != nil {
+			return fmtErr
+		}
+		result, fmtErr := formatter.Format(map[string]interface{}{
+			"server_name": serverName,
+			"approved":    count,
+			"tools":       toolNames,
+		})
+		if fmtErr != nil {
+			return fmtErr
+		}
+		fmt.Println(result)
+		return nil
+	}
+
+	if approveAll {
+		fmt.Printf("Approved %d tools for server '%s'\n", count, serverName)
+	} else {
+		fmt.Printf("Approved %d tool(s) for server '%s': %s\n", count, serverName, strings.Join(toolNames, ", "))
 	}
 
 	return nil

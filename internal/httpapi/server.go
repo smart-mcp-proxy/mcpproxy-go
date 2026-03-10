@@ -117,6 +117,12 @@ type ServerController interface {
 	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
 	GetActivity(id string) (*storage.ActivityRecord, error)
 	StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord
+
+	// Tool-level quarantine (Spec 032)
+	ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error)
+	ApproveTools(serverName string, toolNames []string, approvedBy string) error
+	ApproveAllTools(serverName string, approvedBy string) (int, error)
+	GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error)
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -441,6 +447,9 @@ func (s *Server) setupRoutes() {
 		// Info endpoint (server version, web UI URL, etc.)
 		r.Get("/info", s.handleGetInfo)
 
+		// Routing mode endpoint
+		r.Get("/routing", s.handleGetRouting)
+
 		// Server management
 		r.Get("/servers", s.handleGetServers)
 		r.Post("/servers", s.handleAddServer)                           // T001: Add server
@@ -466,6 +475,11 @@ func (s *Server) setupRoutes() {
 			r.Get("/tools", s.handleGetServerTools)
 			r.Get("/logs", s.handleGetServerLogs)
 			r.Get("/tool-calls", s.handleGetServerToolCalls)
+
+			// Tool-level quarantine (Spec 032)
+			r.Post("/tools/approve", s.handleApproveTools)
+			r.Get("/tools/{tool}/diff", s.handleGetToolDiff)
+			r.Get("/tools/export", s.handleExportToolDescriptions)
 		})
 
 		// Search
@@ -662,13 +676,65 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/status [get]
 func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
+	// Get routing mode from config
+	routingMode := config.RoutingModeRetrieveTools
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.RoutingMode != "" {
+		routingMode = cfg.RoutingMode
+	}
+
 	response := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
 		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": s.controller.GetUpstreamStats(),
 		"status":         s.controller.GetStatus(),
+		"routing_mode":   routingMode,
 		"timestamp":      time.Now().Unix(),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// handleGetRouting godoc
+// @Summary Get routing mode information
+// @Description Get the current routing mode and available MCP endpoints
+// @Tags status
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse "Routing mode information"
+// @Router /api/v1/routing [get]
+func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
+	routingMode := config.RoutingModeRetrieveTools
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.RoutingMode != "" {
+		routingMode = cfg.RoutingMode
+	}
+
+	// Build mode description
+	var description string
+	switch routingMode {
+	case config.RoutingModeDirect:
+		description = "All upstream tools exposed directly via serverName__toolName naming"
+	case config.RoutingModeCodeExecution:
+		description = "JavaScript orchestration via code_execution tool with tool catalog"
+	default:
+		description = "BM25 search via retrieve_tools + call_tool variants (default)"
+	}
+
+	response := map[string]interface{}{
+		"routing_mode": routingMode,
+		"description":  description,
+		"endpoints": map[string]interface{}{
+			"default":        "/mcp",
+			"direct":         "/mcp/all",
+			"code_execution": "/mcp/code",
+			"retrieve_tools": "/mcp/call",
+		},
+		"available_modes": []string{
+			config.RoutingModeRetrieveTools,
+			config.RoutingModeDirect,
+			config.RoutingModeCodeExecution,
+		},
 	}
 
 	s.writeSuccess(w, response)
@@ -3129,4 +3195,151 @@ func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// handleApproveTools handles POST /api/v1/servers/{id}/tools/approve
+func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	var req struct {
+		Tools      []string `json:"tools"`
+		ApproveAll bool     `json:"approve_all"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	if req.ApproveAll {
+		count, err := s.controller.ApproveAllTools(serverID, "api")
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
+			return
+		}
+		s.writeSuccess(w, map[string]interface{}{
+			"approved": count,
+			"message":  fmt.Sprintf("Approved %d tools for server %s", count, serverID),
+		})
+		return
+	}
+
+	if len(req.Tools) == 0 {
+		s.writeError(w, r, http.StatusBadRequest, "Either 'tools' array or 'approve_all: true' required")
+		return
+	}
+
+	if err := s.controller.ApproveTools(serverID, req.Tools, "api"); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, map[string]interface{}{
+		"approved": len(req.Tools),
+		"tools":    req.Tools,
+		"message":  fmt.Sprintf("Approved %d tools for server %s", len(req.Tools), serverID),
+	})
+}
+
+// handleGetToolDiff handles GET /api/v1/servers/{id}/tools/{tool}/diff
+func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	toolName := chi.URLParam(r, "tool")
+
+	if serverID == "" || toolName == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
+		return
+	}
+
+	record, err := s.controller.GetToolApproval(serverID, toolName)
+	if err != nil {
+		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Tool approval record not found: %v", err))
+		return
+	}
+
+	if record.Status != storage.ToolApprovalStatusChanged {
+		s.writeError(w, r, http.StatusNotFound, "No changes detected for this tool")
+		return
+	}
+
+	s.writeSuccess(w, map[string]interface{}{
+		"server_name":          record.ServerName,
+		"tool_name":            record.ToolName,
+		"status":               record.Status,
+		"approved_hash":        record.ApprovedHash,
+		"current_hash":         record.CurrentHash,
+		"previous_description": record.PreviousDescription,
+		"current_description":  record.CurrentDescription,
+		"previous_schema":      record.PreviousSchema,
+		"current_schema":       record.CurrentSchema,
+	})
+}
+
+// handleExportToolDescriptions handles GET /api/v1/servers/{id}/tools/export
+func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	records, err := s.controller.ListToolApprovals(serverID)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list tool approvals: %v", err))
+		return
+	}
+
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "json"
+	}
+
+	if format == "text" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		for _, record := range records {
+			fmt.Fprintf(w, "=== %s:%s ===\n", record.ServerName, record.ToolName)
+			fmt.Fprintf(w, "Status: %s\n", record.Status)
+			fmt.Fprintf(w, "Hash: %s\n", record.CurrentHash)
+			if record.CurrentDescription != "" {
+				fmt.Fprintf(w, "Description:\n%s\n", record.CurrentDescription)
+			}
+			if record.CurrentSchema != "" {
+				fmt.Fprintf(w, "Schema:\n%s\n", record.CurrentSchema)
+			}
+			fmt.Fprintln(w)
+		}
+		return
+	}
+
+	// JSON format
+	type toolExport struct {
+		ServerName  string `json:"server_name"`
+		ToolName    string `json:"tool_name"`
+		Status      string `json:"status"`
+		Hash        string `json:"hash"`
+		Description string `json:"description"`
+		Schema      string `json:"schema,omitempty"`
+	}
+
+	var exports []toolExport
+	for _, record := range records {
+		exports = append(exports, toolExport{
+			ServerName:  record.ServerName,
+			ToolName:    record.ToolName,
+			Status:      record.Status,
+			Hash:        record.CurrentHash,
+			Description: record.CurrentDescription,
+			Schema:      record.CurrentSchema,
+		})
+	}
+
+	s.writeSuccess(w, map[string]interface{}{
+		"server_name": serverID,
+		"tools":       exports,
+		"count":       len(exports),
+	})
 }

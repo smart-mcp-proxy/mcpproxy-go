@@ -11,7 +11,7 @@ require (
 	github.com/blevesearch/bleve/v2 v2.5.2
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/dop251/goja v0.0.0-20251103141225-af2ceb9156d7
+	github.com/dop251/goja v0.0.0-20260305124333-6a7976c22267
 	github.com/gen2brain/beeep v0.11.1
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/golang-jwt/jwt/v5 v5.3.0
@@ -35,6 +35,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.38.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/mod v0.26.0
+	golang.org/x/sys v0.38.0
 	golang.org/x/term v0.37.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -142,7 +143,6 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/net v0.43.0 // indirect
-	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	golang.org/x/tools v0.35.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250825161204-c5933d9347a5 // indirect

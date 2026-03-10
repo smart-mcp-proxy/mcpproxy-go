@@ -11,6 +11,7 @@ const (
 	UpstreamsBucket       = "upstreams"
 	ToolStatsBucket       = "toolstats"
 	ToolHashBucket        = "toolhash"
+	ToolApprovalBucket    = "tool_approvals"
 	OAuthTokenBucket      = "oauth_tokens" //nolint:gosec // bucket name, not a credential
 	OAuthCompletionBucket = "oauth_completion"
 	MetaBucket            = "meta"
@@ -61,10 +62,54 @@ type ToolHashRecord struct {
 	Updated  time.Time `json:"updated"`
 }
 
+// ToolApprovalStatus constants for tool-level quarantine
+const (
+	ToolApprovalStatusApproved = "approved"
+	ToolApprovalStatusPending  = "pending"
+	ToolApprovalStatusChanged  = "changed"
+)
+
+// ToolApprovalRecord represents a tool's approval status for tool-level quarantine.
+// When a tool is first discovered, it starts as "pending". Once approved, it becomes "approved".
+// If the tool's description or schema changes after approval, it becomes "changed".
+type ToolApprovalRecord struct {
+	ServerName          string    `json:"server_name"`
+	ToolName            string    `json:"tool_name"`
+	ApprovedHash        string    `json:"approved_hash"`
+	CurrentHash         string    `json:"current_hash"`
+	Status              string    `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt          time.Time `json:"approved_at"`
+	ApprovedBy          string    `json:"approved_by"`
+	PreviousDescription string    `json:"previous_description,omitempty"`
+	CurrentDescription  string    `json:"current_description,omitempty"`
+	PreviousSchema      string    `json:"previous_schema,omitempty"`
+	CurrentSchema       string    `json:"current_schema,omitempty"`
+}
+
+// ToolApprovalKey returns the storage key for a tool approval record.
+func ToolApprovalKey(serverName, toolName string) string {
+	return serverName + ":" + toolName
+}
+
+// Key returns the storage key for this tool approval record.
+func (r *ToolApprovalRecord) Key() string {
+	return ToolApprovalKey(r.ServerName, r.ToolName)
+}
+
+// MarshalBinary implements encoding.BinaryMarshaler
+func (r *ToolApprovalRecord) MarshalBinary() ([]byte, error) {
+	return json.Marshal(r)
+}
+
+// UnmarshalBinary implements encoding.BinaryUnmarshaler
+func (r *ToolApprovalRecord) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, r)
+}
+
 // OAuthTokenRecord represents stored OAuth tokens for a server
 type OAuthTokenRecord struct {
-	ServerName   string    `json:"server_name"`             // Storage key (serverName_hash format)
-	DisplayName  string    `json:"display_name,omitempty"`  // Actual server name (for RefreshManager lookup)
+	ServerName   string    `json:"server_name"`            // Storage key (serverName_hash format)
+	DisplayName  string    `json:"display_name,omitempty"` // Actual server name (for RefreshManager lookup)
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	TokenType    string    `json:"token_type"`

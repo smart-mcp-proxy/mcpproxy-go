@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -172,6 +174,18 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	effectiveLanguage := options.Language
 	if effectiveLanguage == "" {
 		effectiveLanguage = "javascript"
+	}
+
+	// Inject auth context for permission enforcement (Spec 031)
+	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil {
+		options.AuthContext = &jsruntime.AuthInfo{
+			Type:           authCtx.Type,
+			AgentName:      authCtx.AgentName,
+			AllowedServers: authCtx.AllowedServers,
+			Permissions:    authCtx.Permissions,
+		}
+		// Provide tool annotation lookup function for permission tier resolution
+		options.ToolAnnotationFunc = p.lookupToolPermission
 	}
 
 	// Execute code
@@ -543,4 +557,38 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 			zap.String("record_id", record.ID),
 		)
 	}
+}
+
+// lookupToolPermission returns the required permission tier for a tool based on its annotations.
+// This is used by the JS runtime to enforce auth context permissions during code_execution.
+func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
+	// Primary: exact match via StateView (no BM25 fuzzy matching)
+	annotations := p.lookupToolAnnotations(serverName, toolName)
+	if annotations != nil {
+		callWith := contracts.DeriveCallWith(annotations)
+		perm := contracts.ToolVariantToOperationType[callWith]
+		if perm != "" {
+			return perm
+		}
+	}
+
+	// Fallback: search the index with enough candidates to find an exact match
+	if p.index != nil {
+		qualifiedName := serverName + ":" + toolName
+		results, err := p.index.Search(qualifiedName, 20)
+		if err == nil {
+			for _, r := range results {
+				if r.Tool != nil && r.Tool.ServerName == serverName && r.Tool.Name == toolName {
+					callWith := contracts.DeriveCallWith(r.Tool.Annotations)
+					perm := contracts.ToolVariantToOperationType[callWith]
+					if perm != "" {
+						return perm
+					}
+				}
+			}
+		}
+	}
+
+	// Default to read (safest)
+	return contracts.OperationTypeRead
 }

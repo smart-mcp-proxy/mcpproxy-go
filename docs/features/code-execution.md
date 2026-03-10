@@ -9,7 +9,7 @@ keywords: [code, execution, javascript, orchestration]
 
 # Code Execution
 
-The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES5.1+).
+The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES2020+).
 
 ## Overview
 
@@ -180,14 +180,14 @@ Increase the timeout or optimize your code:
 
 ### Syntax Errors
 
-Use ES5.1 syntax (no arrow functions, let/const, template literals):
+Modern JavaScript syntax (ES2020+) is fully supported, including arrow functions, const/let, template literals, destructuring, optional chaining, and nullish coalescing:
 
 ```javascript
-// Wrong
+// All of these work
 const result = () => call_tool('server', 'tool');
-
-// Correct
-var result = function() { return call_tool('server', 'tool'); };
+const name = user?.profile?.name ?? 'unknown';
+const msg = `Hello, ${name}!`;
+const { data, error } = response;
 ```
 
 ### Tool Not Found

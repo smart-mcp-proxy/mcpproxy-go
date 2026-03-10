@@ -243,6 +243,66 @@
           </div>
 
           <div v-else class="space-y-4">
+            <!-- Tool Quarantine Panel (Spec 032) -->
+            <div v-if="quarantinedTools.length > 0" class="alert alert-warning shadow-lg mb-4">
+              <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <div class="flex-1">
+                <h3 class="font-bold">Tool Quarantine</h3>
+                <div class="text-sm">
+                  {{ quarantinedTools.length }} tool(s) require approval before they can be used by AI agents.
+                </div>
+              </div>
+              <button
+                @click="approveAllTools"
+                :disabled="approvalLoading"
+                class="btn btn-sm btn-warning"
+              >
+                <span v-if="approvalLoading" class="loading loading-spinner loading-xs"></span>
+                Approve All
+              </button>
+            </div>
+
+            <!-- Quarantined Tools List -->
+            <div v-if="quarantinedTools.length > 0" class="space-y-3 mb-6">
+              <div
+                v-for="tool in quarantinedTools"
+                :key="'q-' + tool.tool_name"
+                class="card bg-base-200 border-l-4"
+                :class="tool.status === 'changed' ? 'border-error' : 'border-warning'"
+              >
+                <div class="card-body py-3 px-4">
+                  <div class="flex items-center justify-between">
+                    <div class="flex-1">
+                      <div class="flex items-center gap-2">
+                        <h4 class="font-semibold">{{ tool.tool_name }}</h4>
+                        <span
+                          class="badge badge-sm"
+                          :class="tool.status === 'changed' ? 'badge-error' : 'badge-warning'"
+                        >
+                          {{ tool.status }}
+                        </span>
+                      </div>
+                      <p class="text-sm text-base-content/70 mt-1">{{ tool.description }}</p>
+                      <!-- Show diff for changed tools -->
+                      <div v-if="tool.status === 'changed' && tool.previous_description" class="mt-2 text-xs space-y-1">
+                        <div class="bg-error/10 px-2 py-1 rounded font-mono line-through">{{ tool.previous_description }}</div>
+                        <div class="bg-success/10 px-2 py-1 rounded font-mono">{{ tool.current_description || tool.description }}</div>
+                      </div>
+                    </div>
+                    <button
+                      @click="approveTool(tool.tool_name)"
+                      :disabled="approvalLoading"
+                      class="btn btn-sm btn-outline ml-4"
+                    >
+                      Approve
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div class="flex justify-between items-center">
               <div>
                 <h3 class="text-lg font-semibold">Available Tools</h3>
@@ -432,7 +492,7 @@ import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { Server, Tool } from '@/types'
+import type { Server, Tool, ToolApproval } from '@/types'
 import api from '@/services/api'
 
 interface Props {
@@ -458,6 +518,14 @@ const toolsLoading = ref(false)
 const toolsError = ref<string | null>(null)
 const toolSearch = ref('')
 const selectedToolSchema = ref<Tool | null>(null)
+
+// Tool quarantine (Spec 032)
+const toolApprovals = ref<ToolApproval[]>([])
+const approvalLoading = ref(false)
+
+const quarantinedTools = computed(() => {
+  return toolApprovals.value.filter(t => t.status === 'pending' || t.status === 'changed')
+})
 
 // Logs
 const serverLogs = ref<string[]>([])
@@ -499,9 +567,10 @@ async function loadServerDetails() {
       return
     }
 
-    // Load tools and logs in parallel
+    // Load tools, approvals, and logs in parallel
     await Promise.all([
       loadTools(),
+      loadToolApprovals(),
       loadLogs()
     ])
   } catch (err) {
@@ -528,6 +597,79 @@ async function loadTools() {
     toolsError.value = err instanceof Error ? err.message : 'Failed to load tools'
   } finally {
     toolsLoading.value = false
+  }
+}
+
+// Tool quarantine functions (Spec 032)
+async function loadToolApprovals() {
+  if (!server.value) return
+  try {
+    const response = await api.getToolApprovals(server.value.name)
+    if (response.success && response.data) {
+      toolApprovals.value = response.data.tools || []
+    }
+  } catch {
+    // Silently fail - tool approvals are supplementary info
+  }
+}
+
+async function approveTool(toolName: string) {
+  if (!server.value) return
+  approvalLoading.value = true
+  try {
+    const response = await api.approveTools(server.value.name, [toolName])
+    if (response.success) {
+      systemStore.addToast({
+        type: 'success',
+        title: 'Tool Approved',
+        message: `${toolName} has been approved`,
+      })
+      await loadToolApprovals()
+    } else {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Approval Failed',
+        message: response.error || 'Failed to approve tool',
+      })
+    }
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Approval Failed',
+      message: err instanceof Error ? err.message : 'Failed to approve tool',
+    })
+  } finally {
+    approvalLoading.value = false
+  }
+}
+
+async function approveAllTools() {
+  if (!server.value) return
+  approvalLoading.value = true
+  try {
+    const response = await api.approveTools(server.value.name)
+    if (response.success) {
+      systemStore.addToast({
+        type: 'success',
+        title: 'Tools Approved',
+        message: `All tools for ${server.value.name} have been approved`,
+      })
+      await loadToolApprovals()
+    } else {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Approval Failed',
+        message: response.error || 'Failed to approve tools',
+      })
+    }
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Approval Failed',
+      message: err instanceof Error ? err.message : 'Failed to approve tools',
+    })
+  } finally {
+    approvalLoading.value = false
   }
 }
 

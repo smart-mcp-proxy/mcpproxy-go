@@ -449,6 +449,129 @@ func TestStatusJSONOutput(t *testing.T) {
 	}
 }
 
+func TestStatusRoutingModeInTable(t *testing.T) {
+	tests := []struct {
+		name        string
+		routingMode string
+		expected    string
+	}{
+		{
+			name:        "retrieve_tools mode",
+			routingMode: "retrieve_tools",
+			expected:    "retrieve_tools",
+		},
+		{
+			name:        "direct mode",
+			routingMode: "direct",
+			expected:    "direct",
+		},
+		{
+			name:        "code_execution mode",
+			routingMode: "code_execution",
+			expected:    "code_execution",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &StatusInfo{
+				State:       "Running",
+				Edition:     "personal",
+				ListenAddr:  "127.0.0.1:8080",
+				APIKey:      "a1b2****a1b2",
+				WebUIURL:    "http://127.0.0.1:8080/ui/?apikey=test",
+				RoutingMode: tt.routingMode,
+			}
+
+			old := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			printStatusTable(info)
+
+			w.Close()
+			os.Stdout = old
+
+			buf := make([]byte, 4096)
+			n, _ := r.Read(buf)
+			output := string(buf[:n])
+
+			if !strings.Contains(output, "Routing:") {
+				t.Errorf("expected output to contain 'Routing:', output:\n%s", output)
+			}
+			if !strings.Contains(output, tt.expected) {
+				t.Errorf("expected output to contain %q, output:\n%s", tt.expected, output)
+			}
+		})
+	}
+}
+
+func TestStatusRoutingModeInJSON(t *testing.T) {
+	info := &StatusInfo{
+		State:       "Running",
+		Edition:     "personal",
+		ListenAddr:  "127.0.0.1:8080",
+		APIKey:      "testkey",
+		WebUIURL:    "http://127.0.0.1:8080/ui/",
+		RoutingMode: "direct",
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := printStatusJSON(info)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("printStatusJSON failed: %v", err)
+	}
+
+	buf := make([]byte, 8192)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	var result StatusInfo
+	if jsonErr := json.Unmarshal([]byte(output), &result); jsonErr != nil {
+		t.Fatalf("invalid JSON: %v\nOutput: %s", jsonErr, output)
+	}
+
+	if result.RoutingMode != "direct" {
+		t.Errorf("expected routing_mode 'direct', got %q", result.RoutingMode)
+	}
+}
+
+func TestCollectStatusFromConfigRoutingMode(t *testing.T) {
+	t.Run("uses config routing mode", func(t *testing.T) {
+		cfg := &config.Config{
+			Listen:      "127.0.0.1:8080",
+			APIKey:      "testkey",
+			RoutingMode: "direct",
+		}
+
+		info := collectStatusFromConfig(cfg, "/tmp/test.sock", "/tmp/config.json")
+
+		if info.RoutingMode != "direct" {
+			t.Errorf("expected routing mode 'direct', got %q", info.RoutingMode)
+		}
+	})
+
+	t.Run("defaults to retrieve_tools when empty", func(t *testing.T) {
+		cfg := &config.Config{
+			Listen: "127.0.0.1:8080",
+			APIKey: "testkey",
+		}
+
+		info := collectStatusFromConfig(cfg, "/tmp/test.sock", "/tmp/config.json")
+
+		if info.RoutingMode != config.RoutingModeRetrieveTools {
+			t.Errorf("expected routing mode %q, got %q", config.RoutingModeRetrieveTools, info.RoutingMode)
+		}
+	})
+}
+
 // parseTestDuration is a helper to parse duration strings for tests.
 func parseTestDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)

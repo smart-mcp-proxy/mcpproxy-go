@@ -71,6 +71,11 @@ type MCPProxyServer struct {
 	mainServer      *Server        // Reference to main server for config persistence
 	config          *config.Config // Add config reference for security checks
 
+	// Routing mode MCP server instances (Spec 031)
+	// Each instance has different tools registered for its routing mode.
+	directServer   *mcpserver.MCPServer // Direct mode: upstream tools with serverName__toolName naming
+	codeExecServer *mcpserver.MCPServer // Code execution mode: code_execution + retrieve_tools
+
 	// Docker availability cache
 	dockerAvailableCache *bool
 	dockerCacheTime      time.Time
@@ -216,13 +221,16 @@ func NewMCPProxyServer(
 		sessionStore:    sessionStore,
 	}
 
-	// Register proxy tools
+	// Register proxy tools for the default (retrieve_tools) server
 	proxy.registerTools(debugSearch)
 
 	// Register prompts if enabled
 	if config.EnablePrompts {
 		proxy.registerPrompts()
 	}
+
+	// Initialize routing mode server instances (Spec 031)
+	proxy.initRoutingModeServers()
 
 	return proxy
 }
@@ -448,12 +456,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// code_execution - JavaScript/TypeScript code execution for multi-tool orchestration (feature-flagged)
 	if p.config.EnableCodeExecution {
 		codeExecutionTool := mcp.NewTool("code_execution",
-			mcp.WithDescription("Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request. Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations that would require multiple round-trips otherwise.\n\n**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n**Available in code**:\n- `input` global: Your input data passed via the 'input' parameter\n- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n- Standard ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. Types are automatically stripped before execution.\n\n**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
+			mcp.WithDescription("Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request. Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations that would require multiple round-trips otherwise.\n\n**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n**Available in code**:\n- `input` global: Your input data passed via the 'input' parameter\n- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n- Modern JavaScript (ES2020+): arrow functions, const/let, template literals, destructuring, classes, for-of, optional chaining (?.), nullish coalescing (??), spread/rest, Promises, Symbols, Map/Set, Proxy/Reflect (no require(), filesystem, or network access)\n\n**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. Types are automatically stripped before execution.\n\n**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
 			mcp.WithTitleAnnotation("Code Execution"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("code",
 				mcp.Required(),
-				mcp.Description("JavaScript or TypeScript source code to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. Return value must be JSON-serializable. Example: `const res = call_tool('github', 'get_user', {username: input.username}); if (!res.ok) throw new Error(res.error.message); ({user: res.result, timestamp: Date.now()})`"),
+				mcp.Description("JavaScript or TypeScript source code (ES2020+) to execute. Supports modern syntax: arrow functions, const/let, template literals, destructuring, optional chaining, nullish coalescing. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. Return value must be JSON-serializable. Example: `const res = call_tool('github', 'get_user', {username: input.username}); if (!res.ok) throw new Error(res.error.message); ({user: res.result, timestamp: Date.now()})`"),
 			),
 			mcp.WithString("language",
 				mcp.Description("Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution. Type annotations are stripped, enums and namespaces are converted to JavaScript equivalents. Default: 'javascript'."),
@@ -519,16 +527,19 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 		// quarantine_security - Security quarantine management
 		quarantineSecurityTool := mcp.NewTool("quarantine_security",
-			mcp.WithDescription("Security quarantine management for MCP servers. Review and manage quarantined servers to prevent Tool Poisoning Attacks (TPAs). This tool handles security analysis and quarantine state management. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
+			mcp.WithDescription("Security quarantine management for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs). Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
 			mcp.WithTitleAnnotation("Quarantine Security"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server"),
-				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server"),
+				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools"),
+				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools"),
 			),
 			mcp.WithString("name",
-				mcp.Description("Server name (required for inspect_quarantined and quarantine_server operations)"),
+				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools)"),
+			),
+			mcp.WithString("tool_name",
+				mcp.Description("Tool name (required for approve_tool operation)"),
 			),
 		)
 		p.server.AddTool(quarantineSecurityTool, p.handleQuarantineSecurity)
@@ -1266,6 +1277,55 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs), nil
+	}
+
+	// Check tool-level quarantine (Spec 032) - only if server is not quarantined
+	if p.config.IsQuarantineEnabled() {
+		if serverConfig != nil && !serverConfig.IsQuarantineSkipped() {
+			if approval, approvalErr := p.storage.GetToolApproval(serverName, actualToolName); approvalErr == nil {
+				if approval.Status == storage.ToolApprovalStatusPending {
+					p.logger.Debug("handleCallToolVariant: tool is pending approval (quarantined)",
+						zap.String("server_name", serverName),
+						zap.String("tool_name", actualToolName))
+
+					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked",
+						"Tool is pending approval (new unapproved tool)")
+
+					response := map[string]interface{}{
+						"status":              "TOOL_QUARANTINED",
+						"server_name":         serverName,
+						"tool_name":           actualToolName,
+						"reason":              "new_unapproved_tool",
+						"message":             fmt.Sprintf("Tool '%s:%s' has not been approved yet. New tools must be inspected and approved before use.", serverName, actualToolName),
+						"current_description": approval.CurrentDescription,
+						"action":              fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
+					}
+					jsonResult, _ := json.Marshal(response)
+					return mcp.NewToolResultText(string(jsonResult)), nil
+				}
+				if approval.Status == storage.ToolApprovalStatusChanged {
+					p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
+						zap.String("server_name", serverName),
+						zap.String("tool_name", actualToolName))
+
+					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked",
+						"Tool description/schema changed since last approval")
+
+					response := map[string]interface{}{
+						"status":               "TOOL_QUARANTINED",
+						"server_name":          serverName,
+						"tool_name":            actualToolName,
+						"reason":               "tool_description_changed",
+						"message":              fmt.Sprintf("Tool '%s:%s' description has changed since last approval. Inspect changes before using.", serverName, actualToolName),
+						"previous_description": approval.PreviousDescription,
+						"current_description":  approval.CurrentDescription,
+						"action":               fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
+					}
+					jsonResult, _ := json.Marshal(response)
+					return mcp.NewToolResultText(string(jsonResult)), nil
+				}
+			}
+		}
 	}
 
 	// Check connection status before attempting tool call to prevent hanging
@@ -2126,6 +2186,10 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	var result *mcp.CallToolResult
 	var opErr error
 
+	if toolNameArg := request.GetString("tool_name", ""); toolNameArg != "" {
+		args["tool_name"] = toolNameArg
+	}
+
 	switch operation {
 	case "list_quarantined":
 		result, opErr = p.handleListQuarantinedUpstreams(ctx)
@@ -2133,6 +2197,12 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		result, opErr = p.handleInspectQuarantinedTools(ctx, request)
 	case "quarantine":
 		result, opErr = p.handleQuarantineUpstream(ctx, request)
+	case "inspect_tools":
+		result, opErr = p.handleInspectToolApprovals(request)
+	case "approve_tool":
+		result, opErr = p.handleApproveToolByName(request)
+	case "approve_all_tools":
+		result, opErr = p.handleApproveAllToolsByServer(request)
 	default:
 		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown quarantine operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil)
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown quarantine operation: %s", operation)), nil
@@ -2161,6 +2231,98 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	}
 
 	return result, opErr
+}
+
+// handleInspectToolApprovals shows tool-level quarantine status for a server (Spec 032)
+func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+
+	records, err := p.storage.ListToolApprovals(serverName)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to list tool approvals: %v", err)), nil
+	}
+
+	if len(records) == 0 {
+		return mcp.NewToolResultText(fmt.Sprintf("No tool approval records found for server '%s'", serverName)), nil
+	}
+
+	pendingCount, changedCount, approvedCount := 0, 0, 0
+	toolList := make([]map[string]interface{}, len(records))
+	for i, r := range records {
+		tool := map[string]interface{}{
+			"tool_name":   r.ToolName,
+			"status":      r.Status,
+			"hash":        r.CurrentHash,
+			"description": r.CurrentDescription,
+		}
+		switch r.Status {
+		case "changed":
+			tool["previous_description"] = r.PreviousDescription
+			changedCount++
+		case "pending":
+			pendingCount++
+		default:
+			approvedCount++
+		}
+		toolList[i] = tool
+	}
+
+	result := map[string]interface{}{
+		"server_name":    serverName,
+		"tools":          toolList,
+		"total":          len(records),
+		"approved_count": approvedCount,
+		"pending_count":  pendingCount,
+		"changed_count":  changedCount,
+	}
+
+	if pendingCount > 0 || changedCount > 0 {
+		result["action_required"] = fmt.Sprintf("%d tool(s) need approval. Use approve_tool or approve_all_tools operation.", pendingCount+changedCount)
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonBytes)), nil
+}
+
+// handleApproveToolByName approves a specific tool for a server (Spec 032)
+func (p *MCPProxyServer) handleApproveToolByName(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+
+	toolName := request.GetString("tool_name", "")
+	if toolName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'tool_name'"), nil
+	}
+
+	if err := p.mainServer.runtime.ApproveTools(serverName, []string{toolName}, "mcp"); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to approve tool '%s': %v", toolName, err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Tool '%s' on server '%s' has been approved.", toolName, serverName)), nil
+}
+
+// handleApproveAllToolsByServer approves all pending/changed tools for a server (Spec 032)
+func (p *MCPProxyServer) handleApproveAllToolsByServer(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+
+	count, err := p.mainServer.runtime.ApproveAllTools(serverName, "mcp")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to approve tools: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Approved %d tool(s) on server '%s'.", count, serverName)), nil
 }
 
 func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallToolResult, error) {

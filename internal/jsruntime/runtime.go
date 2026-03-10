@@ -18,7 +18,53 @@ type ExecutionOptions struct {
 	AllowedServers []string               // Whitelist of allowed server names (empty = all allowed)
 	ExecutionID    string                 // Unique execution ID for logging (auto-generated if empty)
 	Language       string                 // Source language: "javascript" (default) or "typescript"
+
+	// Auth enforcement (Spec 031)
+	AuthContext        *AuthInfo            // Auth context for permission enforcement (nil = no restrictions)
+	ToolAnnotationFunc ToolAnnotationLookup // Function to look up tool annotations for permission checking
 }
+
+// AuthInfo carries authentication context for permission enforcement in JS execution.
+// This is a simplified view of the auth.AuthContext to avoid circular imports.
+type AuthInfo struct {
+	Type           string   // "admin", "agent", "user", etc.
+	AgentName      string   // Name of the agent token
+	AllowedServers []string // Servers this token can access (nil = all)
+	Permissions    []string // Permission tiers: "read", "write", "destructive"
+}
+
+// CanAccessServer checks whether this auth context can access the named server.
+func (a *AuthInfo) CanAccessServer(name string) bool {
+	if a == nil || a.Type == "admin" || a.Type == "admin_user" {
+		return true
+	}
+	if name == "" {
+		return false
+	}
+	for _, s := range a.AllowedServers {
+		if s == "*" || s == name {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPermission checks whether this auth context includes the given permission.
+func (a *AuthInfo) HasPermission(perm string) bool {
+	if a == nil || a.Type == "admin" || a.Type == "admin_user" {
+		return true
+	}
+	for _, p := range a.Permissions {
+		if p == perm {
+			return true
+		}
+	}
+	return false
+}
+
+// ToolAnnotationLookup is a function that returns the permission tier required for a tool.
+// Returns one of "read", "write", "destructive".
+type ToolAnnotationLookup func(serverName, toolName string) string
 
 // ToolCaller is an interface for calling upstream MCP tools
 type ToolCaller interface {
@@ -37,6 +83,11 @@ type ExecutionContext struct {
 	toolCaller       ToolCaller
 	maxToolCalls     int
 	allowedServerMap map[string]bool
+
+	// Auth enforcement (Spec 031)
+	authInfo           *AuthInfo
+	toolAnnotationFunc ToolAnnotationLookup
+	maxPermissionLevel string // Tracks highest permission used: read < write < destructive
 }
 
 // ToolCallRecord represents a single call_tool() invocation
@@ -75,13 +126,16 @@ func Execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 
 	// Create execution context
 	execCtx := &ExecutionContext{
-		ExecutionID:      opts.ExecutionID,
-		StartTime:        time.Now(),
-		Status:           "running",
-		ToolCalls:        make([]ToolCallRecord, 0),
-		toolCaller:       caller,
-		maxToolCalls:     opts.MaxToolCalls,
-		allowedServerMap: make(map[string]bool),
+		ExecutionID:        opts.ExecutionID,
+		StartTime:          time.Now(),
+		Status:             "running",
+		ToolCalls:          make([]ToolCallRecord, 0),
+		toolCaller:         caller,
+		maxToolCalls:       opts.MaxToolCalls,
+		allowedServerMap:   make(map[string]bool),
+		authInfo:           opts.AuthContext,
+		toolAnnotationFunc: opts.ToolAnnotationFunc,
+		maxPermissionLevel: "",
 	}
 
 	// Build allowed server map for fast lookup
@@ -257,6 +311,39 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 			})
 		}
 
+		// Auth context enforcement (Spec 031)
+		if ec.authInfo != nil {
+			// Check server access
+			if !ec.authInfo.CanAccessServer(serverName) {
+				return vm.ToValue(map[string]interface{}{
+					"ok": false,
+					"error": map[string]interface{}{
+						"code":    "ACCESS_DENIED",
+						"message": fmt.Sprintf("token does not have access to server '%s'", serverName),
+					},
+				})
+			}
+
+			// Determine required permission via annotation lookup
+			requiredPerm := "read" // Default to read
+			if ec.toolAnnotationFunc != nil {
+				requiredPerm = ec.toolAnnotationFunc(serverName, toolName)
+			}
+
+			if !ec.authInfo.HasPermission(requiredPerm) {
+				return vm.ToValue(map[string]interface{}{
+					"ok": false,
+					"error": map[string]interface{}{
+						"code":    "PERMISSION_DENIED",
+						"message": fmt.Sprintf("token does not have '%s' permission for tool '%s:%s'", requiredPerm, serverName, toolName),
+					},
+				})
+			}
+
+			// Track highest permission level
+			ec.updateMaxPermissionLevel(requiredPerm)
+		}
+
 		// Record tool call start
 		record := ToolCallRecord{
 			ServerName: serverName,
@@ -307,4 +394,23 @@ func validateSerializable(value interface{}) error {
 		return fmt.Errorf("result must be JSON-serializable: %w", err)
 	}
 	return nil
+}
+
+// permissionRank maps permission tiers to numeric rank for comparison.
+var permissionRank = map[string]int{
+	"read":        1,
+	"write":       2,
+	"destructive": 3,
+}
+
+// updateMaxPermissionLevel tracks the highest permission level used during execution.
+func (ec *ExecutionContext) updateMaxPermissionLevel(perm string) {
+	if permissionRank[perm] > permissionRank[ec.maxPermissionLevel] {
+		ec.maxPermissionLevel = perm
+	}
+}
+
+// GetMaxPermissionLevel returns the highest permission level used during execution.
+func (ec *ExecutionContext) GetMaxPermissionLevel() string {
+	return ec.maxPermissionLevel
 }

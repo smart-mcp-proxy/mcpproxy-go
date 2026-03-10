@@ -27,7 +27,7 @@ Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript)
     "properties": {
       "code": {
         "type": "string",
-        "description": "JavaScript or TypeScript source code to execute..."
+        "description": "JavaScript or TypeScript source code (ES2020+) to execute..."
       },
       "language": {
         "type": "string",
@@ -113,7 +113,7 @@ Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `code` | string | **Yes** | JavaScript or TypeScript source code to execute |
+| `code` | string | **Yes** | JavaScript or TypeScript source code to execute (ES2020+ syntax supported) |
 | `language` | string | No | Source language: `"javascript"` (default) or `"typescript"` |
 | `input` | object | No | Input data accessible as `input` global variable (default: `{}`) |
 | `options` | object | No | Execution options (see below) |
@@ -277,7 +277,7 @@ var data = res.result;
 
 ### Available JavaScript Features
 
-#### ES5.1 Standard Library
+#### JavaScript Standard Library (ES2020+)
 
 ✅ **Available**:
 - **Objects**: `Object.keys()`, `Object.create()`, `Object.defineProperty()`, etc.
@@ -294,7 +294,7 @@ var data = res.result;
 - **Filesystem**: No `fs` module or file I/O
 - **Network**: No `http`, `https`, `fetch`, or network access
 - **Process**: No `process` object or environment variables
-- **ES6+**: No arrow functions, template literals, `async/await`, `Promise`, etc.
+- **Node.js APIs**: No Node.js-specific APIs (Buffer, Stream, etc.)
 
 #### Type Conversions
 
@@ -594,13 +594,12 @@ mcpproxy code exec --code="while(true){}" --timeout=1000 2>&1
 
 # Save code to file for complex scripts
 cat > /tmp/script.js << 'EOF'
-var users = ['octocat', 'torvalds'];
-var results = [];
-for (var i = 0; i < users.length; i++) {
-  var res = call_tool('github', 'get_user', {username: users[i]});
-  if (res.ok) results.push(res.result.name);
-}
-return {names: results};
+const users = ['octocat', 'torvalds'];
+const names = users
+  .map(username => call_tool('github', 'get_user', {username}))
+  .filter(res => res.ok)
+  .map(res => res.result.name);
+return {names};
 EOF
 
 mcpproxy code exec --file=/tmp/script.js
@@ -614,7 +613,7 @@ mcpproxy code exec --file=/tmp/script.js
 
 - **Required**: `code` parameter must be provided
 - **Type**: Must be a string
-- **Syntax**: Must be valid ES5.1 JavaScript
+- **Syntax**: Must be valid JavaScript (ES2020+ supported)
 - **Serialization**: Return value must be JSON-serializable
 
 ### Input Validation
