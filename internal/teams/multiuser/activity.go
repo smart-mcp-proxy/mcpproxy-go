@@ -1,4 +1,4 @@
-//go:build teams
+//go:build server
 
 package multiuser
 
@@ -17,7 +17,7 @@ type ActivityStorageProvider interface {
 	GetActivity(id string) (*storage.ActivityRecord, error)
 }
 
-// ActivityFilter provides user-scoped activity log access for the teams edition.
+// ActivityFilter provides user-scoped activity log access for the server edition.
 // It wraps the storage provider and filters activity records based on user identity
 // extracted from the request context.
 type ActivityFilter struct {
@@ -72,7 +72,7 @@ func (f *ActivityFilter) GetFilteredActivity(ctx context.Context, userID string,
 }
 
 // EnrichRecord sets UserID and UserEmail on an activity record from the request context.
-// This should be called when creating new activity records in the teams edition
+// This should be called when creating new activity records in the server edition
 // to associate each record with the authenticated user.
 // If no auth context is present or the user has no ID, the record is left unchanged.
 func (f *ActivityFilter) EnrichRecord(ctx context.Context, record *storage.ActivityRecord) {

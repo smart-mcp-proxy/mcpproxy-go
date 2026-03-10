@@ -3,7 +3,7 @@
     <div class="flex justify-between items-center mb-6">
       <div>
         <h1 class="text-2xl font-bold">Server Management</h1>
-        <p class="text-sm text-base-content/60 mt-1">Manage upstream MCP servers. Shared servers are available to all team members.</p>
+        <p class="text-sm text-base-content/60 mt-1">Manage upstream MCP servers. Shared servers are available to all users.</p>
       </div>
     </div>
 

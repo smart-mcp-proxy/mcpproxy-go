@@ -663,7 +663,7 @@ class APIService {
     })
   }
 
-  // Admin server management (Teams)
+  // Admin server management (Server edition)
   async adminEnableServer(name: string): Promise<APIResponse<any>> {
     return this.request(`/api/v1/admin/servers/${encodeURIComponent(name)}/enable`, { method: 'POST', credentials: 'include' } as RequestInit)
   }
@@ -676,7 +676,7 @@ class APIService {
     return this.request(`/api/v1/admin/servers/${encodeURIComponent(name)}/restart`, { method: 'POST', credentials: 'include' } as RequestInit)
   }
 
-  // User tokens (Teams)
+  // User tokens (Server edition)
   async listUserTokens(): Promise<APIResponse<{ tokens: AgentTokenInfo[] }>> {
     return this.request<{ tokens: AgentTokenInfo[] }>('/api/v1/user/tokens', { credentials: 'include' } as RequestInit)
   }

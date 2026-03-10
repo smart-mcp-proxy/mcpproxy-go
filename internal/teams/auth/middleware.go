@@ -1,4 +1,4 @@
-//go:build teams
+//go:build server
 
 package auth
 
@@ -18,8 +18,8 @@ import (
 // treated as JWT bearer tokens.
 const agentTokenPrefix = "mcp_agt_"
 
-// TeamsAuthMiddleware validates team member authentication via session cookies
-// or JWT bearer tokens.
+// TeamsAuthMiddleware validates user authentication via session cookies
+// or JWT bearer tokens (server edition).
 type TeamsAuthMiddleware struct {
 	sessionManager *SessionManager
 	userStore      *users.UserStore
@@ -176,7 +176,7 @@ func (m *TeamsAuthMiddleware) authenticateFromBearer(r *http.Request) (*coreauth
 }
 
 // buildAuthContext creates an AuthContext for the given user, determining the
-// role from the teams config admin email list.
+// role from the server config admin email list.
 func (m *TeamsAuthMiddleware) buildAuthContext(user *users.User) *coreauth.AuthContext {
 	if m.teamsConfig.IsAdminEmail(user.Email) {
 		return coreauth.AdminUserContext(user.ID, user.Email, user.DisplayName, user.Provider)

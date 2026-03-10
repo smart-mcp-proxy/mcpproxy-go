@@ -8,14 +8,14 @@
           <img src="/src/assets/logo.svg" alt="MCPProxy Logo" class="w-10 h-10" />
           <div>
             <span class="text-xl font-bold">MCPProxy</span>
-            <span v-if="authStore.isTeamsEdition" class="badge badge-xs badge-primary ml-1">Teams</span>
+            <span v-if="authStore.isTeamsEdition" class="badge badge-xs badge-primary ml-1">Server</span>
           </div>
         </router-link>
       </div>
 
       <!-- Navigation Menu -->
       <nav class="flex-1 p-4 overflow-y-auto">
-        <!-- Teams Edition: User Menu -->
+        <!-- Server Edition: User Menu -->
         <template v-if="authStore.isTeamsEdition">
           <ul class="menu">
             <li class="menu-title" v-if="authStore.isAdmin">
@@ -68,7 +68,7 @@
         </template>
       </nav>
 
-      <!-- User Info (Teams Edition) -->
+      <!-- User Info (Server Edition) -->
       <div v-if="authStore.isTeamsEdition && authStore.isAuthenticated" class="px-4 py-3 border-t border-base-300">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2 min-w-0">
@@ -152,7 +152,7 @@ const personalMenu = [
   { name: 'Configuration', path: '/settings' },
 ]
 
-// Teams edition: items visible to all authenticated users
+// Server edition: items visible to all authenticated users
 const teamsUserMenu = [
   { name: 'My Servers', path: '/my/servers' },
   { name: 'My Activity', path: '/my/activity' },
@@ -161,7 +161,7 @@ const teamsUserMenu = [
   { name: 'Search', path: '/search' },
 ]
 
-// Teams edition: items visible only to admins
+// Server edition: items visible only to admins
 const teamsAdminMenu = [
   { name: 'Dashboard', path: '/admin/dashboard' },
   { name: 'Server Management', path: '/admin/servers' },

@@ -4,7 +4,7 @@
     <div class="flex justify-between items-center">
       <div>
         <h1 class="text-2xl font-bold">Admin Dashboard</h1>
-        <p class="text-base-content/70 mt-1">Team overview and system health</p>
+        <p class="text-base-content/70 mt-1">Server overview and system health</p>
       </div>
       <button @click="loadAll" class="btn btn-sm btn-ghost" :disabled="loading">
         <svg class="w-4 h-4" :class="{ 'animate-spin': loading }" fill="none" stroke="currentColor" viewBox="0 0 24 24">

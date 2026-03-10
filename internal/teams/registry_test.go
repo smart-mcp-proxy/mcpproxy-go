@@ -1,4 +1,4 @@
-//go:build teams
+//go:build server
 
 package teams
 
@@ -42,7 +42,7 @@ func TestSetupAllError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from SetupAll")
 	}
-	if err.Error() != "teams feature failing-feature: setup failed" {
+	if err.Error() != "server feature failing-feature: setup failed" {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 }

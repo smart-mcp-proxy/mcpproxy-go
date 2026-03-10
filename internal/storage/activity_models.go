@@ -73,9 +73,9 @@ type ActivityRecord struct {
 	RequestID         string                 `json:"request_id,omitempty"`         // HTTP request ID for correlation
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`           // Additional context-specific data
 
-	// Multi-user identity fields (teams edition). Empty/omitted for personal edition.
-	UserID    string `json:"user_id,omitempty"`    // User's unique identifier (set when teams auth is active)
-	UserEmail string `json:"user_email,omitempty"` // User's email address (set when teams auth is active)
+	// Multi-user identity fields (server edition). Empty/omitted for personal edition.
+	UserID    string `json:"user_id,omitempty"`    // User's unique identifier (set when server auth is active)
+	UserEmail string `json:"user_email,omitempty"` // User's email address (set when server auth is active)
 }
 
 // MarshalBinary implements encoding.BinaryMarshaler for BBolt storage

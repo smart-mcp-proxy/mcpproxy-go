@@ -1,4 +1,4 @@
-//go:build teams
+//go:build server
 
 package teams
 
@@ -24,21 +24,21 @@ func init() {
 
 func setupMultiUserOAuth(deps Dependencies) error {
 	if deps.Config == nil || deps.Config.Teams == nil || !deps.Config.Teams.Enabled {
-		deps.Logger.Debug("Teams multi-user OAuth: teams not enabled, skipping setup")
+		deps.Logger.Debug("Server multi-user OAuth: not enabled, skipping setup")
 		return nil
 	}
 
 	cfg := deps.Config.Teams
 
-	// Validate teams config
+	// Validate server config
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("teams config validation: %w", err)
+		return fmt.Errorf("server config validation: %w", err)
 	}
 
 	// Create user store
 	userStore := users.NewUserStore(deps.DB)
 	if err := userStore.EnsureBuckets(); err != nil {
-		return fmt.Errorf("creating teams buckets: %w", err)
+		return fmt.Errorf("creating server buckets: %w", err)
 	}
 
 	// Get HMAC key for JWT signing
@@ -69,7 +69,7 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// Shared servers are the main config servers (admin-configured).
 	sharedServers := deps.Config.Servers
 
-	// All teams endpoints that require session cookie or JWT authentication.
+	// All server edition endpoints that require session cookie or JWT authentication.
 	// Mounted outside the API key group so session cookies work.
 	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)
 	configPath := config.GetConfigPath(deps.Config.DataDir)
@@ -86,7 +86,7 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		userActivityHandlers.RegisterRoutesWithPrefix(r, "/api/v1")
 	})
 
-	deps.Logger.Infow("Teams multi-user OAuth initialized",
+	deps.Logger.Infow("Server multi-user OAuth initialized",
 		"provider", cfg.OAuth.Provider,
 		"admin_emails", cfg.AdminEmails,
 	)

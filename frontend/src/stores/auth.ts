@@ -15,15 +15,15 @@ export const useAuthStore = defineStore('auth', () => {
   async function checkAuth() {
     loading.value = true
     try {
-      // Check if this is teams edition using the API service (includes API key)
+      // Check if this is server edition using the API service (includes API key)
       const statusRes = await api.getStatus()
-      isTeamsEdition.value = statusRes.data?.edition === 'teams'
+      isTeamsEdition.value = statusRes.data?.edition === 'server'
 
       if (isTeamsEdition.value) {
         user.value = await authApi.getMe()
       }
     } catch {
-      // Not authenticated or not teams edition
+      // Not authenticated or not server edition
       user.value = null
     } finally {
       loading.value = false

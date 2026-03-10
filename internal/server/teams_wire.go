@@ -1,4 +1,4 @@
-//go:build teams
+//go:build server
 
 package server
 
@@ -9,18 +9,18 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams"
 )
 
-// wireTeamsOAuth sets up teams multi-user OAuth routes on the HTTP API server.
+// wireTeamsOAuth sets up server edition multi-user OAuth routes on the HTTP API server.
 // This is called during server initialization after the HTTP API server is created.
 func wireTeamsOAuth(s *Server, httpAPIServer *httpapi.Server) {
 	cfg := s.runtime.Config()
 	if cfg == nil {
-		s.logger.Debug("Teams OAuth wiring skipped: no config available")
+		s.logger.Debug("Server OAuth wiring skipped: no config available")
 		return
 	}
 
 	sm := s.runtime.StorageManager()
 	if sm == nil {
-		s.logger.Debug("Teams OAuth wiring skipped: no storage manager available")
+		s.logger.Debug("Server OAuth wiring skipped: no storage manager available")
 		return
 	}
 
@@ -35,6 +35,6 @@ func wireTeamsOAuth(s *Server, httpAPIServer *httpapi.Server) {
 	}
 
 	if err := teams.SetupAll(deps); err != nil {
-		s.logger.Error("Failed to initialize teams features", zap.Error(err))
+		s.logger.Error("Failed to initialize server features", zap.Error(err))
 	}
 }

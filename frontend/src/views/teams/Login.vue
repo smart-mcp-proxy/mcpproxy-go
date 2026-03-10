@@ -2,7 +2,7 @@
   <div class="min-h-screen flex items-center justify-center bg-base-200">
     <div class="card w-96 bg-base-100 shadow-xl">
       <div class="card-body items-center text-center">
-        <h1 class="card-title text-2xl font-bold">MCPProxy Teams</h1>
+        <h1 class="card-title text-2xl font-bold">MCPProxy Server</h1>
         <p class="text-base-content/70 mb-4">Sign in to access your MCP tools</p>
         <div class="divider"></div>
         <button
