@@ -47,6 +47,13 @@ type Server struct {
 	LastRetryTime     *time.Time        `json:"last_retry_time,omitempty"`
 	UserLoggedOut     bool              `json:"user_logged_out,omitempty"` // True if user explicitly logged out (prevents auto-reconnection)
 	Health            *HealthStatus     `json:"health,omitempty"`          // Unified health status calculated by the backend
+	Quarantine        *QuarantineStats  `json:"quarantine,omitempty"`      // Tool quarantine metrics for this server
+}
+
+// QuarantineStats represents tool quarantine metrics for a server.
+type QuarantineStats struct {
+	PendingCount int `json:"pending_count"` // Number of newly discovered tools awaiting approval
+	ChangedCount int `json:"changed_count"` // Number of tools whose description/schema changed since approval
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -273,14 +280,14 @@ type GetMigrationAnalysisResponse struct {
 
 // DiagnosticIssue represents a single diagnostic issue
 type DiagnosticIssue struct {
-	Type      string                 `json:"type"`                                            // error, warning, info
-	Category  string                 `json:"category"`                                        // oauth, connection, secrets, config
-	Server    string                 `json:"server,omitempty"`                                // Associated server (if any)
-	Title     string                 `json:"title"`                                           // Short title
-	Message   string                 `json:"message"`                                         // Detailed message
-	Timestamp time.Time              `json:"timestamp"`                                       // When detected
-	Severity  string                 `json:"severity"`                                        // critical, high, medium, low
-	Metadata  map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`         // Additional context
+	Type      string                 `json:"type"`                                    // error, warning, info
+	Category  string                 `json:"category"`                                // oauth, connection, secrets, config
+	Server    string                 `json:"server,omitempty"`                        // Associated server (if any)
+	Title     string                 `json:"title"`                                   // Short title
+	Message   string                 `json:"message"`                                 // Detailed message
+	Timestamp time.Time              `json:"timestamp"`                               // When detected
+	Severity  string                 `json:"severity"`                                // critical, high, medium, low
+	Metadata  map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"` // Additional context
 }
 
 // MissingSecret represents an unresolved secret reference
@@ -304,15 +311,15 @@ type DiagnosticsResponse struct {
 // Diagnostics represents aggregated health information from all MCPProxy components.
 // This is the new unified diagnostics format for the management service.
 type Diagnostics struct {
-	TotalIssues       int                        `json:"total_issues"`
-	UpstreamErrors    []UpstreamError            `json:"upstream_errors"`
-	OAuthRequired     []OAuthRequirement         `json:"oauth_required"`
-	OAuthIssues       []OAuthIssue               `json:"oauth_issues"`               // OAuth parameter mismatches
-	MissingSecrets    []MissingSecretInfo         `json:"missing_secrets"`             // Renamed to avoid conflict
-	RuntimeWarnings   []string                    `json:"runtime_warnings"`
-	DeprecatedConfigs []DeprecatedConfigWarning   `json:"deprecated_configs,omitempty"` // Deprecated config fields found
-	DockerStatus      *DockerStatus               `json:"docker_status,omitempty"`
-	Timestamp         time.Time                   `json:"timestamp"`
+	TotalIssues       int                       `json:"total_issues"`
+	UpstreamErrors    []UpstreamError           `json:"upstream_errors"`
+	OAuthRequired     []OAuthRequirement        `json:"oauth_required"`
+	OAuthIssues       []OAuthIssue              `json:"oauth_issues"`    // OAuth parameter mismatches
+	MissingSecrets    []MissingSecretInfo       `json:"missing_secrets"` // Renamed to avoid conflict
+	RuntimeWarnings   []string                  `json:"runtime_warnings"`
+	DeprecatedConfigs []DeprecatedConfigWarning `json:"deprecated_configs,omitempty"` // Deprecated config fields found
+	DockerStatus      *DockerStatus             `json:"docker_status,omitempty"`
+	Timestamp         time.Time                 `json:"timestamp"`
 }
 
 // DeprecatedConfigWarning represents a deprecated configuration field found in the config file.
@@ -374,13 +381,13 @@ type AuthStatus struct {
 // OAuthStartResponse is returned by POST /api/v1/servers/{id}/login when OAuth flow starts successfully.
 // Spec 020: OAuth Login Error Feedback
 type OAuthStartResponse struct {
-	Success       bool   `json:"success"`                   // Always true for successful start
-	ServerName    string `json:"server_name"`               // Name of the server being authenticated
-	CorrelationID string `json:"correlation_id"`            // UUID for tracking this flow
-	AuthURL       string `json:"auth_url,omitempty"`        // Authorization URL (always included for manual use)
-	BrowserOpened bool   `json:"browser_opened"`            // Whether browser launch succeeded
-	BrowserError  string `json:"browser_error,omitempty"`   // Error message if browser launch failed
-	Message       string `json:"message"`                   // Human-readable status message
+	Success       bool   `json:"success"`                 // Always true for successful start
+	ServerName    string `json:"server_name"`             // Name of the server being authenticated
+	CorrelationID string `json:"correlation_id"`          // UUID for tracking this flow
+	AuthURL       string `json:"auth_url,omitempty"`      // Authorization URL (always included for manual use)
+	BrowserOpened bool   `json:"browser_opened"`          // Whether browser launch succeeded
+	BrowserError  string `json:"browser_error,omitempty"` // Error message if browser launch failed
+	Message       string `json:"message"`                 // Human-readable status message
 }
 
 // OAuthValidationError is returned for pre-flight validation failures before OAuth is attempted.
@@ -418,16 +425,16 @@ func NewOAuthValidationError(serverName, errorType, message, suggestion string) 
 // Implements the error interface so it can be returned as an error while carrying structured data.
 // Spec 020: OAuth Login Error Feedback
 type OAuthFlowError struct {
-	Success       bool               `json:"success"`                   // Always false
-	ErrorType     string             `json:"error_type"`                // Category of OAuth runtime failure
-	ErrorCode     string             `json:"error_code"`                // Machine-readable error code (e.g., OAUTH_NO_METADATA)
-	ServerName    string             `json:"server_name"`               // Server that failed OAuth
-	CorrelationID string             `json:"correlation_id"`            // Flow tracking ID for log correlation
-	RequestID     string             `json:"request_id"`                // HTTP request ID (from PR #237)
-	Message       string             `json:"message"`                   // Human-readable error description
-	Details       *OAuthErrorDetails `json:"details,omitempty"`         // Structured discovery/failure details
-	Suggestion    string             `json:"suggestion"`                // Actionable remediation hint
-	DebugHint     string             `json:"debug_hint"`                // CLI command for log lookup
+	Success       bool               `json:"success"`           // Always false
+	ErrorType     string             `json:"error_type"`        // Category of OAuth runtime failure
+	ErrorCode     string             `json:"error_code"`        // Machine-readable error code (e.g., OAUTH_NO_METADATA)
+	ServerName    string             `json:"server_name"`       // Server that failed OAuth
+	CorrelationID string             `json:"correlation_id"`    // Flow tracking ID for log correlation
+	RequestID     string             `json:"request_id"`        // HTTP request ID (from PR #237)
+	Message       string             `json:"message"`           // Human-readable error description
+	Details       *OAuthErrorDetails `json:"details,omitempty"` // Structured discovery/failure details
+	Suggestion    string             `json:"suggestion"`        // Actionable remediation hint
+	DebugHint     string             `json:"debug_hint"`        // CLI command for log lookup
 }
 
 // Error implements the error interface for OAuthFlowError.
@@ -450,10 +457,10 @@ func NewOAuthFlowError(serverName, errorType, errorCode, message, suggestion str
 
 // OAuthErrorDetails contains structured discovery/failure details for OAuth errors.
 type OAuthErrorDetails struct {
-	ServerURL                     string          `json:"server_url"`
-	ProtectedResourceMetadata     *MetadataStatus `json:"protected_resource_metadata,omitempty"`
-	AuthorizationServerMetadata   *MetadataStatus `json:"authorization_server_metadata,omitempty"`
-	DCRStatus                     *DCRStatus      `json:"dcr_status,omitempty"`
+	ServerURL                   string          `json:"server_url"`
+	ProtectedResourceMetadata   *MetadataStatus `json:"protected_resource_metadata,omitempty"`
+	AuthorizationServerMetadata *MetadataStatus `json:"authorization_server_metadata,omitempty"`
+	DCRStatus                   *DCRStatus      `json:"dcr_status,omitempty"`
 }
 
 // MetadataStatus represents the status of OAuth metadata discovery.
@@ -525,24 +532,24 @@ type TokenMetrics struct {
 
 // ToolCallRecord represents a single recorded tool call with full context
 type ToolCallRecord struct {
-	ID               string                 `json:"id"`                                                   // Unique identifier
-	ServerID         string                 `json:"server_id"`                                            // Server identity hash
-	ServerName       string                 `json:"server_name"`                                          // Human-readable server name
-	ToolName         string                 `json:"tool_name"`                                            // Tool name (without server prefix)
-	Arguments        map[string]interface{} `json:"arguments" swaggertype:"object"`                       // Tool arguments
-	Response         interface{}            `json:"response,omitempty" swaggertype:"object"`              // Tool response (success only)
-	Error            string                 `json:"error,omitempty"`                                      // Error message (failure only)
-	Duration         int64                  `json:"duration"`                                             // Duration in nanoseconds
-	Timestamp        time.Time              `json:"timestamp"`                                            // When the call was made
-	ConfigPath       string                 `json:"config_path"`                                          // Active config file path
-	RequestID        string                 `json:"request_id,omitempty"`                                 // Request correlation ID
-	Metrics          *TokenMetrics          `json:"metrics,omitempty"`                                    // Token usage metrics (nil for older records)
-	ParentCallID     string                 `json:"parent_call_id,omitempty"`                             // Links nested calls to parent code_execution
-	ExecutionType    string                 `json:"execution_type,omitempty"`                             // "direct" or "code_execution"
-	MCPSessionID     string                 `json:"mcp_session_id,omitempty"`                             // MCP session identifier
-	MCPClientName    string                 `json:"mcp_client_name,omitempty"`                            // MCP client name from InitializeRequest
-	MCPClientVersion string                 `json:"mcp_client_version,omitempty"`                         // MCP client version
-	Annotations      *ToolAnnotation        `json:"annotations,omitempty"`                                // Tool behavior hints snapshot
+	ID               string                 `json:"id"`                                      // Unique identifier
+	ServerID         string                 `json:"server_id"`                               // Server identity hash
+	ServerName       string                 `json:"server_name"`                             // Human-readable server name
+	ToolName         string                 `json:"tool_name"`                               // Tool name (without server prefix)
+	Arguments        map[string]interface{} `json:"arguments" swaggertype:"object"`          // Tool arguments
+	Response         interface{}            `json:"response,omitempty" swaggertype:"object"` // Tool response (success only)
+	Error            string                 `json:"error,omitempty"`                         // Error message (failure only)
+	Duration         int64                  `json:"duration"`                                // Duration in nanoseconds
+	Timestamp        time.Time              `json:"timestamp"`                               // When the call was made
+	ConfigPath       string                 `json:"config_path"`                             // Active config file path
+	RequestID        string                 `json:"request_id,omitempty"`                    // Request correlation ID
+	Metrics          *TokenMetrics          `json:"metrics,omitempty"`                       // Token usage metrics (nil for older records)
+	ParentCallID     string                 `json:"parent_call_id,omitempty"`                // Links nested calls to parent code_execution
+	ExecutionType    string                 `json:"execution_type,omitempty"`                // "direct" or "code_execution"
+	MCPSessionID     string                 `json:"mcp_session_id,omitempty"`                // MCP session identifier
+	MCPClientName    string                 `json:"mcp_client_name,omitempty"`               // MCP client name from InitializeRequest
+	MCPClientVersion string                 `json:"mcp_client_version,omitempty"`            // MCP client version
+	Annotations      *ToolAnnotation        `json:"annotations,omitempty"`                   // Tool behavior hints snapshot
 }
 
 // GetToolCallsResponse is the response for GET /api/v1/tool-calls
@@ -598,8 +605,8 @@ type ConfigApplyResult struct {
 
 // GetConfigResponse is the response for GET /api/v1/config
 type GetConfigResponse struct {
-	Config     interface{} `json:"config" swaggertype:"object"`      // The configuration object
-	ConfigPath string      `json:"config_path"`                      // Path to config file
+	Config     interface{} `json:"config" swaggertype:"object"` // The configuration object
+	ConfigPath string      `json:"config_path"`                 // Path to config file
 }
 
 // ValidateConfigRequest is the request for POST /api/v1/config/validate
@@ -741,9 +748,9 @@ type InfoEndpoints struct {
 
 // InfoResponse is the response for GET /api/v1/info
 type InfoResponse struct {
-	Version    string        `json:"version"`     // Current MCPProxy version
-	WebUIURL   string        `json:"web_ui_url"`  // URL to access the web control panel
-	ListenAddr string        `json:"listen_addr"` // Listen address (e.g., "127.0.0.1:8080")
-	Endpoints  InfoEndpoints `json:"endpoints"`   // Available API endpoints
+	Version    string        `json:"version"`          // Current MCPProxy version
+	WebUIURL   string        `json:"web_ui_url"`       // URL to access the web control panel
+	ListenAddr string        `json:"listen_addr"`      // Listen address (e.g., "127.0.0.1:8080")
+	Endpoints  InfoEndpoints `json:"endpoints"`        // Available API endpoints
 	Update     *UpdateInfo   `json:"update,omitempty"` // Update information (if available)
 }

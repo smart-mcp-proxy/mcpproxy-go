@@ -1136,6 +1136,16 @@ components:
           description: Always true for successful start
           type: boolean
       type: object
+    contracts.QuarantineStats:
+      description: Tool quarantine metrics for this server
+      properties:
+        changed_count:
+          description: Number of tools whose description/schema changed since approval
+          type: integer
+        pending_count:
+          description: Number of newly discovered tools awaiting approval
+          type: integer
+      type: object
     contracts.Registry:
       properties:
         count:
@@ -1309,6 +1319,8 @@ components:
           type: string
         protocol:
           type: string
+        quarantine:
+          $ref: '#/components/schemas/contracts.QuarantineStats'
         quarantined:
           type: boolean
         reconnect_count:

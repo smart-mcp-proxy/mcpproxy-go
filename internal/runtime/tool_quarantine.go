@@ -36,8 +36,9 @@ type ToolApprovalResult struct {
 
 // checkToolApprovals checks and updates tool approval records for discovered tools.
 // It returns the set of tool names that should be blocked (not indexed).
-// If quarantine is disabled (globally or per-server), hashes are still tracked but
-// no tools are blocked.
+// If quarantine is disabled (globally or per-server), new tools are auto-approved
+// and no tools are blocked. Changed tools from previously-approved servers are still
+// blocked for security (rug pull detection).
 func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMetadata) (*ToolApprovalResult, error) {
 	if r.storageManager == nil {
 		return &ToolApprovalResult{BlockedTools: make(map[string]bool)}, nil
@@ -79,7 +80,43 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		existing, err := r.storageManager.GetToolApproval(serverName, toolName)
 
 		if err != nil {
-			// No existing record - this is a new tool
+			// No existing record - this is a new tool.
+			// If the server is trusted (quarantine not enforced), auto-approve immediately.
+			// This prevents blocking tools on upgrade for existing trusted servers.
+			if !enforceQuarantine {
+				now := time.Now().UTC()
+				record := &storage.ToolApprovalRecord{
+					ServerName:         serverName,
+					ToolName:           toolName,
+					CurrentHash:        currentHash,
+					ApprovedHash:       currentHash,
+					Status:             storage.ToolApprovalStatusApproved,
+					ApprovedBy:         "auto",
+					ApprovedAt:         now,
+					CurrentDescription: tool.Description,
+					CurrentSchema:      schemaJSON,
+				}
+
+				if saveErr := r.storageManager.SaveToolApproval(record); saveErr != nil {
+					r.logger.Error("Failed to save auto-approved tool record",
+						zap.String("server", serverName),
+						zap.String("tool", toolName),
+						zap.Error(saveErr))
+					continue
+				}
+
+				r.logger.Info("New tool discovered, auto-approved (server trusted)",
+					zap.String("server", serverName),
+					zap.String("tool", toolName))
+
+				// Emit activity event
+				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
+					"", tool.Description, "", schemaJSON)
+
+				continue
+			}
+
+			// Server IS quarantined - mark tool as pending
 			record := &storage.ToolApprovalRecord{
 				ServerName:         serverName,
 				ToolName:           toolName,
@@ -99,13 +136,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 			r.logger.Info("New tool discovered, pending approval",
 				zap.String("server", serverName),
-				zap.String("tool", toolName),
-				zap.Bool("quarantine_enforced", enforceQuarantine))
+				zap.String("tool", toolName))
 
-			if enforceQuarantine {
-				result.BlockedTools[toolName] = true
-				result.PendingCount++
-			}
+			result.BlockedTools[toolName] = true
+			result.PendingCount++
 
 			// Emit activity event
 			r.emitToolQuarantineEvent(serverName, toolName, "tool_discovered", "", currentHash,

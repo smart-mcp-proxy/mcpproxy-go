@@ -29,7 +29,13 @@
         <div class="stat bg-base-200 rounded-lg p-3">
           <div class="stat-title text-xs">Tools</div>
           <div class="stat-value text-lg">{{ server.tool_count }}</div>
-          <div v-if="server.tool_list_token_size" class="stat-desc text-xs">
+          <div v-if="quarantineToolCount > 0" class="stat-desc text-xs text-warning flex items-center gap-1">
+            <svg class="w-3 h-3 inline-block flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            {{ quarantineToolCount }} pending approval
+          </div>
+          <div v-else-if="server.tool_list_token_size" class="stat-desc text-xs">
             {{ server.tool_list_token_size.toLocaleString() }} tokens
           </div>
         </div>
@@ -267,6 +273,13 @@ const statusTooltip = computed(() => {
 // Suggested action from health status
 const healthAction = computed(() => {
   return props.server.health?.action || ''
+})
+
+// Tool-level quarantine count (pending + changed)
+const quarantineToolCount = computed(() => {
+  const q = props.server.quarantine
+  if (!q) return 0
+  return (q.pending_count ?? 0) + (q.changed_count ?? 0)
 })
 
 // Determine if error message should be shown (FR-018, FR-019)
