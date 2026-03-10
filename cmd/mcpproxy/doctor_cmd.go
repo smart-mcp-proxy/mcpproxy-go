@@ -427,11 +427,12 @@ func displaySecurityFeaturesStatus() {
 		routingMode = config.RoutingModeRetrieveTools
 	}
 	fmt.Printf("  Routing Mode: %s\n", routingMode)
-	if routingMode == config.RoutingModeDirect {
+	switch routingMode {
+	case config.RoutingModeDirect:
 		fmt.Println("    All upstream tools exposed directly via /mcp endpoint")
-	} else if routingMode == config.RoutingModeCodeExecution {
+	case config.RoutingModeCodeExecution:
 		fmt.Println("    JS orchestration via code_execution tool")
-	} else {
+	default:
 		fmt.Println("    BM25 search via retrieve_tools + call_tool variants")
 	}
 	fmt.Printf("    Endpoints: /mcp/all (direct), /mcp/code (code_execution), /mcp/call (retrieve_tools)\n")
