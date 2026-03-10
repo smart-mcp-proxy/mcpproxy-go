@@ -409,7 +409,7 @@ All server responses include a `health` field that provides consistent status in
 
 ## JavaScript Code Execution
 
-The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES5.1+).
+The `code_execution` tool enables orchestrating multiple upstream MCP tools in a single request using sandboxed JavaScript (ES2020+). Modern syntax is fully supported: arrow functions, const/let, template literals, destructuring, classes, for-of, optional chaining (?.), nullish coalescing (??), spread/rest, Promises, Symbols, Map/Set, Proxy/Reflect, and generators.
 
 ### Configuration
 
@@ -561,7 +561,7 @@ Runtime detection (uvx→Python, npx→Node.js), image selection, environment pa
 Dynamic port allocation, RFC 8252 + PKCE, flow coordinator (`internal/oauth/coordinator.go`), automatic token refresh. See [docs/oauth-resource-autodetect.md](docs/oauth-resource-autodetect.md).
 
 ### Code Execution
-Sandboxed JavaScript (ES5.1+), orchestrates multiple upstream tools in single request. See [docs/code_execution/overview.md](docs/code_execution/overview.md).
+Sandboxed JavaScript (ES2020+), orchestrates multiple upstream tools in single request. See [docs/code_execution/overview.md](docs/code_execution/overview.md).
 
 ### Connection Management
 Exponential backoff, separate contexts for app vs server lifecycle, state machine: Disconnected → Connecting → Authenticating → Ready.

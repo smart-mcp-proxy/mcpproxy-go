@@ -52,8 +52,8 @@ if (!user.ok) {
 
 // Loop with accumulation
 const results = [];
-for (let i = 0; i < input.repos.length; i++) {
-  const repo = call_tool('github', 'get_repo', {name: input.repos[i]});
+for (const repoName of input.repos) {
+  const repo = call_tool('github', 'get_repo', {name: repoName});
   if (repo.ok) {
     results.push(repo.result);
   }
@@ -69,11 +69,9 @@ const repos = call_tool('github', 'list_repos', {user: input.username});
 if (!repos.ok) return repos;
 
 // Filter and transform
-const activeRepos = repos.result.filter(function(r) {
-  return !r.archived && r.pushed_at > input.since;
-}).map(function(r) {
-  return {name: r.name, stars: r.stargazers_count, language: r.language};
-});
+const activeRepos = repos.result
+  .filter(r => !r.archived && r.pushed_at > input.since)
+  .map(r => ({name: r.name, stars: r.stargazers_count, language: r.language}));
 
 return {repos: activeRepos, total: activeRepos.length};
 ```
@@ -147,12 +145,12 @@ The JavaScript execution environment is **heavily sandboxed** to prevent securit
 - Filesystem access - No `fs` module
 - Network access - No `http` or `fetch`
 - Environment variables - No `process.env`
-- Node.js built-ins - ES5.1+ standard library only
+- Node.js built-ins - JavaScript standard library only
 
 ✅ **Available:**
 - `input` - Global variable with request input data
 - `call_tool(serverName, toolName, args)` - Function to call upstream MCP tools
-- ES5.1+ standard library (Array, Object, String, Math, Date, JSON, etc.)
+- Modern JavaScript (ES2020+) standard library including Array, Object, String, Math, Date, JSON, Map, Set, Symbol, Promise, Proxy, Reflect
 
 ### Configuration & Limits
 
@@ -269,7 +267,7 @@ return {
 
 ```javascript
 // Try primary server, fallback to secondary
-var result = call_tool('primary-db', 'query', {sql: input.query});
+let result = call_tool('primary-db', 'query', {sql: input.query});
 
 if (!result.ok) {
   // Primary failed, try backup
@@ -283,16 +281,16 @@ return result.ok ? result.result : {error: 'Both databases unavailable'};
 
 ```javascript
 // Fetch details for multiple items
-var results = [];
-var errors = [];
+const results = [];
+const errors = [];
 
-for (var i = 0; i < input.ids.length; i++) {
-  var res = call_tool('api-server', 'get_item', {id: input.ids[i]});
+for (const id of input.ids) {
+  const res = call_tool('api-server', 'get_item', {id});
 
   if (res.ok) {
     results.push(res.result);
   } else {
-    errors.push({id: input.ids[i], error: res.error});
+    errors.push({id, error: res.error});
   }
 }
 
@@ -308,25 +306,23 @@ return {
 
 ```javascript
 // Get repos and compute statistics
-var reposRes = call_tool('github', 'list_repos', {user: input.username});
+const reposRes = call_tool('github', 'list_repos', {user: input.username});
 if (!reposRes.ok) return reposRes;
 
-var repos = reposRes.result;
-var totalStars = 0;
-var languages = {};
+const repos = reposRes.result;
+const totalStars = repos.reduce((sum, r) => sum + (r.stargazers_count ?? 0), 0);
+const languages = {};
 
-for (var i = 0; i < repos.length; i++) {
-  totalStars += repos[i].stargazers_count || 0;
-
-  var lang = repos[i].language || 'Unknown';
-  languages[lang] = (languages[lang] || 0) + 1;
+for (const repo of repos) {
+  const lang = repo.language ?? 'Unknown';
+  languages[lang] = (languages[lang] ?? 0) + 1;
 }
 
 return {
   total_repos: repos.length,
   total_stars: totalStars,
   avg_stars: Math.round(totalStars / repos.length),
-  languages: languages
+  languages
 };
 ```
 
@@ -380,7 +376,7 @@ code_execution({
 ## Best Practices
 
 ### 1. Keep Code Simple
-- Use ES5.1 syntax (no arrow functions, template literals, or async/await)
+- Use modern JavaScript syntax (arrow functions, const/let, template literals, destructuring are all supported)
 - Avoid deeply nested logic
 - Prefer explicit error handling over implicit failures
 

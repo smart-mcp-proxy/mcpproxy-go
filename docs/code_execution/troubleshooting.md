@@ -109,46 +109,25 @@ mcpproxy call tool --tool-name=retrieve_tools --json_args='{"query":"code execut
 **Common Causes**:
 1. Missing closing brackets/braces
 2. Invalid JavaScript syntax
-3. Using ES6+ features (not supported)
 
 **Solutions**:
 
 **Problem**: Missing brackets
 ```javascript
 // Bad
-var x = { value: 1, missing: 2
+const x = { value: 1, missing: 2
 
 // Good
-var x = { value: 1, missing: 2 };
+const x = { value: 1, missing: 2 };
 ```
 
-**Problem**: ES6 arrow functions
+**Problem**: Incomplete expressions
 ```javascript
-// Bad (ES6)
-var doubled = arr.map(x => x * 2);
+// Bad
+const msg = `Hello, ${
 
-// Good (ES5)
-var doubled = arr.map(function(x) { return x * 2; });
-```
-
-**Problem**: Template literals
-```javascript
-// Bad (ES6)
-var msg = `Hello, ${name}!`;
-
-// Good (ES5)
-var msg = 'Hello, ' + name + '!';
-```
-
-**Problem**: Const/let
-```javascript
-// Bad (ES6)
-const x = 42;
-let y = 10;
-
-// Good (ES5)
-var x = 42;
-var y = 10;
+// Good
+const msg = `Hello, ${name}!`;
 ```
 
 ---
@@ -729,7 +708,7 @@ return result;
 
 ### Use Error Boundaries
 
-Wrap risky operations in try-catch (though not available in ES5, use checks instead):
+Wrap risky operations in try-catch or use checks:
 
 ```javascript
 // Check before accessing

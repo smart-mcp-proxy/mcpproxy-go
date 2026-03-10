@@ -92,26 +92,22 @@ mcpproxy code exec \
 // Request
 {
   "code": `
-var userRes = call_tool('github', 'get_user', {username: input.username});
+const userRes = call_tool('github', 'get_user', {username: input.username});
 if (!userRes.ok) {
   return {error: 'Failed to get user: ' + userRes.error.message};
 }
 
-var reposRes = call_tool('github', 'list_repos', {user: input.username, limit: 5});
+const reposRes = call_tool('github', 'list_repos', {user: input.username, limit: 5});
 if (!reposRes.ok) {
   return {error: 'Failed to get repos: ' + reposRes.error.message};
 }
 
+const { name, login, public_repos } = userRes.result;
+
 return {
-  user: {
-    name: userRes.result.name,
-    login: userRes.result.login,
-    public_repos: userRes.result.public_repos
-  },
-  repos: reposRes.result.map(function(r) {
-    return {name: r.name, stars: r.stargazers_count};
-  }),
-  total_repos: userRes.result.public_repos
+  user: { name, login, public_repos },
+  repos: reposRes.result.map(r => ({name: r.name, stars: r.stargazers_count})),
+  total_repos: public_repos
 };
   `,
   "input": {"username": "octocat"}
@@ -140,26 +136,22 @@ return {
 ```bash
 # Save to file for readability
 cat > /tmp/github_user_repos.js << 'EOF'
-var userRes = call_tool('github', 'get_user', {username: input.username});
+const userRes = call_tool('github', 'get_user', {username: input.username});
 if (!userRes.ok) {
-  return {error: 'Failed to get user: ' + userRes.error.message};
+  return {error: `Failed to get user: ${userRes.error.message}`};
 }
 
-var reposRes = call_tool('github', 'list_repos', {user: input.username, limit: 5});
+const reposRes = call_tool('github', 'list_repos', {user: input.username, limit: 5});
 if (!reposRes.ok) {
-  return {error: 'Failed to get repos: ' + reposRes.error.message};
+  return {error: `Failed to get repos: ${reposRes.error.message}`};
 }
+
+const { name, login, public_repos } = userRes.result;
 
 return {
-  user: {
-    name: userRes.result.name,
-    login: userRes.result.login,
-    public_repos: userRes.result.public_repos
-  },
-  repos: reposRes.result.map(function(r) {
-    return {name: r.name, stars: r.stargazers_count};
-  }),
-  total_repos: userRes.result.public_repos
+  user: { name, login, public_repos },
+  repos: reposRes.result.map(r => ({name: r.name, stars: r.stargazers_count})),
+  total_repos: public_repos
 };
 EOF
 
@@ -176,25 +168,20 @@ mcpproxy code exec --file=/tmp/github_user_repos.js --input='{"username": "octoc
 // Request
 {
   "code": `
-var githubUser = call_tool('github', 'get_user', {username: input.username});
-var gitlabUser = call_tool('gitlab', 'get_user', {username: input.username});
-var bitbucketUser = call_tool('bitbucket', 'get_user', {username: input.username});
+const sources = ['github', 'gitlab', 'bitbucket'];
+const profiles = {};
+const availableOn = [];
 
-var results = {
-  github: githubUser.ok ? githubUser.result : null,
-  gitlab: gitlabUser.ok ? gitlabUser.result : null,
-  bitbucket: bitbucketUser.ok ? bitbucketUser.result : null
-};
-
-var availableOn = [];
-if (results.github) availableOn.push('github');
-if (results.gitlab) availableOn.push('gitlab');
-if (results.bitbucket) availableOn.push('bitbucket');
+for (const source of sources) {
+  const res = call_tool(source, 'get_user', {username: input.username});
+  profiles[source] = res.ok ? res.result : null;
+  if (res.ok) availableOn.push(source);
+}
 
 return {
   username: input.username,
   available_on: availableOn,
-  profiles: results
+  profiles
 };
   `,
   "input": {"username": "johndoe"}
@@ -213,7 +200,7 @@ return {
 // Request
 {
   "code": `
-var res = call_tool('github', 'get_user', {username: input.username});
+const res = call_tool('github', 'get_user', {username: input.username});
 
 if (!res.ok) {
   // Return structured error with details
@@ -227,14 +214,8 @@ if (!res.ok) {
   };
 }
 
-return {
-  success: true,
-  data: {
-    name: res.result.name,
-    login: res.result.login,
-    bio: res.result.bio
-  }
-};
+const { name, login, bio } = res.result;
+return { success: true, data: { name, login, bio } };
   `,
   "input": {"username": "this-user-definitely-does-not-exist-12345"}
 }
@@ -317,28 +298,20 @@ return {
 // Request
 {
   "code": `
-var results = [];
-var errors = [];
+const results = [];
+const errors = [];
 
-for (var i = 0; i < input.repo_names.length; i++) {
-  var repoName = input.repo_names[i];
-  var res = call_tool('github', 'get_repo', {
+for (const repoName of input.repo_names) {
+  const res = call_tool('github', 'get_repo', {
     owner: input.owner,
     repo: repoName
   });
 
   if (res.ok) {
-    results.push({
-      name: repoName,
-      stars: res.result.stargazers_count,
-      forks: res.result.forks_count,
-      language: res.result.language
-    });
+    const { stargazers_count: stars, forks_count: forks, language } = res.result;
+    results.push({ name: repoName, stars, forks, language });
   } else {
-    errors.push({
-      name: repoName,
-      error: res.error.message
-    });
+    errors.push({ name: repoName, error: res.error.message });
   }
 }
 
@@ -378,22 +351,18 @@ return {
 **CLI Command**:
 ```bash
 cat > /tmp/batch_repos.js << 'EOF'
-var results = [];
-var errors = [];
+const results = [];
+const errors = [];
 
-for (var i = 0; i < input.repo_names.length; i++) {
-  var repoName = input.repo_names[i];
-  var res = call_tool('github', 'get_repo', {
+for (const repoName of input.repo_names) {
+  const res = call_tool('github', 'get_repo', {
     owner: input.owner,
     repo: repoName
   });
 
   if (res.ok) {
-    results.push({
-      name: repoName,
-      stars: res.result.stargazers_count,
-      forks: res.result.forks_count
-    });
+    const { stargazers_count: stars, forks_count: forks } = res.result;
+    results.push({ name: repoName, stars, forks });
   } else {
     errors.push({name: repoName, error: res.error.message});
   }
@@ -467,7 +436,7 @@ return {
 // Request
 {
   "code": `
-var reposRes = call_tool('github', 'list_repos', {
+const reposRes = call_tool('github', 'list_repos', {
   user: input.username,
   limit: 100
 });
@@ -476,25 +445,24 @@ if (!reposRes.ok) {
   return {error: reposRes.error.message};
 }
 
-var repos = reposRes.result;
-var totalStars = 0;
-var totalForks = 0;
-var languages = {};
-var activeRepos = 0;
+const repos = reposRes.result;
+const totalStars = repos.reduce((sum, r) => sum + (r.stargazers_count ?? 0), 0);
+const totalForks = repos.reduce((sum, r) => sum + (r.forks_count ?? 0), 0);
+const languages = {};
 
-for (var i = 0; i < repos.length; i++) {
-  var repo = repos[i];
-
-  totalStars += repo.stargazers_count || 0;
-  totalForks += repo.forks_count || 0;
-
-  var lang = repo.language || 'Unknown';
-  languages[lang] = (languages[lang] || 0) + 1;
+let activeRepos = 0;
+for (const repo of repos) {
+  const lang = repo.language ?? 'Unknown';
+  languages[lang] = (languages[lang] ?? 0) + 1;
 
   if (!repo.archived && repo.pushed_at) {
     activeRepos++;
   }
 }
+
+const sorted = [...repos].sort((a, b) =>
+  (b.stargazers_count ?? 0) - (a.stargazers_count ?? 0)
+);
 
 return {
   username: input.username,
@@ -504,10 +472,8 @@ return {
   total_stars: totalStars,
   total_forks: totalForks,
   avg_stars: repos.length > 0 ? Math.round(totalStars / repos.length) : 0,
-  languages: languages,
-  most_popular_repo: repos.sort(function(a, b) {
-    return (b.stargazers_count || 0) - (a.stargazers_count || 0);
-  })[0].name
+  languages,
+  most_popular_repo: sorted[0]?.name ?? 'N/A'
 };
   `,
   "input": {"username": "octocat"}
@@ -546,7 +512,7 @@ return {
 // Request
 {
   "code": `
-var reposRes = call_tool('github', 'list_repos', {
+const reposRes = call_tool('github', 'list_repos', {
   user: input.username,
   limit: 50
 });
@@ -556,34 +522,26 @@ if (!reposRes.ok) {
 }
 
 // Filter: only non-archived repos updated recently
-var cutoffDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000); // 90 days ago
+const cutoffDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000); // 90 days ago
 
-var activeRepos = reposRes.result.filter(function(repo) {
-  if (repo.archived) return false;
-  if (!repo.pushed_at) return false;
+const activeRepos = reposRes.result.filter(repo =>
+  !repo.archived && repo.pushed_at && new Date(repo.pushed_at) > cutoffDate
+);
 
-  var pushedDate = new Date(repo.pushed_at);
-  return pushedDate > cutoffDate;
-});
-
-// Map: extract relevant fields
-var simplified = activeRepos.map(function(repo) {
-  return {
+// Map, transform, and sort by stars descending
+const simplified = activeRepos
+  .map(repo => ({
     name: repo.name,
-    description: repo.description || 'No description',
-    language: repo.language || 'Unknown',
+    description: repo.description ?? 'No description',
+    language: repo.language ?? 'Unknown',
     stars: repo.stargazers_count,
     last_updated: repo.pushed_at
-  };
-});
-
-// Sort by stars descending
-simplified.sort(function(a, b) {
-  return b.stars - a.stars;
-});
+  }))
+  .sort((a, b) => b.stars - a.stars)
+  .slice(0, 10); // Top 10
 
 return {
-  repos: simplified.slice(0, 10), // Top 10
+  repos: simplified,
   total_active: activeRepos.length,
   total_repos: reposRes.result.length
 };
@@ -604,31 +562,24 @@ return {
 // Request
 {
   "code": `
-var users = ['octocat', 'torvalds', 'nonexistent-user-xyz'];
-var successful = [];
-var failed = [];
+const users = ['octocat', 'torvalds', 'nonexistent-user-xyz'];
+const successful = [];
+const failed = [];
 
-for (var i = 0; i < users.length; i++) {
-  var username = users[i];
-  var res = call_tool('github', 'get_user', {username: username});
+for (const username of users) {
+  const res = call_tool('github', 'get_user', {username});
 
   if (res.ok) {
-    successful.push({
-      username: username,
-      name: res.result.name,
-      public_repos: res.result.public_repos
-    });
+    const { name, public_repos } = res.result;
+    successful.push({ username, name, public_repos });
   } else {
-    failed.push({
-      username: username,
-      reason: res.error.message
-    });
+    failed.push({ username, reason: res.error.message });
   }
 }
 
 return {
-  successful: successful,
-  failed: failed,
+  successful,
+  failed,
   summary: {
     success_count: successful.length,
     failure_count: failed.length,
@@ -672,18 +623,16 @@ return {
 // Request
 {
   "code": `
-var items = input.items;
-var results = [];
+const { items } = input;
+const results = [];
 
-for (var i = 0; i < items.length; i++) {
+for (const item of items) {
   // Simulate delay by doing some computation
-  for (var j = 0; j < 1000000; j++) {
+  for (let j = 0; j < 1000000; j++) {
     // Busy wait
   }
 
-  var res = call_tool('api-server', 'process_item', {
-    id: items[i]
-  });
+  const res = call_tool('api-server', 'process_item', { id: item });
 
   if (res.ok) {
     results.push(res.result);
@@ -710,7 +659,7 @@ return {processed: results, count: results.length};
 {
   "code": `
 // Get user's repos
-var reposRes = call_tool('github', 'list_repos', {
+const reposRes = call_tool('github', 'list_repos', {
   user: input.username,
   limit: 5
 });
@@ -719,24 +668,20 @@ if (!reposRes.ok) {
   return {error: reposRes.error.message};
 }
 
-var reposWithContributors = [];
-
 // For each repo, fetch contributors
-for (var i = 0; i < reposRes.result.length; i++) {
-  var repo = reposRes.result[i];
-
-  var contributorsRes = call_tool('github', 'list_contributors', {
+const reposWithContributors = reposRes.result.map(repo => {
+  const contributorsRes = call_tool('github', 'list_contributors', {
     owner: input.username,
     repo: repo.name,
     limit: 3
   });
 
-  reposWithContributors.push({
+  return {
     name: repo.name,
     stars: repo.stargazers_count,
     contributors: contributorsRes.ok ? contributorsRes.result : []
-  });
-}
+  };
+});
 
 return {
   username: input.username,
