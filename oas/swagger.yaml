@@ -424,7 +424,7 @@ components:
           description: Security quarantine status
           type: boolean
         shared:
-          description: 'Teams: shared with all users'
+          description: 'Server edition: shared with all users'
           type: boolean
         updated:
           type: string
