@@ -1,6 +1,6 @@
 <template>
-  <header class="bg-base-100 border-b border-base-300 sticky top-0 z-30 overflow-x-hidden">
-    <div class="flex items-center justify-between px-6 py-4 max-w-full overflow-x-hidden">
+  <header class="bg-base-100 border-b border-base-300 sticky top-0 z-30">
+    <div class="flex items-center justify-between px-6 py-4 max-w-full">
       <!-- Left: Mobile menu toggle + Search + Add Server -->
 <div class="flex items-center space-x-3 flex-1 min-w-0 overflow-x-hidden">
         <!-- Mobile menu toggle -->
@@ -71,15 +71,21 @@
         </div>
 
         <!-- MCP Endpoints Dropdown -->
-        <div v-if="systemStore.listenAddr" class="dropdown dropdown-end">
-          <label tabindex="0" class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg cursor-pointer hover:bg-base-300 transition-colors">
+        <div v-if="systemStore.listenAddr" class="relative">
+          <button
+            @click="showEndpoints = !showEndpoints"
+            class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg cursor-pointer hover:bg-base-300 transition-colors"
+          >
             <span class="text-xs font-medium opacity-60">MCP:</span>
             <code class="text-xs font-mono">{{ systemStore.listenAddr }}</code>
-            <svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-3 h-3 opacity-60 transition-transform" :class="{ 'rotate-180': showEndpoints }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
             </svg>
-          </label>
-          <div tabindex="0" class="dropdown-content z-50 mt-2 p-3 shadow-lg bg-base-100 rounded-box w-96 border border-base-300">
+          </button>
+          <div
+            v-if="showEndpoints"
+            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-96 border border-base-300 z-50"
+          >
             <div class="text-xs font-semibold opacity-60 mb-2 px-1">MCP Endpoints</div>
             <div class="space-y-1">
               <div
@@ -109,6 +115,8 @@
               </div>
             </div>
           </div>
+          <!-- Click-outside overlay -->
+          <div v-if="showEndpoints" class="fixed inset-0 z-40" @click="showEndpoints = false" />
         </div>
       </div>
     </div>
@@ -151,6 +159,7 @@ const routingModeLabel = computed(() => {
 
 const searchQuery = ref('')
 const showAddServerModal = ref(false)
+const showEndpoints = ref(false)
 
 interface McpEndpoint {
   path: string
