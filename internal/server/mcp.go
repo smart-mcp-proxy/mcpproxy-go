@@ -1264,6 +1264,55 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs), nil
 	}
 
+	// Check tool-level quarantine (Spec 032) - only if server is not quarantined
+	if p.config.IsQuarantineEnabled() {
+		if serverConfig != nil && !serverConfig.IsQuarantineSkipped() {
+			if approval, approvalErr := p.storage.GetToolApproval(serverName, actualToolName); approvalErr == nil {
+				if approval.Status == storage.ToolApprovalStatusPending {
+					p.logger.Debug("handleCallToolVariant: tool is pending approval (quarantined)",
+						zap.String("server_name", serverName),
+						zap.String("tool_name", actualToolName))
+
+					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked",
+						"Tool is pending approval (new unapproved tool)")
+
+					response := map[string]interface{}{
+						"status":              "TOOL_QUARANTINED",
+						"server_name":         serverName,
+						"tool_name":           actualToolName,
+						"reason":              "new_unapproved_tool",
+						"message":             fmt.Sprintf("Tool '%s:%s' has not been approved yet. New tools must be inspected and approved before use.", serverName, actualToolName),
+						"current_description": approval.CurrentDescription,
+						"action":              fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
+					}
+					jsonResult, _ := json.Marshal(response)
+					return mcp.NewToolResultText(string(jsonResult)), nil
+				}
+				if approval.Status == storage.ToolApprovalStatusChanged {
+					p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
+						zap.String("server_name", serverName),
+						zap.String("tool_name", actualToolName))
+
+					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked",
+						"Tool description/schema changed since last approval")
+
+					response := map[string]interface{}{
+						"status":               "TOOL_QUARANTINED",
+						"server_name":          serverName,
+						"tool_name":            actualToolName,
+						"reason":               "tool_description_changed",
+						"message":              fmt.Sprintf("Tool '%s:%s' description has changed since last approval. Inspect changes before using.", serverName, actualToolName),
+						"previous_description": approval.PreviousDescription,
+						"current_description":  approval.CurrentDescription,
+						"action":               fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
+					}
+					jsonResult, _ := json.Marshal(response)
+					return mcp.NewToolResultText(string(jsonResult)), nil
+				}
+			}
+		}
+	}
+
 	// Check connection status before attempting tool call to prevent hanging
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
 		if !client.IsConnected() {
