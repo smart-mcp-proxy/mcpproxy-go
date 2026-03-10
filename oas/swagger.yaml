@@ -76,6 +76,13 @@ components:
         oauth_expiry_warning_hours:
           description: Health status settings
           type: number
+        quarantine_enabled:
+          description: |-
+            Tool-level quarantine settings (Spec 032)
+            QuarantineEnabled controls whether tool-level quarantine is active.
+            When nil (default), quarantine is enabled (secure by default).
+            Set to explicit false to disable tool-level quarantine.
+          type: boolean
         read_only_mode:
           type: boolean
         registries:
@@ -425,6 +432,9 @@ components:
           type: boolean
         shared:
           description: 'Server edition: shared with all users'
+          type: boolean
+        skip_quarantine:
+          description: Skip tool-level quarantine for this server
           type: boolean
         updated:
           type: string
