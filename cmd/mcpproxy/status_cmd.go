@@ -21,16 +21,24 @@ import (
 
 // StatusInfo holds the collected status data for display.
 type StatusInfo struct {
-	State            string  `json:"state"`
-	ListenAddr       string  `json:"listen_addr"`
-	Uptime           string  `json:"uptime,omitempty"`
-	UptimeSeconds    float64 `json:"uptime_seconds,omitempty"`
-	APIKey           string  `json:"api_key"`
-	WebUIURL         string  `json:"web_ui_url"`
-	Servers          *ServerCounts `json:"servers,omitempty"`
-	SocketPath       string  `json:"socket_path,omitempty"`
-	ConfigPath       string  `json:"config_path,omitempty"`
-	Version          string  `json:"version,omitempty"`
+	State         string           `json:"state"`
+	Edition       string           `json:"edition"`
+	ListenAddr    string           `json:"listen_addr"`
+	Uptime        string           `json:"uptime,omitempty"`
+	UptimeSeconds float64          `json:"uptime_seconds,omitempty"`
+	APIKey        string           `json:"api_key"`
+	WebUIURL      string           `json:"web_ui_url"`
+	Servers       *ServerCounts    `json:"servers,omitempty"`
+	SocketPath    string           `json:"socket_path,omitempty"`
+	ConfigPath    string           `json:"config_path,omitempty"`
+	Version       string           `json:"version,omitempty"`
+	TeamsInfo     *TeamsStatusInfo `json:"teams,omitempty"`
+}
+
+// TeamsStatusInfo holds teams-specific status information.
+type TeamsStatusInfo struct {
+	OAuthProvider string   `json:"oauth_provider"`
+	AdminEmails   []string `json:"admin_emails"`
 }
 
 // ServerCounts holds upstream server statistics.
@@ -151,10 +159,14 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 
 	info := &StatusInfo{
 		State:      "Running",
+		Edition:    Edition,
 		APIKey:     cfg.APIKey,
 		SocketPath: socketPath,
 		ConfigPath: configPath,
 	}
+
+	// Add teams info if available
+	info.TeamsInfo = collectTeamsInfo(cfg)
 
 	// Get status data (running, listen_addr, upstream_stats)
 	statusData, err := client.GetStatus(ctx)
@@ -208,13 +220,18 @@ func collectStatusFromConfig(cfg *config.Config, socketPath, configPath string) 
 		listenAddr = "127.0.0.1:8080"
 	}
 
-	return &StatusInfo{
+	info := &StatusInfo{
 		State:      "Not running",
+		Edition:    Edition,
 		ListenAddr: listenAddr + " (configured)",
 		APIKey:     cfg.APIKey,
 		WebUIURL:   statusBuildWebUIURL(listenAddr, cfg.APIKey),
 		ConfigPath: configPath,
 	}
+
+	info.TeamsInfo = collectTeamsInfo(cfg)
+
+	return info
 }
 
 func extractServerCounts(stats map[string]interface{}) *ServerCounts {
@@ -321,6 +338,7 @@ func printStatusTable(info *StatusInfo) {
 	fmt.Println("MCPProxy Status")
 
 	fmt.Printf("  %-12s %s\n", "State:", info.State)
+	fmt.Printf("  %-12s %s\n", "Edition:", info.Edition)
 
 	if info.Version != "" {
 		fmt.Printf("  %-12s %s\n", "Version:", info.Version)
@@ -345,6 +363,13 @@ func printStatusTable(info *StatusInfo) {
 
 	if info.ConfigPath != "" {
 		fmt.Printf("  %-12s %s\n", "Config:", info.ConfigPath)
+	}
+
+	if info.TeamsInfo != nil {
+		fmt.Println()
+		fmt.Println("Teams")
+		fmt.Printf("  %-12s %s\n", "OAuth:", info.TeamsInfo.OAuthProvider)
+		fmt.Printf("  %-12s %s\n", "Admins:", strings.Join(info.TeamsInfo.AdminEmails, ", "))
 	}
 }
 

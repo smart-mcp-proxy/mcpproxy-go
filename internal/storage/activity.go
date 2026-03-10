@@ -170,6 +170,7 @@ func (m *Manager) ListActivities(filter ActivityFilter) ([]*ActivityRecord, int,
 				records = append(records, &ActivityRecord{
 					ID:                record.ID,
 					Type:              record.Type,
+					Source:            record.Source,
 					ServerName:        record.ServerName,
 					ToolName:          record.ToolName,
 					Arguments:         record.Arguments,
@@ -182,6 +183,8 @@ func (m *Manager) ListActivities(filter ActivityFilter) ([]*ActivityRecord, int,
 					SessionID:         record.SessionID,
 					RequestID:         record.RequestID,
 					Metadata:          record.Metadata,
+					UserID:            record.UserID,
+					UserEmail:         record.UserEmail,
 				})
 			}
 		}

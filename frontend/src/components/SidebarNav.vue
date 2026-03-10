@@ -6,24 +6,89 @@
       <div class="px-6 py-5 border-b border-base-300">
         <router-link to="/" class="flex items-center space-x-3">
           <img src="/src/assets/logo.svg" alt="MCPProxy Logo" class="w-10 h-10" />
-          <span class="text-xl font-bold">MCPProxy</span>
+          <div>
+            <span class="text-xl font-bold">MCPProxy</span>
+            <span v-if="authStore.isTeamsEdition" class="badge badge-xs badge-primary ml-1">Teams</span>
+          </div>
         </router-link>
       </div>
 
       <!-- Navigation Menu -->
-      <nav class="flex-1 p-4">
-        <ul class="menu">
-          <li v-for="item in menuItems" :key="item.path">
-            <router-link
-              :to="item.path"
-              :class="{ 'active': isActiveRoute(item.path) }"
-              class="flex items-center space-x-3 py-3 px-4 rounded-lg"
-            >
-              <span class="text-lg">{{ item.name }}</span>
-            </router-link>
-          </li>
-        </ul>
+      <nav class="flex-1 p-4 overflow-y-auto">
+        <!-- Teams Edition: User Menu -->
+        <template v-if="authStore.isTeamsEdition">
+          <ul class="menu">
+            <li class="menu-title" v-if="authStore.isAdmin">
+              <span>My Workspace</span>
+            </li>
+            <li v-for="item in teamsUserMenu" :key="item.path">
+              <router-link
+                :to="item.path"
+                :class="{ 'active': isActiveRoute(item.path) }"
+                class="flex items-center space-x-3 py-3 px-4 rounded-lg"
+              >
+                <span class="text-lg">{{ item.name }}</span>
+              </router-link>
+            </li>
+          </ul>
+
+          <!-- Admin Section -->
+          <template v-if="authStore.isAdmin">
+            <div class="divider my-2 px-2"></div>
+            <ul class="menu">
+              <li class="menu-title">
+                <span>Administration</span>
+              </li>
+              <li v-for="item in teamsAdminMenu" :key="item.path">
+                <router-link
+                  :to="item.path"
+                  :class="{ 'active': isActiveRoute(item.path) }"
+                  class="flex items-center space-x-3 py-3 px-4 rounded-lg"
+                >
+                  <span class="text-lg">{{ item.name }}</span>
+                </router-link>
+              </li>
+            </ul>
+          </template>
+        </template>
+
+        <!-- Personal Edition: Original Menu -->
+        <template v-else>
+          <ul class="menu">
+            <li v-for="item in personalMenu" :key="item.path">
+              <router-link
+                :to="item.path"
+                :class="{ 'active': isActiveRoute(item.path) }"
+                class="flex items-center space-x-3 py-3 px-4 rounded-lg"
+              >
+                <span class="text-lg">{{ item.name }}</span>
+              </router-link>
+            </li>
+          </ul>
+        </template>
       </nav>
+
+      <!-- User Info (Teams Edition) -->
+      <div v-if="authStore.isTeamsEdition && authStore.isAuthenticated" class="px-4 py-3 border-t border-base-300">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2 min-w-0">
+            <div class="avatar placeholder">
+              <div class="bg-primary text-primary-content rounded-full w-8">
+                <span class="text-xs">{{ userInitials }}</span>
+              </div>
+            </div>
+            <div class="min-w-0">
+              <div class="text-sm font-medium truncate">{{ authStore.displayName }}</div>
+              <div v-if="authStore.user?.email" class="text-xs text-base-content/50 truncate">{{ authStore.user.email }}</div>
+            </div>
+          </div>
+          <button @click="handleLogout" class="btn btn-ghost btn-xs" title="Sign out">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+          </button>
+        </div>
+      </div>
 
       <!-- Version Display -->
       <div v-if="systemStore.version" class="px-4 py-2 border-t border-base-300">
@@ -65,13 +130,18 @@
 </template>
 
 <script setup lang="ts">
-import { useRoute } from 'vue-router'
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
+const router = useRouter()
 const systemStore = useSystemStore()
+const authStore = useAuthStore()
 
-const menuItems = [
+// Personal edition menu (unchanged from original)
+const personalMenu = [
   { name: 'Dashboard', path: '/' },
   { name: 'Servers', path: '/servers' },
   { name: 'Secrets', path: '/secrets' },
@@ -82,10 +152,45 @@ const menuItems = [
   { name: 'Configuration', path: '/settings' },
 ]
 
+// Teams edition: items visible to all authenticated users
+const teamsUserMenu = [
+  { name: 'My Servers', path: '/my/servers' },
+  { name: 'My Activity', path: '/my/activity' },
+  { name: 'Agent Tokens', path: '/my/tokens' },
+  { name: 'Diagnostics', path: '/my/diagnostics' },
+  { name: 'Search', path: '/search' },
+]
+
+// Teams edition: items visible only to admins
+const teamsAdminMenu = [
+  { name: 'Dashboard', path: '/admin/dashboard' },
+  { name: 'Server Management', path: '/admin/servers' },
+  { name: 'Activity (All)', path: '/activity' },
+  { name: 'Users', path: '/admin/users' },
+  { name: 'Sessions', path: '/sessions' },
+  { name: 'Configuration', path: '/settings' },
+]
+
+// Compute user initials for avatar
+const userInitials = computed(() => {
+  const name = authStore.displayName
+  if (!name) return '?'
+  const parts = name.split(/[\s@]+/)
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase()
+  }
+  return name.substring(0, 2).toUpperCase()
+})
+
 function isActiveRoute(path: string): boolean {
   if (path === '/') {
     return route.path === '/'
   }
   return route.path.startsWith(path)
+}
+
+async function handleLogout() {
+  await authStore.logout()
+  router.push('/login')
 }
 </script>

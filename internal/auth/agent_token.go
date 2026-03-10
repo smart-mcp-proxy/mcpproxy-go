@@ -33,15 +33,16 @@ const MaxTokens = 100
 
 // AgentToken represents a stored agent token record.
 type AgentToken struct {
-	Name           string    `json:"name"`
-	TokenHash      string    `json:"token_hash"`
-	TokenPrefix    string    `json:"token_prefix"` // first 12 chars of the raw token
-	AllowedServers []string  `json:"allowed_servers"`
-	Permissions    []string  `json:"permissions"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	CreatedAt      time.Time `json:"created_at"`
+	Name           string     `json:"name"`
+	TokenHash      string     `json:"token_hash"`
+	TokenPrefix    string     `json:"token_prefix"` // first 12 chars of the raw token
+	AllowedServers []string   `json:"allowed_servers"`
+	Permissions    []string   `json:"permissions"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	CreatedAt      time.Time  `json:"created_at"`
 	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`
-	Revoked        bool      `json:"revoked"`
+	Revoked        bool       `json:"revoked"`
+	UserID         string     `json:"user_id,omitempty"` // Owner user ID (teams edition)
 }
 
 // IsExpired returns true if the token has passed its expiry time.

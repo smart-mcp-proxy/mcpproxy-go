@@ -103,11 +103,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize management service and set it on runtime
 	secretResolver := secret.NewResolver()
 	mgmtService := management.NewService(
-		rt,                // RuntimeOperations
-		cfg,               // Config
-		rt.ConfigPath(),   // Config file path for deprecation checks
-		rt,                // EventEmitter
-		secretResolver,    // SecretResolver
+		rt,              // RuntimeOperations
+		cfg,             // Config
+		rt.ConfigPath(), // Config file path for deprecation checks
+		rt,              // EventEmitter
+		secretResolver,  // SecretResolver
 		logger.Sugar(),
 	)
 	rt.SetManagementService(mgmtService)
@@ -822,7 +822,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"status":          status,
 			"should_retry":    false, // Managed by Actor internally now
 			"retry_count":     serverStatus.RetryCount,
-			"last_retry_time": nil,    // Actor tracks this internally
+			"last_retry_time": nil,          // Actor tracks this internally
 			"health":          healthStatus, // Spec 013: Health is source of truth
 		})
 	}
@@ -1481,6 +1481,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		}
 		httpAPIServer.SetTokenStore(sm, dataDir)
 	}
+	// Wire teams multi-user OAuth (no-op in personal edition)
+	wireTeamsOAuth(s, httpAPIServer)
 	mux.Handle("/api/", httpAPIServer)
 	mux.Handle("/events", httpAPIServer)
 

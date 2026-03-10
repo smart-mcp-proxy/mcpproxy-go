@@ -259,6 +259,16 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		Metadata:          metadata,
 	}
 
+	// Extract user identity from auth metadata injected into arguments (teams edition)
+	if arguments != nil {
+		if userID, ok := arguments["_auth_user_id"].(string); ok && userID != "" {
+			record.UserID = userID
+		}
+		if userEmail, ok := arguments["_auth_user_email"].(string); ok && userEmail != "" {
+			record.UserEmail = userEmail
+		}
+	}
+
 	if err := s.storage.SaveActivity(record); err != nil {
 		s.logger.Error("Failed to save activity record",
 			zap.Error(err),
@@ -349,10 +359,10 @@ func (s *ActivityService) handleSystemStart(evt Event) {
 		Source: storage.ActivitySourceAPI, // System events come from the API server
 		Status: "success",
 		Metadata: map[string]interface{}{
-			"version":            version,
-			"listen_address":     listenAddress,
+			"version":             version,
+			"listen_address":      listenAddress,
 			"startup_duration_ms": startupDurationMs,
-			"config_path":        configPath,
+			"config_path":         configPath,
 		},
 		Timestamp: evt.Timestamp,
 	}
@@ -464,6 +474,16 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		Timestamp:    evt.Timestamp,
 		SessionID:    sessionID,
 		RequestID:    requestID,
+	}
+
+	// Extract user identity from auth metadata injected into arguments (teams edition)
+	if arguments != nil {
+		if userID, ok := arguments["_auth_user_id"].(string); ok && userID != "" {
+			record.UserID = userID
+		}
+		if userEmail, ok := arguments["_auth_user_email"].(string); ok && userEmail != "" {
+			record.UserEmail = userEmail
+		}
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -712,4 +732,3 @@ func (s *ActivityService) extractDetectionTypes(detections []security.Detection)
 
 	return types
 }
-

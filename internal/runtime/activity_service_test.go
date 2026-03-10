@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // TestEmitActivitySystemStart verifies system_start event emission (Spec 024)
@@ -467,4 +469,209 @@ func TestActivityService_ExtractDetectionTypes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// setupTestStorage creates a temporary storage manager for tests.
+func setupTestStorage(t *testing.T) (*storage.Manager, func()) {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "activity_svc_test_*")
+	require.NoError(t, err)
+	mgr, err := storage.NewManager(tmpDir, zap.NewNop().Sugar())
+	require.NoError(t, err)
+	return mgr, func() {
+		mgr.Close()
+		os.RemoveAll(tmpDir)
+	}
+}
+
+// TestHandleToolCallCompleted_UserIdentityExtraction verifies that handleToolCallCompleted
+// extracts UserID and UserEmail from _auth_ prefixed arguments and sets them on the record.
+func TestHandleToolCallCompleted_UserIdentityExtraction(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	logger := zap.NewNop()
+	svc := NewActivityService(store, logger)
+
+	evt := Event{
+		Type:      EventTypeActivityToolCallCompleted,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name": "github",
+			"tool_name":   "list_repos",
+			"session_id":  "sess-001",
+			"request_id":  "req-001",
+			"source":      "mcp",
+			"status":      "success",
+			"duration_ms": int64(100),
+			"arguments": map[string]interface{}{
+				"owner":            "octocat",
+				"_auth_auth_type":  "user",
+				"_auth_user_id":    "01HUSER123",
+				"_auth_user_email": "alice@example.com",
+			},
+			"response": `{"repos": []}`,
+		},
+	}
+
+	svc.handleEvent(evt)
+
+	// Retrieve the saved record
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	record := records[0]
+	assert.Equal(t, "01HUSER123", record.UserID, "UserID should be extracted from _auth_user_id")
+	assert.Equal(t, "alice@example.com", record.UserEmail, "UserEmail should be extracted from _auth_user_email")
+	assert.Equal(t, "github", record.ServerName)
+	assert.Equal(t, "list_repos", record.ToolName)
+}
+
+// TestHandleToolCallCompleted_NoUserIdentity verifies records without _auth_ user fields
+// have empty UserID/UserEmail (backwards compatibility with personal edition).
+func TestHandleToolCallCompleted_NoUserIdentity(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	logger := zap.NewNop()
+	svc := NewActivityService(store, logger)
+
+	evt := Event{
+		Type:      EventTypeActivityToolCallCompleted,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name": "github",
+			"tool_name":   "list_repos",
+			"status":      "success",
+			"duration_ms": int64(50),
+			"arguments": map[string]interface{}{
+				"owner":           "octocat",
+				"_auth_auth_type": "admin",
+			},
+			"response": `{"repos": []}`,
+		},
+	}
+
+	svc.handleEvent(evt)
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	record := records[0]
+	assert.Empty(t, record.UserID, "UserID should be empty when no _auth_user_id is present")
+	assert.Empty(t, record.UserEmail, "UserEmail should be empty when no _auth_user_email is present")
+}
+
+// TestHandleToolCallCompleted_NilArguments verifies no panic when arguments is nil.
+func TestHandleToolCallCompleted_NilArguments(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	logger := zap.NewNop()
+	svc := NewActivityService(store, logger)
+
+	evt := Event{
+		Type:      EventTypeActivityToolCallCompleted,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name": "github",
+			"tool_name":   "list_repos",
+			"status":      "success",
+			"duration_ms": int64(50),
+			"response":    `{"repos": []}`,
+		},
+	}
+
+	// Should not panic
+	svc.handleEvent(evt)
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Empty(t, records[0].UserID)
+	assert.Empty(t, records[0].UserEmail)
+}
+
+// TestHandleInternalToolCall_UserIdentityExtraction verifies that handleInternalToolCall
+// extracts UserID and UserEmail from _auth_ prefixed arguments.
+func TestHandleInternalToolCall_UserIdentityExtraction(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	logger := zap.NewNop()
+	svc := NewActivityService(store, logger)
+
+	evt := Event{
+		Type:      EventTypeActivityInternalToolCall,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"internal_tool_name": "retrieve_tools",
+			"target_server":      "",
+			"target_tool":        "",
+			"tool_variant":       "",
+			"session_id":         "sess-002",
+			"request_id":         "req-002",
+			"status":             "success",
+			"error_message":      "",
+			"duration_ms":        int64(25),
+			"arguments": map[string]interface{}{
+				"query":            "github repos",
+				"_auth_auth_type":  "admin_user",
+				"_auth_user_id":    "01HADMIN789",
+				"_auth_user_email": "admin@example.com",
+			},
+			"response": "Found 5 tools",
+		},
+	}
+
+	svc.handleEvent(evt)
+
+	// Use a filter that includes internal tool calls
+	filter := storage.DefaultActivityFilter()
+	filter.ExcludeCallToolSuccess = false
+	records, _, err := store.ListActivities(filter)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	record := records[0]
+	assert.Equal(t, "01HADMIN789", record.UserID, "UserID should be extracted from _auth_user_id")
+	assert.Equal(t, "admin@example.com", record.UserEmail, "UserEmail should be extracted from _auth_user_email")
+	assert.Equal(t, storage.ActivityTypeInternalToolCall, record.Type)
+	assert.Equal(t, "retrieve_tools", record.ToolName)
+}
+
+// TestHandleInternalToolCall_NoUserIdentity verifies internal tool calls without user identity work.
+func TestHandleInternalToolCall_NoUserIdentity(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	logger := zap.NewNop()
+	svc := NewActivityService(store, logger)
+
+	evt := Event{
+		Type:      EventTypeActivityInternalToolCall,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"internal_tool_name": "retrieve_tools",
+			"status":             "success",
+			"duration_ms":        int64(10),
+			"arguments": map[string]interface{}{
+				"query": "search",
+			},
+			"response": "Found 3 tools",
+		},
+	}
+
+	svc.handleEvent(evt)
+
+	filter := storage.DefaultActivityFilter()
+	filter.ExcludeCallToolSuccess = false
+	records, _, err := store.ListActivities(filter)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	assert.Empty(t, records[0].UserID)
+	assert.Empty(t, records[0].UserEmail)
 }

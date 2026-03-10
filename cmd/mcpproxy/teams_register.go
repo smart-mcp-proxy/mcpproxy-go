@@ -2,17 +2,10 @@
 
 package main
 
-import (
-	"log"
-
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams"
-)
-
-func init() {
-	// Initialize all registered teams features.
-	// Individual feature packages (auth, workspace, etc.) register
-	// themselves via their own init() functions.
-	if err := teams.SetupAll(teams.Dependencies{}); err != nil {
-		log.Fatalf("failed to initialize teams features: %v", err)
-	}
-}
+// Teams features are registered via init() functions in their respective
+// packages. The actual setup happens when the server calls teams.SetupAll()
+// during HTTP server initialization (see internal/server/teams_wire.go).
+//
+// This file imports the teams package for its init() side effects,
+// which register feature modules in the teams registry.
+import _ "github.com/smart-mcp-proxy/mcpproxy-go/internal/teams"
