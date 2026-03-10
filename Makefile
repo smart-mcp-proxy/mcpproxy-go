@@ -149,6 +149,13 @@ dev-setup:
 	cd e2e/playwright && npm install
 	@echo "📦 Installing Playwright browsers..."
 	cd e2e/playwright && npx playwright install chromium
+	@echo "📦 Installing pre-commit hooks..."
+	@if command -v prek >/dev/null 2>&1; then \
+		prek install && prek install --hook-type pre-push; \
+		echo "✅ Git hooks installed (prek)"; \
+	else \
+		echo "⚠️  prek not found. Install with: brew install prek"; \
+	fi
 	@echo "✅ Development setup completed"
 
 # Run OAuth E2E tests with Playwright

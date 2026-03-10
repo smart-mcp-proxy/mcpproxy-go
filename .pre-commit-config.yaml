@@ -1,0 +1,33 @@
+# Pre-commit hooks for MCPProxy
+# Install: brew install prek && prek install && prek install --hook-type pre-push
+# Run manually: prek run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -w
+        language: system
+        types: [go]
+
+      - id: swagger-verify
+        name: Verify OpenAPI spec is up to date
+        entry: make swagger-verify
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+
+      - id: go-build
+        name: go build
+        entry: go build -o /dev/null ./cmd/mcpproxy
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
