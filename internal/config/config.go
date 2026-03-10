@@ -12,6 +12,11 @@ import (
 
 const (
 	defaultPort = "127.0.0.1:8080" // Localhost-only binding by default for security
+
+	// Routing mode constants (Spec 031)
+	RoutingModeRetrieveTools = "retrieve_tools" // Default: BM25 search via retrieve_tools + call_tool_read/write/destructive
+	RoutingModeDirect        = "direct"         // All upstream tools exposed directly with serverName__toolName naming
+	RoutingModeCodeExecution = "code_execution" // JS orchestration via code_execution tool with tool catalog
 )
 
 // Duration is a wrapper around time.Duration that can be marshaled to/from JSON.
@@ -122,6 +127,10 @@ type Config struct {
 
 	// Sensitive data detection settings (Spec 026)
 	SensitiveDataDetection *SensitiveDataDetectionConfig `json:"sensitive_data_detection,omitempty" mapstructure:"sensitive-data-detection"`
+
+	// Routing mode (Spec 031): how MCP tools are exposed to clients
+	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
+	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
 
 	// Server edition multi-user configuration (only meaningful with -tags server)
 	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams" swaggerignore:"true"`
@@ -835,6 +844,21 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		})
 	}
 
+	// Validate routing mode (Spec 031)
+	if c.RoutingMode != "" {
+		validRoutingModes := map[string]bool{
+			RoutingModeRetrieveTools: true,
+			RoutingModeDirect:        true,
+			RoutingModeCodeExecution: true,
+		}
+		if !validRoutingModes[c.RoutingMode] {
+			errors = append(errors, ValidationError{
+				Field:   "routing_mode",
+				Message: fmt.Sprintf("invalid routing mode: %s (must be retrieve_tools, direct, or code_execution)", c.RoutingMode),
+			})
+		}
+	}
+
 	// Validate server configurations
 	serverNames := make(map[string]bool)
 	for i, server := range c.Servers {
@@ -966,6 +990,11 @@ func (c *Config) Validate() error {
 		c.CodeExecutionPoolSize = 10 // 10 JavaScript runtime instances
 	}
 	// CodeExecutionMaxToolCalls defaults to 0 (unlimited), which is valid
+
+	// Apply routing mode default (Spec 031)
+	if c.RoutingMode == "" {
+		c.RoutingMode = RoutingModeRetrieveTools
+	}
 
 	// Then perform detailed validation
 	errors := c.ValidateDetailed()
