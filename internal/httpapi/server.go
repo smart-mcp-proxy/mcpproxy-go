@@ -667,7 +667,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	// Get routing mode from config
 	routingMode := config.RoutingModeRetrieveTools
-	if cfg, err := s.controller.GetConfig(); err == nil && cfg.RoutingMode != "" {
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.RoutingMode != "" {
 		routingMode = cfg.RoutingMode
 	}
 
@@ -695,7 +695,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 // @Router /api/v1/routing [get]
 func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 	routingMode := config.RoutingModeRetrieveTools
-	if cfg, err := s.controller.GetConfig(); err == nil && cfg.RoutingMode != "" {
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.RoutingMode != "" {
 		routingMode = cfg.RoutingMode
 	}
 
