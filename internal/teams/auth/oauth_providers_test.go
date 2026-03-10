@@ -309,8 +309,8 @@ func TestFetchUserInfo_Microsoft_MockServer(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":                "ms-user-456",
-			"displayName":      "Bob Corp",
-			"mail":             "bob@contoso.com",
+			"displayName":       "Bob Corp",
+			"mail":              "bob@contoso.com",
 			"userPrincipalName": "bob@contoso.onmicrosoft.com",
 		})
 	}))
@@ -341,7 +341,7 @@ func TestFetchUserInfo_Microsoft_FallbackToUPN(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":                "ms-user-789",
-			"displayName":      "Charlie",
+			"displayName":       "Charlie",
 			"userPrincipalName": "charlie@contoso.onmicrosoft.com",
 		})
 	}))
@@ -686,9 +686,9 @@ func TestBase64URLDecode_Padding(t *testing.T) {
 		name  string
 		input string
 	}{
-		{"no padding needed", "dGVzdA"},            // "test" - len%4 == 0 (after raw encoding... actually len=4)
-		{"needs one pad", "dGVzdDE"},               // "test1" - len%4 == 3
-		{"needs two pads", "dGVzdDEy"},             // "test12" - len%4 == 0 (after raw encoding)
+		{"no padding needed", "dGVzdA"},           // "test" - len%4 == 0 (after raw encoding... actually len=4)
+		{"needs one pad", "dGVzdDE"},              // "test1" - len%4 == 3
+		{"needs two pads", "dGVzdDEy"},            // "test12" - len%4 == 0 (after raw encoding)
 		{"standard base64url", "SGVsbG8gV29ybGQ"}, // "Hello World"
 	}
 

@@ -21,7 +21,7 @@ type OAuthProvider struct {
 	AuthURL      string
 	TokenURL     string
 	UserInfoURL  string
-	EmailsURL    string   // GitHub-specific: endpoint for fetching primary email
+	EmailsURL    string // GitHub-specific: endpoint for fetching primary email
 	Scopes       []string
 	SupportsOIDC bool // If true, ID token contains user info
 	SupportsPKCE bool

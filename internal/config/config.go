@@ -47,19 +47,19 @@ func (d Duration) Duration() time.Duration {
 
 // Config represents the main configuration structure
 type Config struct {
-	Listen            string          `json:"listen" mapstructure:"listen"`
-	TrayEndpoint      string          `json:"tray_endpoint,omitempty" mapstructure:"tray-endpoint"`       // Tray endpoint override (unix:// or npipe://)
-	EnableSocket      bool            `json:"enable_socket" mapstructure:"enable-socket"`                 // Enable Unix socket/named pipe for local IPC (default: true)
-	DataDir           string          `json:"data_dir" mapstructure:"data-dir"`
+	Listen       string `json:"listen" mapstructure:"listen"`
+	TrayEndpoint string `json:"tray_endpoint,omitempty" mapstructure:"tray-endpoint"` // Tray endpoint override (unix:// or npipe://)
+	EnableSocket bool   `json:"enable_socket" mapstructure:"enable-socket"`           // Enable Unix socket/named pipe for local IPC (default: true)
+	DataDir      string `json:"data_dir" mapstructure:"data-dir"`
 	// Deprecated: EnableTray is unused and has no runtime effect. Kept for backward compatibility.
-	EnableTray        bool            `json:"enable_tray,omitempty" mapstructure:"tray"`
-	DebugSearch       bool            `json:"debug_search" mapstructure:"debug-search"`
-	Servers           []*ServerConfig `json:"mcpServers" mapstructure:"servers"`
+	EnableTray  bool            `json:"enable_tray,omitempty" mapstructure:"tray"`
+	DebugSearch bool            `json:"debug_search" mapstructure:"debug-search"`
+	Servers     []*ServerConfig `json:"mcpServers" mapstructure:"servers"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
-	TopK              int             `json:"top_k,omitempty" mapstructure:"top-k"`
-	ToolsLimit        int             `json:"tools_limit" mapstructure:"tools-limit"`
-	ToolResponseLimit int             `json:"tool_response_limit" mapstructure:"tool-response-limit"`
-	CallToolTimeout   Duration        `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
+	TopK              int      `json:"top_k,omitempty" mapstructure:"top-k"`
+	ToolsLimit        int      `json:"tools_limit" mapstructure:"tools-limit"`
+	ToolResponseLimit int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
+	CallToolTimeout   Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -68,8 +68,8 @@ type Config struct {
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
 
 	// Security settings
-	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"`                    // API key for REST API authentication
-	RequireMCPAuth    bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"`            // Require authentication on /mcp endpoint (default: false)
+	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
+	RequireMCPAuth    bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
 	ReadOnlyMode      bool   `json:"read_only_mode" mapstructure:"read-only-mode"`
 	DisableManagement bool   `json:"disable_management" mapstructure:"disable-management"`
 	AllowServerAdd    bool   `json:"allow_server_add" mapstructure:"allow-server-add"`
@@ -103,10 +103,10 @@ type Config struct {
 	Tokenizer *TokenizerConfig `json:"tokenizer,omitempty" mapstructure:"tokenizer"`
 
 	// Code execution settings
-	EnableCodeExecution          bool `json:"enable_code_execution" mapstructure:"enable-code-execution"`                     // Enable JavaScript code execution tool (default: false)
-	CodeExecutionTimeoutMs       int  `json:"code_execution_timeout_ms,omitempty" mapstructure:"code-execution-timeout-ms"`   // Timeout in milliseconds (default: 120000, max: 600000)
-	CodeExecutionMaxToolCalls    int  `json:"code_execution_max_tool_calls,omitempty" mapstructure:"code-execution-max-tool-calls"` // Max tool calls per execution (0 = unlimited, default: 0)
-	CodeExecutionPoolSize        int  `json:"code_execution_pool_size,omitempty" mapstructure:"code-execution-pool-size"`     // JavaScript runtime pool size (default: 10)
+	EnableCodeExecution       bool `json:"enable_code_execution" mapstructure:"enable-code-execution"`                           // Enable JavaScript code execution tool (default: false)
+	CodeExecutionTimeoutMs    int  `json:"code_execution_timeout_ms,omitempty" mapstructure:"code-execution-timeout-ms"`         // Timeout in milliseconds (default: 120000, max: 600000)
+	CodeExecutionMaxToolCalls int  `json:"code_execution_max_tool_calls,omitempty" mapstructure:"code-execution-max-tool-calls"` // Max tool calls per execution (0 = unlimited, default: 0)
+	CodeExecutionPoolSize     int  `json:"code_execution_pool_size,omitempty" mapstructure:"code-execution-pool-size"`           // JavaScript runtime pool size (default: 10)
 
 	// Health status settings
 	OAuthExpiryWarningHours float64 `json:"oauth_expiry_warning_hours,omitempty" mapstructure:"oauth-expiry-warning-hours"` // Hours before token expiry to show degraded status (default: 1.0)
@@ -168,8 +168,8 @@ type ServerConfig struct {
 	Headers     map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
 	OAuth       *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
 	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
-	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"`           // Security quarantine status
-	Shared      bool              `json:"shared,omitempty" mapstructure:"shared"`             // Teams: shared with all users
+	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
+	Shared      bool              `json:"shared,omitempty" mapstructure:"shared"` // Teams: shared with all users
 	Created     time.Time         `json:"created" mapstructure:"created"`
 	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
 	Isolation   *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
@@ -187,17 +187,17 @@ type OAuthConfig struct {
 
 // DockerIsolationConfig represents global Docker isolation settings
 type DockerIsolationConfig struct {
-	Enabled       bool              `json:"enabled" mapstructure:"enabled"`                       // Global enable/disable for Docker isolation
-	DefaultImages map[string]string `json:"default_images" mapstructure:"default_images"`         // Map of runtime type to Docker image
-	Registry      string            `json:"registry,omitempty" mapstructure:"registry"`           // Custom registry (defaults to docker.io)
-	NetworkMode   string            `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Docker network mode (default: bridge)
-	MemoryLimit   string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"`   // Memory limit for containers
-	CPULimit      string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`         // CPU limit for containers
-	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout" swaggertype:"string"`             // Container startup timeout
-	ExtraArgs     []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments
-	LogDriver     string            `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver (default: json-file)
-	LogMaxSize    string            `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files (default: 100m)
-	LogMaxFiles   string            `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files (default: 3)
+	Enabled       bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation
+	DefaultImages map[string]string `json:"default_images" mapstructure:"default_images"`                  // Map of runtime type to Docker image
+	Registry      string            `json:"registry,omitempty" mapstructure:"registry"`                    // Custom registry (defaults to docker.io)
+	NetworkMode   string            `json:"network_mode,omitempty" mapstructure:"network_mode"`            // Docker network mode (default: bridge)
+	MemoryLimit   string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"`            // Memory limit for containers
+	CPULimit      string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`                  // CPU limit for containers
+	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout" swaggertype:"string"` // Container startup timeout
+	ExtraArgs     []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`                // Additional docker run arguments
+	LogDriver     string            `json:"log_driver,omitempty" mapstructure:"log_driver"`                // Docker log driver (default: json-file)
+	LogMaxSize    string            `json:"log_max_size,omitempty" mapstructure:"log_max_size"`            // Maximum size of log files (default: 100m)
+	LogMaxFiles   string            `json:"log_max_files,omitempty" mapstructure:"log_max_files"`          // Maximum number of log files (default: 3)
 }
 
 // IsolationConfig represents per-server isolation settings
@@ -229,24 +229,24 @@ func BoolPtr(b bool) *bool {
 
 // DockerRecoveryConfig represents Docker recovery settings for the tray application
 type DockerRecoveryConfig struct {
-	Enabled          bool       `json:"enabled" mapstructure:"enabled"`                       // Enable Docker recovery monitoring (default: true)
-	CheckIntervals   []Duration `json:"check_intervals,omitempty" mapstructure:"intervals" swaggerignore:"true"`  // Custom health check intervals (exponential backoff)
-	MaxRetries       int        `json:"max_retries,omitempty" mapstructure:"max_retries"`     // Maximum retry attempts (0 = unlimited)
-	NotifyOnStart    bool       `json:"notify_on_start" mapstructure:"notify_on_start"`       // Show notification when recovery starts (default: true)
-	NotifyOnSuccess  bool       `json:"notify_on_success" mapstructure:"notify_on_success"`   // Show notification on successful recovery (default: true)
-	NotifyOnFailure  bool       `json:"notify_on_failure" mapstructure:"notify_on_failure"`   // Show notification on recovery failure (default: true)
-	NotifyOnRetry    bool       `json:"notify_on_retry" mapstructure:"notify_on_retry"`       // Show notification on each retry (default: false)
-	PersistentState  bool       `json:"persistent_state" mapstructure:"persistent_state"`     // Save recovery state across restarts (default: true)
+	Enabled         bool       `json:"enabled" mapstructure:"enabled"`                                          // Enable Docker recovery monitoring (default: true)
+	CheckIntervals  []Duration `json:"check_intervals,omitempty" mapstructure:"intervals" swaggerignore:"true"` // Custom health check intervals (exponential backoff)
+	MaxRetries      int        `json:"max_retries,omitempty" mapstructure:"max_retries"`                        // Maximum retry attempts (0 = unlimited)
+	NotifyOnStart   bool       `json:"notify_on_start" mapstructure:"notify_on_start"`                          // Show notification when recovery starts (default: true)
+	NotifyOnSuccess bool       `json:"notify_on_success" mapstructure:"notify_on_success"`                      // Show notification on successful recovery (default: true)
+	NotifyOnFailure bool       `json:"notify_on_failure" mapstructure:"notify_on_failure"`                      // Show notification on recovery failure (default: true)
+	NotifyOnRetry   bool       `json:"notify_on_retry" mapstructure:"notify_on_retry"`                          // Show notification on each retry (default: false)
+	PersistentState bool       `json:"persistent_state" mapstructure:"persistent_state"`                        // Save recovery state across restarts (default: true)
 }
 
 // DefaultCheckIntervals returns the default Docker recovery check intervals
 func DefaultCheckIntervals() []time.Duration {
 	return []time.Duration{
-		2 * time.Second,   // Immediate retry (Docker just paused)
-		5 * time.Second,   // Quick retry
-		10 * time.Second,  // Normal retry
-		30 * time.Second,  // Slow retry
-		60 * time.Second,  // Very slow retry (max backoff)
+		2 * time.Second,  // Immediate retry (Docker just paused)
+		5 * time.Second,  // Quick retry
+		10 * time.Second, // Normal retry
+		30 * time.Second, // Slow retry
+		60 * time.Second, // Very slow retry (max backoff)
 	}
 }
 
@@ -321,22 +321,22 @@ func (d *DockerRecoveryConfig) GetMaxRetries() int {
 
 // SensitiveDataDetectionConfig represents sensitive data detection settings (Spec 026)
 type SensitiveDataDetectionConfig struct {
-	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                           // Enable sensitive data detection (default: true)
-	ScanRequests      bool              `json:"scan_requests" mapstructure:"scan-requests"`               // Scan tool call arguments (default: true)
-	ScanResponses     bool              `json:"scan_responses" mapstructure:"scan-responses"`             // Scan tool responses (default: true)
-	MaxPayloadSizeKB  int               `json:"max_payload_size_kb" mapstructure:"max-payload-size-kb"`   // Max size to scan before truncating (default: 1024)
-	EntropyThreshold  float64           `json:"entropy_threshold" mapstructure:"entropy-threshold"`       // Shannon entropy threshold for high-entropy detection (default: 4.5)
-	Categories        map[string]bool   `json:"categories,omitempty" mapstructure:"categories"`           // Enable/disable specific detection categories
-	CustomPatterns    []CustomPattern   `json:"custom_patterns,omitempty" mapstructure:"custom-patterns"` // User-defined detection patterns
-	SensitiveKeywords []string          `json:"sensitive_keywords,omitempty" mapstructure:"sensitive-keywords"` // Keywords to flag
+	Enabled           bool            `json:"enabled" mapstructure:"enabled"`                                 // Enable sensitive data detection (default: true)
+	ScanRequests      bool            `json:"scan_requests" mapstructure:"scan-requests"`                     // Scan tool call arguments (default: true)
+	ScanResponses     bool            `json:"scan_responses" mapstructure:"scan-responses"`                   // Scan tool responses (default: true)
+	MaxPayloadSizeKB  int             `json:"max_payload_size_kb" mapstructure:"max-payload-size-kb"`         // Max size to scan before truncating (default: 1024)
+	EntropyThreshold  float64         `json:"entropy_threshold" mapstructure:"entropy-threshold"`             // Shannon entropy threshold for high-entropy detection (default: 4.5)
+	Categories        map[string]bool `json:"categories,omitempty" mapstructure:"categories"`                 // Enable/disable specific detection categories
+	CustomPatterns    []CustomPattern `json:"custom_patterns,omitempty" mapstructure:"custom-patterns"`       // User-defined detection patterns
+	SensitiveKeywords []string        `json:"sensitive_keywords,omitempty" mapstructure:"sensitive-keywords"` // Keywords to flag
 }
 
 // CustomPattern represents a user-defined detection pattern
 type CustomPattern struct {
-	Name     string   `json:"name" mapstructure:"name"`                 // Unique identifier for this pattern
-	Regex    string   `json:"regex,omitempty" mapstructure:"regex"`     // Regex pattern (mutually exclusive with Keywords)
+	Name     string   `json:"name" mapstructure:"name"`                   // Unique identifier for this pattern
+	Regex    string   `json:"regex,omitempty" mapstructure:"regex"`       // Regex pattern (mutually exclusive with Keywords)
 	Keywords []string `json:"keywords,omitempty" mapstructure:"keywords"` // Keywords to match (mutually exclusive with Regex)
-	Severity string   `json:"severity" mapstructure:"severity"`         // Risk level: critical, high, medium, low
+	Severity string   `json:"severity" mapstructure:"severity"`           // Risk level: critical, high, medium, low
 	Category string   `json:"category,omitempty" mapstructure:"category"` // Category (defaults to "custom")
 }
 
@@ -579,7 +579,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Listen:            defaultPort,
 		EnableSocket:      true, // Enable Unix socket/named pipe by default for local IPC
-		DataDir:           "", // Will be set to ~/.mcpproxy by loader
+		DataDir:           "",   // Will be set to ~/.mcpproxy by loader
 		DebugSearch:       false,
 		Servers:           []*ServerConfig{},
 		ToolsLimit:        15,

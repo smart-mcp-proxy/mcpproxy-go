@@ -503,7 +503,7 @@ func TestHandleToolCallCompleted_UserIdentityExtraction(t *testing.T) {
 			"request_id":  "req-001",
 			"source":      "mcp",
 			"status":      "success",
-			"duration_ms":  int64(100),
+			"duration_ms": int64(100),
 			"arguments": map[string]interface{}{
 				"owner":            "octocat",
 				"_auth_auth_type":  "user",
@@ -544,7 +544,7 @@ func TestHandleToolCallCompleted_NoUserIdentity(t *testing.T) {
 			"server_name": "github",
 			"tool_name":   "list_repos",
 			"status":      "success",
-			"duration_ms":  int64(50),
+			"duration_ms": int64(50),
 			"arguments": map[string]interface{}{
 				"owner":           "octocat",
 				"_auth_auth_type": "admin",
@@ -579,7 +579,7 @@ func TestHandleToolCallCompleted_NilArguments(t *testing.T) {
 			"server_name": "github",
 			"tool_name":   "list_repos",
 			"status":      "success",
-			"duration_ms":  int64(50),
+			"duration_ms": int64(50),
 			"response":    `{"repos": []}`,
 		},
 	}
@@ -608,14 +608,14 @@ func TestHandleInternalToolCall_UserIdentityExtraction(t *testing.T) {
 		Timestamp: time.Now().UTC(),
 		Payload: map[string]any{
 			"internal_tool_name": "retrieve_tools",
-			"target_server":     "",
-			"target_tool":       "",
-			"tool_variant":      "",
-			"session_id":        "sess-002",
-			"request_id":        "req-002",
-			"status":            "success",
-			"error_message":     "",
-			"duration_ms":       int64(25),
+			"target_server":      "",
+			"target_tool":        "",
+			"tool_variant":       "",
+			"session_id":         "sess-002",
+			"request_id":         "req-002",
+			"status":             "success",
+			"error_message":      "",
+			"duration_ms":        int64(25),
 			"arguments": map[string]interface{}{
 				"query":            "github repos",
 				"_auth_auth_type":  "admin_user",
@@ -655,8 +655,8 @@ func TestHandleInternalToolCall_NoUserIdentity(t *testing.T) {
 		Timestamp: time.Now().UTC(),
 		Payload: map[string]any{
 			"internal_tool_name": "retrieve_tools",
-			"status":            "success",
-			"duration_ms":       int64(10),
+			"status":             "success",
+			"duration_ms":        int64(10),
 			"arguments": map[string]interface{}{
 				"query": "search",
 			},

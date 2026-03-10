@@ -21,10 +21,10 @@ type TeamsConfig struct {
 
 // TeamsOAuthConfig holds OAuth identity provider configuration.
 type TeamsOAuthConfig struct {
-	Provider       string   `json:"provider" mapstructure:"provider"`                          // "google", "github", "microsoft"
+	Provider       string   `json:"provider" mapstructure:"provider"` // "google", "github", "microsoft"
 	ClientID       string   `json:"client_id" mapstructure:"client-id"`
 	ClientSecret   string   `json:"client_secret" mapstructure:"client-secret"`
-	TenantID       string   `json:"tenant_id,omitempty" mapstructure:"tenant-id"`              // Microsoft only
+	TenantID       string   `json:"tenant_id,omitempty" mapstructure:"tenant-id"` // Microsoft only
 	AllowedDomains []string `json:"allowed_domains,omitempty" mapstructure:"allowed-domains"`
 }
 

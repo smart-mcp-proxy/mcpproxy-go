@@ -53,8 +53,8 @@ type ServerController interface {
 
 	// Server management
 	GetAllServers() ([]map[string]interface{}, error)
-	AddServer(ctx context.Context, serverConfig *config.ServerConfig) error    // T001: Add server
-	RemoveServer(ctx context.Context, serverName string) error                  // T002: Remove server
+	AddServer(ctx context.Context, serverConfig *config.ServerConfig) error // T001: Add server
+	RemoveServer(ctx context.Context, serverName string) error              // T002: Remove server
 	EnableServer(serverName string, enabled bool) error
 	RestartServer(serverName string) error
 	ForceReconnectAllServers(reason string) error
@@ -443,18 +443,18 @@ func (s *Server) setupRoutes() {
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
-		r.Post("/servers", s.handleAddServer)          // T001: Add server
-		r.Post("/servers/import", s.handleImportServers)            // Import from file upload
-		r.Post("/servers/import/json", s.handleImportServersJSON) // Import from JSON/TOML content
-		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths)  // Get canonical config paths
-		r.Post("/servers/import/path", s.handleImportFromPath)           // Import from file path
+		r.Post("/servers", s.handleAddServer)                           // T001: Add server
+		r.Post("/servers/import", s.handleImportServers)                // Import from file upload
+		r.Post("/servers/import/json", s.handleImportServersJSON)       // Import from JSON/TOML content
+		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths) // Get canonical config paths
+		r.Post("/servers/import/path", s.handleImportFromPath)          // Import from file path
 		r.Post("/servers/reconnect", s.handleForceReconnectServers)
 		// T076-T077: Bulk operation routes
 		r.Post("/servers/restart_all", s.handleRestartAll)
 		r.Post("/servers/enable_all", s.handleEnableAll)
 		r.Post("/servers/disable_all", s.handleDisableAll)
 		r.Route("/servers/{id}", func(r chi.Router) {
-			r.Delete("/", s.handleRemoveServer)        // T002: Remove server
+			r.Delete("/", s.handleRemoveServer) // T002: Remove server
 			r.Post("/enable", s.handleEnableServer)
 			r.Post("/disable", s.handleDisableServer)
 			r.Post("/restart", s.handleRestartServer)
@@ -1404,12 +1404,12 @@ func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Reques
 
 	if err := s.controller.DiscoverServerTools(r.Context(), serverID); err != nil {
 		s.logger.Error("Failed to discover tools for server", "server", serverID, "error", err)
-		
+
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
 			return
 		}
-		
+
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to discover tools: %v", err))
 		return
 	}

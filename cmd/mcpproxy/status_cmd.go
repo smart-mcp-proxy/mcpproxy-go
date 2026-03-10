@@ -21,23 +21,23 @@ import (
 
 // StatusInfo holds the collected status data for display.
 type StatusInfo struct {
-	State            string  `json:"state"`
-	Edition          string  `json:"edition"`
-	ListenAddr       string  `json:"listen_addr"`
-	Uptime           string  `json:"uptime,omitempty"`
-	UptimeSeconds    float64 `json:"uptime_seconds,omitempty"`
-	APIKey           string  `json:"api_key"`
-	WebUIURL         string  `json:"web_ui_url"`
-	Servers          *ServerCounts `json:"servers,omitempty"`
-	SocketPath       string  `json:"socket_path,omitempty"`
-	ConfigPath       string  `json:"config_path,omitempty"`
-	Version          string  `json:"version,omitempty"`
-	TeamsInfo        *TeamsStatusInfo `json:"teams,omitempty"`
+	State         string           `json:"state"`
+	Edition       string           `json:"edition"`
+	ListenAddr    string           `json:"listen_addr"`
+	Uptime        string           `json:"uptime,omitempty"`
+	UptimeSeconds float64          `json:"uptime_seconds,omitempty"`
+	APIKey        string           `json:"api_key"`
+	WebUIURL      string           `json:"web_ui_url"`
+	Servers       *ServerCounts    `json:"servers,omitempty"`
+	SocketPath    string           `json:"socket_path,omitempty"`
+	ConfigPath    string           `json:"config_path,omitempty"`
+	Version       string           `json:"version,omitempty"`
+	TeamsInfo     *TeamsStatusInfo `json:"teams,omitempty"`
 }
 
 // TeamsStatusInfo holds teams-specific status information.
 type TeamsStatusInfo struct {
-	OAuthProvider string `json:"oauth_provider"`
+	OAuthProvider string   `json:"oauth_provider"`
 	AdminEmails   []string `json:"admin_emails"`
 }
 

@@ -401,4 +401,3 @@ func buildCallbackURL(r *http.Request) string {
 	}
 	return fmt.Sprintf("%s://%s/api/v1/auth/callback", scheme, r.Host)
 }
-

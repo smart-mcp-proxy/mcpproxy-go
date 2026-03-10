@@ -359,10 +359,10 @@ func (s *ActivityService) handleSystemStart(evt Event) {
 		Source: storage.ActivitySourceAPI, // System events come from the API server
 		Status: "success",
 		Metadata: map[string]interface{}{
-			"version":            version,
-			"listen_address":     listenAddress,
+			"version":             version,
+			"listen_address":      listenAddress,
 			"startup_duration_ms": startupDurationMs,
-			"config_path":        configPath,
+			"config_path":         configPath,
 		},
 		Timestamp: evt.Timestamp,
 	}
@@ -732,4 +732,3 @@ func (s *ActivityService) extractDetectionTypes(detections []security.Detection)
 
 	return types
 }
-
