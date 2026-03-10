@@ -31,26 +31,26 @@ type mockManagementService struct{}
 
 func (m *mockManagementService) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
 	return []*contracts.Server{
-		{
-			ID:              "test-server",
-			Name:            "test-server",
-			Protocol:        "stdio",
-			Command:         "echo",
-			Args:            []string{"hello"},
-			Enabled:         true,
-			Quarantined:     false,
-			Connected:       true,
-			Status:          "Ready",
-			ToolCount:       5,
-			ReconnectCount:  0,
-			Authenticated:   false,
-		},
-	}, &contracts.ServerStats{
-		TotalServers:       1,
-		ConnectedServers:   1,
-		QuarantinedServers: 0,
-		TotalTools:         5,
-	}, nil
+			{
+				ID:             "test-server",
+				Name:           "test-server",
+				Protocol:       "stdio",
+				Command:        "echo",
+				Args:           []string{"hello"},
+				Enabled:        true,
+				Quarantined:    false,
+				Connected:      true,
+				Status:         "Ready",
+				ToolCount:      5,
+				ReconnectCount: 0,
+				Authenticated:  false,
+			},
+		}, &contracts.ServerStats{
+			TotalServers:       1,
+			ConnectedServers:   1,
+			QuarantinedServers: 0,
+			TotalTools:         5,
+		}, nil
 }
 
 func (m *mockManagementService) EnableServer(ctx context.Context, name string, enabled bool) error {
@@ -161,11 +161,11 @@ func (m *MockServerController) GetQuarantinedServers() ([]map[string]interface{}
 func (m *MockServerController) UnquarantineServer(_ string) error { return nil }
 func (m *MockServerController) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 	return &storage.DockerRecoveryState{
-		DockerAvailable:  true,
-		RecoveryMode:     false,
-		FailureCount:     0,
-		AttemptsSinceUp:  0,
-		LastError:        "",
+		DockerAvailable: true,
+		RecoveryMode:    false,
+		FailureCount:    0,
+		AttemptsSinceUp: 0,
+		LastError:       "",
 	}
 }
 func (m *MockServerController) GetRecentSessions(_ int) ([]*contracts.MCPSession, int, error) {
@@ -326,6 +326,16 @@ func (m *MockServerController) AddServer(_ context.Context, _ *config.ServerConf
 }
 func (m *MockServerController) RemoveServer(_ context.Context, _ string) error {
 	return nil
+}
+
+// Tool-level quarantine (Spec 032)
+func (m *MockServerController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRecord, error) {
+	return nil, nil
+}
+func (m *MockServerController) ApproveTools(_ string, _ []string, _ string) error { return nil }
+func (m *MockServerController) ApproveAllTools(_ string, _ string) (int, error)   { return 0, nil }
+func (m *MockServerController) GetToolApproval(_, _ string) (*storage.ToolApprovalRecord, error) {
+	return nil, nil
 }
 
 // Test contract compliance for API responses

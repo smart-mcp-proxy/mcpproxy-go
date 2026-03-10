@@ -223,23 +223,23 @@ func (m *mockControllerWithKey) GetCurrentConfig() any {
 // baseController provides stub implementations for all ServerController methods
 type baseController struct{}
 
-func (m *baseController) IsRunning() bool                              { return true }
-func (m *baseController) IsReady() bool                                { return true }
-func (m *baseController) GetListenAddress() string                     { return "" }
-func (m *baseController) GetUpstreamStats() map[string]interface{}     { return nil }
-func (m *baseController) StartServer(ctx context.Context) error        { return nil }
-func (m *baseController) StopServer() error                            { return nil }
-func (m *baseController) GetStatus() interface{}                       { return nil }
-func (m *baseController) StatusChannel() <-chan interface{}            { return nil }
-func (m *baseController) EventsChannel() <-chan runtime.Event          { return nil }
-func (m *baseController) SubscribeEvents() chan runtime.Event          { return nil }
-func (m *baseController) UnsubscribeEvents(chan runtime.Event)         {}
+func (m *baseController) IsRunning() bool                          { return true }
+func (m *baseController) IsReady() bool                            { return true }
+func (m *baseController) GetListenAddress() string                 { return "" }
+func (m *baseController) GetUpstreamStats() map[string]interface{} { return nil }
+func (m *baseController) StartServer(ctx context.Context) error    { return nil }
+func (m *baseController) StopServer() error                        { return nil }
+func (m *baseController) GetStatus() interface{}                   { return nil }
+func (m *baseController) StatusChannel() <-chan interface{}        { return nil }
+func (m *baseController) EventsChannel() <-chan runtime.Event      { return nil }
+func (m *baseController) SubscribeEvents() chan runtime.Event      { return nil }
+func (m *baseController) UnsubscribeEvents(chan runtime.Event)     {}
 func (m *baseController) GetAllServers() ([]map[string]interface{}, error) {
 	return nil, nil
 }
 func (m *baseController) EnableServer(serverName string, enabled bool) error { return nil }
-func (m *baseController) RestartServer(serverName string) error               { return nil }
-func (m *baseController) ForceReconnectAllServers(reason string) error        { return nil }
+func (m *baseController) RestartServer(serverName string) error              { return nil }
+func (m *baseController) ForceReconnectAllServers(reason string) error       { return nil }
 func (m *baseController) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 	return nil
 }
@@ -250,7 +250,7 @@ func (m *baseController) GetQuarantinedServers() ([]map[string]interface{}, erro
 	return nil, nil
 }
 func (m *baseController) UnquarantineServer(serverName string) error { return nil }
-func (m *baseController) GetManagementService() interface{}           { return nil }
+func (m *baseController) GetManagementService() interface{}          { return nil }
 func (m *baseController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	return nil, nil
 }
@@ -260,10 +260,10 @@ func (m *baseController) SearchTools(query string, limit int) ([]map[string]inte
 func (m *baseController) GetServerLogs(serverName string, tail int) ([]contracts.LogEntry, error) {
 	return nil, nil
 }
-func (m *baseController) ReloadConfiguration() error                                       { return nil }
-func (m *baseController) GetConfigPath() string                                            { return "" }
-func (m *baseController) GetLogDir() string                                                { return "" }
-func (m *baseController) TriggerOAuthLogin(serverName string) error                        { return nil }
+func (m *baseController) ReloadConfiguration() error                                      { return nil }
+func (m *baseController) GetConfigPath() string                                           { return "" }
+func (m *baseController) GetLogDir() string                                               { return "" }
+func (m *baseController) TriggerOAuthLogin(serverName string) error                       { return nil }
 func (m *baseController) GetSecretResolver() *secret.Resolver                             { return nil }
 func (m *baseController) NotifySecretsChanged(ctx context.Context, op, name string) error { return nil }
 func (m *baseController) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
@@ -284,7 +284,7 @@ func (m *baseController) ValidateConfig(cfg *config.Config) ([]config.Validation
 func (m *baseController) ApplyConfig(cfg *config.Config, cfgPath string) (*runtime.ConfigApplyResult, error) {
 	return nil, nil
 }
-func (m *baseController) GetConfig() (*config.Config, error)                       { return nil, nil }
+func (m *baseController) GetConfig() (*config.Config, error)                      { return nil, nil }
 func (m *baseController) GetTokenSavings() (*contracts.ServerTokenMetrics, error) { return nil, nil }
 func (m *baseController) ListRegistries() ([]interface{}, error) {
 	return nil, nil
@@ -295,7 +295,7 @@ func (m *baseController) SearchRegistryServers(registryID, query, tag string, li
 func (m *baseController) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
 	return nil, nil
 }
-func (m *baseController) GetRuntime() *runtime.Runtime                             { return nil }
+func (m *baseController) GetRuntime() *runtime.Runtime                            { return nil }
 func (m *baseController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
 func (m *baseController) GetSessionByID(id string) (*contracts.MCPSession, error) { return nil, nil }
 func (m *baseController) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error) {
@@ -304,7 +304,7 @@ func (m *baseController) GetRecentSessions(limit int) ([]*contracts.MCPSession, 
 func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
 	return nil, 0, nil
 }
-func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo    { return nil }
+func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo     { return nil }
 func (m *baseController) RefreshVersionInfo() *updatecheck.VersionInfo { return nil }
 func (m *baseController) DiscoverServerTools(_ context.Context, _ string) error {
 	return nil
@@ -325,4 +325,12 @@ func (m *baseController) StreamActivities(_ storage.ActivityFilter) <-chan *stor
 	ch := make(chan *storage.ActivityRecord)
 	close(ch)
 	return ch
+}
+func (m *baseController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRecord, error) {
+	return nil, nil
+}
+func (m *baseController) ApproveTools(_ string, _ []string, _ string) error { return nil }
+func (m *baseController) ApproveAllTools(_ string, _ string) (int, error)   { return 0, nil }
+func (m *baseController) GetToolApproval(_, _ string) (*storage.ToolApprovalRecord, error) {
+	return nil, nil
 }
