@@ -28,11 +28,11 @@ import (
 // This matches the contracts.HealthStatus struct from the core.
 // Spec 013: Health is the single source of truth for server status.
 type HealthStatus struct {
-	Level      string `json:"level"`                 // "healthy", "degraded", "unhealthy"
-	AdminState string `json:"admin_state"`           // "enabled", "disabled", "quarantined"
-	Summary    string `json:"summary"`               // e.g., "Connected (5 tools)"
-	Detail     string `json:"detail,omitempty"`      // Optional longer explanation
-	Action     string `json:"action,omitempty"`      // "login", "restart", "enable", "approve", "set_secret", "configure", "view_logs", ""
+	Level      string `json:"level"`            // "healthy", "degraded", "unhealthy"
+	AdminState string `json:"admin_state"`      // "enabled", "disabled", "quarantined"
+	Summary    string `json:"summary"`          // e.g., "Connected (5 tools)"
+	Detail     string `json:"detail,omitempty"` // Optional longer explanation
+	Action     string `json:"action,omitempty"` // "login", "restart", "enable", "approve", "set_secret", "configure", "view_logs", ""
 }
 
 // Server represents a server from the API
@@ -550,7 +550,7 @@ func (c *Client) GetServers() ([]Server, error) {
 				"base_url", c.baseURL)
 		} else if stateChanged {
 			// Only log when server states actually change
-			c.logger.Infow("Server state changed",
+			c.logger.Debugw("Server state changed",
 				"count", len(result),
 				"connected", countConnected(result),
 				"with_health", withHealthCount,
