@@ -383,6 +383,49 @@ func (m *Manager) DeleteToolHash(toolName string) error {
 	return m.db.DeleteToolHash(toolName)
 }
 
+// Tool approval operations (tool-level quarantine)
+
+// SaveToolApproval saves a tool approval record
+func (m *Manager) SaveToolApproval(record *ToolApprovalRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveToolApproval(record)
+}
+
+// GetToolApproval retrieves a tool approval record by server and tool name
+func (m *Manager) GetToolApproval(serverName, toolName string) (*ToolApprovalRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.GetToolApproval(serverName, toolName)
+}
+
+// ListToolApprovals returns all tool approval records for a server.
+// If serverName is empty, returns all records across all servers.
+func (m *Manager) ListToolApprovals(serverName string) ([]*ToolApprovalRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.ListToolApprovals(serverName)
+}
+
+// DeleteToolApproval deletes a tool approval record
+func (m *Manager) DeleteToolApproval(serverName, toolName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteToolApproval(serverName, toolName)
+}
+
+// DeleteServerToolApprovals deletes all tool approval records for a server
+func (m *Manager) DeleteServerToolApprovals(serverName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteServerToolApprovals(serverName)
+}
+
 // Docker recovery state operations
 
 // SaveDockerRecoveryState saves the Docker recovery state to persistent storage

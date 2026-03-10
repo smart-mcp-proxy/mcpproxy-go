@@ -416,17 +416,28 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 // applyDifferentialToolUpdate performs differential update of tools for a server.
 // It compares new tools with existing indexed tools and applies only the changes:
 // - Removed tools are deleted from the index
-// - Added tools are indexed
-// - Modified tools (different hash) are re-indexed
+// - Added tools are indexed (unless blocked by tool-level quarantine)
+// - Modified tools (different hash) are re-indexed (unless blocked by tool-level quarantine)
+// - Tools blocked by quarantine are removed from the index if previously indexed
 func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName string, newTools []*config.ToolMetadata) error {
+	// Check tool-level quarantine approvals before indexing
+	approvalResult, err := r.checkToolApprovals(serverName, newTools)
+	if err != nil {
+		r.logger.Warn("Failed to check tool approvals, proceeding without quarantine",
+			zap.String("server", serverName),
+			zap.Error(err))
+		approvalResult = &ToolApprovalResult{BlockedTools: make(map[string]bool)}
+	}
+
 	// Query existing tools from the index
 	existingTools, err := r.indexManager.GetToolsByServer(serverName)
 	if err != nil {
 		r.logger.Warn("Failed to query existing tools, performing full re-index",
 			zap.String("server", serverName),
 			zap.Error(err))
-		// Fall back to full batch index
-		return r.indexManager.BatchIndexTools(newTools)
+		// Filter out blocked tools before full batch index
+		allowedTools := filterBlockedTools(newTools, approvalResult.BlockedTools)
+		return r.indexManager.BatchIndexTools(allowedTools)
 	}
 
 	// Build maps for efficient lookup
@@ -513,26 +524,54 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 					zap.Error(err))
 			}
 		}
+
+		// Clean up tool approval records for removed tools
+		if r.storageManager != nil {
+			if err := r.storageManager.DeleteToolApproval(serverName, toolName); err != nil {
+				r.logger.Debug("Failed to delete tool approval for removed tool",
+					zap.String("tool", fullToolName),
+					zap.Error(err))
+			}
+		}
 	}
 
-	// 2. Index added tools
-	if len(addedTools) > 0 {
+	// 2. Remove blocked tools from index if previously indexed
+	for blockedToolName := range approvalResult.BlockedTools {
+		if _, wasIndexed := oldToolsMap[blockedToolName]; wasIndexed {
+			r.logger.Info("Removing blocked tool from index (quarantine)",
+				zap.String("server", serverName),
+				zap.String("tool", blockedToolName))
+			if err := r.indexManager.DeleteTool(serverName, blockedToolName); err != nil {
+				r.logger.Error("Failed to remove blocked tool from index",
+					zap.String("server", serverName),
+					zap.String("tool", blockedToolName),
+					zap.Error(err))
+			}
+		}
+	}
+
+	// 3. Index added tools (excluding blocked)
+	allowedAddedTools := filterBlockedTools(addedTools, approvalResult.BlockedTools)
+	if len(allowedAddedTools) > 0 {
 		r.logger.Info("Indexing new tools",
 			zap.String("server", serverName),
-			zap.Int("count", len(addedTools)))
+			zap.Int("count", len(allowedAddedTools)),
+			zap.Int("blocked", len(addedTools)-len(allowedAddedTools)))
 
-		if err := r.indexManager.BatchIndexTools(addedTools); err != nil {
+		if err := r.indexManager.BatchIndexTools(allowedAddedTools); err != nil {
 			return fmt.Errorf("failed to index added tools: %w", err)
 		}
 	}
 
-	// 3. Re-index modified tools
-	if len(modifiedTools) > 0 {
+	// 4. Re-index modified tools (excluding blocked)
+	allowedModifiedTools := filterBlockedTools(modifiedTools, approvalResult.BlockedTools)
+	if len(allowedModifiedTools) > 0 {
 		r.logger.Info("Re-indexing modified tools",
 			zap.String("server", serverName),
-			zap.Int("count", len(modifiedTools)))
+			zap.Int("count", len(allowedModifiedTools)),
+			zap.Int("blocked", len(modifiedTools)-len(allowedModifiedTools)))
 
-		for _, tool := range modifiedTools {
+		for _, tool := range allowedModifiedTools {
 			r.logger.Debug("Tool schema changed",
 				zap.String("server", serverName),
 				zap.String("tool", tool.Name),
@@ -540,12 +579,27 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 				zap.String("new_hash", tool.Hash))
 		}
 
-		if err := r.indexManager.BatchIndexTools(modifiedTools); err != nil {
+		if err := r.indexManager.BatchIndexTools(allowedModifiedTools); err != nil {
 			return fmt.Errorf("failed to re-index modified tools: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// filterBlockedTools removes tools that are blocked by quarantine from the list.
+func filterBlockedTools(tools []*config.ToolMetadata, blocked map[string]bool) []*config.ToolMetadata {
+	if len(blocked) == 0 {
+		return tools
+	}
+	var allowed []*config.ToolMetadata
+	for _, tool := range tools {
+		toolName := extractToolName(tool.Name)
+		if !blocked[toolName] {
+			allowed = append(allowed, tool)
+		}
+	}
+	return allowed
 }
 
 // extractToolName removes the server prefix from a tool name if present

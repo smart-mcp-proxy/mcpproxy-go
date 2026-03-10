@@ -1061,6 +1061,14 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 			zap.Error(err))
 	}
 
+	// Clean up tool approval records for the removed server
+	// This prevents orphaned approval records from accumulating
+	if err := storageManager.DeleteServerToolApprovals(serverName); err != nil {
+		s.logger.Warn("Failed to clear tool approvals for removed server",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
+
 	// Save configuration to file
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Warn("Failed to save configuration after removing server",
@@ -2140,4 +2148,24 @@ func (s *Server) GetActivity(id string) (*storage.ActivityRecord, error) {
 // StreamActivities returns a channel that yields activity records matching the filter.
 func (s *Server) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	return s.runtime.StreamActivities(filter)
+}
+
+// ListToolApprovals returns tool approval records for a server (Spec 032).
+func (s *Server) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	return s.runtime.ListToolApprovals(serverName)
+}
+
+// ApproveTools approves specific tools for a server (Spec 032).
+func (s *Server) ApproveTools(serverName string, toolNames []string, approvedBy string) error {
+	return s.runtime.ApproveTools(serverName, toolNames, approvedBy)
+}
+
+// ApproveAllTools approves all pending/changed tools for a server (Spec 032).
+func (s *Server) ApproveAllTools(serverName string, approvedBy string) (int, error) {
+	return s.runtime.ApproveAllTools(serverName, approvedBy)
+}
+
+// GetToolApproval returns the approval record for a specific tool (Spec 032).
+func (s *Server) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
+	return s.runtime.GetToolApproval(serverName, toolName)
 }

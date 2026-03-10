@@ -77,6 +77,7 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 	ln.Close()
 
 	// Create proxy server with test config
+	quarantineDisabled := false
 	cfg := &config.Config{
 		DataDir:           dataDir,
 		Listen:            fmt.Sprintf(":%d", testPort),
@@ -88,6 +89,7 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 		AllowServerRemove: true,
 		EnablePrompts:     true,
 		DebugSearch:       true,
+		QuarantineEnabled: &quarantineDisabled, // Disable tool-level quarantine in E2E tests (tested separately)
 	}
 
 	env.proxyServer, err = NewServer(cfg, logger)
@@ -1873,7 +1875,7 @@ func TestE2E_Activity_ExcludeCallToolSuccess(t *testing.T) {
 		callRequest := mcp.CallToolRequest{}
 		callRequest.Params.Name = "call_tool_read"
 		callRequest.Params.Arguments = map[string]interface{}{
-			"name": "test-server-fixture:echo_tool",
+			"name":      "test-server-fixture:echo_tool",
 			"args_json": `{"message": "test-activity-filtering"}`,
 			"intent": map[string]interface{}{
 				"operation_type": "read",
