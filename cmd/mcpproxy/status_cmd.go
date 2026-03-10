@@ -28,6 +28,7 @@ type StatusInfo struct {
 	UptimeSeconds float64          `json:"uptime_seconds,omitempty"`
 	APIKey        string           `json:"api_key"`
 	WebUIURL      string           `json:"web_ui_url"`
+	RoutingMode   string           `json:"routing_mode"`
 	Servers       *ServerCounts    `json:"servers,omitempty"`
 	SocketPath    string           `json:"socket_path,omitempty"`
 	ConfigPath    string           `json:"config_path,omitempty"`
@@ -158,11 +159,17 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 	defer cancel()
 
 	info := &StatusInfo{
-		State:      "Running",
-		Edition:    Edition,
-		APIKey:     cfg.APIKey,
-		SocketPath: socketPath,
-		ConfigPath: configPath,
+		State:       "Running",
+		Edition:     Edition,
+		APIKey:      cfg.APIKey,
+		RoutingMode: cfg.RoutingMode,
+		SocketPath:  socketPath,
+		ConfigPath:  configPath,
+	}
+
+	// Apply routing mode default if empty
+	if info.RoutingMode == "" {
+		info.RoutingMode = config.RoutingModeRetrieveTools
 	}
 
 	// Add teams info if available
@@ -220,13 +227,19 @@ func collectStatusFromConfig(cfg *config.Config, socketPath, configPath string) 
 		listenAddr = "127.0.0.1:8080"
 	}
 
+	routingMode := cfg.RoutingMode
+	if routingMode == "" {
+		routingMode = config.RoutingModeRetrieveTools
+	}
+
 	info := &StatusInfo{
-		State:      "Not running",
-		Edition:    Edition,
-		ListenAddr: listenAddr + " (configured)",
-		APIKey:     cfg.APIKey,
-		WebUIURL:   statusBuildWebUIURL(listenAddr, cfg.APIKey),
-		ConfigPath: configPath,
+		State:       "Not running",
+		Edition:     Edition,
+		ListenAddr:  listenAddr + " (configured)",
+		APIKey:      cfg.APIKey,
+		WebUIURL:    statusBuildWebUIURL(listenAddr, cfg.APIKey),
+		RoutingMode: routingMode,
+		ConfigPath:  configPath,
 	}
 
 	info.TeamsInfo = collectTeamsInfo(cfg)
@@ -351,6 +364,7 @@ func printStatusTable(info *StatusInfo) {
 	}
 
 	fmt.Printf("  %-12s %s\n", "API Key:", info.APIKey)
+	fmt.Printf("  %-12s %s\n", "Routing:", info.RoutingMode)
 	fmt.Printf("  %-12s %s\n", "Web UI:", info.WebUIURL)
 
 	if info.Servers != nil {

@@ -421,6 +421,22 @@ func displaySecurityFeaturesStatus() {
 		return
 	}
 
+	// Routing Mode status (Spec 031)
+	routingMode := cfg.RoutingMode
+	if routingMode == "" {
+		routingMode = config.RoutingModeRetrieveTools
+	}
+	fmt.Printf("  Routing Mode: %s\n", routingMode)
+	if routingMode == config.RoutingModeDirect {
+		fmt.Println("    All upstream tools exposed directly via /mcp endpoint")
+	} else if routingMode == config.RoutingModeCodeExecution {
+		fmt.Println("    JS orchestration via code_execution tool")
+	} else {
+		fmt.Println("    BM25 search via retrieve_tools + call_tool variants")
+	}
+	fmt.Printf("    Endpoints: /mcp/all (direct), /mcp/code (code_execution), /mcp/call (retrieve_tools)\n")
+	fmt.Println()
+
 	// Sensitive Data Detection status
 	sddConfig := cfg.SensitiveDataDetection
 	if sddConfig == nil || sddConfig.IsEnabled() {
