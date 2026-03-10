@@ -427,7 +427,12 @@ func (s *Server) Start(ctx context.Context) error {
 			zap.String("listen", listenAddr))
 
 		// Create Streamable HTTP server with custom routing
-		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServer())
+		// Use the MCP server instance that corresponds to the configured routing_mode
+		routingMode := ""
+		if cfg != nil {
+			routingMode = cfg.RoutingMode
+		}
+		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(routingMode))
 
 		// Create custom HTTP server for handling multiple routes
 		if err := s.startCustomHTTPServer(ctx, streamableServer); err != nil {

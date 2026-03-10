@@ -205,45 +205,64 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 // Includes: code_execution (with enhanced description listing available tools) and retrieve_tools (for discovery).
 // Does NOT include call_tool_read/write/destructive.
 func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
-	ctx := context.Background()
-
-	// Build enhanced description with available tools catalog
-	toolCatalog := p.buildToolCatalogDescription(ctx)
-
-	codeExecDescription := fmt.Sprintf(
-		"Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request. "+
-			"Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations.\n\n"+
-			"**Available in JavaScript**:\n"+
-			"- `input` global: Your input data passed via the 'input' parameter\n"+
-			"- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n"+
-			"- Standard ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n"+
-			"**Available tools for orchestration**:\n%s\n\n"+
-			"Use call_tool('serverName', 'toolName', {args}) to invoke tools.",
-		toolCatalog,
-	)
-
 	tools := make([]mcpserver.ServerTool, 0, 2)
 
-	// code_execution tool with enhanced description
-	codeExecutionTool := mcp.NewTool("code_execution",
-		mcp.WithDescription(codeExecDescription),
-		mcp.WithTitleAnnotation("Code Execution"),
-		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithString("code",
-			mcp.Required(),
-			mcp.Description("JavaScript source code (ES5.1+) to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools."),
-		),
-		mcp.WithObject("input",
-			mcp.Description("Input data accessible as global `input` variable in JavaScript code (default: {})"),
-		),
-		mcp.WithObject("options",
-			mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
-		),
-	)
-	tools = append(tools, mcpserver.ServerTool{
-		Tool:    codeExecutionTool,
-		Handler: p.handleCodeExecution,
-	})
+	// Check if code execution is enabled in config
+	if p.config != nil && !p.config.EnableCodeExecution {
+		// Code execution is disabled: register a stub tool that returns a clear error message
+		codeExecutionTool := mcp.NewTool("code_execution",
+			mcp.WithDescription("Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config."),
+			mcp.WithTitleAnnotation("Code Execution (Disabled)"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("code",
+				mcp.Required(),
+				mcp.Description("JavaScript source code (ES5.1+) to execute."),
+			),
+		)
+		tools = append(tools, mcpserver.ServerTool{
+			Tool: codeExecutionTool,
+			Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				return mcp.NewToolResultError("Code execution is disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy configuration file."), nil
+			},
+		})
+	} else {
+		// Build enhanced description with available tools catalog
+		ctx := context.Background()
+		toolCatalog := p.buildToolCatalogDescription(ctx)
+
+		codeExecDescription := fmt.Sprintf(
+			"Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request. "+
+				"Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations.\n\n"+
+				"**Available in JavaScript**:\n"+
+				"- `input` global: Your input data passed via the 'input' parameter\n"+
+				"- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n"+
+				"- Standard ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n"+
+				"**Available tools for orchestration**:\n%s\n\n"+
+				"Use call_tool('serverName', 'toolName', {args}) to invoke tools.",
+			toolCatalog,
+		)
+
+		// code_execution tool with enhanced description
+		codeExecutionTool := mcp.NewTool("code_execution",
+			mcp.WithDescription(codeExecDescription),
+			mcp.WithTitleAnnotation("Code Execution"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("code",
+				mcp.Required(),
+				mcp.Description("JavaScript source code (ES5.1+) to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools."),
+			),
+			mcp.WithObject("input",
+				mcp.Description("Input data accessible as global `input` variable in JavaScript code (default: {})"),
+			),
+			mcp.WithObject("options",
+				mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
+			),
+		)
+		tools = append(tools, mcpserver.ServerTool{
+			Tool:    codeExecutionTool,
+			Handler: p.handleCodeExecution,
+		})
+	}
 
 	// retrieve_tools for discovery
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",

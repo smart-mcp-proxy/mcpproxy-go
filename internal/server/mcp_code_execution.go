@@ -548,11 +548,21 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 // lookupToolPermission returns the required permission tier for a tool based on its annotations.
 // This is used by the JS runtime to enforce auth context permissions during code_execution.
 func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
-	// Try to find tool annotations from the index
+	// Primary: exact match via StateView (no BM25 fuzzy matching)
+	annotations := p.lookupToolAnnotations(serverName, toolName)
+	if annotations != nil {
+		callWith := contracts.DeriveCallWith(annotations)
+		perm := contracts.ToolVariantToOperationType[callWith]
+		if perm != "" {
+			return perm
+		}
+	}
+
+	// Fallback: search the index with enough candidates to find an exact match
 	if p.index != nil {
 		qualifiedName := serverName + ":" + toolName
-		results, err := p.index.Search(qualifiedName, 1)
-		if err == nil && len(results) > 0 {
+		results, err := p.index.Search(qualifiedName, 20)
+		if err == nil {
 			for _, r := range results {
 				if r.Tool != nil && r.Tool.ServerName == serverName && r.Tool.Name == toolName {
 					callWith := contracts.DeriveCallWith(r.Tool.Annotations)
@@ -564,6 +574,7 @@ func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) strin
 			}
 		}
 	}
+
 	// Default to read (safest)
 	return contracts.OperationTypeRead
 }
