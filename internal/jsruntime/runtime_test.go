@@ -19,7 +19,10 @@ type mockToolCaller struct {
 
 func newMockToolCaller() *mockToolCaller {
 	return &mockToolCaller{
-		calls:   make([]struct{ server, tool string; args map[string]interface{} }, 0),
+		calls: make([]struct {
+			server, tool string
+			args         map[string]interface{}
+		}, 0),
 		results: make(map[string]interface{}),
 		errors:  make(map[string]error),
 	}
@@ -319,6 +322,177 @@ func TestExecuteNonSerializableResult(t *testing.T) {
 
 	if result.Error.Code != ErrorCodeSerializationError {
 		t.Errorf("expected error code SERIALIZATION_ERROR, got %s", result.Error.Code)
+	}
+}
+
+// TestExecuteTypeScript tests TypeScript code execution via Execute()
+func TestExecuteTypeScript(t *testing.T) {
+	caller := newMockToolCaller()
+	code := `const x: number = 42; const msg: string = "hello"; ({ result: x, message: msg })`
+	opts := ExecutionOptions{
+		Language: "typescript",
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+
+	resultMap, ok := result.Value.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result to be a map, got %T", result.Value)
+	}
+
+	var resultNum int64
+	switch v := resultMap["result"].(type) {
+	case int64:
+		resultNum = v
+	case float64:
+		resultNum = int64(v)
+	}
+	if resultNum != 42 {
+		t.Errorf("expected result=42, got %v", resultMap["result"])
+	}
+	if resultMap["message"] != "hello" {
+		t.Errorf("expected message='hello', got %v", resultMap["message"])
+	}
+}
+
+// TestExecuteTypeScriptWithCallTool tests TypeScript code that uses call_tool()
+func TestExecuteTypeScriptWithCallTool(t *testing.T) {
+	caller := newMockToolCaller()
+	caller.results["github:get_user"] = map[string]interface{}{
+		"login": "octocat",
+		"id":    583231,
+	}
+
+	code := `
+		interface ToolResult {
+			ok: boolean;
+			result?: any;
+			error?: any;
+		}
+		const res: ToolResult = call_tool("github", "get_user", { username: "octocat" });
+		if (!res.ok) throw new Error("Failed");
+		({ user: res.result })
+	`
+	opts := ExecutionOptions{
+		Language: "typescript",
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+
+	if len(caller.calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(caller.calls))
+	}
+}
+
+// TestExecuteJavaScriptWithLanguageExplicit tests that language: "javascript" works as before
+func TestExecuteJavaScriptWithLanguageExplicit(t *testing.T) {
+	caller := newMockToolCaller()
+	code := `({ result: 42 })`
+	opts := ExecutionOptions{
+		Language: "javascript",
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+}
+
+// TestExecuteEmptyLanguageDefaultsToJavaScript tests that empty language works as JavaScript
+func TestExecuteEmptyLanguageDefaultsToJavaScript(t *testing.T) {
+	caller := newMockToolCaller()
+	code := `({ result: 42 })`
+	opts := ExecutionOptions{
+		Language: "", // empty = default = javascript
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+}
+
+// TestExecuteInvalidLanguage tests that an invalid language returns an error
+func TestExecuteInvalidLanguage(t *testing.T) {
+	caller := newMockToolCaller()
+	code := `({ result: 42 })`
+	opts := ExecutionOptions{
+		Language: "python",
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+
+	if result.Ok {
+		t.Fatalf("expected ok=false for invalid language, got ok=true")
+	}
+	if result.Error.Code != ErrorCodeInvalidLanguage {
+		t.Errorf("expected error code INVALID_LANGUAGE, got %s", result.Error.Code)
+	}
+}
+
+// TestExecuteTypeScriptTranspileError tests that transpilation errors are returned properly
+func TestExecuteTypeScriptTranspileError(t *testing.T) {
+	caller := newMockToolCaller()
+	code := `const x: number = ;` // invalid TypeScript
+	opts := ExecutionOptions{
+		Language: "typescript",
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+
+	if result.Ok {
+		t.Fatalf("expected ok=false for transpile error, got ok=true")
+	}
+	if result.Error.Code != ErrorCodeTranspileError {
+		t.Errorf("expected error code TRANSPILE_ERROR, got %s", result.Error.Code)
+	}
+}
+
+// TestExecuteTypeScriptWithInput tests TypeScript with input variable
+func TestExecuteTypeScriptWithInput(t *testing.T) {
+	caller := newMockToolCaller()
+	code := `
+		interface Input { value: number; name: string; }
+		const inp = input as Input;
+		({ doubled: inp.value * 2, greeting: "Hello " + inp.name })
+	`
+	opts := ExecutionOptions{
+		Language: "typescript",
+		Input: map[string]interface{}{
+			"value": 21,
+			"name":  "World",
+		},
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+
+	resultMap := result.Value.(map[string]interface{})
+	var doubled int64
+	switch v := resultMap["doubled"].(type) {
+	case int64:
+		doubled = v
+	case float64:
+		doubled = int64(v)
+	}
+	if doubled != 42 {
+		t.Errorf("expected doubled=42, got %v", resultMap["doubled"])
+	}
+	if resultMap["greeting"] != "Hello World" {
+		t.Errorf("expected greeting='Hello World', got %v", resultMap["greeting"])
 	}
 }
 

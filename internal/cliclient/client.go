@@ -147,7 +147,12 @@ func parseAPIError(errorMsg, requestID string) error {
 	return &APIError{Message: errorMsg, RequestID: requestID}
 }
 
-// CodeExec executes JavaScript code via the daemon API.
+// CodeExecOptions contains optional parameters for code execution via the daemon API.
+type CodeExecOptions struct {
+	Language string // Source language: "javascript" (default) or "typescript"
+}
+
+// CodeExec executes JavaScript or TypeScript code via the daemon API.
 func (c *Client) CodeExec(
 	ctx context.Context,
 	code string,
@@ -155,6 +160,7 @@ func (c *Client) CodeExec(
 	timeoutMS int,
 	maxToolCalls int,
 	allowedServers []string,
+	opts ...CodeExecOptions,
 ) (*CodeExecResult, error) {
 	// Build request body
 	reqBody := map[string]interface{}{
@@ -165,6 +171,11 @@ func (c *Client) CodeExec(
 			"max_tool_calls":  maxToolCalls,
 			"allowed_servers": allowedServers,
 		},
+	}
+
+	// Apply optional language parameter
+	if len(opts) > 0 && opts[0].Language != "" && opts[0].Language != "javascript" {
+		reqBody["language"] = opts[0].Language
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -211,7 +222,7 @@ func (c *Client) CallTool(
 ) (*CallToolResult, error) {
 	// Build request body (REST API format)
 	reqBody := map[string]interface{}{
-		"tool_name":  toolName,
+		"tool_name": toolName,
 		"arguments": args,
 	}
 

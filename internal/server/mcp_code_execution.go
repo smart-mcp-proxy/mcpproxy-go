@@ -32,6 +32,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// Get all arguments
 	args := request.GetArguments()
 
+	// Extract language (optional, default: "javascript")
+	if language, ok := args["language"].(string); ok && language != "" {
+		options.Language = language
+	}
+
 	// Extract input (optional) - this is an object
 	input, ok := args["input"].(map[string]interface{})
 	if !ok || input == nil {
@@ -103,16 +108,16 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Create tool caller adapter that wraps the upstream manager
 	toolCaller := &upstreamToolCaller{
-		upstreamManager:  p.upstreamManager,
-		logger:           p.logger,
-		executionID:      options.ExecutionID,
-		storage:          p.storage,
-		configPath:       configPath,
-		parentCallID:     parentCallID,
-		sessionID:        sessionID,
-		clientName:       clientName,
-		clientVersion:    clientVersion,
-		mainServer:       p.mainServer,
+		upstreamManager: p.upstreamManager,
+		logger:          p.logger,
+		executionID:     options.ExecutionID,
+		storage:         p.storage,
+		configPath:      configPath,
+		parentCallID:    parentCallID,
+		sessionID:       sessionID,
+		clientName:      clientName,
+		clientVersion:   clientVersion,
+		mainServer:      p.mainServer,
 	}
 
 	// Log pool metrics before acquisition
@@ -163,9 +168,16 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}()
 	}
 
-	// Execute JavaScript
-	p.logger.Info("executing JavaScript code",
+	// Determine effective language for logging
+	effectiveLanguage := options.Language
+	if effectiveLanguage == "" {
+		effectiveLanguage = "javascript"
+	}
+
+	// Execute code
+	p.logger.Info("executing code",
 		zap.String("execution_id", options.ExecutionID),
+		zap.String("language", effectiveLanguage),
 		zap.Int("code_length", len(code)),
 		zap.Int("timeout_ms", options.TimeoutMs),
 		zap.Int("max_tool_calls", options.MaxToolCalls),
@@ -257,13 +269,14 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Record the parent code_execution call in history
 	codeExecRecord := &storage.ToolCallRecord{
-		ID:               parentCallID,
-		ServerID:         "code_execution", // Special server ID for built-in tool
-		ServerName:       "mcpproxy",       // Built-in tool
-		ToolName:         "code_execution",
+		ID:         parentCallID,
+		ServerID:   "code_execution", // Special server ID for built-in tool
+		ServerName: "mcpproxy",       // Built-in tool
+		ToolName:   "code_execution",
 		Arguments: map[string]interface{}{
-			"code":  code,
-			"input": options.Input,
+			"code":     code,
+			"input":    options.Input,
+			"language": effectiveLanguage,
 		},
 		Response:         result,
 		Duration:         int64(executionDuration),
@@ -307,8 +320,9 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 	}
 	codeExecArgs := map[string]interface{}{
-		"code":  code,
-		"input": options.Input,
+		"code":     code,
+		"input":    options.Input,
+		"language": effectiveLanguage,
 	}
 	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil)
 
@@ -331,18 +345,18 @@ type toolCallRecord struct {
 
 // upstreamToolCaller adapts the upstream.Manager to implement jsruntime.ToolCaller
 type upstreamToolCaller struct {
-	upstreamManager  *upstream.Manager
-	logger           *zap.Logger
-	executionID      string
-	storage          *storage.Manager
-	configPath       string
-	toolCalls        []toolCallRecord
-	mu               sync.Mutex
-	parentCallID     string // ID of the parent code_execution call
-	sessionID        string // MCP session ID
-	clientName       string // MCP client name
-	clientVersion    string // MCP client version
-	mainServer       *Server // Reference to main server for tokenizer access
+	upstreamManager *upstream.Manager
+	logger          *zap.Logger
+	executionID     string
+	storage         *storage.Manager
+	configPath      string
+	toolCalls       []toolCallRecord
+	mu              sync.Mutex
+	parentCallID    string  // ID of the parent code_execution call
+	sessionID       string  // MCP session ID
+	clientName      string  // MCP client name
+	clientVersion   string  // MCP client version
+	mainServer      *Server // Reference to main server for tokenizer access
 }
 
 // CallTool implements jsruntime.ToolCaller interface

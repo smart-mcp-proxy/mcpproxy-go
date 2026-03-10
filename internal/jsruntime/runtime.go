@@ -12,11 +12,12 @@ import (
 
 // ExecutionOptions contains optional parameters for JavaScript execution
 type ExecutionOptions struct {
-	Input              map[string]interface{} // Input data accessible as global `input` variable
-	TimeoutMs          int                     // Execution timeout in milliseconds
-	MaxToolCalls       int                     // Maximum number of call_tool() invocations (0 = unlimited)
-	AllowedServers     []string                // Whitelist of allowed server names (empty = all allowed)
-	ExecutionID        string                  // Unique execution ID for logging (auto-generated if empty)
+	Input          map[string]interface{} // Input data accessible as global `input` variable
+	TimeoutMs      int                    // Execution timeout in milliseconds
+	MaxToolCalls   int                    // Maximum number of call_tool() invocations (0 = unlimited)
+	AllowedServers []string               // Whitelist of allowed server names (empty = all allowed)
+	ExecutionID    string                 // Unique execution ID for logging (auto-generated if empty)
+	Language       string                 // Source language: "javascript" (default) or "typescript"
 }
 
 // ToolCaller is an interface for calling upstream MCP tools
@@ -26,15 +27,15 @@ type ToolCaller interface {
 
 // ExecutionContext tracks the state of a single JavaScript execution
 type ExecutionContext struct {
-	ExecutionID  string
-	StartTime    time.Time
-	EndTime      *time.Time
-	Status       string // "running", "success", "error", "timeout"
-	ToolCalls    []ToolCallRecord
-	ResultValue  interface{}
-	ErrorDetails *JsError
-	toolCaller   ToolCaller
-	maxToolCalls int
+	ExecutionID      string
+	StartTime        time.Time
+	EndTime          *time.Time
+	Status           string // "running", "success", "error", "timeout"
+	ToolCalls        []ToolCallRecord
+	ResultValue      interface{}
+	ErrorDetails     *JsError
+	toolCaller       ToolCaller
+	maxToolCalls     int
 	allowedServerMap map[string]bool
 }
 
@@ -50,21 +51,36 @@ type ToolCallRecord struct {
 	ErrorDetail interface{}            `json:"error_details,omitempty"`
 }
 
-// Execute runs JavaScript code in a sandboxed environment with tool call capabilities
+// Execute runs JavaScript or TypeScript code in a sandboxed environment with tool call capabilities.
+// When opts.Language is "typescript", the code is transpiled to JavaScript before execution.
 func Execute(ctx context.Context, caller ToolCaller, code string, opts ExecutionOptions) *Result {
 	// Generate execution ID if not provided
 	if opts.ExecutionID == "" {
 		opts.ExecutionID = uuid.New().String()
 	}
 
+	// Validate language parameter
+	if langErr := ValidateLanguage(opts.Language); langErr != nil {
+		return NewErrorResult(langErr)
+	}
+
+	// Transpile TypeScript to JavaScript if needed
+	if opts.Language == "typescript" {
+		transpiled, transpileErr := TranspileTypeScript(code)
+		if transpileErr != nil {
+			return NewErrorResult(transpileErr)
+		}
+		code = transpiled
+	}
+
 	// Create execution context
 	execCtx := &ExecutionContext{
-		ExecutionID:  opts.ExecutionID,
-		StartTime:    time.Now(),
-		Status:       "running",
-		ToolCalls:    make([]ToolCallRecord, 0),
-		toolCaller:   caller,
-		maxToolCalls: opts.MaxToolCalls,
+		ExecutionID:      opts.ExecutionID,
+		StartTime:        time.Now(),
+		Status:           "running",
+		ToolCalls:        make([]ToolCallRecord, 0),
+		toolCaller:       caller,
+		maxToolCalls:     opts.MaxToolCalls,
 		allowedServerMap: make(map[string]bool),
 	}
 

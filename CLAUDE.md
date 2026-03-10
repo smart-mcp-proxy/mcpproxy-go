@@ -615,6 +615,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt database (`~/.mcpproxy/config.db`) — new `agent_tokens` bucket (028-agent-tokens)
 - Go 1.24 (toolchain go1.24.10) + TypeScript 5.9 / Vue 3.5 + Chi router, BBolt, Zap logging, mcp-go, golang-jwt/jwt/v5, Vue 3, Pinia, DaisyUI (024-teams-multiuser-oauth)
 - BBolt database (`~/.mcpproxy/config.db`) - new buckets for users, sessions, user servers (024-teams-multiuser-oauth)
+- Go 1.24 (toolchain go1.24.10) + `github.com/dop251/goja` (existing JS sandbox), `github.com/evanw/esbuild` (new - TypeScript transpilation), `github.com/mark3labs/mcp-go` (MCP protocol), `github.com/spf13/cobra` (CLI) (033-typescript-code-execution)
+- N/A (no new storage requirements) (033-typescript-code-execution)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

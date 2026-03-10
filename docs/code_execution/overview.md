@@ -1,8 +1,10 @@
-# JavaScript Code Execution - Overview
+# Code Execution - Overview
 
 ## What is Code Execution?
 
-The `code_execution` tool enables LLM agents to orchestrate multiple upstream MCP tools in a single request using JavaScript. Instead of making multiple round-trips to the model, you can execute complex multi-step workflows with conditional logic, loops, and data transformations—all within a single execution context.
+The `code_execution` tool enables LLM agents to orchestrate multiple upstream MCP tools in a single request using JavaScript or TypeScript. Instead of making multiple round-trips to the model, you can execute complex multi-step workflows with conditional logic, loops, and data transformations—all within a single execution context.
+
+**TypeScript support**: Set `language: "typescript"` to write code with type annotations, interfaces, enums, and generics. Types are automatically stripped before execution with near-zero overhead (<5ms).
 
 ## When to Use Code Execution
 
@@ -215,8 +217,11 @@ mcpproxy serve
 ### 3. Test with CLI
 
 ```bash
-# Simple test
+# Simple JavaScript test
 mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}'
+
+# TypeScript test
+mcpproxy code exec --language typescript --code="const x: number = 42; ({ result: x })"
 
 # Call upstream tool
 mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user})" --input='{"user":"octocat"}'
@@ -376,6 +381,59 @@ code_execution({
 })
 // Returns: {ok: false, error: {code: "MAX_TOOL_CALLS_EXCEEDED", message: "..."}}
 ```
+
+## TypeScript Support
+
+You can write code execution scripts in TypeScript by setting the `language` parameter to `"typescript"`. TypeScript types are automatically stripped before execution using esbuild, with near-zero transpilation overhead.
+
+### Supported TypeScript Features
+
+- Type annotations: `const x: number = 42`
+- Interfaces: `interface User { name: string; age: number; }`
+- Type aliases: `type StringOrNumber = string | number`
+- Generics: `function identity<T>(arg: T): T { return arg; }`
+- Enums: `enum Direction { Up = "UP", Down = "DOWN" }`
+- Namespaces: `namespace MyLib { export const value = 42; }`
+- Type assertions: `const x = value as string`
+
+### TypeScript via MCP Tool
+
+```json
+{
+  "name": "code_execution",
+  "arguments": {
+    "code": "interface User { name: string; }\nconst user: User = { name: input.username };\n({ greeting: 'Hello ' + user.name })",
+    "language": "typescript",
+    "input": {"username": "Alice"}
+  }
+}
+```
+
+### TypeScript via REST API
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/code/exec \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
+  -d '{
+    "code": "const x: number = 42; ({ result: x })",
+    "language": "typescript"
+  }'
+```
+
+### TypeScript via CLI
+
+```bash
+mcpproxy code exec --language typescript \
+  --code="const x: number = 42; ({ result: x })"
+```
+
+### Important Notes
+
+- TypeScript support uses type-stripping only (no type checking or semantic validation)
+- Valid JavaScript is also valid TypeScript, so you can always use `language: "typescript"` even for plain JS
+- The transpiled output runs in the same ES5.1+ goja sandbox with all existing capabilities
+- Transpilation errors return the `TRANSPILE_ERROR` error code with line/column information
 
 ## Best Practices
 

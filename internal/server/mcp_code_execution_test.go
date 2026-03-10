@@ -88,3 +88,187 @@ func TestCodeExecution_WithMainServer(t *testing.T) {
 	// For now, we skip it as the existing integration tests cover this case
 	t.Skip("Covered by existing integration tests")
 }
+
+// TestCodeExecution_TypeScript tests TypeScript execution via the MCP tool
+func TestCodeExecution_TypeScript(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := zap.NewNop()
+
+	cfg := &config.Config{
+		DataDir:               tmpDir,
+		EnableCodeExecution:   true,
+		CodeExecutionPoolSize: 1,
+		ToolResponseLimit:     10000,
+		Servers:               []*config.ServerConfig{},
+	}
+
+	storageManager, err := storage.NewManager(tmpDir, logger.Sugar())
+	require.NoError(t, err)
+	defer storageManager.Close()
+
+	indexManager, err := index.NewManager(tmpDir, logger)
+	require.NoError(t, err)
+	defer indexManager.Close()
+
+	secretResolver := secret.NewResolver()
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+
+	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
+	require.NoError(t, err)
+	defer cacheManager.Close()
+
+	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
+
+	mcpProxy := server.NewMCPProxyServer(
+		storageManager,
+		indexManager,
+		upstreamManager,
+		cacheManager,
+		truncator,
+		logger,
+		nil,
+		false,
+		cfg,
+	)
+	defer mcpProxy.Close()
+
+	ctx := context.Background()
+	args := map[string]interface{}{
+		"code":     "const x: number = 42; const msg: string = \"hello\"; ({ result: x, message: msg })",
+		"language": "typescript",
+		"input":    map[string]interface{}{},
+		"options": map[string]interface{}{
+			"timeout_ms":     10000,
+			"max_tool_calls": 0,
+		},
+	}
+
+	result, err := mcpProxy.CallBuiltInTool(ctx, "code_execution", args)
+
+	require.NoError(t, err, "CallBuiltInTool should not error")
+	assert.NotNil(t, result, "Result should not be nil")
+	assert.Greater(t, len(result.Content), 0, "Result should have content")
+}
+
+// TestCodeExecution_JavaScriptBackwardCompat tests that JavaScript still works without language param
+func TestCodeExecution_JavaScriptBackwardCompat(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := zap.NewNop()
+
+	cfg := &config.Config{
+		DataDir:               tmpDir,
+		EnableCodeExecution:   true,
+		CodeExecutionPoolSize: 1,
+		ToolResponseLimit:     10000,
+		Servers:               []*config.ServerConfig{},
+	}
+
+	storageManager, err := storage.NewManager(tmpDir, logger.Sugar())
+	require.NoError(t, err)
+	defer storageManager.Close()
+
+	indexManager, err := index.NewManager(tmpDir, logger)
+	require.NoError(t, err)
+	defer indexManager.Close()
+
+	secretResolver := secret.NewResolver()
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+
+	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
+	require.NoError(t, err)
+	defer cacheManager.Close()
+
+	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
+
+	mcpProxy := server.NewMCPProxyServer(
+		storageManager,
+		indexManager,
+		upstreamManager,
+		cacheManager,
+		truncator,
+		logger,
+		nil,
+		false,
+		cfg,
+	)
+	defer mcpProxy.Close()
+
+	ctx := context.Background()
+	// No "language" key - backward compatible
+	args := map[string]interface{}{
+		"code":  "({ result: input.value * 2 })",
+		"input": map[string]interface{}{"value": 21},
+		"options": map[string]interface{}{
+			"timeout_ms":     10000,
+			"max_tool_calls": 0,
+		},
+	}
+
+	result, err := mcpProxy.CallBuiltInTool(ctx, "code_execution", args)
+
+	require.NoError(t, err, "CallBuiltInTool should not error")
+	assert.NotNil(t, result, "Result should not be nil")
+	assert.Greater(t, len(result.Content), 0, "Result should have content")
+}
+
+// TestCodeExecution_InvalidLanguage tests that an invalid language returns an error
+func TestCodeExecution_InvalidLanguage(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := zap.NewNop()
+
+	cfg := &config.Config{
+		DataDir:               tmpDir,
+		EnableCodeExecution:   true,
+		CodeExecutionPoolSize: 1,
+		ToolResponseLimit:     10000,
+		Servers:               []*config.ServerConfig{},
+	}
+
+	storageManager, err := storage.NewManager(tmpDir, logger.Sugar())
+	require.NoError(t, err)
+	defer storageManager.Close()
+
+	indexManager, err := index.NewManager(tmpDir, logger)
+	require.NoError(t, err)
+	defer indexManager.Close()
+
+	secretResolver := secret.NewResolver()
+	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+
+	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
+	require.NoError(t, err)
+	defer cacheManager.Close()
+
+	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
+
+	mcpProxy := server.NewMCPProxyServer(
+		storageManager,
+		indexManager,
+		upstreamManager,
+		cacheManager,
+		truncator,
+		logger,
+		nil,
+		false,
+		cfg,
+	)
+	defer mcpProxy.Close()
+
+	ctx := context.Background()
+	args := map[string]interface{}{
+		"code":     "({ result: 42 })",
+		"language": "python",
+		"input":    map[string]interface{}{},
+		"options": map[string]interface{}{
+			"timeout_ms":     10000,
+			"max_tool_calls": 0,
+		},
+	}
+
+	result, err := mcpProxy.CallBuiltInTool(ctx, "code_execution", args)
+
+	// The tool returns an error in the result content, not as a Go error
+	require.NoError(t, err, "CallBuiltInTool should not return Go error")
+	assert.NotNil(t, result, "Result should not be nil")
+	assert.Greater(t, len(result.Content), 0, "Result should have content")
+}
