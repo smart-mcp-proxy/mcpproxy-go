@@ -80,6 +80,22 @@ export interface Tool {
   annotations?: ToolAnnotation
 }
 
+// Tool approval types (Spec 032)
+export interface ToolApproval {
+  server_name: string
+  tool_name: string
+  status: 'pending' | 'approved' | 'changed'
+  hash: string
+  description: string
+  schema?: string
+  approved_hash?: string
+  current_hash?: string
+  previous_description?: string
+  current_description?: string
+  previous_schema?: string
+  current_schema?: string
+}
+
 // Search result types
 export interface SearchResult {
   tool: {
