@@ -49,14 +49,21 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	globalEnabled := cfg.IsQuarantineEnabled()
 
 	serverSkipped := false
+	serverQuarantined := false
 	for _, sc := range cfg.Servers {
 		if sc.Name == serverName {
 			serverSkipped = sc.IsQuarantineSkipped()
+			serverQuarantined = sc.Quarantined
 			break
 		}
 	}
 
-	enforceQuarantine := globalEnabled && !serverSkipped
+	// Auto-approve new tools when:
+	// - Global quarantine is disabled, OR
+	// - Server has skip_quarantine=true, OR
+	// - Server is NOT quarantined (user trusts this server)
+	// Changed tools are still blocked regardless (rug pull detection).
+	enforceQuarantine := globalEnabled && !serverSkipped && serverQuarantined
 
 	result := &ToolApprovalResult{
 		BlockedTools: make(map[string]bool),
@@ -217,7 +224,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				zap.String("current_hash", currentHash),
 				zap.Bool("quarantine_enforced", enforceQuarantine))
 
-			if enforceQuarantine {
+			// Always block changed tools when quarantine is globally enabled,
+			// even for trusted (non-quarantined) servers.
+			// Rug pull detection is a critical security feature.
+			if globalEnabled {
 				result.BlockedTools[toolName] = true
 				result.ChangedCount++
 			}
