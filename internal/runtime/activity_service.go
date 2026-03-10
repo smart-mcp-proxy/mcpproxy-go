@@ -202,6 +202,9 @@ func (s *ActivityService) handleEvent(evt Event) {
 		s.handleInternalToolCall(evt)
 	case EventTypeActivityConfigChange:
 		s.handleConfigChange(evt)
+	// Spec 032: Tool-level quarantine events
+	case EventTypeActivityToolQuarantineChange:
+		s.handleToolQuarantineChange(evt)
 	default:
 		// Ignore other event types
 	}
@@ -716,6 +719,49 @@ func (s *ActivityService) extractMaxSeverity(detections []security.Detection) st
 	}
 
 	return maxSeverity
+}
+
+// handleToolQuarantineChange persists a tool quarantine state change event (Spec 032).
+func (s *ActivityService) handleToolQuarantineChange(evt Event) {
+	serverName := getStringPayload(evt.Payload, "server_name")
+	toolName := getStringPayload(evt.Payload, "tool_name")
+	action := getStringPayload(evt.Payload, "action")
+	metadataStr := getStringPayload(evt.Payload, "metadata")
+
+	// Parse metadata from JSON string
+	var metadata map[string]interface{}
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &metadata); err != nil {
+			s.logger.Debug("Failed to parse tool quarantine metadata",
+				zap.Error(err))
+			metadata = map[string]interface{}{
+				"action":    action,
+				"tool_name": toolName,
+			}
+		}
+	} else {
+		metadata = map[string]interface{}{
+			"action":    action,
+			"tool_name": toolName,
+		}
+	}
+
+	record := &storage.ActivityRecord{
+		Type:       storage.ActivityTypeToolQuarantineChange,
+		ServerName: serverName,
+		ToolName:   toolName,
+		Status:     action,
+		Metadata:   metadata,
+		Timestamp:  evt.Timestamp,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save tool quarantine activity",
+			zap.Error(err),
+			zap.String("server_name", serverName),
+			zap.String("tool_name", toolName),
+			zap.String("action", action))
+	}
 }
 
 // extractDetectionTypes returns a unique list of detection types from a list of detections.
