@@ -1,10 +1,17 @@
 package server
 
 import (
+	"context"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func TestParseDirectToolName(t *testing.T) {
@@ -213,4 +220,171 @@ func TestGetMCPServerForMode_NilFallback(t *testing.T) {
 	assert.Same(t, mainServer, proxy.GetMCPServerForMode("direct"))
 	assert.Same(t, mainServer, proxy.GetMCPServerForMode("code_execution"))
 	assert.Same(t, mainServer, proxy.GetMCPServerForMode("retrieve_tools"))
+}
+
+func TestDirectModeHandler_PermissionDenied(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	proxy := &MCPProxyServer{
+		logger: logger,
+		config: &config.Config{},
+	}
+
+	// Create a handler for a read-only tool
+	readOnlyHint := true
+	annotations := &config.ToolAnnotations{
+		ReadOnlyHint: &readOnlyHint,
+	}
+	handler := proxy.makeDirectModeHandler("github", "list_repos", annotations)
+
+	// Create a context with agent token that only has write permission (no read)
+	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "test-agent",
+		AllowedServers: []string{"github"},
+		Permissions:    []string{"write"}, // Only write, no read
+	})
+
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "github__list_repos",
+		},
+	}
+
+	result, err := handler(agentCtx, request)
+	require.NoError(t, err) // Handler returns errors as tool results, not Go errors
+	require.NotNil(t, result)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Permission denied")
+}
+
+func TestDirectModeHandler_ServerAccessDenied(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	proxy := &MCPProxyServer{
+		logger: logger,
+		config: &config.Config{},
+	}
+
+	handler := proxy.makeDirectModeHandler("gitlab", "list_repos", nil)
+
+	// Create a context with agent token that only has access to github
+	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "test-agent",
+		AllowedServers: []string{"github"}, // Only github, not gitlab
+		Permissions:    []string{"read"},
+	})
+
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "gitlab__list_repos",
+		},
+	}
+
+	result, err := handler(agentCtx, request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Access denied")
+}
+
+func TestDirectModeHandler_AgentWithCorrectPermissions(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	proxy := &MCPProxyServer{
+		logger: logger,
+		config: &config.Config{},
+	}
+
+	// A read-only tool requires "read" permission
+	readOnlyHint := true
+	annotations := &config.ToolAnnotations{
+		ReadOnlyHint: &readOnlyHint,
+	}
+	handler := proxy.makeDirectModeHandler("github", "list_repos", annotations)
+
+	// Agent with read permission and github access should pass auth checks
+	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "test-agent",
+		AllowedServers: []string{"github"},
+		Permissions:    []string{"read"},
+	})
+
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "github__list_repos",
+		},
+	}
+
+	// Will panic due to nil upstreamManager, but we use recover to verify
+	// that auth checks passed (if it had failed at auth, result would be returned cleanly)
+	func() {
+		defer func() {
+			r := recover()
+			// If we reach here, the auth check passed and we hit the upstream call
+			// which panics due to nil manager. This is expected behavior.
+			assert.NotNil(t, r, "should panic at upstream call, proving auth checks passed")
+		}()
+		handler(agentCtx, request)
+	}()
+}
+
+func TestDirectModeHandler_DestructiveToolNeedsDestructivePermission(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	proxy := &MCPProxyServer{
+		logger: logger,
+		config: &config.Config{},
+	}
+
+	destructiveHint := true
+	annotations := &config.ToolAnnotations{
+		DestructiveHint: &destructiveHint,
+	}
+	handler := proxy.makeDirectModeHandler("github", "delete_repo", annotations)
+
+	// Agent with only read+write but no destructive permission
+	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "test-agent",
+		AllowedServers: []string{"github"},
+		Permissions:    []string{"read", "write"},
+	})
+
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "github__delete_repo",
+		},
+	}
+
+	result, err := handler(agentCtx, request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Permission denied")
+	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "destructive")
+}
+
+func TestDirectModeHandler_NoAuthContext(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	proxy := &MCPProxyServer{
+		logger: logger,
+		config: &config.Config{},
+	}
+
+	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+
+	// No auth context in context - should pass auth checks (backward compatible)
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "github__list_repos",
+		},
+	}
+
+	// Will panic due to nil upstreamManager, proving auth checks passed
+	func() {
+		defer func() {
+			r := recover()
+			assert.NotNil(t, r, "should panic at upstream call, proving auth checks passed")
+		}()
+		handler(context.Background(), request)
+	}()
 }
