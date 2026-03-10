@@ -885,6 +885,9 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Enrich with quarantine stats
+		s.enrichServersWithQuarantineStats(serverValues)
+
 		// Dereference stats pointer
 		var statsValue contracts.ServerStats
 		if stats != nil {
@@ -909,6 +912,10 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 
 	// Convert to typed servers
 	servers := contracts.ConvertGenericServersToTyped(genericServers)
+
+	// Enrich with quarantine stats
+	s.enrichServersWithQuarantineStats(servers)
+
 	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
 
 	response := contracts.GetServersResponse{
@@ -917,6 +924,36 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// enrichServersWithQuarantineStats adds quarantine metrics (pending/changed tool counts)
+// to each server in the list. This enables the frontend to show quarantine badges.
+func (s *Server) enrichServersWithQuarantineStats(servers []contracts.Server) {
+	for i := range servers {
+		records, err := s.controller.ListToolApprovals(servers[i].Name)
+		if err != nil {
+			s.logger.Debugw("Failed to get tool approvals for server",
+				"server", servers[i].Name, "error", err)
+			continue
+		}
+
+		var pending, changed int
+		for _, rec := range records {
+			switch rec.Status {
+			case storage.ToolApprovalStatusPending:
+				pending++
+			case storage.ToolApprovalStatusChanged:
+				changed++
+			}
+		}
+
+		if pending > 0 || changed > 0 {
+			servers[i].Quarantine = &contracts.QuarantineStats{
+				PendingCount: pending,
+				ChangedCount: changed,
+			}
+		}
+	}
 }
 
 // AddServerRequest represents a request to add a new server
