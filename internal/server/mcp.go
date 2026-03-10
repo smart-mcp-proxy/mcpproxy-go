@@ -2246,12 +2246,13 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 			"hash":        r.CurrentHash,
 			"description": r.CurrentDescription,
 		}
-		if r.Status == "changed" {
+		switch r.Status {
+		case "changed":
 			tool["previous_description"] = r.PreviousDescription
 			changedCount++
-		} else if r.Status == "pending" {
+		case "pending":
 			pendingCount++
-		} else {
+		default:
 			approvedCount++
 		}
 		toolList[i] = tool
