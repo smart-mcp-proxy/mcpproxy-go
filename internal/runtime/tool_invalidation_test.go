@@ -33,6 +33,7 @@ func TestToolCacheInvalidation_ToolReplacement(t *testing.T) {
 		Listen:            "127.0.0.1:0",
 		ToolResponseLimit: 0,
 		Servers:           []*config.ServerConfig{},
+		QuarantineEnabled: boolP(false), // Disable quarantine for index invalidation tests
 	}
 
 	rt, err := New(cfg, "", zap.NewNop())
@@ -124,6 +125,7 @@ func TestToolCacheInvalidation_ToolAddition(t *testing.T) {
 		Listen:            "127.0.0.1:0",
 		ToolResponseLimit: 0,
 		Servers:           []*config.ServerConfig{},
+		QuarantineEnabled: boolP(false), // Disable quarantine for index invalidation tests
 	}
 
 	rt, err := New(cfg, "", zap.NewNop())
@@ -174,6 +176,7 @@ func TestToolCacheInvalidation_ToolRemoval(t *testing.T) {
 		Listen:            "127.0.0.1:0",
 		ToolResponseLimit: 0,
 		Servers:           []*config.ServerConfig{},
+		QuarantineEnabled: boolP(false), // Disable quarantine for index invalidation tests
 	}
 
 	rt, err := New(cfg, "", zap.NewNop())
@@ -224,6 +227,7 @@ func TestToolCacheInvalidation_ToolModification(t *testing.T) {
 		Listen:            "127.0.0.1:0",
 		ToolResponseLimit: 0,
 		Servers:           []*config.ServerConfig{},
+		QuarantineEnabled: boolP(false), // Disable quarantine for index invalidation tests
 	}
 
 	rt, err := New(cfg, "", zap.NewNop())
@@ -281,6 +285,7 @@ func TestToolCacheInvalidation_DescriptionOnlyChange(t *testing.T) {
 		Listen:            "127.0.0.1:0",
 		ToolResponseLimit: 0,
 		Servers:           []*config.ServerConfig{},
+		QuarantineEnabled: boolP(false), // Disable quarantine for index invalidation tests
 	}
 
 	rt, err := New(cfg, "", zap.NewNop())
@@ -339,6 +344,7 @@ func TestToolCacheInvalidation_MultipleServers(t *testing.T) {
 		Listen:            "127.0.0.1:0",
 		ToolResponseLimit: 0,
 		Servers:           []*config.ServerConfig{},
+		QuarantineEnabled: boolP(false), // Disable quarantine for index invalidation tests
 	}
 
 	rt, err := New(cfg, "", zap.NewNop())
@@ -398,6 +404,7 @@ func TestToolCacheInvalidation_DisableServerRemovesTools(t *testing.T) {
 		Listen:            "127.0.0.1:0",
 		ToolResponseLimit: 0,
 		Servers:           []*config.ServerConfig{},
+		QuarantineEnabled: boolP(false), // Disable quarantine for index invalidation tests
 	}
 
 	rt, err := New(cfg, "", zap.NewNop())
@@ -446,6 +453,7 @@ func TestToolCacheInvalidation_OrphanCleanup(t *testing.T) {
 		Listen:            "127.0.0.1:0",
 		ToolResponseLimit: 0,
 		Servers:           []*config.ServerConfig{},
+		QuarantineEnabled: boolP(false), // Disable quarantine for index invalidation tests
 	}
 
 	rt, err := New(cfg, "", zap.NewNop())
@@ -508,4 +516,3 @@ func TestToolCacheInvalidation_OrphanCleanup(t *testing.T) {
 	assert.Len(t, activeIndexed, 1)
 	assert.Equal(t, "active_tool", extractToolName(activeIndexed[0].Name))
 }
-
