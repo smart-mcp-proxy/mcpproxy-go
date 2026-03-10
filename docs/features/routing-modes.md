@@ -52,36 +52,51 @@ This means you can point different AI clients at different endpoints. For exampl
 
 ### retrieve_tools (Default)
 
-The default mode uses BM25 full-text search to help AI agents discover relevant tools without exposing the entire tool catalog. This is the most token-efficient mode.
+The default mode uses BM25 full-text search to help AI agents discover relevant tools without exposing the entire tool catalog. This approach — sometimes called "lazy tool loading" or "tool search" — is used by Anthropic's own MCP implementation and is the recommended pattern for large tool sets.
+
+**Endpoint:** `/mcp/call`
 
 **Tools exposed:**
-- `retrieve_tools` -- Search for tools by natural language query
-- `call_tool_read` -- Execute read-only tool calls
-- `call_tool_write` -- Execute write tool calls
-- `call_tool_destructive` -- Execute destructive tool calls
-- `upstream_servers` -- Manage upstream servers (if management enabled)
-- `code_execution` -- JavaScript orchestration (if enabled)
+- `retrieve_tools` — Search for tools by natural language query
+- `call_tool_read` — Execute read-only tool calls
+- `call_tool_write` — Execute write tool calls
+- `call_tool_destructive` — Execute destructive tool calls
+- `read_cache` — Access paginated responses
 
 **How it works:**
 1. AI agent calls `retrieve_tools` with a natural language query
-2. MCPProxy returns matching tools ranked by BM25 relevance
-3. AI agent calls the appropriate `call_tool_*` variant with the tool name
+2. MCPProxy returns matching tools ranked by BM25 relevance, with `call_with` recommendations
+3. AI agent calls the appropriate `call_tool_*` variant with the exact tool name from results
+
+**Pros:**
+- Massive token savings: only matched tools are sent to the model, not the full catalog
+- Scales to hundreds of tools across many servers without context window bloat
+- Intent-based permission control (read/write/destructive variants) enables granular IDE approval flows
+- Activity logging captures operation type and intent metadata for auditing
+
+**Cons:**
+- Two-step workflow (search then call) adds one round-trip compared to direct mode
+- BM25 search quality depends on tool descriptions — poorly described tools may not surface
+- The AI agent must learn the retrieve-then-call pattern (most modern models handle this well)
 
 **When to use:**
 - You have many upstream servers with dozens or hundreds of tools
-- Token usage is a concern (only tool metadata for matched tools is sent)
-- You want intent-based permission control (read/write/destructive variants)
+- Token usage is a concern (common with paid API usage)
+- You want intent-based permission control in IDE auto-approve settings
+- Production deployments where audit trails matter
 
 ### direct
 
-Direct mode exposes every upstream tool directly to the AI agent. Each tool is named `serverName__toolName` (double underscore separator).
+Direct mode exposes every upstream tool directly to the AI agent. Each tool appears in the standard MCP `tools/list` with a `serverName__toolName` name. This is the simplest mode and the closest to how individual MCP servers work natively.
+
+**Endpoint:** `/mcp/all`
 
 **Tools exposed:**
 - Every tool from every connected, enabled, non-quarantined upstream server
 - Named as `serverName__toolName` (e.g., `github__create_issue`, `filesystem__read_file`)
 
 **How it works:**
-1. AI agent sees all available tools in the tools list
+1. AI agent sees all available tools in `tools/list`
 2. AI agent calls tools directly by their `serverName__toolName` name
 3. MCPProxy routes the call to the correct upstream server
 
@@ -94,30 +109,73 @@ Direct mode exposes every upstream tool directly to the AI agent. Each tool is n
 - Agent tokens with server restrictions are enforced (access denied if token lacks server access)
 - Permission levels are derived from tool annotations (read-only, destructive, etc.)
 
+**Pros:**
+- Zero learning curve: tools work exactly like native MCP tools
+- Single round-trip: no search step needed, call any tool directly
+- Maximum compatibility: works with any MCP client without special handling
+- Tool annotations (readOnlyHint, destructiveHint) are preserved from upstream
+
+**Cons:**
+- High token cost: all tool definitions are sent in every request context
+- Does not scale well beyond ~50 tools (context window fills up, model accuracy degrades)
+- No intent-based permission tiers (the model just calls tools)
+- All tools visible upfront increases attack surface for prompt injection
+
 **When to use:**
-- You have a small number of upstream servers (fewer than 50 total tools)
-- You want maximum simplicity and compatibility
-- AI clients that work better with a flat tool list
+- Small setups with fewer than 50 total tools
+- Quick prototyping and testing
+- AI clients that don't support the retrieve-then-call pattern
+- CI/CD agents that know exactly which tools they need
 
 ### code_execution
 
-Code execution mode is designed for multi-step orchestration workflows. It exposes the `code_execution` tool with an enhanced description that includes a catalog of all available upstream tools.
+Code execution mode is designed for multi-step orchestration workflows. Instead of making separate tool calls for each step, the AI agent writes JavaScript or TypeScript code that chains multiple tool calls together in a single request. This is inspired by patterns from OpenAI's code interpreter and similar "tool-as-code" approaches.
+
+**Endpoint:** `/mcp/code`
 
 **Tools exposed:**
-- `code_execution` -- Execute JavaScript/TypeScript that orchestrates upstream tools
-- `retrieve_tools` -- Search for tools (useful for discovery before writing code)
+- `code_execution` — Execute JavaScript/TypeScript that orchestrates upstream tools (includes a catalog of all available tools in the description)
+- `retrieve_tools` — Search for tools (instructs to use `code_execution`, not `call_tool_*`)
 
 **How it works:**
 1. AI agent sees the `code_execution` tool with a listing of all available upstream tools
 2. AI agent writes JavaScript/TypeScript code that calls `call_tool(serverName, toolName, args)`
-3. MCPProxy executes the code in a sandboxed VM, routing tool calls to upstream servers
+3. MCPProxy executes the code in a sandboxed ES2020+ VM, routing tool calls to upstream servers
+4. Results are returned as a single response
+
+**Pros:**
+- Minimal round-trips: complex multi-step workflows execute in one request
+- Full programming power: conditionals, loops, error handling, data transformation
+- TypeScript support with type safety (auto-transpiled via esbuild)
+- Sandboxed execution: no filesystem or network access, timeout enforcement
+- Tool catalog in description means no separate search step needed
+
+**Cons:**
+- Requires the AI model to write correct JavaScript/TypeScript code
+- Debugging is harder: errors come from inside the sandbox, not from MCP tool calls
+- Higher latency per request (VM startup + multiple sequential tool calls)
+- Must be explicitly enabled (`"enable_code_execution": true`)
+- Not all AI models are equally good at writing code for tool orchestration
 
 **When to use:**
-- Workflows that require chaining 2+ tool calls together
-- You want to minimize model round-trips
-- Complex conditional logic or data transformation between tool calls
+- Workflows that chain 2+ tool calls with data dependencies between them
+- Batch operations (e.g., "for each repo, check CI status and create issue if failing")
+- Complex conditional logic that would require many round-trips in other modes
+- Data transformation pipelines (fetch from one tool, transform, send to another)
 
 **Note:** Code execution must be enabled in config (`"enable_code_execution": true`). If disabled, the `code_execution` tool appears but returns an error message directing the user to enable it.
+
+## Choosing the Right Mode
+
+| Factor | retrieve_tools | direct | code_execution |
+|--------|---------------|--------|----------------|
+| **Token cost** | Low (only matched tools) | High (all tools) | Medium (catalog in description) |
+| **Round-trips per task** | 2 (search + call) | 1 (direct call) | 1 (code handles all) |
+| **Max practical tools** | 500+ | ~50 | 500+ |
+| **Setup complexity** | None (default) | None | Requires enablement |
+| **Model requirements** | Any modern LLM | Any LLM | Code-capable LLM |
+| **Audit granularity** | High (intent metadata) | Medium (annotations) | Medium (code logged) |
+| **IDE auto-approve** | Per-variant rules | Per-tool rules | Single rule |
 
 ## Viewing Current Routing Mode
 

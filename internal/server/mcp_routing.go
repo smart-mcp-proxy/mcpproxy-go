@@ -285,6 +285,9 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		Handler: p.handleRetrieveTools,
 	})
 
+	// Add management tools (upstream_servers, quarantine, registries)
+	tools = append(tools, p.buildManagementTools()...)
+
 	p.logger.Info("built code execution mode tools",
 		zap.Int("tool_count", len(tools)))
 
@@ -421,6 +424,9 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		Handler: p.handleReadCache,
 	})
 
+	// Add management tools (upstream_servers, quarantine, registries)
+	tools = append(tools, p.buildManagementTools()...)
+
 	p.logger.Info("built call tool mode tools",
 		zap.Int("tool_count", len(tools)))
 
@@ -466,7 +472,7 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// Create direct mode server
 	p.directServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
-		"1.0.0",
+		mcpServerVersion(),
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
 	)
@@ -474,7 +480,7 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// Create code execution mode server
 	p.codeExecServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
-		"1.0.0",
+		mcpServerVersion(),
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
 	)
@@ -482,7 +488,7 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// Create call tool mode server (/mcp/call)
 	p.callToolServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
-		"1.0.0",
+		mcpServerVersion(),
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
 	)
