@@ -174,6 +174,8 @@ go test -race ./internal/... -v     # Race detection
 mcpproxy upstream list              # List all servers
 mcpproxy upstream logs <name>       # View logs (--tail, --follow)
 mcpproxy upstream restart <name>    # Restart server (supports --all)
+mcpproxy upstream inspect <name>    # Inspect tool approval status (Spec 032)
+mcpproxy upstream approve <name>    # Approve pending/changed tools (Spec 032)
 mcpproxy doctor                     # Run health checks
 ```
 
@@ -300,6 +302,7 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 - **`call_tool_destructive`** - Proxy destructive tool calls to upstream servers (Spec 018)
 - **`code_execution`** - Execute JavaScript to orchestrate multiple tools (disabled by default)
 - **`upstream_servers`** - CRUD operations for server management
+- **`quarantine_security`** - Security quarantine management: list/inspect quarantined servers, inspect/approve/approve-all tools (Spec 032)
 
 **Tool Format**: `<serverName>:<toolName>` (e.g., `github:create_issue`)
 
@@ -333,6 +336,9 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `GET /api/v1/tokens/{name}` | Get agent token details |
 | `DELETE /api/v1/tokens/{name}` | Revoke agent token |
 | `POST /api/v1/tokens/{name}/regenerate` | Regenerate agent token secret |
+| `POST /api/v1/servers/{id}/tools/approve` | Approve pending/changed tools (Spec 032) |
+| `GET /api/v1/servers/{id}/tools/{tool}/diff` | View tool description/schema changes (Spec 032) |
+| `GET /api/v1/servers/{id}/tools/export` | Export tool approval records (Spec 032) |
 | `GET /events` | SSE stream for live updates |
 
 **Authentication**: Use `X-API-Key` header or `?apikey=` query parameter.
@@ -439,6 +445,7 @@ See `docs/code_execution/` for complete guides:
 - **`require_mcp_auth`**: When enabled, `/mcp` endpoint rejects unauthenticated requests (default: false for backward compatibility)
 - **Quarantine system**: New servers quarantined until manually approved
 - **Tool Poisoning Attack (TPA) protection**: Automatic detection of malicious descriptions
+- **Tool-level quarantine (Spec 032)**: SHA-256 hash-based change detection for individual tool descriptions/schemas. New tools start as "pending", changed tools marked as "changed" (rug pull detection). Configurable via `quarantine_enabled` (global) and `skip_quarantine` (per-server).
 
 See [docs/features/agent-tokens.md](docs/features/agent-tokens.md) and [docs/features/security-quarantine.md](docs/features/security-quarantine.md) for details.
 
@@ -561,6 +568,17 @@ Exponential backoff, separate contexts for app vs server lifecycle, state machin
 
 ### Tool Indexing
 Full rebuild on server changes, hash-based change detection, background indexing.
+
+### Tool-Level Quarantine (Spec 032)
+SHA-256 hash-based approval system for individual tools. Key files:
+- `internal/storage/models.go` - `ToolApprovalRecord` model and `ToolApprovalBucket`
+- `internal/storage/bbolt.go` - CRUD operations for tool approvals
+- `internal/runtime/tool_quarantine.go` - Hash calculation, approval checking, blocking logic
+- `internal/runtime/lifecycle.go` - Integration in `applyDifferentialToolUpdate()`
+- `internal/server/mcp.go` - Tool-level blocking in `handleCallToolVariant()` and MCP tool operations
+- `internal/httpapi/server.go` - REST API endpoints for inspection/approval
+- `internal/config/config.go` - `QuarantineEnabled` (global) and `SkipQuarantine` (per-server)
+- `frontend/src/views/ServerDetail.vue` - Web UI quarantine panel
 
 ### Signal Handling
 Graceful shutdown, context cancellation, Docker cleanup, double shutdown protection.
