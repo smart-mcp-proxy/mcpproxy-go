@@ -132,6 +132,12 @@ type Config struct {
 	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
 	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
 
+	// Tool-level quarantine settings (Spec 032)
+	// QuarantineEnabled controls whether tool-level quarantine is active.
+	// When nil (default), quarantine is enabled (secure by default).
+	// Set to explicit false to disable tool-level quarantine.
+	QuarantineEnabled *bool `json:"quarantine_enabled,omitempty" mapstructure:"quarantine-enabled"`
+
 	// Server edition multi-user configuration (only meaningful with -tags server)
 	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams" swaggerignore:"true"`
 }
@@ -167,21 +173,22 @@ type LogConfig struct {
 
 // ServerConfig represents upstream MCP server configuration
 type ServerConfig struct {
-	Name        string            `json:"name,omitempty" mapstructure:"name"`
-	URL         string            `json:"url,omitempty" mapstructure:"url"`
-	Protocol    string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
-	Command     string            `json:"command,omitempty" mapstructure:"command"`
-	Args        []string          `json:"args,omitempty" mapstructure:"args"`
-	WorkingDir  string            `json:"working_dir,omitempty" mapstructure:"working_dir"` // Working directory for stdio servers
-	Env         map[string]string `json:"env,omitempty" mapstructure:"env"`
-	Headers     map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
-	OAuth       *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
-	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
-	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
-	Shared      bool              `json:"shared,omitempty" mapstructure:"shared"` // Server edition: shared with all users
-	Created     time.Time         `json:"created" mapstructure:"created"`
-	Updated     time.Time         `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation   *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
+	Name           string            `json:"name,omitempty" mapstructure:"name"`
+	URL            string            `json:"url,omitempty" mapstructure:"url"`
+	Protocol       string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
+	Command        string            `json:"command,omitempty" mapstructure:"command"`
+	Args           []string          `json:"args,omitempty" mapstructure:"args"`
+	WorkingDir     string            `json:"working_dir,omitempty" mapstructure:"working_dir"` // Working directory for stdio servers
+	Env            map[string]string `json:"env,omitempty" mapstructure:"env"`
+	Headers        map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
+	OAuth          *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
+	Enabled        bool              `json:"enabled" mapstructure:"enabled"`
+	Quarantined    bool              `json:"quarantined" mapstructure:"quarantined"`                   // Security quarantine status
+	SkipQuarantine bool              `json:"skip_quarantine,omitempty" mapstructure:"skip-quarantine"` // Skip tool-level quarantine for this server
+	Shared         bool              `json:"shared,omitempty" mapstructure:"shared"`                   // Server edition: shared with all users
+	Created        time.Time         `json:"created" mapstructure:"created"`
+	Updated        time.Time         `json:"updated,omitempty" mapstructure:"updated"`
+	Isolation      *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -748,6 +755,20 @@ func (s APIKeySource) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// IsQuarantineEnabled returns whether tool-level quarantine is enabled.
+// Defaults to true (secure by default) when not explicitly set.
+func (c *Config) IsQuarantineEnabled() bool {
+	if c.QuarantineEnabled == nil {
+		return true
+	}
+	return *c.QuarantineEnabled
+}
+
+// IsQuarantineSkipped returns whether this server should skip tool-level quarantine.
+func (sc *ServerConfig) IsQuarantineSkipped() bool {
+	return sc.SkipQuarantine
 }
 
 // EnsureAPIKey ensures the API key is set, generating one if needed

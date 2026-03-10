@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -276,6 +276,25 @@ class APIService {
 
   async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
     return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
+  }
+
+  // Tool-level quarantine (Spec 032)
+  async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number }>> {
+    return this.request<{ tools: ToolApproval[], count: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/export`)
+  }
+
+  async getToolDiff(serverName: string, toolName: string): Promise<APIResponse<ToolApproval>> {
+    return this.request<ToolApproval>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/diff`)
+  }
+
+  async approveTools(serverName: string, tools?: string[]): Promise<APIResponse<{ approved: number }>> {
+    const body = tools && tools.length > 0
+      ? { tools }
+      : { approve_all: true }
+    return this.request<{ approved: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/approve`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
   }
 
   async getServerLogs(serverName: string, tail?: number): Promise<APIResponse<{ logs: string[] }>> {

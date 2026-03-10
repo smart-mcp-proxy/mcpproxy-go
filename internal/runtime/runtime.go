@@ -73,10 +73,10 @@ type Runtime struct {
 	truncator         *truncate.Truncator
 	secretResolver    *secret.Resolver
 	tokenizer         tokens.Tokenizer
-	refreshManager    *oauth.RefreshManager    // Proactive OAuth token refresh
-	updateChecker     *updatecheck.Checker     // Background version checking
-	managementService interface{}              // Initialized later to avoid import cycle
-	activityService   *ActivityService         // Activity logging service
+	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
+	updateChecker     *updatecheck.Checker  // Background version checking
+	managementService interface{}           // Initialized later to avoid import cycle
+	activityService   *ActivityService      // Activity logging service
 
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
@@ -1628,45 +1628,45 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					zap.Error(err))
 
 				if err == nil && token != nil {
-				authenticated = true
-				tokenExpiresAt = token.ExpiresAt
-				hasRefreshToken = token.RefreshToken != ""
-				r.logger.Info("OAuth token found for server",
-					zap.String("server", serverStatus.Name),
-					zap.String("server_key", serverKey),
-					zap.Time("expires_at", token.ExpiresAt),
-					zap.Bool("has_refresh_token", hasRefreshToken))
+					authenticated = true
+					tokenExpiresAt = token.ExpiresAt
+					hasRefreshToken = token.RefreshToken != ""
+					r.logger.Info("OAuth token found for server",
+						zap.String("server", serverStatus.Name),
+						zap.String("server_key", serverKey),
+						zap.Time("expires_at", token.ExpiresAt),
+						zap.Bool("has_refresh_token", hasRefreshToken))
 
-				// For autodiscovery servers (no explicit OAuth config), create minimal oauthConfig
-				if oauthConfig == nil {
-					oauthConfig = map[string]interface{}{
-						"autodiscovery": true,
+					// For autodiscovery servers (no explicit OAuth config), create minimal oauthConfig
+					if oauthConfig == nil {
+						oauthConfig = map[string]interface{}{
+							"autodiscovery": true,
+						}
 					}
-				}
 
-				// Add token expiration info to oauth config
-				if !token.ExpiresAt.IsZero() {
-					oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
-					// Check if token is expired
-					isValid := time.Now().Before(token.ExpiresAt)
-					oauthConfig["token_valid"] = isValid
-					if isValid {
-						oauthStatus = string(oauth.OAuthStatusAuthenticated)
+					// Add token expiration info to oauth config
+					if !token.ExpiresAt.IsZero() {
+						oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
+						// Check if token is expired
+						isValid := time.Now().Before(token.ExpiresAt)
+						oauthConfig["token_valid"] = isValid
+						if isValid {
+							oauthStatus = string(oauth.OAuthStatusAuthenticated)
+						} else {
+							oauthStatus = string(oauth.OAuthStatusExpired)
+						}
 					} else {
-						oauthStatus = string(oauth.OAuthStatusExpired)
+						// No expiration means token is valid indefinitely
+						oauthConfig["token_valid"] = true
+						oauthStatus = string(oauth.OAuthStatusAuthenticated)
 					}
 				} else {
-					// No expiration means token is valid indefinitely
-					oauthConfig["token_valid"] = true
-					oauthStatus = string(oauth.OAuthStatusAuthenticated)
-				}
-			} else {
-				// No token found - check if OAuth config exists to determine status
-				if oauthConfig != nil {
-					oauthStatus = string(oauth.OAuthStatusNone)
+					// No token found - check if OAuth config exists to determine status
+					if oauthConfig != nil {
+						oauthStatus = string(oauth.OAuthStatusNone)
+					}
 				}
 			}
-		}
 		}
 
 		// Check for OAuth error in last_error - this indicates OAuth autodiscovery detected
@@ -2029,4 +2029,20 @@ func (r *Runtime) StreamActivities(filter storage.ActivityFilter) <-chan *storag
 		return ch
 	}
 	return r.storageManager.StreamActivities(filter)
+}
+
+// ListToolApprovals returns all tool approval records for a server (Spec 032).
+func (r *Runtime) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	if r.storageManager == nil {
+		return nil, nil
+	}
+	return r.storageManager.ListToolApprovals(serverName)
+}
+
+// GetToolApproval returns a single tool approval record (Spec 032).
+func (r *Runtime) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
+	if r.storageManager == nil {
+		return nil, fmt.Errorf("storage not available")
+	}
+	return r.storageManager.GetToolApproval(serverName, toolName)
 }

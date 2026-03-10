@@ -29,6 +29,8 @@ const (
 	ActivityTypeInternalToolCall ActivityType = "internal_tool_call"
 	// ActivityTypeConfigChange represents configuration changes like server add/remove/update (Spec 024)
 	ActivityTypeConfigChange ActivityType = "config_change"
+	// ActivityTypeToolQuarantineChange represents a tool-level quarantine state change (Spec 032)
+	ActivityTypeToolQuarantineChange ActivityType = "tool_quarantine_change"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -41,6 +43,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeSystemStop),
 	string(ActivityTypeInternalToolCall),
 	string(ActivityTypeConfigChange),
+	string(ActivityTypeToolQuarantineChange),
 }
 
 // ActivitySource indicates how the activity was triggered

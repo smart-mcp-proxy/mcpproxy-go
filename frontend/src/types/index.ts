@@ -1,5 +1,5 @@
 export * from './api'
-export type { ImportResponse, ImportSummary, ImportedServer, SkippedServer, FailedServer, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse } from './api'
+export type { ImportResponse, ImportSummary, ImportedServer, SkippedServer, FailedServer, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, ToolApproval } from './api'
 // Selectively export types from contracts.ts that don't conflict with api.ts
 export type {
   UpdateInfo,

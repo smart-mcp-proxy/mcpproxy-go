@@ -948,3 +948,115 @@ func TestRoutingModeConstants(t *testing.T) {
 	assert.Equal(t, "direct", RoutingModeDirect)
 	assert.Equal(t, "code_execution", RoutingModeCodeExecution)
 }
+
+// Tests for tool-level quarantine config (Spec 032)
+
+func TestConfig_IsQuarantineEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   Config
+		expected bool
+	}{
+		{
+			name:     "nil pointer defaults to true (secure by default)",
+			config:   Config{QuarantineEnabled: nil},
+			expected: true,
+		},
+		{
+			name:     "explicit true",
+			config:   Config{QuarantineEnabled: boolPtr(true)},
+			expected: true,
+		},
+		{
+			name:     "explicit false",
+			config:   Config{QuarantineEnabled: boolPtr(false)},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.config.IsQuarantineEnabled())
+		})
+	}
+}
+
+func TestServerConfig_IsQuarantineSkipped(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   ServerConfig
+		expected bool
+	}{
+		{
+			name:     "default false",
+			config:   ServerConfig{},
+			expected: false,
+		},
+		{
+			name:     "explicit true",
+			config:   ServerConfig{SkipQuarantine: true},
+			expected: true,
+		},
+		{
+			name:     "explicit false",
+			config:   ServerConfig{SkipQuarantine: false},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.config.IsQuarantineSkipped())
+		})
+	}
+}
+
+func TestConfig_QuarantineEnabled_JSONSerialization(t *testing.T) {
+	// Test 1: quarantine_enabled omitted (nil) defaults to true
+	cfg1JSON := `{"listen": "127.0.0.1:8080"}`
+	var cfg1 Config
+	err := json.Unmarshal([]byte(cfg1JSON), &cfg1)
+	require.NoError(t, err)
+	assert.Nil(t, cfg1.QuarantineEnabled)
+	assert.True(t, cfg1.IsQuarantineEnabled())
+
+	// Test 2: quarantine_enabled explicitly false
+	cfg2JSON := `{"listen": "127.0.0.1:8080", "quarantine_enabled": false}`
+	var cfg2 Config
+	err = json.Unmarshal([]byte(cfg2JSON), &cfg2)
+	require.NoError(t, err)
+	require.NotNil(t, cfg2.QuarantineEnabled)
+	assert.False(t, *cfg2.QuarantineEnabled)
+	assert.False(t, cfg2.IsQuarantineEnabled())
+
+	// Test 3: quarantine_enabled explicitly true
+	cfg3JSON := `{"listen": "127.0.0.1:8080", "quarantine_enabled": true}`
+	var cfg3 Config
+	err = json.Unmarshal([]byte(cfg3JSON), &cfg3)
+	require.NoError(t, err)
+	require.NotNil(t, cfg3.QuarantineEnabled)
+	assert.True(t, *cfg3.QuarantineEnabled)
+	assert.True(t, cfg3.IsQuarantineEnabled())
+}
+
+func TestServerConfig_SkipQuarantine_JSONSerialization(t *testing.T) {
+	// Test: skip_quarantine in server config
+	serverJSON := `{"name": "test", "skip_quarantine": true, "enabled": true}`
+	var sc ServerConfig
+	err := json.Unmarshal([]byte(serverJSON), &sc)
+	require.NoError(t, err)
+	assert.True(t, sc.SkipQuarantine)
+	assert.True(t, sc.IsQuarantineSkipped())
+
+	// Test: skip_quarantine omitted defaults to false
+	serverJSON2 := `{"name": "test", "enabled": true}`
+	var sc2 ServerConfig
+	err = json.Unmarshal([]byte(serverJSON2), &sc2)
+	require.NoError(t, err)
+	assert.False(t, sc2.SkipQuarantine)
+	assert.False(t, sc2.IsQuarantineSkipped())
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
