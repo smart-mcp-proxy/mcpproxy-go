@@ -89,8 +89,6 @@ components:
           type: boolean
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
-        teams:
-          $ref: '#/components/schemas/config.TeamsConfig'
         tls:
           $ref: '#/components/schemas/config.TLSConfig'
         tokenizer:
@@ -451,10 +449,6 @@ components:
         require_client_cert:
           description: Enable mTLS
           type: boolean
-      type: object
-    config.TeamsConfig:
-      description: Teams edition multi-user configuration (only meaningful with -tags
-        teams)
       type: object
     config.TokenizerConfig:
       description: Tokenizer configuration for token counting

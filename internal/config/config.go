@@ -124,7 +124,7 @@ type Config struct {
 	SensitiveDataDetection *SensitiveDataDetectionConfig `json:"sensitive_data_detection,omitempty" mapstructure:"sensitive-data-detection"`
 
 	// Teams edition multi-user configuration (only meaningful with -tags teams)
-	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams"`
+	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams" swaggerignore:"true"`
 }
 
 // TLSConfig represents TLS configuration
