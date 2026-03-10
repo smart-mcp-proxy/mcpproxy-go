@@ -427,7 +427,7 @@ Add to your `mcp_config.json`:
   "docker_isolation": {
     "enabled": true,
     "memory_limit": "512m",
-    "cpu_limit": "1.0", 
+    "cpu_limit": "1.0",
     "timeout": "60s",
     "network_mode": "bridge",
     "default_images": {
@@ -450,7 +450,7 @@ Add to your `mcp_config.json`:
       // Docker isolation applied automatically
     },
     {
-      "name": "custom-isolation-server", 
+      "name": "custom-isolation-server",
       "command": "python",
       "args": ["-m", "my_server"],
       "isolation": {
@@ -698,7 +698,7 @@ Solve project context issues by specifying working directories for stdio MCP ser
 
 **Benefits**:
 - **Project isolation**: File-based servers operate in correct directory context
-- **Multiple projects**: Same MCP server type for different projects  
+- **Multiple projects**: Same MCP server type for different projects
 - **Context separation**: Work and personal project isolation
 
 **Tool-based Management**:
@@ -810,6 +810,40 @@ curl -k https://localhost:8080/api/v1/status
 * Website: <https://mcpproxy.app>
 * Releases: <https://github.com/smart-mcp-proxy/mcpproxy-go/releases>
 
-## Contributing 🤝
+## Contributing
 
-We welcome issues, feature ideas, and PRs! Fork the repo, create a feature branch, and open a pull request. See `CONTRIBUTING.md` (coming soon) for guidelines. 
+We welcome issues, feature ideas, and PRs!
+
+### Development Setup
+
+```bash
+make dev-setup                # Install swag, frontend deps, Playwright
+brew install prek             # Install pre-commit hook runner (or: uv tool install prek)
+prek install                  # Install pre-commit hooks
+prek install --hook-type pre-push  # Install pre-push hooks
+```
+
+### Pre-commit Hooks
+
+We use [prek](https://github.com/j178/prek) to catch issues before they reach CI:
+
+| Hook | Stage | What it does |
+|------|-------|-------------|
+| `gofmt` | pre-commit | Auto-formats staged Go files |
+| `trailing-whitespace` | pre-commit | Removes trailing whitespace |
+| `end-of-file-fixer` | pre-commit | Ensures files end with newline |
+| `check-merge-conflict` | pre-commit | Detects merge conflict markers |
+| `swagger-verify` | pre-push | Fails if OpenAPI spec is out of date |
+| `go-build` | pre-push | Verifies the project compiles |
+
+Run hooks manually: `prek run --all-files`
+
+### Build & Test
+
+```bash
+make build          # Build frontend + backend
+make swagger        # Regenerate OpenAPI spec
+make test           # Unit tests
+make test-e2e       # E2E tests
+make lint           # Run linters
+```
