@@ -19,7 +19,7 @@
 
 **Purpose**: Establish a green baseline before any changes. All tests must pass before implementation begins.
 
-- [ ] T001 Run baseline tests and confirm green: `go test ./internal/secret/... ./internal/upstream/core/... ./internal/config/... -race -v`
+- [x] T001 Run baseline tests and confirm green: `go test ./internal/secret/... ./internal/upstream/core/... ./internal/config/... -race -v`
 
 ---
 
@@ -31,11 +31,11 @@
 
 > **TDD**: Write tests first (T002), confirm they FAIL, then implement (T003–T004).
 
-- [ ] T002 Write failing tests for `ExpandStructSecretsCollectErrors` in `internal/secret/resolver_test.go` (7 cases: HappyPath, PartialFailure, NilPointer, NestedStruct, SliceField, MapField, NoRefs) — tests must FAIL before T003
-- [ ] T003 Add `SecretExpansionError` struct type to `internal/secret/resolver.go`
-- [ ] T004 Implement `ExpandStructSecretsCollectErrors` and internal `expandValueCollectErrors` helper in `internal/secret/resolver.go` (mirrors `expandValue` with path tracking + collect-errors semantics)
-- [ ] T005 Export `copyServerConfig` → `CopyServerConfig` in `internal/config/merge.go` and update 3 internal call sites in the same file
-- [ ] T006 Verify foundational phase: `go test ./internal/secret/... ./internal/config/... -race` — all T002 tests must now pass
+- [x] T002 Write failing tests for `ExpandStructSecretsCollectErrors` in `internal/secret/resolver_test.go` (7 cases: HappyPath, PartialFailure, NilPointer, NestedStruct, SliceField, MapField, NoRefs) — tests must FAIL before T003
+- [x] T003 Add `SecretExpansionError` struct type to `internal/secret/resolver.go`
+- [x] T004 Implement `ExpandStructSecretsCollectErrors` and internal `expandValueCollectErrors` helper in `internal/secret/resolver.go` (mirrors `expandValue` with path tracking + collect-errors semantics)
+- [x] T005 Export `copyServerConfig` → `CopyServerConfig` in `internal/config/merge.go` and update 3 internal call sites in the same file
+- [x] T006 Verify foundational phase: `go test ./internal/secret/... ./internal/config/... -race` — all T002 tests must now pass
 
 **Checkpoint**: Foundation ready — `ExpandStructSecretsCollectErrors` and `CopyServerConfig` available for user story implementation.
 
@@ -51,10 +51,10 @@
 
 > **TDD**: Write tests first (T007–T008), confirm they FAIL, then implement (T009).
 
-- [ ] T007 [US1] [US2] Write failing tests for `NewClientWithOptions` expansion in `internal/upstream/core/client_secret_test.go` (new file): ExpandsWorkingDir, ExpandsIsolationWorkingDir, ExpandsURL, PreservesExistingEnvArgsHeaders, DoesNotMutateOriginal — tests must FAIL before T009
-- [ ] T008 [P] [US2] Write reflection regression test `TestNewClientWithOptions_ReflectionRegressionTest` in `internal/upstream/core/client_secret_test.go`: walks all string fields of resolved config via reflection and asserts none match `IsSecretRef()` (SC-004) — must FAIL before T009
-- [ ] T009 [US1] [US2] Replace manual expansion block (lines 105–182) in `internal/upstream/core/client.go` with `config.CopyServerConfig(serverConfig)` + `secretResolver.ExpandStructSecretsCollectErrors(ctx, resolvedServerConfig)` + error logging loop
-- [ ] T010 [US1] [US2] Verify: `go test ./internal/upstream/core/... -race` — all T007 and T008 tests must now pass
+- [x] T007 [US1] [US2] Write failing tests for `NewClientWithOptions` expansion in `internal/upstream/core/client_secret_test.go` (new file): ExpandsWorkingDir, ExpandsIsolationWorkingDir, ExpandsURL, PreservesExistingEnvArgsHeaders, DoesNotMutateOriginal — tests must FAIL before T009
+- [x] T008 [P] [US2] Write reflection regression test `TestNewClientWithOptions_ReflectionRegressionTest` in `internal/upstream/core/client_secret_test.go`: walks all string fields of resolved config via reflection and asserts none match `IsSecretRef()` (SC-004) — must FAIL before T009
+- [x] T009 [US1] [US2] Replace manual expansion block (lines 105–182) in `internal/upstream/core/client.go` with `config.CopyServerConfig(serverConfig)` + `secretResolver.ExpandStructSecretsCollectErrors(ctx, resolvedServerConfig)` + error logging loop
+- [x] T010 [US1] [US2] Verify: `go test ./internal/upstream/core/... -race` — all T007 and T008 tests must now pass
 
 **Checkpoint**: US1 and US2 complete. WorkingDir and all other `ServerConfig` string fields expand refs. Existing `Env`/`Args`/`Headers` behavior preserved (FR-008). Original config not mutated (FR-004).
 
@@ -68,9 +68,9 @@
 
 > **TDD**: Write tests first (T011), confirm they FAIL, then implement (T012).
 
-- [ ] T011 [US3] Write failing tests for DataDir expansion in `internal/config/config_test.go`: TestLoadConfig_ExpandsDataDir (env var resolves before Validate), TestLoadConfig_DataDirExpandFailure (missing var → warn + Validate fails on dir not found) — tests must FAIL before T012
-- [ ] T012 [US3] Implement DataDir expansion in `internal/config/loader.go` at both `cfg.Validate()` call sites (lines ~50 and ~143): `secret.NewResolver().ExpandSecretRefs(ctx, cfg.DataDir)` with WARN on failure
-- [ ] T013 [US3] Verify: `go test ./internal/config/... -race` — all T011 tests must now pass
+- [x] T011 [US3] Write failing tests for DataDir expansion in `internal/config/config_test.go`: TestLoadConfig_ExpandsDataDir (env var resolves before Validate), TestLoadConfig_DataDirExpandFailure (missing var → warn + Validate fails on dir not found) — tests must FAIL before T012
+- [x] T012 [US3] Implement DataDir expansion in `internal/config/loader.go` at both `cfg.Validate()` call sites (lines ~50 and ~143): `secret.NewResolver().ExpandSecretRefs(ctx, cfg.DataDir)` with WARN on failure
+- [x] T013 [US3] Verify: `go test ./internal/config/... -race` — all T011 tests must now pass
 
 **Checkpoint**: US3 complete. `data_dir` refs expand before validation. All three user stories are independently functional.
 
@@ -78,10 +78,10 @@
 
 ## Phase 5: Polish & Cross-Cutting Concerns
 
-- [ ] T014 Run `.specify/scripts/bash/update-agent-context.sh claude` to add `ExpandStructSecretsCollectErrors` to CLAUDE.md Active Technologies section
-- [ ] T015 [P] Full regression: `go test ./internal/... -race` — zero test failures
-- [ ] T016 [P] E2E sanity: `./scripts/test-api-e2e.sh` — passes clean
-- [ ] T017 Manual smoke test: add server with `"working_dir": "${env:HOME}/test"` to config and verify it starts with resolved path
+- [x] T014 Run `.specify/scripts/bash/update-agent-context.sh claude` to add `ExpandStructSecretsCollectErrors` to CLAUDE.md Active Technologies section
+- [x] T015 [P] Full regression: `go test ./internal/... -race` — zero test failures
+- [x] T016 [P] E2E sanity: `./scripts/test-api-e2e.sh` — passes clean
+- [x] T017 Manual smoke test: add server with `"working_dir": "${env:HOME}/test"` to config and verify it starts with resolved path
 
 ---
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/spf13/viper"
 )
 
@@ -37,6 +39,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 		}
 		cfg.DataDir = filepath.Join(homeDir, DefaultDataDir)
 	}
+
+	// Expand secret/env refs in DataDir before creating it
+	expandDataDir(cfg)
 
 	// Create data directory if it doesn't exist
 	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
@@ -122,6 +127,9 @@ func Load() (*Config, error) {
 		}
 		cfg.DataDir = filepath.Join(homeDir, DefaultDataDir)
 	}
+
+	// Expand secret/env refs in DataDir before creating it
+	expandDataDir(cfg)
 
 	// Create data directory if it doesn't exist
 	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
@@ -458,6 +466,21 @@ var registriesInitCallback func(*Config)
 // SetRegistriesInitCallback sets the callback function for registries initialization
 func SetRegistriesInitCallback(callback func(*Config)) {
 	registriesInitCallback = callback
+}
+
+// expandDataDir expands secret/env refs in cfg.DataDir in place.
+// Failures are logged to stderr and the original value is kept.
+func expandDataDir(cfg *Config) {
+	if cfg.DataDir == "" {
+		return
+	}
+	resolver := secret.NewResolver()
+	resolved, err := resolver.ExpandSecretRefs(context.Background(), cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in data_dir, using original value: reference=%s err=%v\n", cfg.DataDir, err)
+		return
+	}
+	cfg.DataDir = resolved
 }
 
 // applyTLSEnvOverrides applies environment variable overrides for TLS configuration

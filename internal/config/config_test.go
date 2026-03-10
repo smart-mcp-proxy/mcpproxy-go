@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1059,4 +1060,43 @@ func TestServerConfig_SkipQuarantine_JSONSerialization(t *testing.T) {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// --- T011: DataDir secret-ref expansion in LoadFromFile ---
+
+// TestLoadConfig_ExpandsDataDir verifies that ${env:...} refs in data_dir are resolved
+// before MkdirAll / Validate() run, so the database opens at the resolved path (US3).
+func TestLoadConfig_ExpandsDataDir(t *testing.T) {
+	resolvedDir := t.TempDir()
+	t.Setenv("TEST_MCPPROXY_EXPAND_DATA_DIR", resolvedDir)
+
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	cfgData := `{"data_dir": "${env:TEST_MCPPROXY_EXPAND_DATA_DIR}"}`
+	require.NoError(t, os.WriteFile(cfgFile, []byte(cfgData), 0600))
+
+	cfg, err := LoadFromFile(cfgFile)
+	require.NoError(t, err)
+	assert.Equal(t, resolvedDir, cfg.DataDir)
+}
+
+// TestLoadConfig_DataDirExpandFailure verifies that when the env var in data_dir is
+// missing, LoadFromFile warns and retains the original unresolved reference rather
+// than returning an error (US3 robustness requirement).
+func TestLoadConfig_DataDirExpandFailure(t *testing.T) {
+	// Use a unique name that is almost certainly not set in any environment.
+	const missingVar = "TEST_MCPPROXY_MISSING_DATA_DIR_XYZ_9876"
+	os.Unsetenv(missingVar) //nolint:errcheck
+
+	tmpBase := t.TempDir()
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	// DataDir contains an unresolvable ref; the literal path lives inside tmpBase
+	// so any directory MkdirAll creates is cleaned up automatically.
+	cfgData := fmt.Sprintf(`{"data_dir": "%s/${env:%s}"}`, tmpBase, missingVar)
+	require.NoError(t, os.WriteFile(cfgFile, []byte(cfgData), 0600))
+
+	// LoadFromFile must succeed even when expansion fails — warn + retain original.
+	cfg, err := LoadFromFile(cfgFile)
+	require.NoError(t, err)
+	assert.Contains(t, cfg.DataDir, fmt.Sprintf("${env:%s}", missingVar),
+		"original unresolved ref should be retained when expansion fails")
 }
