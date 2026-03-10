@@ -8,7 +8,7 @@ When operating to complete a task, adhere strictly to the following constraints 
 
 ### Must-Do (Defaults & Assumptions)
 - **Zero Interruption Policy**: If a decision is needed and no explicit instruction exists, you MUST make an informed, safe assumption based on idiomatic Go best practices and document it in the PR/commit. Do NOT ask for human clarification mid-task.
-- **Test-Driven Progress**: You must write a failing Go test (`_test.go`) for every sub-task before implementing the feature. 
+- **Test-Driven Progress**: You must write a failing Go test (`_test.go`) for every sub-task before implementing the feature.
 - **Graceful Fallbacks**: If an API or dependency lacks documentation, use mock interfaces or a simplified implementation rather than blocking the task.
 - **Continuous Logging**: Document every step completed in an `execution_log.md` within the current working directory to maintain state.
 
