@@ -19,7 +19,10 @@ type mockToolCaller struct {
 
 func newMockToolCaller() *mockToolCaller {
 	return &mockToolCaller{
-		calls:   make([]struct{ server, tool string; args map[string]interface{} }, 0),
+		calls: make([]struct {
+			server, tool string
+			args         map[string]interface{}
+		}, 0),
 		results: make(map[string]interface{}),
 		errors:  make(map[string]error),
 	}
@@ -347,5 +350,243 @@ func TestExecuteSandboxRestrictions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestExecuteAuthContext_ServerAccessDenied tests auth enforcement blocks unauthorized server access
+func TestExecuteAuthContext_ServerAccessDenied(t *testing.T) {
+	caller := newMockToolCaller()
+
+	code := `
+		var res = call_tool("secret-server", "get_data", {});
+		({ ok: res.ok, code: res.error ? res.error.code : null, msg: res.error ? res.error.message : null })
+	`
+	opts := ExecutionOptions{
+		AuthContext: &AuthInfo{
+			Type:           "agent",
+			AgentName:      "test-bot",
+			AllowedServers: []string{"github"}, // Only github, not secret-server
+			Permissions:    []string{"read"},
+		},
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["ok"] != false {
+		t.Errorf("expected tool call to fail, got ok=%v", resultMap["ok"])
+	}
+	if resultMap["code"] != "ACCESS_DENIED" {
+		t.Errorf("expected ACCESS_DENIED, got %v", resultMap["code"])
+	}
+	if len(caller.calls) != 0 {
+		t.Errorf("expected 0 upstream calls (blocked by auth), got %d", len(caller.calls))
+	}
+}
+
+// TestExecuteAuthContext_PermissionDenied tests auth enforcement blocks insufficient permissions
+func TestExecuteAuthContext_PermissionDenied(t *testing.T) {
+	caller := newMockToolCaller()
+
+	code := `
+		var res = call_tool("github", "delete_repo", {});
+		({ ok: res.ok, code: res.error ? res.error.code : null })
+	`
+	opts := ExecutionOptions{
+		AuthContext: &AuthInfo{
+			Type:           "agent",
+			AgentName:      "reader-bot",
+			AllowedServers: []string{"github"},
+			Permissions:    []string{"read"}, // Only read, needs destructive
+		},
+		ToolAnnotationFunc: func(serverName, toolName string) string {
+			if toolName == "delete_repo" {
+				return "destructive"
+			}
+			return "read"
+		},
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["ok"] != false {
+		t.Errorf("expected tool call to fail, got ok=%v", resultMap["ok"])
+	}
+	if resultMap["code"] != "PERMISSION_DENIED" {
+		t.Errorf("expected PERMISSION_DENIED, got %v", resultMap["code"])
+	}
+}
+
+// TestExecuteAuthContext_PermissionAggregation tests that max permission level is tracked
+func TestExecuteAuthContext_PermissionAggregation(t *testing.T) {
+	caller := newMockToolCaller()
+
+	code := `
+		call_tool("github", "list_repos", {});
+		call_tool("github", "create_issue", {});
+		call_tool("github", "list_repos", {});
+		({ done: true })
+	`
+	opts := ExecutionOptions{
+		AuthContext: &AuthInfo{
+			Type:           "agent",
+			AgentName:      "writer-bot",
+			AllowedServers: []string{"github"},
+			Permissions:    []string{"read", "write", "destructive"},
+		},
+		ToolAnnotationFunc: func(serverName, toolName string) string {
+			if toolName == "create_issue" {
+				return "write"
+			}
+			return "read"
+		},
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+
+	if len(caller.calls) != 3 {
+		t.Errorf("expected 3 tool calls, got %d", len(caller.calls))
+	}
+}
+
+// TestExecuteAuthContext_AdminBypass tests that admin auth bypasses permission checks
+func TestExecuteAuthContext_AdminBypass(t *testing.T) {
+	caller := newMockToolCaller()
+
+	code := `
+		var res = call_tool("secret-server", "delete_all", {});
+		({ ok: res.ok })
+	`
+	opts := ExecutionOptions{
+		AuthContext: &AuthInfo{
+			Type: "admin",
+			// No AllowedServers or Permissions - admin bypasses everything
+		},
+		ToolAnnotationFunc: func(serverName, toolName string) string {
+			return "destructive"
+		},
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["ok"] != true {
+		t.Errorf("admin should bypass all auth checks, got ok=%v", resultMap["ok"])
+	}
+	if len(caller.calls) != 1 {
+		t.Errorf("expected 1 tool call (admin bypass), got %d", len(caller.calls))
+	}
+}
+
+// TestExecuteAuthContext_NoAuthContext tests backward compatibility with nil auth
+func TestExecuteAuthContext_NoAuthContext(t *testing.T) {
+	caller := newMockToolCaller()
+
+	code := `
+		var res = call_tool("any-server", "any-tool", {});
+		({ ok: res.ok })
+	`
+	opts := ExecutionOptions{
+		// No AuthContext - should not enforce any restrictions
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["ok"] != true {
+		t.Errorf("expected ok=true with no auth context, got %v", resultMap["ok"])
+	}
+}
+
+// TestAuthInfo_CanAccessServer tests the AuthInfo.CanAccessServer method
+func TestAuthInfo_CanAccessServer(t *testing.T) {
+	tests := []struct {
+		name     string
+		auth     *AuthInfo
+		server   string
+		expected bool
+	}{
+		{"nil auth allows all", nil, "anything", true},
+		{"admin allows all", &AuthInfo{Type: "admin"}, "anything", true},
+		{"admin_user allows all", &AuthInfo{Type: "admin_user"}, "anything", true},
+		{"wildcard allows all", &AuthInfo{Type: "agent", AllowedServers: []string{"*"}}, "anything", true},
+		{"specific match", &AuthInfo{Type: "agent", AllowedServers: []string{"github"}}, "github", true},
+		{"no match", &AuthInfo{Type: "agent", AllowedServers: []string{"github"}}, "gitlab", false},
+		{"empty server name", &AuthInfo{Type: "agent", AllowedServers: []string{"github"}}, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.auth.CanAccessServer(tt.server)
+			if result != tt.expected {
+				t.Errorf("expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestAuthInfo_HasPermission tests the AuthInfo.HasPermission method
+func TestAuthInfo_HasPermission(t *testing.T) {
+	tests := []struct {
+		name     string
+		auth     *AuthInfo
+		perm     string
+		expected bool
+	}{
+		{"nil auth allows all", nil, "destructive", true},
+		{"admin allows all", &AuthInfo{Type: "admin"}, "destructive", true},
+		{"has read", &AuthInfo{Type: "agent", Permissions: []string{"read"}}, "read", true},
+		{"no write", &AuthInfo{Type: "agent", Permissions: []string{"read"}}, "write", false},
+		{"has write", &AuthInfo{Type: "agent", Permissions: []string{"read", "write"}}, "write", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.auth.HasPermission(tt.perm)
+			if result != tt.expected {
+				t.Errorf("expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestPermissionLevelTracking tests max permission level tracking
+func TestPermissionLevelTracking(t *testing.T) {
+	ec := &ExecutionContext{}
+
+	ec.updateMaxPermissionLevel("read")
+	if ec.GetMaxPermissionLevel() != "read" {
+		t.Errorf("expected read, got %s", ec.GetMaxPermissionLevel())
+	}
+
+	ec.updateMaxPermissionLevel("write")
+	if ec.GetMaxPermissionLevel() != "write" {
+		t.Errorf("expected write, got %s", ec.GetMaxPermissionLevel())
+	}
+
+	ec.updateMaxPermissionLevel("read") // Lower level shouldn't downgrade
+	if ec.GetMaxPermissionLevel() != "write" {
+		t.Errorf("expected write (should not downgrade), got %s", ec.GetMaxPermissionLevel())
+	}
+
+	ec.updateMaxPermissionLevel("destructive")
+	if ec.GetMaxPermissionLevel() != "destructive" {
+		t.Errorf("expected destructive, got %s", ec.GetMaxPermissionLevel())
 	}
 }

@@ -843,6 +843,112 @@ func TestConfig_WithSensitiveDataDetection(t *testing.T) {
 	assert.Equal(t, 4.5, restored.SensitiveDataDetection.EntropyThreshold)
 }
 
+// Tests for routing mode (Spec 031)
+
+func TestRoutingModeDefault(t *testing.T) {
+	cfg := &Config{}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, RoutingModeRetrieveTools, cfg.RoutingMode, "default routing mode should be retrieve_tools")
+}
+
+func TestRoutingModeValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		routingMode string
+		wantErr     bool
+	}{
+		{
+			name:        "empty defaults to retrieve_tools",
+			routingMode: "",
+			wantErr:     false,
+		},
+		{
+			name:        "retrieve_tools is valid",
+			routingMode: RoutingModeRetrieveTools,
+			wantErr:     false,
+		},
+		{
+			name:        "direct is valid",
+			routingMode: RoutingModeDirect,
+			wantErr:     false,
+		},
+		{
+			name:        "code_execution is valid",
+			routingMode: RoutingModeCodeExecution,
+			wantErr:     false,
+		},
+		{
+			name:        "invalid mode is rejected",
+			routingMode: "invalid_mode",
+			wantErr:     true,
+		},
+		{
+			name:        "typo mode is rejected",
+			routingMode: "Direct",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				RoutingMode: tt.routingMode,
+			}
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "routing_mode")
+			} else {
+				assert.NoError(t, err)
+				if tt.routingMode == "" {
+					assert.Equal(t, RoutingModeRetrieveTools, cfg.RoutingMode)
+				} else {
+					assert.Equal(t, tt.routingMode, cfg.RoutingMode)
+				}
+			}
+		})
+	}
+}
+
+func TestRoutingModeJSONSerialization(t *testing.T) {
+	cfg := &Config{
+		Listen:      "127.0.0.1:8080",
+		RoutingMode: RoutingModeDirect,
+	}
+
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	var restored Config
+	err = json.Unmarshal(data, &restored)
+	require.NoError(t, err)
+	assert.Equal(t, RoutingModeDirect, restored.RoutingMode)
+}
+
+func TestRoutingModeOmittedFromJSON(t *testing.T) {
+	// When routing_mode is empty, it should be omitted from JSON
+	cfg := &Config{
+		Listen: "127.0.0.1:8080",
+	}
+
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	// Parse as map to check key presence
+	var m map[string]interface{}
+	err = json.Unmarshal(data, &m)
+	require.NoError(t, err)
+	_, exists := m["routing_mode"]
+	assert.False(t, exists, "routing_mode should be omitted when empty")
+}
+
+func TestRoutingModeConstants(t *testing.T) {
+	assert.Equal(t, "retrieve_tools", RoutingModeRetrieveTools)
+	assert.Equal(t, "direct", RoutingModeDirect)
+	assert.Equal(t, "code_execution", RoutingModeCodeExecution)
+}
+
 // Tests for tool-level quarantine config (Spec 032)
 
 func TestConfig_IsQuarantineEnabled(t *testing.T) {

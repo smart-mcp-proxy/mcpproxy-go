@@ -447,6 +447,9 @@ func (s *Server) setupRoutes() {
 		// Info endpoint (server version, web UI URL, etc.)
 		r.Get("/info", s.handleGetInfo)
 
+		// Routing mode endpoint
+		r.Get("/routing", s.handleGetRouting)
+
 		// Server management
 		r.Get("/servers", s.handleGetServers)
 		r.Post("/servers", s.handleAddServer)                           // T001: Add server
@@ -673,13 +676,65 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/status [get]
 func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
+	// Get routing mode from config
+	routingMode := config.RoutingModeRetrieveTools
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.RoutingMode != "" {
+		routingMode = cfg.RoutingMode
+	}
+
 	response := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
 		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": s.controller.GetUpstreamStats(),
 		"status":         s.controller.GetStatus(),
+		"routing_mode":   routingMode,
 		"timestamp":      time.Now().Unix(),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// handleGetRouting godoc
+// @Summary Get routing mode information
+// @Description Get the current routing mode and available MCP endpoints
+// @Tags status
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse "Routing mode information"
+// @Router /api/v1/routing [get]
+func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
+	routingMode := config.RoutingModeRetrieveTools
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.RoutingMode != "" {
+		routingMode = cfg.RoutingMode
+	}
+
+	// Build mode description
+	var description string
+	switch routingMode {
+	case config.RoutingModeDirect:
+		description = "All upstream tools exposed directly via serverName__toolName naming"
+	case config.RoutingModeCodeExecution:
+		description = "JavaScript orchestration via code_execution tool with tool catalog"
+	default:
+		description = "BM25 search via retrieve_tools + call_tool variants (default)"
+	}
+
+	response := map[string]interface{}{
+		"routing_mode": routingMode,
+		"description":  description,
+		"endpoints": map[string]interface{}{
+			"default":        "/mcp",
+			"direct":         "/mcp/all",
+			"code_execution": "/mcp/code",
+			"retrieve_tools": "/mcp/call",
+		},
+		"available_modes": []string{
+			config.RoutingModeRetrieveTools,
+			config.RoutingModeDirect,
+			config.RoutingModeCodeExecution,
+		},
 	}
 
 	s.writeSuccess(w, response)

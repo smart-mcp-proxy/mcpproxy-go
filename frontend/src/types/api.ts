@@ -115,6 +115,7 @@ export interface SearchResult {
 export interface StatusUpdate {
   running: boolean
   listen_addr: string
+  routing_mode?: string
   upstream_stats: {
     connected_servers: number
     total_servers: number
@@ -122,6 +123,19 @@ export interface StatusUpdate {
   }
   status: Record<string, any>
   timestamp: number
+}
+
+// Routing mode types
+export interface RoutingInfo {
+  routing_mode: string
+  description: string
+  endpoints: {
+    default: string
+    direct: string
+    code_execution: string
+    retrieve_tools: string
+  }
+  available_modes: string[]
 }
 
 // Dashboard stats

@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -205,8 +205,13 @@ class APIService {
   }
 
   // Status endpoint
-  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean }>> {
-    return this.request<{ edition: string; running: boolean }>('/api/v1/status')
+  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean; routing_mode: string }>> {
+    return this.request<{ edition: string; running: boolean; routing_mode: string }>('/api/v1/status')
+  }
+
+  // Routing mode endpoint
+  async getRouting(): Promise<APIResponse<RoutingInfo>> {
+    return this.request<RoutingInfo>('/api/v1/routing')
   }
 
   // Server endpoints

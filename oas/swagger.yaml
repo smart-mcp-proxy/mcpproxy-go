@@ -94,6 +94,11 @@ components:
         require_mcp_auth:
           description: 'Require authentication on /mcp endpoint (default: false)'
           type: boolean
+        routing_mode:
+          description: |-
+            Routing mode (Spec 031): how MCP tools are exposed to clients
+            Valid values: "retrieve_tools" (default), "direct", "code_execution"
+          type: string
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
         tls:
@@ -2522,6 +2527,22 @@ paths:
       summary: Search MCP servers in a registry
       tags:
       - registries
+  /api/v1/routing:
+    get:
+      description: Get the current routing mode and available MCP endpoints
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Routing mode information
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get routing mode information
+      tags:
+      - status
   /api/v1/secrets:
     post:
       description: Stores a secret value in the operating system's secure keyring.

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { StatusUpdate, Theme, Toast, InfoResponse } from '@/types'
+import type { StatusUpdate, Theme, Toast, InfoResponse, RoutingInfo } from '@/types'
 import api from '@/services/api'
 
 export const useSystemStore = defineStore('system', () => {
@@ -11,6 +11,7 @@ export const useSystemStore = defineStore('system', () => {
   const currentTheme = ref<string>('corporate')
   const toasts = ref<Toast[]>([])
   const info = ref<InfoResponse | null>(null)
+  const routing = ref<RoutingInfo | null>(null)
 
   // Available themes
   const themes: Theme[] = [
@@ -58,6 +59,9 @@ export const useSystemStore = defineStore('system', () => {
   const version = computed(() => info.value?.version ?? '')
   const updateAvailable = computed(() => info.value?.update?.available ?? false)
   const latestVersion = computed(() => info.value?.update?.latest_version ?? '')
+
+  // Routing mode
+  const routingMode = computed(() => routing.value?.routing_mode ?? status.value?.routing_mode ?? 'retrieve_tools')
 
   // Actions
   function connectEventSource() {
@@ -348,6 +352,17 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
+  async function fetchRouting() {
+    try {
+      const response = await api.getRouting()
+      if (response.success && response.data) {
+        routing.value = response.data
+      }
+    } catch (error) {
+      console.error('Failed to fetch routing:', error)
+    }
+  }
+
   // Initialize theme on store creation
   loadTheme()
 
@@ -359,6 +374,7 @@ export const useSystemStore = defineStore('system', () => {
     toasts,
     themes,
     info,
+    routing,
 
     // Computed
     isRunning,
@@ -368,6 +384,7 @@ export const useSystemStore = defineStore('system', () => {
     version,
     updateAvailable,
     latestVersion,
+    routingMode,
 
     // Actions
     connectEventSource,
@@ -378,5 +395,6 @@ export const useSystemStore = defineStore('system', () => {
     removeToast,
     clearToasts,
     fetchInfo,
+    fetchRouting,
   }
 })

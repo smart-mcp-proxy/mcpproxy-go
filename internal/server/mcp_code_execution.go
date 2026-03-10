@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -103,16 +105,16 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Create tool caller adapter that wraps the upstream manager
 	toolCaller := &upstreamToolCaller{
-		upstreamManager:  p.upstreamManager,
-		logger:           p.logger,
-		executionID:      options.ExecutionID,
-		storage:          p.storage,
-		configPath:       configPath,
-		parentCallID:     parentCallID,
-		sessionID:        sessionID,
-		clientName:       clientName,
-		clientVersion:    clientVersion,
-		mainServer:       p.mainServer,
+		upstreamManager: p.upstreamManager,
+		logger:          p.logger,
+		executionID:     options.ExecutionID,
+		storage:         p.storage,
+		configPath:      configPath,
+		parentCallID:    parentCallID,
+		sessionID:       sessionID,
+		clientName:      clientName,
+		clientVersion:   clientVersion,
+		mainServer:      p.mainServer,
 	}
 
 	// Log pool metrics before acquisition
@@ -161,6 +163,18 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 				)
 			}
 		}()
+	}
+
+	// Inject auth context for permission enforcement (Spec 031)
+	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil {
+		options.AuthContext = &jsruntime.AuthInfo{
+			Type:           authCtx.Type,
+			AgentName:      authCtx.AgentName,
+			AllowedServers: authCtx.AllowedServers,
+			Permissions:    authCtx.Permissions,
+		}
+		// Provide tool annotation lookup function for permission tier resolution
+		options.ToolAnnotationFunc = p.lookupToolPermission
 	}
 
 	// Execute JavaScript
@@ -257,10 +271,10 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Record the parent code_execution call in history
 	codeExecRecord := &storage.ToolCallRecord{
-		ID:               parentCallID,
-		ServerID:         "code_execution", // Special server ID for built-in tool
-		ServerName:       "mcpproxy",       // Built-in tool
-		ToolName:         "code_execution",
+		ID:         parentCallID,
+		ServerID:   "code_execution", // Special server ID for built-in tool
+		ServerName: "mcpproxy",       // Built-in tool
+		ToolName:   "code_execution",
 		Arguments: map[string]interface{}{
 			"code":  code,
 			"input": options.Input,
@@ -331,18 +345,18 @@ type toolCallRecord struct {
 
 // upstreamToolCaller adapts the upstream.Manager to implement jsruntime.ToolCaller
 type upstreamToolCaller struct {
-	upstreamManager  *upstream.Manager
-	logger           *zap.Logger
-	executionID      string
-	storage          *storage.Manager
-	configPath       string
-	toolCalls        []toolCallRecord
-	mu               sync.Mutex
-	parentCallID     string // ID of the parent code_execution call
-	sessionID        string // MCP session ID
-	clientName       string // MCP client name
-	clientVersion    string // MCP client version
-	mainServer       *Server // Reference to main server for tokenizer access
+	upstreamManager *upstream.Manager
+	logger          *zap.Logger
+	executionID     string
+	storage         *storage.Manager
+	configPath      string
+	toolCalls       []toolCallRecord
+	mu              sync.Mutex
+	parentCallID    string  // ID of the parent code_execution call
+	sessionID       string  // MCP session ID
+	clientName      string  // MCP client name
+	clientVersion   string  // MCP client version
+	mainServer      *Server // Reference to main server for tokenizer access
 }
 
 // CallTool implements jsruntime.ToolCaller interface
@@ -529,4 +543,38 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 			zap.String("record_id", record.ID),
 		)
 	}
+}
+
+// lookupToolPermission returns the required permission tier for a tool based on its annotations.
+// This is used by the JS runtime to enforce auth context permissions during code_execution.
+func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
+	// Primary: exact match via StateView (no BM25 fuzzy matching)
+	annotations := p.lookupToolAnnotations(serverName, toolName)
+	if annotations != nil {
+		callWith := contracts.DeriveCallWith(annotations)
+		perm := contracts.ToolVariantToOperationType[callWith]
+		if perm != "" {
+			return perm
+		}
+	}
+
+	// Fallback: search the index with enough candidates to find an exact match
+	if p.index != nil {
+		qualifiedName := serverName + ":" + toolName
+		results, err := p.index.Search(qualifiedName, 20)
+		if err == nil {
+			for _, r := range results {
+				if r.Tool != nil && r.Tool.ServerName == serverName && r.Tool.Name == toolName {
+					callWith := contracts.DeriveCallWith(r.Tool.Annotations)
+					perm := contracts.ToolVariantToOperationType[callWith]
+					if perm != "" {
+						return perm
+					}
+				}
+			}
+		}
+	}
+
+	// Default to read (safest)
+	return contracts.OperationTypeRead
 }

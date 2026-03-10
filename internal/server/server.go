@@ -134,6 +134,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	server.mcpProxy = mcpProxy
 
 	go server.forwardRuntimeStatus()
+	go server.listenForRoutingModeRefresh()
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
@@ -356,6 +357,24 @@ func (s *Server) forwardRuntimeStatus() {
 	}
 }
 
+// listenForRoutingModeRefresh subscribes to server events and refreshes routing mode
+// tool sets when upstream servers change (Spec 031).
+func (s *Server) listenForRoutingModeRefresh() {
+	eventCh := s.runtime.SubscribeEvents()
+	defer s.runtime.UnsubscribeEvents(eventCh)
+
+	for evt := range eventCh {
+		if evt.Type == runtime.EventTypeServersChanged {
+			s.logger.Debug("servers changed, refreshing routing mode tools",
+				zap.String("event_type", string(evt.Type)))
+			if s.mcpProxy != nil {
+				s.mcpProxy.RefreshDirectModeTools()
+				s.mcpProxy.RefreshCodeExecModeTools()
+			}
+		}
+	}
+}
+
 // Start starts the MCP proxy server
 func (s *Server) Start(ctx context.Context) error {
 	// Spec 024: Track server start time for lifecycle events
@@ -408,7 +427,12 @@ func (s *Server) Start(ctx context.Context) error {
 			zap.String("listen", listenAddr))
 
 		// Create Streamable HTTP server with custom routing
-		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServer())
+		// Use the MCP server instance that corresponds to the configured routing_mode
+		routingMode := ""
+		if cfg != nil {
+			routingMode = cfg.RoutingMode
+		}
+		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(routingMode))
 
 		// Create custom HTTP server for handling multiple routes
 		if err := s.startCustomHTTPServer(ctx, streamableServer); err != nil {
@@ -1473,6 +1497,30 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/mcp", mcpHandler)
 	mux.Handle("/mcp/", mcpHandler) // Handle trailing slash
 
+	// Routing mode dedicated endpoints (Spec 031)
+	// Each endpoint always serves its specific routing mode regardless of config.
+	// /mcp/all → direct mode (all tools with serverName__toolName naming)
+	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect))
+	directHandler := s.mcpAuthMiddleware(loggingHandler(directStreamable))
+	mux.Handle("/mcp/all", directHandler)
+	mux.Handle("/mcp/all/", directHandler)
+
+	// /mcp/code → code_execution mode (JS orchestration)
+	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution))
+	codeExecHandler := s.mcpAuthMiddleware(loggingHandler(codeExecStreamable))
+	mux.Handle("/mcp/code", codeExecHandler)
+	mux.Handle("/mcp/code/", codeExecHandler)
+
+	// /mcp/call → retrieve_tools mode (explicit, same as default server)
+	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServer())
+	callToolHandler := s.mcpAuthMiddleware(loggingHandler(callToolStreamable))
+	mux.Handle("/mcp/call", callToolHandler)
+	mux.Handle("/mcp/call/", callToolHandler)
+
+	s.logger.Info("Registered routing mode MCP endpoints",
+		zap.String("default_mode", cfg.RoutingMode),
+		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call"}))
+
 	// Legacy endpoints for backward compatibility
 	mux.Handle("/v1/tool_code", mcpHandler)
 	mux.Handle("/v1/tool-code", mcpHandler) // Alias for python client
@@ -1597,7 +1645,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 	// List all registered endpoints for visibility
 	allEndpoints := []string{
-		"/mcp", "/mcp/", // MCP protocol endpoints
+		"/mcp", "/mcp/", // MCP protocol endpoints (default routing mode)
+		"/mcp/all", "/mcp/code", "/mcp/call", // Routing mode endpoints (Spec 031)
 		"/v1/tool_code", "/v1/tool-code", // Legacy MCP endpoints
 		"/api/v1/*", "/events", // REST API and SSE endpoints
 		"/ui/", "/", // Web UI endpoints

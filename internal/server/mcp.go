@@ -71,6 +71,11 @@ type MCPProxyServer struct {
 	mainServer      *Server        // Reference to main server for config persistence
 	config          *config.Config // Add config reference for security checks
 
+	// Routing mode MCP server instances (Spec 031)
+	// Each instance has different tools registered for its routing mode.
+	directServer   *mcpserver.MCPServer // Direct mode: upstream tools with serverName__toolName naming
+	codeExecServer *mcpserver.MCPServer // Code execution mode: code_execution + retrieve_tools
+
 	// Docker availability cache
 	dockerAvailableCache *bool
 	dockerCacheTime      time.Time
@@ -216,13 +221,16 @@ func NewMCPProxyServer(
 		sessionStore:    sessionStore,
 	}
 
-	// Register proxy tools
+	// Register proxy tools for the default (retrieve_tools) server
 	proxy.registerTools(debugSearch)
 
 	// Register prompts if enabled
 	if config.EnablePrompts {
 		proxy.registerPrompts()
 	}
+
+	// Initialize routing mode server instances (Spec 031)
+	proxy.initRoutingModeServers()
 
 	return proxy
 }
