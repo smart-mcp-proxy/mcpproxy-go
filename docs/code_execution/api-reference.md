@@ -1,6 +1,6 @@
-# JavaScript Code Execution - API Reference
+# Code Execution - API Reference
 
-Complete reference for the `code_execution` MCP tool.
+Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript).
 
 ## Table of Contents
 
@@ -27,11 +27,17 @@ Complete reference for the `code_execution` MCP tool.
     "properties": {
       "code": {
         "type": "string",
-        "description": "JavaScript source code (ES2020+) to execute..."
+        "description": "JavaScript or TypeScript source code (ES2020+) to execute..."
+      },
+      "language": {
+        "type": "string",
+        "description": "Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution.",
+        "enum": ["javascript", "typescript"],
+        "default": "javascript"
       },
       "input": {
         "type": "object",
-        "description": "Input data accessible as global `input` variable in JavaScript code",
+        "description": "Input data accessible as global `input` variable in code",
         "default": {}
       },
       "options": {
@@ -77,6 +83,16 @@ Complete reference for the `code_execution` MCP tool.
 }
 ```
 
+### TypeScript Request
+
+```json
+{
+  "code": "const x: number = 42; const msg: string = 'hello'; ({ result: x, message: msg })",
+  "language": "typescript",
+  "input": {}
+}
+```
+
 ### Full Request with Options
 
 ```json
@@ -97,7 +113,8 @@ Complete reference for the `code_execution` MCP tool.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `code` | string | **Yes** | JavaScript source code to execute (ES2020+ syntax supported) |
+| `code` | string | **Yes** | JavaScript or TypeScript source code to execute (ES2020+ syntax supported) |
+| `language` | string | No | Source language: `"javascript"` (default) or `"typescript"` |
 | `input` | object | No | Input data accessible as `input` global variable (default: `{}`) |
 | `options` | object | No | Execution options (see below) |
 

@@ -28,16 +28,19 @@ import (
 var (
 	codeCmd = &cobra.Command{
 		Use:   "code",
-		Short: "JavaScript code execution for multi-tool orchestration",
-		Long:  "Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request",
+		Short: "JavaScript/TypeScript code execution for multi-tool orchestration",
+		Long:  "Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request",
 	}
 
 	codeExecCmd = &cobra.Command{
 		Use:   "exec",
-		Short: "Execute JavaScript code",
-		Long: `Execute JavaScript code that can orchestrate multiple upstream MCP tools.
+		Short: "Execute JavaScript or TypeScript code",
+		Long: `Execute JavaScript or TypeScript code that can orchestrate multiple upstream MCP tools.
 
-The JavaScript code has access to:
+Use --language typescript to write TypeScript code with type annotations,
+interfaces, enums, and generics. Types are automatically stripped before execution.
+
+The code has access to:
 - input: Global variable containing the input data (from --input or --input-file)
 - call_tool(serverName, toolName, args): Function to invoke upstream MCP tools
 
@@ -63,6 +66,7 @@ Exit codes:
 	codeAllowedSrvs  []string
 	codeLogLevel     string
 	codeConfigPath   string
+	codeLanguage     string
 )
 
 // GetCodeCommand returns the code command for adding to the root command
@@ -84,13 +88,20 @@ func init() {
 	codeExecCmd.Flags().StringSliceVar(&codeAllowedSrvs, "allowed-servers", []string{}, "Comma-separated list of allowed server names (empty = all allowed)")
 	codeExecCmd.Flags().StringVarP(&codeLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
 	codeExecCmd.Flags().StringVarP(&codeConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	codeExecCmd.Flags().StringVar(&codeLanguage, "language", "javascript", "Source code language: javascript, typescript")
 
 	// Add examples
 	codeExecCmd.Example = `  # Execute inline code with input
   mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}'
 
+  # Execute TypeScript code
+  mcpproxy code exec --language typescript --code="const x: number = 42; ({ result: x })"
+
   # Execute code from file
   mcpproxy code exec --file=script.js --input-file=params.json
+
+  # Execute TypeScript from file
+  mcpproxy code exec --language typescript --file=script.ts --input-file=params.json
 
   # Call upstream tools
   mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user})" --input='{"user":"octocat"}'
@@ -196,6 +207,7 @@ func runCodeExecClientMode(dataDir, code string, input map[string]interface{}, l
 		codeTimeout,
 		codeMaxToolCalls,
 		codeAllowedSrvs,
+		cliclient.CodeExecOptions{Language: codeLanguage},
 	)
 	if err != nil {
 		// T029: Use formatErrorWithRequestID to include request_id in error output
@@ -274,6 +286,11 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 		},
 	}
 
+	// Pass language if not the default
+	if codeLanguage != "" && codeLanguage != "javascript" {
+		args["language"] = codeLanguage
+	}
+
 	// Call the code_execution tool
 	result, err := mcpProxy.CallBuiltInTool(ctx, "code_execution", args)
 	if err != nil {
@@ -329,6 +346,10 @@ func validateOptions() error {
 	if codeMaxToolCalls < 0 {
 		fmt.Fprintf(os.Stderr, "Error: max-tool-calls cannot be negative\n")
 		return fmt.Errorf("invalid max-tool-calls")
+	}
+	if codeLanguage != "javascript" && codeLanguage != "typescript" {
+		fmt.Fprintf(os.Stderr, "Error: unsupported language %q. Supported languages: javascript, typescript\n", codeLanguage)
+		return fmt.Errorf("invalid language")
 	}
 	return nil
 }

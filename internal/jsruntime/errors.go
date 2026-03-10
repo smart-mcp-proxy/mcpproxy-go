@@ -23,6 +23,12 @@ const (
 
 	// ErrorCodeSerializationError indicates result cannot be JSON-serialized
 	ErrorCodeSerializationError ErrorCode = "SERIALIZATION_ERROR"
+
+	// ErrorCodeTranspileError indicates TypeScript transpilation failed
+	ErrorCodeTranspileError ErrorCode = "TRANSPILE_ERROR"
+
+	// ErrorCodeInvalidLanguage indicates an unsupported language was specified
+	ErrorCodeInvalidLanguage ErrorCode = "INVALID_LANGUAGE"
 )
 
 // JsError represents a JavaScript execution error with message, stack trace, and error code

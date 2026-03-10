@@ -15,9 +15,10 @@ import (
 
 // CodeExecRequest represents the request body for code execution.
 type CodeExecRequest struct {
-	Code    string                 `json:"code"`
-	Input   map[string]interface{} `json:"input"`
-	Options CodeExecOptions        `json:"options"`
+	Code     string                 `json:"code"`
+	Language string                 `json:"language,omitempty"` // "javascript" (default) or "typescript"
+	Input    map[string]interface{} `json:"input"`
+	Options  CodeExecOptions        `json:"options"`
 }
 
 // CodeExecOptions represents execution options.
@@ -75,6 +76,13 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate language if provided
+	if req.Language != "" && req.Language != "javascript" && req.Language != "typescript" {
+		h.writeError(w, r, http.StatusBadRequest, "INVALID_LANGUAGE",
+			fmt.Sprintf("Unsupported language %q. Supported languages: javascript, typescript", req.Language))
+		return
+	}
+
 	// Set defaults
 	if req.Input == nil {
 		req.Input = make(map[string]interface{})
@@ -97,6 +105,11 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"max_tool_calls":  req.Options.MaxToolCalls,
 			"allowed_servers": req.Options.AllowedServers,
 		},
+	}
+
+	// Pass language if specified
+	if req.Language != "" {
+		args["language"] = req.Language
 	}
 
 	// Call the code_execution built-in tool

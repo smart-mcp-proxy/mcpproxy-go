@@ -34,6 +34,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// Get all arguments
 	args := request.GetArguments()
 
+	// Extract language (optional, default: "javascript")
+	if language, ok := args["language"].(string); ok && language != "" {
+		options.Language = language
+	}
+
 	// Extract input (optional) - this is an object
 	input, ok := args["input"].(map[string]interface{})
 	if !ok || input == nil {
@@ -165,6 +170,12 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}()
 	}
 
+	// Determine effective language for logging
+	effectiveLanguage := options.Language
+	if effectiveLanguage == "" {
+		effectiveLanguage = "javascript"
+	}
+
 	// Inject auth context for permission enforcement (Spec 031)
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil {
 		options.AuthContext = &jsruntime.AuthInfo{
@@ -177,9 +188,10 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		options.ToolAnnotationFunc = p.lookupToolPermission
 	}
 
-	// Execute JavaScript
-	p.logger.Info("executing JavaScript code",
+	// Execute code
+	p.logger.Info("executing code",
 		zap.String("execution_id", options.ExecutionID),
+		zap.String("language", effectiveLanguage),
 		zap.Int("code_length", len(code)),
 		zap.Int("timeout_ms", options.TimeoutMs),
 		zap.Int("max_tool_calls", options.MaxToolCalls),
@@ -276,8 +288,9 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		ServerName: "mcpproxy",       // Built-in tool
 		ToolName:   "code_execution",
 		Arguments: map[string]interface{}{
-			"code":  code,
-			"input": options.Input,
+			"code":     code,
+			"input":    options.Input,
+			"language": effectiveLanguage,
 		},
 		Response:         result,
 		Duration:         int64(executionDuration),
@@ -321,8 +334,9 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 	}
 	codeExecArgs := map[string]interface{}{
-		"code":  code,
-		"input": options.Input,
+		"code":     code,
+		"input":    options.Input,
+		"language": effectiveLanguage,
 	}
 	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil)
 

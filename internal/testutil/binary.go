@@ -157,8 +157,8 @@ func (env *BinaryTestEnv) Start() {
 	// Start the binary
 	env.cmd = exec.Command(env.binaryPath, "serve", "--config="+env.configPath, "--log-level=debug")
 	env.cmd.Env = append(os.Environ(),
-		"MCPPROXY_DISABLE_OAUTH=true",        // Disable OAuth for testing
-		"MCPPROXY_API_KEY="+TestAPIKey,       // Set API key for testing
+		"MCPPROXY_DISABLE_OAUTH=true",  // Disable OAuth for testing
+		"MCPPROXY_API_KEY="+TestAPIKey, // Set API key for testing
 	)
 
 	err := env.cmd.Start()
@@ -253,7 +253,7 @@ func (env *BinaryTestEnv) waitForToolIndexing() {
 					bodyStr := string(body)
 					// Check if we have success response and at least one server
 					if strings.Contains(bodyStr, `"success":true`) &&
-					   strings.Contains(bodyStr, `"servers":`) {
+						strings.Contains(bodyStr, `"servers":`) {
 						// Server API is working, that's enough
 						// Don't strictly require tools to be indexed as they might index slowly
 						env.t.Log("Server API is responding, proceeding with tests")
@@ -433,6 +433,7 @@ func createTestConfig(t *testing.T, configPath string, port int, dataDir string)
       "NPM_CONFIG_PREFIX"
     ]
   },
+  "quarantine_enabled": false,
   "docker_isolation": {
     "enabled": false
   }

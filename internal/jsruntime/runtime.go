@@ -17,6 +17,7 @@ type ExecutionOptions struct {
 	MaxToolCalls   int                    // Maximum number of call_tool() invocations (0 = unlimited)
 	AllowedServers []string               // Whitelist of allowed server names (empty = all allowed)
 	ExecutionID    string                 // Unique execution ID for logging (auto-generated if empty)
+	Language       string                 // Source language: "javascript" (default) or "typescript"
 
 	// Auth enforcement (Spec 031)
 	AuthContext        *AuthInfo            // Auth context for permission enforcement (nil = no restrictions)
@@ -101,11 +102,26 @@ type ToolCallRecord struct {
 	ErrorDetail interface{}            `json:"error_details,omitempty"`
 }
 
-// Execute runs JavaScript code in a sandboxed environment with tool call capabilities
+// Execute runs JavaScript or TypeScript code in a sandboxed environment with tool call capabilities.
+// When opts.Language is "typescript", the code is transpiled to JavaScript before execution.
 func Execute(ctx context.Context, caller ToolCaller, code string, opts ExecutionOptions) *Result {
 	// Generate execution ID if not provided
 	if opts.ExecutionID == "" {
 		opts.ExecutionID = uuid.New().String()
+	}
+
+	// Validate language parameter
+	if langErr := ValidateLanguage(opts.Language); langErr != nil {
+		return NewErrorResult(langErr)
+	}
+
+	// Transpile TypeScript to JavaScript if needed
+	if opts.Language == "typescript" {
+		transpiled, transpileErr := TranspileTypeScript(code)
+		if transpileErr != nil {
+			return NewErrorResult(transpileErr)
+		}
+		code = transpiled
 	}
 
 	// Create execution context

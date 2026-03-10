@@ -29,22 +29,22 @@ func (m *mockController) CallTool(ctx context.Context, toolName string, args map
 }
 
 // Stub implementations for other ServerController methods
-func (m *mockController) IsRunning() bool                              { return true }
-func (m *mockController) IsReady() bool                                { return true }
-func (m *mockController) GetListenAddress() string                     { return "" }
-func (m *mockController) GetUpstreamStats() map[string]interface{}     { return nil }
-func (m *mockController) StartServer(ctx context.Context) error        { return nil }
-func (m *mockController) StopServer() error                            { return nil }
-func (m *mockController) GetStatus() interface{}                       { return nil }
-func (m *mockController) StatusChannel() <-chan interface{}            { return nil }
-func (m *mockController) EventsChannel() <-chan interface{}            { return nil }
+func (m *mockController) IsRunning() bool                          { return true }
+func (m *mockController) IsReady() bool                            { return true }
+func (m *mockController) GetListenAddress() string                 { return "" }
+func (m *mockController) GetUpstreamStats() map[string]interface{} { return nil }
+func (m *mockController) StartServer(ctx context.Context) error    { return nil }
+func (m *mockController) StopServer() error                        { return nil }
+func (m *mockController) GetStatus() interface{}                   { return nil }
+func (m *mockController) StatusChannel() <-chan interface{}        { return nil }
+func (m *mockController) EventsChannel() <-chan interface{}        { return nil }
 func (m *mockController) GetAllServers() ([]map[string]interface{}, error) {
 	return nil, nil
 }
-func (m *mockController) EnableServer(serverName string, enabled bool) error      { return nil }
-func (m *mockController) RestartServer(serverName string) error                   { return nil }
-func (m *mockController) ForceReconnectAllServers(reason string) error            { return nil }
-func (m *mockController) GetDockerRecoveryStatus() interface{}                    { return nil }
+func (m *mockController) EnableServer(serverName string, enabled bool) error { return nil }
+func (m *mockController) RestartServer(serverName string) error              { return nil }
+func (m *mockController) ForceReconnectAllServers(reason string) error       { return nil }
+func (m *mockController) GetDockerRecoveryStatus() interface{}               { return nil }
 func (m *mockController) QuarantineServer(serverName string, quarantined bool) error {
 	return nil
 }
@@ -61,17 +61,19 @@ func (m *mockController) SearchTools(query string, limit int) ([]map[string]inte
 func (m *mockController) GetServerLogs(serverName string, tail int) ([]contracts.LogEntry, error) {
 	return nil, nil
 }
-func (m *mockController) ReloadConfiguration() error                                   { return nil }
-func (m *mockController) GetConfigPath() string                                        { return "" }
-func (m *mockController) GetLogDir() string                                            { return "" }
-func (m *mockController) TriggerOAuthLogin(serverName string) error                    { return nil }
-func (m *mockController) GetSecretResolver() interface{}                               { return nil }
-func (m *mockController) GetCurrentConfig() interface{}                                { return nil }
+func (m *mockController) ReloadConfiguration() error                { return nil }
+func (m *mockController) GetConfigPath() string                     { return "" }
+func (m *mockController) GetLogDir() string                         { return "" }
+func (m *mockController) TriggerOAuthLogin(serverName string) error { return nil }
+func (m *mockController) GetSecretResolver() interface{}            { return nil }
+func (m *mockController) GetCurrentConfig() interface{}             { return nil }
 func (m *mockController) NotifySecretsChanged(ctx context.Context, operation, secretName string) error {
 	return nil
 }
-func (m *mockController) GetToolCalls(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
-func (m *mockController) GetToolCallByID(id string) (interface{}, error)           { return nil, nil }
+func (m *mockController) GetToolCalls(limit, offset int) (interface{}, int, error) {
+	return nil, 0, nil
+}
+func (m *mockController) GetToolCallByID(id string) (interface{}, error) { return nil, nil }
 func (m *mockController) GetServerToolCalls(serverName string, limit int) (interface{}, error) {
 	return nil, nil
 }
@@ -90,21 +92,21 @@ func (m *mockController) ListRegistries() ([]interface{}, error) { return nil, n
 func (m *mockController) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
 	return nil, nil
 }
-func (m *mockController) GetManagementService() interface{}       { return nil }
-func (m *mockController) GetRuntime() interface{}                 { return nil }
+func (m *mockController) GetManagementService() interface{}                       { return nil }
+func (m *mockController) GetRuntime() interface{}                                 { return nil }
 func (m *mockController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
-func (m *mockController) GetSessionByID(id string) (interface{}, error) { return nil, nil }
-func (m *mockController) GetRecentSessions(limit int) (interface{}, int, error) { return nil, 0, nil }
+func (m *mockController) GetSessionByID(id string) (interface{}, error)           { return nil, nil }
+func (m *mockController) GetRecentSessions(limit int) (interface{}, int, error)   { return nil, 0, nil }
 func (m *mockController) GetToolCallsBySession(sessionID string, limit, offset int) (interface{}, int, error) {
 	return nil, 0, nil
 }
-func (m *mockController) GetVersionInfo() interface{}            { return nil }
-func (m *mockController) RefreshVersionInfo() interface{}        { return nil }
-func (m *mockController) DiscoverServerTools(_ context.Context, _ string) error { return nil }
-func (m *mockController) AddServer(_ context.Context, _ interface{}) error { return nil }
-func (m *mockController) RemoveServer(_ context.Context, _ string) error { return nil }
+func (m *mockController) GetVersionInfo() interface{}                            { return nil }
+func (m *mockController) RefreshVersionInfo() interface{}                        { return nil }
+func (m *mockController) DiscoverServerTools(_ context.Context, _ string) error  { return nil }
+func (m *mockController) AddServer(_ context.Context, _ interface{}) error       { return nil }
+func (m *mockController) RemoveServer(_ context.Context, _ string) error         { return nil }
 func (m *mockController) ListActivities(_ interface{}) (interface{}, int, error) { return nil, 0, nil }
-func (m *mockController) GetActivity(_ string) (interface{}, error) { return nil, nil }
+func (m *mockController) GetActivity(_ string) (interface{}, error)              { return nil, nil }
 func (m *mockController) StreamActivities(_ interface{}) <-chan interface{} {
 	ch := make(chan interface{})
 	close(ch)
@@ -190,6 +192,131 @@ func TestCodeExecHandler_MissingCode(t *testing.T) {
 
 	assert.False(t, response["ok"].(bool))
 	assert.Contains(t, response, "error")
+}
+
+func TestCodeExecHandler_TypeScriptSuccess(t *testing.T) {
+	// Given: TypeScript code execution request
+	reqBody := map[string]interface{}{
+		"code":     "const x: number = 42; ({ result: x })",
+		"language": "typescript",
+		"input":    map[string]interface{}{},
+		"options": map[string]interface{}{
+			"timeout_ms":     60000,
+			"max_tool_calls": 10,
+		},
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/code/exec", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	// Mock controller that verifies language is passed through
+	mockCtrl := &mockController{
+		callToolFunc: func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+			assert.Equal(t, "code_execution", toolName)
+			// Verify language parameter is passed
+			assert.Equal(t, "typescript", args["language"])
+			// Return success
+			execResult := map[string]interface{}{
+				"ok":    true,
+				"value": 42,
+			}
+			resultJSON, _ := json.Marshal(execResult)
+			return []interface{}{
+				map[string]interface{}{
+					"type": "text",
+					"text": string(resultJSON),
+				},
+			}, nil
+		},
+	}
+
+	logger := zap.NewNop().Sugar()
+	handler := httpapi.NewCodeExecHandler(mockCtrl, logger)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(recorder.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.True(t, response["ok"].(bool))
+}
+
+func TestCodeExecHandler_NoLanguageDefaultsToJavaScript(t *testing.T) {
+	// Given: Request without language field
+	reqBody := map[string]interface{}{
+		"code":  "({ result: 42 })",
+		"input": map[string]interface{}{},
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/code/exec", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	mockCtrl := &mockController{
+		callToolFunc: func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+			// Verify no language parameter is passed (backward compat)
+			_, hasLanguage := args["language"]
+			assert.False(t, hasLanguage, "language should not be in args when not specified")
+			execResult := map[string]interface{}{
+				"ok":    true,
+				"value": 42,
+			}
+			resultJSON, _ := json.Marshal(execResult)
+			return []interface{}{
+				map[string]interface{}{
+					"type": "text",
+					"text": string(resultJSON),
+				},
+			}, nil
+		},
+	}
+
+	logger := zap.NewNop().Sugar()
+	handler := httpapi.NewCodeExecHandler(mockCtrl, logger)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(recorder.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.True(t, response["ok"].(bool))
+}
+
+func TestCodeExecHandler_InvalidLanguage(t *testing.T) {
+	// Given: Request with invalid language
+	reqBody := map[string]interface{}{
+		"code":     "({ result: 42 })",
+		"language": "python",
+		"input":    map[string]interface{}{},
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/code/exec", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	mockCtrl := &mockController{}
+	logger := zap.NewNop().Sugar()
+	handler := httpapi.NewCodeExecHandler(mockCtrl, logger)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(recorder.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.False(t, response["ok"].(bool))
+	errorMap := response["error"].(map[string]interface{})
+	assert.Equal(t, "INVALID_LANGUAGE", errorMap["code"])
+	assert.Contains(t, errorMap["message"], "python")
 }
 
 func TestCodeExecHandler_ExecutionError(t *testing.T) {
