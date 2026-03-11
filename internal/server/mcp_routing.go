@@ -404,18 +404,37 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 	}
 
 	codeExecutionTool := mcp.NewTool("code_execution",
-		mcp.WithDescription("Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request. "+
-			"Use when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations.\n\n"+
-			"**Available in JavaScript**:\n"+
+		mcp.WithDescription("Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request. "+
+			"Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations "+
+			"that would require multiple round-trips otherwise.\n\n"+
+			"**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n"+
+			"**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n"+
+			"**Available in code**:\n"+
 			"- `input` global: Your input data passed via the 'input' parameter\n"+
 			"- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n"+
-			"- ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n"+
-			"Use `retrieve_tools` to discover available tools, then call them via `call_tool('serverName', 'toolName', {args})`."),
+			"- Modern JavaScript (ES2020+): arrow functions, const/let, template literals, destructuring, classes, for-of, "+
+			"optional chaining (?.), nullish coalescing (??), spread/rest, Promises, Symbols, Map/Set, Proxy/Reflect "+
+			"(no require(), filesystem, or network access)\n\n"+
+			"**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. "+
+			"Types are automatically stripped before execution.\n\n"+
+			"**Important runtime rules**:\n"+
+			"- `call_tool` is strictly SYNCHRONOUS. Do not use `await`.\n"+
+			"- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n"+
+			"- The last evaluated expression in your script is automatically returned as the final output.\n\n"+
+			"**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
 		mcp.WithTitleAnnotation("Code Execution"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("code",
 			mcp.Required(),
-			mcp.Description("JavaScript source code (ES5.1+) to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools."),
+			mcp.Description("JavaScript or TypeScript source code (ES2020+) to execute. Supports modern syntax: arrow functions, const/let, template literals, destructuring, "+
+				"optional chaining, nullish coalescing. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. "+
+				"call_tool is SYNCHRONOUS — do not use await. Return value is the last evaluated expression and must be JSON-serializable. "+
+				"Example: `const res = call_tool('github', 'get_user', {username: input.username}); const data = JSON.parse(res.result.content[0].text); ({user: data, timestamp: Date.now()})`"),
+		),
+		mcp.WithString("language",
+			mcp.Description("Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution. "+
+				"Type annotations are stripped, enums and namespaces are converted to JavaScript equivalents. Default: 'javascript'."),
+			mcp.Enum("javascript", "typescript"),
 		),
 		mcp.WithObject("input",
 			mcp.Description("Input data accessible as global `input` variable in code (default: {})"),
