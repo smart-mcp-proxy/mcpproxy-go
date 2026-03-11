@@ -163,14 +163,14 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 			return nil, nil, fmt.Errorf("%w: both base and patch are nil", ErrInvalidConfig)
 		}
 		// Return a copy of patch
-		merged := copyServerConfig(patch)
+		merged := CopyServerConfig(patch)
 		merged.Updated = time.Now()
 		return merged, NewConfigDiff(), nil
 	}
 
 	if patch == nil {
 		// If no patch, return a copy of base
-		merged := copyServerConfig(base)
+		merged := CopyServerConfig(base)
 		return merged, nil, nil
 	}
 
@@ -189,7 +189,7 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 	}
 
 	// Start with a copy of base
-	merged := copyServerConfig(base)
+	merged := CopyServerConfig(base)
 
 	// Track changes if requested
 	var diff *ConfigDiff
@@ -522,7 +522,7 @@ func MergeOAuthConfig(base, patch *OAuthConfig, removeIfNil bool) *OAuthConfig {
 
 // Helper functions to copy configs (avoiding pointer aliasing)
 
-func copyServerConfig(src *ServerConfig) *ServerConfig {
+func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	if src == nil {
 		return nil
 	}

@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -236,4 +237,230 @@ func TestNewResolver(t *testing.T) {
 	// Should have default providers registered
 	assert.Contains(t, resolver.providers, "env")
 	assert.Contains(t, resolver.providers, "keyring")
+}
+
+// --- Tests for ExpandStructSecretsCollectErrors ---
+
+func TestExpandStructSecretsCollectErrors_HappyPath(t *testing.T) {
+	type simpleConfig struct {
+		WorkingDir string
+		URL        string
+	}
+	s := &simpleConfig{
+		WorkingDir: "${mock:work-dir}",
+		URL:        "https://plain.example.com",
+	}
+
+	mockProvider := &MockProvider{}
+	r := &Resolver{providers: make(map[string]Provider)}
+	r.RegisterProvider("mock", mockProvider)
+
+	ctx := context.Background()
+	mockProvider.On("CanResolve", "mock").Return(true)
+	mockProvider.On("IsAvailable").Return(true)
+	mockProvider.On("Resolve", ctx, Ref{Type: "mock", Name: "work-dir", Original: "${mock:work-dir}"}).Return("/home/user/project", nil)
+
+	errs := r.ExpandStructSecretsCollectErrors(ctx, s)
+
+	assert.Empty(t, errs)
+	assert.Equal(t, "/home/user/project", s.WorkingDir)
+	assert.Equal(t, "https://plain.example.com", s.URL) // plain values untouched
+	mockProvider.AssertExpectations(t)
+}
+
+func TestExpandStructSecretsCollectErrors_PartialFailure(t *testing.T) {
+	type twoFieldConfig struct {
+		URL        string
+		WorkingDir string
+	}
+	s := &twoFieldConfig{
+		URL:        "${mock:my-url}",
+		WorkingDir: "${mock:missing-dir}",
+	}
+
+	mockProvider := &MockProvider{}
+	r := &Resolver{providers: make(map[string]Provider)}
+	r.RegisterProvider("mock", mockProvider)
+
+	ctx := context.Background()
+	mockProvider.On("CanResolve", "mock").Return(true)
+	mockProvider.On("IsAvailable").Return(true)
+	mockProvider.On("Resolve", ctx, Ref{Type: "mock", Name: "my-url", Original: "${mock:my-url}"}).Return("https://resolved.example.com", nil)
+	mockProvider.On("Resolve", ctx, Ref{Type: "mock", Name: "missing-dir", Original: "${mock:missing-dir}"}).Return("", errors.New("secret not found"))
+
+	errs := r.ExpandStructSecretsCollectErrors(ctx, s)
+
+	assert.Len(t, errs, 1)
+	assert.Equal(t, "WorkingDir", errs[0].FieldPath)
+	assert.Equal(t, "${mock:missing-dir}", errs[0].Reference)
+	assert.Error(t, errs[0].Err)
+	// Successful field is resolved; failed field retains original value
+	assert.Equal(t, "https://resolved.example.com", s.URL)
+	assert.Equal(t, "${mock:missing-dir}", s.WorkingDir)
+	mockProvider.AssertExpectations(t)
+}
+
+func TestExpandStructSecretsCollectErrors_NilPointer(t *testing.T) {
+	type nested struct {
+		WorkingDir string
+	}
+	type configWithOptional struct {
+		WorkingDir string
+		Isolation  *nested
+	}
+	s := &configWithOptional{WorkingDir: "no-refs", Isolation: nil}
+
+	r := &Resolver{providers: make(map[string]Provider)}
+	ctx := context.Background()
+
+	// Should not panic on nil nested pointer
+	errs := r.ExpandStructSecretsCollectErrors(ctx, s)
+
+	assert.Empty(t, errs)
+	assert.Equal(t, "no-refs", s.WorkingDir)
+}
+
+func TestExpandStructSecretsCollectErrors_NestedStruct(t *testing.T) {
+	type isolationConfig struct {
+		WorkingDir string
+	}
+	type serverConfig struct {
+		Isolation *isolationConfig
+	}
+
+	mockProvider := &MockProvider{}
+	r := &Resolver{providers: make(map[string]Provider)}
+	r.RegisterProvider("mock", mockProvider)
+	ctx := context.Background()
+
+	t.Run("success expands nested field", func(t *testing.T) {
+		s := &serverConfig{Isolation: &isolationConfig{WorkingDir: "${mock:iso-dir}"}}
+		mockProvider.On("CanResolve", "mock").Return(true)
+		mockProvider.On("IsAvailable").Return(true)
+		mockProvider.On("Resolve", ctx, Ref{Type: "mock", Name: "iso-dir", Original: "${mock:iso-dir}"}).Return("/isolation/dir", nil)
+
+		errs := r.ExpandStructSecretsCollectErrors(ctx, s)
+
+		assert.Empty(t, errs)
+		assert.Equal(t, "/isolation/dir", s.Isolation.WorkingDir)
+		mockProvider.AssertExpectations(t)
+	})
+
+	t.Run("failure reports nested field path", func(t *testing.T) {
+		mockFail := &MockProvider{}
+		rFail := &Resolver{providers: make(map[string]Provider)}
+		rFail.RegisterProvider("mock", mockFail)
+
+		s := &serverConfig{Isolation: &isolationConfig{WorkingDir: "${mock:missing}"}}
+		mockFail.On("CanResolve", "mock").Return(true)
+		mockFail.On("IsAvailable").Return(true)
+		mockFail.On("Resolve", ctx, Ref{Type: "mock", Name: "missing", Original: "${mock:missing}"}).Return("", errors.New("not found"))
+
+		errs := rFail.ExpandStructSecretsCollectErrors(ctx, s)
+
+		assert.Len(t, errs, 1)
+		assert.Equal(t, "Isolation.WorkingDir", errs[0].FieldPath)
+		assert.Equal(t, "${mock:missing}", errs[0].Reference)
+		// Original value retained on failure
+		assert.Equal(t, "${mock:missing}", s.Isolation.WorkingDir)
+		mockFail.AssertExpectations(t)
+	})
+}
+
+func TestExpandStructSecretsCollectErrors_SliceField(t *testing.T) {
+	type configWithArgs struct {
+		Args []string
+	}
+	s := &configWithArgs{Args: []string{"${mock:arg0}", "${mock:arg1}"}}
+
+	mockProvider := &MockProvider{}
+	r := &Resolver{providers: make(map[string]Provider)}
+	r.RegisterProvider("mock", mockProvider)
+
+	ctx := context.Background()
+	mockProvider.On("CanResolve", "mock").Return(true)
+	mockProvider.On("IsAvailable").Return(true)
+	mockProvider.On("Resolve", ctx, Ref{Type: "mock", Name: "arg0", Original: "${mock:arg0}"}).Return("resolved-arg0", nil)
+	mockProvider.On("Resolve", ctx, Ref{Type: "mock", Name: "arg1", Original: "${mock:arg1}"}).Return("resolved-arg1", nil)
+
+	errs := r.ExpandStructSecretsCollectErrors(ctx, s)
+
+	assert.Empty(t, errs)
+	assert.Equal(t, []string{"resolved-arg0", "resolved-arg1"}, s.Args)
+	mockProvider.AssertExpectations(t)
+
+	// Verify failure reports correct path "Args[0]"
+	mockFail := &MockProvider{}
+	rFail := &Resolver{providers: make(map[string]Provider)}
+	rFail.RegisterProvider("mock", mockFail)
+
+	sFail := &configWithArgs{Args: []string{"${mock:missing}"}}
+	mockFail.On("CanResolve", "mock").Return(true)
+	mockFail.On("IsAvailable").Return(true)
+	mockFail.On("Resolve", ctx, Ref{Type: "mock", Name: "missing", Original: "${mock:missing}"}).Return("", errors.New("not found"))
+
+	errsFail := rFail.ExpandStructSecretsCollectErrors(ctx, sFail)
+	assert.Len(t, errsFail, 1)
+	assert.Equal(t, "Args[0]", errsFail[0].FieldPath)
+	mockFail.AssertExpectations(t)
+}
+
+func TestExpandStructSecretsCollectErrors_MapField(t *testing.T) {
+	type configWithEnv struct {
+		Env map[string]string
+	}
+	s := &configWithEnv{Env: map[string]string{"MY_VAR": "${mock:my-secret}"}}
+
+	mockProvider := &MockProvider{}
+	r := &Resolver{providers: make(map[string]Provider)}
+	r.RegisterProvider("mock", mockProvider)
+
+	ctx := context.Background()
+	mockProvider.On("CanResolve", "mock").Return(true)
+	mockProvider.On("IsAvailable").Return(true)
+	mockProvider.On("Resolve", ctx, Ref{Type: "mock", Name: "my-secret", Original: "${mock:my-secret}"}).Return("resolved-secret", nil)
+
+	errs := r.ExpandStructSecretsCollectErrors(ctx, s)
+
+	assert.Empty(t, errs)
+	assert.Equal(t, "resolved-secret", s.Env["MY_VAR"])
+	mockProvider.AssertExpectations(t)
+
+	// Verify failure reports correct path "Env[MY_VAR]"
+	mockFail := &MockProvider{}
+	rFail := &Resolver{providers: make(map[string]Provider)}
+	rFail.RegisterProvider("mock", mockFail)
+
+	sFail := &configWithEnv{Env: map[string]string{"MY_VAR": "${mock:missing}"}}
+	mockFail.On("CanResolve", "mock").Return(true)
+	mockFail.On("IsAvailable").Return(true)
+	mockFail.On("Resolve", ctx, Ref{Type: "mock", Name: "missing", Original: "${mock:missing}"}).Return("", errors.New("not found"))
+
+	errsFail := rFail.ExpandStructSecretsCollectErrors(ctx, sFail)
+	assert.Len(t, errsFail, 1)
+	assert.Equal(t, "Env[MY_VAR]", errsFail[0].FieldPath)
+	mockFail.AssertExpectations(t)
+}
+
+func TestExpandStructSecretsCollectErrors_NoRefs(t *testing.T) {
+	type simpleConfig struct {
+		WorkingDir string
+		URL        string
+		Args       []string
+	}
+	s := &simpleConfig{
+		WorkingDir: "/absolute/path",
+		URL:        "https://plain.example.com",
+		Args:       []string{"--flag", "value"},
+	}
+
+	r := &Resolver{providers: make(map[string]Provider)}
+	ctx := context.Background()
+
+	errs := r.ExpandStructSecretsCollectErrors(ctx, s)
+
+	assert.Empty(t, errs)
+	assert.Equal(t, "/absolute/path", s.WorkingDir)
+	assert.Equal(t, "https://plain.example.com", s.URL)
+	assert.Equal(t, []string{"--flag", "value"}, s.Args)
 }

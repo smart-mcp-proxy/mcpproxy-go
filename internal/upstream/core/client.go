@@ -102,88 +102,27 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 
 // NewClientWithOptions creates a new core MCP client with additional options
 func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, cliDebugMode bool, secretResolver *secret.Resolver) (*Client, error) {
-	// Resolve secrets in server config before using it
-	resolvedServerConfig := *serverConfig // Create a copy
+	// Deep-copy the config so expansion never mutates the caller's value (FR-004).
+	// ExpandStructSecretsCollectErrors resolves ${env:...} and ${keyring:...} refs in
+	// every string field of ServerConfig and its nested structs (IsolationConfig, OAuthConfig)
+	// without an explicit per-field allowlist (FR-001 / US2).
+	resolvedServerConfig := config.CopyServerConfig(serverConfig)
 	if secretResolver != nil {
-		// Create a context for secret resolution
 		ctx := context.Background()
-
-		// Resolve secrets in environment variables
-		if len(resolvedServerConfig.Env) > 0 {
-			resolvedEnv := make(map[string]string)
-			for k, v := range resolvedServerConfig.Env {
-				resolvedValue, err := secretResolver.ExpandSecretRefs(ctx, v)
-				if err != nil {
-					logger.Error("CRITICAL: Failed to resolve secret in environment variable - server will use UNRESOLVED placeholder",
-						zap.String("server", serverConfig.Name),
-						zap.String("env_var", k),
-						zap.String("reference", v),
-						zap.Error(err),
-						zap.String("help", "Use Web UI (http://localhost:8080/ui/) or API to add the secret to keyring"))
-					resolvedValue = v // Use original value on error - THIS IS THE PROBLEM!
-				} else if resolvedValue != v {
-					logger.Debug("Secret resolved successfully",
-						zap.String("server", serverConfig.Name),
-						zap.String("env_var", k),
-						zap.String("reference", v))
-				}
-				resolvedEnv[k] = resolvedValue
-			}
-			resolvedServerConfig.Env = resolvedEnv
-		}
-
-		// Resolve secrets in arguments
-		if len(resolvedServerConfig.Args) > 0 {
-			resolvedArgs := make([]string, len(resolvedServerConfig.Args))
-			for i, arg := range resolvedServerConfig.Args {
-				resolvedValue, err := secretResolver.ExpandSecretRefs(ctx, arg)
-				if err != nil {
-					logger.Error("CRITICAL: Failed to resolve secret in argument - server will use UNRESOLVED placeholder",
-						zap.String("server", serverConfig.Name),
-						zap.Int("arg_index", i),
-						zap.String("reference", arg),
-						zap.Error(err),
-						zap.String("help", "Use Web UI (http://localhost:8080/ui/) or API to add the secret to keyring"))
-					resolvedValue = arg // Use original value on error - THIS IS THE PROBLEM!
-				} else if resolvedValue != arg {
-					logger.Debug("Secret resolved successfully",
-						zap.String("server", serverConfig.Name),
-						zap.Int("arg_index", i),
-						zap.String("reference", arg))
-				}
-				resolvedArgs[i] = resolvedValue
-			}
-			resolvedServerConfig.Args = resolvedArgs
-		}
-
-		// Resolve secrets in headers
-		if len(resolvedServerConfig.Headers) > 0 {
-			resolvedHeaders := make(map[string]string)
-			for k, v := range resolvedServerConfig.Headers {
-				resolvedValue, err := secretResolver.ExpandSecretRefs(ctx, v)
-				if err != nil {
-					logger.Error("CRITICAL: Failed to resolve secret in header - server will use UNRESOLVED placeholder",
-						zap.String("server", serverConfig.Name),
-						zap.String("header", k),
-						zap.String("reference", v),
-						zap.Error(err),
-						zap.String("help", "Use Web UI (http://localhost:8080/ui/) or API to add the secret to keyring"))
-					resolvedValue = v
-				} else if resolvedValue != v {
-					logger.Debug("Secret resolved successfully",
-						zap.String("server", serverConfig.Name),
-						zap.String("header", k),
-						zap.String("reference", v))
-				}
-				resolvedHeaders[k] = resolvedValue
-			}
-			resolvedServerConfig.Headers = resolvedHeaders
+		errs := secretResolver.ExpandStructSecretsCollectErrors(ctx, resolvedServerConfig)
+		for _, e := range errs {
+			logger.Error("CRITICAL: Failed to resolve secret reference - field will use UNRESOLVED placeholder",
+				zap.String("server", serverConfig.Name),
+				zap.String("field", e.FieldPath),
+				zap.String("reference", e.Reference),
+				zap.Error(e.Err),
+				zap.String("help", "Use Web UI (http://localhost:8080/ui/) or API to add the secret to keyring"))
 		}
 	}
 
 	c := &Client{
 		id:             id,
-		config:         &resolvedServerConfig, // Use resolved config
+		config:         resolvedServerConfig,
 		globalConfig:   globalConfig,
 		storage:        storage,
 		secretResolver: secretResolver, // Store resolver for future use
