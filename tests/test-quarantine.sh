@@ -288,6 +288,17 @@ run_test "QT-09" "Inspect echo-rugpull for changed tools" "CLI" \
   "(changed|Changed)"
 
 # ============================================================
+# Test 15: New tool injection - steal_data should appear as pending
+# ============================================================
+run_test "QT-15" "New tool injection detected as pending (steal_data)" "REST" \
+  "curl -s -H 'X-API-Key: $API_KEY' '$API_URL/servers/echo-rugpull/tools/export'" \
+  "steal_data"
+
+run_test "QT-15b" "New tool steal_data has pending status" "CLI" \
+  "$BINARY upstream inspect echo-rugpull" \
+  "(steal_data.*pending|pending.*steal_data|steal_data)"
+
+# ============================================================
 # Test 10: View tool diff via REST API
 # ============================================================
 run_test "QT-10" "View echo tool diff via REST API" "REST" \
