@@ -625,6 +625,9 @@ async function approveTool(toolName: string) {
         message: `${toolName} has been approved`,
       })
       await loadToolApprovals()
+      // Refresh server data to update quarantine counts
+      await serversStore.fetchServers()
+      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
     } else {
       systemStore.addToast({
         type: 'error',
@@ -655,6 +658,9 @@ async function approveAllTools() {
         message: `All tools for ${server.value.name} have been approved`,
       })
       await loadToolApprovals()
+      // Refresh server data to update quarantine counts
+      await serversStore.fetchServers()
+      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
     } else {
       systemStore.addToast({
         type: 'error',
