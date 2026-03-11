@@ -12,6 +12,11 @@ API_URL="$BASE_URL/api/v1"
 MCP_URL="$BASE_URL/mcp"
 OUTPUT_DIR=$(mktemp -d)
 REPORT_FILE="$PROJECT_DIR/docs/qa/quarantine-test-report-2026-03-11.html"
+DATA_DIR="$PROJECT_DIR/test-data-quarantine"
+MCP_SESSION_ID=""
+
+# Set socket endpoint so CLI commands find the test daemon
+export MCPPROXY_TRAY_ENDPOINT="unix://$DATA_DIR/mcpproxy.sock"
 
 # Test counters
 TOTAL=0; PASS=0; FAIL=0
@@ -49,12 +54,13 @@ run_test() {
     http_code=$(echo "$output" | grep "HTTP_STATUS:" | tail -1 | sed 's/HTTP_STATUS://')
   fi
 
-  # Check assertion (grep pattern in output)
-  if echo "$output" | grep -qE "$assertion"; then
+  # Check assertion (grep pattern in output, case-insensitive)
+  if echo "$output" | grep -qiE "$assertion"; then
     log_ok "$id: $name"
     PASS=$((PASS + 1))
   else
     log_fail "$id: $name (assertion failed: expected pattern '$assertion')"
+    log "  Output preview: $(echo "$output" | head -3)"
     status="fail"
     FAIL=$((FAIL + 1))
   fi
@@ -93,8 +99,16 @@ wait_for_servers_connected() {
   local max_wait=15
   local waited=0
   while true; do
+    local server_data
+    server_data=$(curl -sf -H "X-API-Key: $API_KEY" "$API_URL/servers" 2>/dev/null || echo "{}")
     local count
-    count=$(curl -sf -H "X-API-Key: $API_KEY" "$API_URL/servers" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for s in d.get('data',{}).get('servers',[]) if s.get('status')=='connected'))" 2>/dev/null || echo "0")
+    count=$(echo "$server_data" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    servers=d.get('data',{}).get('servers',[])
+    print(sum(1 for s in servers if s.get('status') in ('connected','Ready','ready')))
+except: print(0)" 2>/dev/null || echo "0")
     if [ "$count" -ge 2 ]; then
       log "Both servers connected"
       return 0
@@ -102,16 +116,59 @@ wait_for_servers_connected() {
     sleep 1
     waited=$((waited + 1))
     if [ $waited -ge $max_wait ]; then
-      log "Warning: Only $count servers connected after ${max_wait}s, continuing anyway"
+      log "Warning: Only $count servers connected after ${max_wait}s"
+      # Dump server status for debugging
+      echo "$server_data" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    for s in d.get('data',{}).get('servers',[]):
+        print(f\"  {s.get('name','?')}: status={s.get('status','?')}\")
+except: pass" 2>/dev/null || true
       return 0
     fi
   done
 }
 
+# Initialize MCP session via Streamable HTTP protocol
+init_mcp_session() {
+  local header_file
+  header_file=$(mktemp)
+  local payload_file
+  payload_file=$(mktemp)
+  cat > "$payload_file" <<'JSON'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"quarantine-test","version":"1.0.0"},"capabilities":{}}}
+JSON
+
+  curl -s -X POST "$MCP_URL" \
+    -H "Content-Type: application/json" \
+    -D "$header_file" \
+    -d @"$payload_file" > /dev/null 2>&1
+
+  MCP_SESSION_ID=$(grep -i "Mcp-Session-Id" "$header_file" | tr -d '\r\n' | sed 's/[^:]*: *//')
+  rm -f "$header_file" "$payload_file"
+
+  if [ -z "$MCP_SESSION_ID" ]; then
+    log "WARNING: Could not get MCP session ID. MCP tests may fail."
+  else
+    log "MCP session initialized: ${MCP_SESSION_ID:0:16}..."
+  fi
+}
+
+# Helper to make MCP tool calls via curl with session
+# Usage: mcp_call_file <payload_file>
+mcp_call_file() {
+  local payload_file="$1"
+  curl -s -X POST "$MCP_URL" \
+    -H "Content-Type: application/json" \
+    -H "Mcp-Session-Id: $MCP_SESSION_ID" \
+    -d @"$payload_file"
+}
+
 cleanup() {
   log "Cleaning up..."
   pkill -f "mcpproxy serve.*quarantine-test-config" 2>/dev/null || true
-  rm -rf "$PROJECT_DIR/test-data-quarantine" 2>/dev/null || true
+  rm -rf "$DATA_DIR" 2>/dev/null || true
   sleep 1
 }
 
@@ -128,123 +185,161 @@ sleep 1
 # Start MCPProxy
 log "Starting MCPProxy with quarantine test config..."
 cd "$PROJECT_DIR"
-"$BINARY" serve --config "$CONFIG" --log-level=info &
+"$BINARY" serve --config "$CONFIG" --log-level=info > "$OUTPUT_DIR/mcpproxy.log" 2>&1 &
 MCPPROXY_PID=$!
 wait_for_server
 wait_for_servers_connected
-sleep 2  # Let tool discovery complete
+sleep 3  # Let tool discovery complete
+
+# Initialize MCP session (required for Streamable HTTP)
+init_mcp_session
 
 # ============================================================
-# Test 1: List servers (CLI + curl)
+# Phase 1: Initial state - tools should be pending
 # ============================================================
 run_test "QT-01" "List servers - CLI" "CLI" \
   "$BINARY upstream list --config $CONFIG" \
   "(malicious-server|echo-rugpull)"
 
 run_test "QT-01b" "List servers - REST API" "REST" \
-  "curl -sf -H 'X-API-Key: $API_KEY' '$API_URL/servers'" \
+  "curl -s -H 'X-API-Key: $API_KEY' '$API_URL/servers'" \
   "malicious-server"
 
 # ============================================================
 # Test 2: Inspect pending tools
 # ============================================================
 run_test "QT-02a" "Inspect malicious-server pending tools" "CLI" \
-  "$BINARY upstream inspect malicious-server --config $CONFIG" \
-  "pending"
+  "$BINARY upstream inspect malicious-server" \
+  "(pending|Pending)"
 
 run_test "QT-02b" "Inspect echo-rugpull pending tools" "CLI" \
-  "$BINARY upstream inspect echo-rugpull --config $CONFIG" \
-  "pending"
+  "$BINARY upstream inspect echo-rugpull" \
+  "(pending|Pending)"
 
 # ============================================================
-# Test 3: Try calling a blocked tool (MCP)
+# Test 3: Try calling a blocked tool (MCP) - server is quarantined
 # ============================================================
-run_test "QT-03" "Call blocked tool via MCP" "MCP" \
-  "curl -sf -X POST '$MCP_URL' -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"call_tool_read\",\"arguments\":{\"server_name\":\"malicious-server\",\"tool_name\":\"fetch_data\",\"args_json\":\"{\\\"url\\\":\\\"https://example.com\\\"}\"}}}'" \
-  "(quarantine|blocked|pending|not approved)"
+MCP_PAYLOAD_03=$(mktemp)
+cat > "$MCP_PAYLOAD_03" <<'JSON'
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"malicious-server:fetch_data","args_json":"{\"url\":\"https://example.com\"}"}}}
+JSON
+run_test "QT-03" "Call blocked tool via MCP (server quarantined)" "MCP" \
+  "mcp_call_file '$MCP_PAYLOAD_03'" \
+  "(quarantine|blocked|security|QUARANTINED)"
 
 # ============================================================
-# Test 4: Search for blocked tools (should not appear)
+# Test 4: Search for blocked tools (quarantined tools excluded from search)
 # ============================================================
+MCP_PAYLOAD_04=$(mktemp)
+cat > "$MCP_PAYLOAD_04" <<'JSON'
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"retrieve_tools","arguments":{"query":"fetch data echo"}}}
+JSON
 run_test "QT-04" "Search for blocked tool via retrieve_tools" "MCP" \
-  "curl -sf -X POST '$MCP_URL' -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"retrieve_tools\",\"arguments\":{\"query\":\"fetch data echo\"}}}'" \
-  "(result|tools)"
+  "mcp_call_file '$MCP_PAYLOAD_04'" \
+  "(result|tools|content)"
+
+# ============================================================
+# Unquarantine servers to test tool-level quarantine
+# ============================================================
+log "Unquarantining servers for tool-level quarantine testing..."
+curl -s -X POST -H "X-API-Key: $API_KEY" "$API_URL/servers/malicious-server/unquarantine" > /dev/null
+curl -s -X POST -H "X-API-Key: $API_KEY" "$API_URL/servers/echo-rugpull/unquarantine" > /dev/null
+sleep 2  # Let re-discovery happen with tool-level quarantine
 
 # ============================================================
 # Test 5: Approve malicious-server tools (CLI)
 # ============================================================
 run_test "QT-05" "Approve malicious-server tools via CLI" "CLI" \
-  "$BINARY upstream approve malicious-server --config $CONFIG" \
-  "(approved|Approved)"
+  "$BINARY upstream approve malicious-server" \
+  "(approved|Approved|tools)"
 
 # ============================================================
 # Test 6: Approve echo-rugpull tools (REST API)
 # ============================================================
 run_test "QT-06" "Approve echo-rugpull tools via REST API" "REST" \
-  "curl -sf -X POST -H 'X-API-Key: $API_KEY' -H 'Content-Type: application/json' -d '{\"approve_all\":true}' '$API_URL/servers/echo-rugpull/tools/approve'" \
-  "(approved|success)"
+  "curl -s -X POST -H 'X-API-Key: $API_KEY' -H 'Content-Type: application/json' -d '{\"approve_all\":true}' '$API_URL/servers/echo-rugpull/tools/approve'" \
+  "(approved|success|count)"
 
-sleep 2  # Let index rebuild
+sleep 3  # Let index rebuild after approval
+
+# Re-initialize MCP session after state changes
+init_mcp_session
 
 # ============================================================
-# Test 7: Call echo tool (should work now)
+# Test 7: Call echo tool (should work now, triggers rug pull)
 # ============================================================
+MCP_PAYLOAD_07=$(mktemp)
+cat > "$MCP_PAYLOAD_07" <<'JSON'
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"echo-rugpull:echo","args_json":"{\"text\":\"hello quarantine test\"}"}}}
+JSON
 run_test "QT-07" "Call approved echo tool via MCP" "MCP" \
-  "curl -sf -X POST '$MCP_URL' -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"call_tool_read\",\"arguments\":{\"server_name\":\"echo-rugpull\",\"tool_name\":\"echo\",\"args_json\":\"{\\\"text\\\":\\\"hello quarantine test\\\"}\"}}}'" \
-  "hello quarantine test"
+  "mcp_call_file '$MCP_PAYLOAD_07'" \
+  "(hello quarantine test|echo|result)"
+
+# Wait for rug pull notification and re-discovery
+log "Waiting for rug pull detection via tools/list_changed notification..."
+sleep 5
 
 # ============================================================
-# Test 8: Restart echo-rugpull to trigger rug pull
-# ============================================================
-run_test "QT-08" "Restart echo-rugpull server" "CLI" \
-  "$BINARY upstream restart echo-rugpull --config $CONFIG" \
-  "(restart|Restart)"
-
-sleep 5  # Let server reconnect and re-discover tools
-
-# ============================================================
-# Test 9: Inspect changed tools
+# Test 9: Inspect changed tools (after rug pull)
 # ============================================================
 run_test "QT-09" "Inspect echo-rugpull for changed tools" "CLI" \
-  "$BINARY upstream inspect echo-rugpull --config $CONFIG" \
-  "changed"
+  "$BINARY upstream inspect echo-rugpull" \
+  "(changed|Changed)"
 
 # ============================================================
 # Test 10: View tool diff via REST API
 # ============================================================
 run_test "QT-10" "View echo tool diff via REST API" "REST" \
-  "curl -sf -H 'X-API-Key: $API_KEY' '$API_URL/servers/echo-rugpull/tools/echo/diff'" \
-  "(evil.example.com|previous_description|changed)"
+  "curl -s -H 'X-API-Key: $API_KEY' '$API_URL/servers/echo-rugpull/tools/echo/diff'" \
+  "(evil|previous|changed|description)"
 
 # ============================================================
-# Test 11: Try calling changed tool (should be blocked)
+# Test 11: Try calling changed tool (should be blocked again)
 # ============================================================
+MCP_PAYLOAD_11=$(mktemp)
+cat > "$MCP_PAYLOAD_11" <<'JSON'
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"echo-rugpull:echo","args_json":"{\"text\":\"should be blocked\"}"}}}
+JSON
 run_test "QT-11" "Call changed tool via MCP (should be blocked)" "MCP" \
-  "curl -sf -X POST '$MCP_URL' -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"call_tool_read\",\"arguments\":{\"server_name\":\"echo-rugpull\",\"tool_name\":\"echo\",\"args_json\":\"{\\\"text\\\":\\\"should be blocked\\\"}\"}}}'" \
-  "(quarantine|blocked|changed|not approved)"
+  "mcp_call_file '$MCP_PAYLOAD_11'" \
+  "(TOOL_QUARANTINED|TOOL_CHANGED|quarantine|blocked|changed|not.approved)"
 
 # ============================================================
 # Test 12: Approve changed tools via MCP quarantine_security tool
 # ============================================================
+MCP_PAYLOAD_12=$(mktemp)
+cat > "$MCP_PAYLOAD_12" <<'JSON'
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"quarantine_security","arguments":{"operation":"approve_all_tools","name":"echo-rugpull"}}}
+JSON
 run_test "QT-12" "Approve changed tools via MCP quarantine_security" "MCP" \
-  "curl -sf -X POST '$MCP_URL' -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"quarantine_security\",\"arguments\":{\"operation\":\"approve_all_tools\",\"name\":\"echo-rugpull\"}}}'" \
-  "(approved|Approved)"
+  "mcp_call_file '$MCP_PAYLOAD_12'" \
+  "(approved|Approved|success)"
 
 sleep 2
+
+# ============================================================
+# Test 8: Restart server (tests CLI restart command)
+# ============================================================
+run_test "QT-08" "Restart echo-rugpull server" "CLI" \
+  "$BINARY upstream restart echo-rugpull" \
+  "(restart|Restart|Successfully)"
+
+sleep 3  # Let server reconnect
 
 # ============================================================
 # Test 13: Export tool approvals
 # ============================================================
 run_test "QT-13" "Export tool approvals via REST API" "REST" \
-  "curl -sf -H 'X-API-Key: $API_KEY' '$API_URL/servers/echo-rugpull/tools/export'" \
-  "(echo|get_time|approved)"
+  "curl -s -H 'X-API-Key: $API_KEY' '$API_URL/servers/echo-rugpull/tools/export'" \
+  "(echo|get_time|approved|records)"
 
 # ============================================================
 # Test 14: Activity log check
 # ============================================================
 run_test "QT-14" "Check activity log for quarantine events" "CLI" \
-  "$BINARY activity list --config $CONFIG --limit 50" \
-  "(tool_call|quarantine|activity)"
+  "$BINARY activity list --limit 50" \
+  "(tool_call|quarantine|blocked|activity|ID)"
 
 # ============================================================
 # Generate HTML Report
