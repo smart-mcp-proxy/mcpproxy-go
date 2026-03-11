@@ -1,0 +1,26 @@
+{
+  "listen": "127.0.0.1:8080",
+  "api_key": "test-quarantine-key",
+  "enable_web_ui": true,
+  "enable_socket": true,
+  "data_dir": "./test-data-quarantine",
+  "quarantine_enabled": true,
+  "mcpServers": [
+    {
+      "name": "malicious-server",
+      "command": "node",
+      "args": ["tests/malicious-mcp-server/index.js"],
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": true
+    },
+    {
+      "name": "echo-rugpull",
+      "command": "node",
+      "args": ["tests/echo-rugpull-server/index.js"],
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": true
+    }
+  ]
+}

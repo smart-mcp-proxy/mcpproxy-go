@@ -606,7 +606,26 @@ async function loadToolApprovals() {
   try {
     const response = await api.getToolApprovals(server.value.name)
     if (response.success && response.data) {
-      toolApprovals.value = response.data.tools || []
+      const approvals = response.data.tools || []
+
+      // Fetch diffs for changed tools to populate previous_description
+      const changedTools = approvals.filter(t => t.status === 'changed')
+      if (changedTools.length > 0) {
+        const diffPromises = changedTools.map(async (tool) => {
+          try {
+            const diffResp = await api.getToolDiff(server.value!.name, tool.tool_name)
+            if (diffResp.success && diffResp.data) {
+              tool.previous_description = diffResp.data.previous_description
+              tool.current_description = diffResp.data.current_description
+            }
+          } catch {
+            // Diff fetch failed, continue without it
+          }
+        })
+        await Promise.all(diffPromises)
+      }
+
+      toolApprovals.value = approvals
     }
   } catch {
     // Silently fail - tool approvals are supplementary info
@@ -625,6 +644,9 @@ async function approveTool(toolName: string) {
         message: `${toolName} has been approved`,
       })
       await loadToolApprovals()
+      // Refresh server data to update quarantine counts
+      await serversStore.fetchServers()
+      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
     } else {
       systemStore.addToast({
         type: 'error',
@@ -655,6 +677,9 @@ async function approveAllTools() {
         message: `All tools for ${server.value.name} have been approved`,
       })
       await loadToolApprovals()
+      // Refresh server data to update quarantine counts
+      await serversStore.fetchServers()
+      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
     } else {
       systemStore.addToast({
         type: 'error',
