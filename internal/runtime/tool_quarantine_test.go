@@ -34,7 +34,7 @@ func setupQuarantineRuntime(t *testing.T, quarantineEnabled *bool, servers []*co
 
 func TestCheckToolApprovals_NewTool_PendingStatus(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
-		{Name: "github", Enabled: true},
+		{Name: "github", Enabled: true, Quarantined: true},
 	})
 
 	tools := []*config.ToolMetadata{
@@ -261,7 +261,7 @@ func TestCheckToolApprovals_AutoApproved_ThenChanged_StillBlocked(t *testing.T) 
 
 func TestApproveTools(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
-		{Name: "github", Enabled: true},
+		{Name: "github", Enabled: true, Quarantined: true},
 	})
 
 	// Create pending tools
@@ -293,7 +293,7 @@ func TestApproveTools(t *testing.T) {
 
 func TestApproveAllTools(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
-		{Name: "github", Enabled: true},
+		{Name: "github", Enabled: true, Quarantined: true},
 	})
 
 	// Create pending tools

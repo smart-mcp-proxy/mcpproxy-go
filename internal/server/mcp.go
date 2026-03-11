@@ -59,6 +59,21 @@ const (
 	messageConnectionCancelled = "Connection monitoring cancelled due to server shutdown"
 )
 
+// proxyVersion holds the build version for MCP server identification.
+// Set via SetMCPServerVersion during startup.
+var proxyVersion = "1.0.0"
+
+// SetMCPServerVersion sets the version reported by MCP server instances.
+func SetMCPServerVersion(v string) {
+	if v != "" {
+		proxyVersion = v
+	}
+}
+
+func mcpServerVersion() string {
+	return proxyVersion
+}
+
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
 	server          *mcpserver.MCPServer
@@ -75,6 +90,7 @@ type MCPProxyServer struct {
 	// Each instance has different tools registered for its routing mode.
 	directServer   *mcpserver.MCPServer // Direct mode: upstream tools with serverName__toolName naming
 	codeExecServer *mcpserver.MCPServer // Code execution mode: code_execution + retrieve_tools
+	callToolServer *mcpserver.MCPServer // Call tool mode: retrieve_tools + call_tool_read/write/destructive
 
 	// Docker availability cache
 	dockerAvailableCache *bool
@@ -191,7 +207,7 @@ func NewMCPProxyServer(
 
 	mcpServer := mcpserver.NewMCPServer(
 		"mcpproxy-go",
-		"1.0.0",
+		mcpServerVersion(),
 		capabilities...,
 	)
 
@@ -352,21 +368,6 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
 
-	// tool_search_tool_bm25_20251119 - Anthropic-compatible tool search (lazy loading)
-	// Claude models are fine-tuned to recognize this specific tool name for on-demand tool discovery.
-	// Returns tool_reference content blocks per Anthropic's custom implementation format.
-	// See: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
-	toolSearchBM25Tool := mcp.NewTool("tool_search_tool_bm25_20251119",
-		mcp.WithDescription("Search for tools by keyword or description. Use this to find relevant tools before calling them."),
-		mcp.WithTitleAnnotation("Tool Search (BM25)"),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("query",
-			mcp.Required(),
-			mcp.Description("The search query (e.g. 'weather', 'git commit', 'database query')."),
-		),
-	)
-	p.server.AddTool(toolSearchBM25Tool, p.handleToolSearchBM25)
-
 	// Intent-based tool variants (Spec 018)
 	// These replace the legacy call_tool with three operation-specific variants
 	// that enable granular IDE permission control and require explicit intent declaration.
@@ -477,8 +478,21 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		p.server.AddTool(codeExecutionTool, p.handleCodeExecution)
 	}
 
-	// upstream_servers - Basic server management (with security checks)
-	if !p.config.DisableManagement && !p.config.ReadOnlyMode {
+	// Management tools (shared across routing modes)
+	for _, st := range p.buildManagementTools() {
+		p.server.AddTool(st.Tool, st.Handler)
+	}
+}
+
+// buildManagementTools builds the management tool set (upstream_servers, quarantine, registries).
+// These are shared across all routing mode servers.
+func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
+	if p.config.DisableManagement || p.config.ReadOnlyMode {
+		return nil
+	}
+
+	var tools []mcpserver.ServerTool
+	{
 		upstreamServersTool := mcp.NewTool("upstream_servers",
 			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Use 'isolation_json' parameter to configure per-server Docker images, CPU/memory limits, and network isolation. Example: {\"enabled\": true, \"image\": \"node:20\", \"network_mode\": \"bridge\"}.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Enable isolation: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"enabled\\\": true}\"} - enables isolation with defaults\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)"),
 			mcp.WithTitleAnnotation("Upstream Servers"),
@@ -523,9 +537,11 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Description("Whether server should be enabled (default: true)"),
 			),
 		)
-		p.server.AddTool(upstreamServersTool, p.handleUpstreamServers)
+		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
+	}
 
-		// quarantine_security - Security quarantine management
+	// quarantine_security - Security quarantine management
+	{
 		quarantineSecurityTool := mcp.NewTool("quarantine_security",
 			mcp.WithDescription("Security quarantine management for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs). Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
 			mcp.WithTitleAnnotation("Quarantine Security"),
@@ -542,9 +558,11 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Description("Tool name (required for approve_tool operation)"),
 			),
 		)
-		p.server.AddTool(quarantineSecurityTool, p.handleQuarantineSecurity)
+		tools = append(tools, mcpserver.ServerTool{Tool: quarantineSecurityTool, Handler: p.handleQuarantineSecurity})
+	}
 
-		// search_servers - Registry search and discovery
+	// search_servers - Registry search and discovery
+	{
 		searchServersTool := mcp.NewTool("search_servers",
 			mcp.WithDescription("🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command."),
 			mcp.WithTitleAnnotation("Search Servers"),
@@ -563,16 +581,20 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 				mcp.Description("Maximum number of results to return (default: 10, max: 50)"),
 			),
 		)
-		p.server.AddTool(searchServersTool, p.handleSearchServers)
+		tools = append(tools, mcpserver.ServerTool{Tool: searchServersTool, Handler: p.handleSearchServers})
+	}
 
-		// list_registries - Explicit registry discovery tool
+	// list_registries - Explicit registry discovery tool
+	{
 		listRegistriesTool := mcp.NewTool("list_registries",
 			mcp.WithDescription("📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams."),
 			mcp.WithTitleAnnotation("List Registries"),
 			mcp.WithReadOnlyHintAnnotation(true),
 		)
-		p.server.AddTool(listRegistriesTool, p.handleListRegistries)
+		tools = append(tools, mcpserver.ServerTool{Tool: listRegistriesTool, Handler: p.handleListRegistries})
 	}
+
+	return tools
 }
 
 // registerPrompts registers prompt templates for common tasks
@@ -1007,68 +1029,6 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 
 	// Emit success event with args and response (Spec 024)
 	p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil)
-
-	return mcp.NewToolResultText(string(jsonResult)), nil
-}
-
-// handleToolSearchBM25 implements the Anthropic-standard tool search tool
-// This tool name (tool_search_tool_bm25_20251119) is fine-tuned into Claude models
-// for lazy loading tool discovery. Returns tool_reference content blocks per
-// Anthropic's custom implementation format.
-// See: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
-func (p *MCPProxyServer) handleToolSearchBM25(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	startTime := time.Now()
-
-	// Extract session info for activity logging (Spec 024)
-	var sessionID string
-	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
-		sessionID = sess.SessionID()
-	}
-	requestID := fmt.Sprintf("%d-tool_search_bm25", time.Now().UnixNano())
-
-	query, err := request.RequireString("query")
-	if err != nil {
-		p.emitActivityInternalToolCall("tool_search_tool_bm25_20251119", "", "", "",
-			sessionID, requestID, "error", err.Error(),
-			time.Since(startTime).Milliseconds(), nil, nil, nil)
-		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'query': %v", err)), nil
-	}
-
-	// Build arguments map for activity logging
-	args := map[string]interface{}{"query": query}
-
-	// Search using existing BM25 index (limit to 5 per Anthropic standard)
-	results, err := p.index.Search(query, 5)
-	if err != nil {
-		p.logger.Error("Tool search failed", zap.String("query", query), zap.Error(err))
-		p.emitActivityInternalToolCall("tool_search_tool_bm25_20251119", "", "", "",
-			sessionID, requestID, "error", err.Error(),
-			time.Since(startTime).Milliseconds(), args, nil, nil)
-		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
-	}
-
-	// Build tool_reference content blocks (Anthropic custom implementation format)
-	content := make([]map[string]interface{}, 0, len(results))
-	for _, result := range results {
-		content = append(content, map[string]interface{}{
-			"type":      "tool_reference",
-			"tool_name": result.Tool.Name,
-		})
-	}
-
-	// Return as JSON array (Claude will parse this)
-	jsonResult, err := json.Marshal(content)
-	if err != nil {
-		p.emitActivityInternalToolCall("tool_search_tool_bm25_20251119", "", "", "",
-			sessionID, requestID, "error", err.Error(),
-			time.Since(startTime).Milliseconds(), args, nil, nil)
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
-	}
-
-	// Emit success event
-	p.emitActivityInternalToolCall("tool_search_tool_bm25_20251119", "", "", "",
-		sessionID, requestID, "success", "",
-		time.Since(startTime).Milliseconds(), args, content, nil)
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }

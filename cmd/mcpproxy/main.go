@@ -41,8 +41,8 @@ import (
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
@@ -476,8 +476,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.String("log_level", cmdLogLevel),
 		zap.Bool("log_to_file", cmdLogToFile))
 
-	// Pass edition to httpapi for status endpoint
+	// Pass edition and version to internal packages
 	httpapi.SetEdition(Edition)
+	server.SetMCPServerVersion(version)
 
 	// Override other settings from command line
 	cfg.DebugSearch = cmdDebugSearch

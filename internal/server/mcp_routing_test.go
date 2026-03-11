@@ -165,10 +165,12 @@ func TestGetMCPServerForMode(t *testing.T) {
 	mainServer := mcpserver.NewMCPServer("main", "1.0.0", mcpserver.WithToolCapabilities(true))
 	directServer := mcpserver.NewMCPServer("direct", "1.0.0", mcpserver.WithToolCapabilities(true))
 	codeExecServer := mcpserver.NewMCPServer("code_exec", "1.0.0", mcpserver.WithToolCapabilities(true))
+	callToolServer := mcpserver.NewMCPServer("call_tool", "1.0.0", mcpserver.WithToolCapabilities(true))
 
 	proxy.server = mainServer
 	proxy.directServer = directServer
 	proxy.codeExecServer = codeExecServer
+	proxy.callToolServer = callToolServer
 
 	tests := []struct {
 		name     string
@@ -176,9 +178,9 @@ func TestGetMCPServerForMode(t *testing.T) {
 		expected *mcpserver.MCPServer
 	}{
 		{
-			name:     "retrieve_tools returns main server",
+			name:     "retrieve_tools returns call tool server",
 			mode:     "retrieve_tools",
-			expected: mainServer,
+			expected: callToolServer,
 		},
 		{
 			name:     "direct returns direct server",

@@ -202,71 +202,20 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 }
 
 // buildCodeExecModeTools builds the tool set for code_execution routing mode.
-// Includes: code_execution (with enhanced description listing available tools) and retrieve_tools (for discovery).
+// Includes: code_execution + retrieve_tools (for discovery).
 // Does NOT include call_tool_read/write/destructive.
 func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
-	tools := make([]mcpserver.ServerTool, 0, 2)
+	tools := make([]mcpserver.ServerTool, 0, 4)
 
-	// Check if code execution is enabled in config
-	if p.config != nil && !p.config.EnableCodeExecution {
-		// Code execution is disabled: register a stub tool that returns a clear error message
-		codeExecutionTool := mcp.NewTool("code_execution",
-			mcp.WithDescription("Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config."),
-			mcp.WithTitleAnnotation("Code Execution (Disabled)"),
-			mcp.WithReadOnlyHintAnnotation(true),
-			mcp.WithString("code",
-				mcp.Required(),
-				mcp.Description("JavaScript source code (ES5.1+) to execute."),
-			),
-		)
-		tools = append(tools, mcpserver.ServerTool{
-			Tool: codeExecutionTool,
-			Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				return mcp.NewToolResultError("Code execution is disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy configuration file."), nil
-			},
-		})
-	} else {
-		// Build enhanced description with available tools catalog
-		ctx := context.Background()
-		toolCatalog := p.buildToolCatalogDescription(ctx)
+	// code_execution tool
+	tools = append(tools, p.buildCodeExecutionTool()...)
 
-		codeExecDescription := fmt.Sprintf(
-			"Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request. "+
-				"Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations.\n\n"+
-				"**Available in JavaScript**:\n"+
-				"- `input` global: Your input data passed via the 'input' parameter\n"+
-				"- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n"+
-				"- Standard ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n"+
-				"**Available tools for orchestration**:\n%s\n\n"+
-				"Use call_tool('serverName', 'toolName', {args}) to invoke tools.",
-			toolCatalog,
-		)
-
-		// code_execution tool with enhanced description
-		codeExecutionTool := mcp.NewTool("code_execution",
-			mcp.WithDescription(codeExecDescription),
-			mcp.WithTitleAnnotation("Code Execution"),
-			mcp.WithDestructiveHintAnnotation(true),
-			mcp.WithString("code",
-				mcp.Required(),
-				mcp.Description("JavaScript source code (ES5.1+) to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools."),
-			),
-			mcp.WithObject("input",
-				mcp.Description("Input data accessible as global `input` variable in JavaScript code (default: {})"),
-			),
-			mcp.WithObject("options",
-				mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
-			),
-		)
-		tools = append(tools, mcpserver.ServerTool{
-			Tool:    codeExecutionTool,
-			Handler: p.handleCodeExecution,
-		})
-	}
-
-	// retrieve_tools for discovery
+	// retrieve_tools for discovery — instructs to use code_execution (NOT call_tool_*)
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. Use this to find tools before orchestrating them with code_execution. Use natural language to describe what you want to accomplish."),
+		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
+			"Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. "+
+			"Do NOT use call_tool_read/write/destructive — they are not available in this mode. "+
+			"Use natural language to describe what you want to accomplish."),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("query",
@@ -282,42 +231,203 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		Handler: p.handleRetrieveTools,
 	})
 
+	// Add management tools (upstream_servers, quarantine, registries)
+	tools = append(tools, p.buildManagementTools()...)
+
 	p.logger.Info("built code execution mode tools",
 		zap.Int("tool_count", len(tools)))
 
 	return tools
 }
 
-// buildToolCatalogDescription builds a human-readable catalog of available tools for the code_execution description.
-func (p *MCPProxyServer) buildToolCatalogDescription(ctx context.Context) string {
-	tools, err := p.upstreamManager.DiscoverTools(ctx)
-	if err != nil {
-		return "  (unable to discover tools - use retrieve_tools to search)"
+// buildCallToolModeTools builds the tool set for retrieve_tools routing mode (/mcp/call).
+// Includes: retrieve_tools (with call_tool_* instructions) + call_tool_read/write/destructive + read_cache + code_execution.
+func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
+	tools := make([]mcpserver.ServerTool, 0, 8)
+
+	// retrieve_tools — instructs to use call_tool_read/write/destructive
+	retrieveToolsTool := mcp.NewTool("retrieve_tools",
+		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
+			"WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results "+
+			"to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. "+
+			"Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation. "+
+			"Use natural language to describe what you want to accomplish."),
+		mcp.WithTitleAnnotation("Retrieve Tools"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Natural language description of what you want to accomplish. Be specific (e.g., 'create a new GitHub repository', 'get weather for London')."),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of tools to return (default: configured tools_limit, max: 100)"),
+		),
+		mcp.WithBoolean("include_stats",
+			mcp.Description("Include usage statistics for returned tools (default: false)"),
+		),
+		mcp.WithBoolean("debug",
+			mcp.Description("Enable debug mode with detailed scoring and ranking explanations (default: false)"),
+		),
+		mcp.WithString("explain_tool",
+			mcp.Description("When debug=true, explain why a specific tool was ranked low (format: 'server:tool')"),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    retrieveToolsTool,
+		Handler: p.handleRetrieveTools,
+	})
+
+	// call_tool_read
+	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
+		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. This is the DEFAULT choice when unsure."),
+		mcp.WithTitleAnnotation("Call Tool (Read)"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:get_user'). Use exact names from retrieve_tools results."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
+		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data: public, internal, private, or unknown."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this tool being called? Provide context."),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    callToolReadTool,
+		Handler: p.handleCallToolRead,
+	})
+
+	// call_tool_write
+	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
+		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit. Use only when explicitly modifying state."),
+		mcp.WithTitleAnnotation("Call Tool (Write)"),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_issue'). Use exact names from retrieve_tools results."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
+		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data: public, internal, private, or unknown."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this modification needed? Provide context."),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    callToolWriteTool,
+		Handler: p.handleCallToolWrite,
+	})
+
+	// call_tool_destructive
+	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
+		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, terminate. Use for irreversible or high-impact operations."),
+		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:delete_repo'). Use exact names from retrieve_tools results."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
+		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description("Classify data: public, internal, private, or unknown."),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description("Why is this deletion needed? Provide justification."),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    callToolDestructiveTool,
+		Handler: p.handleCallToolDestructive,
+	})
+
+	// read_cache for paginated responses
+	readCacheTool := mcp.NewTool("read_cache",
+		mcp.WithDescription("Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages."),
+		mcp.WithTitleAnnotation("Read Cache"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("key",
+			mcp.Required(),
+			mcp.Description("Cache key provided by mcpproxy when a response was truncated."),
+		),
+		mcp.WithNumber("offset",
+			mcp.Description("Starting record offset for pagination (default: 0)"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of records to return per page (default: 50, max: 1000)"),
+		),
+	)
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    readCacheTool,
+		Handler: p.handleReadCache,
+	})
+
+	// code_execution tool (available but not the primary workflow)
+	tools = append(tools, p.buildCodeExecutionTool()...)
+
+	// Add management tools (upstream_servers, quarantine, registries)
+	tools = append(tools, p.buildManagementTools()...)
+
+	p.logger.Info("built call tool mode tools",
+		zap.Int("tool_count", len(tools)))
+
+	return tools
+}
+
+// buildCodeExecutionTool builds the code_execution tool for routing mode servers.
+// Returns a slice (either 1 tool or 1 disabled stub) for easy appending.
+func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
+	if p.config != nil && !p.config.EnableCodeExecution {
+		// Disabled stub
+		codeExecutionTool := mcp.NewTool("code_execution",
+			mcp.WithDescription("Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config."),
+			mcp.WithTitleAnnotation("Code Execution (Disabled)"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("code",
+				mcp.Required(),
+				mcp.Description("JavaScript source code to execute."),
+			),
+		)
+		return []mcpserver.ServerTool{{
+			Tool: codeExecutionTool,
+			Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				return mcp.NewToolResultError("Code execution is disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy configuration file."), nil
+			},
+		}}
 	}
 
-	if len(tools) == 0 {
-		return "  (no upstream tools available)"
-	}
-
-	var sb strings.Builder
-	for _, tool := range tools {
-		// Determine permission tier from annotations
-		callWith := contracts.DeriveCallWith(tool.Annotations)
-		perm := contracts.ToolVariantToOperationType[callWith]
-		if perm == "" {
-			perm = "read"
-		}
-
-		// Truncate description for catalog listing
-		desc := tool.Description
-		if len(desc) > 80 {
-			desc = desc[:77] + "..."
-		}
-
-		sb.WriteString(fmt.Sprintf("- %s:%s (%s) - %s\n", tool.ServerName, tool.Name, perm, desc))
-	}
-
-	return sb.String()
+	codeExecutionTool := mcp.NewTool("code_execution",
+		mcp.WithDescription("Execute JavaScript code that orchestrates multiple upstream MCP tools in a single request. "+
+			"Use when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations.\n\n"+
+			"**Available in JavaScript**:\n"+
+			"- `input` global: Your input data passed via the 'input' parameter\n"+
+			"- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n"+
+			"- ES5.1+ JavaScript (no require(), filesystem, or network access)\n\n"+
+			"Use `retrieve_tools` to discover available tools, then call them via `call_tool('serverName', 'toolName', {args})`."),
+		mcp.WithTitleAnnotation("Code Execution"),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithString("code",
+			mcp.Required(),
+			mcp.Description("JavaScript source code (ES5.1+) to execute. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools."),
+		),
+		mcp.WithObject("input",
+			mcp.Description("Input data accessible as global `input` variable in code (default: {})"),
+		),
+		mcp.WithObject("options",
+			mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
+		),
+	)
+	return []mcpserver.ServerTool{{
+		Tool:    codeExecutionTool,
+		Handler: p.handleCodeExecution,
+	}}
 }
 
 // initRoutingModeServers creates separate MCP server instances for each routing mode.
@@ -327,7 +437,7 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// Create direct mode server
 	p.directServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
-		"1.0.0",
+		mcpServerVersion(),
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
 	)
@@ -335,7 +445,15 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// Create code execution mode server
 	p.codeExecServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
-		"1.0.0",
+		mcpServerVersion(),
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithRecovery(),
+	)
+
+	// Create call tool mode server (/mcp/call)
+	p.callToolServer = mcpserver.NewMCPServer(
+		"mcpproxy-go",
+		mcpServerVersion(),
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
 	)
@@ -344,6 +462,12 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	codeExecTools := p.buildCodeExecModeTools()
 	for _, st := range codeExecTools {
 		p.codeExecServer.AddTool(st.Tool, st.Handler)
+	}
+
+	// Register tools for call tool mode
+	callToolModeTools := p.buildCallToolModeTools()
+	for _, st := range callToolModeTools {
+		p.callToolServer.AddTool(st.Tool, st.Handler)
 	}
 
 	// Note: Direct mode tools are built lazily/on-demand via RefreshDirectModeTools
@@ -403,6 +527,10 @@ func (p *MCPProxyServer) GetMCPServerForMode(mode string) *mcpserver.MCPServer {
 		if p.codeExecServer != nil {
 			return p.codeExecServer
 		}
+	case config.RoutingModeRetrieveTools:
+		if p.callToolServer != nil {
+			return p.callToolServer
+		}
 	}
 	// Default: retrieve_tools mode (the original server)
 	return p.server
@@ -416,4 +544,9 @@ func (p *MCPProxyServer) GetDirectServer() *mcpserver.MCPServer {
 // GetCodeExecServer returns the code execution mode MCP server instance.
 func (p *MCPProxyServer) GetCodeExecServer() *mcpserver.MCPServer {
 	return p.codeExecServer
+}
+
+// GetCallToolServer returns the call tool mode MCP server instance.
+func (p *MCPProxyServer) GetCallToolServer() *mcpserver.MCPServer {
+	return p.callToolServer
 }

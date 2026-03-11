@@ -1,6 +1,6 @@
 <template>
-  <header class="bg-base-100 border-b border-base-300 sticky top-0 z-30 overflow-x-hidden">
-    <div class="flex items-center justify-between px-6 py-4 max-w-full overflow-x-hidden">
+  <header class="bg-base-100 border-b border-base-300 sticky top-0 z-30">
+    <div class="flex items-center justify-between px-6 py-4 max-w-full">
       <!-- Left: Mobile menu toggle + Search + Add Server -->
 <div class="flex items-center space-x-3 flex-1 min-w-0 overflow-x-hidden">
         <!-- Mobile menu toggle -->
@@ -70,19 +70,53 @@
           <span class="font-medium">{{ routingModeLabel }}</span>
         </div>
 
-        <!-- Proxy Address with Copy -->
-        <div v-if="systemStore.listenAddr" class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg">
-          <span class="text-xs font-medium opacity-60">Proxy:</span>
-          <code class="text-xs font-mono">{{ systemStore.listenAddr }}</code>
+        <!-- MCP Endpoints Dropdown -->
+        <div v-if="systemStore.listenAddr" class="relative">
           <button
-            @click="copyAddress"
-            class="btn btn-ghost btn-xs p-1 tooltip"
-            :data-tip="copyTooltip"
+            @click="showEndpoints = !showEndpoints"
+            class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg cursor-pointer hover:bg-base-300 transition-colors"
           >
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            <span class="text-xs font-medium opacity-60">MCP:</span>
+            <code class="text-xs font-mono">{{ systemStore.listenAddr }}</code>
+            <svg class="w-3 h-3 opacity-60 transition-transform" :class="{ 'rotate-180': showEndpoints }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
             </svg>
           </button>
+          <div
+            v-if="showEndpoints"
+            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-96 border border-base-300 z-50"
+          >
+            <div class="text-xs font-semibold opacity-60 mb-2 px-1">MCP Endpoints</div>
+            <div class="space-y-1">
+              <div
+                v-for="ep in mcpEndpoints"
+                :key="ep.path"
+                class="flex items-center justify-between px-2 py-1.5 rounded hover:bg-base-200 group"
+              >
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center space-x-2">
+                    <code class="text-xs font-mono truncate">{{ ep.url }}</code>
+                    <span v-if="ep.isDefault" class="badge badge-xs badge-primary">default</span>
+                  </div>
+                  <div class="text-xs opacity-50 mt-0.5">{{ ep.description }}</div>
+                </div>
+                <button
+                  @click.stop="copyEndpoint(ep)"
+                  class="btn btn-ghost btn-xs p-1 opacity-0 group-hover:opacity-100 transition-opacity tooltip tooltip-left flex-shrink-0 ml-2"
+                  :data-tip="ep.copyTooltip"
+                >
+                  <svg v-if="ep.copyTooltip === 'Copied!'" class="w-3.5 h-3.5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  <svg v-else class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <!-- Click-outside overlay -->
+          <div v-if="showEndpoints" class="fixed inset-0 z-40" @click="showEndpoints = false" />
         </div>
       </div>
     </div>
@@ -97,7 +131,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
@@ -124,25 +158,63 @@ const routingModeLabel = computed(() => {
 })
 
 const searchQuery = ref('')
-const copyTooltip = ref('Copy MCP address')
 const showAddServerModal = ref(false)
+const showEndpoints = ref(false)
 
-async function copyAddress() {
-  const address = systemStore.listenAddr
-  if (!address) return
+interface McpEndpoint {
+  path: string
+  url: string
+  description: string
+  isDefault: boolean
+  copyTooltip: string
+}
 
+const mcpEndpoints = computed<McpEndpoint[]>(() => {
+  const addr = systemStore.listenAddr
+  if (!addr) return []
+  const base = `http://${addr}`
+  const mode = systemStore.routingMode
+  return [
+    {
+      path: '/mcp',
+      url: `${base}/mcp`,
+      description: `Default endpoint (${mode === 'direct' ? 'direct' : mode === 'code_execution' ? 'code execution' : 'retrieve tools'} mode)`,
+      isDefault: true,
+      copyTooltip: 'Copy URL',
+    },
+    {
+      path: '/mcp/call',
+      url: `${base}/mcp/call`,
+      description: 'Retrieve tools + call_tool_read/write/destructive',
+      isDefault: false,
+      copyTooltip: 'Copy URL',
+    },
+    {
+      path: '/mcp/all',
+      url: `${base}/mcp/all`,
+      description: 'Direct access to all tools (serverName__toolName)',
+      isDefault: false,
+      copyTooltip: 'Copy URL',
+    },
+    {
+      path: '/mcp/code',
+      url: `${base}/mcp/code`,
+      description: 'Code execution + retrieve_tools for discovery',
+      isDefault: false,
+      copyTooltip: 'Copy URL',
+    },
+  ]
+})
+
+async function copyEndpoint(ep: McpEndpoint) {
   try {
-    await navigator.clipboard.writeText(`http://${address}/mcp`)
-    copyTooltip.value = 'Copied!'
-    setTimeout(() => {
-      copyTooltip.value = 'Copy MCP address'
-    }, 2000)
+    await navigator.clipboard.writeText(ep.url)
+    ep.copyTooltip = 'Copied!'
+    setTimeout(() => { ep.copyTooltip = 'Copy URL' }, 2000)
   } catch (err) {
-    console.error('Failed to copy to clipboard:', err)
-    copyTooltip.value = 'Failed to copy'
-    setTimeout(() => {
-      copyTooltip.value = 'Copy MCP address'
-    }, 2000)
+    console.error('Failed to copy:', err)
+    ep.copyTooltip = 'Failed'
+    setTimeout(() => { ep.copyTooltip = 'Copy URL' }, 2000)
   }
 }
 

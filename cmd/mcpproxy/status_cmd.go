@@ -21,19 +21,20 @@ import (
 
 // StatusInfo holds the collected status data for display.
 type StatusInfo struct {
-	State         string           `json:"state"`
-	Edition       string           `json:"edition"`
-	ListenAddr    string           `json:"listen_addr"`
-	Uptime        string           `json:"uptime,omitempty"`
-	UptimeSeconds float64          `json:"uptime_seconds,omitempty"`
-	APIKey        string           `json:"api_key"`
-	WebUIURL      string           `json:"web_ui_url"`
-	RoutingMode   string           `json:"routing_mode"`
-	Servers       *ServerCounts    `json:"servers,omitempty"`
-	SocketPath    string           `json:"socket_path,omitempty"`
-	ConfigPath    string           `json:"config_path,omitempty"`
-	Version       string           `json:"version,omitempty"`
-	TeamsInfo     *TeamsStatusInfo `json:"teams,omitempty"`
+	State         string            `json:"state"`
+	Edition       string            `json:"edition"`
+	ListenAddr    string            `json:"listen_addr"`
+	Uptime        string            `json:"uptime,omitempty"`
+	UptimeSeconds float64           `json:"uptime_seconds,omitempty"`
+	APIKey        string            `json:"api_key"`
+	WebUIURL      string            `json:"web_ui_url"`
+	RoutingMode   string            `json:"routing_mode"`
+	Endpoints     map[string]string `json:"endpoints"`
+	Servers       *ServerCounts     `json:"servers,omitempty"`
+	SocketPath    string            `json:"socket_path,omitempty"`
+	ConfigPath    string            `json:"config_path,omitempty"`
+	Version       string            `json:"version,omitempty"`
+	TeamsInfo     *TeamsStatusInfo  `json:"teams,omitempty"`
 }
 
 // TeamsStatusInfo holds teams-specific status information.
@@ -218,6 +219,9 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 		info.WebUIURL = statusBuildWebUIURL(info.ListenAddr, cfg.APIKey)
 	}
 
+	// Build MCP endpoint URLs
+	info.Endpoints = statusBuildEndpoints(info.ListenAddr)
+
 	return info, nil
 }
 
@@ -239,6 +243,7 @@ func collectStatusFromConfig(cfg *config.Config, socketPath, configPath string) 
 		APIKey:      cfg.APIKey,
 		WebUIURL:    statusBuildWebUIURL(listenAddr, cfg.APIKey),
 		RoutingMode: routingMode,
+		Endpoints:   statusBuildEndpoints(listenAddr),
 		ConfigPath:  configPath,
 	}
 
@@ -271,6 +276,21 @@ func statusMaskAPIKey(apiKey string) string {
 		return "****"
 	}
 	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
+}
+
+// statusBuildEndpoints constructs the MCP endpoint URLs map.
+func statusBuildEndpoints(listenAddr string) map[string]string {
+	addr := listenAddr
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
+	}
+	base := "http://" + addr
+	return map[string]string{
+		"default":        base + "/mcp",
+		"retrieve_tools": base + "/mcp/call",
+		"direct":         base + "/mcp/all",
+		"code_execution": base + "/mcp/code",
+	}
 }
 
 // statusBuildWebUIURL constructs the Web UI URL with embedded API key.
@@ -377,6 +397,23 @@ func printStatusTable(info *StatusInfo) {
 
 	if info.ConfigPath != "" {
 		fmt.Printf("  %-12s %s\n", "Config:", info.ConfigPath)
+	}
+
+	if info.Endpoints != nil {
+		fmt.Println()
+		fmt.Println("MCP Endpoints")
+		if v, ok := info.Endpoints["default"]; ok {
+			fmt.Printf("  %-16s %s  (default, %s mode)\n", "/mcp", v, info.RoutingMode)
+		}
+		if v, ok := info.Endpoints["retrieve_tools"]; ok {
+			fmt.Printf("  %-16s %s  (retrieve + call tools)\n", "/mcp/call", v)
+		}
+		if v, ok := info.Endpoints["direct"]; ok {
+			fmt.Printf("  %-16s %s  (all tools, direct access)\n", "/mcp/all", v)
+		}
+		if v, ok := info.Endpoints["code_execution"]; ok {
+			fmt.Printf("  %-16s %s  (code execution)\n", "/mcp/code", v)
+		}
 	}
 
 	if info.TeamsInfo != nil {

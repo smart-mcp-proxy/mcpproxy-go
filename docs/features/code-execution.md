@@ -233,7 +233,7 @@ const user: User = { name: input.username };
 - TypeScript support uses type-stripping only (no type checking or semantic validation)
 - Valid JavaScript is also valid TypeScript
 - Transpilation errors return the `TRANSPILE_ERROR` error code with line/column information
-- See [Code Execution Overview](../code_execution/overview.md#typescript-support) for comprehensive TypeScript documentation
+- See `docs/code_execution/overview.md` in the repository for comprehensive TypeScript documentation
 
 ## Best Practices
 
