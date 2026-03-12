@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 )
 
 const (
@@ -942,8 +944,10 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		// ClientSecret can be a secret reference, so we don't validate it as empty.
 	}
 
-	// Validate DataDir exists (if specified and not empty)
-	if c.DataDir != "" {
+	// Validate DataDir exists (if specified and not empty).
+	// Skip validation if the path still contains unresolved ${...} refs —
+	// it will be resolved at a later point or the user will fix the env var.
+	if c.DataDir != "" && !strings.Contains(c.DataDir, "${") {
 		if _, err := os.Stat(c.DataDir); os.IsNotExist(err) {
 			errors = append(errors, ValidationError{
 				Field:   "data_dir",

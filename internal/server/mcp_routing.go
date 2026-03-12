@@ -228,7 +228,7 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 	)
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    retrieveToolsTool,
-		Handler: p.handleRetrieveTools,
+		Handler: p.handleRetrieveToolsForMode(config.RoutingModeCodeExecution),
 	})
 
 	// Add management tools (upstream_servers, quarantine, registries)
@@ -273,7 +273,7 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 	)
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    retrieveToolsTool,
-		Handler: p.handleRetrieveTools,
+		Handler: p.handleRetrieveToolsForMode(config.RoutingModeRetrieveTools),
 	})
 
 	// call_tool_read

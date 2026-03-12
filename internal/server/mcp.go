@@ -844,8 +844,23 @@ func (p *MCPProxyServer) handleListRegistries(ctx context.Context, _ mcp.CallToo
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-// handleRetrieveTools implements the retrieve_tools functionality
+// handleRetrieveToolsForMode returns a handler closure with the routing mode baked in.
+// This allows the retrieve_tools handler to adapt its usage_instructions based on
+// whether it's being used in code_execution mode or retrieve_tools (call_tool) mode.
+func (p *MCPProxyServer) handleRetrieveToolsForMode(routingMode string) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return p.handleRetrieveToolsWithMode(ctx, request, routingMode)
+	}
+}
+
+// handleRetrieveTools implements the retrieve_tools functionality with default (retrieve_tools) mode.
+// This is a backward-compatible wrapper for callers that don't need mode-specific instructions.
 func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return p.handleRetrieveToolsWithMode(ctx, request, "")
+}
+
+// handleRetrieveToolsWithMode implements the retrieve_tools functionality with mode-aware instructions.
+func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, request mcp.CallToolRequest, routingMode string) (*mcp.CallToolResult, error) {
 	startTime := time.Now()
 
 	// Extract session info for activity logging (Spec 024)
@@ -980,17 +995,29 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 		mcpTools = append(mcpTools, mcpTool)
 	}
 
-	response := map[string]interface{}{
-		"tools": mcpTools,
-		"query": query,
-		"total": len(results),
-		// Add usage instructions for intent-based tool calling (Spec 018)
-		"usage_instructions": "TOOL SELECTION GUIDE: Check the 'call_with' field for each tool, then use the matching tool variant. " +
+	// Build mode-aware usage instructions
+	var usageInstructions string
+	switch routingMode {
+	case config.RoutingModeCodeExecution:
+		usageInstructions = "TOOL CALLING GUIDE: Use the `code_execution` tool to call any discovered tool via JavaScript: " +
+			"call_tool(serverName, toolName, args). Example: call_tool('github', 'create_issue', {title: 'Bug fix'}). " +
+			"The 'call_with' field indicates each tool's permission tier (read/write/destructive) for your reference. " +
+			"Do NOT use call_tool_read, call_tool_write, or call_tool_destructive — they are not available in code execution mode."
+	default:
+		// Default instructions for retrieve_tools mode and backward-compatible callers
+		usageInstructions = "TOOL SELECTION GUIDE: Check the 'call_with' field for each tool, then use the matching tool variant. " +
 			"DECISION RULES BY TOOL NAME: " +
 			"(1) READ (call_tool_read): search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. DEFAULT choice when unsure. " +
 			"(2) WRITE (call_tool_write): create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. " +
 			"(3) DESTRUCTIVE (call_tool_destructive): delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. " +
-			"INTENT TRACKING: Always provide intent_reason (why you're calling this tool) and intent_data_sensitivity (public/internal/private/unknown) to enable activity auditing.",
+			"INTENT TRACKING: Always provide intent_reason (why you're calling this tool) and intent_data_sensitivity (public/internal/private/unknown) to enable activity auditing."
+	}
+
+	response := map[string]interface{}{
+		"tools":              mcpTools,
+		"query":              query,
+		"total":              len(results),
+		"usage_instructions": usageInstructions,
 	}
 
 	// Add debug information if requested

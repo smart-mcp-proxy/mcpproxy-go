@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -389,4 +390,157 @@ func TestDirectModeHandler_NoAuthContext(t *testing.T) {
 		}()
 		handler(context.Background(), request)
 	}()
+}
+
+// TestRetrieveToolsInstructions_CodeExecutionMode verifies that handleRetrieveToolsWithMode
+// returns code_execution-specific usage_instructions when called with RoutingModeCodeExecution.
+func TestRetrieveToolsInstructions_CodeExecutionMode(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "retrieve_tools"
+	request.Params.Arguments = map[string]interface{}{
+		"query": "test query",
+	}
+
+	result, err := proxy.handleRetrieveToolsWithMode(context.Background(), request, config.RoutingModeCodeExecution)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError)
+
+	// Parse the response JSON to extract usage_instructions
+	responseText := result.Content[0].(mcp.TextContent).Text
+	var response map[string]interface{}
+	err = json.Unmarshal([]byte(responseText), &response)
+	require.NoError(t, err, "response should be valid JSON")
+
+	instructions, ok := response["usage_instructions"].(string)
+	require.True(t, ok, "usage_instructions should be a string")
+
+	// Code execution mode: should mention code_execution and call_tool()
+	assert.Contains(t, instructions, "code_execution",
+		"code_execution mode should mention 'code_execution' tool")
+	assert.Contains(t, instructions, "call_tool(",
+		"code_execution mode should mention call_tool() JavaScript function")
+
+	// Code execution mode: should NOT recommend call_tool_read/write/destructive as tools to use.
+	// Note: the instructions may mention them in a "Do NOT use" warning, which is acceptable.
+	// What they must NOT contain is the retrieve_tools-mode decision rules that tell the LLM
+	// to use these as tool variants.
+	assert.NotContains(t, instructions, "DECISION RULES BY TOOL NAME",
+		"code_execution mode should NOT contain call_tool variant decision rules")
+	assert.NotContains(t, instructions, "(1) READ (call_tool_read)",
+		"code_execution mode should NOT recommend call_tool_read as a variant")
+	assert.NotContains(t, instructions, "(2) WRITE (call_tool_write)",
+		"code_execution mode should NOT recommend call_tool_write as a variant")
+	assert.NotContains(t, instructions, "(3) DESTRUCTIVE (call_tool_destructive)",
+		"code_execution mode should NOT recommend call_tool_destructive as a variant")
+}
+
+// TestRetrieveToolsInstructions_RetrieveToolsMode verifies that handleRetrieveToolsWithMode
+// returns call_tool_*-specific usage_instructions when called with RoutingModeRetrieveTools.
+func TestRetrieveToolsInstructions_RetrieveToolsMode(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "retrieve_tools"
+	request.Params.Arguments = map[string]interface{}{
+		"query": "test query",
+	}
+
+	result, err := proxy.handleRetrieveToolsWithMode(context.Background(), request, config.RoutingModeRetrieveTools)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError)
+
+	// Parse the response JSON to extract usage_instructions
+	responseText := result.Content[0].(mcp.TextContent).Text
+	var response map[string]interface{}
+	err = json.Unmarshal([]byte(responseText), &response)
+	require.NoError(t, err, "response should be valid JSON")
+
+	instructions, ok := response["usage_instructions"].(string)
+	require.True(t, ok, "usage_instructions should be a string")
+
+	// Retrieve tools mode: should mention call_tool_read/write/destructive
+	assert.Contains(t, instructions, "call_tool_read",
+		"retrieve_tools mode should mention call_tool_read")
+	assert.Contains(t, instructions, "call_tool_write",
+		"retrieve_tools mode should mention call_tool_write")
+	assert.Contains(t, instructions, "call_tool_destructive",
+		"retrieve_tools mode should mention call_tool_destructive")
+	assert.Contains(t, instructions, "INTENT TRACKING",
+		"retrieve_tools mode should mention intent tracking")
+}
+
+// TestRetrieveToolsInstructions_DefaultMode verifies that handleRetrieveToolsWithMode
+// with empty routingMode returns the same instructions as retrieve_tools mode.
+func TestRetrieveToolsInstructions_DefaultMode(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "retrieve_tools"
+	request.Params.Arguments = map[string]interface{}{
+		"query": "test query",
+	}
+
+	result, err := proxy.handleRetrieveToolsWithMode(context.Background(), request, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError)
+
+	// Parse the response JSON to extract usage_instructions
+	responseText := result.Content[0].(mcp.TextContent).Text
+	var response map[string]interface{}
+	err = json.Unmarshal([]byte(responseText), &response)
+	require.NoError(t, err, "response should be valid JSON")
+
+	instructions, ok := response["usage_instructions"].(string)
+	require.True(t, ok, "usage_instructions should be a string")
+
+	// Default mode should use the same instructions as retrieve_tools mode
+	assert.Contains(t, instructions, "call_tool_read",
+		"default mode should contain call_tool_read instructions")
+	assert.Contains(t, instructions, "call_tool_write",
+		"default mode should contain call_tool_write instructions")
+}
+
+// TestHandleRetrieveToolsForMode_ClosureReturnsDifferentInstructions verifies that
+// handleRetrieveToolsForMode creates closures that produce different instructions per mode.
+func TestHandleRetrieveToolsForMode_ClosureReturnsDifferentInstructions(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "retrieve_tools"
+	request.Params.Arguments = map[string]interface{}{
+		"query": "search for tools",
+	}
+
+	// Get handler for code_execution mode
+	codeExecHandler := proxy.handleRetrieveToolsForMode(config.RoutingModeCodeExecution)
+	codeExecResult, err := codeExecHandler(context.Background(), request)
+	require.NoError(t, err)
+
+	// Get handler for retrieve_tools mode
+	retrieveHandler := proxy.handleRetrieveToolsForMode(config.RoutingModeRetrieveTools)
+	retrieveResult, err := retrieveHandler(context.Background(), request)
+	require.NoError(t, err)
+
+	// Parse both results
+	var codeExecResponse, retrieveResponse map[string]interface{}
+	err = json.Unmarshal([]byte(codeExecResult.Content[0].(mcp.TextContent).Text), &codeExecResponse)
+	require.NoError(t, err)
+	err = json.Unmarshal([]byte(retrieveResult.Content[0].(mcp.TextContent).Text), &retrieveResponse)
+	require.NoError(t, err)
+
+	codeExecInstructions := codeExecResponse["usage_instructions"].(string)
+	retrieveInstructions := retrieveResponse["usage_instructions"].(string)
+
+	// They should be different
+	assert.NotEqual(t, codeExecInstructions, retrieveInstructions,
+		"code_execution and retrieve_tools modes should produce different usage_instructions")
+
+	// Code exec should mention code_execution, retrieve should mention call_tool_read
+	assert.Contains(t, codeExecInstructions, "code_execution")
+	assert.Contains(t, retrieveInstructions, "call_tool_read")
 }
