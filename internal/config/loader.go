@@ -43,9 +43,13 @@ func LoadFromFile(configPath string) (*Config, error) {
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
 
-	// Create data directory if it doesn't exist
-	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+	// Create data directory if it doesn't exist.
+	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
+	// these are invalid path characters on Windows and the directory can't be created anyway.
+	if !strings.Contains(cfg.DataDir, "${") {
+		if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+			return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+		}
 	}
 
 	// Apply environment variable overrides for TLS configuration
@@ -131,9 +135,13 @@ func Load() (*Config, error) {
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
 
-	// Create data directory if it doesn't exist
-	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+	// Create data directory if it doesn't exist.
+	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
+	// these are invalid path characters on Windows and the directory can't be created anyway.
+	if !strings.Contains(cfg.DataDir, "${") {
+		if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+			return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+		}
 	}
 
 	// Parse upstream servers from CLI
