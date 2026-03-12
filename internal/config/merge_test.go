@@ -899,3 +899,101 @@ func TestConfigDiff_IsEmpty(t *testing.T) {
 		t.Error("Diff with removed should not be empty")
 	}
 }
+
+// TestCopyServerConfig_AllFields verifies that CopyServerConfig copies all
+// ServerConfig fields, including SkipQuarantine and Shared which were
+// previously missing.
+func TestCopyServerConfig_AllFields(t *testing.T) {
+	now := time.Now()
+	src := &ServerConfig{
+		Name:           "test-server",
+		URL:            "https://example.com/mcp",
+		Protocol:       "http",
+		Command:        "echo",
+		Args:           []string{"--flag", "value"},
+		WorkingDir:     "/work/dir",
+		Env:            map[string]string{"KEY": "VAL"},
+		Headers:        map[string]string{"X-H": "hval"},
+		Enabled:        true,
+		Quarantined:    true,
+		SkipQuarantine: true,
+		Shared:         true,
+		Created:        now,
+		Updated:        now,
+		Isolation: &IsolationConfig{
+			Image:      "myimage:latest",
+			WorkingDir: "/container/dir",
+		},
+		OAuth: &OAuthConfig{
+			ClientID: "my-client",
+		},
+	}
+
+	dst := CopyServerConfig(src)
+
+	// Verify all scalar fields
+	if dst.Name != src.Name {
+		t.Errorf("Name: got %q, want %q", dst.Name, src.Name)
+	}
+	if dst.URL != src.URL {
+		t.Errorf("URL: got %q, want %q", dst.URL, src.URL)
+	}
+	if dst.Protocol != src.Protocol {
+		t.Errorf("Protocol: got %q, want %q", dst.Protocol, src.Protocol)
+	}
+	if dst.Command != src.Command {
+		t.Errorf("Command: got %q, want %q", dst.Command, src.Command)
+	}
+	if dst.WorkingDir != src.WorkingDir {
+		t.Errorf("WorkingDir: got %q, want %q", dst.WorkingDir, src.WorkingDir)
+	}
+	if dst.Enabled != src.Enabled {
+		t.Errorf("Enabled: got %v, want %v", dst.Enabled, src.Enabled)
+	}
+	if dst.Quarantined != src.Quarantined {
+		t.Errorf("Quarantined: got %v, want %v", dst.Quarantined, src.Quarantined)
+	}
+	if dst.SkipQuarantine != src.SkipQuarantine {
+		t.Errorf("SkipQuarantine: got %v, want %v", dst.SkipQuarantine, src.SkipQuarantine)
+	}
+	if dst.Shared != src.Shared {
+		t.Errorf("Shared: got %v, want %v", dst.Shared, src.Shared)
+	}
+	if !dst.Created.Equal(src.Created) {
+		t.Errorf("Created: got %v, want %v", dst.Created, src.Created)
+	}
+	if !dst.Updated.Equal(src.Updated) {
+		t.Errorf("Updated: got %v, want %v", dst.Updated, src.Updated)
+	}
+
+	// Verify deep-copied slices don't alias
+	if !reflect.DeepEqual(dst.Args, src.Args) {
+		t.Errorf("Args: got %v, want %v", dst.Args, src.Args)
+	}
+	dst.Args[0] = "mutated"
+	if src.Args[0] == "mutated" {
+		t.Error("Args slice aliases the original")
+	}
+
+	// Verify deep-copied maps don't alias
+	if !reflect.DeepEqual(dst.Env, src.Env) {
+		t.Errorf("Env: got %v, want %v", dst.Env, src.Env)
+	}
+	dst.Env["KEY"] = "mutated"
+	if src.Env["KEY"] == "mutated" {
+		t.Error("Env map aliases the original")
+	}
+
+	// Verify nested structs are deep-copied
+	if dst.Isolation == nil || dst.Isolation.Image != "myimage:latest" {
+		t.Error("Isolation not copied correctly")
+	}
+	if dst.OAuth == nil || dst.OAuth.ClientID != "my-client" {
+		t.Error("OAuth not copied correctly")
+	}
+
+	// Verify nil input
+	if CopyServerConfig(nil) != nil {
+		t.Error("CopyServerConfig(nil) should return nil")
+	}
+}
