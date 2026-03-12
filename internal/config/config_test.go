@@ -1091,7 +1091,7 @@ func TestLoadConfig_DataDirExpandFailure(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "config.json")
 	// DataDir contains an unresolvable ref; the literal path lives inside tmpBase
 	// so any directory MkdirAll creates is cleaned up automatically.
-	cfgData := fmt.Sprintf(`{"data_dir": "%s/${env:%s}"}`, tmpBase, missingVar)
+	cfgData := fmt.Sprintf(`{"data_dir": "%s/${env:%s}"}`, filepath.ToSlash(tmpBase), missingVar)
 	require.NoError(t, os.WriteFile(cfgFile, []byte(cfgData), 0600))
 
 	// LoadFromFile must succeed even when expansion fails — warn + retain original.
