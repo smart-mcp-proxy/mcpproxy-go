@@ -2182,6 +2182,23 @@ paths:
       summary: Get activity summary statistics
       tags:
       - Activity
+  /api/v1/annotations/coverage:
+    get:
+      description: Reports how many upstream tools have MCP annotations vs don't,
+        broken down by server
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Annotation coverage report
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get annotation coverage report
+      tags:
+      - annotations
   /api/v1/config:
     get:
       description: Retrieves the current MCPProxy configuration including all server
