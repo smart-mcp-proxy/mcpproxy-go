@@ -227,6 +227,8 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	// Extract intent metadata if present (Spec 018)
 	toolVariant := getStringPayload(evt.Payload, "tool_variant")
 	intent := getMapPayload(evt.Payload, "intent")
+	// Extract content trust metadata if present (Spec 035)
+	contentTrust := getStringPayload(evt.Payload, "content_trust")
 	// Default source to "mcp" if not specified (backwards compatibility)
 	activitySource := storage.ActivitySourceMCP
 	if source != "" {
@@ -235,13 +237,17 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 
 	// Build metadata with intent information if present
 	var metadata map[string]interface{}
-	if toolVariant != "" || intent != nil {
+	if toolVariant != "" || intent != nil || contentTrust != "" {
 		metadata = make(map[string]interface{})
 		if toolVariant != "" {
 			metadata["tool_variant"] = toolVariant
 		}
 		if intent != nil {
 			metadata["intent"] = intent
+		}
+		// Spec 035: Tag activity with content trust level based on openWorldHint
+		if contentTrust != "" {
+			metadata["content_trust"] = contentTrust
 		}
 	}
 
@@ -447,6 +453,9 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		}
 	}
 
+	// Extract content trust metadata if present (Spec 035)
+	contentTrust := getStringPayload(evt.Payload, "content_trust")
+
 	metadata := map[string]interface{}{
 		"internal_tool_name": internalToolName,
 	}
@@ -461,6 +470,10 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	}
 	if intent != nil {
 		metadata["intent"] = intent
+	}
+	// Spec 035: Tag activity with content trust level based on openWorldHint
+	if contentTrust != "" {
+		metadata["content_trust"] = contentTrust
 	}
 
 	record := &storage.ActivityRecord{
