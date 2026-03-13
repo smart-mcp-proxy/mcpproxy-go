@@ -338,7 +338,29 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		"input":    options.Input,
 		"language": effectiveLanguage,
 	}
-	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil)
+
+	// Spec 035: Determine content trust for code_execution based on tools called.
+	// If any tool called within the JS sandbox has openWorldHint=true (or nil, default true),
+	// the entire code_execution result is tagged as untrusted.
+	codeExecContentTrust := ""
+	toolCallRecords := toolCaller.getToolCalls()
+	if len(toolCallRecords) > 0 {
+		hasOpenWorldTool := false
+		for _, tc := range toolCallRecords {
+			toolAnnotations := p.lookupToolAnnotations(tc.ServerName, tc.ToolName)
+			if contracts.IsOpenWorldTool(toolAnnotations) {
+				hasOpenWorldTool = true
+				break
+			}
+		}
+		if hasOpenWorldTool {
+			codeExecContentTrust = contracts.ContentTrustUntrusted
+		} else {
+			codeExecContentTrust = contracts.ContentTrustTrusted
+		}
+	}
+
+	p.emitActivityInternalToolCallWithContentTrust("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil, codeExecContentTrust)
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{

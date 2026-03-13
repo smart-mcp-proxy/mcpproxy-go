@@ -164,9 +164,12 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 
 		durationMs := time.Since(startTime).Milliseconds()
 
+		// Spec 035: Determine content trust based on openWorldHint
+		directContentTrust := contracts.ContentTrustForTool(annotations)
+
 		if err != nil {
 			// Emit error activity
-			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil)
+			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust)
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 
@@ -195,7 +198,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		}
 
 		// Emit success activity
-		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "success", "", durationMs, enrichedArgs, responseText, truncated, toolVariant, nil)
+		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "success", "", durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust)
 
 		return mcp.NewToolResultText(responseText), nil
 	}

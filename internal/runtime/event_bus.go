@@ -105,7 +105,7 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // arguments is the input parameters passed to the tool call
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}) {
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust string) {
 	payload := map[string]any{
 		"server_name":        serverName,
 		"tool_name":          toolName,
@@ -128,6 +128,10 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 	}
 	if intent != nil {
 		payload["intent"] = intent
+	}
+	// Add content trust metadata if provided (Spec 035)
+	if contentTrust != "" {
+		payload["content_trust"] = contentTrust
 	}
 	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
 }
@@ -207,6 +211,42 @@ func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, t
 	}
 	if intent != nil {
 		payload["intent"] = intent
+	}
+	r.publishEvent(newEvent(EventTypeActivityInternalToolCall, payload))
+}
+
+// EmitActivityInternalToolCallWithContentTrust is like EmitActivityInternalToolCall but also
+// includes content trust metadata (Spec 035) for open-world hint scanning.
+func (r *Runtime) EmitActivityInternalToolCallWithContentTrust(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string) {
+	payload := map[string]any{
+		"internal_tool_name": internalToolName,
+		"session_id":         sessionID,
+		"request_id":         requestID,
+		"status":             status,
+		"error_message":      errorMsg,
+		"duration_ms":        durationMs,
+	}
+	if targetServer != "" {
+		payload["target_server"] = targetServer
+	}
+	if targetTool != "" {
+		payload["target_tool"] = targetTool
+	}
+	if toolVariant != "" {
+		payload["tool_variant"] = toolVariant
+	}
+	if arguments != nil {
+		payload["arguments"] = arguments
+	}
+	if response != nil {
+		payload["response"] = response
+	}
+	if intent != nil {
+		payload["intent"] = intent
+	}
+	// Spec 035: Add content trust metadata
+	if contentTrust != "" {
+		payload["content_trust"] = contentTrust
 	}
 	r.publishEvent(newEvent(EventTypeActivityInternalToolCall, payload))
 }
