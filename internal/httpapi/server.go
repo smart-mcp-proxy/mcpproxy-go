@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -533,6 +534,9 @@ func (s *Server) setupRoutes() {
 		r.Get("/activity/summary", s.handleActivitySummary)
 		r.Get("/activity/export", s.handleExportActivity)
 		r.Get("/activity/{id}", s.handleGetActivityDetail)
+
+		// Annotation coverage (Spec 035)
+		r.Get("/annotations/coverage", s.handleAnnotationCoverage)
 
 		// Agent token management (Spec 028)
 		r.Route("/tokens", func(r chi.Router) {
@@ -3379,4 +3383,105 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 		"tools":       exports,
 		"count":       len(exports),
 	})
+}
+
+// handleAnnotationCoverage godoc
+// @Summary Get annotation coverage report
+// @Description Reports how many upstream tools have MCP annotations vs don't, broken down by server
+// @Tags annotations
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse "Annotation coverage report"
+// @Router /api/v1/annotations/coverage [get]
+func (s *Server) handleAnnotationCoverage(w http.ResponseWriter, r *http.Request) {
+	type serverCoverage struct {
+		Name            string  `json:"name"`
+		TotalTools      int     `json:"total_tools"`
+		AnnotatedTools  int     `json:"annotated_tools"`
+		CoveragePercent float64 `json:"coverage_percent"`
+	}
+
+	type coverageResponse struct {
+		TotalTools      int              `json:"total_tools"`
+		AnnotatedTools  int              `json:"annotated_tools"`
+		CoveragePercent float64          `json:"coverage_percent"`
+		Servers         []serverCoverage `json:"servers"`
+	}
+
+	allServers, err := s.controller.GetAllServers()
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get servers")
+		return
+	}
+
+	resp := coverageResponse{
+		Servers: make([]serverCoverage, 0, len(allServers)),
+	}
+
+	for _, srv := range allServers {
+		name, _ := srv["name"].(string)
+		if name == "" {
+			continue
+		}
+
+		tools, err := s.controller.GetServerTools(name)
+		if err != nil {
+			// Skip servers whose tools can't be retrieved (disconnected, etc.)
+			continue
+		}
+
+		sc := serverCoverage{
+			Name:       name,
+			TotalTools: len(tools),
+		}
+
+		for _, tool := range tools {
+			if hasAnnotationHints(tool) {
+				sc.AnnotatedTools++
+			}
+		}
+
+		if sc.TotalTools > 0 {
+			sc.CoveragePercent = math.Round(float64(sc.AnnotatedTools)/float64(sc.TotalTools)*10000) / 100
+		}
+
+		resp.TotalTools += sc.TotalTools
+		resp.AnnotatedTools += sc.AnnotatedTools
+		resp.Servers = append(resp.Servers, sc)
+	}
+
+	if resp.TotalTools > 0 {
+		resp.CoveragePercent = math.Round(float64(resp.AnnotatedTools)/float64(resp.TotalTools)*10000) / 100
+	}
+
+	s.writeSuccess(w, resp)
+}
+
+// hasAnnotationHints checks if a tool map has meaningful annotation hints.
+// A tool is considered "annotated" if its Annotations is non-nil AND at least
+// one of ReadOnlyHint, DestructiveHint, IdempotentHint, OpenWorldHint is set.
+// Title alone does not count as a meaningful annotation.
+func hasAnnotationHints(tool map[string]interface{}) bool {
+	ann, ok := tool["annotations"]
+	if !ok || ann == nil {
+		return false
+	}
+
+	// Check if it's a *config.ToolAnnotations (direct from stateview)
+	if ta, ok := ann.(*config.ToolAnnotations); ok {
+		return ta.ReadOnlyHint != nil || ta.DestructiveHint != nil ||
+			ta.IdempotentHint != nil || ta.OpenWorldHint != nil
+	}
+
+	// Fallback: check as map (e.g., from JSON round-trip)
+	if m, ok := ann.(map[string]interface{}); ok {
+		for _, key := range []string{"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"} {
+			if v, exists := m[key]; exists && v != nil {
+				return true
+			}
+		}
+	}
+
+	return false
 }
