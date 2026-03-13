@@ -13,14 +13,24 @@ import (
 )
 
 // calculateToolApprovalHash computes a stable SHA-256 hash for tool-level quarantine.
-// Uses toolName + description + schemaJSON for consistent detection of changes.
-func calculateToolApprovalHash(toolName, description, schemaJSON string) string {
+// Uses toolName + description + schemaJSON + annotationsJSON for consistent detection of changes.
+// This includes annotations to detect "annotation rug-pulls" (e.g., flipping destructiveHint).
+// If annotations is nil, an empty string is used to maintain backward compatibility
+// with tools that were approved before annotation tracking was added.
+func calculateToolApprovalHash(toolName, description, schemaJSON string, annotations *config.ToolAnnotations) string {
 	h := sha256.New()
 	h.Write([]byte(toolName))
 	h.Write([]byte("|"))
 	h.Write([]byte(description))
 	h.Write([]byte("|"))
 	h.Write([]byte(schemaJSON))
+	h.Write([]byte("|"))
+	if annotations != nil {
+		annotationsJSON, err := json.Marshal(annotations)
+		if err == nil {
+			h.Write(annotationsJSON)
+		}
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -80,8 +90,8 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			schemaJSON = "{}"
 		}
 
-		// Calculate current hash
-		currentHash := calculateToolApprovalHash(toolName, tool.Description, schemaJSON)
+		// Calculate current hash (includes annotations for rug-pull detection)
+		currentHash := calculateToolApprovalHash(toolName, tool.Description, schemaJSON, tool.Annotations)
 
 		// Look up existing approval record
 		existing, err := r.storageManager.GetToolApproval(serverName, toolName)
