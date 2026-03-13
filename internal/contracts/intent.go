@@ -76,20 +76,20 @@ type IntentDeclaration struct {
 
 // IntentValidationError represents intent validation failures
 type IntentValidationError struct {
-	Code    string                 `json:"code"`                          // Error code for programmatic handling
-	Message string                 `json:"message"`                       // Human-readable error message
-	Details map[string]interface{} `json:"details" swaggertype:"object"`  // Additional context
+	Code    string                 `json:"code"`                         // Error code for programmatic handling
+	Message string                 `json:"message"`                      // Human-readable error message
+	Details map[string]interface{} `json:"details" swaggertype:"object"` // Additional context
 }
 
 // Error codes for intent validation
 const (
-	IntentErrorCodeMissing             = "MISSING_INTENT"
+	IntentErrorCodeMissing              = "MISSING_INTENT"
 	IntentErrorCodeMissingOperationType = "MISSING_OPERATION_TYPE"
 	IntentErrorCodeInvalidOperationType = "INVALID_OPERATION_TYPE"
-	IntentErrorCodeMismatch            = "INTENT_MISMATCH"
-	IntentErrorCodeServerMismatch      = "SERVER_MISMATCH"
-	IntentErrorCodeInvalidSensitivity  = "INVALID_SENSITIVITY"
-	IntentErrorCodeReasonTooLong       = "REASON_TOO_LONG"
+	IntentErrorCodeMismatch             = "INTENT_MISMATCH"
+	IntentErrorCodeServerMismatch       = "SERVER_MISMATCH"
+	IntentErrorCodeInvalidSensitivity   = "INVALID_SENSITIVITY"
+	IntentErrorCodeReasonTooLong        = "REASON_TOO_LONG"
 )
 
 // Error implements the error interface
@@ -115,8 +115,8 @@ func (i *IntentDeclaration) Validate() *IntentValidationError {
 			IntentErrorCodeInvalidSensitivity,
 			fmt.Sprintf("Invalid intent.data_sensitivity '%s': must be public, internal, private, or unknown", i.DataSensitivity),
 			map[string]interface{}{
-				"provided":       i.DataSensitivity,
-				"valid_values":   ValidDataSensitivities,
+				"provided":     i.DataSensitivity,
+				"valid_values": ValidDataSensitivities,
 			},
 		)
 	}
@@ -225,6 +225,36 @@ func DeriveCallWith(annotations *config.ToolAnnotations) string {
 	// (search, query, list, get, fetch, check, view, find operations).
 	// LLMs should analyze tool descriptions to select write/destructive when appropriate.
 	return ToolVariantRead
+}
+
+// Content trust constants for open-world hint scanning (Spec 035)
+const (
+	// ContentTrustUntrusted marks tool output as untrusted (open-world tool, data from external sources)
+	ContentTrustUntrusted = "untrusted"
+	// ContentTrustTrusted marks tool output as trusted (closed-world tool, data from controlled sources)
+	ContentTrustTrusted = "trusted"
+)
+
+// IsOpenWorldTool checks whether a tool's annotations indicate it operates in an
+// open-world context (fetching data from external/untrusted sources). Per the MCP spec,
+// openWorldHint defaults to true when nil or when annotations are nil entirely.
+func IsOpenWorldTool(annotations *config.ToolAnnotations) bool {
+	if annotations == nil {
+		return true // spec default: openWorldHint=true
+	}
+	if annotations.OpenWorldHint == nil {
+		return true // nil defaults to true per spec
+	}
+	return *annotations.OpenWorldHint
+}
+
+// ContentTrustForTool returns the content trust level based on tool annotations.
+// Open-world tools return "untrusted", closed-world tools return "trusted".
+func ContentTrustForTool(annotations *config.ToolAnnotations) string {
+	if IsOpenWorldTool(annotations) {
+		return ContentTrustUntrusted
+	}
+	return ContentTrustTrusted
 }
 
 // isValidDataSensitivity checks if the data sensitivity is valid
