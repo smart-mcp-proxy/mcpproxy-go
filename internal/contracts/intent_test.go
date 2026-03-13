@@ -6,6 +6,112 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
+func TestIsOpenWorldTool(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name        string
+		annotations *config.ToolAnnotations
+		want        bool
+	}{
+		{
+			name:        "nil annotations - defaults to true (open world)",
+			annotations: nil,
+			want:        true,
+		},
+		{
+			name:        "empty annotations (no hints set) - defaults to true",
+			annotations: &config.ToolAnnotations{},
+			want:        true,
+		},
+		{
+			name: "openWorldHint nil - defaults to true",
+			annotations: &config.ToolAnnotations{
+				ReadOnlyHint: &trueVal, // other hint set but not openWorldHint
+			},
+			want: true,
+		},
+		{
+			name: "openWorldHint explicitly true",
+			annotations: &config.ToolAnnotations{
+				OpenWorldHint: &trueVal,
+			},
+			want: true,
+		},
+		{
+			name: "openWorldHint explicitly false",
+			annotations: &config.ToolAnnotations{
+				OpenWorldHint: &falseVal,
+			},
+			want: false,
+		},
+		{
+			name: "openWorldHint false with other hints",
+			annotations: &config.ToolAnnotations{
+				OpenWorldHint:   &falseVal,
+				ReadOnlyHint:    &trueVal,
+				DestructiveHint: &falseVal,
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsOpenWorldTool(tt.annotations)
+			if got != tt.want {
+				t.Errorf("IsOpenWorldTool() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContentTrustForTool(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name        string
+		annotations *config.ToolAnnotations
+		want        string
+	}{
+		{
+			name:        "nil annotations - untrusted",
+			annotations: nil,
+			want:        ContentTrustUntrusted,
+		},
+		{
+			name:        "empty annotations - untrusted",
+			annotations: &config.ToolAnnotations{},
+			want:        ContentTrustUntrusted,
+		},
+		{
+			name: "openWorldHint true - untrusted",
+			annotations: &config.ToolAnnotations{
+				OpenWorldHint: &trueVal,
+			},
+			want: ContentTrustUntrusted,
+		},
+		{
+			name: "openWorldHint false - trusted",
+			annotations: &config.ToolAnnotations{
+				OpenWorldHint: &falseVal,
+			},
+			want: ContentTrustTrusted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ContentTrustForTool(tt.annotations)
+			if got != tt.want {
+				t.Errorf("ContentTrustForTool() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIntentDeclaration_Validate(t *testing.T) {
 	// Note: Validate() only checks optional fields (data_sensitivity, reason)
 	// operation_type is inferred from tool variant, not validated here
@@ -99,12 +205,12 @@ func TestIntentDeclaration_ValidateForToolVariant(t *testing.T) {
 	// Note: ValidateForToolVariant now SETS operation_type from tool variant (inference)
 	// It no longer validates that operation_type matches - it always overwrites with inferred value
 	tests := []struct {
-		name           string
-		intent         IntentDeclaration
-		toolVariant    string
-		wantErr        bool
-		wantErrCode    string
-		wantOpType     string // expected operation_type after call
+		name        string
+		intent      IntentDeclaration
+		toolVariant string
+		wantErr     bool
+		wantErrCode string
+		wantOpType  string // expected operation_type after call
 	}{
 		{
 			name:        "empty intent with call_tool_read - sets operation_type",
