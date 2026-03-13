@@ -883,6 +883,11 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	debugMode := request.GetBool("debug", false)
 	explainTool := request.GetString("explain_tool", "")
 
+	// Spec 035 F4: Annotation-based filtering parameters
+	readOnlyOnly := request.GetBool("read_only_only", false)
+	excludeDestructive := request.GetBool("exclude_destructive", false)
+	excludeOpenWorld := request.GetBool("exclude_open_world", false)
+
 	// Build arguments map for activity logging (Spec 024)
 	args := map[string]interface{}{
 		"query": query,
@@ -896,6 +901,15 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	}
 	if explainTool != "" {
 		args["explain_tool"] = explainTool
+	}
+	if readOnlyOnly {
+		args["read_only_only"] = true
+	}
+	if excludeDestructive {
+		args["exclude_destructive"] = true
+	}
+	if excludeOpenWorld {
+		args["exclude_open_world"] = true
 	}
 
 	// Validate limit
@@ -927,6 +941,40 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			}
 		}
 		results = filtered
+	}
+
+	// Spec 035 F4: Resolve annotations for each result and apply annotation-based filtering
+	// before building the MCP tool response. This allows agents to self-restrict discovery.
+	annotationFilterActive := readOnlyOnly || excludeDestructive || excludeOpenWorld
+	if annotationFilterActive {
+		var annotatedResults []annotatedSearchResult
+		for i, result := range results {
+			serverName := result.Tool.ServerName
+			toolName := result.Tool.Name
+			if serverName == "" {
+				if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
+					serverName = parts[0]
+					toolName = parts[1]
+				}
+			}
+			var annotations *config.ToolAnnotations
+			if serverName != "" {
+				annotations = p.lookupToolAnnotations(serverName, toolName)
+			}
+			annotatedResults = append(annotatedResults, annotatedSearchResult{
+				serverName:  serverName,
+				toolName:    toolName,
+				annotations: annotations,
+				resultIndex: i,
+			})
+		}
+
+		filtered := filterByAnnotations(annotatedResults, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+		var filteredResults []*config.SearchResult
+		for _, ar := range filtered {
+			filteredResults = append(filteredResults, results[ar.resultIndex])
+		}
+		results = filteredResults
 	}
 
 	// Convert results to MCP tool format for LLM compatibility
@@ -1018,6 +1066,26 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		"query":              query,
 		"total":              len(results),
 		"usage_instructions": usageInstructions,
+	}
+
+	// Spec 035 F2: Session risk analysis — analyze all connected servers' tool annotations
+	// to detect the "lethal trifecta" risk combination.
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if sup := p.mainServer.runtime.Supervisor(); sup != nil {
+			snapshot := sup.StateView().Snapshot()
+			risk := analyzeSessionRisk(snapshot)
+			sessionRisk := map[string]interface{}{
+				"level":                 risk.Level,
+				"has_open_world_tools":  risk.HasOpenWorld,
+				"has_destructive_tools": risk.HasDestructive,
+				"has_write_tools":       risk.HasWrite,
+				"lethal_trifecta":       risk.LethalTrifecta,
+			}
+			if risk.Warning != "" {
+				sessionRisk["warning"] = risk.Warning
+			}
+			response["session_risk"] = sessionRisk
+		}
 	}
 
 	// Add debug information if requested
