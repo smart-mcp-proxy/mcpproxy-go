@@ -1,0 +1,11 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.smart-mcp-proxy/mcpproxy-go",
+  "description": "Smart MCP proxy with BM25 tool discovery, quarantine security, and ~99% token savings",
+  "repository": {
+    "url": "https://github.com/smart-mcp-proxy/mcpproxy-go",
+    "source": "github"
+  },
+  "version": "0.21.2",
+  "packages": []
+}
