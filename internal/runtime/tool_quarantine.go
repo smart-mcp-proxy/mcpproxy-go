@@ -178,21 +178,26 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 		// Existing record found - check if hash matches
 		if existing.ApprovedHash == currentHash {
+			needsSave := false
 			if existing.Status != storage.ToolApprovalStatusApproved {
 				// Hash matches but status is not approved (e.g., falsely marked "changed"
 				// by a previous binary with a different hash formula). Restore to approved.
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
+				needsSave = true
 				r.logger.Info("Tool restored to approved (hash matches after formula update)",
 					zap.String("server", serverName),
 					zap.String("tool", toolName))
 			}
 			// Update current hash/description in case they differ from storage
-			if existing.CurrentHash != currentHash || existing.Status == storage.ToolApprovalStatusApproved {
+			if existing.CurrentHash != currentHash {
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
+				needsSave = true
+			}
+			if needsSave {
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 					r.logger.Debug("Failed to update tool approval record",
 						zap.String("server", serverName),
