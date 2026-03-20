@@ -44,13 +44,13 @@ jobs:
             cgo: "0"
             name: mcpproxy-windows-arm64.exe
             archive_format: zip
-          - os: macos-14
+          - os: macos-15
             goos: darwin
             goarch: amd64
             cgo: "1"
             name: mcpproxy-darwin-amd64
             archive_format: tar.gz
-          - os: macos-14
+          - os: macos-15
             goos: darwin
             goarch: arm64
             cgo: "1"
