@@ -390,6 +390,57 @@ func TestCalculateToolApprovalHash(t *testing.T) {
 	assert.Equal(t, h1, legacy, "Nil annotations hash should match legacy hash")
 }
 
+// TestCalculateToolApprovalHash_Stability ensures that hash values remain stable across releases.
+// If this test breaks, it means the hash formula changed and ALL existing tool approvals in user
+// databases will be invalidated, causing every tool to appear as "changed". You MUST add backward
+// compatibility (like calculateLegacyToolApprovalHash) before merging such a change.
+func TestCalculateToolApprovalHash_Stability(t *testing.T) {
+	// These golden hashes were computed from the current formula and must never change.
+	// If the hash function changes, update the legacy migration code, NOT these expected values.
+	tests := []struct {
+		name        string
+		toolName    string
+		description string
+		schema      string
+		annotations *config.ToolAnnotations
+		expected    string
+	}{
+		{
+			name:        "nil annotations",
+			toolName:    "create_issue",
+			description: "Creates a GitHub issue",
+			schema:      `{"type":"object"}`,
+			annotations: nil,
+			expected:    "d97092125a6b97ad10b2a3892192d645e4b408954e4402e237622e3989ab3394",
+		},
+		{
+			name:        "with title annotation",
+			toolName:    "search_docs",
+			description: "Search the documentation",
+			schema:      `{"type":"object","properties":{"query":{"type":"string"}}}`,
+			annotations: &config.ToolAnnotations{Title: "Search Docs"},
+			expected:    "a86935a057cb98815c39cc1b53b140d4c8900151eb41fe07874d939d4c2e9e6d",
+		},
+		{
+			name:        "with destructiveHint",
+			toolName:    "delete_repo",
+			description: "Delete a repository",
+			schema:      `{"type":"object"}`,
+			annotations: &config.ToolAnnotations{DestructiveHint: boolP(true)},
+			expected:    "5c362171e5ed38c3cea0659e3d4a21feb737d1851b9099846c986320e800d490",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hash := calculateToolApprovalHash(tt.toolName, tt.description, tt.schema, tt.annotations)
+			assert.Equal(t, tt.expected, hash,
+				"Hash changed! This will invalidate ALL existing tool approvals in user databases. "+
+					"If intentional, add backward-compatible migration logic before updating expected values.")
+		})
+	}
+}
+
 func TestCheckToolApprovals_LegacyHashMigration(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
 		{Name: "github", Enabled: true},
