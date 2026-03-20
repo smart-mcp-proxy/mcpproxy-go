@@ -13,8 +13,29 @@ import (
 )
 
 // calculateToolApprovalHash computes a stable SHA-256 hash for tool-level quarantine.
-// Uses toolName + description + schemaJSON for consistent detection of changes.
-func calculateToolApprovalHash(toolName, description, schemaJSON string) string {
+// Uses toolName + description + schemaJSON + annotationsJSON for consistent detection of changes.
+// Annotations are included to detect "annotation rug-pulls" (e.g., flipping destructiveHint).
+func calculateToolApprovalHash(toolName, description, schemaJSON string, annotations *config.ToolAnnotations) string {
+	h := sha256.New()
+	h.Write([]byte(toolName))
+	h.Write([]byte("|"))
+	h.Write([]byte(description))
+	h.Write([]byte("|"))
+	h.Write([]byte(schemaJSON))
+	if annotations != nil {
+		annotationsJSON, err := json.Marshal(annotations)
+		if err == nil {
+			h.Write([]byte("|"))
+			h.Write(annotationsJSON)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// calculateLegacyToolApprovalHash computes the old hash format (without annotations).
+// Used for backward compatibility: tools approved before annotation tracking can be
+// silently re-approved if only the hash formula changed (not the actual content).
+func calculateLegacyToolApprovalHash(toolName, description, schemaJSON string) string {
 	h := sha256.New()
 	h.Write([]byte(toolName))
 	h.Write([]byte("|"))
@@ -80,8 +101,8 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			schemaJSON = "{}"
 		}
 
-		// Calculate current hash
-		currentHash := calculateToolApprovalHash(toolName, tool.Description, schemaJSON)
+		// Calculate current hash (includes annotations for rug-pull detection)
+		currentHash := calculateToolApprovalHash(toolName, tool.Description, schemaJSON, tool.Annotations)
 
 		// Look up existing approval record
 		existing, err := r.storageManager.GetToolApproval(serverName, toolName)
@@ -156,15 +177,24 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		}
 
 		// Existing record found - check if hash matches
-		if existing.Status == storage.ToolApprovalStatusApproved && existing.ApprovedHash == currentHash {
-			// Hash matches approved hash - tool is unchanged, keep approved
-			// Also update current hash/description in case they differ from storage
-			if existing.CurrentHash != currentHash {
+		if existing.ApprovedHash == currentHash {
+			if existing.Status != storage.ToolApprovalStatusApproved {
+				// Hash matches but status is not approved (e.g., falsely marked "changed"
+				// by a previous binary with a different hash formula). Restore to approved.
+				existing.Status = storage.ToolApprovalStatusApproved
+				existing.PreviousDescription = ""
+				existing.PreviousSchema = ""
+				r.logger.Info("Tool restored to approved (hash matches after formula update)",
+					zap.String("server", serverName),
+					zap.String("tool", toolName))
+			}
+			// Update current hash/description in case they differ from storage
+			if existing.CurrentHash != currentHash || existing.Status == storage.ToolApprovalStatusApproved {
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
-					r.logger.Debug("Failed to update tool approval current hash",
+					r.logger.Debug("Failed to update tool approval record",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
 						zap.Error(saveErr))
@@ -193,6 +223,30 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		}
 
 		if existing.ApprovedHash != "" && existing.ApprovedHash != currentHash {
+			// Before marking as changed, check if this is a legacy hash migration.
+			// Tools previously marked "changed" due to hash formula upgrade should be restored.
+			legacyHash := calculateLegacyToolApprovalHash(toolName, tool.Description, schemaJSON)
+			if existing.ApprovedHash == legacyHash {
+				existing.Status = storage.ToolApprovalStatusApproved
+				existing.ApprovedHash = currentHash
+				existing.CurrentHash = currentHash
+				existing.CurrentDescription = tool.Description
+				existing.CurrentSchema = schemaJSON
+				existing.PreviousDescription = ""
+				existing.PreviousSchema = ""
+				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+					r.logger.Debug("Failed to migrate changed tool approval hash",
+						zap.String("server", serverName),
+						zap.String("tool", toolName),
+						zap.Error(saveErr))
+				} else {
+					r.logger.Info("Tool approval hash migrated to include annotations (was falsely changed)",
+						zap.String("server", serverName),
+						zap.String("tool", toolName))
+				}
+				continue
+			}
+
 			// Hash differs from approved hash - tool description/schema changed (rug pull)
 			oldDesc := existing.CurrentDescription
 			oldSchema := existing.CurrentSchema
