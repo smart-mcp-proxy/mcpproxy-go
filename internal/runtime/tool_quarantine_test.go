@@ -65,7 +65,7 @@ func TestCheckToolApprovals_ApprovedTool_SameHash(t *testing.T) {
 	})
 
 	// Pre-approve a tool
-	hash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`)
+	hash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`, nil)
 	err := rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName:         "github",
 		ToolName:           "create_issue",
@@ -94,13 +94,55 @@ func TestCheckToolApprovals_ApprovedTool_SameHash(t *testing.T) {
 	assert.Equal(t, 0, result.ChangedCount)
 }
 
+func TestCheckToolApprovals_ChangedTool_HashNowMatches_Restored(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// Simulate a tool falsely marked "changed" by a previous binary with a different
+	// hash formula. The approved hash matches the current hash (e.g., no annotations).
+	hash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`, nil)
+	err := rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName:          "github",
+		ToolName:            "create_issue",
+		ApprovedHash:        hash,
+		CurrentHash:         "old-different-hash",
+		Status:              storage.ToolApprovalStatusChanged,
+		CurrentDescription:  "Creates a GitHub issue",
+		CurrentSchema:       `{"type":"object"}`,
+		PreviousDescription: "Creates a GitHub issue",
+		PreviousSchema:      `{"type":"object"}`,
+	})
+	require.NoError(t, err)
+
+	tools := []*config.ToolMetadata{
+		{
+			ServerName:  "github",
+			Name:        "create_issue",
+			Description: "Creates a GitHub issue",
+			ParamsJSON:  `{"type":"object"}`,
+		},
+	}
+
+	result, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.Equal(t, 0, len(result.BlockedTools), "Tool should not be blocked")
+	assert.Equal(t, 0, result.ChangedCount, "Should not count as changed")
+
+	// Verify status was restored to approved
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+	assert.Empty(t, record.PreviousDescription, "Previous description should be cleared")
+}
+
 func TestCheckToolApprovals_ApprovedTool_ChangedHash(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
 		{Name: "github", Enabled: true},
 	})
 
 	// Pre-approve a tool with old hash
-	oldHash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`)
+	oldHash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`, nil)
 	err := rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName:         "github",
 		ToolName:           "create_issue",
@@ -324,18 +366,198 @@ func TestApproveAllTools(t *testing.T) {
 }
 
 func TestCalculateToolApprovalHash(t *testing.T) {
-	h1 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`)
-	h2 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`)
+	h1 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`, nil)
+	h2 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`, nil)
 	assert.Equal(t, h1, h2, "Same inputs should produce same hash")
 
-	h3 := calculateToolApprovalHash("tool_a", "desc B", `{"type":"object"}`)
+	h3 := calculateToolApprovalHash("tool_a", "desc B", `{"type":"object"}`, nil)
 	assert.NotEqual(t, h1, h3, "Different description should produce different hash")
 
-	h4 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"array"}`)
+	h4 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"array"}`, nil)
 	assert.NotEqual(t, h1, h4, "Different schema should produce different hash")
 
-	h5 := calculateToolApprovalHash("tool_b", "desc A", `{"type":"object"}`)
+	h5 := calculateToolApprovalHash("tool_b", "desc A", `{"type":"object"}`, nil)
 	assert.NotEqual(t, h1, h5, "Different tool name should produce different hash")
+
+	// Annotations affect the hash
+	h6 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`, &config.ToolAnnotations{
+		Title: "My Tool",
+	})
+	assert.NotEqual(t, h1, h6, "Annotations should change the hash")
+
+	// Nil annotations produce same hash as legacy formula
+	legacy := calculateLegacyToolApprovalHash("tool_a", "desc A", `{"type":"object"}`)
+	assert.Equal(t, h1, legacy, "Nil annotations hash should match legacy hash")
+}
+
+// TestCalculateToolApprovalHash_Stability ensures that hash values remain stable across releases.
+// If this test breaks, it means the hash formula changed and ALL existing tool approvals in user
+// databases will be invalidated, causing every tool to appear as "changed". You MUST add backward
+// compatibility (like calculateLegacyToolApprovalHash) before merging such a change.
+func TestCalculateToolApprovalHash_Stability(t *testing.T) {
+	// These golden hashes were computed from the current formula and must never change.
+	// If the hash function changes, update the legacy migration code, NOT these expected values.
+	tests := []struct {
+		name        string
+		toolName    string
+		description string
+		schema      string
+		annotations *config.ToolAnnotations
+		expected    string
+	}{
+		{
+			name:        "nil annotations",
+			toolName:    "create_issue",
+			description: "Creates a GitHub issue",
+			schema:      `{"type":"object"}`,
+			annotations: nil,
+			expected:    "d97092125a6b97ad10b2a3892192d645e4b408954e4402e237622e3989ab3394",
+		},
+		{
+			name:        "with title annotation",
+			toolName:    "search_docs",
+			description: "Search the documentation",
+			schema:      `{"type":"object","properties":{"query":{"type":"string"}}}`,
+			annotations: &config.ToolAnnotations{Title: "Search Docs"},
+			expected:    "a86935a057cb98815c39cc1b53b140d4c8900151eb41fe07874d939d4c2e9e6d",
+		},
+		{
+			name:        "with destructiveHint",
+			toolName:    "delete_repo",
+			description: "Delete a repository",
+			schema:      `{"type":"object"}`,
+			annotations: &config.ToolAnnotations{DestructiveHint: boolP(true)},
+			expected:    "5c362171e5ed38c3cea0659e3d4a21feb737d1851b9099846c986320e800d490",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hash := calculateToolApprovalHash(tt.toolName, tt.description, tt.schema, tt.annotations)
+			assert.Equal(t, tt.expected, hash,
+				"Hash changed! This will invalidate ALL existing tool approvals in user databases. "+
+					"If intentional, add backward-compatible migration logic before updating expected values.")
+		})
+	}
+}
+
+func TestCheckToolApprovals_LegacyHashMigration(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// Pre-approve a tool with the LEGACY hash (no annotations)
+	legacyHash := calculateLegacyToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`)
+	err := rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName:         "github",
+		ToolName:           "create_issue",
+		ApprovedHash:       legacyHash,
+		CurrentHash:        legacyHash,
+		Status:             storage.ToolApprovalStatusApproved,
+		CurrentDescription: "Creates a GitHub issue",
+		CurrentSchema:      `{"type":"object"}`,
+	})
+	require.NoError(t, err)
+
+	// Tool now reports with annotations (same description/schema)
+	tools := []*config.ToolMetadata{
+		{
+			ServerName:  "github",
+			Name:        "create_issue",
+			Description: "Creates a GitHub issue",
+			ParamsJSON:  `{"type":"object"}`,
+			Annotations: &config.ToolAnnotations{Title: "Create Issue"},
+		},
+	}
+
+	result, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.Equal(t, 0, len(result.BlockedTools), "Legacy hash should be auto-migrated, not blocked")
+	assert.Equal(t, 0, result.ChangedCount, "Should not count as changed")
+
+	// Verify the hash was migrated
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+	newHash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`, &config.ToolAnnotations{Title: "Create Issue"})
+	assert.Equal(t, newHash, record.ApprovedHash, "Approved hash should be updated to new formula")
+}
+
+func TestCheckToolApprovals_LegacyHashMigration_ChangedStatus(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// Simulate a tool that was falsely marked "changed" due to hash formula upgrade
+	legacyHash := calculateLegacyToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`)
+	err := rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName:          "github",
+		ToolName:            "create_issue",
+		ApprovedHash:        legacyHash,
+		CurrentHash:         "some-new-hash",
+		Status:              storage.ToolApprovalStatusChanged,
+		CurrentDescription:  "Creates a GitHub issue",
+		CurrentSchema:       `{"type":"object"}`,
+		PreviousDescription: "Creates a GitHub issue",
+		PreviousSchema:      `{"type":"object"}`,
+	})
+	require.NoError(t, err)
+
+	tools := []*config.ToolMetadata{
+		{
+			ServerName:  "github",
+			Name:        "create_issue",
+			Description: "Creates a GitHub issue",
+			ParamsJSON:  `{"type":"object"}`,
+			Annotations: &config.ToolAnnotations{Title: "Create Issue"},
+		},
+	}
+
+	result, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.Equal(t, 0, len(result.BlockedTools), "Falsely changed tool should be restored")
+	assert.Equal(t, 0, result.ChangedCount)
+
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+	assert.Empty(t, record.PreviousDescription, "Previous description should be cleared")
+}
+
+func TestCheckToolApprovals_AnnotationChange_Detected(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// Pre-approve with annotations
+	annotations := &config.ToolAnnotations{DestructiveHint: boolP(true)}
+	hash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`, annotations)
+	err := rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName:         "github",
+		ToolName:           "create_issue",
+		ApprovedHash:       hash,
+		CurrentHash:        hash,
+		Status:             storage.ToolApprovalStatusApproved,
+		CurrentDescription: "Creates a GitHub issue",
+		CurrentSchema:      `{"type":"object"}`,
+	})
+	require.NoError(t, err)
+
+	// Annotation rug pull: destructiveHint flipped from true to false
+	tools := []*config.ToolMetadata{
+		{
+			ServerName:  "github",
+			Name:        "create_issue",
+			Description: "Creates a GitHub issue",
+			ParamsJSON:  `{"type":"object"}`,
+			Annotations: &config.ToolAnnotations{DestructiveHint: boolP(false)},
+		},
+	}
+
+	result, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.ChangedCount, "Annotation change should be detected")
+	assert.True(t, result.BlockedTools["create_issue"], "Tool with changed annotations should be blocked")
 }
 
 func TestFilterBlockedTools(t *testing.T) {
