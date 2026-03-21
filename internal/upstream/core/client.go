@@ -348,6 +348,9 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 
 	request := mcp.CallToolRequest{}
 	request.Params.Name = toolName
+	if args == nil {
+		args = map[string]interface{}{}
+	}
 	request.Params.Arguments = args
 
 	// Log to server-specific log
