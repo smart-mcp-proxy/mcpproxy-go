@@ -116,7 +116,7 @@ func (s *Service) Start(ctx context.Context) {
 	}
 
 	// Send first heartbeat
-	s.sendHeartbeat()
+	s.sendHeartbeat(ctx)
 
 	// Then send every interval
 	ticker := time.NewTicker(s.heartbeatInterval)
@@ -125,7 +125,7 @@ func (s *Service) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			s.sendHeartbeat()
+			s.sendHeartbeat(ctx)
 		case <-ctx.Done():
 			s.logger.Info("Telemetry service stopped")
 			return
@@ -133,7 +133,7 @@ func (s *Service) Start(ctx context.Context) {
 	}
 }
 
-func (s *Service) sendHeartbeat() {
+func (s *Service) sendHeartbeat(ctx context.Context) {
 	payload := s.buildHeartbeat()
 
 	data, err := json.Marshal(payload)
@@ -143,7 +143,7 @@ func (s *Service) sendHeartbeat() {
 	}
 
 	url := s.endpoint + "/heartbeat"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		s.logger.Debug("Failed to create heartbeat request", zap.Error(err))
 		return
