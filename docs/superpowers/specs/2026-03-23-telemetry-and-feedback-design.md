@@ -147,15 +147,40 @@ Max 5 feedback submissions per hour per instance (in-memory counter, resets on r
 
 ### 3. CLI Commands
 
-```bash
-mcpproxy telemetry status    # Show current telemetry config
-mcpproxy telemetry enable    # Set enabled: true in config
-mcpproxy telemetry disable   # Set enabled: false in config
+#### Telemetry on/off toggle
 
+```bash
+mcpproxy telemetry status    # Show: enabled/disabled, anonymous_id, endpoint
+mcpproxy telemetry enable    # Set enabled: true in config, takes effect immediately
+mcpproxy telemetry disable   # Set enabled: false in config, stops heartbeats immediately
+```
+
+The `enable`/`disable` commands modify `mcp_config.json` directly (setting `telemetry.enabled`). The file watcher picks up the change and the running telemetry service reacts without restart. Output confirms the action:
+```
+Telemetry enabled. Anonymous usage statistics will be sent.
+Disable at any time with: mcpproxy telemetry disable
+```
+```
+Telemetry disabled. No data will be sent.
+```
+
+The `status` command prints a summary:
+```
+Telemetry: enabled
+Anonymous ID: 550e8400-e29b-41d4-a716-446655440000
+Endpoint: https://telemetry.mcpproxy.app/v1
+Environment override: none
+```
+
+#### Feedback from CLI
+
+```bash
 mcpproxy feedback "OAuth login fails with Cloudflare"           # Quick bug report
 mcpproxy feedback --category feature "Add SAML support"         # Feature request
 mcpproxy feedback --category bug --email me@x.com "Crash on..."  # With email
 ```
+
+The CLI feedback command connects via Unix socket (bypasses API key) or loads the API key from config, then POSTs to the local `POST /api/v1/feedback` endpoint. The backend populates context and proxies to the Worker.
 
 ### 4. Web UI
 
@@ -221,6 +246,54 @@ CREATE INDEX idx_heartbeats_version ON heartbeats(version);
 
 ---
 
+## Documentation Deliverables
+
+### 1. CLAUDE.md updates
+
+Add telemetry CLI commands to the "CLI Management" section:
+```bash
+mcpproxy telemetry status              # Show telemetry status
+mcpproxy telemetry enable              # Enable anonymous telemetry
+mcpproxy telemetry disable             # Disable anonymous telemetry
+```
+
+Add feedback CLI to the same section:
+```bash
+mcpproxy feedback "message"            # Submit feedback (bug report by default)
+mcpproxy feedback --category feature "message"  # Feature request
+```
+
+Add to "Environment Variables" section:
+- `MCPPROXY_TELEMETRY` — Set to `false` to disable telemetry (overrides config)
+
+Add `POST /api/v1/feedback` to the HTTP API Endpoints table.
+
+### 2. Dedicated telemetry doc (`docs/features/telemetry.md`)
+
+Create a standalone document covering:
+- What data is collected (exact payload with field descriptions)
+- What is NOT collected (explicit exclusion list)
+- How to disable (3 methods: CLI, config file, environment variable)
+- How to verify it's disabled (`mcpproxy telemetry status`)
+- Data retention policy (on the Worker side — mention that data is aggregated, not stored per-user long-term)
+- Link to source code (`internal/telemetry/`) for full transparency
+- Anonymous ID explanation (random UUID, no hardware fingerprint, deletable)
+
+This page should be linkable from the first-run notice and the Web UI banner (`mcpproxy.app/telemetry` → this doc or a landing page that references it).
+
+### 3. Configuration reference update (`docs/configuration.md`)
+
+Add the `telemetry` config block with field descriptions:
+```json
+{
+  "telemetry": {
+    "enabled": true,
+    "anonymous_id": "auto-generated",
+    "endpoint": "https://telemetry.mcpproxy.app/v1"
+  }
+}
+```
+
 ## File Structure
 
 ```
@@ -249,6 +322,13 @@ internal/tray/
 
 internal/config/
   config.go             # Add TelemetryConfig struct (modify existing)
+
+docs/
+  features/telemetry.md # Standalone telemetry documentation
+  configuration.md      # Add telemetry config block (modify existing)
+
+CLAUDE.md               # Add telemetry/feedback CLI + env var docs (modify existing)
+oas/swagger.yaml        # Add POST /api/v1/feedback endpoint (modify existing)
 ```
 
 ## Testing Strategy
