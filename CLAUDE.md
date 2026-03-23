@@ -205,6 +205,22 @@ mcpproxy token regenerate deploy-bot   # Regenerate token secret
 
 See [docs/features/agent-tokens.md](docs/features/agent-tokens.md) for complete reference.
 
+### Telemetry CLI
+```bash
+mcpproxy telemetry status              # Show telemetry status and anonymous ID
+mcpproxy telemetry enable              # Enable anonymous usage telemetry
+mcpproxy telemetry disable             # Disable telemetry (no data sent)
+```
+
+### Feedback CLI
+```bash
+mcpproxy feedback "message"                          # Submit bug report
+mcpproxy feedback --category feature "Add SAML"      # Feature request
+mcpproxy feedback --category bug --email me@x.com "Crash"  # With contact email
+```
+
+See [docs/features/telemetry.md](docs/features/telemetry.md) for telemetry details and privacy policy.
+
 ### CLI Output Formatting
 ```bash
 mcpproxy upstream list -o json      # JSON output for scripting
@@ -289,6 +305,7 @@ See [docs/socket-communication.md](docs/socket-communication.md) for details.
 - `MCPPROXY_LISTEN` - Override network binding (e.g., `127.0.0.1:8080`)
 - `MCPPROXY_API_KEY` - Set API key for REST API authentication
 - `MCPPROXY_DEBUG` - Enable debug mode
+- `MCPPROXY_TELEMETRY` - Set to `false` to disable anonymous telemetry (overrides config)
 - `HEADLESS` - Run in headless mode (no browser launching)
 
 See [docs/configuration.md](docs/configuration.md) for complete reference.
@@ -339,6 +356,7 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `POST /api/v1/servers/{id}/tools/approve` | Approve pending/changed tools (Spec 032) |
 | `GET /api/v1/servers/{id}/tools/{tool}/diff` | View tool description/schema changes (Spec 032) |
 | `GET /api/v1/servers/{id}/tools/export` | Export tool approval records (Spec 032) |
+| `POST /api/v1/feedback` | Submit feedback/bug report (proxied to GitHub Issues) |
 | `GET /events` | SSE stream for live updates |
 
 **Authentication**: Use `X-API-Key` header or `?apikey=` query parameter.
