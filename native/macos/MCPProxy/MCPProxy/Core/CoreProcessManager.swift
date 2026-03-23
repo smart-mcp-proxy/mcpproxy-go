@@ -24,7 +24,13 @@ actor CoreProcessManager {
 
     // MARK: - Properties
 
-    private var process: Process?
+    /// Exposed for synchronous termination in applicationWillTerminate.
+    /// Safe to read from any isolation context since Process is thread-safe for terminate().
+    nonisolated(unsafe) var managedProcess: Process?
+
+    private var process: Process? {
+        didSet { managedProcess = process }
+    }
     private let appState: AppState
     private var apiClient: APIClient?
     private var sseClient: SSEClient?

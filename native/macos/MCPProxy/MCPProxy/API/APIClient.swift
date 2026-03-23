@@ -48,14 +48,17 @@ actor APIClient {
         self.baseURL = baseURL
         self.apiKey = apiKey
 
-        // Prefer socket transport when available
+        // Unix socket is the default and preferred transport.
+        // Only fall back to TCP if explicitly requested (empty socketPath string).
+        // The SocketURLProtocol checks socket availability per-request,
+        // so it's safe to register even before the socket file exists.
         if let path = socketPath, path.isEmpty {
             // Explicitly requested TCP-only
             self.session = SocketTransport.makeTCPSession()
-        } else if SocketTransport.isSocketAvailable(path: socketPath) {
-            self.session = SocketTransport.makeURLSession(socketPath: socketPath)
         } else {
-            self.session = SocketTransport.makeTCPSession()
+            // Always use socket-backed session — SocketURLProtocol falls through
+            // to standard networking if the socket file doesn't exist yet.
+            self.session = SocketTransport.makeURLSession(socketPath: socketPath)
         }
     }
 
@@ -71,7 +74,7 @@ actor APIClient {
     /// Check if the core is ready to accept requests.
     /// Returns `true` if `/healthz/ready` returns 200.
     func ready() async throws -> Bool {
-        let (_, response) = try await performRequest(path: "/healthz/ready", method: "GET")
+        let (_, response) = try await performRequest(path: "/ready", method: "GET")
         _ = response // suppress unused warning
         return true
     }

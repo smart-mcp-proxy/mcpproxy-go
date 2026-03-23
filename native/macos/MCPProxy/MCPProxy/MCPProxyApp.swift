@@ -3,51 +3,46 @@
 //
 // The @main entry point for the MCPProxy macOS tray application.
 // Sets up MenuBarExtra, initializes services, and manages app lifecycle.
+//
+// IMPORTANT: Core process launch happens at app startup (via AppDelegate),
+// NOT on first menu open. The .menu style MenuBarExtra only renders its
+// content when the user clicks the icon, so .task{} would be too late.
 
 import SwiftUI
 
-@main
-struct MCPProxyApp: App {
-    @StateObject private var appState = AppState()
-    @State private var coreManager: CoreProcessManager?
-    @State private var notificationService = NotificationService()
-    @State private var updateService = UpdateService()
-    @State private var hasInitialized = false
+// MARK: - App Delegate (startup logic)
 
-    var body: some Scene {
-        MenuBarExtra {
-            TrayMenu(
-                appState: appState,
-                updateService: updateService,
-                onRestart: { Task { await coreManager?.retry() } },
-                onQuit: { Task { await shutdown() } }
-            )
-            .task {
-                guard !hasInitialized else { return }
-                hasInitialized = true
-                await setupOnFirstAppear()
-            }
-        } label: {
-            TrayIcon(appState: appState)
+/// Handles app lifecycle events. Core launch happens here, not in SwiftUI views.
+final class AppController: NSObject, NSApplicationDelegate {
+    let appState = AppState()
+    let notificationService = NotificationService()
+    let updateService = UpdateService()
+    var coreManager: CoreProcessManager?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Task {
+            await startCore()
         }
-        .menuBarExtraStyle(.menu)
     }
 
-    // MARK: - Lifecycle
+    func applicationWillTerminate(_ notification: Notification) {
+        // Synchronous shutdown — send SIGTERM and don't wait
+        if let process = coreManager?.managedProcess {
+            process.terminate()
+        }
+    }
 
-    /// Called once when the menu first appears. Initializes core process management,
-    /// notification categories, and auto-start state.
-    private func setupOnFirstAppear() async {
+    private func startCore() async {
         // Register notification categories and request permission
         await notificationService.setup()
 
         // Read auto-start state from the system
-        appState.autoStartEnabled = AutoStartService.isEnabled
+        await MainActor.run {
+            appState.autoStartEnabled = AutoStartService.isEnabled
+        }
 
-        // Offer symlink creation if not already set up
+        // Symlink setup
         if SymlinkService.needsSetup() {
-            // Attempt non-interactively; if the bundled binary exists inside .app we link it.
-            // Errors are logged but not user-blocking.
             if let bundledBinary = resolveBundledCoreBinary() {
                 await SymlinkService.updateSymlinkIfNeeded(bundledBinary: bundledBinary)
             }
@@ -60,14 +55,6 @@ struct MCPProxyApp: App {
         )
         coreManager = manager
         await manager.start()
-    }
-
-    /// Gracefully shuts down the core and exits the application.
-    private func shutdown() async {
-        await coreManager?.shutdown()
-        // Give a brief moment for cleanup before terminating
-        try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
-        NSApplication.shared.terminate(nil)
     }
 
     /// Resolve the bundled core binary inside the .app bundle's Resources/bin/ directory.
@@ -85,5 +72,34 @@ struct MCPProxyApp: App {
             return candidate.path
         }
         return nil
+    }
+}
+
+// MARK: - App
+
+@main
+struct MCPProxyApp: App {
+    @NSApplicationDelegateAdaptor(AppController.self) var controller
+
+    var body: some Scene {
+        MenuBarExtra {
+            TrayMenu(
+                appState: controller.appState,
+                updateService: controller.updateService,
+                onRestart: { [weak controller] in
+                    Task { await controller?.coreManager?.retry() }
+                },
+                onQuit: { [weak controller] in
+                    Task {
+                        await controller?.coreManager?.shutdown()
+                        try? await Task.sleep(nanoseconds: 200_000_000)
+                        NSApplication.shared.terminate(nil)
+                    }
+                }
+            )
+        } label: {
+            TrayIcon(appState: controller.appState)
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
