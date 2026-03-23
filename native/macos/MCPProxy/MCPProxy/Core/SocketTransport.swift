@@ -197,7 +197,6 @@ final class SocketURLProtocol: URLProtocol {
     // MARK: - HTTP Response Reader
 
     private func readResponse(fd: Int32) {
-        var allData = Data()
         let bufferSize = 8192
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 1)
         defer {
@@ -208,38 +207,106 @@ final class SocketURLProtocol: URLProtocol {
             }
         }
 
-        // Read until EOF or cancellation
+        // Phase 1: Read until we find the header/body separator (\r\n\r\n)
+        var headerData = Data()
+        let separator = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+        var separatorRange: Range<Data.Index>?
+
         while !isCancelled {
             let bytesRead = Darwin.read(fd, buffer, bufferSize)
-            if bytesRead > 0 {
-                allData.append(buffer.assumingMemoryBound(to: UInt8.self), count: bytesRead)
-            } else {
-                break // EOF or error
+            if bytesRead <= 0 { break }
+            headerData.append(buffer.assumingMemoryBound(to: UInt8.self), count: bytesRead)
+            if let range = headerData.range(of: separator) {
+                separatorRange = range
+                break
             }
         }
 
-        guard !isCancelled else { return }
+        guard !isCancelled, let sepRange = separatorRange else {
+            if !isCancelled {
+                let error = NSError(domain: "SocketURLProtocol", code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Failed to read HTTP headers from socket"])
+                client?.urlProtocol(self, didFailWithError: error)
+            }
+            return
+        }
 
-        // Parse HTTP response
-        guard let parsed = parseHTTPResponse(allData) else {
+        // Parse headers
+        let headersEnd = sepRange.lowerBound
+        let bodyStart = sepRange.upperBound
+        guard let headerString = String(data: headerData[headerData.startIndex..<headersEnd], encoding: .utf8) else {
             let error = NSError(domain: "SocketURLProtocol", code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: "Failed to parse HTTP response from socket"])
+                                userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP header encoding"])
             client?.urlProtocol(self, didFailWithError: error)
             return
         }
 
+        let headerLines = headerString.components(separatedBy: "\r\n")
+        guard let statusLine = headerLines.first else {
+            let error = NSError(domain: "SocketURLProtocol", code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "Missing HTTP status line"])
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+
+        let statusParts = statusLine.split(separator: " ", maxSplits: 2)
+        guard statusParts.count >= 2, let statusCode = Int(statusParts[1]) else {
+            let error = NSError(domain: "SocketURLProtocol", code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP status line: \(statusLine)"])
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+
+        var headers: [String: String] = [:]
+        for i in 1..<headerLines.count {
+            let line = headerLines[i]
+            guard let colonIdx = line.firstIndex(of: ":") else { continue }
+            let key = String(line[line.startIndex..<colonIdx]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+            headers[key] = value
+        }
+
+        // Phase 2: Read body based on Content-Length or Transfer-Encoding
+        // We already have some body bytes in headerData after the separator
+        var bodyData = Data(headerData[bodyStart..<headerData.endIndex])
+
+        let isChunked = headers["Transfer-Encoding"]?.lowercased().contains("chunked") == true
+
+        if let contentLengthStr = headers["Content-Length"], let contentLength = Int(contentLengthStr) {
+            // Read exactly Content-Length bytes
+            while bodyData.count < contentLength && !isCancelled {
+                let remaining = contentLength - bodyData.count
+                let toRead = min(remaining, bufferSize)
+                let bytesRead = Darwin.read(fd, buffer, toRead)
+                if bytesRead <= 0 { break }
+                bodyData.append(buffer.assumingMemoryBound(to: UInt8.self), count: bytesRead)
+            }
+        } else if isChunked {
+            // Read chunked until we see the terminal "0\r\n\r\n"
+            let terminator = Data([0x30, 0x0D, 0x0A, 0x0D, 0x0A]) // "0\r\n\r\n"
+            while !isCancelled && bodyData.range(of: terminator) == nil {
+                let bytesRead = Darwin.read(fd, buffer, bufferSize)
+                if bytesRead <= 0 { break }
+                bodyData.append(buffer.assumingMemoryBound(to: UInt8.self), count: bytesRead)
+            }
+            bodyData = decodeChunkedBody(bodyData)
+        }
+        // else: no Content-Length and not chunked — bodyData is whatever we already have
+
+        guard !isCancelled else { return }
+
         // Deliver to URLProtocol client
         if let httpResponse = HTTPURLResponse(
             url: request.url ?? URL(string: "http://localhost")!,
-            statusCode: parsed.statusCode,
+            statusCode: statusCode,
             httpVersion: "HTTP/1.1",
-            headerFields: parsed.headers
+            headerFields: headers
         ) {
             client?.urlProtocol(self, didReceive: httpResponse, cacheStoragePolicy: .notAllowed)
         }
 
-        if !parsed.body.isEmpty {
-            client?.urlProtocol(self, didLoad: parsed.body)
+        if !bodyData.isEmpty {
+            client?.urlProtocol(self, didLoad: bodyData)
         }
 
         client?.urlProtocolDidFinishLoading(self)

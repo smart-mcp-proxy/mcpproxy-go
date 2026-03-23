@@ -212,8 +212,10 @@ actor CoreProcessManager {
             startPeriodicRefresh()
 
         } catch let error as CoreError {
+            NSLog("[MCPProxy] launchAndConnect FAILED (CoreError): %@", error.userMessage)
             await handleCoreError(error)
         } catch {
+            NSLog("[MCPProxy] launchAndConnect FAILED: %@", error.localizedDescription)
             await handleCoreError(.general(error.localizedDescription))
         }
     }
@@ -391,6 +393,9 @@ actor CoreProcessManager {
 
     /// Create API and SSE clients connected to the core via the Unix socket.
     private func connectToCore() async throws {
+        NSLog("[MCPProxy] connectToCore: creating APIClient (socket=%@, apiKey=%@)",
+              socketPath, sessionAPIKey != nil ? "set" : "nil")
+
         let client = APIClient(
             socketPath: socketPath,
             baseURL: "http://127.0.0.1:8080",
@@ -398,13 +403,17 @@ actor CoreProcessManager {
         )
 
         // Verify the core is ready
+        NSLog("[MCPProxy] connectToCore: calling /ready...")
         let ready = try await client.ready()
         guard ready else {
             throw CoreError.general("Core reported not ready")
         }
+        NSLog("[MCPProxy] connectToCore: core is ready")
 
         // Fetch version info
+        NSLog("[MCPProxy] connectToCore: calling /api/v1/info...")
         let info = try await client.info()
+        NSLog("[MCPProxy] connectToCore: got version=%@", info.version)
         await MainActor.run {
             appState.version = info.version
             if let update = info.update, update.available, let latest = update.latestVersion {
@@ -414,12 +423,14 @@ actor CoreProcessManager {
 
         apiClient = client
 
-        // Create SSE client
+        // Create SSE client — uses TCP (not socket) for streaming compatibility
+        NSLog("[MCPProxy] connectToCore: creating SSEClient (TCP, apiKey=%@)",
+              sessionAPIKey != nil ? "set" : "nil")
         sseClient = SSEClient(
-            socketPath: socketPath,
             baseURL: "http://127.0.0.1:8080",
             apiKey: sessionAPIKey
         )
+        NSLog("[MCPProxy] connectToCore: done")
     }
 
     // MARK: - Private: SSE Streaming
