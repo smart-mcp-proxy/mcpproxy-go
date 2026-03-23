@@ -7,8 +7,8 @@
 import SwiftUI
 
 struct TrayMenu: View {
-    let appState: AppState
-    let updateService: UpdateService
+    @ObservedObject var appState: AppState
+    @ObservedObject var updateService: UpdateService
     let onRestart: () -> Void
     let onQuit: () -> Void
 

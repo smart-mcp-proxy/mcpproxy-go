@@ -28,8 +28,7 @@ import Foundation
 ///
 /// When Sparkle is not available (SPM dependency not resolved), all methods
 /// are no-ops and `canCheckForUpdates` returns `false`.
-@Observable
-final class UpdateService {
+final class UpdateService: ObservableObject {
 
     // MARK: - Sparkle Integration
 
@@ -48,7 +47,7 @@ final class UpdateService {
     }
 
     /// Whether an update check is currently in progress.
-    private(set) var isChecking: Bool = false
+    @Published private(set) var isChecking: Bool = false
 
     /// Flag indicating whether Sparkle framework is linked.
     private let sparkleAvailable: Bool

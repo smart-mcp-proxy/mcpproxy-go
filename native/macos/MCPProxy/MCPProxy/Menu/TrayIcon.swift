@@ -7,7 +7,7 @@
 import SwiftUI
 
 struct TrayIcon: View {
-    let appState: AppState
+    @ObservedObject var appState: AppState
 
     var body: some View {
         Image(systemName: iconName)

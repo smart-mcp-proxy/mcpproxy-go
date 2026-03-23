@@ -9,7 +9,7 @@
 //   - ServerStatus, ActivityEntry, HealthStatus, etc.          -> API/Models.swift
 
 import Foundation
-import Observation
+import Combine
 
 // MARK: - Health Indicator (tray icon badge)
 
@@ -26,37 +26,37 @@ enum HealthIndicator: String, Sendable {
 /// The root observable state object for the entire tray application.
 /// All views bind to properties on this object.
 ///
+/// Uses ObservableObject (not @Observable) for macOS 13 compatibility.
 /// Server and activity data use the Codable model types from `API/Models.swift`.
 /// Core lifecycle state uses the state machine from `Core/CoreState.swift`.
-@Observable
-final class AppState {
+final class AppState: ObservableObject {
 
     // MARK: Core lifecycle
 
     /// Current core process state (uses CoreState from CoreState.swift).
-    var coreState: CoreState = .idle
+    @Published var coreState: CoreState = .idle
 
     /// Who owns the core process.
-    var ownership: CoreOwnership = .trayManaged
+    @Published var ownership: CoreOwnership = .trayManaged
 
     // MARK: Server inventory (ServerStatus from Models.swift)
 
-    var servers: [ServerStatus] = []
-    var connectedCount: Int = 0
-    var totalServers: Int = 0
-    var totalTools: Int = 0
+    @Published var servers: [ServerStatus] = []
+    @Published var connectedCount: Int = 0
+    @Published var totalServers: Int = 0
+    @Published var totalTools: Int = 0
 
     // MARK: Activity & security (ActivityEntry from Models.swift)
 
-    var recentActivity: [ActivityEntry] = []
-    var sensitiveDataAlertCount: Int = 0
-    var quarantinedToolsCount: Int = 0
+    @Published var recentActivity: [ActivityEntry] = []
+    @Published var sensitiveDataAlertCount: Int = 0
+    @Published var quarantinedToolsCount: Int = 0
 
     // MARK: Metadata
 
-    var version: String = ""
-    var updateAvailable: String? = nil
-    var autoStartEnabled: Bool = false
+    @Published var version: String = ""
+    @Published var updateAvailable: String? = nil
+    @Published var autoStartEnabled: Bool = false
 
     // MARK: Computed properties
 

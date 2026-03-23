@@ -8,7 +8,7 @@ import SwiftUI
 
 @main
 struct MCPProxyApp: App {
-    @State private var appState = AppState()
+    @StateObject private var appState = AppState()
     @State private var coreManager: CoreProcessManager?
     @State private var notificationService = NotificationService()
     @State private var updateService = UpdateService()

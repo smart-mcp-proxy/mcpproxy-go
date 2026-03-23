@@ -152,7 +152,7 @@ enum CoreState: Equatable {
 
 /// Specific error types mapped from mcpproxy exit codes.
 /// See CLAUDE.md "Exit Codes" section for the canonical mapping.
-enum CoreError: Equatable {
+enum CoreError: Error, Equatable {
     /// Port already in use (exit code 2)
     case portConflict
     /// Database file locked by another process (exit code 3)
