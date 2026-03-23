@@ -26,6 +26,8 @@
     <false/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>MCPProxy connects to its local core service to manage your MCP servers.</string>
     <key>SUFeedURL</key>
     <string>https://mcpproxy.app/appcast.xml</string>
     <key>SUPublicEDKey</key>
