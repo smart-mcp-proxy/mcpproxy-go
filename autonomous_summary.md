@@ -65,19 +65,28 @@ Successfully designed and implemented a native macOS Swift tray app for MCPProxy
 | Check | Result | Notes |
 |-------|--------|-------|
 | Swift syntax validation (swiftc -parse) | PASS | All 14 source files + 4 test files |
+| Swift full compilation (swiftc -o) | PASS | 1.3MB arm64 Mach-O binary produced |
 | Go core build (go build ./cmd/mcpproxy) | PASS | No regressions |
 | Go tray build (go build ./cmd/mcpproxy-tray) | PASS | Windows compatibility preserved |
 | Pre-commit hooks | PASS | Trailing whitespace, end-of-file |
-| SPM build (swift build) | BLOCKED | Requires Xcode.app (not just CLT) |
-| XCTest (swift test) | BLOCKED | Same Xcode dependency |
+| Binary execution | PASS | Runs, creates SwiftUI app (needs .app bundle for notifications) |
+| SPM build (swift build) | BLOCKED | CLT has SPM linker version mismatch - Xcode.app resolves this |
+| XCTest (swift test) | BLOCKED | XCTest framework only in Xcode.app, not CLT |
 
-### Build Prerequisite
+### Compilation Details
 
-The Swift Package Manager build requires **Xcode 15+** installed (not just Command Line Tools). On a machine with Xcode:
+The app compiles successfully with direct swiftc invocation (bypassing SPM):
+```bash
+swiftc -target arm64-apple-macosx13.0 -sdk $(xcrun --show-sdk-path) \
+  -framework SwiftUI -framework AppKit -framework Foundation \
+  -framework ServiceManagement -framework UserNotifications \
+  -o MCPProxy MCPProxy/*.swift MCPProxy/**/*.swift
+```
 
+For SPM/Xcode builds (after installing Xcode 15+):
 ```bash
 cd native/macos/MCPProxy
-swift build        # builds the app
+swift build        # builds with Sparkle dependency
 swift test         # runs unit tests
 ```
 
