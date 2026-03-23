@@ -14,7 +14,26 @@ struct TrayMenu: View {
 
     @State private var apiClient: APIClient?
 
+    /// Unique ID that changes when server list changes.
+    /// Forces SwiftUI to rebuild the menu tree (workaround for
+    /// MenuBarExtra .menu style not properly diffing ForEach items).
+    private var menuIdentity: String {
+        let serverIDs = appState.servers.map(\.id).joined(separator: ",")
+        let counts = "\(appState.connectedCount)/\(appState.totalServers)/\(appState.totalTools)"
+        let activity = "\(appState.recentActivity.count)/\(appState.sensitiveDataAlertCount)"
+        return "\(serverIDs)|\(counts)|\(activity)|\(appState.quarantinedToolsCount)"
+    }
+
     var body: some View {
+        // Use .id() to force full menu rebuild when state changes.
+        // Without this, MenuBarExtra .menu style appends duplicates
+        // to the underlying NSMenu instead of replacing items.
+        menuContent
+            .id(menuIdentity)
+    }
+
+    @ViewBuilder
+    private var menuContent: some View {
         // MARK: - Header
         headerSection
 
