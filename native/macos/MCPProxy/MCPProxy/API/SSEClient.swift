@@ -139,14 +139,16 @@ actor SSEClient {
         self.baseURL = baseURL
         self.apiKey = apiKey
 
-        // SSE needs a long-timeout session; socket or TCP based on availability
-        if let path = socketPath, path.isEmpty {
-            self.session = SSEClient.makeLongLivedSession(useSocket: false, socketPath: nil)
-        } else if SocketTransport.isSocketAvailable(path: socketPath) {
-            self.session = SSEClient.makeLongLivedSession(useSocket: true, socketPath: socketPath)
-        } else {
-            self.session = SSEClient.makeLongLivedSession(useSocket: false, socketPath: nil)
-        }
+        // IMPORTANT: SSE MUST use TCP, not the Unix socket URLProtocol.
+        //
+        // SocketURLProtocol buffers the entire response before delivering it
+        // (reads until EOF in readResponse). SSE is an infinite stream that
+        // never sends EOF, so the URLProtocol hangs forever.
+        //
+        // URLSession.bytes(for:) needs real streaming which only works with
+        // the native TCP transport. The core listens on both socket AND TCP,
+        // so SSE goes via TCP (127.0.0.1:8080) while API calls use the socket.
+        self.session = SSEClient.makeLongLivedSession(useSocket: false, socketPath: nil)
     }
 
     /// Create an SSE client with an explicit URLSession (for testing).
