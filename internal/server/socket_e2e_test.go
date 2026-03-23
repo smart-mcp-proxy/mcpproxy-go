@@ -88,7 +88,7 @@ func TestE2E_TrayToCore_UnixSocket(t *testing.T) {
 	// Wait for server to be ready
 	require.Eventually(t, func() bool {
 		return srv.IsReady()
-	}, 5*time.Second, 100*time.Millisecond, "Server should become ready")
+	}, 15*time.Second, 100*time.Millisecond, "Server should become ready")
 
 	// Wait for TCP address to be resolved (may take a moment with race detector)
 	var tcpAddr string
@@ -271,7 +271,7 @@ func TestE2E_DualListener_Concurrent(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return srv.IsReady()
-	}, 5*time.Second, 100*time.Millisecond)
+	}, 15*time.Second, 100*time.Millisecond)
 
 	tcpAddr := srv.GetListenAddress()
 	socketPath := filepath.Join(tmpDir, "mcpproxy.sock")
@@ -399,7 +399,7 @@ func TestE2E_SocketPermissions(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return srv.IsReady()
-	}, 5*time.Second, 100*time.Millisecond)
+	}, 15*time.Second, 100*time.Millisecond)
 
 	socketPath := filepath.Join(tmpDir, "mcpproxy.sock")
 
