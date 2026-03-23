@@ -239,10 +239,10 @@ func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 // backgroundSessionCleanup periodically closes sessions that haven't had activity.
 // This handles the HTTP transport limitation where OnUnregisterSession is never called.
 func (r *Runtime) backgroundSessionCleanup(ctx context.Context) {
-	// Session inactivity timeout: 5 minutes
-	// This is a reasonable timeout for MCP sessions where clients typically
-	// send tool calls every few seconds during active use.
-	const sessionInactivityTimeout = 5 * time.Minute
+	// Session inactivity timeout: 30 minutes
+	// MCP clients may have gaps between tool calls (e.g., user reading results).
+	// 5 minutes was too aggressive and caused sessions to appear stale.
+	const sessionInactivityTimeout = 30 * time.Minute
 
 	// Check every minute for inactive sessions
 	ticker := time.NewTicker(1 * time.Minute)

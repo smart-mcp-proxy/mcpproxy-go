@@ -453,28 +453,34 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 // Each server instance has its own set of tools registered appropriate for that mode.
 // The main "server" field remains the retrieve_tools mode server (default).
 func (p *MCPProxyServer) initRoutingModeServers() {
+	// All routing mode servers share the same hooks for session tracking
+	opts := []mcpserver.ServerOption{
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithRecovery(),
+	}
+	if p.hooks != nil {
+		opts = append(opts, mcpserver.WithHooks(p.hooks))
+	}
+
 	// Create direct mode server
 	p.directServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),
-		mcpserver.WithToolCapabilities(true),
-		mcpserver.WithRecovery(),
+		opts...,
 	)
 
 	// Create code execution mode server
 	p.codeExecServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),
-		mcpserver.WithToolCapabilities(true),
-		mcpserver.WithRecovery(),
+		opts...,
 	)
 
 	// Create call tool mode server (/mcp/call)
 	p.callToolServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),
-		mcpserver.WithToolCapabilities(true),
-		mcpserver.WithRecovery(),
+		opts...,
 	)
 
 	// Register tools for code execution mode (static tools that don't change)

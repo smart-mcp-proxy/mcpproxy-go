@@ -962,8 +962,8 @@ func (m *Manager) CreateSession(session *SessionRecord) error {
 		c := bucket.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			keyStr := string(k)
-			// Check if key ends with the session ID (after the underscore)
-			if len(keyStr) > len(session.ID) && keyStr[len(keyStr)-len(session.ID):] == session.ID {
+			// Check if key ends with _{session_id}
+			if strings.HasSuffix(keyStr, "_"+session.ID) {
 				existingKey = k
 				if err := json.Unmarshal(v, &existingSession); err != nil {
 					m.logger.Warnw("Failed to unmarshal existing session", "error", err)
@@ -1033,8 +1033,8 @@ func (m *Manager) CloseSession(sessionID string) error {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			// Key format: {timestamp_ns}_{session_id}
 			keyStr := string(k)
-			// Check if key ends with the session ID (after the underscore)
-			if len(keyStr) > len(sessionID) && keyStr[len(keyStr)-len(sessionID):] == sessionID {
+			// Check if key ends with _{session_id}
+			if strings.HasSuffix(keyStr, "_"+sessionID) {
 				sessionKey = k
 				if err := json.Unmarshal(v, &session); err != nil {
 					return fmt.Errorf("failed to unmarshal session: %w", err)
@@ -1115,8 +1115,8 @@ func (m *Manager) GetSessionByID(sessionID string) (*SessionRecord, error) {
 		c := bucket.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			keyStr := string(k)
-			// Check if key ends with the session ID (after the underscore)
-			if len(keyStr) > len(sessionID) && keyStr[len(keyStr)-len(sessionID):] == sessionID {
+			// Check if key ends with _{session_id}
+			if strings.HasSuffix(keyStr, "_"+sessionID) {
 				var s SessionRecord
 				if err := json.Unmarshal(v, &s); err != nil {
 					return fmt.Errorf("failed to unmarshal session: %w", err)
@@ -1200,8 +1200,8 @@ func (m *Manager) UpdateSessionStats(sessionID string, tokens int) error {
 		c := bucket.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			keyStr := string(k)
-			// Check if key ends with the session ID (after the underscore)
-			if len(keyStr) > len(sessionID) && keyStr[len(keyStr)-len(sessionID):] == sessionID {
+			// Check if key ends with _{session_id}
+			if strings.HasSuffix(keyStr, "_"+sessionID) {
 				sessionKey = k
 				if err := json.Unmarshal(v, &session); err != nil {
 					return fmt.Errorf("failed to unmarshal session: %w", err)
@@ -1225,6 +1225,38 @@ func (m *Manager) UpdateSessionStats(sessionID string, tokens int) error {
 		}
 
 		return bucket.Put(sessionKey, data)
+	})
+}
+
+// UpdateSessionActivity updates LastActivity without incrementing tool call counts.
+// Call this on any MCP message to keep the session alive.
+func (m *Manager) UpdateSessionActivity(sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return nil
+		}
+
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			keyStr := string(k)
+			if strings.HasSuffix(keyStr, "_"+sessionID) {
+				var session SessionRecord
+				if err := json.Unmarshal(v, &session); err != nil {
+					return err
+				}
+				session.LastActivity = time.Now()
+				data, err := json.Marshal(session)
+				if err != nil {
+					return err
+				}
+				return bucket.Put(k, data)
+			}
+		}
+		return nil // Session not found is not an error - may not be persisted yet
 	})
 }
 

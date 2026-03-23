@@ -101,6 +101,9 @@ type MCPProxyServer struct {
 
 	// MCP session tracking
 	sessionStore *SessionStore
+
+	// Hooks shared across all routing mode servers
+	hooks *mcpserver.Hooks
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -122,6 +125,17 @@ func NewMCPProxyServer(
 
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
+	// Update session activity on every MCP message to prevent premature cleanup.
+	// Without this, sessions that only do retrieve_tools (not tool calls) would
+	// appear inactive and get closed by the background cleanup.
+	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		session := mcpserver.ClientSessionFromContext(ctx)
+		if session == nil {
+			return
+		}
+		sessionStore.UpdateActivity(session.SessionID())
+	})
+
 	hooks.AddOnRegisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
 		sessionID := sess.SessionID()
 
@@ -235,6 +249,7 @@ func NewMCPProxyServer(
 		config:          config,
 		jsPool:          jsPool,
 		sessionStore:    sessionStore,
+		hooks:           hooks,
 	}
 
 	// Register proxy tools for the default (retrieve_tools) server
