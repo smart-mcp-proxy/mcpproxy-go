@@ -728,6 +728,14 @@ class APIService {
     } as RequestInit)
   }
 
+  // Feedback submission
+  async submitFeedback(data: { category: string; message: string; email?: string }): Promise<APIResponse<{ issue_url?: string }>> {
+    return this.request<{ issue_url?: string }>('/api/v1/feedback', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {

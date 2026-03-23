@@ -101,6 +101,8 @@ components:
           type: string
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
+        telemetry:
+          $ref: '#/components/schemas/config.TelemetryConfig'
         tls:
           $ref: '#/components/schemas/config.TLSConfig'
         tokenizer:
@@ -464,6 +466,19 @@ components:
         require_client_cert:
           description: Enable mTLS
           type: boolean
+      type: object
+    config.TelemetryConfig:
+      description: Telemetry settings (Spec 036)
+      properties:
+        anonymous_id:
+          description: Auto-generated UUIDv4
+          type: string
+        enabled:
+          description: 'Default: true (opt-out)'
+          type: boolean
+        endpoint:
+          description: Override for testing
+          type: string
       type: object
     config.TokenizerConfig:
       description: Tokenizer configuration for token counting
@@ -1795,6 +1810,44 @@ components:
         inherit_system_safe:
           type: boolean
       type: object
+    telemetry.FeedbackContext:
+      properties:
+        arch:
+          type: string
+        connected_server_count:
+          type: integer
+        edition:
+          type: string
+        os:
+          type: string
+        routing_mode:
+          type: string
+        server_count:
+          type: integer
+        version:
+          type: string
+      type: object
+    telemetry.FeedbackRequest:
+      properties:
+        category:
+          description: bug, feature, other
+          type: string
+        context:
+          $ref: '#/components/schemas/telemetry.FeedbackContext'
+        email:
+          type: string
+        message:
+          type: string
+      type: object
+    telemetry.FeedbackResponse:
+      properties:
+        error:
+          type: string
+        issue_url:
+          type: string
+        success:
+          type: boolean
+      type: object
   securitySchemes:
     ApiKeyAuth:
       description: API key authentication via query parameter. Use ?apikey=your-key
@@ -2383,6 +2436,52 @@ paths:
       summary: Get health diagnostics
       tags:
       - diagnostics
+  /api/v1/feedback:
+    post:
+      description: Submit a bug report, feature request, or general feedback
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/telemetry.FeedbackRequest'
+        description: Feedback request
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/telemetry.FeedbackResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                type: object
+          description: Bad Request
+        "429":
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                type: object
+          description: Too Many Requests
+        "500":
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                type: object
+          description: Internal Server Error
+      security:
+      - ApiKeyAuth: []
+      summary: Submit feedback
+      tags:
+      - feedback
   /api/v1/index/search:
     get:
       description: Search across all upstream MCP server tools using BM25 keyword

@@ -62,6 +62,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/feedback',
+      name: 'feedback',
+      component: () => import('@/views/Feedback.vue'),
+      meta: {
+        title: 'Send Feedback',
+      },
+    },
+    {
       path: '/secrets',
       name: 'secrets',
       component: () => import('@/views/Secrets.vue'),

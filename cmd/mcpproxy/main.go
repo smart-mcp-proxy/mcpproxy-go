@@ -172,6 +172,12 @@ func main() {
 	// Add token command (Spec 028: Agent tokens)
 	tokenCmd := GetTokenCommand()
 
+	// Add telemetry command (Spec 036)
+	telemetryCmd := GetTelemetryCommand()
+
+	// Add feedback command (Spec 036)
+	feedbackCmd := GetFeedbackCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
@@ -187,6 +193,8 @@ func main() {
 	rootCmd.AddCommand(tuiCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(tokenCmd)
+	rootCmd.AddCommand(telemetryCmd)
+	rootCmd.AddCommand(feedbackCmd)
 
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added

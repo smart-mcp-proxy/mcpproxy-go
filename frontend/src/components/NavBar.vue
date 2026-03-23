@@ -127,6 +127,7 @@ const menuItems = [
   { name: 'Secrets', path: '/secrets', icon: SecretsIcon },
   { name: 'Repositories', path: '/repositories', icon: RepositoriesIcon },
   { name: 'Settings', path: '/settings', icon: SettingsIcon },
+  { name: 'Feedback', path: '/feedback', icon: 'svg' },
 ]
 
 // Copy-to-clipboard functionality

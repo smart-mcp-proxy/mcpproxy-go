@@ -29,6 +29,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -75,6 +76,7 @@ type Runtime struct {
 	tokenizer         tokens.Tokenizer
 	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
 	updateChecker     *updatecheck.Checker  // Background version checking
+	telemetryService  *telemetry.Service    // Anonymous usage telemetry (Spec 036)
 	managementService interface{}           // Initialized later to avoid import cycle
 	activityService   *ActivityService      // Activity logging service
 
@@ -2001,6 +2003,86 @@ func (r *Runtime) RefreshVersionInfo() *updatecheck.VersionInfo {
 		return nil
 	}
 	return r.updateChecker.CheckNow()
+}
+
+// SetTelemetry initializes the telemetry service with the given version and edition.
+// This should be called once during server startup.
+func (r *Runtime) SetTelemetry(version, edition string) {
+	if r.telemetryService != nil {
+		return
+	}
+
+	r.telemetryService = telemetry.New(r.cfg, r.cfgPath, version, edition, r.logger)
+	r.telemetryService.SetRuntimeStats(r)
+	r.logger.Info("Telemetry service initialized", zap.String("version", version), zap.String("edition", edition))
+}
+
+// TelemetryService returns the telemetry service instance.
+func (r *Runtime) TelemetryService() *telemetry.Service {
+	return r.telemetryService
+}
+
+// GetServerCount returns the total number of configured servers (implements telemetry.RuntimeStats).
+func (r *Runtime) GetServerCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.cfg == nil {
+		return 0
+	}
+	return len(r.cfg.Servers)
+}
+
+// GetConnectedServerCount returns the number of connected upstream servers (implements telemetry.RuntimeStats).
+func (r *Runtime) GetConnectedServerCount() int {
+	if r.upstreamManager == nil {
+		return 0
+	}
+	stats := r.upstreamManager.GetStats()
+	if stats == nil {
+		return 0
+	}
+	servers, ok := stats["servers"].(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	count := 0
+	for _, serverStat := range servers {
+		if stat, ok := serverStat.(map[string]interface{}); ok {
+			if connected, ok := stat["connected"].(bool); ok && connected {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// GetToolCount returns the total number of indexed tools (implements telemetry.RuntimeStats).
+func (r *Runtime) GetToolCount() int {
+	if r.upstreamManager == nil {
+		return 0
+	}
+	stats := r.upstreamManager.GetStats()
+	return extractToolCount(stats)
+}
+
+// GetRoutingMode returns the current routing mode (implements telemetry.RuntimeStats).
+func (r *Runtime) GetRoutingMode() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.cfg == nil || r.cfg.RoutingMode == "" {
+		return config.RoutingModeRetrieveTools
+	}
+	return r.cfg.RoutingMode
+}
+
+// IsQuarantineEnabled returns whether tool-level quarantine is enabled (implements telemetry.RuntimeStats).
+func (r *Runtime) IsQuarantineEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.cfg == nil {
+		return true
+	}
+	return r.cfg.IsQuarantineEnabled()
 }
 
 // Activity logging methods (RFC-003)

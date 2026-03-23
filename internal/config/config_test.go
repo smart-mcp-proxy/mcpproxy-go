@@ -1100,3 +1100,163 @@ func TestLoadConfig_DataDirExpandFailure(t *testing.T) {
 	assert.Contains(t, cfg.DataDir, fmt.Sprintf("${env:%s}", missingVar),
 		"original unresolved ref should be retained when expansion fails")
 }
+
+func TestConfig_IsTelemetryEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      *Config
+		envValue string
+		want     bool
+	}{
+		{
+			name: "default (nil telemetry)",
+			cfg:  &Config{},
+			want: true,
+		},
+		{
+			name: "nil enabled (default true)",
+			cfg:  &Config{Telemetry: &TelemetryConfig{}},
+			want: true,
+		},
+		{
+			name: "explicitly enabled",
+			cfg:  &Config{Telemetry: &TelemetryConfig{Enabled: BoolPtr(true)}},
+			want: true,
+		},
+		{
+			name: "explicitly disabled",
+			cfg:  &Config{Telemetry: &TelemetryConfig{Enabled: BoolPtr(false)}},
+			want: false,
+		},
+		{
+			name:     "env var override false",
+			cfg:      &Config{},
+			envValue: "false",
+			want:     false,
+		},
+		{
+			name:     "env var override false beats config enabled",
+			cfg:      &Config{Telemetry: &TelemetryConfig{Enabled: BoolPtr(true)}},
+			envValue: "false",
+			want:     false,
+		},
+		{
+			name:     "env var other value does not disable",
+			cfg:      &Config{},
+			envValue: "true",
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envValue != "" {
+				t.Setenv("MCPPROXY_TELEMETRY", tt.envValue)
+			} else {
+				os.Unsetenv("MCPPROXY_TELEMETRY") //nolint:errcheck
+			}
+			got := tt.cfg.IsTelemetryEnabled()
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestConfig_GetTelemetryEndpoint(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{
+			name: "default",
+			cfg:  &Config{},
+			want: "https://telemetry.mcpproxy.app/v1",
+		},
+		{
+			name: "custom endpoint",
+			cfg:  &Config{Telemetry: &TelemetryConfig{Endpoint: "https://custom.example.com/v1"}},
+			want: "https://custom.example.com/v1",
+		},
+		{
+			name: "empty endpoint falls back to default",
+			cfg:  &Config{Telemetry: &TelemetryConfig{Endpoint: ""}},
+			want: "https://telemetry.mcpproxy.app/v1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.GetTelemetryEndpoint()
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestConfig_GetAnonymousID(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{
+			name: "default (nil telemetry)",
+			cfg:  &Config{},
+			want: "",
+		},
+		{
+			name: "set ID",
+			cfg:  &Config{Telemetry: &TelemetryConfig{AnonymousID: "abc-123"}},
+			want: "abc-123",
+		},
+		{
+			name: "empty ID",
+			cfg:  &Config{Telemetry: &TelemetryConfig{AnonymousID: ""}},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.GetAnonymousID()
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestTelemetryConfig_JSONSerialization(t *testing.T) {
+	// Test that TelemetryConfig serializes/deserializes correctly
+	enabled := true
+	cfg := &Config{
+		Listen: "127.0.0.1:8080",
+		Telemetry: &TelemetryConfig{
+			Enabled:     &enabled,
+			AnonymousID: "test-uuid",
+			Endpoint:    "https://custom.example.com/v1",
+		},
+	}
+
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	var restored Config
+	err = json.Unmarshal(data, &restored)
+	require.NoError(t, err)
+
+	require.NotNil(t, restored.Telemetry)
+	require.NotNil(t, restored.Telemetry.Enabled)
+	assert.Equal(t, true, *restored.Telemetry.Enabled)
+	assert.Equal(t, "test-uuid", restored.Telemetry.AnonymousID)
+	assert.Equal(t, "https://custom.example.com/v1", restored.Telemetry.Endpoint)
+}
+
+func TestTelemetryConfig_OmittedWhenNil(t *testing.T) {
+	cfg := &Config{
+		Listen: "127.0.0.1:8080",
+	}
+
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	// telemetry should not appear in JSON when nil
+	assert.NotContains(t, string(data), "telemetry")
+}

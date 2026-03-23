@@ -128,13 +128,14 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller    ServerController
-	logger        *zap.SugaredLogger
-	httpLogger    *zap.Logger // Separate logger for HTTP requests
-	router        *chi.Mux
-	observability *observability.Manager
-	tokenStore    TokenStore // Agent token CRUD (T022)
-	dataDir       string     // Data directory for HMAC key (T022)
+	controller        ServerController
+	logger            *zap.SugaredLogger
+	httpLogger        *zap.Logger // Separate logger for HTTP requests
+	router            *chi.Mux
+	observability     *observability.Manager
+	tokenStore        TokenStore        // Agent token CRUD (T022)
+	dataDir           string            // Data directory for HMAC key (T022)
+	feedbackSubmitter FeedbackSubmitter // Feedback submission (Spec 036)
 }
 
 // NewServer creates a new HTTP API server
@@ -164,6 +165,11 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 func (s *Server) SetTokenStore(store TokenStore, dataDir string) {
 	s.tokenStore = store
 	s.dataDir = dataDir
+}
+
+// SetFeedbackSubmitter configures the feedback submission handler (Spec 036).
+func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
+	s.feedbackSubmitter = submitter
 }
 
 // Router returns the underlying chi.Mux for external route registration.
@@ -548,6 +554,9 @@ func (s *Server) setupRoutes() {
 				r.Post("/regenerate", s.handleRegenerateToken)
 			})
 		})
+
+		// Feedback submission (Spec 036)
+		r.Post("/feedback", s.handleFeedback)
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD

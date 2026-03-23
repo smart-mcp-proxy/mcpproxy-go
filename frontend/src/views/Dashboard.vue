@@ -1,5 +1,8 @@
 <template>
   <div class="space-y-6">
+    <!-- Telemetry Notice Banner -->
+    <TelemetryBanner />
+
     <!-- Servers Needing Attention Banner (using unified health status) -->
     <div
       v-if="serversNeedingAttention.length > 0"
@@ -336,6 +339,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import TelemetryBanner from '@/components/TelemetryBanner.vue'
 import TokenPieChart from '@/components/TokenPieChart.vue'
 // TODO: Re-enable in next release
 // import ActivityWidget from '@/components/ActivityWidget.vue'
