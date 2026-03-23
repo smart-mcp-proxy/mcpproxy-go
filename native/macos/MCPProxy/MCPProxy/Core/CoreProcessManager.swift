@@ -72,16 +72,37 @@ actor CoreProcessManager {
     // MARK: - Public API
 
     /// Start the core process and connect to it.
+    ///
+    /// Strategy: always try to launch our own core first. If the socket already
+    /// exists, probe it with an actual API call — a stale socket file from a
+    /// killed process will fail the probe, so we remove it and launch fresh.
     func start() async {
-        // Check if an external core is already running on the socket
+        // If socket file exists, check if a real core is behind it
         if SocketTransport.isSocketAvailable(path: socketPath) {
-            await attachToExternalCore()
-            return
+            if await probeExternalCore() {
+                // Real core is running — attach to it
+                await attachToExternalCore()
+                return
+            }
+            // Stale socket — remove it so our new core can create a fresh one
+            try? FileManager.default.removeItem(atPath: socketPath)
         }
 
-        // Launch our own core
+        // Launch our own core as a subprocess
         await MainActor.run { appState.ownership = .trayManaged }
         await launchAndConnect()
+    }
+
+    /// Probe an existing socket to see if a live core is behind it.
+    /// Returns true only if the core responds to an API call.
+    private func probeExternalCore() async -> Bool {
+        let probeClient = APIClient(socketPath: socketPath)
+        do {
+            let ready = try await probeClient.ready()
+            return ready
+        } catch {
+            return false
+        }
     }
 
     /// Gracefully shut down the core process and all connections.
