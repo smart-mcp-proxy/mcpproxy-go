@@ -206,6 +206,7 @@ func TestEmitActivityInternalToolCall(t *testing.T) {
 		testArgs,
 		testResponse,
 		intent,
+		"",
 	)
 
 	// Wait for event
@@ -640,6 +641,129 @@ func TestHandleInternalToolCall_UserIdentityExtraction(t *testing.T) {
 	assert.Equal(t, "admin@example.com", record.UserEmail, "UserEmail should be extracted from _auth_user_email")
 	assert.Equal(t, storage.ActivityTypeInternalToolCall, record.Type)
 	assert.Equal(t, "retrieve_tools", record.ToolName)
+}
+
+// TestHandleToolCallCompleted_ContentTrust verifies that content_trust metadata
+// is extracted from the event payload and stored in the activity record's metadata (Spec 035).
+func TestHandleToolCallCompleted_ContentTrust(t *testing.T) {
+	tests := []struct {
+		name         string
+		contentTrust string
+		wantInMeta   bool
+		wantValue    string
+	}{
+		{
+			name:         "untrusted content (open-world tool)",
+			contentTrust: "untrusted",
+			wantInMeta:   true,
+			wantValue:    "untrusted",
+		},
+		{
+			name:         "trusted content (closed-world tool)",
+			contentTrust: "trusted",
+			wantInMeta:   true,
+			wantValue:    "trusted",
+		},
+		{
+			name:         "empty content trust (not set)",
+			contentTrust: "",
+			wantInMeta:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, cleanup := setupTestStorage(t)
+			defer cleanup()
+
+			logger := zap.NewNop()
+			svc := NewActivityService(store, logger)
+
+			payload := map[string]any{
+				"server_name":  "github",
+				"tool_name":    "search_code",
+				"session_id":   "sess-ct",
+				"request_id":   "req-ct",
+				"source":       "mcp",
+				"status":       "success",
+				"duration_ms":  int64(200),
+				"tool_variant": "call_tool_read",
+				"response":     `{"results": []}`,
+			}
+			if tt.contentTrust != "" {
+				payload["content_trust"] = tt.contentTrust
+			}
+
+			evt := Event{
+				Type:      EventTypeActivityToolCallCompleted,
+				Timestamp: time.Now().UTC(),
+				Payload:   payload,
+			}
+
+			svc.handleEvent(evt)
+
+			records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+
+			record := records[0]
+			if tt.wantInMeta {
+				require.NotNil(t, record.Metadata, "Metadata should not be nil when content_trust is set")
+				ct, ok := record.Metadata["content_trust"]
+				assert.True(t, ok, "content_trust should be present in metadata")
+				assert.Equal(t, tt.wantValue, ct, "content_trust value mismatch")
+			} else {
+				// When content_trust is empty, metadata may still exist (from tool_variant)
+				if record.Metadata != nil {
+					_, ok := record.Metadata["content_trust"]
+					assert.False(t, ok, "content_trust should not be in metadata when not set")
+				}
+			}
+		})
+	}
+}
+
+// TestHandleInternalToolCall_ContentTrust verifies that content_trust metadata
+// is extracted from internal tool call events and stored in metadata (Spec 035).
+func TestHandleInternalToolCall_ContentTrust(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	logger := zap.NewNop()
+	svc := NewActivityService(store, logger)
+
+	evt := Event{
+		Type:      EventTypeActivityInternalToolCall,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"internal_tool_name": "code_execution",
+			"session_id":         "sess-ce",
+			"request_id":         "req-ce",
+			"status":             "success",
+			"error_message":      "",
+			"duration_ms":        int64(500),
+			"content_trust":      "untrusted",
+			"arguments": map[string]interface{}{
+				"code":     "call_tool('github', 'search_code', {q: 'test'})",
+				"language": "javascript",
+			},
+			"response": "ok",
+		},
+	}
+
+	svc.handleEvent(evt)
+
+	filter := storage.DefaultActivityFilter()
+	filter.ExcludeCallToolSuccess = false
+	records, _, err := store.ListActivities(filter)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	record := records[0]
+	require.NotNil(t, record.Metadata, "Metadata should not be nil")
+	ct, ok := record.Metadata["content_trust"]
+	assert.True(t, ok, "content_trust should be present in metadata")
+	assert.Equal(t, "untrusted", ct, "content_trust should be untrusted for code_execution calling open-world tools")
 }
 
 // TestHandleInternalToolCall_NoUserIdentity verifies internal tool calls without user identity work.

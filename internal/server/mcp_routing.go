@@ -164,9 +164,12 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 
 		durationMs := time.Since(startTime).Milliseconds()
 
+		// Spec 035: Determine content trust based on openWorldHint
+		directContentTrust := contracts.ContentTrustForTool(annotations)
+
 		if err != nil {
 			// Emit error activity
-			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil)
+			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust)
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 
@@ -195,7 +198,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		}
 
 		// Emit success activity
-		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "success", "", durationMs, enrichedArgs, responseText, truncated, toolVariant, nil)
+		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "success", "", durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust)
 
 		return mcp.NewToolResultText(responseText), nil
 	}
@@ -215,7 +218,8 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
 			"Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. "+
 			"Do NOT use call_tool_read/write/destructive — they are not available in this mode. "+
-			"Use natural language to describe what you want to accomplish."),
+			"Use natural language to describe what you want to accomplish. "+
+			"Response includes session_risk analysis detecting the 'lethal trifecta' of open-world + destructive + write tools."),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("query",
@@ -224,6 +228,15 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		),
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of tools to return (default: configured tools_limit, max: 100)"),
+		),
+		mcp.WithBoolean("read_only_only",
+			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
+		),
+		mcp.WithBoolean("exclude_destructive",
+			mcp.Description("Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations."),
+		),
+		mcp.WithBoolean("exclude_open_world",
+			mcp.Description("Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools."),
 		),
 	)
 	tools = append(tools, mcpserver.ServerTool{
@@ -250,7 +263,9 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
 			"WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results "+
 			"to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. "+
-			"Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation. "+
+			"Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, "+
+			"and 'session_risk' analysis detecting the 'lethal trifecta' of open-world + destructive + write tools. "+
+			"Use annotation filters to self-restrict discovery scope. "+
 			"Use natural language to describe what you want to accomplish."),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -269,6 +284,15 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		),
 		mcp.WithString("explain_tool",
 			mcp.Description("When debug=true, explain why a specific tool was ranked low (format: 'server:tool')"),
+		),
+		mcp.WithBoolean("read_only_only",
+			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
+		),
+		mcp.WithBoolean("exclude_destructive",
+			mcp.Description("Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations."),
+		),
+		mcp.WithBoolean("exclude_open_world",
+			mcp.Description("Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools."),
 		),
 	)
 	tools = append(tools, mcpserver.ServerTool{
