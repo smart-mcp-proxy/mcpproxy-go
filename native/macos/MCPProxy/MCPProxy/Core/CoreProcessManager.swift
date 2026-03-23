@@ -453,18 +453,36 @@ actor CoreProcessManager {
     }
 
     /// Handle a single SSE event.
+    ///
+    /// IMPORTANT: SSE `status` events fire frequently (every few seconds).
+    /// We must NOT re-fetch the full server list on each one — that would
+    /// trigger @Published updates which cause MenuBarExtra to duplicate items.
+    /// Instead, only update lightweight counters from the inline status data.
     private func handleSSEEvent(_ event: SSEEvent) async {
         switch event.event {
         case "status":
-            // Full status snapshot; refresh all server state
-            await refreshState()
+            // Status events contain inline stats — update counters only,
+            // do NOT re-fetch the full server list.
+            if let data = event.data.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let stats = json["upstream_stats"] as? [String: Any] {
+                let connected = stats["connected_servers"] as? Int ?? 0
+                let total = stats["total_servers"] as? Int ?? 0
+                let tools = stats["total_tools"] as? Int ?? 0
+                await MainActor.run {
+                    // Only update if values changed to avoid unnecessary re-renders
+                    if appState.connectedCount != connected { appState.connectedCount = connected }
+                    if appState.totalServers != total { appState.totalServers = total }
+                    if appState.totalTools != tools { appState.totalTools = tools }
+                }
+            }
 
         case "servers.changed":
-            // Server list changed; re-fetch servers
+            // Server list actually changed; re-fetch once
             await refreshServers()
 
         case "config.reloaded":
-            // Configuration reloaded; refresh everything
+            // Configuration reloaded; refresh everything once
             await refreshState()
 
         case "activity":
@@ -476,8 +494,7 @@ actor CoreProcessManager {
             break
 
         default:
-            // Unknown event type; refresh servers as a safe default
-            await refreshServers()
+            break
         }
     }
 

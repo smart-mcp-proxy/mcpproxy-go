@@ -111,25 +111,37 @@ final class AppState: ObservableObject {
     // MARK: Mutating helpers (called from background actors via MainActor)
 
     /// Update server list and recompute derived counts.
+    /// Only publishes changes when the data actually differs to prevent
+    /// MenuBarExtra from duplicating menu items on spurious re-renders.
     @MainActor
     func updateServers(_ newServers: [ServerStatus]) {
-        servers = newServers
-        totalServers = newServers.count
-        connectedCount = newServers.filter { server in
-            if let health = server.health {
-                return health.level == "healthy"
-            }
-            return server.connected
-        }.count
-        totalTools = newServers.reduce(0) { $0 + $1.toolCount }
-        quarantinedToolsCount = newServers.filter { $0.quarantined }.count
+        let newIDs = newServers.map(\.id).sorted()
+        let oldIDs = servers.map(\.id).sorted()
+        let newConnected = newServers.filter { $0.connected }.count
+        let newTools = newServers.reduce(0) { $0 + $1.toolCount }
+        let newQuarantined = newServers.filter { $0.quarantined }.count
+
+        // Only update the server array if the list actually changed
+        if newIDs != oldIDs || newConnected != connectedCount || newTools != totalTools {
+            servers = newServers
+        }
+        if totalServers != newServers.count { totalServers = newServers.count }
+        if connectedCount != newConnected { connectedCount = newConnected }
+        if totalTools != newTools { totalTools = newTools }
+        if quarantinedToolsCount != newQuarantined { quarantinedToolsCount = newQuarantined }
     }
 
     /// Replace the recent activity list.
+    /// Only publishes changes when the data actually differs.
     @MainActor
     func updateActivity(_ entries: [ActivityEntry]) {
-        recentActivity = entries
-        sensitiveDataAlertCount = entries.filter { $0.hasSensitiveData == true }.count
+        let newIDs = entries.map(\.id)
+        let oldIDs = recentActivity.map(\.id)
+        if newIDs != oldIDs {
+            recentActivity = entries
+        }
+        let newSensitive = entries.filter { $0.hasSensitiveData == true }.count
+        if sensitiveDataAlertCount != newSensitive { sensitiveDataAlertCount = newSensitive }
     }
 
     /// Transition the core state on the main actor.
