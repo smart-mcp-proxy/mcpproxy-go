@@ -185,7 +185,7 @@ func (r *Runtime) EmitActivitySystemStop(reason, signal string, uptimeSeconds in
 // targetServer and targetTool are used for call_tool_* handlers
 // arguments contains the input parameters, response contains the output
 // intent is the intent declaration metadata
-func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}) {
+func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string) {
 	payload := map[string]any{
 		"internal_tool_name": internalToolName,
 		"session_id":         sessionID,
@@ -212,39 +212,6 @@ func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, t
 	if intent != nil {
 		payload["intent"] = intent
 	}
-	r.publishEvent(newEvent(EventTypeActivityInternalToolCall, payload))
-}
-
-// EmitActivityInternalToolCallWithContentTrust is like EmitActivityInternalToolCall but also
-// includes content trust metadata (Spec 035) for open-world hint scanning.
-func (r *Runtime) EmitActivityInternalToolCallWithContentTrust(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string) {
-	payload := map[string]any{
-		"internal_tool_name": internalToolName,
-		"session_id":         sessionID,
-		"request_id":         requestID,
-		"status":             status,
-		"error_message":      errorMsg,
-		"duration_ms":        durationMs,
-	}
-	if targetServer != "" {
-		payload["target_server"] = targetServer
-	}
-	if targetTool != "" {
-		payload["target_tool"] = targetTool
-	}
-	if toolVariant != "" {
-		payload["tool_variant"] = toolVariant
-	}
-	if arguments != nil {
-		payload["arguments"] = arguments
-	}
-	if response != nil {
-		payload["response"] = response
-	}
-	if intent != nil {
-		payload["intent"] = intent
-	}
-	// Spec 035: Add content trust metadata
 	if contentTrust != "" {
 		payload["content_trust"] = contentTrust
 	}

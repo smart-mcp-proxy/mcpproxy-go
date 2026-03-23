@@ -360,7 +360,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 	}
 
-	p.emitActivityInternalToolCallWithContentTrust("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil, codeExecContentTrust)
+	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil, codeExecContentTrust)
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{

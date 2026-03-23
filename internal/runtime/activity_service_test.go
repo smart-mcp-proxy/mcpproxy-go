@@ -206,6 +206,7 @@ func TestEmitActivityInternalToolCall(t *testing.T) {
 		testArgs,
 		testResponse,
 		intent,
+		"",
 	)
 
 	// Wait for event
