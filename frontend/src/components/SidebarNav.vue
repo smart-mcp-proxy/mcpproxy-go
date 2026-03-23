@@ -150,6 +150,7 @@ const personalMenu = [
   { name: 'Activity Log', path: '/activity' },
   { name: 'Repositories', path: '/repositories' },
   { name: 'Configuration', path: '/settings' },
+  { name: 'Feedback', path: '/feedback' },
 ]
 
 // Server edition: items visible to all authenticated users
