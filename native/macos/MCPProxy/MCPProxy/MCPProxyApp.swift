@@ -131,14 +131,19 @@ final class AppController: NSObject, NSApplicationDelegate {
         // Needs Attention
         let attentionServers = appState.serversNeedingAttention
         if !attentionServers.isEmpty {
-            let header = NSMenuItem(title: "Needs Attention", action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: "Needs Attention (\(attentionServers.count))", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
 
             for server in attentionServers {
                 let action = server.health?.action ?? ""
+                let actionLabel = actionDisplayName(for: action)
+                let summary = server.health?.summary ?? ""
                 let icon = actionIcon(for: action)
-                let item = NSMenuItem(title: server.name, action: #selector(handleAttentionAction(_:)), keyEquivalent: "")
+
+                // Show "servername — Action Needed" format
+                let title = summary.isEmpty ? "\(server.name) — \(actionLabel)" : "\(server.name) — \(summary)"
+                let item = NSMenuItem(title: title, action: #selector(handleAttentionAction(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = server
                 item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
@@ -220,13 +225,24 @@ final class AppController: NSObject, NSApplicationDelegate {
             menu.addItem(.separator())
         }
 
-        // Recent Activity
+        // Recent Activity (deduplicated — show unique entries only)
         if !appState.recentActivity.isEmpty {
             let activityHeader = NSMenuItem(title: "Recent Activity", action: nil, keyEquivalent: "")
             activityHeader.isEnabled = false
             menu.addItem(activityHeader)
 
-            for entry in appState.recentActivity.prefix(5) {
+            // Deduplicate by (serverName + toolName + type) — keep first occurrence
+            var seen = Set<String>()
+            var uniqueEntries: [ActivityEntry] = []
+            for entry in appState.recentActivity {
+                let key = "\(entry.serverName ?? ""):\(entry.toolName ?? ""):\(entry.type)"
+                if !seen.contains(key) {
+                    seen.insert(key)
+                    uniqueEntries.append(entry)
+                }
+            }
+
+            for entry in uniqueEntries.prefix(5) {
                 var text = ""
                 if let sn = entry.serverName, !sn.isEmpty {
                     text = sn
@@ -235,9 +251,18 @@ final class AppController: NSObject, NSApplicationDelegate {
                     text = entry.type
                 }
 
+                // Add relative timestamp
+                let timeAgo = relativeTimeString(from: entry.timestamp)
+                if !timeAgo.isEmpty { text += " · \(timeAgo)" }
+
                 let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
                 item.isEnabled = false
-                let iconName = entry.status == "error" ? "xmark.circle" : "checkmark.circle"
+                let iconName: String
+                switch entry.status {
+                case "error": iconName = "xmark.circle"
+                case "blocked": iconName = "hand.raised"
+                default: iconName = "checkmark.circle"
+                }
                 item.image = NSImage(systemSymbolName: iconName, accessibilityDescription: entry.status)
                 menu.addItem(item)
             }
@@ -400,6 +425,36 @@ final class AppController: NSObject, NSApplicationDelegate {
         case "approve": return "checkmark.shield"
         default: return "exclamationmark.circle"
         }
+    }
+
+    private func actionDisplayName(for action: String) -> String {
+        switch action {
+        case "login": return "Login Required"
+        case "restart": return "Restart Needed"
+        case "enable": return "Disabled"
+        case "approve": return "Approval Needed"
+        case "set_secret": return "Secret Missing"
+        case "configure": return "Configuration Needed"
+        case "view_logs": return "Check Logs"
+        default: return "Action Needed"
+        }
+    }
+
+    private func relativeTimeString(from timestamp: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = formatter.date(from: timestamp)
+        if date == nil {
+            formatter.formatOptions = [.withInternetDateTime]
+            date = formatter.date(from: timestamp)
+        }
+        guard let d = date else { return "" }
+
+        let elapsed = -d.timeIntervalSinceNow
+        if elapsed < 60 { return "just now" }
+        if elapsed < 3600 { return "\(Int(elapsed / 60))m ago" }
+        if elapsed < 86400 { return "\(Int(elapsed / 3600))h ago" }
+        return "\(Int(elapsed / 86400))d ago"
     }
 }
 
