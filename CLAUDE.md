@@ -653,6 +653,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt database (`~/.mcpproxy/config.db`) - new buckets for users, sessions, user servers (024-teams-multiuser-oauth)
 - Go 1.24 (toolchain go1.24.10) + `github.com/dop251/goja` (existing JS sandbox), `github.com/evanw/esbuild` (new - TypeScript transpilation), `github.com/mark3labs/mcp-go` (MCP protocol), `github.com/spf13/cobra` (CLI) (033-typescript-code-execution)
 - N/A (no new storage requirements) (033-typescript-code-execution)
+- Swift 5.9+ / Xcode 15+ + SwiftUI, AppKit (escape hatches), Sparkle 2.x (SPM), Foundation (URLSession, Process, UNUserNotificationCenter) (037-macos-swift-tray)
+- N/A (tray reads all state from core via REST API — no local persistence per Constitution III) (037-macos-swift-tray)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
