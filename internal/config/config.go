@@ -130,6 +130,9 @@ type Config struct {
 	// Sensitive data detection settings (Spec 026)
 	SensitiveDataDetection *SensitiveDataDetectionConfig `json:"sensitive_data_detection,omitempty" mapstructure:"sensitive-data-detection"`
 
+	// Telemetry settings (Spec 036)
+	Telemetry *TelemetryConfig `json:"telemetry,omitempty" mapstructure:"telemetry"`
+
 	// Routing mode (Spec 031): how MCP tools are exposed to clients
 	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
 	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
@@ -1135,4 +1138,42 @@ func OAuthConfigChanged(old, new *OAuthConfig) bool {
 	}
 
 	return false
+}
+
+// TelemetryConfig controls anonymous usage telemetry (Spec 036)
+type TelemetryConfig struct {
+	Enabled     *bool  `json:"enabled,omitempty" mapstructure:"enabled"`           // Default: true (opt-out)
+	AnonymousID string `json:"anonymous_id,omitempty" mapstructure:"anonymous-id"` // Auto-generated UUIDv4
+	Endpoint    string `json:"endpoint,omitempty" mapstructure:"endpoint"`         // Override for testing
+}
+
+// IsTelemetryEnabled returns whether telemetry is enabled.
+// Respects MCPPROXY_TELEMETRY=false env var override and defaults to true.
+func (c *Config) IsTelemetryEnabled() bool {
+	if os.Getenv("MCPPROXY_TELEMETRY") == "false" {
+		return false
+	}
+	if c.Telemetry == nil {
+		return true // default enabled
+	}
+	if c.Telemetry.Enabled == nil {
+		return true
+	}
+	return *c.Telemetry.Enabled
+}
+
+// GetTelemetryEndpoint returns the telemetry endpoint URL.
+func (c *Config) GetTelemetryEndpoint() string {
+	if c.Telemetry != nil && c.Telemetry.Endpoint != "" {
+		return c.Telemetry.Endpoint
+	}
+	return "https://telemetry.mcpproxy.app/v1"
+}
+
+// GetAnonymousID returns the anonymous telemetry ID if set.
+func (c *Config) GetAnonymousID() string {
+	if c.Telemetry != nil && c.Telemetry.AnonymousID != "" {
+		return c.Telemetry.AnonymousID
+	}
+	return ""
 }

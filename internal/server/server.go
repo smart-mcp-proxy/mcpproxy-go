@@ -89,6 +89,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// This must happen before StartBackgroundInitialization is called
 	rt.SetVersion(httpapi.GetBuildVersion())
 
+	// Initialize telemetry service with build version and edition (Spec 036)
+	rt.SetTelemetry(httpapi.GetBuildVersion(), httpapi.GetEdition())
+
 	// Initialize observability manager for metrics (FR-011: OAuth refresh metrics)
 	obsConfig := observability.DefaultConfig("mcpproxy", httpapi.GetBuildVersion())
 	obsManager, err := observability.NewManager(logger.Sugar(), &obsConfig)
@@ -1536,6 +1539,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			dataDir = cfg.DataDir
 		}
 		httpAPIServer.SetTokenStore(sm, dataDir)
+	}
+	// Wire feedback submitter (Spec 036)
+	if ts := s.runtime.TelemetryService(); ts != nil {
+		httpAPIServer.SetFeedbackSubmitter(ts)
 	}
 	// Wire teams multi-user OAuth (no-op in personal edition)
 	wireTeamsOAuth(s, httpAPIServer)

@@ -32,6 +32,12 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Update checker background process started")
 	}
 
+	// Start telemetry service for anonymous usage heartbeats (Spec 036)
+	if r.telemetryService != nil {
+		go r.telemetryService.Start(r.appCtx)
+		r.logger.Info("Telemetry service background process started")
+	}
+
 	// Clean up orphaned OAuth tokens before starting the refresh manager
 	// This removes tokens for servers that were deleted while mcpproxy was not running
 	if r.storageManager != nil {
