@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>MCPProxy</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.smartmcpproxy.mcpproxy</string>
+    <key>CFBundleName</key>
+    <string>MCPProxy</string>
+    <key>CFBundleDisplayName</key>
+    <string>Smart MCP Proxy</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.22.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>MCPP</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSBackgroundOnly</key>
+    <false/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://mcpproxy.app/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>SPARKLE_PUBLIC_KEY_PLACEHOLDER</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>14400</integer>
+</dict>
+</plist>

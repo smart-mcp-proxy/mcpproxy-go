@@ -1,0 +1,421 @@
+import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
+
+// MARK: - Unix Domain Socket URL Protocol
+
+/// Custom `URLProtocol` that routes HTTP requests over a Unix domain socket.
+///
+/// Register on a `URLSessionConfiguration` via
+/// `config.protocolClasses = [SocketURLProtocol.self]`
+/// to transparently redirect all HTTP traffic through the mcpproxy socket.
+///
+/// The protocol intercepts requests whose host is `localhost` or `127.0.0.1`
+/// and rewrites the transport layer to use the Unix socket at `~/.mcpproxy/mcpproxy.sock`.
+final class SocketURLProtocol: URLProtocol {
+
+    /// Default socket path used by mcpproxy core.
+    static let socketPath: String = {
+        NSHomeDirectory() + "/.mcpproxy/mcpproxy.sock"
+    }()
+
+    /// Allow override for testing.
+    static var overrideSocketPath: String?
+
+    private static var effectiveSocketPath: String {
+        overrideSocketPath ?? socketPath
+    }
+
+    /// Active read task, retained for cancellation.
+    private var socketFD: Int32 = -1
+    private var readThread: Thread?
+    private var isCancelled = false
+
+    // MARK: - URLProtocol Overrides
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard let url = request.url,
+              let scheme = url.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              let host = url.host?.lowercased(),
+              (host == "localhost" || host == "127.0.0.1") else {
+            return false
+        }
+        // Only intercept if the socket exists.
+        return FileManager.default.fileExists(atPath: effectiveSocketPath)
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            let error = NSError(domain: NSPOSIXErrorDomain, code: Int(errno),
+                                userInfo: [NSLocalizedDescriptionKey: "Failed to create Unix socket"])
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+        socketFD = fd
+
+        // Build sockaddr_un
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let path = Self.effectiveSocketPath
+        let pathBytes = path.utf8CString
+        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+            Darwin.close(fd)
+            let error = NSError(domain: NSPOSIXErrorDomain, code: Int(ENAMETOOLONG),
+                                userInfo: [NSLocalizedDescriptionKey: "Socket path too long"])
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { sunPathPtr in
+            sunPathPtr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
+                for i in 0..<pathBytes.count {
+                    dest[i] = pathBytes[i]
+                }
+            }
+        }
+
+        // Connect
+        let connectResult = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connectResult == 0 else {
+            let connectErrno = errno
+            Darwin.close(fd)
+            let error = NSError(domain: NSPOSIXErrorDomain, code: Int(connectErrno),
+                                userInfo: [NSLocalizedDescriptionKey: "Failed to connect to Unix socket at \(path): \(String(cString: strerror(connectErrno)))"])
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+
+        // Build HTTP/1.1 request bytes
+        let requestData = buildHTTPRequest(from: request)
+
+        // Write request
+        var totalWritten = 0
+        let count = requestData.count
+        let writeResult = requestData.withUnsafeBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress else { return false }
+            while totalWritten < count {
+                let written = Darwin.write(fd, baseAddress.advanced(by: totalWritten), count - totalWritten)
+                if written <= 0 {
+                    return false
+                }
+                totalWritten += written
+            }
+            return true
+        }
+
+        guard writeResult else {
+            let writeErrno = errno
+            Darwin.close(fd)
+            let error = NSError(domain: NSPOSIXErrorDomain, code: Int(writeErrno),
+                                userInfo: [NSLocalizedDescriptionKey: "Failed to write to socket"])
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+
+        // Read response on a background thread to avoid blocking the caller.
+        let thread = Thread { [weak self] in
+            self?.readResponse(fd: fd)
+        }
+        thread.qualityOfService = .userInitiated
+        thread.name = "SocketURLProtocol-read"
+        readThread = thread
+        thread.start()
+    }
+
+    override func stopLoading() {
+        isCancelled = true
+        if socketFD >= 0 {
+            Darwin.close(socketFD)
+            socketFD = -1
+        }
+    }
+
+    // MARK: - HTTP Request Builder
+
+    private func buildHTTPRequest(from request: URLRequest) -> Data {
+        guard let url = request.url else { return Data() }
+        let method = request.httpMethod ?? "GET"
+
+        // Request line
+        var path = url.path
+        if path.isEmpty { path = "/" }
+        if let query = url.query, !query.isEmpty {
+            path += "?" + query
+        }
+
+        var lines = ["\(method) \(path) HTTP/1.1"]
+
+        // Host header (required by HTTP/1.1)
+        let host = url.host ?? "localhost"
+        if let port = url.port {
+            lines.append("Host: \(host):\(port)")
+        } else {
+            lines.append("Host: \(host)")
+        }
+
+        // Forward all headers from the original request
+        var hasContentLength = false
+        if let allHeaders = request.allHTTPHeaderFields {
+            for (key, value) in allHeaders {
+                let lowerKey = key.lowercased()
+                if lowerKey == "host" { continue } // already added
+                if lowerKey == "content-length" { hasContentLength = true }
+                lines.append("\(key): \(value)")
+            }
+        }
+
+        // Body
+        let body = request.httpBody ?? Data()
+        if !body.isEmpty && !hasContentLength {
+            lines.append("Content-Length: \(body.count)")
+        }
+
+        // Connection close to simplify reading
+        lines.append("Connection: close")
+
+        // Blank line terminates headers
+        lines.append("")
+        lines.append("")
+
+        var data = lines.joined(separator: "\r\n").data(using: .utf8) ?? Data()
+        if !body.isEmpty {
+            data.append(body)
+        }
+        return data
+    }
+
+    // MARK: - HTTP Response Reader
+
+    private func readResponse(fd: Int32) {
+        var allData = Data()
+        let bufferSize = 8192
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 1)
+        defer {
+            buffer.deallocate()
+            if socketFD >= 0 {
+                Darwin.close(socketFD)
+                socketFD = -1
+            }
+        }
+
+        // Read until EOF or cancellation
+        while !isCancelled {
+            let bytesRead = Darwin.read(fd, buffer, bufferSize)
+            if bytesRead > 0 {
+                allData.append(buffer.assumingMemoryBound(to: UInt8.self), count: bytesRead)
+            } else {
+                break // EOF or error
+            }
+        }
+
+        guard !isCancelled else { return }
+
+        // Parse HTTP response
+        guard let parsed = parseHTTPResponse(allData) else {
+            let error = NSError(domain: "SocketURLProtocol", code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "Failed to parse HTTP response from socket"])
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+
+        // Deliver to URLProtocol client
+        if let httpResponse = HTTPURLResponse(
+            url: request.url ?? URL(string: "http://localhost")!,
+            statusCode: parsed.statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: parsed.headers
+        ) {
+            client?.urlProtocol(self, didReceive: httpResponse, cacheStoragePolicy: .notAllowed)
+        }
+
+        if !parsed.body.isEmpty {
+            client?.urlProtocol(self, didLoad: parsed.body)
+        }
+
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    // MARK: - HTTP Response Parser
+
+    private struct ParsedHTTPResponse {
+        let statusCode: Int
+        let headers: [String: String]
+        let body: Data
+    }
+
+    private func parseHTTPResponse(_ data: Data) -> ParsedHTTPResponse? {
+        // Find the header/body separator: \r\n\r\n
+        let crlf2 = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        guard let separatorRange = data.range(of: crlf2) else {
+            // Try with just \n\n as a fallback
+            let lf2 = Data([0x0A, 0x0A])
+            guard let altRange = data.range(of: lf2) else {
+                return nil
+            }
+            return parseWithSeparator(data: data, headerEnd: altRange.lowerBound, bodyStart: altRange.upperBound, lineEnding: "\n")
+        }
+        return parseWithSeparator(data: data, headerEnd: separatorRange.lowerBound, bodyStart: separatorRange.upperBound, lineEnding: "\r\n")
+    }
+
+    private func parseWithSeparator(data: Data, headerEnd: Data.Index, bodyStart: Data.Index, lineEnding: String) -> ParsedHTTPResponse? {
+        guard let headerString = String(data: data[data.startIndex..<headerEnd], encoding: .utf8) else {
+            return nil
+        }
+
+        let headerLines = headerString.components(separatedBy: lineEnding)
+        guard let statusLine = headerLines.first else { return nil }
+
+        // Parse status line: "HTTP/1.1 200 OK"
+        let statusParts = statusLine.split(separator: " ", maxSplits: 2)
+        guard statusParts.count >= 2, let statusCode = Int(statusParts[1]) else {
+            return nil
+        }
+
+        // Parse headers
+        var headers: [String: String] = [:]
+        for i in 1..<headerLines.count {
+            let line = headerLines[i]
+            guard let colonIndex = line.firstIndex(of: ":") else { continue }
+            let key = String(line[line.startIndex..<colonIndex]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+            headers[key] = value
+        }
+
+        // Body
+        let body: Data
+        if bodyStart < data.endIndex {
+            body = data[bodyStart..<data.endIndex]
+        } else {
+            body = Data()
+        }
+
+        // Handle chunked transfer encoding
+        if let te = headers["Transfer-Encoding"]?.lowercased(), te.contains("chunked") {
+            let decoded = decodeChunkedBody(body)
+            return ParsedHTTPResponse(statusCode: statusCode, headers: headers, body: decoded)
+        }
+
+        return ParsedHTTPResponse(statusCode: statusCode, headers: headers, body: body)
+    }
+
+    /// Minimal chunked transfer encoding decoder.
+    private func decodeChunkedBody(_ data: Data) -> Data {
+        var result = Data()
+        var offset = data.startIndex
+
+        while offset < data.endIndex {
+            // Find end of chunk size line
+            guard let lineEnd = findCRLF(in: data, from: offset) else { break }
+
+            // Parse chunk size (hex)
+            guard let sizeString = String(data: data[offset..<lineEnd], encoding: .ascii),
+                  let chunkSize = UInt(sizeString.trimmingCharacters(in: .whitespaces), radix: 16) else {
+                break
+            }
+
+            if chunkSize == 0 { break } // Terminal chunk
+
+            let chunkStart = lineEnd + 2 // skip \r\n after size
+            let chunkEnd = data.index(chunkStart, offsetBy: Int(chunkSize), limitedBy: data.endIndex) ?? data.endIndex
+            result.append(data[chunkStart..<chunkEnd])
+
+            // Skip past chunk data + trailing \r\n
+            offset = min(chunkEnd + 2, data.endIndex)
+        }
+
+        return result
+    }
+
+    private func findCRLF(in data: Data, from start: Data.Index) -> Data.Index? {
+        var i = start
+        while i < data.endIndex {
+            let next = data.index(after: i)
+            if next < data.endIndex && data[i] == 0x0D && data[next] == 0x0A {
+                return i
+            }
+            i = next
+        }
+        return nil
+    }
+}
+
+// MARK: - Socket Transport Helper
+
+/// Factory for creating URLSessions that communicate via Unix domain socket.
+enum SocketTransport {
+
+    /// Create a `URLSession` configured to route traffic through the mcpproxy Unix socket.
+    /// Falls back to standard networking if the socket is not available.
+    static func makeURLSession(socketPath: String? = nil) -> URLSession {
+        if let path = socketPath {
+            SocketURLProtocol.overrideSocketPath = path
+        }
+
+        let config = URLSessionConfiguration.default
+        config.protocolClasses = [SocketURLProtocol.self]
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 300
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+
+        return URLSession(configuration: config)
+    }
+
+    /// Create a standard TCP-based `URLSession` (no socket override).
+    static func makeTCPSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 300
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        return URLSession(configuration: config)
+    }
+
+    /// Check whether the mcpproxy Unix socket file exists and is connectable.
+    static func isSocketAvailable(path: String? = nil) -> Bool {
+        let socketPath = path ?? SocketURLProtocol.socketPath
+
+        guard FileManager.default.fileExists(atPath: socketPath) else {
+            return false
+        }
+
+        // Attempt a quick connect to verify the socket is alive
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+
+        // Set non-blocking for a quick probe
+        let flags = fcntl(fd, F_GETFL)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = socketPath.utf8CString
+        withUnsafeMutablePointer(to: &addr.sun_path) { sunPathPtr in
+            sunPathPtr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
+                for i in 0..<pathBytes.count {
+                    dest[i] = pathBytes[i]
+                }
+            }
+        }
+
+        let result = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+
+        // Non-blocking connect returns 0 on immediate success or EINPROGRESS
+        return result == 0 || errno == EINPROGRESS
+    }
+}

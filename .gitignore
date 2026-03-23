@@ -99,7 +99,7 @@ coverage.txt
 
 # Cache directories
 .cache/
-*.cache 
+*.cache
 data/
 .cursor/
 assets/mcpproxy.icns
@@ -134,3 +134,4 @@ website/docs/
 website/npm-debug.log*
 website/yarn-error.log*
 __pycache__/
+native/macos/MCPProxy/.build/
