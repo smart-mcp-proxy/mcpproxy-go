@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"go.uber.org/zap"
 )
 
 // SessionInfo holds MCP session metadata
@@ -124,6 +124,16 @@ func (s *SessionStore) UpdateSessionStats(sessionID string, tokens int) {
 				zap.Error(err),
 			)
 		}
+	}
+}
+
+// UpdateActivity updates the last activity timestamp for a session without incrementing stats.
+func (s *SessionStore) UpdateActivity(sessionID string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.storageManager != nil {
+		_ = s.storageManager.UpdateSessionActivity(sessionID)
 	}
 }
 
