@@ -32,7 +32,14 @@ actor CoreProcessManager {
         didSet { managedProcess = process }
     }
     private let appState: AppState
-    private var apiClient: APIClient?
+    /// Exposed for menu actions (enable/disable/restart/login servers).
+    private(set) var apiClient: APIClient?
+
+    /// Non-isolated accessor for menu action dispatch.
+    nonisolated var apiClientForActions: APIClient? {
+        // Safe because APIClient is an actor — all its methods are isolated
+        get async { await apiClient }
+    }
     private var sseClient: SSEClient?
     private var sseTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
