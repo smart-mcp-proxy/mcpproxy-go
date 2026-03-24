@@ -11,7 +11,7 @@ import SwiftUI
 enum SidebarItem: String, CaseIterable, Identifiable {
     case servers = "Servers"
     case activity = "Activity Log"
-    case tokens = "Agent Tokens"
+    case secrets = "Secrets"
     case config = "Configuration"
 
     var id: String { rawValue }
@@ -20,7 +20,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .servers: return "server.rack"
         case .activity: return "clock.arrow.circlepath"
-        case .tokens: return "person.badge.key"
+        case .secrets: return "key.fill"
         case .config: return "gearshape"
         }
     }
@@ -56,8 +56,8 @@ struct MainWindow: View {
             ServersView(appState: appState, apiClient: apiClient)
         case .activity:
             ActivityView(appState: appState, apiClient: apiClient)
-        case .tokens:
-            TokensView(apiClient: apiClient)
+        case .secrets:
+            SecretsView(apiClient: apiClient)
         case .config:
             ConfigView(apiClient: apiClient)
         }
