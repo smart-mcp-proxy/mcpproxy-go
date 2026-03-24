@@ -5,7 +5,6 @@ import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable {
     case servers = "Servers"
-    case search = "Search"
     case activity = "Activity Log"
     case secrets = "Secrets"
     case config = "Configuration"
@@ -14,7 +13,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .servers: return "server.rack"
-        case .search: return "magnifyingglass"
         case .activity: return "clock.arrow.circlepath"
         case .secrets: return "key.fill"
         case .config: return "gearshape"
@@ -43,8 +41,6 @@ struct MainWindow: View {
                 switch selectedItem ?? .servers {
                 case .servers:
                     ServersView(appState: appState)
-                case .search:
-                    SearchView(appState: appState)
                 case .activity:
                     ActivityView(appState: appState)
                 case .secrets:

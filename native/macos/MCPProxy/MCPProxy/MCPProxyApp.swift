@@ -31,11 +31,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Switch to accessory (menu bar only) now that launch is complete
         NSApp.setActivationPolicy(.accessory)
 
-        // Create the status bar item
+        // Create the status bar item with the MCPProxy monochrome icon
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "server.rack",
-                                   accessibilityDescription: "MCPProxy")
+            // Load the bundled icon-mono-44.png from the app bundle
+            if let iconPath = Bundle.main.path(forResource: "icon-mono-44", ofType: "png"),
+               let icon = NSImage(contentsOfFile: iconPath) {
+                icon.isTemplate = true  // Adapts to light/dark menu bar
+                icon.size = NSSize(width: 18, height: 18)
+                button.image = icon
+            } else {
+                // Fallback to SF Symbol if bundled icon not found
+                button.image = NSImage(systemSymbolName: "server.rack",
+                                       accessibilityDescription: "MCPProxy")
+            }
         }
 
         // Build initial menu (rebuildMenu creates the NSMenu and sets delegate)
@@ -197,8 +206,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let button = statusItem.button else { return }
 
         let health = appState.healthLevel
-        let baseIcon = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "MCPProxy")
-        guard let base = baseIcon else { return }
+        // Use the MCPProxy monochrome icon (same as initial tray icon)
+        let base: NSImage
+        if let iconPath = Bundle.main.path(forResource: "icon-mono-44", ofType: "png"),
+           let bundledIcon = NSImage(contentsOfFile: iconPath) {
+            base = bundledIcon
+        } else if let sfIcon = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "MCPProxy") {
+            base = sfIcon
+        } else {
+            return
+        }
 
         // Compose the icon with a badge dot
         let size = NSSize(width: 18, height: 18)
