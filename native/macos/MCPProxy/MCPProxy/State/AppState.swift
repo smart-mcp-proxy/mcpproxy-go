@@ -67,11 +67,13 @@ final class AppState: ObservableObject {
 
     // MARK: Computed properties
 
-    /// Servers that have a health action the user should take.
+    /// Servers that need user intervention — NOT including intentionally disabled servers.
+    /// Only: auth required (login), connection errors (restart), quarantine (approve).
     var serversNeedingAttention: [ServerStatus] {
         servers.filter { server in
             guard let action = server.health?.action, !action.isEmpty else { return false }
-            return true
+            // "enable" means disabled by user — intentional, not attention-worthy
+            return action != "enable"
         }
     }
 

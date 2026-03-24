@@ -252,7 +252,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         menu.addItem(.separator())
 
-        // Needs Attention
+        // Needs Attention — only auth required, connection errors, quarantine (NOT disabled)
         let attentionServers = appState.serversNeedingAttention
         if !attentionServers.isEmpty {
             let header = NSMenuItem(title: "Needs Attention (\(attentionServers.count))", action: nil, keyEquivalent: "")
@@ -261,12 +261,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
             for server in attentionServers {
                 let action = server.health?.action ?? ""
-                let actionLabel = actionDisplayName(for: action)
                 let summary = server.health?.summary ?? ""
                 let icon = actionIcon(for: action)
 
-                // Show "servername — Action Needed" format
-                let title = summary.isEmpty ? "\(server.name) — \(actionLabel)" : "\(server.name) — \(summary)"
+                let title = "\(server.name) — \(summary.isEmpty ? actionDisplayName(for: action) : summary)"
                 let item = NSMenuItem(title: title, action: #selector(handleAttentionAction(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = server
@@ -288,31 +286,58 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(.separator())
         }
 
-        // Servers
+        // Servers — as a SUBMENU (not flat list)
         if !appState.servers.isEmpty {
-            let serversHeader = NSMenuItem(title: "Servers", action: nil, keyEquivalent: "")
-            serversHeader.isEnabled = false
-            menu.addItem(serversHeader)
+            let serversMenuItem = NSMenuItem(title: "Servers (\(appState.servers.count))", action: nil, keyEquivalent: "")
+            let serversSubmenu = NSMenu()
 
             for server in appState.servers {
                 let item = NSMenuItem(title: server.name, action: nil, keyEquivalent: "")
 
-                // Status dot
+                // Status icon: colored dot + auth indicator
+                let needsAuth = server.health?.action == "login"
                 let dotColor = serverStatusColor(for: server)
-                let dot = NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
+
+                let iconSize = NSSize(width: 16, height: 16)
+                let icon = NSImage(size: iconSize, flipped: false) { rect in
+                    // Draw health dot
+                    let dotRect = NSRect(x: 2, y: 4, width: 8, height: 8)
                     dotColor.setFill()
-                    NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+                    NSBezierPath(ovalIn: dotRect).fill()
+
+                    // Draw auth lock icon overlay if needed
+                    if needsAuth {
+                        let lockRect = NSRect(x: 9, y: 0, width: 7, height: 7)
+                        NSColor.systemRed.setFill()
+                        NSBezierPath(ovalIn: lockRect).fill()
+                    }
                     return true
                 }
-                item.image = dot
+                item.image = icon
 
-                // Submenu with actions
+                // Per-server submenu with actions
                 let sub = NSMenu()
-                let statusText = server.health?.summary ?? (server.connected ? "Connected" : "Disconnected")
-                let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-                statusItem.isEnabled = false
-                sub.addItem(statusItem)
+                let statusText = server.health?.summary ?? (server.connected ? "Connected" : server.enabled ? "Disconnected" : "Disabled")
+                let statusLine = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+                statusLine.isEnabled = false
+                sub.addItem(statusLine)
+
+                // Protocol info
+                let protoLine = NSMenuItem(title: "Protocol: \(server.protocol)", action: nil, keyEquivalent: "")
+                protoLine.isEnabled = false
+                sub.addItem(protoLine)
+
                 sub.addItem(.separator())
+
+                // Auth login button — prominently first if needed
+                if needsAuth {
+                    let login = NSMenuItem(title: "Log In (Opens Browser)", action: #selector(loginServer(_:)), keyEquivalent: "")
+                    login.target = self
+                    login.representedObject = server.id
+                    login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "login")
+                    sub.addItem(login)
+                    sub.addItem(.separator())
+                }
 
                 if server.enabled {
                     let disable = NSMenuItem(title: "Disable", action: #selector(disableServer(_:)), keyEquivalent: "")
@@ -331,12 +356,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 restart.representedObject = server.id
                 sub.addItem(restart)
 
-                if server.health?.action == "login" {
-                    let login = NSMenuItem(title: "Log In", action: #selector(loginServer(_:)), keyEquivalent: "")
-                    login.target = self
-                    login.representedObject = server.id
-                    sub.addItem(login)
-                }
+                sub.addItem(.separator())
 
                 let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
                 logs.target = self
@@ -344,8 +364,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 sub.addItem(logs)
 
                 item.submenu = sub
-                menu.addItem(item)
+                serversSubmenu.addItem(item)
             }
+
+            serversMenuItem.submenu = serversSubmenu
+            menu.addItem(serversMenuItem)
             menu.addItem(.separator())
         }
 
