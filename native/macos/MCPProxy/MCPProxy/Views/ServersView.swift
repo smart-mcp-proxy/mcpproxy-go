@@ -1,11 +1,8 @@
 // ServersView.swift
 // MCPProxy
 //
-// Displays all upstream MCP servers with their health status, tool counts,
-// and action buttons for enable/disable/restart/login operations.
-//
-// Uses a local @State snapshot of servers to avoid SwiftUI List duplication
-// bugs caused by frequent @Published updates from SSE events.
+// Uses ScrollView + LazyVStack instead of List to avoid SwiftUI's
+// List duplication bug with @ObservedObject / @Published arrays.
 
 import SwiftUI
 
@@ -15,14 +12,9 @@ struct ServersView: View {
     @ObservedObject var appState: AppState
     let apiClient: APIClient?
 
-    // Local snapshot — prevents List duplication from frequent @Published updates.
-    // Updated only when the server ID set actually changes.
-    @State private var displayedServers: [ServerStatus] = []
-    @State private var lastServerIDs: String = ""
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header with aggregate stats
+            // Header
             HStack {
                 Text("Servers")
                     .font(.title2.bold())
@@ -35,7 +27,7 @@ struct ServersView: View {
                     .foregroundStyle(.secondary)
 
                 Button {
-                    refreshSnapshot()
+                    // Force refresh from API
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -45,45 +37,29 @@ struct ServersView: View {
 
             Divider()
 
-            if displayedServers.isEmpty {
-                emptyState
+            if appState.servers.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "server.rack")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tertiary)
+                    Text("No servers configured")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List {
-                    ForEach(displayedServers) { server in
-                        ServerRow(server: server, apiClient: apiClient)
+                // ScrollView + LazyVStack — no duplication bugs unlike List
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(appState.servers) { server in
+                            ServerRow(server: server, apiClient: apiClient)
+                            Divider().padding(.leading, 34)
+                        }
                     }
+                    .padding(.horizontal)
                 }
             }
         }
-        .onAppear { refreshSnapshot() }
-        .onChange(of: appState.servers.map(\.id).sorted().joined()) { _ in
-            refreshSnapshot()
-        }
-    }
-
-    private func refreshSnapshot() {
-        let newIDs = appState.servers.map(\.id).sorted().joined(separator: ",")
-        // Always update to get latest status, but only if data is present
-        if !appState.servers.isEmpty {
-            displayedServers = appState.servers
-            lastServerIDs = newIDs
-        }
-    }
-
-    @ViewBuilder
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "server.rack")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("No servers configured")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-            Text("Add servers in ~/.mcpproxy/mcp_config.json")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -107,8 +83,8 @@ struct ServerRow: View {
                     Text(server.health?.summary ?? statusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if let detail = server.health?.detail, !detail.isEmpty {
-                        Text("— \(detail)")
+                    if server.toolCount > 0 {
+                        Text("(\(server.toolCount) tools)")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     }
@@ -117,7 +93,6 @@ struct ServerRow: View {
 
             Spacer()
 
-            // Protocol badge
             Text(server.protocol)
                 .font(.caption2)
                 .padding(.horizontal, 6)
@@ -134,16 +109,8 @@ struct ServerRow: View {
                     .cornerRadius(4)
             }
 
-            if server.quarantined {
-                Label("Quarantined", systemImage: "shield.lefthalf.filled")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-
-            // Actions
             if isPerformingAction {
-                ProgressView()
-                    .controlSize(.small)
+                ProgressView().controlSize(.small)
             } else if !server.enabled {
                 Button("Enable") {
                     performAction { try await apiClient?.enableServer(server.id) }
@@ -151,42 +118,37 @@ struct ServerRow: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             } else {
-                serverActionsMenu
+                Menu {
+                    Button("Restart") {
+                        performAction { try await apiClient?.restartServer(server.id) }
+                    }
+                    Button("Disable") {
+                        performAction { try await apiClient?.disableServer(server.id) }
+                    }
+                    if server.health?.action == "login" {
+                        Divider()
+                        Button("Log In") {
+                            performAction { try await apiClient?.loginServer(server.id) }
+                        }
+                    }
+                    Divider()
+                    Button("View Logs") {
+                        let home = FileManager.default.homeDirectoryForCurrentUser
+                        let logFile = home.appendingPathComponent("Library/Logs/mcpproxy/server-\(server.name).log")
+                        if FileManager.default.fileExists(atPath: logFile.path) {
+                            NSWorkspace.shared.open(logFile)
+                        } else {
+                            NSWorkspace.shared.open(home.appendingPathComponent("Library/Logs/mcpproxy"))
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
         }
-        .padding(.vertical, 4)
-    }
-
-    @ViewBuilder
-    private var serverActionsMenu: some View {
-        Menu {
-            Button("Restart") {
-                performAction { try await apiClient?.restartServer(server.id) }
-            }
-            Button("Disable") {
-                performAction { try await apiClient?.disableServer(server.id) }
-            }
-            if server.health?.action == "login" {
-                Divider()
-                Button("Log In") {
-                    performAction { try await apiClient?.loginServer(server.id) }
-                }
-            }
-            if server.quarantined {
-                Divider()
-                Button("Unquarantine") {
-                    performAction { try await apiClient?.unquarantineServer(server.id) }
-                }
-            }
-            Divider()
-            Button("View Logs") {
-                openLogsForServer(server.name)
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
+        .padding(.vertical, 8)
     }
 
     private var healthColor: Color {
@@ -216,16 +178,6 @@ struct ServerRow: View {
             try? await action()
             try? await Task.sleep(nanoseconds: 300_000_000)
             await MainActor.run { isPerformingAction = false }
-        }
-    }
-
-    private func openLogsForServer(_ name: String) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let logFile = home.appendingPathComponent("Library/Logs/mcpproxy/server-\(name).log")
-        if FileManager.default.fileExists(atPath: logFile.path) {
-            NSWorkspace.shared.open(logFile)
-        } else {
-            NSWorkspace.shared.open(home.appendingPathComponent("Library/Logs/mcpproxy"))
         }
     }
 }
