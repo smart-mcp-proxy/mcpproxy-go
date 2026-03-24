@@ -12,7 +12,7 @@ import Combine
 // MARK: - App Delegate
 
 /// Manages the status bar item, menu, core process, and app lifecycle.
-final class AppController: NSObject, NSApplicationDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let appState = AppState()
     let notificationService = NotificationService()
     let updateService = UpdateService()
@@ -67,9 +67,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Build the APIClient reference for the window views.
-        // The apiClientForActions property is async (actor-isolated),
-        // so we capture it asynchronously after window creation.
+        // Show in Dock and Cmd+Tab when window is open
+        NSApp.setActivationPolicy(.regular)
+
         let contentView = MainWindow(
             appState: appState,
             apiClient: nil
@@ -87,12 +87,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         window.center()
         window.setFrameAutosaveName("MCPProxyMainWindow")
         window.isReleasedWhenClosed = false
+        // Watch for window close to hide from Dock again
+        window.delegate = self
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         mainWindow = window
 
-        // Asynchronously wire up the API client after creation
+        // Asynchronously wire up the API client
         Task {
             let client = await coreManager?.apiClientForActions
             await MainActor.run {
@@ -100,14 +102,19 @@ final class AppController: NSObject, NSApplicationDelegate {
                     appState: appState,
                     apiClient: client
                 )
-                let updatedHosting = NSHostingView(rootView: updatedView)
-                window.contentView = updatedHosting
+                window.contentView = NSHostingView(rootView: updatedView)
             }
         }
     }
 
     @objc private func openMainWindow() {
         showMainWindow()
+    }
+
+    // NSWindowDelegate — hide from Dock when window closes
+    func windowWillClose(_ notification: Notification) {
+        // Return to accessory (menu bar only) when main window closes
+        NSApp.setActivationPolicy(.accessory)
     }
 
     // MARK: - Core Startup
@@ -472,8 +479,14 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openWebUI() {
-        if let url = URL(string: "http://127.0.0.1:8080/ui/") {
-            NSWorkspace.shared.open(url)
+        Task {
+            let apiKey = await coreManager?.currentAPIKey ?? ""
+            let urlString = apiKey.isEmpty
+                ? "http://127.0.0.1:8080/ui/"
+                : "http://127.0.0.1:8080/ui/?apikey=\(apiKey)"
+            if let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 

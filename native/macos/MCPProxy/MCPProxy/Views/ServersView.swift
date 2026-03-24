@@ -3,6 +3,9 @@
 //
 // Displays all upstream MCP servers with their health status, tool counts,
 // and action buttons for enable/disable/restart/login operations.
+//
+// Uses a local @State snapshot of servers to avoid SwiftUI List duplication
+// bugs caused by frequent @Published updates from SSE events.
 
 import SwiftUI
 
@@ -11,6 +14,11 @@ import SwiftUI
 struct ServersView: View {
     @ObservedObject var appState: AppState
     let apiClient: APIClient?
+
+    // Local snapshot — prevents List duplication from frequent @Published updates.
+    // Updated only when the server ID set actually changes.
+    @State private var displayedServers: [ServerStatus] = []
+    @State private var lastServerIDs: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -25,18 +33,40 @@ struct ServersView: View {
                     .foregroundStyle(.secondary)
                 Text("\(appState.totalTools) tools")
                     .foregroundStyle(.secondary)
+
+                Button {
+                    refreshSnapshot()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
             }
             .padding()
 
             Divider()
 
-            if appState.servers.isEmpty {
+            if displayedServers.isEmpty {
                 emptyState
             } else {
-                List(appState.servers) { server in
-                    ServerRow(server: server, apiClient: apiClient)
+                List {
+                    ForEach(displayedServers) { server in
+                        ServerRow(server: server, apiClient: apiClient)
+                    }
                 }
             }
+        }
+        .onAppear { refreshSnapshot() }
+        .onChange(of: appState.servers.map(\.id).sorted().joined()) { _ in
+            refreshSnapshot()
+        }
+    }
+
+    private func refreshSnapshot() {
+        let newIDs = appState.servers.map(\.id).sorted().joined(separator: ",")
+        // Always update to get latest status, but only if data is present
+        if !appState.servers.isEmpty {
+            displayedServers = appState.servers
+            lastServerIDs = newIDs
         }
     }
 
@@ -66,23 +96,35 @@ struct ServerRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Health indicator dot
             Circle()
                 .fill(healthColor)
                 .frame(width: 10, height: 10)
 
-            // Server name and status summary
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
                     .font(.headline)
-                Text(server.health?.summary ?? statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(server.health?.summary ?? statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let detail = server.health?.detail, !detail.isEmpty {
+                        Text("— \(detail)")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
             }
 
             Spacer()
 
-            // Tool count badge
+            // Protocol badge
+            Text(server.protocol)
+                .font(.caption2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.quaternary)
+                .cornerRadius(3)
+
             if server.toolCount > 0 {
                 Text("\(server.toolCount) tools")
                     .font(.caption)
@@ -92,21 +134,13 @@ struct ServerRow: View {
                     .cornerRadius(4)
             }
 
-            // Quarantine badge
             if server.quarantined {
                 Label("Quarantined", systemImage: "shield.lefthalf.filled")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
 
-            // Pending approval badge
-            if server.pendingApprovalCount > 0 {
-                Text("\(server.pendingApprovalCount) pending")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-
-            // Action controls
+            // Actions
             if isPerformingAction {
                 ProgressView()
                     .controlSize(.small)
@@ -123,8 +157,6 @@ struct ServerRow: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Actions Menu
-
     @ViewBuilder
     private var serverActionsMenu: some View {
         Menu {
@@ -134,28 +166,18 @@ struct ServerRow: View {
             Button("Disable") {
                 performAction { try await apiClient?.disableServer(server.id) }
             }
-
             if server.health?.action == "login" {
                 Divider()
                 Button("Log In") {
                     performAction { try await apiClient?.loginServer(server.id) }
                 }
             }
-
             if server.quarantined {
                 Divider()
                 Button("Unquarantine") {
                     performAction { try await apiClient?.unquarantineServer(server.id) }
                 }
             }
-
-            if server.pendingApprovalCount > 0 {
-                Divider()
-                Button("Approve Tools") {
-                    performAction { try await apiClient?.approveTools(server.id) }
-                }
-            }
-
             Divider()
             Button("View Logs") {
                 openLogsForServer(server.name)
@@ -166,8 +188,6 @@ struct ServerRow: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
     }
-
-    // MARK: - Helpers
 
     private var healthColor: Color {
         if server.quarantined { return .orange }
@@ -194,7 +214,6 @@ struct ServerRow: View {
         isPerformingAction = true
         Task {
             try? await action()
-            // Brief delay so the spinner is visible
             try? await Task.sleep(nanoseconds: 300_000_000)
             await MainActor.run { isPerformingAction = false }
         }
@@ -206,8 +225,7 @@ struct ServerRow: View {
         if FileManager.default.fileExists(atPath: logFile.path) {
             NSWorkspace.shared.open(logFile)
         } else {
-            let logsDir = home.appendingPathComponent("Library/Logs/mcpproxy")
-            NSWorkspace.shared.open(logsDir)
+            NSWorkspace.shared.open(home.appendingPathComponent("Library/Logs/mcpproxy"))
         }
     }
 }

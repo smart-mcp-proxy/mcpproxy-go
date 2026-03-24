@@ -3,13 +3,11 @@
 //
 // Root SwiftUI view for the main application window.
 // Uses NavigationSplitView with a sidebar for navigation between sections.
-// Requires macOS 13+ for NavigationSplitView support.
 
 import SwiftUI
 
 // MARK: - Sidebar Navigation
 
-/// Sidebar items for the main window navigation.
 enum SidebarItem: String, CaseIterable, Identifiable {
     case servers = "Servers"
     case activity = "Activity Log"
@@ -18,7 +16,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// SF Symbol name for the sidebar icon.
     var icon: String {
         switch self {
         case .servers: return "server.rack"
@@ -31,8 +28,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
 // MARK: - Main Window View
 
-/// The root view hosted inside the main NSWindow.
-/// Provides a sidebar with navigation to all major sections of the app.
 struct MainWindow: View {
     @ObservedObject var appState: AppState
     let apiClient: APIClient?
@@ -40,19 +35,16 @@ struct MainWindow: View {
 
     var body: some View {
         NavigationSplitView {
-            List(SidebarItem.allCases, selection: $selectedItem) { item in
-                Label(item.rawValue, systemImage: item.icon)
+            List(selection: $selectedItem) {
+                ForEach(SidebarItem.allCases) { item in
+                    Label(item.rawValue, systemImage: item.icon)
+                        .tag(item)
+                }
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .navigationTitle("MCPProxy")
+            .listStyle(.sidebar)
         } detail: {
-            if let selected = selectedItem {
-                detailView(for: selected)
-            } else {
-                Text("Select an item from the sidebar")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            detailView(for: selectedItem ?? .servers)
         }
         .frame(minWidth: 800, minHeight: 500)
     }

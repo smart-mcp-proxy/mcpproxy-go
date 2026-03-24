@@ -55,7 +55,13 @@ actor CoreProcessManager {
     private var coreBinaryPath: String?
 
     /// API key generated for this session's core communication.
-    private var sessionAPIKey: String?
+    /// API key for the current session. Exposed for Web UI URL construction.
+    private(set) var sessionAPIKey: String?
+
+    /// Non-isolated accessor for the API key (for menu actions).
+    nonisolated var currentAPIKey: String? {
+        get async { await sessionAPIKey }
+    }
 
     /// Socket path for the core process.
     private let socketPath: String
