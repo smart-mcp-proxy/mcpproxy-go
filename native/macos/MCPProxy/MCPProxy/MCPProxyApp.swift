@@ -342,9 +342,11 @@ final class AppController: NSObject, NSApplicationDelegate {
         checkUpdates.isEnabled = updateService.canCheckForUpdates
         menu.addItem(checkUpdates)
 
-        if let available = appState.updateAvailable {
-            let updateNote = NSMenuItem(title: "Update available: v\(available)", action: nil, keyEquivalent: "")
-            updateNote.isEnabled = false
+        // Show update from either appState (from core /api/v1/info) or UpdateService (GitHub check)
+        let updateVersion = appState.updateAvailable ?? updateService.latestVersion
+        if let available = updateVersion {
+            let updateNote = NSMenuItem(title: "Update available: v\(available)", action: #selector(openDownloadPage), keyEquivalent: "")
+            updateNote.target = self
             menu.addItem(updateNote)
         }
 
@@ -438,7 +440,12 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func checkForUpdates() {
+        updateService.currentVersion = appState.version
         updateService.checkForUpdates()
+    }
+
+    @objc private func openDownloadPage() {
+        updateService.openDownloadPage()
     }
 
     @objc private func quitApp() {

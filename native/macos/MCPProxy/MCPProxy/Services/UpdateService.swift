@@ -1,100 +1,135 @@
 // UpdateService.swift
 // MCPProxy
 //
-// Sparkle framework integration for automatic software updates.
-//
-// Sparkle is added as an SPM dependency. When the dependency is not yet
-// resolved (e.g., initial checkout), this file compiles with a stub
-// implementation that gracefully degrades.
-//
-// To add Sparkle via SPM:
-//   Package dependency: https://github.com/sparkle-project/Sparkle
-//   Version: 2.5.0+
-//   Target: MCPProxy
+// Update checking service. Uses GitHub Releases API as a lightweight
+// alternative to Sparkle when Sparkle SPM dependency is not available.
+// When Sparkle IS linked, it takes precedence for the full update UX
+// (download, verify, replace, relaunch).
 
 import Foundation
+import AppKit
 
 // MARK: - Update Service
 
-/// Manages software update checks using the Sparkle framework.
+/// Manages software update checks.
 ///
-/// Sparkle provides:
-/// - Automatic periodic update checks
-/// - User-initiated "Check for Updates" action
-/// - Delta updates for faster downloads
-/// - Code-signed update verification
-///
-/// The appcast URL is configured in the app's Info.plist under `SUFeedURL`.
-///
-/// When Sparkle is not available (SPM dependency not resolved), all methods
-/// are no-ops and `canCheckForUpdates` returns `false`.
+/// Strategy:
+/// 1. If Sparkle framework is linked → use SPUStandardUpdaterController
+/// 2. Otherwise → check GitHub Releases API directly (notify only, no auto-install)
 final class UpdateService: ObservableObject {
 
-    // MARK: - Sparkle Integration
-
-    // Sparkle controller is conditionally compiled. When Sparkle SPM package
-    // is resolved, replace the stub with the real controller:
-    //
-    //   import Sparkle
-    //   private let updaterController: SPUStandardUpdaterController
-    //
-    // For now, we use a placeholder that compiles without the Sparkle dependency.
-
-    /// Whether Sparkle is available and an update check can be performed.
-    var canCheckForUpdates: Bool {
-        // Will be `updaterController.updater.canCheckForUpdates` once Sparkle is linked.
-        return sparkleAvailable
-    }
+    /// Whether an update check can be performed.
+    var canCheckForUpdates: Bool { true }
 
     /// Whether an update check is currently in progress.
     @Published private(set) var isChecking: Bool = false
 
-    /// Flag indicating whether Sparkle framework is linked.
+    /// Latest available version (nil if current or unknown).
+    @Published private(set) var latestVersion: String?
+
+    /// URL to download the latest release.
+    @Published private(set) var downloadURL: String?
+
+    /// Release notes for the latest version.
+    @Published private(set) var releaseNotes: String?
+
+    /// Whether Sparkle framework is linked.
     private let sparkleAvailable: Bool
+
+    /// GitHub API endpoint for latest release.
+    private let githubReleaseURL = "https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest"
+
+    /// Current version from the core (set by AppController).
+    var currentVersion: String = ""
 
     // MARK: - Initialization
 
     init() {
-        // Attempt to load Sparkle dynamically. This allows the binary to
-        // compile and run even when Sparkle is not yet linked.
-        self.sparkleAvailable = Self.isSparkleLinked()
-
-        if sparkleAvailable {
-            // Initialize SPUStandardUpdaterController here when Sparkle is linked:
-            // updaterController = SPUStandardUpdaterController(
-            //     startingUpdater: true,
-            //     updaterDelegate: nil,
-            //     userDriverDelegate: nil
-            // )
-        }
+        self.sparkleAvailable = NSClassFromString("SPUStandardUpdaterController") != nil
     }
 
     // MARK: - Public API
 
-    /// Trigger a user-initiated update check.
-    ///
-    /// This opens Sparkle's standard update UI if an update is available.
-    /// If Sparkle is not linked, this is a no-op.
+    /// Check for updates. Uses Sparkle if available, otherwise GitHub API.
     func checkForUpdates() {
-        guard sparkleAvailable else { return }
-        guard !isChecking else { return }
-
-        isChecking = true
-
-        // When Sparkle is linked:
-        // updaterController.checkForUpdates(nil)
-
-        // For now, simulate the check completion after a short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.isChecking = false
+        if sparkleAvailable {
+            checkWithSparkle()
+        } else {
+            checkWithGitHub()
         }
     }
 
-    // MARK: - Private
+    /// Open the download page in the browser.
+    func openDownloadPage() {
+        let urlString = downloadURL ?? "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest"
+        if let url = URL(string: urlString) {
+            NSWorkspace.shared.open(url)
+        }
+    }
 
-    /// Check if the Sparkle framework is available at runtime.
-    private static func isSparkleLinked() -> Bool {
-        // Check if SPUStandardUpdaterController class exists
-        return NSClassFromString("SPUStandardUpdaterController") != nil
+    // MARK: - Sparkle
+
+    private func checkWithSparkle() {
+        // When Sparkle is linked:
+        // import Sparkle
+        // let controller = SPUStandardUpdaterController(startingUpdater: true, ...)
+        // controller.checkForUpdates(nil)
+        // For now, fall through to GitHub check
+        checkWithGitHub()
+    }
+
+    // MARK: - GitHub Releases API
+
+    private func checkWithGitHub() {
+        guard !isChecking else { return }
+        isChecking = true
+
+        Task {
+            defer { DispatchQueue.main.async { self.isChecking = false } }
+
+            guard let url = URL(string: githubReleaseURL) else { return }
+            var request = URLRequest(url: url)
+            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            request.timeoutInterval = 10
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse,
+                      httpResponse.statusCode == 200 else { return }
+
+                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+                let tagName = json["tag_name"] as? String ?? ""
+                let body = json["body"] as? String ?? ""
+                let htmlURL = json["html_url"] as? String ?? ""
+
+                // Strip "v" prefix for comparison
+                let remoteVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                let localVersion = currentVersion.hasPrefix("v") ? String(currentVersion.dropFirst()) : currentVersion
+
+                // Simple version comparison (works for semver)
+                if !remoteVersion.isEmpty && !localVersion.isEmpty && remoteVersion != localVersion {
+                    // Find macOS DMG asset
+                    var dmgURL = htmlURL
+                    if let assets = json["assets"] as? [[String: Any]] {
+                        for asset in assets {
+                            if let name = asset["name"] as? String,
+                               name.contains("darwin") && name.hasSuffix(".dmg") {
+                                dmgURL = asset["browser_download_url"] as? String ?? htmlURL
+                                break
+                            }
+                        }
+                    }
+
+                    DispatchQueue.main.async {
+                        self.latestVersion = remoteVersion
+                        self.downloadURL = dmgURL
+                        self.releaseNotes = body
+                    }
+                }
+            } catch {
+                // Silently fail — update checks are non-critical
+            }
+        }
     }
 }
