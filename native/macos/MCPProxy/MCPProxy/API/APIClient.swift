@@ -155,6 +155,104 @@ actor APIClient {
         return response.activities
     }
 
+    // MARK: - Server Detail
+
+    /// Fetch tools for a specific server from `GET /api/v1/servers/{id}/tools`.
+    func serverTools(_ id: String) async throws -> [ServerTool] {
+        let data = try await fetchRaw(path: "/api/v1/servers/\(id)/tools")
+        let decoder = JSONDecoder()
+        // Try wrapped response first
+        if let wrapper = try? decoder.decode(APIResponse<ServerToolsResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload.tools
+        }
+        // Try direct decode
+        if let direct = try? decoder.decode(ServerToolsResponse.self, from: data) {
+            return direct.tools
+        }
+        // Try {"data": {"tools": [...]}} shape
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let dataObj = json["data"] as? [String: Any],
+           let toolsArray = dataObj["tools"] as? [[String: Any]] {
+            let toolsData = try JSONSerialization.data(withJSONObject: toolsArray)
+            return try decoder.decode([ServerTool].self, from: toolsData)
+        }
+        return []
+    }
+
+    /// Fetch log lines for a specific server from `GET /api/v1/servers/{id}/logs`.
+    func serverLogs(_ id: String, tail: Int = 100) async throws -> [String] {
+        let data = try await fetchRaw(path: "/api/v1/servers/\(id)/logs?tail=\(tail)")
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<ServerLogsResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload.lines
+        }
+        if let direct = try? decoder.decode(ServerLogsResponse.self, from: data) {
+            return direct.lines
+        }
+        return []
+    }
+
+    // MARK: - Add / Import Servers
+
+    /// Add a new server via `POST /api/v1/servers`.
+    func addServer(_ config: [String: Any]) async throws {
+        try await postAction(path: "/api/v1/servers", body: config)
+    }
+
+    /// Fetch canonical config paths for import from `GET /api/v1/servers/import/paths`.
+    func importPaths() async throws -> [CanonicalConfigPath] {
+        let data = try await fetchRaw(path: "/api/v1/servers/import/paths")
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<CanonicalConfigPathsResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload.paths
+        }
+        if let direct = try? decoder.decode(CanonicalConfigPathsResponse.self, from: data) {
+            return direct.paths
+        }
+        return []
+    }
+
+    /// Import servers from a filesystem path via `POST /api/v1/servers/import/path`.
+    func importFromPath(_ path: String, format: String? = nil) async throws -> ImportResponse {
+        var body: [String: Any] = ["path": path]
+        if let format { body["format"] = format }
+        let data = try await postRaw(path: "/api/v1/servers/import/path", body: body)
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<ImportResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload
+        }
+        return try decoder.decode(ImportResponse.self, from: data)
+    }
+
+    // MARK: - Tool Search
+
+    /// Search tools across all servers via `GET /api/v1/tools`.
+    func searchTools(query: String, limit: Int = 20) async throws -> [SearchResult] {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let data = try await fetchRaw(path: "/api/v1/tools?q=\(encoded)&limit=\(limit)")
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<SearchToolsResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload.results ?? []
+        }
+        if let direct = try? decoder.decode(SearchToolsResponse.self, from: data) {
+            return direct.results ?? []
+        }
+        return []
+    }
+
+    // MARK: - Tool Quarantine
+
+    /// Approve specific tools for a server via `POST /api/v1/servers/{id}/tools/approve`.
+    func approveSpecificTools(_ id: String, tools: [String]) async throws {
+        let body: [String: Any] = ["tools": tools]
+        try await postAction(path: "/api/v1/servers/\(id)/tools/approve", body: body)
+    }
+
     // MARK: - Generic Endpoints (for views that need raw data access)
 
     /// Fetch raw response data from a GET endpoint.

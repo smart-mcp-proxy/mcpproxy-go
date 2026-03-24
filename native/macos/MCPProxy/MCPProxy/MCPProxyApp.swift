@@ -138,6 +138,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         showMainWindow()
     }
 
+    @objc private func showAddServer() {
+        showMainWindow()
+        // The Add Server sheet is triggered from ServersView's + button.
+        // Opening the main window with Servers tab is the entry point.
+        // For a more direct approach, we post a notification that ServersView observes.
+        NotificationCenter.default.post(name: .showAddServer, object: nil)
+    }
+
     // NSWindowDelegate — hide from Dock when window closes
     func windowWillClose(_ notification: Notification) {
         // Return to accessory (menu bar only) when main window closes
@@ -440,6 +448,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         // Actions
+        let addServer = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
+        addServer.target = self
+        menu.addItem(addServer)
+
         let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: ",")
         openApp.target = self
         menu.addItem(openApp)
@@ -661,6 +673,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 }
 
 // MARK: - App
+
+// MARK: - Notification Names
+
+extension Notification.Name {
+    /// Posted by tray menu "Add Server..." to trigger the sheet in ServersView.
+    static let showAddServer = Notification.Name("MCPProxy.showAddServer")
+}
 
 @main
 struct MCPProxyApp: App {

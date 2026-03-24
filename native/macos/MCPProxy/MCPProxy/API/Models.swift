@@ -493,3 +493,125 @@ struct ServerActionResponse: Codable {
         case serverName = "server_name"
     }
 }
+
+// MARK: - Server Tools
+
+/// Annotation hints for an MCP tool (read-only, destructive, etc.).
+struct ToolAnnotation: Codable, Equatable {
+    let readOnlyHint: Bool?
+    let destructiveHint: Bool?
+    let idempotentHint: Bool?
+    let openWorldHint: Bool?
+    let title: String?
+
+    enum CodingKeys: String, CodingKey {
+        case readOnlyHint = "readOnlyHint"
+        case destructiveHint = "destructiveHint"
+        case idempotentHint = "idempotentHint"
+        case openWorldHint = "openWorldHint"
+        case title
+    }
+}
+
+/// A single tool exposed by an upstream MCP server.
+struct ServerTool: Codable, Identifiable, Equatable {
+    var id: String { name }
+    let name: String
+    let description: String?
+    let serverName: String?
+    let annotations: ToolAnnotation?
+    let approvalStatus: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, description, annotations
+        case serverName = "server_name"
+        case approvalStatus = "approval_status"
+    }
+
+    static func == (lhs: ServerTool, rhs: ServerTool) -> Bool {
+        lhs.name == rhs.name && lhs.serverName == rhs.serverName
+    }
+}
+
+/// Response wrapper for `GET /api/v1/servers/{id}/tools`.
+struct ServerToolsResponse: Codable {
+    let tools: [ServerTool]
+}
+
+/// Response wrapper for `GET /api/v1/servers/{id}/logs`.
+struct ServerLogsResponse: Codable {
+    let serverName: String?
+    let lines: [String]
+    let count: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case serverName = "server_name"
+        case lines, count
+    }
+}
+
+// MARK: - Import Config
+
+/// A canonical config file path discovered by the backend.
+struct CanonicalConfigPath: Codable, Identifiable {
+    var id: String { path }
+    let name: String
+    let path: String
+    let format: String?
+    let exists: Bool
+    let description: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, path, format, exists, description
+    }
+}
+
+/// Response wrapper for `GET /api/v1/servers/import/paths`.
+struct CanonicalConfigPathsResponse: Codable {
+    let os: String?
+    let paths: [CanonicalConfigPath]
+}
+
+/// Summary of an import operation.
+struct ImportSummary: Codable {
+    let total: Int?
+    let imported: Int?
+    let skipped: Int?
+    let failed: Int?
+}
+
+/// Response wrapper for `POST /api/v1/servers/import/path`.
+struct ImportResponse: Codable {
+    let summary: ImportSummary?
+    let message: String?
+}
+
+// MARK: - Tool Search
+
+/// A tool returned in search results.
+struct SearchTool: Codable {
+    let name: String
+    let description: String?
+    let serverName: String?
+    let annotations: ToolAnnotation?
+
+    enum CodingKeys: String, CodingKey {
+        case name, description, annotations
+        case serverName = "server_name"
+    }
+}
+
+/// A single search result with score.
+struct SearchResult: Codable, Identifiable {
+    var id: String { "\(tool.serverName ?? ""):\(tool.name)" }
+    let score: Double
+    let tool: SearchTool
+}
+
+/// Response wrapper for `GET /api/v1/tools` or `GET /api/v1/index/search`.
+struct SearchToolsResponse: Codable {
+    let query: String?
+    let results: [SearchResult]?
+    let tools: [SearchTool]?
+    let total: Int?
+}
