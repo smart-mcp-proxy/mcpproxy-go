@@ -1,15 +1,7 @@
 // MainWindow.swift
 // MCPProxy
-//
-// Root SwiftUI view for the main application window.
-// Uses NavigationSplitView with a sidebar for navigation between sections.
-//
-// The apiClient is read from appState (not passed as a parameter) so that
-// the window never needs to be recreated when the client becomes available.
 
 import SwiftUI
-
-// MARK: - Sidebar Navigation
 
 enum SidebarItem: String, CaseIterable, Identifiable {
     case servers = "Servers"
@@ -18,7 +10,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case config = "Configuration"
 
     var id: String { rawValue }
-
     var icon: String {
         switch self {
         case .servers: return "server.rack"
@@ -28,8 +19,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         }
     }
 }
-
-// MARK: - Main Window View
 
 struct MainWindow: View {
     @ObservedObject var appState: AppState
@@ -48,23 +37,20 @@ struct MainWindow: View {
             .listStyle(.sidebar)
             .accessibilityIdentifier("sidebar-list")
         } detail: {
-            detailView(for: selectedItem ?? .servers)
-                .accessibilityIdentifier("detail-view")
+            Group {
+                switch selectedItem ?? .servers {
+                case .servers:
+                    ServersView(appState: appState)
+                case .activity:
+                    ActivityView(appState: appState)
+                case .secrets:
+                    SecretsView(appState: appState)
+                case .config:
+                    ConfigView(appState: appState)
+                }
+            }
+            .accessibilityIdentifier("detail-view")
         }
         .frame(minWidth: 800, minHeight: 500)
-    }
-
-    @ViewBuilder
-    private func detailView(for item: SidebarItem) -> some View {
-        switch item {
-        case .servers:
-            ServersView(appState: appState)
-        case .activity:
-            ActivityView(appState: appState)
-        case .secrets:
-            SecretsView(appState: appState)
-        case .config:
-            ConfigView(appState: appState)
-        }
     }
 }

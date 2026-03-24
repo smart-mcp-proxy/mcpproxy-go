@@ -1,18 +1,21 @@
 // ServersView.swift
 // MCPProxy
 //
-// Uses ScrollView + LazyVStack instead of List to avoid SwiftUI's
-// List duplication bug with @ObservedObject / @Published arrays.
-//
-// Reads apiClient from appState so the view never needs to be recreated
-// when the client becomes available after core startup.
+// APPROACH: Use AppKit NSTableView via NSViewRepresentable to display servers.
+// NSTableView has zero duplication issues and proper view recycling.
+// SwiftUI List with @ObservedObject is fundamentally broken for this use case.
 
 import SwiftUI
+import AppKit
 
-// MARK: - Servers View
+// MARK: - Servers View (SwiftUI shell with AppKit table)
 
 struct ServersView: View {
     @ObservedObject var appState: AppState
+
+    @State private var servers: [ServerStatus] = []
+    @State private var isLoading = false
+    @State private var loadTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -28,177 +31,203 @@ struct ServersView: View {
                 Text("\(appState.totalTools) tools")
                     .foregroundStyle(.secondary)
 
-                Button {
-                    // Force refresh from API
-                    Task {
-                        if let client = appState.apiClient {
-                            let servers = try? await client.servers()
-                            if let servers {
-                                await appState.updateServers(servers)
-                            }
-                        }
+                if isLoading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button {
+                        triggerLoad()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("servers-refresh")
                 }
-                .buttonStyle(.borderless)
-                .accessibilityIdentifier("servers-refresh")
             }
             .padding()
             .accessibilityIdentifier("servers-header")
 
             Divider()
 
-            if appState.servers.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "server.rack")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("No servers configured")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                // Use List with .id() keyed on server count to force full rebuild.
-                // ScrollView+LazyVStack had layout issues in NavigationSplitView detail.
-                // The .id() prevents the List duplication bug by forcing a complete
-                // teardown and rebuild when the server set changes.
-                List {
-                    ForEach(appState.servers) { server in
-                        ServerRow(server: server, appState: appState)
-                            .equatable()
-                            .accessibilityIdentifier("server-row-\(server.id)")
-                    }
-                }
-                .id("servers-\(appState.servers.count)-\(appState.servers.first?.id ?? "")")
+            // AppKit NSTableView — no duplication bugs
+            ServerTableView(servers: $servers, apiClient: appState.apiClient)
                 .accessibilityIdentifier("servers-list")
+        }
+        .onAppear {
+            triggerLoad()
+        }
+    }
+
+    private func triggerLoad() {
+        loadTask?.cancel()
+        loadTask = Task {
+            guard let client = appState.apiClient else {
+                servers = appState.servers
+                return
             }
+            isLoading = true
+            do {
+                servers = try await client.servers()
+            } catch {
+                servers = appState.servers
+            }
+            isLoading = false
         }
     }
 }
 
-// MARK: - Server Row
+// MARK: - AppKit NSTableView wrapper
 
-struct ServerRow: View, Equatable {
-    let server: ServerStatus
-    @ObservedObject var appState: AppState
-    @State private var isPerformingAction = false
+struct ServerTableView: NSViewRepresentable {
+    @Binding var servers: [ServerStatus]
+    let apiClient: APIClient?
 
-    static func == (lhs: ServerRow, rhs: ServerRow) -> Bool {
-        lhs.server == rhs.server
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+
+        let tableView = NSTableView()
+        tableView.style = .fullWidth
+        tableView.rowHeight = 52
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.headerView = nil  // No header row
+
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("server"))
+        col.title = "Server"
+        tableView.addTableColumn(col)
+
+        tableView.delegate = context.coordinator
+        tableView.dataSource = context.coordinator
+
+        scrollView.documentView = tableView
+        context.coordinator.tableView = tableView
+        return scrollView
     }
 
-    private var apiClient: APIClient? { appState.apiClient }
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        context.coordinator.servers = servers
+        context.coordinator.apiClient = apiClient
+        context.coordinator.tableView?.reloadData()
+    }
 
-    var body: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(healthColor)
-                .frame(width: 10, height: 10)
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(server.name)
-                    .font(.headline)
-                HStack(spacing: 4) {
-                    Text(server.health?.summary ?? statusText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if server.toolCount > 0 {
-                        Text("(\(server.toolCount) tools)")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-            }
+    class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        var servers: [ServerStatus] = []
+        var apiClient: APIClient?
+        weak var tableView: NSTableView?
 
-            Spacer()
+        func numberOfRows(in tableView: NSTableView) -> Int {
+            servers.count
+        }
 
-            Text(server.protocol)
-                .font(.caption2)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(.quaternary)
-                .cornerRadius(3)
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard row < servers.count else { return nil }
+            let server = servers[row]
 
-            if server.toolCount > 0 {
-                Text("\(server.toolCount) tools")
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(.quaternary)
-                    .cornerRadius(4)
-            }
-
-            if isPerformingAction {
-                ProgressView().controlSize(.small)
-            } else if !server.enabled {
-                Button("Enable") {
-                    performAction { try await apiClient?.enableServer(server.id) }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+            let cellId = NSUserInterfaceItemIdentifier("ServerCell")
+            let cell: NSTableCellView
+            if let reused = tableView.makeView(withIdentifier: cellId, owner: nil) as? NSTableCellView {
+                cell = reused
+                // Clear old subviews
+                cell.subviews.forEach { $0.removeFromSuperview() }
             } else {
-                Menu {
-                    Button("Restart") {
-                        performAction { try await apiClient?.restartServer(server.id) }
-                    }
-                    Button("Disable") {
-                        performAction { try await apiClient?.disableServer(server.id) }
-                    }
-                    if server.health?.action == "login" {
-                        Divider()
-                        Button("Log In") {
-                            performAction { try await apiClient?.loginServer(server.id) }
-                        }
-                    }
-                    Divider()
-                    Button("View Logs") {
-                        let home = FileManager.default.homeDirectoryForCurrentUser
-                        let logFile = home.appendingPathComponent("Library/Logs/mcpproxy/server-\(server.name).log")
-                        if FileManager.default.fileExists(atPath: logFile.path) {
-                            NSWorkspace.shared.open(logFile)
-                        } else {
-                            NSWorkspace.shared.open(home.appendingPathComponent("Library/Logs/mcpproxy"))
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
+                cell = NSTableCellView()
+                cell.identifier = cellId
+            }
+
+            // Build the cell content
+            let stack = NSStackView()
+            stack.orientation = .horizontal
+            stack.spacing = 10
+            stack.alignment = .centerY
+            stack.translatesAutoresizingMaskIntoConstraints = false
+
+            // Health dot
+            let dot = NSView()
+            dot.wantsLayer = true
+            dot.layer?.cornerRadius = 5
+            dot.layer?.backgroundColor = healthColor(for: server).cgColor
+            dot.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                dot.widthAnchor.constraint(equalToConstant: 10),
+                dot.heightAnchor.constraint(equalToConstant: 10)
+            ])
+            stack.addArrangedSubview(dot)
+
+            // Name + status
+            let nameStack = NSStackView()
+            nameStack.orientation = .vertical
+            nameStack.alignment = .leading
+            nameStack.spacing = 2
+
+            let nameLabel = NSTextField(labelWithString: server.name)
+            nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+            nameStack.addArrangedSubview(nameLabel)
+
+            let statusText = server.health?.summary ?? (server.connected ? "Connected" : server.enabled ? "Disconnected" : "Disabled")
+            let toolsText = server.toolCount > 0 ? " (\(server.toolCount) tools)" : ""
+            let statusLabel = NSTextField(labelWithString: "\(statusText)\(toolsText)")
+            statusLabel.font = .systemFont(ofSize: 11)
+            statusLabel.textColor = .secondaryLabelColor
+            nameStack.addArrangedSubview(statusLabel)
+            stack.addArrangedSubview(nameStack)
+
+            // Spacer
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            stack.addArrangedSubview(spacer)
+
+            // Protocol badge
+            let protoBadge = NSTextField(labelWithString: server.protocol)
+            protoBadge.font = .systemFont(ofSize: 10)
+            protoBadge.textColor = .secondaryLabelColor
+            protoBadge.backgroundColor = NSColor.quaternaryLabelColor
+            protoBadge.isBordered = false
+            protoBadge.drawsBackground = true
+            protoBadge.wantsLayer = true
+            protoBadge.layer?.cornerRadius = 3
+            stack.addArrangedSubview(protoBadge)
+
+            // Tools count
+            if server.toolCount > 0 {
+                let toolsBadge = NSTextField(labelWithString: "\(server.toolCount) tools")
+                toolsBadge.font = .systemFont(ofSize: 10)
+                toolsBadge.textColor = .secondaryLabelColor
+                toolsBadge.backgroundColor = NSColor.quaternaryLabelColor
+                toolsBadge.isBordered = false
+                toolsBadge.drawsBackground = true
+                toolsBadge.wantsLayer = true
+                toolsBadge.layer?.cornerRadius = 3
+                stack.addArrangedSubview(toolsBadge)
+            }
+
+            cell.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+                stack.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+                stack.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4)
+            ])
+
+            cell.setAccessibilityIdentifier("server-row-\(server.id)")
+            return cell
+        }
+
+        private func healthColor(for server: ServerStatus) -> NSColor {
+            if server.quarantined { return .systemOrange }
+            if !server.enabled { return .systemGray }
+            if let health = server.health {
+                switch health.level {
+                case "healthy": return .systemGreen
+                case "degraded": return .systemYellow
+                case "unhealthy": return .systemRed
+                default: break
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
             }
-        }
-        .padding(.vertical, 8)
-    }
-
-    private var healthColor: Color {
-        if server.quarantined { return .orange }
-        if !server.enabled { return .gray }
-        if let health = server.health {
-            switch health.level {
-            case "healthy": return .green
-            case "degraded": return .yellow
-            case "unhealthy": return .red
-            default: break
-            }
-        }
-        return server.connected ? .green : .gray
-    }
-
-    private var statusText: String {
-        if !server.enabled { return "Disabled" }
-        if server.quarantined { return "Quarantined" }
-        if server.connecting == true { return "Connecting..." }
-        return server.connected ? "Connected" : "Disconnected"
-    }
-
-    private func performAction(_ action: @escaping () async throws -> Void) {
-        isPerformingAction = true
-        Task {
-            try? await action()
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            await MainActor.run { isPerformingAction = false }
+            return server.connected ? .systemGreen : .systemGray
         }
     }
 }
