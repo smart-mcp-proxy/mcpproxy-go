@@ -108,6 +108,7 @@ struct SecretsView: View {
                     showAddSheet = true
                 }
                 .buttonStyle(.bordered)
+                .accessibilityIdentifier("secrets-add-button")
             }
             .padding()
 
@@ -131,6 +132,7 @@ struct SecretsView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 500)
+                .accessibilityIdentifier("secrets-filter")
 
                 Spacer()
 
@@ -162,8 +164,10 @@ struct SecretsView: View {
                         SecretRow(entry: entry, appState: appState, onDelete: {
                             Task { await loadSecrets() }
                         })
+                        .accessibilityIdentifier("secret-row-\(entry.id)")
                     }
                 }
+                .accessibilityIdentifier("secrets-list")
             }
         }
         .sheet(isPresented: $showAddSheet) {

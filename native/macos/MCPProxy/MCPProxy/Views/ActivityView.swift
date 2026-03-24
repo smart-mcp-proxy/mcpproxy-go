@@ -98,6 +98,7 @@ struct ActivityView: View {
                         ActivityRow(entry: entry)
                             .tag(entry.id)
                     }
+                    .accessibilityIdentifier("activity-list")
                 }
             }
             .frame(minWidth: 400)
@@ -185,6 +186,7 @@ struct ActivityView: View {
                     }
                 }
                 .frame(maxWidth: 180)
+                .accessibilityIdentifier("activity-filter-type")
                 .onChange(of: filterType) { _ in
                     Task { await loadActivities() }
                 }
@@ -195,6 +197,7 @@ struct ActivityView: View {
                     }
                 }
                 .frame(maxWidth: 180)
+                .accessibilityIdentifier("activity-filter-server")
                 .onChange(of: filterServer) { _ in
                     Task { await loadActivities() }
                 }
@@ -205,6 +208,7 @@ struct ActivityView: View {
                     }
                 }
                 .frame(maxWidth: 180)
+                .accessibilityIdentifier("activity-filter-status")
                 .onChange(of: filterStatus) { _ in
                     Task { await loadActivities() }
                 }

@@ -42,8 +42,10 @@ struct ServersView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
+                .accessibilityIdentifier("servers-refresh")
             }
             .padding()
+            .accessibilityIdentifier("servers-header")
 
             Divider()
 
@@ -65,9 +67,12 @@ struct ServersView: View {
                 List {
                     ForEach(appState.servers) { server in
                         ServerRow(server: server, appState: appState)
+                            .equatable()
+                            .accessibilityIdentifier("server-row-\(server.id)")
                     }
                 }
                 .id("servers-\(appState.servers.count)-\(appState.servers.first?.id ?? "")")
+                .accessibilityIdentifier("servers-list")
             }
         }
     }
@@ -75,10 +80,14 @@ struct ServersView: View {
 
 // MARK: - Server Row
 
-struct ServerRow: View {
+struct ServerRow: View, Equatable {
     let server: ServerStatus
     @ObservedObject var appState: AppState
     @State private var isPerformingAction = false
+
+    static func == (lhs: ServerRow, rhs: ServerRow) -> Bool {
+        lhs.server == rhs.server
+    }
 
     private var apiClient: APIClient? { appState.apiClient }
 

@@ -41,12 +41,15 @@ struct MainWindow: View {
                 ForEach(SidebarItem.allCases) { item in
                     Label(item.rawValue, systemImage: item.icon)
                         .tag(item)
+                        .accessibilityIdentifier("sidebar-\(item.rawValue)")
                 }
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
             .listStyle(.sidebar)
+            .accessibilityIdentifier("sidebar-list")
         } detail: {
             detailView(for: selectedItem ?? .servers)
+                .accessibilityIdentifier("detail-view")
         }
         .frame(minWidth: 800, minHeight: 500)
     }

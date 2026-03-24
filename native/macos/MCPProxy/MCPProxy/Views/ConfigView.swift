@@ -130,6 +130,7 @@ struct ConfigView: View {
             TextEditor(text: $configText)
                 .font(.system(.body, design: .monospaced))
                 .padding(8)
+                .accessibilityIdentifier("config-editor")
                 .onChange(of: configText) { _ in
                     clearMessages()
                 }
@@ -162,6 +163,7 @@ struct ConfigView: View {
                 .padding(.vertical, 8)
             }
             .background(Color(nsColor: .textBackgroundColor))
+            .accessibilityIdentifier("config-editor")
         }
     }
 

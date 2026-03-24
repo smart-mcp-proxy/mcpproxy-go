@@ -12,7 +12,7 @@ import Combine
 // MARK: - App Delegate
 
 /// Manages the status bar item, menu, core process, and app lifecycle.
-final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     let appState = AppState()
     let notificationService = NotificationService()
     let updateService = UpdateService()
@@ -22,7 +22,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var mainWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
+        NSApp.setActivationPolicy(.prohibited)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Switch to accessory (menu bar only) now that launch is complete
+        NSApp.setActivationPolicy(.accessory)
+
         // Create the status bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -30,15 +38,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                    accessibilityDescription: "MCPProxy")
         }
 
-        // Build initial menu
+        // Build initial menu (rebuildMenu creates the NSMenu and sets delegate)
         rebuildMenu()
 
-        // Subscribe to state changes — rebuild menu and update icon
+        // Subscribe to state changes — update icon AND menu (debounced)
+        // Menu also rebuilds on menuWillOpen for guaranteed freshness
         appState.objectWillChange
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] _ in
-                self?.rebuildMenu()
                 self?.updateStatusIcon()
+                self?.rebuildMenu()
             }
             .store(in: &cancellables)
 
@@ -46,6 +55,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Task {
             await startCore()
         }
+    }
+
+    // MARK: - NSMenuDelegate
+
+    func menuWillOpen(_ menu: NSMenu) {
+        rebuildMenu()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -62,12 +77,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// - Parameter tab: Optional sidebar item to select when the window opens.
     func showMainWindow(tab: SidebarItem? = nil) {
         if let window = mainWindow, window.isVisible {
+            NSApp.setActivationPolicy(.regular)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
-        // Show in Dock and Cmd+Tab when window is open
+        // Show in Dock and Cmd+Tab BEFORE presenting the window
         NSApp.setActivationPolicy(.regular)
 
         // MainWindow reads apiClient from appState, so we create it once.
@@ -192,9 +208,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Menu Building (AppKit NSMenu — no SwiftUI)
 
     /// Rebuild the entire NSMenu from current appState.
-    /// Called on every debounced state change (max once per 500ms).
+    /// Clears and rebuilds in-place to avoid replacing the menu object
+    /// (which would close an already-open menu and lose the delegate).
     private func rebuildMenu() {
-        let menu = NSMenu()
+        let menu: NSMenu
+        if let existing = statusItem.menu {
+            existing.removeAllItems()
+            menu = existing
+        } else {
+            menu = NSMenu()
+            menu.delegate = self
+            statusItem.menu = menu
+        }
 
         // Header
         let title = appState.version.isEmpty ? "MCPProxy" : "MCPProxy v\(appState.version)"
@@ -413,7 +438,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         quit.target = self
         menu.addItem(quit)
 
-        statusItem.menu = menu
     }
 
     // MARK: - Menu Actions
