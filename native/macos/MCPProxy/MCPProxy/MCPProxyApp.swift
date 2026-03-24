@@ -32,11 +32,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         // Build initial menu
         rebuildMenu()
 
-        // Subscribe to state changes — rebuild menu when data changes
+        // Subscribe to state changes — rebuild menu and update icon
         appState.objectWillChange
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 self?.rebuildMenu()
+                self?.updateStatusIcon()
             }
             .store(in: &cancellables)
 
@@ -88,6 +89,52 @@ final class AppController: NSObject, NSApplicationDelegate {
             return candidate.path
         }
         return nil
+    }
+
+    // MARK: - Status Icon
+
+    /// Update the status bar icon with a health-colored badge dot.
+    private func updateStatusIcon() {
+        guard let button = statusItem.button else { return }
+
+        let health = appState.healthLevel
+        let baseIcon = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "MCPProxy")
+        guard let base = baseIcon else { return }
+
+        // Compose the icon with a badge dot
+        let size = NSSize(width: 18, height: 18)
+        let composed = NSImage(size: size, flipped: false) { rect in
+            // Draw base icon
+            base.draw(in: rect)
+
+            // Draw badge dot in bottom-right
+            let dotSize: CGFloat = 6
+            let dotRect = NSRect(
+                x: rect.width - dotSize - 0.5,
+                y: 0.5,
+                width: dotSize,
+                height: dotSize
+            )
+
+            let dotColor: NSColor
+            switch health {
+            case .healthy: dotColor = .systemGreen
+            case .degraded: dotColor = .systemYellow
+            case .unhealthy: dotColor = .systemRed
+            case .disconnected: dotColor = .systemGray
+            }
+
+            // White outline for visibility
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: dotRect.insetBy(dx: -1, dy: -1)).fill()
+            // Colored dot
+            dotColor.setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+
+            return true
+        }
+        composed.isTemplate = false // Has colors, can't be template
+        button.image = composed
     }
 
     // MARK: - Menu Building (AppKit NSMenu — no SwiftUI)

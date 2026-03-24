@@ -486,15 +486,38 @@ actor CoreProcessManager {
 
         case "servers.changed":
             // Server list actually changed; re-fetch once
+            let oldQuarantined = await MainActor.run { appState.quarantinedToolsCount }
             await refreshServers()
+            let newQuarantined = await MainActor.run { appState.quarantinedToolsCount }
+            // Notify on new quarantine events
+            if newQuarantined > oldQuarantined {
+                await notificationService.sendQuarantineAlert(
+                    server: "upstream",
+                    toolCount: newQuarantined
+                )
+            }
 
         case "config.reloaded":
             // Configuration reloaded; refresh everything once
             await refreshState()
 
         case "activity":
-            // New activity; refresh recent activity
+            // New activity; refresh and check for sensitive data
+            let oldSensitive = await MainActor.run { appState.sensitiveDataAlertCount }
             await refreshActivity()
+            let newSensitive = await MainActor.run { appState.sensitiveDataAlertCount }
+            // Notify on new sensitive data detections
+            if newSensitive > oldSensitive {
+                if let latest = await MainActor.run(body: {
+                    appState.recentActivity.first(where: { $0.hasSensitiveData == true })
+                }) {
+                    await notificationService.sendSensitiveDataAlert(
+                        server: latest.serverName ?? "unknown",
+                        tool: latest.toolName ?? "unknown",
+                        category: "sensitive data"
+                    )
+                }
+            }
 
         case "ping":
             // Keepalive; no action needed
