@@ -253,7 +253,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         // Header
-        let title = appState.version.isEmpty ? "MCPProxy" : "MCPProxy v\(appState.version)"
+        let ver = appState.version.hasPrefix("v") ? appState.version : "v\(appState.version)"
+        let title = appState.version.isEmpty ? "MCPProxy" : "MCPProxy \(ver)"
         let titleItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         let font = NSFont.boldSystemFont(ofSize: 13)
