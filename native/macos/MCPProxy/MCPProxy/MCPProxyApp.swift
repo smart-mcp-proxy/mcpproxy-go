@@ -41,13 +41,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Build initial menu (rebuildMenu creates the NSMenu and sets delegate)
         rebuildMenu()
 
-        // Subscribe to state changes — update icon AND menu (debounced)
-        // Menu also rebuilds on menuWillOpen for guaranteed freshness
+        // Subscribe to state changes — update icon, menu, and refresh servers periodically
         appState.objectWillChange
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 self?.updateStatusIcon()
                 self?.rebuildMenu()
+            }
+            .store(in: &cancellables)
+
+        // Periodic server refresh every 10s to keep health/action data current
+        Timer.publish(every: 10, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self, let client = self.appState.apiClient else { return }
+                Task {
+                    if let servers = try? await client.servers() {
+                        await self.appState.updateServers(servers)
+                    }
+                }
             }
             .store(in: &cancellables)
 
@@ -60,6 +72,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
+        // Fetch fresh server data before building the menu
+        // This ensures health.action (login/restart) is current
+        if let client = appState.apiClient {
+            Task {
+                if let servers = try? await client.servers() {
+                    await appState.updateServers(servers)
+                    await MainActor.run { rebuildMenu() }
+                }
+            }
+        }
+        // Build with current data immediately (async fetch updates it shortly after)
         rebuildMenu()
     }
 
@@ -333,7 +356,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if needsAuth {
                     let login = NSMenuItem(title: "Log In (Opens Browser)", action: #selector(loginServer(_:)), keyEquivalent: "")
                     login.target = self
-                    login.representedObject = server.id
+                    login.representedObject = server.name
                     login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "login")
                     sub.addItem(login)
                     sub.addItem(.separator())
@@ -342,18 +365,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if server.enabled {
                     let disable = NSMenuItem(title: "Disable", action: #selector(disableServer(_:)), keyEquivalent: "")
                     disable.target = self
-                    disable.representedObject = server.id
+                    disable.representedObject = server.name
                     sub.addItem(disable)
                 } else {
                     let enable = NSMenuItem(title: "Enable", action: #selector(enableServer(_:)), keyEquivalent: "")
                     enable.target = self
-                    enable.representedObject = server.id
+                    enable.representedObject = server.name
                     sub.addItem(enable)
                 }
 
                 let restart = NSMenuItem(title: "Restart", action: #selector(restartServer(_:)), keyEquivalent: "")
                 restart.target = self
-                restart.representedObject = server.id
+                restart.representedObject = server.name
                 sub.addItem(restart)
 
                 sub.addItem(.separator())
@@ -474,9 +497,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let action = server.health?.action else { return }
         Task {
             switch action {
-            case "login": try? await coreManager?.apiClientForActions?.loginServer(server.id)
-            case "restart": try? await coreManager?.apiClientForActions?.restartServer(server.id)
-            case "enable": try? await coreManager?.apiClientForActions?.enableServer(server.id)
+            case "login": try? await appState.apiClient?.loginServer(server.id)
+            case "restart": try? await appState.apiClient?.restartServer(server.id)
+            case "enable": try? await appState.apiClient?.enableServer(server.id)
             default: openWebUI()
             }
         }
@@ -484,22 +507,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func enableServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await coreManager?.apiClientForActions?.enableServer(id) }
+        Task { try? await appState.apiClient?.enableServer(id) }
     }
 
     @objc private func disableServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await coreManager?.apiClientForActions?.disableServer(id) }
+        Task { try? await appState.apiClient?.disableServer(id) }
     }
 
     @objc private func restartServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await coreManager?.apiClientForActions?.restartServer(id) }
+        Task { try? await appState.apiClient?.restartServer(id) }
     }
 
     @objc private func loginServer(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        Task { try? await coreManager?.apiClientForActions?.loginServer(id) }
+        guard let id = sender.representedObject as? String else {
+            NSLog("[MCPProxy] loginServer: no server ID in representedObject")
+            return
+        }
+        NSLog("[MCPProxy] loginServer: triggering login for %@", id)
+        // Use appState.apiClient directly (already on main thread, no async needed)
+        if let client = appState.apiClient {
+            Task {
+                do {
+                    try await client.loginServer(id)
+                    NSLog("[MCPProxy] loginServer: API call succeeded for %@", id)
+                } catch {
+                    NSLog("[MCPProxy] loginServer: API call failed: %@", error.localizedDescription)
+                }
+            }
+        } else {
+            NSLog("[MCPProxy] loginServer: no apiClient available")
+        }
     }
 
     @objc private func viewServerLogs(_ sender: NSMenuItem) {
