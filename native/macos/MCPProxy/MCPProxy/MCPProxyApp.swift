@@ -19,6 +19,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     var coreManager: CoreProcessManager?
 
     private var statusItem: NSStatusItem!
+    private var mainWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -51,6 +52,62 @@ final class AppController: NSObject, NSApplicationDelegate {
         if let process = coreManager?.managedProcess {
             process.terminate()
         }
+    }
+
+    // MARK: - Main Window
+
+    /// Show the main application window with SwiftUI content.
+    /// If the window already exists, bring it to front. Otherwise create it.
+    ///
+    /// - Parameter tab: Optional sidebar item to select when the window opens.
+    func showMainWindow(tab: SidebarItem? = nil) {
+        if let window = mainWindow, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // Build the APIClient reference for the window views.
+        // The apiClientForActions property is async (actor-isolated),
+        // so we capture it asynchronously after window creation.
+        let contentView = MainWindow(
+            appState: appState,
+            apiClient: nil
+        )
+        let hostingView = NSHostingView(rootView: contentView)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "MCPProxy"
+        window.contentView = hostingView
+        window.center()
+        window.setFrameAutosaveName("MCPProxyMainWindow")
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        mainWindow = window
+
+        // Asynchronously wire up the API client after creation
+        Task {
+            let client = await coreManager?.apiClientForActions
+            await MainActor.run {
+                let updatedView = MainWindow(
+                    appState: appState,
+                    apiClient: client
+                )
+                let updatedHosting = NSHostingView(rootView: updatedView)
+                window.contentView = updatedHosting
+            }
+        }
+    }
+
+    @objc private func openMainWindow() {
+        showMainWindow()
     }
 
     // MARK: - Core Startup
@@ -317,6 +374,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
 
         // Actions
+        let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: ",")
+        openApp.target = self
+        menu.addItem(openApp)
+
         let webUI = NSMenuItem(title: "Open Web UI", action: #selector(openWebUI), keyEquivalent: "")
         webUI.target = self
         menu.addItem(webUI)

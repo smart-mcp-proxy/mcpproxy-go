@@ -155,6 +155,39 @@ actor APIClient {
         return response.activities
     }
 
+    // MARK: - Generic Endpoints (for views that need raw data access)
+
+    /// Fetch raw response data from a GET endpoint.
+    /// Used by views that handle their own decoding (e.g., TokensView).
+    func fetchRaw(path: String) async throws -> Data {
+        let (data, _) = try await performRequest(path: path, method: "GET")
+        return data
+    }
+
+    /// Execute a POST action and return the raw response data.
+    /// Used by views that need to inspect the full response (e.g., token creation).
+    @discardableResult
+    func postRaw(path: String, body: [String: Any]? = nil) async throws -> Data {
+        let bodyData: Data?
+        if let body {
+            bodyData = try JSONSerialization.data(withJSONObject: body)
+        } else {
+            bodyData = nil
+        }
+        let (data, _) = try await performRequest(path: path, method: "POST", body: bodyData)
+        return data
+    }
+
+    /// Execute a DELETE action.
+    /// Used by views that need to delete resources (e.g., token revocation).
+    func deleteAction(path: String) async throws {
+        let (data, response) = try await performRequest(path: path, method: "DELETE")
+        if let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
+           !errorResponse.success, let message = errorResponse.error {
+            throw APIClientError.httpError(statusCode: response.statusCode, message: message)
+        }
+    }
+
     // MARK: - Private Helpers
 
     /// Fetch a resource wrapped in the standard `APIResponse` envelope.
