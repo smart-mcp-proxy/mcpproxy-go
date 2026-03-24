@@ -78,20 +78,29 @@ final class AppState: ObservableObject {
     }
 
     /// Aggregate health indicator for the tray icon badge.
+    /// Only considers ENABLED servers. Disabled servers are intentional — don't flag them.
+    /// Uses majority-based logic: green if most are healthy, yellow if some degraded,
+    /// red only if the majority are unhealthy.
     var healthLevel: HealthIndicator {
         guard coreState == .connected else {
             return .disconnected
         }
-        if servers.isEmpty {
+
+        let enabled = servers.filter { $0.enabled }
+        if enabled.isEmpty {
             return .healthy
         }
 
-        let hasUnhealthy = servers.contains { $0.health?.level == "unhealthy" }
-        let hasDegraded = servers.contains { $0.health?.level == "degraded" }
+        let unhealthyCount = enabled.filter { $0.health?.level == "unhealthy" }.count
+        let degradedCount = enabled.filter { $0.health?.level == "degraded" }.count
+        let total = enabled.count
 
-        if hasUnhealthy {
+        // Red only if more than half of enabled servers are unhealthy
+        if unhealthyCount > total / 2 {
             return .unhealthy
-        } else if hasDegraded {
+        }
+        // Yellow if any degraded or unhealthy (but not majority)
+        if unhealthyCount > 0 || degradedCount > 0 {
             return .degraded
         }
         return .healthy
