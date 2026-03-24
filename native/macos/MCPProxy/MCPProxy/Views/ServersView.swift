@@ -58,16 +58,16 @@ struct ServersView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // ScrollView + LazyVStack -- no duplication bugs unlike List
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(appState.servers) { server in
-                            ServerRow(server: server, appState: appState)
-                            Divider().padding(.leading, 34)
-                        }
+                // Use List with .id() keyed on server count to force full rebuild.
+                // ScrollView+LazyVStack had layout issues in NavigationSplitView detail.
+                // The .id() prevents the List duplication bug by forcing a complete
+                // teardown and rebuild when the server set changes.
+                List {
+                    ForEach(appState.servers) { server in
+                        ServerRow(server: server, appState: appState)
                     }
-                    .padding(.horizontal)
                 }
+                .id("servers-\(appState.servers.count)-\(appState.servers.first?.id ?? "")")
             }
         }
     }
