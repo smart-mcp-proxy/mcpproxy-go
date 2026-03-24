@@ -4,13 +4,17 @@
 // Displays and allows editing the MCPProxy configuration file
 // (~/.mcpproxy/mcp_config.json). Shows the raw JSON with basic
 // syntax highlighting and provides save/revert functionality.
+//
+// Reads apiClient from appState instead of taking it as a parameter.
 
 import SwiftUI
 
 // MARK: - Config View
 
 struct ConfigView: View {
-    let apiClient: APIClient?
+    @ObservedObject var appState: AppState
+
+    private var apiClient: APIClient? { appState.apiClient }
 
     @State private var configText = ""
     @State private var originalText = ""

@@ -70,10 +70,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Show in Dock and Cmd+Tab when window is open
         NSApp.setActivationPolicy(.regular)
 
-        let contentView = MainWindow(
-            appState: appState,
-            apiClient: nil
-        )
+        // MainWindow reads apiClient from appState, so we create it once.
+        // When appState.apiClient is set by CoreProcessManager, all views
+        // automatically re-render — no need to replace the NSHostingView.
+        let contentView = MainWindow(appState: appState)
         let hostingView = NSHostingView(rootView: contentView)
 
         let window = NSWindow(
@@ -93,18 +93,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         mainWindow = window
-
-        // Asynchronously wire up the API client
-        Task {
-            let client = await coreManager?.apiClientForActions
-            await MainActor.run {
-                let updatedView = MainWindow(
-                    appState: appState,
-                    apiClient: client
-                )
-                window.contentView = NSHostingView(rootView: updatedView)
-            }
-        }
     }
 
     @objc private func openMainWindow() {

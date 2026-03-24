@@ -1,9 +1,9 @@
 // ActivityView.swift
 // MCPProxy
 //
-// Shows the activity log with a list on the left and detail panel on the right.
-// Supports filtering and refresh. Detail view shows formatted JSON for the
-// selected activity entry.
+// Shows the activity log with summary stats, filter dropdowns for Type/Server/Status,
+// a list on the left, and a detail panel on the right.
+// Reads apiClient from appState instead of taking it as a parameter.
 
 import SwiftUI
 
@@ -11,17 +11,81 @@ import SwiftUI
 
 struct ActivityView: View {
     @ObservedObject var appState: AppState
-    let apiClient: APIClient?
     @State private var activities: [ActivityEntry] = []
     @State private var selectedActivityID: String?
     @State private var isLoading = false
+    @State private var totalCount: Int = 0
+
+    // Summary stats
+    @State private var summary: ActivitySummary?
+    @State private var isSummaryLoading = false
+
+    // Filter state
+    @State private var filterType = "all"
+    @State private var filterServer = "all"
+    @State private var filterStatus = "all"
     @State private var filterText = ""
+
+    private var apiClient: APIClient? { appState.apiClient }
+
+    // Available filter options
+    private let typeOptions: [(label: String, value: String)] = [
+        ("All Types", "all"),
+        ("Tool Call", "tool_call"),
+        ("Quarantine Change", "tool_quarantine_change"),
+        ("System Start", "system_start"),
+        ("System Stop", "system_stop"),
+        ("Config Change", "config_change"),
+        ("Policy Decision", "policy_decision"),
+        ("Server Change", "server_change"),
+    ]
+
+    private let statusOptions: [(label: String, value: String)] = [
+        ("All Statuses", "all"),
+        ("Success", "success"),
+        ("Error", "error"),
+        ("Blocked", "blocked"),
+        ("Description Changed", "tool_description_changed"),
+    ]
+
+    /// Unique server names extracted from the current activity list,
+    /// plus the servers from appState for a more complete list.
+    private var serverOptions: [(label: String, value: String)] {
+        var names = Set<String>()
+        for entry in activities {
+            if let name = entry.serverName, !name.isEmpty {
+                names.insert(name)
+            }
+        }
+        for server in appState.servers {
+            names.insert(server.name)
+        }
+        var options: [(label: String, value: String)] = [("All Servers", "all")]
+        for name in names.sorted() {
+            options.append((name, name))
+        }
+        return options
+    }
+
+    /// Activities filtered by the text search (applied client-side on top of API filters).
+    private var filteredActivities: [ActivityEntry] {
+        guard !filterText.isEmpty else { return activities }
+        let query = filterText.lowercased()
+        return activities.filter { entry in
+            (entry.serverName?.lowercased().contains(query) ?? false) ||
+            (entry.toolName?.lowercased().contains(query) ?? false) ||
+            entry.type.lowercased().contains(query) ||
+            entry.status.lowercased().contains(query)
+        }
+    }
 
     var body: some View {
         HSplitView {
-            // Left: activity list
+            // Left: activity list with filters
             VStack(alignment: .leading, spacing: 0) {
                 activityListHeader
+                summaryStatsBar
+                filterBar
                 Divider()
 
                 if isLoading && activities.isEmpty {
@@ -36,7 +100,7 @@ struct ActivityView: View {
                     }
                 }
             }
-            .frame(minWidth: 350)
+            .frame(minWidth: 400)
 
             // Right: detail panel
             if let selectedID = selectedActivityID,
@@ -48,7 +112,10 @@ struct ActivityView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task { await loadActivities() }
+        .task {
+            await loadSummary()
+            await loadActivities()
+        }
     }
 
     // MARK: - Header
@@ -64,21 +131,101 @@ struct ActivityView: View {
                     .controlSize(.small)
             }
             Button {
-                Task { await loadActivities() }
+                Task {
+                    await loadSummary()
+                    await loadActivities()
+                }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
             .help("Refresh activity log")
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.top)
+        .padding(.bottom, 8)
+    }
 
-        // Search filter
-        HStack {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-            TextField("Filter by server, tool, or type...", text: $filterText)
-                .textFieldStyle(.plain)
+    // MARK: - Summary Stats Bar
+
+    @ViewBuilder
+    private var summaryStatsBar: some View {
+        HStack(spacing: 16) {
+            if let s = summary {
+                SummaryStatPill(label: "Total 24h", value: "\(s.totalCount)", color: .blue)
+                SummaryStatPill(label: "Success", value: "\(s.successCount)", color: .green)
+                SummaryStatPill(label: "Errors", value: "\(s.errorCount)", color: .red)
+                SummaryStatPill(label: "Blocked", value: "\(s.blockedCount)", color: .orange)
+            } else if isSummaryLoading {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading summary...")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Summary unavailable")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - Filter Bar
+
+    @ViewBuilder
+    private var filterBar: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 12) {
+                Picker("Type", selection: $filterType) {
+                    ForEach(typeOptions, id: \.value) { option in
+                        Text(option.label).tag(option.value)
+                    }
+                }
+                .frame(maxWidth: 180)
+                .onChange(of: filterType) { _ in
+                    Task { await loadActivities() }
+                }
+
+                Picker("Server", selection: $filterServer) {
+                    ForEach(serverOptions, id: \.value) { option in
+                        Text(option.label).tag(option.value)
+                    }
+                }
+                .frame(maxWidth: 180)
+                .onChange(of: filterServer) { _ in
+                    Task { await loadActivities() }
+                }
+
+                Picker("Status", selection: $filterStatus) {
+                    ForEach(statusOptions, id: \.value) { option in
+                        Text(option.label).tag(option.value)
+                    }
+                }
+                .frame(maxWidth: 180)
+                .onChange(of: filterStatus) { _ in
+                    Task { await loadActivities() }
+                }
+            }
+
+            // Text search
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search by server, tool, or type...", text: $filterText)
+                    .textFieldStyle(.plain)
+                if !filterText.isEmpty {
+                    Button {
+                        filterText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
         }
         .padding(.horizontal)
         .padding(.bottom, 8)
@@ -102,20 +249,18 @@ struct ActivityView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - Filtering
+    // MARK: - Data Loading
 
-    private var filteredActivities: [ActivityEntry] {
-        guard !filterText.isEmpty else { return activities }
-        let query = filterText.lowercased()
-        return activities.filter { entry in
-            (entry.serverName?.lowercased().contains(query) ?? false) ||
-            (entry.toolName?.lowercased().contains(query) ?? false) ||
-            entry.type.lowercased().contains(query) ||
-            entry.status.lowercased().contains(query)
+    private func loadSummary() async {
+        guard let client = apiClient else { return }
+        isSummaryLoading = true
+        defer { isSummaryLoading = false }
+        do {
+            summary = try await client.activitySummary()
+        } catch {
+            // Non-fatal; summary just won't display
         }
     }
-
-    // MARK: - Data Loading
 
     private func loadActivities() async {
         isLoading = true
@@ -125,12 +270,59 @@ struct ActivityView: View {
             activities = appState.recentActivity
             return
         }
+
+        // Build query string with active filters
+        var queryParts: [String] = ["limit=100"]
+        if filterType != "all" {
+            queryParts.append("type=\(filterType)")
+        }
+        if filterServer != "all" {
+            queryParts.append("server=\(filterServer)")
+        }
+        if filterStatus != "all" {
+            queryParts.append("status=\(filterStatus)")
+        }
+        let queryString = queryParts.joined(separator: "&")
+
         do {
-            activities = try await client.recentActivity(limit: 100)
+            let data = try await client.fetchRaw(path: "/api/v1/activity?\(queryString)")
+            let decoder = JSONDecoder()
+            // Try APIResponse wrapper
+            if let wrapper = try? decoder.decode(APIResponse<ActivityListResponse>.self, from: data),
+               let payload = wrapper.data {
+                activities = payload.activities
+                totalCount = payload.total
+            } else if let direct = try? decoder.decode(ActivityListResponse.self, from: data) {
+                activities = direct.activities
+                totalCount = direct.total
+            }
         } catch {
             // Fall back to cached data on error
             activities = appState.recentActivity
         }
+    }
+}
+
+// MARK: - Summary Stat Pill
+
+struct SummaryStatPill: View {
+    let label: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(value)
+                .font(.subheadline.bold().monospacedDigit())
+                .foregroundStyle(color)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(.quaternary)
+        .cornerRadius(6)
     }
 }
 
@@ -153,7 +345,7 @@ struct ActivityRow: View {
 
                 // Secondary line: type and timestamp
                 HStack(spacing: 6) {
-                    Text(entry.type)
+                    Text(displayType)
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -193,9 +385,23 @@ struct ActivityRow: View {
             parts.append(tool)
         }
         if parts.isEmpty {
-            return entry.type
+            return displayType
         }
         return parts.joined(separator: ":")
+    }
+
+    /// Human-friendly display name for the activity type.
+    private var displayType: String {
+        switch entry.type {
+        case "tool_call": return "Tool Call"
+        case "tool_quarantine_change": return "Quarantine Change"
+        case "system_start": return "System Start"
+        case "system_stop": return "System Stop"
+        case "config_change": return "Config Change"
+        case "policy_decision": return "Policy Decision"
+        case "server_change": return "Server Change"
+        default: return entry.type
+        }
     }
 
     private var statusIcon: String {
@@ -206,6 +412,7 @@ struct ActivityRow: View {
         case "error": return "xmark.circle.fill"
         case "blocked": return "hand.raised.fill"
         case "success": return "checkmark.circle.fill"
+        case "tool_description_changed": return "pencil.circle.fill"
         default: return "circle.fill"
         }
     }
@@ -215,6 +422,7 @@ struct ActivityRow: View {
         case "error": return .red
         case "blocked": return .orange
         case "success": return .green
+        case "tool_description_changed": return .yellow
         default: return .gray
         }
     }
@@ -363,6 +571,7 @@ struct ActivityDetailView: View {
         case "error": return "xmark.circle.fill"
         case "blocked": return "hand.raised.fill"
         case "success": return "checkmark.circle.fill"
+        case "tool_description_changed": return "pencil.circle.fill"
         default: return "circle.fill"
         }
     }
@@ -372,6 +581,7 @@ struct ActivityDetailView: View {
         case "error": return .red
         case "blocked": return .orange
         case "success": return .green
+        case "tool_description_changed": return .yellow
         default: return .gray
         }
     }

@@ -3,6 +3,9 @@
 //
 // Root SwiftUI view for the main application window.
 // Uses NavigationSplitView with a sidebar for navigation between sections.
+//
+// The apiClient is read from appState (not passed as a parameter) so that
+// the window never needs to be recreated when the client becomes available.
 
 import SwiftUI
 
@@ -30,7 +33,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
 struct MainWindow: View {
     @ObservedObject var appState: AppState
-    let apiClient: APIClient?
     @State private var selectedItem: SidebarItem? = .servers
 
     var body: some View {
@@ -53,13 +55,13 @@ struct MainWindow: View {
     private func detailView(for item: SidebarItem) -> some View {
         switch item {
         case .servers:
-            ServersView(appState: appState, apiClient: apiClient)
+            ServersView(appState: appState)
         case .activity:
-            ActivityView(appState: appState, apiClient: apiClient)
+            ActivityView(appState: appState)
         case .secrets:
-            SecretsView(apiClient: apiClient)
+            SecretsView(appState: appState)
         case .config:
-            ConfigView(apiClient: apiClient)
+            ConfigView(appState: appState)
         }
     }
 }

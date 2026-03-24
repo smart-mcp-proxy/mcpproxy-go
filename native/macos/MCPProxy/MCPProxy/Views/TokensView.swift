@@ -4,6 +4,8 @@
 // Displays agent tokens with name, creation date, permissions, and
 // server restrictions. Supports creating and revoking tokens.
 // Uses the /api/v1/tokens REST API endpoints.
+//
+// Reads apiClient from appState instead of taking it as a parameter.
 
 import SwiftUI
 
@@ -37,12 +39,14 @@ struct TokensListResponse: Codable {
 // MARK: - Tokens View
 
 struct TokensView: View {
-    let apiClient: APIClient?
+    @ObservedObject var appState: AppState
     @State private var tokens: [AgentToken] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var showCreateSheet = false
     @State private var selectedTokenID: String?
+
+    private var apiClient: APIClient? { appState.apiClient }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -85,7 +89,7 @@ struct TokensView: View {
         }
         .task { await loadTokens() }
         .sheet(isPresented: $showCreateSheet) {
-            CreateTokenSheet(apiClient: apiClient) { _ in
+            CreateTokenSheet(appState: appState) { _ in
                 Task { await loadTokens() }
             }
         }
@@ -268,8 +272,10 @@ struct TokenRow: View {
 // MARK: - Create Token Sheet
 
 struct CreateTokenSheet: View {
-    let apiClient: APIClient?
+    @ObservedObject var appState: AppState
     let onCreated: (String) -> Void
+
+    private var apiClient: APIClient? { appState.apiClient }
 
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""

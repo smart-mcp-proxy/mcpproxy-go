@@ -52,6 +52,13 @@ final class AppState: ObservableObject {
     @Published var sensitiveDataAlertCount: Int = 0
     @Published var quarantinedToolsCount: Int = 0
 
+    // MARK: API Client (shared with all views via AppState)
+
+    /// The API client for the running core, set once connected.
+    /// Views read this instead of receiving it as a parameter,
+    /// which avoids the need to replace NSHostingView when the client becomes available.
+    @Published var apiClient: APIClient?
+
     // MARK: Metadata
 
     @Published var version: String = ""

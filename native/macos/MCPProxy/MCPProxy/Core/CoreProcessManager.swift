@@ -133,6 +133,7 @@ actor CoreProcessManager {
         }
         sseClient = nil
         apiClient = nil
+        await MainActor.run { appState.apiClient = nil }
 
         // Terminate the process if we own it
         if let process, process.isRunning {
@@ -435,6 +436,7 @@ actor CoreProcessManager {
         }
 
         apiClient = client
+        await MainActor.run { appState.apiClient = client }
 
         // Create SSE client — uses TCP (not socket) for streaming compatibility
         NSLog("[MCPProxy] connectToCore: creating SSEClient (TCP, apiKey=%@)",

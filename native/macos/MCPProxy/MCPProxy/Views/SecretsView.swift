@@ -3,35 +3,55 @@
 //
 // Displays secrets stored in the system keyring and environment variables
 // referenced in server configurations. Matches the Web UI Secrets page.
+//
+// Uses the /api/v1/secrets/config endpoint which returns the actual response
+// shape with secret_ref objects and is_set booleans.
 
 import SwiftUI
 
-// MARK: - Secret Model
+// MARK: - Secret Models (matches /api/v1/secrets/config response)
 
-struct SecretEntry: Codable, Identifiable, Equatable {
-    var id: String { name }
+/// Reference info for a single secret in the configuration.
+struct SecretRefInfo: Codable, Equatable {
+    let type: String
     let name: String
-    let type: String        // "keyring" or "env"
+    let original: String
+}
+
+/// A secret entry as returned by the secrets config endpoint.
+struct ConfigSecret: Codable, Identifiable, Equatable {
+    var id: String { secretRef.name }
+
+    let secretRef: SecretRefInfo
     let isSet: Bool
-    let reference: String?  // e.g. "${keyring:name}"
-    let usedBy: [String]?
 
     enum CodingKeys: String, CodingKey {
-        case name, type, reference
+        case secretRef = "secret_ref"
         case isSet = "is_set"
-        case usedBy = "used_by"
     }
 }
 
-struct SecretsResponse: Codable {
-    let secrets: [SecretEntry]
+/// The data payload inside the APIResponse wrapper for /api/v1/secrets/config.
+struct ConfigSecretsResponse: Codable {
+    let secrets: [ConfigSecret]?
+    let environmentVars: [ConfigSecret]?
+    let totalSecrets: Int?
+    let totalEnvVars: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case secrets
+        case environmentVars = "environment_vars"
+        case totalSecrets = "total_secrets"
+        case totalEnvVars = "total_env_vars"
+    }
 }
 
 // MARK: - Secrets View
 
 struct SecretsView: View {
-    let apiClient: APIClient?
-    @State private var secrets: [SecretEntry] = []
+    @ObservedObject var appState: AppState
+    @State private var secrets: [ConfigSecret] = []
+    @State private var envVars: [ConfigSecret] = []
     @State private var isLoading = false
     @State private var searchText = ""
     @State private var filterType = "all"
@@ -40,20 +60,34 @@ struct SecretsView: View {
     @State private var newSecretValue = ""
     @State private var errorMessage: String?
 
-    private var filteredSecrets: [SecretEntry] {
-        var result = secrets
-        if filterType == "keyring" {
-            result = result.filter { $0.type == "keyring" }
-        } else if filterType == "env" {
-            result = result.filter { $0.type == "env" }
-        } else if filterType == "missing" {
-            result = result.filter { !$0.isSet }
+    private var apiClient: APIClient? { appState.apiClient }
+
+    /// All entries combined for display.
+    private var allEntries: [ConfigSecret] {
+        secrets + envVars
+    }
+
+    private var filteredEntries: [ConfigSecret] {
+        var result: [ConfigSecret]
+        switch filterType {
+        case "keyring":
+            result = secrets
+        case "env":
+            result = envVars
+        case "missing":
+            result = allEntries.filter { !$0.isSet }
+        default:
+            result = allEntries
         }
         if !searchText.isEmpty {
-            result = result.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+            result = result.filter { $0.secretRef.name.localizedCaseInsensitiveContains(searchText) }
         }
         return result
     }
+
+    private var keyringCount: Int { secrets.count }
+    private var envCount: Int { envVars.count }
+    private var missingCount: Int { allEntries.filter { !$0.isSet }.count }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -79,9 +113,9 @@ struct SecretsView: View {
 
             // Stats bar
             HStack(spacing: 20) {
-                StatBadge(label: "Keyring", value: "\(secrets.filter { $0.type == "keyring" }.count)", color: .blue)
-                StatBadge(label: "Env Vars", value: "\(secrets.filter { $0.type == "env" }.count)", color: .green)
-                StatBadge(label: "Missing", value: "\(secrets.filter { !$0.isSet }.count)", color: .red)
+                StatBadge(label: "Keyring", value: "\(keyringCount)", color: .blue)
+                StatBadge(label: "Env Vars", value: "\(envCount)", color: .green)
+                StatBadge(label: "Missing", value: "\(missingCount)", color: .red)
                 Spacer()
             }
             .padding(.horizontal)
@@ -90,10 +124,10 @@ struct SecretsView: View {
             // Filter bar
             HStack {
                 Picker("Filter", selection: $filterType) {
-                    Text("All (\(secrets.count))").tag("all")
-                    Text("Keyring (\(secrets.filter { $0.type == "keyring" }.count))").tag("keyring")
-                    Text("Env Vars (\(secrets.filter { $0.type == "env" }.count))").tag("env")
-                    Text("Missing (\(secrets.filter { !$0.isSet }.count))").tag("missing")
+                    Text("All (\(allEntries.count))").tag("all")
+                    Text("Keyring (\(keyringCount))").tag("keyring")
+                    Text("Env Vars (\(envCount))").tag("env")
+                    Text("Missing (\(missingCount))").tag("missing")
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 500)
@@ -112,7 +146,7 @@ struct SecretsView: View {
             if isLoading {
                 ProgressView("Loading secrets...")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if filteredSecrets.isEmpty {
+            } else if filteredEntries.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "key")
                         .font(.system(size: 48))
@@ -124,8 +158,8 @@ struct SecretsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
-                    ForEach(filteredSecrets) { secret in
-                        SecretRow(secret: secret, apiClient: apiClient, onDelete: {
+                    ForEach(filteredEntries) { entry in
+                        SecretRow(entry: entry, appState: appState, onDelete: {
                             Task { await loadSecrets() }
                         })
                     }
@@ -183,13 +217,16 @@ struct SecretsView: View {
         defer { isLoading = false }
         guard let client = apiClient else { return }
         do {
-            let data = try await client.fetchRaw(path: "/api/v1/secrets")
+            let data = try await client.fetchRaw(path: "/api/v1/secrets/config")
             let decoder = JSONDecoder()
-            if let wrapper = try? decoder.decode(APIResponse<SecretsResponse>.self, from: data),
+            // Try the standard APIResponse wrapper first
+            if let wrapper = try? decoder.decode(APIResponse<ConfigSecretsResponse>.self, from: data),
                let payload = wrapper.data {
-                secrets = payload.secrets
-            } else if let direct = try? decoder.decode(SecretsResponse.self, from: data) {
-                secrets = direct.secrets
+                secrets = payload.secrets ?? []
+                envVars = payload.environmentVars ?? []
+            } else if let direct = try? decoder.decode(ConfigSecretsResponse.self, from: data) {
+                secrets = direct.secrets ?? []
+                envVars = direct.environmentVars ?? []
             }
         } catch {}
     }
@@ -213,55 +250,49 @@ struct SecretsView: View {
 // MARK: - Secret Row
 
 struct SecretRow: View {
-    let secret: SecretEntry
-    let apiClient: APIClient?
+    let entry: ConfigSecret
+    @ObservedObject var appState: AppState
     let onDelete: () -> Void
+
+    private var apiClient: APIClient? { appState.apiClient }
 
     var body: some View {
         HStack(spacing: 12) {
             // Type badge
-            Text(secret.type.capitalized)
+            Text(entry.secretRef.type.capitalized)
                 .font(.caption2.bold())
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(secret.type == "keyring" ? Color.blue.opacity(0.2) : Color.green.opacity(0.2))
-                .foregroundStyle(secret.type == "keyring" ? .blue : .green)
+                .background(entry.secretRef.type == "keyring" ? Color.blue.opacity(0.2) : Color.green.opacity(0.2))
+                .foregroundStyle(entry.secretRef.type == "keyring" ? .blue : .green)
                 .cornerRadius(4)
 
             // Status indicator
             Circle()
-                .fill(secret.isSet ? Color.green : Color.red)
+                .fill(entry.isSet ? Color.green : Color.red)
                 .frame(width: 8, height: 8)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(secret.name)
+                Text(entry.secretRef.name)
                     .font(.headline)
-                if let ref = secret.reference, !ref.isEmpty {
-                    Text(ref)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
+                Text(entry.secretRef.original)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
 
             Spacer()
 
-            if let servers = secret.usedBy, !servers.isEmpty {
-                Text("Used by \(servers.count) server(s)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if !secret.isSet {
+            if !entry.isSet {
                 Label("Missing", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
             }
 
-            if secret.type == "keyring" {
+            if entry.secretRef.type == "keyring" {
                 Button(role: .destructive) {
                     Task {
-                        try? await apiClient?.deleteAction(path: "/api/v1/secrets/\(secret.name)")
+                        try? await apiClient?.deleteAction(path: "/api/v1/secrets/\(entry.secretRef.name)")
                         onDelete()
                     }
                 } label: {

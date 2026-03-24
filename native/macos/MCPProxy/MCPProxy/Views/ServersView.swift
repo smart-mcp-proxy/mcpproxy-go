@@ -3,6 +3,9 @@
 //
 // Uses ScrollView + LazyVStack instead of List to avoid SwiftUI's
 // List duplication bug with @ObservedObject / @Published arrays.
+//
+// Reads apiClient from appState so the view never needs to be recreated
+// when the client becomes available after core startup.
 
 import SwiftUI
 
@@ -10,7 +13,6 @@ import SwiftUI
 
 struct ServersView: View {
     @ObservedObject var appState: AppState
-    let apiClient: APIClient?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -28,6 +30,14 @@ struct ServersView: View {
 
                 Button {
                     // Force refresh from API
+                    Task {
+                        if let client = appState.apiClient {
+                            let servers = try? await client.servers()
+                            if let servers {
+                                await appState.updateServers(servers)
+                            }
+                        }
+                    }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -48,11 +58,11 @@ struct ServersView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // ScrollView + LazyVStack — no duplication bugs unlike List
+                // ScrollView + LazyVStack -- no duplication bugs unlike List
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(appState.servers) { server in
-                            ServerRow(server: server, apiClient: apiClient)
+                            ServerRow(server: server, appState: appState)
                             Divider().padding(.leading, 34)
                         }
                     }
@@ -67,8 +77,10 @@ struct ServersView: View {
 
 struct ServerRow: View {
     let server: ServerStatus
-    let apiClient: APIClient?
+    @ObservedObject var appState: AppState
     @State private var isPerformingAction = false
+
+    private var apiClient: APIClient? { appState.apiClient }
 
     var body: some View {
         HStack(spacing: 12) {
