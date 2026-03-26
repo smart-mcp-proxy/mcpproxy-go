@@ -221,11 +221,30 @@ actor APIClient {
         if let format { body["format"] = format }
         let data = try await postRaw(path: "/api/v1/servers/import/path", body: body)
         let decoder = JSONDecoder()
+
+        // Try the standard API envelope: {"success": true, "data": {...}}
         if let wrapper = try? decoder.decode(APIResponse<ImportResponse>.self, from: data),
            let payload = wrapper.data {
             return payload
         }
-        return try decoder.decode(ImportResponse.self, from: data)
+
+        // Check for an API error envelope: {"success": false, "error": "..."}
+        if let errorResp = try? decoder.decode(APIErrorResponse.self, from: data),
+           !errorResp.success, let message = errorResp.error {
+            throw APIClientError.httpError(statusCode: 400, message: message)
+        }
+
+        // Fallback: try to decode the full body as ImportResponse directly.
+        // If this also fails, surface the raw body so the caller can show something useful.
+        do {
+            return try decoder.decode(ImportResponse.self, from: data)
+        } catch {
+            let preview = String(data: data.prefix(200), encoding: .utf8) ?? "binary"
+            throw APIClientError.decodingError(
+                underlying: NSError(domain: "ImportDecode", code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Cannot decode import response: \(preview)"])
+            )
+        }
     }
 
     // MARK: - Tool Search

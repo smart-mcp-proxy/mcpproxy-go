@@ -569,6 +569,7 @@ actor CoreProcessManager {
     private func refreshState() async {
         await refreshServers()
         await refreshActivity()
+        await refreshTokenMetrics()
     }
 
     /// Fetch the server list and update appState.
@@ -590,6 +591,19 @@ actor CoreProcessManager {
             await appState.updateActivity(activity)
         } catch {
             // Non-fatal; we'll retry on the next refresh
+        }
+    }
+
+    /// Fetch token metrics from the status endpoint and update appState.
+    private func refreshTokenMetrics() async {
+        guard let apiClient else { return }
+        do {
+            let status = try await apiClient.status()
+            if let metrics = status.upstreamStats?.tokenMetrics {
+                await MainActor.run { appState.tokenMetrics = metrics }
+            }
+        } catch {
+            // Non-fatal; token metrics are optional
         }
     }
 

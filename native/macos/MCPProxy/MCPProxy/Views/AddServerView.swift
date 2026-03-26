@@ -193,11 +193,13 @@ struct ImportServerForm: View {
     }
 
     private func importConfig(_ config: CanonicalConfigPath) async {
-        guard let client = apiClient else { return }
+        guard let client = apiClient else {
+            errorMessage = "Not connected to MCPProxy core"
+            return
+        }
         importingPath = config.path
         resultMessage = nil
         errorMessage = nil
-        defer { importingPath = nil }
         do {
             let response = try await client.importFromPath(config.path, format: config.format)
             if let summary = response.summary {
@@ -212,6 +214,7 @@ struct ImportServerForm: View {
         } catch {
             errorMessage = "Import failed: \(error.localizedDescription)"
         }
+        importingPath = nil
     }
 }
 
