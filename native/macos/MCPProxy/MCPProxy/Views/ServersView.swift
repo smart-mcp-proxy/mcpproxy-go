@@ -74,7 +74,45 @@ struct ServersView: View {
             .padding()
             .accessibilityIdentifier("servers-header")
 
+            // Prominent "Add Server" button bar
+            HStack {
+                Button {
+                    showAddServer = true
+                } label: {
+                    Label("Add Server", systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
             Divider()
+
+            if servers.isEmpty && !isLoading {
+                // Empty state when no servers
+                VStack(spacing: 16) {
+                    Spacer()
+                    Image(systemName: "server.rack")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tertiary)
+                    Text("No Servers Configured")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    Text("Add your first MCP server to get started")
+                        .font(.body)
+                        .foregroundStyle(.tertiary)
+                    Button {
+                        showAddServer = true
+                    } label: {
+                        Label("Add Your First Server", systemImage: "plus.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
 
             // AppKit NSTableView -- no duplication bugs
             ServerTableView(
@@ -172,6 +210,12 @@ struct ServerTableView: NSViewRepresentable {
 
         @objc func tableViewDoubleClicked(_ sender: NSTableView) {
             let row = sender.clickedRow
+            guard row >= 0, row < servers.count else { return }
+            onDoubleClick?(servers[row])
+        }
+
+        @objc func infoButtonClicked(_ sender: NSButton) {
+            let row = sender.tag
             guard row >= 0, row < servers.count else { return }
             onDoubleClick?(servers[row])
         }
@@ -377,6 +421,16 @@ struct ServerTableView: NSViewRepresentable {
                 toolsBadge.layer?.cornerRadius = 3
                 stack.addArrangedSubview(toolsBadge)
             }
+
+            // Info button for details
+            let infoButton = NSButton(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
+            infoButton.bezelStyle = .circular
+            infoButton.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Details")
+            infoButton.isBordered = false
+            infoButton.target = self
+            infoButton.action = #selector(infoButtonClicked(_:))
+            infoButton.tag = row
+            stack.addArrangedSubview(infoButton)
 
             // Chevron indicator for double-click
             let chevron = NSTextField(labelWithString: "\u{203A}")

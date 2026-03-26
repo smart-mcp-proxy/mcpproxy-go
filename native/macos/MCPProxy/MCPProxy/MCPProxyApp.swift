@@ -149,10 +149,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func showAddServer() {
         showMainWindow()
-        // The Add Server sheet is triggered from ServersView's + button.
-        // Opening the main window with Servers tab is the entry point.
-        // For a more direct approach, we post a notification that ServersView observes.
-        NotificationCenter.default.post(name: .showAddServer, object: nil)
+        // Post notification after a short delay so the window and ServersView
+        // have time to appear and register their notification observer.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NotificationCenter.default.post(name: .showAddServer, object: nil)
+        }
     }
 
     // NSWindowDelegate — hide from Dock when window closes

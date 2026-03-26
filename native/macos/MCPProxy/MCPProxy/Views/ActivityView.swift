@@ -453,10 +453,36 @@ struct ActivityRow: View {
 
 struct ActivityDetailView: View {
     let entry: ActivityEntry
+    @State private var copiedField: String?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                // Sensitive data warning banner
+                if entry.hasSensitiveData == true {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.title3)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Sensitive Data Detected")
+                                .font(.headline)
+                            if let severity = entry.maxSeverity {
+                                Text("Max severity: \(severity)")
+                                    .font(.subheadline)
+                            }
+                            if let types = entry.detectionTypes, !types.isEmpty {
+                                Text(types.joined(separator: ", "))
+                                    .font(.caption)
+                            }
+                        }
+                        Spacer()
+                    }
+                    .foregroundStyle(.white)
+                    .padding(12)
+                    .background(Color.red)
+                    .cornerRadius(8)
+                }
+
                 // Header
                 HStack {
                     Image(systemName: detailStatusIcon)
@@ -507,9 +533,13 @@ struct ActivityDetailView: View {
                 if let errorMessage = entry.errorMessage, !errorMessage.isEmpty {
                     Divider()
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Error")
-                            .font(.headline)
-                            .foregroundStyle(.red)
+                        HStack {
+                            Text("Error")
+                                .font(.headline)
+                                .foregroundStyle(.red)
+                            Spacer()
+                            copyButton(text: errorMessage, field: "error")
+                        }
                         Text(errorMessage)
                             .font(.system(.body, design: .monospaced))
                             .foregroundStyle(.red.opacity(0.8))
@@ -520,34 +550,28 @@ struct ActivityDetailView: View {
                             .cornerRadius(6)
                     }
                 }
-
-                // Sensitive data detections
-                if entry.hasSensitiveData == true {
-                    Divider()
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label("Sensitive Data Detected", systemImage: "exclamationmark.triangle.fill")
-                            .font(.headline)
-                            .foregroundStyle(.red)
-
-                        if let severity = entry.maxSeverity {
-                            Text("Max severity: \(severity)")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        if let types = entry.detectionTypes, !types.isEmpty {
-                            Text("Detection types: \(types.joined(separator: ", "))")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
             }
             .padding()
         }
     }
 
     // MARK: - Helpers
+
+    @ViewBuilder
+    private func copyButton(text: String, field: String) -> some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copiedField = field
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if copiedField == field { copiedField = nil }
+            }
+        } label: {
+            Image(systemName: copiedField == field ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(.borderless)
+        .help("Copy to clipboard")
+    }
 
     @ViewBuilder
     private func metadataRow(label: String, value: String) -> some View {

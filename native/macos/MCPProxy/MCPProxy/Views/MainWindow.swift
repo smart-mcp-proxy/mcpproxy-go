@@ -24,10 +24,10 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var color: Color {
         switch self {
-        case .dashboard: return .purple
+        case .dashboard: return .indigo
         case .servers: return .blue
         case .activity: return .orange
-        case .secrets: return .yellow
+        case .secrets: return .green
         case .config: return .gray
         }
     }
@@ -43,7 +43,7 @@ struct MainWindow: View {
                 ForEach(SidebarItem.allCases) { item in
                     Label {
                         Text(item.rawValue)
-                            .font(.body)
+                            .font(.system(size: 15))
                     } icon: {
                         Image(systemName: item.icon)
                             .font(.system(size: 14))
@@ -53,6 +53,7 @@ struct MainWindow: View {
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                     .tag(item)
+                    .padding(.vertical, 2)
                     .accessibilityIdentifier("sidebar-\(item.rawValue)")
                 }
             }
