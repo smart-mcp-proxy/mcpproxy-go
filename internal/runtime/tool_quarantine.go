@@ -13,8 +13,13 @@ import (
 )
 
 // calculateToolApprovalHash computes a stable SHA-256 hash for tool-level quarantine.
-// Uses toolName + description + schemaJSON + annotationsJSON for consistent detection of changes.
-// Annotations are included to detect "annotation rug-pulls" (e.g., flipping destructiveHint).
+// Uses toolName + description + schemaJSON only.
+// Annotations are intentionally EXCLUDED because:
+// 1. They are metadata hints, not functional changes to the tool
+// 2. They may not be stable across reconnections (some servers omit them)
+// 3. Including them caused false "tool_description_changed" spam on every reconnect
+// 4. This matches the upstream client's hash.ComputeToolHash approach
+// The annotations parameter is kept for API compatibility but ignored.
 func calculateToolApprovalHash(toolName, description, schemaJSON string, annotations *config.ToolAnnotations) string {
 	h := sha256.New()
 	h.Write([]byte(toolName))
@@ -22,13 +27,7 @@ func calculateToolApprovalHash(toolName, description, schemaJSON string, annotat
 	h.Write([]byte(description))
 	h.Write([]byte("|"))
 	h.Write([]byte(schemaJSON))
-	if annotations != nil {
-		annotationsJSON, err := json.Marshal(annotations)
-		if err == nil {
-			h.Write([]byte("|"))
-			h.Write(annotationsJSON)
-		}
-	}
+	// Annotations excluded from hash — see comment above
 	return hex.EncodeToString(h.Sum(nil))
 }
 

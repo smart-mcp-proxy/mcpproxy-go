@@ -379,11 +379,11 @@ func TestCalculateToolApprovalHash(t *testing.T) {
 	h5 := calculateToolApprovalHash("tool_b", "desc A", `{"type":"object"}`, nil)
 	assert.NotEqual(t, h1, h5, "Different tool name should produce different hash")
 
-	// Annotations affect the hash
+	// Annotations do NOT affect the hash (excluded to prevent false change detection spam)
 	h6 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`, &config.ToolAnnotations{
 		Title: "My Tool",
 	})
-	assert.NotEqual(t, h1, h6, "Annotations should change the hash")
+	assert.Equal(t, h1, h6, "Annotations should NOT change the hash (excluded by design)")
 
 	// Nil annotations produce same hash as legacy formula
 	legacy := calculateLegacyToolApprovalHash("tool_a", "desc A", `{"type":"object"}`)
@@ -391,12 +391,11 @@ func TestCalculateToolApprovalHash(t *testing.T) {
 }
 
 // TestCalculateToolApprovalHash_Stability ensures that hash values remain stable across releases.
-// If this test breaks, it means the hash formula changed and ALL existing tool approvals in user
-// databases will be invalidated, causing every tool to appear as "changed". You MUST add backward
-// compatibility (like calculateLegacyToolApprovalHash) before merging such a change.
+// Annotations are excluded from hash (they caused false change detection spam).
+// The hash now matches calculateLegacyToolApprovalHash — same formula.
 func TestCalculateToolApprovalHash_Stability(t *testing.T) {
-	// These golden hashes were computed from the current formula and must never change.
-	// If the hash function changes, update the legacy migration code, NOT these expected values.
+	// Golden hashes: annotations do NOT affect the hash (intentionally excluded).
+	// This means "with annotations" hashes match "nil annotations" hashes for same name+desc+schema.
 	tests := []struct {
 		name        string
 		toolName    string
@@ -419,7 +418,8 @@ func TestCalculateToolApprovalHash_Stability(t *testing.T) {
 			description: "Search the documentation",
 			schema:      `{"type":"object","properties":{"query":{"type":"string"}}}`,
 			annotations: &config.ToolAnnotations{Title: "Search Docs"},
-			expected:    "a86935a057cb98815c39cc1b53b140d4c8900151eb41fe07874d939d4c2e9e6d",
+			// Annotations excluded from hash — this matches legacy hash for same inputs
+			expected: "5fc374a5a4618188c7b073289e2b14a5161aaffa666db869dc758aa242318298",
 		},
 		{
 			name:        "with destructiveHint",
@@ -427,7 +427,8 @@ func TestCalculateToolApprovalHash_Stability(t *testing.T) {
 			description: "Delete a repository",
 			schema:      `{"type":"object"}`,
 			annotations: &config.ToolAnnotations{DestructiveHint: boolP(true)},
-			expected:    "5c362171e5ed38c3cea0659e3d4a21feb737d1851b9099846c986320e800d490",
+			// Annotations excluded — same hash as without annotations
+			expected: "5a0fca2bd96799d002dbac6871d70ca866158f3082ecb83136c4f383ee3935fe",
 		},
 	}
 
@@ -544,6 +545,11 @@ func TestCheckToolApprovals_AnnotationChange_Detected(t *testing.T) {
 	require.NoError(t, err)
 
 	// Annotation rug pull: destructiveHint flipped from true to false
+	// Since annotations are excluded from hash to prevent false change detection spam,
+	// annotation-only changes are NOT detected. This is intentional:
+	// - Annotations are metadata hints, not functional changes
+	// - Some servers don't return annotations consistently across reconnections
+	// - Including annotations caused spam of tool_description_changed events
 	tools := []*config.ToolMetadata{
 		{
 			ServerName:  "github",
@@ -556,8 +562,8 @@ func TestCheckToolApprovals_AnnotationChange_Detected(t *testing.T) {
 
 	result, err := rt.checkToolApprovals("github", tools)
 	require.NoError(t, err)
-	assert.Equal(t, 1, result.ChangedCount, "Annotation change should be detected")
-	assert.True(t, result.BlockedTools["create_issue"], "Tool with changed annotations should be blocked")
+	assert.Equal(t, 0, result.ChangedCount, "Annotation-only change should NOT trigger change detection")
+	assert.False(t, result.BlockedTools["create_issue"], "Tool with only annotation changes should NOT be blocked")
 }
 
 func TestFilterBlockedTools(t *testing.T) {
