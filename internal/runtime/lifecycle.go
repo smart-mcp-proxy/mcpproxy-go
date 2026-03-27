@@ -960,40 +960,6 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
 
-	// Reload configuration synchronously to ensure server state is updated before returning
-	if err := r.LoadConfiguredServers(nil); err != nil {
-		r.logger.Error("Failed to synchronize runtime after enable toggle", zap.Error(err))
-		return fmt.Errorf("failed to reload configuration: %w", err)
-	}
-
-	// When disabling a server, remove its tools from the search index
-	// This ensures disabled server tools don't appear in search results
-	if !enabled && r.indexManager != nil {
-		if err := r.indexManager.DeleteServerTools(serverName); err != nil {
-			r.logger.Warn("Failed to remove disabled server tools from index",
-				zap.String("server", serverName),
-				zap.Error(err))
-		} else {
-			r.logger.Info("Removed disabled server tools from search index",
-				zap.String("server", serverName))
-		}
-	}
-
-	// Wait for the server to start connecting (LoadConfiguredServers spawns goroutines)
-	// This ensures callers don't race with connection establishment
-	// The goroutine needs time to spawn and then AddServer needs to initiate connection
-	if enabled {
-		time.Sleep(5 * time.Second)
-		r.logger.Info("Waited for server to begin connection attempt",
-			zap.String("server", serverName),
-			zap.Bool("enabled", enabled))
-	}
-
-	r.emitServersChanged("enable_toggle", map[string]any{
-		"server":  serverName,
-		"enabled": enabled,
-	})
-
 	// Emit config change activity for audit trail (Spec 024)
 	action := "server_disabled"
 	if enabled {
@@ -1001,7 +967,34 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 	}
 	r.EmitActivityConfigChange(action, serverName, "api", []string{"enabled"}, map[string]interface{}{"enabled": !enabled}, map[string]interface{}{"enabled": enabled})
 
-	r.HandleUpstreamServerChange(r.AppContext())
+	// Perform heavy operations (server reload, reconnection, reindexing) asynchronously
+	// so the HTTP handler returns immediately after the storage write.
+	// The SSE event is emitted after completion so the UI updates.
+	go func() {
+		if err := r.LoadConfiguredServers(nil); err != nil {
+			r.logger.Error("Failed to synchronize runtime after enable toggle", zap.Error(err))
+		}
+
+		// When disabling a server, remove its tools from the search index
+		// This ensures disabled server tools don't appear in search results
+		if !enabled && r.indexManager != nil {
+			if err := r.indexManager.DeleteServerTools(serverName); err != nil {
+				r.logger.Warn("Failed to remove disabled server tools from index",
+					zap.String("server", serverName),
+					zap.Error(err))
+			} else {
+				r.logger.Info("Removed disabled server tools from search index",
+					zap.String("server", serverName))
+			}
+		}
+
+		r.HandleUpstreamServerChange(r.AppContext())
+
+		r.emitServersChanged("enable_toggle", map[string]any{
+			"server":  serverName,
+			"enabled": enabled,
+		})
+	}()
 
 	return nil
 }
@@ -1129,7 +1122,8 @@ func (r *Runtime) BulkEnableServers(serverNames []string, enabled bool) (map[str
 }
 
 // RestartServer restarts an upstream server by disconnecting and reconnecting it.
-// This is a synchronous operation that waits for the restart to complete.
+// Validation and disconnect are synchronous; reconnection and reindexing happen
+// asynchronously so the caller (HTTP handler) returns immediately.
 func (r *Runtime) RestartServer(serverName string) error {
 	r.logger.Info("Request to restart server", zap.String("server", serverName))
 
@@ -1151,7 +1145,7 @@ func (r *Runtime) RestartServer(serverName string) error {
 		return fmt.Errorf("server '%s' not found in configuration", serverName)
 	}
 
-	// If server is not enabled, enable it first
+	// If server is not enabled, enable it first (EnableServer is already async-safe)
 	if !serverConfig.Enabled {
 		r.logger.Info("Server is disabled, enabling it",
 			zap.String("server", serverName))
@@ -1161,15 +1155,22 @@ func (r *Runtime) RestartServer(serverName string) error {
 	// Get the client to restart
 	client, exists := r.upstreamManager.GetClient(serverName)
 	if !exists {
-		// Server is enabled but client doesn't exist, try to add it
+		// Server is enabled but client doesn't exist, add it asynchronously
 		r.logger.Info("Server client not found, attempting to create and connect",
 			zap.String("server", serverName))
-		if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
-			return fmt.Errorf("failed to add server '%s': %w", serverName, err)
-		}
-		// Wait to allow the connection attempt to begin
-		time.Sleep(2 * time.Second)
-		r.logger.Info("Successfully added server", zap.String("server", serverName))
+		go func() {
+			if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
+				r.logger.Error("Failed to add server during restart",
+					zap.String("server", serverName),
+					zap.Error(err))
+				return
+			}
+			r.logger.Info("Successfully added server", zap.String("server", serverName))
+			r.emitServersChanged("restart", map[string]any{
+				"server": serverName,
+				"reason": "server_added",
+			})
+		}()
 		return nil
 	}
 
@@ -1178,7 +1179,7 @@ func (r *Runtime) RestartServer(serverName string) error {
 	r.logger.Info("Removing existing client to recreate with fresh secret resolution",
 		zap.String("server", serverName))
 
-	// Disconnect and remove the old client
+	// Disconnect and remove the old client synchronously (fast operation)
 	if err := client.Disconnect(); err != nil {
 		r.logger.Warn("Error disconnecting server during restart",
 			zap.String("server", serverName),
@@ -1188,32 +1189,23 @@ func (r *Runtime) RestartServer(serverName string) error {
 	// Remove the client from the manager (this will clean up resources)
 	r.upstreamManager.RemoveServer(serverName)
 
-	// Wait a bit for cleanup
-	time.Sleep(500 * time.Millisecond)
-
-	// Create a completely new client with fresh secret resolution
-	r.logger.Info("Creating new client with fresh secret resolution",
-		zap.String("server", serverName))
-
-	if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
-		r.logger.Error("Failed to recreate server after restart",
-			zap.String("server", serverName),
-			zap.Error(err))
-		return fmt.Errorf("failed to recreate server '%s': %w", serverName, err)
-	}
-
-	// Wait to allow the connection attempt to begin
-	// AddServer starts connection asynchronously, so we give it time to initiate
-	time.Sleep(2 * time.Second)
-
-	r.logger.Info("Successfully recreated server with fresh secrets",
-		zap.String("server", serverName))
-
-	r.logger.Info("Successfully restarted server", zap.String("server", serverName))
-
-	// Trigger tool reindexing asynchronously and emit SSE event AFTER completion
-	// to ensure frontend receives accurate tool counts (fixes stale stats race condition)
+	// Recreate the client and reindex tools asynchronously
 	go func() {
+		r.logger.Info("Creating new client with fresh secret resolution",
+			zap.String("server", serverName))
+
+		if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
+			r.logger.Error("Failed to recreate server after restart",
+				zap.String("server", serverName),
+				zap.Error(err))
+			return
+		}
+
+		r.logger.Info("Successfully recreated server with fresh secrets",
+			zap.String("server", serverName))
+
+		// Trigger tool reindexing and emit SSE event AFTER completion
+		// to ensure frontend receives accurate tool counts
 		if err := r.DiscoverAndIndexTools(r.AppContext()); err != nil {
 			r.logger.Error("Failed to reindex tools after restart", zap.Error(err))
 		}
@@ -1225,6 +1217,7 @@ func (r *Runtime) RestartServer(serverName string) error {
 		})
 	}()
 
+	r.logger.Info("Server restart initiated asynchronously", zap.String("server", serverName))
 	return nil
 }
 

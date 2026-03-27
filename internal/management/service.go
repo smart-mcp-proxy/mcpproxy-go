@@ -19,10 +19,10 @@ import (
 
 // BulkOperationResult holds the results of a bulk operation across multiple servers.
 type BulkOperationResult struct {
-	Total      int               `json:"total"`       // Total servers processed
-	Successful int               `json:"successful"`  // Number of successful operations
-	Failed     int               `json:"failed"`      // Number of failed operations
-	Errors     map[string]string `json:"errors"`      // Map of server name to error message
+	Total      int               `json:"total"`      // Total servers processed
+	Successful int               `json:"successful"` // Number of successful operations
+	Failed     int               `json:"failed"`     // Number of failed operations
+	Errors     map[string]string `json:"errors"`     // Map of server name to error message
 }
 
 // Service defines the management interface for all server lifecycle and diagnostic operations.
@@ -206,6 +206,10 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		}
 		if id, ok := srvRaw["id"].(string); ok {
 			srv.ID = id
+		}
+		// Fallback: use name as ID if id is empty
+		if srv.ID == "" {
+			srv.ID = srv.Name
 		}
 		if protocol, ok := srvRaw["protocol"].(string); ok {
 			srv.Protocol = protocol
