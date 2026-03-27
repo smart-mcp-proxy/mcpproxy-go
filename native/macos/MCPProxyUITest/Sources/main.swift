@@ -428,7 +428,9 @@ func navigateToSubmenu(from element: AXUIElement, path: [String], currentIndex: 
     for item in items {
         var title: AnyObject?
         AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &title)
-        guard let titleStr = title as? String, titleStr == target else { continue }
+        // Match exact title OR title prefix (for "Servers (24)" matching "Servers")
+        guard let titleStr = title as? String,
+              (titleStr == target || titleStr.hasPrefix(target)) else { continue }
 
         // Check for submenu
         var submenuChildren: AnyObject?
@@ -438,10 +440,12 @@ func navigateToSubmenu(from element: AXUIElement, path: [String], currentIndex: 
                 var subRole: AnyObject?
                 AXUIElementCopyAttributeValue(sub, kAXRoleAttribute as CFString, &subRole)
                 if (subRole as? String) == "AXMenu" {
-                    // If there are more path segments, open the submenu and continue
+                    // Always hover/press the item to populate submenu children
+                    // macOS populates AXMenu children lazily on hover
+                    AXUIElementPerformAction(item, kAXPressAction as CFString)
+                    Thread.sleep(forTimeInterval: 0.5)
+
                     if currentIndex + 1 < path.count {
-                        AXUIElementPerformAction(item, kAXPressAction as CFString)
-                        Thread.sleep(forTimeInterval: 0.15)
                         return navigateToSubmenu(from: sub, path: path, currentIndex: currentIndex + 1)
                     } else {
                         return (sub, readMenuItems(from: sub))
@@ -908,8 +912,7 @@ func captureWindowImage(windowID: CGWindowID) -> CGImage? {
 }
 
 func captureFullScreen() -> CGImage? {
-    let displayID = CGMainDisplayID()
-    return CGDisplayCreateImage(displayID)
+    return CGDisplayCreateImage(CGMainDisplayID())
 }
 
 func findWindowID(for pid: pid_t, titleSubstring: String? = nil) -> CGWindowID? {
@@ -1014,7 +1017,7 @@ func handleScreenshotWindow(id: Any, arguments: [String: Any]) -> [String: Any] 
 
 func handleScreenshotStatusBarMenu(id: Any, arguments: [String: Any]) -> [String: Any] {
     let bundleID = arguments["bundle_id"] as? String ?? configuredBundleID
-    let outputPath = arguments["output_path"] as? String
+    let outputPath = arguments["output_path"] as? String ?? "/tmp/mcpproxy-menu-screenshot.png"
 
     guard AXIsProcessTrusted() else {
         return makeToolResult(id: id, text: "Accessibility permission is not granted.", isError: true)
@@ -1028,23 +1031,43 @@ func handleScreenshotStatusBarMenu(id: Any, arguments: [String: Any]) -> [String
         return makeToolResult(id: id, text: error, isError: true)
     }
 
-    // Wait a moment for menu to fully render
-    Thread.sleep(forTimeInterval: 0.3)
+    // Wait for menu to fully render
+    Thread.sleep(forTimeInterval: 0.8)
 
-    // Capture the full screen (menu is an overlay)
-    guard let image = captureFullScreen() else {
-        closeMenu(statusItem: result.statusItem)
-        return makeToolResult(id: id, text: "Failed to capture screen.", isError: true)
+    // Use osascript to invoke screencapture with inherited terminal permissions.
+    // Direct CGDisplayCreateImage/CGWindowListCreateImage require Screen Recording
+    // TCC permission which the ui-test binary may not have, producing black images.
+    // osascript + do shell script inherits the terminal's TCC grants.
+    let captureProcess = Process()
+    captureProcess.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    captureProcess.arguments = ["-e", "do shell script \"/usr/sbin/screencapture -x \(outputPath)\""]
+    do {
+        try captureProcess.run()
+        captureProcess.waitUntilExit()
+    } catch {
+        log("osascript screencapture failed: \(error)")
     }
 
+    // Brief pause then close menu
+    Thread.sleep(forTimeInterval: 0.2)
     closeMenu(statusItem: result.statusItem)
 
-    guard let data = pngData(from: image) else {
-        return makeToolResult(id: id, text: "Failed to encode screenshot as PNG.", isError: true)
+    // Read the captured file
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: outputPath)), data.count > 1000 {
+        let saveResult: [String: Any] = [
+            "success": true,
+            "path": outputPath,
+            "size_bytes": data.count,
+            "message": "Screenshot saved to \(outputPath)"
+        ]
+        return makeToolResult(id: id, text: jsonString(saveResult))
+    } else {
+        return makeToolResult(id: id, text: jsonString([
+            "success": false,
+            "error": "Screen Recording permission required. Grant permission to Terminal/Claude Code in System Settings > Privacy & Security > Screen Recording, OR use 'screencapture -x /tmp/menu.png' from bash while menu is open.",
+            "workaround": "Use list_menu_items to verify menu contents without a screenshot."
+        ] as [String: Any]), isError: true)
     }
-
-    let saveResult = saveOrEncode(imageData: data, outputPath: outputPath)
-    return makeToolResult(id: id, text: jsonString(saveResult))
 }
 
 // MARK: - Request Handling
