@@ -755,6 +755,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - Helpers
 
     private func serverStatusColor(for server: ServerStatus) -> NSColor {
+        // Disabled servers are always gray — check FIRST before health
+        if !server.enabled { return .systemGray }
         if server.quarantined { return .systemOrange }
         if let health = server.health {
             switch health.level {
