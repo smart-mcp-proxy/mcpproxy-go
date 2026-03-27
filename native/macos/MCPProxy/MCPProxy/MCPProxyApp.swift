@@ -230,53 +230,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let hasError: Bool
         if case .error = appState.coreState { hasError = true } else { hasError = false }
 
-        if !isPaused && !hasError {
-            // Normal state — plain icon, no overlay
-            base.isTemplate = true
-            base.size = NSSize(width: 18, height: 18)
-            button.image = base
-            return
+        // Always use template icon (pure black, adapts to light/dark menu bar)
+        base.isTemplate = true
+        base.size = NSSize(width: 18, height: 18)
+        button.image = base
+
+        // Show state indicator as text next to icon (keeps icon as pure template)
+        if isPaused {
+            button.title = "⏸"
+        } else if hasError {
+            button.title = "⚠"
+        } else {
+            button.title = ""
         }
-
-        // Compose base icon + overlay badge
-        let size = NSSize(width: 18, height: 18)
-        let composed = NSImage(size: size, flipped: false) { rect in
-            // Draw base icon
-            base.draw(in: rect)
-
-            // Draw overlay in bottom-right
-            let badgeSize: CGFloat = 8
-            let badgeRect = NSRect(
-                x: rect.width - badgeSize,
-                y: 0,
-                width: badgeSize,
-                height: badgeSize
-            )
-
-            if isPaused {
-                // Draw pause badge (two vertical bars on orange background)
-                NSColor.systemOrange.setFill()
-                NSBezierPath(roundedRect: badgeRect, xRadius: 1, yRadius: 1).fill()
-                NSColor.white.setFill()
-                let bar1 = NSRect(x: badgeRect.minX + 2, y: badgeRect.minY + 1.5, width: 1.5, height: badgeSize - 3)
-                let bar2 = NSRect(x: badgeRect.minX + 4.5, y: badgeRect.minY + 1.5, width: 1.5, height: badgeSize - 3)
-                NSBezierPath(rect: bar1).fill()
-                NSBezierPath(rect: bar2).fill()
-            } else if hasError {
-                // Draw error badge (exclamation on red circle)
-                NSColor.systemRed.setFill()
-                NSBezierPath(ovalIn: badgeRect).fill()
-                NSColor.white.setFill()
-                let excl = NSRect(x: badgeRect.midX - 0.5, y: badgeRect.minY + 2, width: 1, height: 3)
-                NSBezierPath(rect: excl).fill()
-                let dot = NSRect(x: badgeRect.midX - 0.5, y: badgeRect.minY + 1, width: 1, height: 1)
-                NSBezierPath(ovalIn: dot).fill()
-            }
-
-            return true
-        }
-        composed.isTemplate = false // Has colors, not a template
-        button.image = composed
     }
 
     // MARK: - Menu Building (AppKit NSMenu — no SwiftUI)
@@ -512,12 +478,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Pause / Resume
         if appState.isPaused {
-            let resume = NSMenuItem(title: "Resume MCPProxy", action: #selector(resumeCore), keyEquivalent: "")
+            let resume = NSMenuItem(title: "Resume MCPProxy Core", action: #selector(resumeCore), keyEquivalent: "")
             resume.target = self
             resume.image = NSImage(systemSymbolName: "play.circle", accessibilityDescription: "resume")
             menu.addItem(resume)
         } else if appState.coreState == .connected || appState.coreState.isOperational {
-            let pause = NSMenuItem(title: "Pause MCPProxy", action: #selector(pauseCore), keyEquivalent: "")
+            let pause = NSMenuItem(title: "Pause MCPProxy Core", action: #selector(pauseCore), keyEquivalent: "")
             pause.target = self
             pause.image = NSImage(systemSymbolName: "pause.circle", accessibilityDescription: "pause")
             menu.addItem(pause)
