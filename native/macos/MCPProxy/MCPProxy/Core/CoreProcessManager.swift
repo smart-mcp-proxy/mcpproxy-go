@@ -613,6 +613,13 @@ actor CoreProcessManager {
     private func handleProcessExit(status: Int32) async {
         let stderr = stderrBuffer
 
+        // If paused by user, don't retry — this is intentional
+        let isPaused = await MainActor.run { appState.isPaused }
+        if isPaused {
+            NSLog("[MCPProxy] handleProcessExit: paused by user, not retrying")
+            return
+        }
+
         // Normal exit (0) during shutdown is expected
         if status == 0 {
             let currentState = await MainActor.run { appState.coreState }

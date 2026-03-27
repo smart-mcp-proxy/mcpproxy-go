@@ -574,8 +574,13 @@ struct ToolRow: View {
                 .padding(.vertical, 4)
             } else if let diff = diffData {
                 // Description diff
-                let oldDesc = diff["old_description"] as? String ?? ""
-                let newDesc = diff["new_description"] as? String ?? ""
+                // API returns "previous_description"/"current_description" (not "old"/"new")
+                let oldDesc = diff["previous_description"] as? String
+                    ?? diff["old_description"] as? String
+                    ?? ""
+                let newDesc = diff["current_description"] as? String
+                    ?? diff["new_description"] as? String
+                    ?? ""
 
                 if !oldDesc.isEmpty || !newDesc.isEmpty {
                     Text("Description")
@@ -618,10 +623,13 @@ struct ToolRow: View {
                 }
 
                 // Schema diff
-                let oldSchema = diff["old_schema"] as? String
+                // API returns "previous_schema"/"current_schema" (not "old"/"new")
+                let oldSchema = diff["previous_schema"] as? String
+                    ?? diff["old_schema"] as? String
                     ?? (diff["old_input_schema"] as? String)
                     ?? ""
-                let newSchema = diff["new_schema"] as? String
+                let newSchema = diff["current_schema"] as? String
+                    ?? diff["new_schema"] as? String
                     ?? (diff["new_input_schema"] as? String)
                     ?? ""
 

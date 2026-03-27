@@ -208,35 +208,75 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Status Icon
 
-    /// Update the status bar icon based on app state (Docker Desktop style).
-    /// - Running OK: plain MCPProxy template icon (adapts to light/dark)
-    /// - Error/failure: SF Symbol warning icon
-    /// - Paused: SF Symbol pause icon
+    /// Update the status bar icon based on app state.
+    /// Always draws the MCPProxy base icon, with a small colored overlay badge
+    /// in the bottom-right corner for paused or error states.
+    /// - Running OK: plain MCPProxy icon (no overlay)
+    /// - Paused: small orange pause badge overlay
+    /// - Error: small red exclamation badge overlay
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
 
+        // Always start with the MCPProxy base icon
+        let base: NSImage
+        if let iconPath = Bundle.main.path(forResource: "icon-mono-44", ofType: "png"),
+           let bundledIcon = NSImage(contentsOfFile: iconPath) {
+            base = bundledIcon
+        } else if let sfIcon = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "MCPProxy") {
+            base = sfIcon
+        } else { return }
+
+        let isPaused = appState.isPaused
         let hasError: Bool
         if case .error = appState.coreState { hasError = true } else { hasError = false }
 
-        if appState.isPaused {
-            // Paused state — pause icon
-            let icon = NSImage(systemSymbolName: "pause.circle", accessibilityDescription: "MCPProxy Paused")
-            icon?.isTemplate = true
-            button.image = icon
-        } else if hasError {
-            // Error state — warning icon
-            let icon = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "MCPProxy Error")
-            icon?.isTemplate = true
-            button.image = icon
-        } else {
-            // Normal running state — plain MCPProxy icon
-            if let iconPath = Bundle.main.path(forResource: "icon-mono-44", ofType: "png"),
-               let icon = NSImage(contentsOfFile: iconPath) {
-                icon.isTemplate = true
-                icon.size = NSSize(width: 18, height: 18)
-                button.image = icon
-            }
+        if !isPaused && !hasError {
+            // Normal state — plain icon, no overlay
+            base.isTemplate = true
+            base.size = NSSize(width: 18, height: 18)
+            button.image = base
+            return
         }
+
+        // Compose base icon + overlay badge
+        let size = NSSize(width: 18, height: 18)
+        let composed = NSImage(size: size, flipped: false) { rect in
+            // Draw base icon
+            base.draw(in: rect)
+
+            // Draw overlay in bottom-right
+            let badgeSize: CGFloat = 8
+            let badgeRect = NSRect(
+                x: rect.width - badgeSize,
+                y: 0,
+                width: badgeSize,
+                height: badgeSize
+            )
+
+            if isPaused {
+                // Draw pause badge (two vertical bars on orange background)
+                NSColor.systemOrange.setFill()
+                NSBezierPath(roundedRect: badgeRect, xRadius: 1, yRadius: 1).fill()
+                NSColor.white.setFill()
+                let bar1 = NSRect(x: badgeRect.minX + 2, y: badgeRect.minY + 1.5, width: 1.5, height: badgeSize - 3)
+                let bar2 = NSRect(x: badgeRect.minX + 4.5, y: badgeRect.minY + 1.5, width: 1.5, height: badgeSize - 3)
+                NSBezierPath(rect: bar1).fill()
+                NSBezierPath(rect: bar2).fill()
+            } else if hasError {
+                // Draw error badge (exclamation on red circle)
+                NSColor.systemRed.setFill()
+                NSBezierPath(ovalIn: badgeRect).fill()
+                NSColor.white.setFill()
+                let excl = NSRect(x: badgeRect.midX - 0.5, y: badgeRect.minY + 2, width: 1, height: 3)
+                NSBezierPath(rect: excl).fill()
+                let dot = NSRect(x: badgeRect.midX - 0.5, y: badgeRect.minY + 1, width: 1, height: 1)
+                NSBezierPath(ovalIn: dot).fill()
+            }
+
+            return true
+        }
+        composed.isTemplate = false // Has colors, not a template
+        button.image = composed
     }
 
     // MARK: - Menu Building (AppKit NSMenu — no SwiftUI)
@@ -255,13 +295,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             statusItem.menu = menu
         }
 
-        // Header
+        // Header with colored status dot
         let ver = appState.version.hasPrefix("v") ? appState.version : "v\(appState.version)"
         let title = appState.version.isEmpty ? "MCPProxy" : "MCPProxy \(ver)"
         let titleItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         let font = NSFont.boldSystemFont(ofSize: 13)
         titleItem.attributedTitle = NSAttributedString(string: title, attributes: [.font: font])
+
+        // Determine status dot color
+        let statusColor: NSColor
+        if appState.isPaused {
+            statusColor = .systemGray
+        } else if case .error = appState.coreState {
+            statusColor = .systemRed
+        } else if appState.coreState == .connected {
+            if appState.serversNeedingAttention.isEmpty {
+                statusColor = .systemGreen
+            } else {
+                statusColor = .systemYellow
+            }
+        } else {
+            // Launching, waitingForCore, reconnecting, idle
+            statusColor = .systemYellow
+        }
+
+        let dotSize = NSSize(width: 10, height: 10)
+        let dot = NSImage(size: dotSize, flipped: false) { rect in
+            statusColor.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            return true
+        }
+        titleItem.image = dot
         menu.addItem(titleItem)
 
         let summary = NSMenuItem(title: appState.statusSummary, action: nil, keyEquivalent: "")
@@ -472,30 +537,54 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc private func pauseCore() {
+        NSLog("[MCPProxy] pauseCore: starting pause")
+        appState.isPaused = true
+
+        // Kill the core process directly — most reliable method
+        let proc = coreManager?.managedProcess
+        NSLog("[MCPProxy] pauseCore: managedProcess=%@, isRunning=%@",
+              proc != nil ? "exists" : "nil",
+              proc?.isRunning == true ? "yes" : "no")
+
+        if let process = proc, process.isRunning {
+            NSLog("[MCPProxy] pauseCore: sending SIGTERM to PID %d", process.processIdentifier)
+            kill(process.processIdentifier, SIGTERM)
+
+            // Wait up to 5s then SIGKILL
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+                if process.isRunning {
+                    NSLog("[MCPProxy] pauseCore: SIGKILL after 5s timeout")
+                    kill(process.processIdentifier, SIGKILL)
+                }
+            }
+        }
+
+        // Also call shutdown for cleanup (SSE, API client, etc.)
         Task {
             await coreManager?.shutdown()
             await MainActor.run {
-                appState.isPaused = true
                 appState.coreState = .idle
                 appState.servers = []
                 appState.connectedCount = 0
                 appState.totalServers = 0
                 appState.totalTools = 0
+                appState.apiClient = nil
+                updateStatusIcon()
+                rebuildMenu()
             }
         }
     }
 
     @objc private func resumeCore() {
         Task {
-            await MainActor.run {
-                appState.isPaused = false
-            }
+            appState.isPaused = false
             let manager = CoreProcessManager(
                 appState: appState,
                 notificationService: notificationService
             )
             coreManager = manager
             await manager.start()
+            updateStatusIcon()
         }
     }
 
