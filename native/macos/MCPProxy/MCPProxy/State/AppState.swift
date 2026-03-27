@@ -55,6 +55,9 @@ final class AppState: ObservableObject {
     /// Monotonic counter bumped on each SSE activity event for live updates.
     @Published var activityVersion: Int = 0
 
+    /// Monotonic counter bumped on SSE servers.changed / config.reloaded for live updates.
+    @Published var serversVersion: Int = 0
+
     // MARK: Token metrics (from status response)
 
     @Published var tokenMetrics: TokenMetrics?
@@ -144,16 +147,14 @@ final class AppState: ObservableObject {
     /// MenuBarExtra from duplicating menu items on spurious re-renders.
     @MainActor
     func updateServers(_ newServers: [ServerStatus]) {
-        let newIDs = newServers.map(\.id).sorted()
-        let oldIDs = servers.map(\.id).sorted()
         let newConnected = newServers.filter { $0.connected }.count
         let newTools = newServers.reduce(0) { $0 + $1.toolCount }
         let newQuarantined = newServers.filter { $0.quarantined }.count
 
-        // Only update the server array if the list actually changed
-        if newIDs != oldIDs || newConnected != connectedCount || newTools != totalTools {
-            servers = newServers
-        }
+        // Always update server array on servers.changed events.
+        // Health status, connection state, and tool counts can change
+        // even when the server list itself hasn't changed.
+        servers = newServers
         if totalServers != newServers.count { totalServers = newServers.count }
         if connectedCount != newConnected { connectedCount = newConnected }
         if totalTools != newTools { totalTools = newTools }
