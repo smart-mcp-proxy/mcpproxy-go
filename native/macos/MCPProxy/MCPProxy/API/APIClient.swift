@@ -181,15 +181,16 @@ actor APIClient {
     }
 
     /// Fetch log lines for a specific server from `GET /api/v1/servers/{id}/logs`.
+    /// Handles both structured `logs` (objects) and plain `lines` (strings) response formats.
     func serverLogs(_ id: String, tail: Int = 100) async throws -> [String] {
         let data = try await fetchRaw(path: "/api/v1/servers/\(id)/logs?tail=\(tail)")
         let decoder = JSONDecoder()
         if let wrapper = try? decoder.decode(APIResponse<ServerLogsResponse>.self, from: data),
            let payload = wrapper.data {
-            return payload.lines
+            return payload.displayLines
         }
         if let direct = try? decoder.decode(ServerLogsResponse.self, from: data) {
-            return direct.lines
+            return direct.displayLines
         }
         return []
     }
