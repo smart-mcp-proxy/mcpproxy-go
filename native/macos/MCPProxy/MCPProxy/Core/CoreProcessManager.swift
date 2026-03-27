@@ -496,6 +496,7 @@ actor CoreProcessManager {
             // Server list actually changed; re-fetch once
             let oldQuarantined = await MainActor.run { appState.quarantinedToolsCount }
             await refreshServers()
+            await MainActor.run { appState.serversVersion += 1 }
             let newQuarantined = await MainActor.run { appState.quarantinedToolsCount }
             // Notify on new quarantine events
             if newQuarantined > oldQuarantined {
@@ -508,6 +509,10 @@ actor CoreProcessManager {
         case "config.reloaded":
             // Configuration reloaded; refresh everything once
             await refreshState()
+            await MainActor.run {
+                appState.serversVersion += 1
+                appState.activityVersion += 1
+            }
 
         case "activity":
             // New activity; refresh and check for sensitive data

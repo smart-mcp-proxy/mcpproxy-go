@@ -127,6 +127,9 @@ struct ServersView: View {
         .onAppear {
             triggerLoad()
         }
+        .onChange(of: appState.serversVersion) { _ in
+            triggerLoad()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { _ in
             showAddServer = true
         }
