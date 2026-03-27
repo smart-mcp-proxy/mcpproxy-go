@@ -1,8 +1,9 @@
 // DashboardView.swift
 // MCPProxy
 //
-// Dashboard overview showing server stats, servers needing attention,
-// recent activity, and token savings.
+// Dashboard overview matching the web UI layout:
+// Stats cards, servers needing attention, token savings,
+// token distribution, recent sessions, recent tool calls.
 
 import SwiftUI
 
@@ -27,11 +28,17 @@ struct DashboardView: View {
                     attentionSection
                 }
 
-                // Recent activity
-                recentActivitySection
-
                 // Token savings
                 tokenSavingsSection
+
+                // Token distribution
+                tokenDistributionSection
+
+                // Recent sessions (derived from activity)
+                recentSessionsSection
+
+                // Recent tool calls table
+                recentToolCallsSection
             }
             .padding(20)
         }
@@ -101,18 +108,111 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Recent Activity
+    // MARK: - Token Savings
 
     @ViewBuilder
-    private var recentActivitySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Recent Activity", systemImage: "clock.arrow.circlepath")
-                .font(.headline)
+    private var tokenSavingsSection: some View {
+        if let stats = appState.tokenMetrics {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Token Savings", systemImage: "bolt.fill")
+                    .font(.headline)
 
-            if appState.recentActivity.isEmpty {
+                HStack(spacing: 12) {
+                    // Tokens Saved — prominent green card
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.green)
+                            Spacer()
+                        }
+                        Text(formatTokenCount(stats.savedTokens))
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .foregroundStyle(.green)
+                        Text("Tokens Saved")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                        Text("\(Int(stats.savedTokensPercentage))% reduction")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                    // Full tool list size
+                    StatCard(
+                        title: "Full Tool List Size",
+                        value: formatTokenCount(stats.totalServerToolListSize),
+                        subtitle: "total tokens",
+                        icon: "list.bullet",
+                        color: .gray
+                    )
+
+                    // Typical query result
+                    StatCard(
+                        title: "Typical Query Result",
+                        value: formatTokenCount(stats.averageQueryResultSize),
+                        subtitle: "tokens per query",
+                        icon: "magnifyingglass",
+                        color: .purple
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Token Distribution
+
+    @ViewBuilder
+    private var tokenDistributionSection: some View {
+        if let stats = appState.tokenMetrics,
+           let perServer = stats.perServerToolListSizes,
+           !perServer.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Token Distribution", systemImage: "chart.bar.fill")
+                    .font(.headline)
+
+                let sorted = perServer.sorted { $0.value > $1.value }
+                let top = Array(sorted.prefix(6))
+                let maxValue = top.first?.value ?? 1
+
+                VStack(spacing: 6) {
+                    ForEach(top, id: \.key) { server, size in
+                        TokenDistributionBar(
+                            serverName: server,
+                            tokenSize: size,
+                            maxSize: maxValue,
+                            totalSize: stats.totalServerToolListSize
+                        )
+                    }
+                }
+                .padding(12)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    // MARK: - Recent Sessions
+
+    @ViewBuilder
+    private var recentSessionsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Label("Recent Sessions", systemImage: "person.2.fill")
+                    .font(.headline)
+                Text("MCP client connections")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            let sessions = deriveSessions()
+            if sessions.isEmpty {
                 HStack {
                     Spacer()
-                    Text("No recent activity")
+                    Text("No sessions recorded")
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 20)
                     Spacer()
@@ -120,9 +220,54 @@ struct DashboardView: View {
                 .background(Color(nsColor: .controlBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
-                VStack(spacing: 1) {
-                    ForEach(appState.recentActivity.prefix(10)) { entry in
-                        DashboardActivityRow(entry: entry)
+                VStack(spacing: 0) {
+                    // Header
+                    HStack(spacing: 0) {
+                        Text("Client")
+                            .frame(width: 180, alignment: .leading)
+                        Text("Status")
+                            .frame(width: 80, alignment: .leading)
+                        Text("Tool Calls")
+                            .frame(width: 80, alignment: .trailing)
+                        Text("Started")
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+
+                    Divider()
+
+                    ForEach(sessions) { session in
+                        HStack(spacing: 0) {
+                            Text(session.displayId)
+                                .font(.system(.caption, design: .monospaced))
+                                .lineLimit(1)
+                                .frame(width: 180, alignment: .leading)
+
+                            DashboardStatusBadge(
+                                label: session.hasErrors ? "Error" : "Active",
+                                color: session.hasErrors ? .red : .green
+                            )
+                            .frame(width: 80, alignment: .leading)
+
+                            Text("\(session.toolCallCount)")
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 80, alignment: .trailing)
+
+                            Text(session.relativeTime)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+
+                        if session.id != sessions.last?.id {
+                            Divider().padding(.leading, 12)
+                        }
                     }
                 }
                 .background(Color(nsColor: .controlBackgroundColor))
@@ -131,40 +276,64 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Token Savings
+    // MARK: - Recent Tool Calls
 
     @ViewBuilder
-    private var tokenSavingsSection: some View {
-        if let stats = appState.tokenMetrics {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Token Savings", systemImage: "bolt.fill")
+    private var recentToolCallsSection: some View {
+        let toolCalls = appState.recentActivity.filter { $0.type == "tool_call" || $0.type == "internal_tool_call" }
+        let recent = Array(toolCalls.prefix(10))
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Recent Tool Calls", systemImage: "wrench.and.screwdriver")
                     .font(.headline)
+                Spacer()
+            }
 
-                HStack(spacing: 12) {
-                    StatCard(
-                        title: "Saved",
-                        value: "\(Int(stats.savedTokensPercentage))%",
-                        subtitle: "\(formatTokenCount(stats.savedTokens)) tokens",
-                        icon: "arrow.down.circle.fill",
-                        color: .green
-                    )
-
-                    StatCard(
-                        title: "Full Tool List",
-                        value: formatTokenCount(stats.totalServerToolListSize),
-                        subtitle: "tokens",
-                        icon: "list.bullet",
-                        color: .gray
-                    )
-
-                    StatCard(
-                        title: "Avg Query Size",
-                        value: formatTokenCount(stats.averageQueryResultSize),
-                        subtitle: "tokens per query",
-                        icon: "magnifyingglass",
-                        color: .purple
-                    )
+            if recent.isEmpty {
+                HStack {
+                    Spacer()
+                    Text("No tool calls recorded")
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 20)
+                    Spacer()
                 }
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                VStack(spacing: 0) {
+                    // Header row
+                    HStack(spacing: 0) {
+                        Text("Time")
+                            .frame(width: 70, alignment: .leading)
+                        Text("Server")
+                            .frame(width: 120, alignment: .leading)
+                        Text("Tool")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Status")
+                            .frame(width: 80, alignment: .center)
+                        Text("Duration")
+                            .frame(width: 70, alignment: .trailing)
+                        Text("Intent")
+                            .frame(width: 80, alignment: .center)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+
+                    Divider()
+
+                    ForEach(recent) { entry in
+                        ToolCallRow(entry: entry)
+                        if entry.id != recent.last?.id {
+                            Divider().padding(.leading, 12)
+                        }
+                    }
+                }
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -195,6 +364,8 @@ struct DashboardView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
+    // MARK: - Helpers
+
     private func formatTokenCount(_ count: Int) -> String {
         if count >= 1_000_000 {
             return String(format: "%.1fM", Double(count) / 1_000_000)
@@ -202,6 +373,67 @@ struct DashboardView: View {
             return String(format: "%.1fK", Double(count) / 1_000)
         }
         return "\(count)"
+    }
+
+    /// Derive session summaries from recent activity entries grouped by sessionId.
+    private func deriveSessions() -> [SessionSummary] {
+        var grouped: [String: [ActivityEntry]] = [:]
+        for entry in appState.recentActivity {
+            let key = entry.sessionId ?? "unknown"
+            grouped[key, default: []].append(entry)
+        }
+
+        var sessions: [SessionSummary] = []
+        for (sessionId, entries) in grouped {
+            let toolCalls = entries.filter { $0.type == "tool_call" || $0.type == "internal_tool_call" }
+            let hasErrors = entries.contains { $0.status == "error" }
+            let earliest = entries.compactMap { parseISO8601($0.timestamp) }.min() ?? Date.distantPast
+            sessions.append(SessionSummary(
+                sessionId: sessionId,
+                toolCallCount: toolCalls.count,
+                hasErrors: hasErrors,
+                startedAt: earliest
+            ))
+        }
+
+        // Sort by most recent first
+        sessions.sort { $0.startedAt > $1.startedAt }
+        return Array(sessions.prefix(6))
+    }
+
+    private func parseISO8601(_ string: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: string) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: string)
+    }
+}
+
+// MARK: - Session Summary Model
+
+private struct SessionSummary: Identifiable {
+    let sessionId: String
+    let toolCallCount: Int
+    let hasErrors: Bool
+    let startedAt: Date
+
+    var id: String { sessionId }
+
+    var displayId: String {
+        if sessionId == "unknown" { return "unknown" }
+        if sessionId.count > 16 {
+            return String(sessionId.prefix(16)) + "..."
+        }
+        return sessionId
+    }
+
+    var relativeTime: String {
+        let interval = Date().timeIntervalSince(startedAt)
+        if interval < 60 { return "just now" }
+        if interval < 3600 { return "\(Int(interval / 60))m ago" }
+        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+        return "\(Int(interval / 86400))d ago"
     }
 }
 
@@ -236,6 +468,197 @@ private struct StatCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+// MARK: - Token Distribution Bar
+
+private struct TokenDistributionBar: View {
+    let serverName: String
+    let tokenSize: Int
+    let maxSize: Int
+    let totalSize: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(serverName)
+                .font(.caption)
+                .lineLimit(1)
+                .frame(width: 120, alignment: .trailing)
+
+            GeometryReader { geometry in
+                let fraction = maxSize > 0 ? CGFloat(tokenSize) / CGFloat(maxSize) : 0
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.blue.opacity(0.7))
+                    .frame(width: max(4, geometry.size.width * fraction), height: 16)
+            }
+            .frame(height: 16)
+
+            let pct = totalSize > 0 ? Double(tokenSize) / Double(totalSize) * 100 : 0
+            Text(String(format: "%.0f%%", pct))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .trailing)
+
+            Text(formatTokenSize(tokenSize))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 50, alignment: .trailing)
+        }
+    }
+
+    private func formatTokenSize(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            return String(format: "%.1fM", Double(count) / 1_000_000)
+        } else if count >= 1_000 {
+            return String(format: "%.1fK", Double(count) / 1_000)
+        }
+        return "\(count)"
+    }
+}
+
+// MARK: - Dashboard Status Badge
+
+private struct DashboardStatusBadge: View {
+    let label: String
+    let color: Color
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 10, weight: .semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.15))
+            .foregroundStyle(color)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
+// MARK: - Tool Call Row
+
+private struct ToolCallRow: View {
+    let entry: ActivityEntry
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(relativeTime)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 70, alignment: .leading)
+
+            Text(entry.serverName ?? "-")
+                .font(.caption)
+                .lineLimit(1)
+                .frame(width: 120, alignment: .leading)
+
+            Text(entry.toolName ?? entry.type)
+                .font(.caption)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            DashboardStatusBadge(
+                label: statusLabel,
+                color: statusColor
+            )
+            .frame(width: 80, alignment: .center)
+
+            if let duration = entry.durationMs {
+                Text("\(duration)ms")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 70, alignment: .trailing)
+            } else {
+                Text("-")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 70, alignment: .trailing)
+            }
+
+            if let op = entry.intentOperationType {
+                ToolCallIntentBadge(operationType: op)
+                    .frame(width: 80, alignment: .center)
+            } else {
+                Text("-")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 80, alignment: .center)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+    }
+
+    private var statusLabel: String {
+        switch entry.status {
+        case "success": return "Success"
+        case "error": return "Error"
+        case "blocked": return "Blocked"
+        default: return entry.status
+        }
+    }
+
+    private var statusColor: Color {
+        switch entry.status {
+        case "success": return .green
+        case "error": return .red
+        case "blocked": return .orange
+        default: return .gray
+        }
+    }
+
+    private var relativeTime: String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = formatter.date(from: entry.timestamp)
+        if date == nil {
+            formatter.formatOptions = [.withInternetDateTime]
+            date = formatter.date(from: entry.timestamp)
+        }
+        guard let d = date else { return "-" }
+
+        let interval = Date().timeIntervalSince(d)
+        if interval < 60 { return "now" }
+        if interval < 3600 { return "\(Int(interval / 60))m" }
+        if interval < 86400 { return "\(Int(interval / 3600))h" }
+        return "\(Int(interval / 86400))d"
+    }
+}
+
+// MARK: - Tool Call Intent Badge
+
+private struct ToolCallIntentBadge: View {
+    let operationType: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: iconName)
+                .font(.system(size: 8))
+            Text(operationType)
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(backgroundColor.opacity(0.15))
+        .foregroundStyle(backgroundColor)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    private var iconName: String {
+        switch operationType {
+        case "read": return "book.fill"
+        case "write": return "pencil"
+        case "destructive": return "exclamationmark.triangle.fill"
+        default: return "questionmark"
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch operationType {
+        case "read": return .green
+        case "write": return .blue
+        case "destructive": return .red
+        default: return .gray
+        }
     }
 }
 
@@ -310,93 +733,5 @@ private struct AttentionRow: View {
         } catch {
             // Action errors are visible via server health refresh
         }
-    }
-}
-
-// MARK: - Activity Row
-
-private struct DashboardActivityRow: View {
-    let entry: ActivityEntry
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: typeIcon)
-                .font(.system(size: 12))
-                .foregroundStyle(statusColor)
-                .frame(width: 20)
-
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    if let server = entry.serverName {
-                        Text(server)
-                            .font(.caption.weight(.medium))
-                        if let tool = entry.toolName {
-                            Text(":")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(tool)
-                                .font(.caption)
-                        }
-                    } else {
-                        Text(entry.type)
-                            .font(.caption.weight(.medium))
-                    }
-                }
-                Text(relativeTime)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-
-            Spacer()
-
-            if entry.status == "error" {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.red)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-    }
-
-    private var typeIcon: String {
-        switch entry.type {
-        case "tool_call": return "wrench.fill"
-        case "connection": return "link"
-        case "security": return "shield.fill"
-        case "config": return "gearshape.fill"
-        default: return "circle.fill"
-        }
-    }
-
-    private var statusColor: Color {
-        switch entry.status {
-        case "success": return .green
-        case "error": return .red
-        case "blocked": return .orange
-        default: return .secondary
-        }
-    }
-
-    private var relativeTime: String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: entry.timestamp) else {
-            // Try without fractional seconds
-            formatter.formatOptions = [.withInternetDateTime]
-            guard let date = formatter.date(from: entry.timestamp) else {
-                return entry.timestamp
-            }
-            return formatRelative(date)
-        }
-        return formatRelative(date)
-    }
-
-    private func formatRelative(_ date: Date) -> String {
-        let interval = Date().timeIntervalSince(date)
-        if interval < 60 { return "just now" }
-        if interval < 3600 { return "\(Int(interval / 60))m ago" }
-        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
-        return "\(Int(interval / 86400))d ago"
     }
 }
