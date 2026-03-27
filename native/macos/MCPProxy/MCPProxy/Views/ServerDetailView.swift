@@ -247,6 +247,9 @@ struct ServerDetailView: View {
             HStack {
                 Text("Server Logs")
                     .font(.subheadline.bold())
+                Text("\(logLines.count) lines")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 if isLoadingLogs {
                     ProgressView().controlSize(.small)
@@ -281,20 +284,57 @@ struct ServerDetailView: View {
                     Text("No log entries")
                         .font(.title3)
                         .foregroundStyle(.secondary)
+                    Text("Logs will appear when the server produces output")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView([.horizontal, .vertical]) {
-                    Text(logLines.joined(separator: "\n"))
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                ScrollViewReader { proxy in
+                    ScrollView([.horizontal, .vertical]) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(logLines.enumerated()), id: \.offset) { idx, line in
+                                logLineView(line)
+                                    .id(idx)
+                            }
+                        }
                         .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .onChange(of: logLines.count) { _ in
+                        // Auto-scroll to bottom on new lines
+                        if let last = logLines.indices.last {
+                            proxy.scrollTo(last, anchor: .bottom)
+                        }
+                    }
                 }
-                .background(Color(nsColor: .textBackgroundColor))
             }
         }
         .task { await loadLogs() }
+    }
+
+    /// Render a single log line with color-coded level.
+    @ViewBuilder
+    private func logLineView(_ line: String) -> some View {
+        let levelColor = logLevelColor(line)
+        Text(line)
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(levelColor)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 1)
+    }
+
+    private func logLevelColor(_ line: String) -> Color {
+        if line.contains("[ERROR]") || line.contains("| ERROR |") {
+            return .red
+        } else if line.contains("[WARN]") || line.contains("| WARN |") {
+            return .orange
+        } else if line.contains("[DEBUG]") || line.contains("| DEBUG |") {
+            return .gray
+        }
+        return .primary
     }
 
     // MARK: - Config Tab

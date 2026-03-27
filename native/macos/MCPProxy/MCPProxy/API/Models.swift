@@ -674,15 +674,42 @@ struct ServerToolsResponse: Codable {
     let tools: [ServerTool]
 }
 
+/// A single structured log entry from a server.
+struct ServerLogEntry: Codable {
+    let timestamp: String?
+    let level: String?
+    let message: String?
+    let server: String?
+
+    /// Format as a colored display line.
+    var displayLine: String {
+        let ts = timestamp?.components(separatedBy: ".").first ?? ""
+        let lvl = level ?? ""
+        let msg = message ?? ""
+        if ts.isEmpty { return msg }
+        return "\(ts) [\(lvl)] \(msg)"
+    }
+}
+
 /// Response wrapper for `GET /api/v1/servers/{id}/logs`.
+/// Supports both structured `logs` (array of objects) and plain `lines` (array of strings).
 struct ServerLogsResponse: Codable {
     let serverName: String?
-    let lines: [String]
+    let logs: [ServerLogEntry]?
+    let lines: [String]?
     let count: Int?
 
     enum CodingKeys: String, CodingKey {
         case serverName = "server_name"
-        case lines, count
+        case logs, lines, count
+    }
+
+    /// Resolve to display lines from either format.
+    var displayLines: [String] {
+        if let logs = logs, !logs.isEmpty {
+            return logs.map(\.displayLine)
+        }
+        return lines ?? []
     }
 }
 
