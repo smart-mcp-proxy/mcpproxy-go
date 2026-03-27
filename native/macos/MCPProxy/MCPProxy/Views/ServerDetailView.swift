@@ -533,7 +533,7 @@ struct ServerDetailView: View {
     }
 }
 
-// MARK: - Tool Row
+// MARK: - Tool Row (Expandable Disclosure)
 
 struct ToolRow: View {
     let tool: ServerTool
@@ -550,65 +550,191 @@ struct ToolRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(tool.name)
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-
-                annotationBadges
-
-                if let status = tool.approvalStatus, status != "approved" {
-                    Text(status.capitalized)
-                        .font(.caption2.bold())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(status == "changed" ? Color.red : .orange)
-                        .clipShape(Capsule())
+        VStack(alignment: .leading, spacing: 0) {
+            // Collapsed header -- always visible, clickable to expand
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
                 }
+                if isExpanded && needsApproval && diffData == nil {
+                    loadDiff()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12)
 
-                Spacer()
+                    Text(tool.name)
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.primary)
 
-                if needsApproval {
-                    Button {
-                        if isExpanded {
-                            isExpanded = false
-                        } else {
-                            isExpanded = true
-                            if diffData == nil {
-                                loadDiff()
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 10))
-                            Text("View Changes")
-                                .font(.caption)
-                        }
+                    annotationBadgesCollapsed
+
+                    if let status = tool.approvalStatus, status != "approved" {
+                        Text(status.capitalized)
+                            .font(.caption2.bold())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(status == "changed" ? Color.red : .orange)
+                            .clipShape(Capsule())
                     }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.orange)
-                }
-            }
 
-            if let desc = tool.description, !desc.isEmpty {
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+
+            // One-line description preview (always visible)
+            if let desc = tool.description, !desc.isEmpty, !isExpanded {
                 Text(desc)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .padding(.leading, 26)
+                    .padding(.trailing, 8)
+                    .padding(.bottom, 6)
             }
 
-            // Expanded diff section
-            if isExpanded && needsApproval {
-                diffSection
+            // Expanded detail section
+            if isExpanded {
+                expandedContent
+                    .padding(.leading, 26)
+                    .padding(.trailing, 8)
+                    .padding(.bottom, 8)
             }
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 8)
         .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(6)
     }
+
+    // MARK: - Expanded Content
+
+    @ViewBuilder
+    private var expandedContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Full description
+            if let desc = tool.description, !desc.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Description")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    Text(desc)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            // Annotations section
+            if let annotations = tool.annotations, hasAnyAnnotation(annotations) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Annotations")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    annotationBadgesExpanded(annotations)
+                }
+            }
+
+            // Approval Status section
+            if let status = tool.approvalStatus {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Approval Status")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(approvalStatusColor(status))
+                            .frame(width: 8, height: 8)
+                        Text(approvalStatusLabel(status))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+
+            // Diff section for quarantined tools
+            if needsApproval {
+                diffSection
+            }
+        }
+    }
+
+    // MARK: - Annotation Helpers
+
+    private func hasAnyAnnotation(_ a: ToolAnnotation) -> Bool {
+        a.readOnlyHint == true || a.destructiveHint == true ||
+        a.idempotentHint == true || a.openWorldHint == true ||
+        (a.title != nil && !a.title!.isEmpty)
+    }
+
+    /// Compact inline badges for collapsed state.
+    @ViewBuilder
+    private var annotationBadgesCollapsed: some View {
+        if let annotations = tool.annotations {
+            if annotations.readOnlyHint == true {
+                badge(text: "read-only", color: .green, icon: "eye")
+            }
+            if annotations.destructiveHint == true {
+                badge(text: "destructive", color: .red, icon: "trash")
+            }
+            if annotations.idempotentHint == true {
+                badge(text: "idempotent", color: .blue, icon: "arrow.2.squarepath")
+            }
+            if annotations.openWorldHint == true {
+                badge(text: "open-world", color: .orange, icon: "globe")
+            }
+        }
+    }
+
+    /// Full annotation display for expanded state.
+    @ViewBuilder
+    private func annotationBadgesExpanded(_ annotations: ToolAnnotation) -> some View {
+        let items: [(String, Color, String, Bool?)] = [
+            ("Read-Only", .green, "eye", annotations.readOnlyHint),
+            ("Destructive", .red, "trash", annotations.destructiveHint),
+            ("Idempotent", .blue, "arrow.2.squarepath", annotations.idempotentHint),
+            ("Open World", .orange, "globe", annotations.openWorldHint),
+        ]
+        FlowLayout(spacing: 4) {
+            if let title = annotations.title, !title.isEmpty {
+                badge(text: title, color: .purple, icon: "tag")
+            }
+            ForEach(items, id: \.0) { label, color, icon, value in
+                if value == true {
+                    badge(text: label, color: color, icon: icon)
+                }
+            }
+        }
+    }
+
+    // MARK: - Approval Status Helpers
+
+    private func approvalStatusColor(_ status: String) -> Color {
+        switch status {
+        case "approved": return .green
+        case "pending": return .orange
+        case "changed": return .red
+        default: return .gray
+        }
+    }
+
+    private func approvalStatusLabel(_ status: String) -> String {
+        switch status {
+        case "approved": return "Approved"
+        case "pending": return "Pending Approval"
+        case "changed": return "Changed (needs re-approval)"
+        default: return status.capitalized
+        }
+    }
+
+    // MARK: - Diff Section
 
     @ViewBuilder
     private var diffSection: some View {
@@ -626,7 +752,6 @@ struct ToolRow: View {
                 .padding(.vertical, 4)
             } else if let diff = diffData {
                 // Description diff
-                // API returns "previous_description"/"current_description" (not "old"/"new")
                 let oldDesc = diff["previous_description"] as? String
                     ?? diff["old_description"] as? String
                     ?? ""
@@ -635,37 +760,16 @@ struct ToolRow: View {
                     ?? ""
 
                 if !oldDesc.isEmpty || !newDesc.isEmpty {
-                    Text("Description")
+                    Text("Description Changes")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
 
                     if oldDesc != newDesc {
                         if !oldDesc.isEmpty {
-                            HStack(alignment: .top, spacing: 4) {
-                                Image(systemName: "minus.circle.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.red)
-                                Text(oldDesc)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.red.opacity(0.08))
-                            .cornerRadius(4)
+                            diffLine(text: oldDesc, isOld: true)
                         }
                         if !newDesc.isEmpty {
-                            HStack(alignment: .top, spacing: 4) {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.green)
-                                Text(newDesc)
-                                    .font(.system(size: 11, design: .monospaced))
-                            }
-                            .padding(4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.green.opacity(0.08))
-                            .cornerRadius(4)
+                            diffLine(text: newDesc, isOld: false)
                         }
                     } else {
                         Text("No description changes")
@@ -675,7 +779,6 @@ struct ToolRow: View {
                 }
 
                 // Schema diff
-                // API returns "previous_schema"/"current_schema" (not "old"/"new")
                 let oldSchema = diff["previous_schema"] as? String
                     ?? diff["old_schema"] as? String
                     ?? (diff["old_input_schema"] as? String)
@@ -686,40 +789,17 @@ struct ToolRow: View {
                     ?? ""
 
                 if !oldSchema.isEmpty || !newSchema.isEmpty {
-                    Text("Schema")
+                    Text("Schema Changes")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                         .padding(.top, 4)
 
                     if oldSchema != newSchema {
                         if !oldSchema.isEmpty {
-                            HStack(alignment: .top, spacing: 4) {
-                                Image(systemName: "minus.circle.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.red)
-                                Text(oldSchema)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(6)
-                            }
-                            .padding(4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.red.opacity(0.08))
-                            .cornerRadius(4)
+                            diffLine(text: oldSchema, isOld: true)
                         }
                         if !newSchema.isEmpty {
-                            HStack(alignment: .top, spacing: 4) {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.green)
-                                Text(newSchema)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .lineLimit(6)
-                            }
-                            .padding(4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.green.opacity(0.08))
-                            .cornerRadius(4)
+                            diffLine(text: newSchema, isOld: false)
                         }
                     } else {
                         Text("No schema changes")
@@ -728,7 +808,6 @@ struct ToolRow: View {
                     }
                 }
 
-                // If no diff data came back at all
                 if oldDesc.isEmpty && newDesc.isEmpty && oldSchema.isEmpty && newSchema.isEmpty {
                     HStack(spacing: 6) {
                         Image(systemName: "info.circle")
@@ -744,7 +823,23 @@ struct ToolRow: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.top, 4)
+    }
+
+    @ViewBuilder
+    private func diffLine(text: String, isOld: Bool) -> some View {
+        HStack(alignment: .top, spacing: 4) {
+            Image(systemName: isOld ? "minus.circle.fill" : "plus.circle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(isOld ? .red : .green)
+            Text(text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(isOld ? .secondary : .primary)
+                .lineLimit(isOld ? 6 : nil)
+        }
+        .padding(4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((isOld ? Color.red : Color.green).opacity(0.08))
+        .cornerRadius(4)
     }
 
     private func loadDiff() {
@@ -769,19 +864,7 @@ struct ToolRow: View {
         }
     }
 
-    @ViewBuilder
-    private var annotationBadges: some View {
-        if let annotations = tool.annotations {
-            if annotations.readOnlyHint == true {
-                badge(text: "read", color: .green, icon: "eye")
-            }
-            if annotations.destructiveHint == true {
-                badge(text: "destructive", color: .red, icon: "trash")
-            } else if annotations.readOnlyHint != true {
-                badge(text: "write", color: .orange, icon: "pencil")
-            }
-        }
-    }
+    // MARK: - Badge
 
     @ViewBuilder
     private func badge(text: String, color: Color, icon: String) -> some View {
@@ -796,5 +879,58 @@ struct ToolRow: View {
         .padding(.vertical, 2)
         .background(color.opacity(0.1))
         .cornerRadius(4)
+    }
+}
+
+// MARK: - Flow Layout (for wrapping annotation badges)
+
+/// A simple horizontal flow layout that wraps items to the next line.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = layout(in: proposal.width ?? .infinity, subviews: subviews)
+        return result.size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = layout(in: bounds.width, subviews: subviews)
+        for (index, position) in result.positions.enumerated() {
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + position.x, y: bounds.minY + position.y),
+                proposal: ProposedViewSize(subviews[index].sizeThatFits(.unspecified))
+            )
+        }
+    }
+
+    private struct LayoutResult {
+        var positions: [CGPoint]
+        var size: CGSize
+    }
+
+    private func layout(in maxWidth: CGFloat, subviews: Subviews) -> LayoutResult {
+        var positions: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var maxX: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth, x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            positions.append(CGPoint(x: x, y: y))
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+            maxX = max(maxX, x - spacing)
+        }
+
+        return LayoutResult(
+            positions: positions,
+            size: CGSize(width: maxX, height: y + rowHeight)
+        )
     }
 }

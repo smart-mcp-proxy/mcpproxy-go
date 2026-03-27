@@ -158,7 +158,7 @@ struct ServersView: View {
 
 // MARK: - Column Identifiers
 
-private enum ServerColumn: String, CaseIterable {
+enum ServerColumn: String, CaseIterable {
     case status = "status"
     case name = "name"
     case type = "type"
@@ -237,7 +237,7 @@ struct ServerTableView: NSViewRepresentable {
         tableView.intercellSpacing = NSSize(width: 8, height: 0)
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
 
-        // Create columns
+        // Create columns with sort descriptors
         for col in ServerColumn.allCases {
             let column = NSTableColumn(identifier: col.identifier)
             column.title = col.title
@@ -245,11 +245,21 @@ struct ServerTableView: NSViewRepresentable {
             column.maxWidth = col.maxWidth
             column.width = col.minWidth
             column.resizingMask = col.resizingMask
+            // Add sort descriptor for sortable columns (not status dot or actions)
+            if col != .status && col != .actions {
+                column.sortDescriptorPrototype = NSSortDescriptor(key: col.rawValue, ascending: true)
+            }
             tableView.addTableColumn(column)
         }
 
         // Enable header
         tableView.headerView = NSTableHeaderView()
+
+        // Set default sort by name ascending
+        if let nameCol = tableView.tableColumns.first(where: { $0.identifier.rawValue == ServerColumn.name.rawValue }),
+           let descriptor = nameCol.sortDescriptorPrototype {
+            tableView.sortDescriptors = [descriptor]
+        }
 
         tableView.delegate = context.coordinator
         tableView.dataSource = context.coordinator
@@ -289,26 +299,77 @@ struct ServerTableView: NSViewRepresentable {
         var onServersChanged: (() -> Void)?
         weak var tableView: NSTableView?
 
+        // Sort state
+        var sortColumn: ServerColumn = .name
+        var sortAscending: Bool = true
+
+        /// Servers sorted by current sort column and direction.
+        var sortedServers: [ServerStatus] {
+            servers.sorted { a, b in
+                let result: Bool
+                switch sortColumn {
+                case .status:
+                    result = a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                case .name:
+                    result = a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                case .type:
+                    result = a.protocol.localizedCaseInsensitiveCompare(b.protocol) == .orderedAscending
+                case .state:
+                    result = stateOrder(a) < stateOrder(b)
+                case .tools:
+                    result = a.toolCount < b.toolCount
+                case .tokenSize:
+                    result = (a.toolListTokenSize ?? 0) < (b.toolListTokenSize ?? 0)
+                case .actions:
+                    result = a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                }
+                return sortAscending ? result : !result
+            }
+        }
+
+        /// Numeric ordering for server state (for stable sort).
+        private func stateOrder(_ server: ServerStatus) -> Int {
+            if server.quarantined { return 3 }
+            if !server.enabled { return 4 }
+            if server.connected { return 0 }
+            if let health = server.health, health.level == "unhealthy" { return 2 }
+            return 1 // disconnected
+        }
+
+        // MARK: - Sort Descriptors Changed
+
+        func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+            guard let descriptor = tableView.sortDescriptors.first,
+                  let key = descriptor.key,
+                  let col = ServerColumn(rawValue: key) else { return }
+            sortColumn = col
+            sortAscending = descriptor.ascending
+            tableView.reloadData()
+        }
+
         // MARK: - Double Click
 
         @objc func tableViewDoubleClicked(_ sender: NSTableView) {
             let row = sender.clickedRow
-            guard row >= 0, row < servers.count else { return }
-            onDoubleClick?(servers[row])
+            let sorted = sortedServers
+            guard row >= 0, row < sorted.count else { return }
+            onDoubleClick?(sorted[row])
         }
 
         // MARK: - Action Button Handlers
 
         @objc func infoButtonClicked(_ sender: NSButton) {
             let row = sender.tag
-            guard row >= 0, row < servers.count else { return }
-            onDoubleClick?(servers[row])
+            let sorted = sortedServers
+            guard row >= 0, row < sorted.count else { return }
+            onDoubleClick?(sorted[row])
         }
 
         @objc func toggleEnabledClicked(_ sender: NSButton) {
             let row = sender.tag
-            guard row >= 0, row < servers.count else { return }
-            let server = servers[row]
+            let sorted = sortedServers
+            guard row >= 0, row < sorted.count else { return }
+            let server = sorted[row]
             Task {
                 if server.enabled {
                     try? await apiClient?.disableServer(server.id)
@@ -321,8 +382,9 @@ struct ServerTableView: NSViewRepresentable {
 
         @objc func restartButtonClicked(_ sender: NSButton) {
             let row = sender.tag
-            guard row >= 0, row < servers.count else { return }
-            let server = servers[row]
+            let sorted = sortedServers
+            guard row >= 0, row < sorted.count else { return }
+            let server = sorted[row]
             Task {
                 try? await apiClient?.restartServer(server.id)
                 await MainActor.run { onServersChanged?() }
@@ -331,8 +393,9 @@ struct ServerTableView: NSViewRepresentable {
 
         @objc func deleteButtonClicked(_ sender: NSButton) {
             let row = sender.tag
-            guard row >= 0, row < servers.count else { return }
-            let server = servers[row]
+            let sorted = sortedServers
+            guard row >= 0, row < sorted.count else { return }
+            let server = sorted[row]
 
             // Show confirmation alert
             let alert = NSAlert()
@@ -360,8 +423,9 @@ struct ServerTableView: NSViewRepresentable {
             menu.removeAllItems()
             guard let tableView else { return }
             let row = tableView.clickedRow
-            guard row >= 0, row < servers.count else { return }
-            let server = servers[row]
+            let sorted = sortedServers
+            guard row >= 0, row < sorted.count else { return }
+            let server = sorted[row]
 
             // Enable/Disable
             if server.enabled {
@@ -499,14 +563,15 @@ struct ServerTableView: NSViewRepresentable {
         // MARK: - Data Source
 
         func numberOfRows(in tableView: NSTableView) -> Int {
-            servers.count
+            sortedServers.count
         }
 
         // MARK: - Delegate
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            guard row < servers.count, let colId = tableColumn?.identifier else { return nil }
-            let server = servers[row]
+            let sorted = sortedServers
+            guard row < sorted.count, let colId = tableColumn?.identifier else { return nil }
+            let server = sorted[row]
 
             guard let column = ServerColumn(rawValue: colId.rawValue) else { return nil }
 
