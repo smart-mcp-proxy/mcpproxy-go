@@ -195,7 +195,7 @@ struct ServerDetailView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 1) {
                         ForEach(tools) { tool in
-                            ToolRow(tool: tool)
+                            ToolRow(tool: tool, serverName: server.name, apiClient: apiClient)
                         }
                     }
                     .padding()
@@ -485,6 +485,17 @@ struct ServerDetailView: View {
 
 struct ToolRow: View {
     let tool: ServerTool
+    var serverName: String = ""
+    var apiClient: APIClient? = nil
+
+    @State private var isExpanded = false
+    @State private var diffData: [String: Any]? = nil
+    @State private var isLoadingDiff = false
+
+    private var needsApproval: Bool {
+        guard let status = tool.approvalStatus else { return false }
+        return status == "pending" || status == "changed"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -505,6 +516,28 @@ struct ToolRow: View {
                 }
 
                 Spacer()
+
+                if needsApproval {
+                    Button {
+                        if isExpanded {
+                            isExpanded = false
+                        } else {
+                            isExpanded = true
+                            if diffData == nil {
+                                loadDiff()
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 10))
+                            Text("View Changes")
+                                .font(.caption)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.orange)
+                }
             }
 
             if let desc = tool.description, !desc.isEmpty {
@@ -513,11 +546,167 @@ struct ToolRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
+
+            // Expanded diff section
+            if isExpanded && needsApproval {
+                diffSection
+            }
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 8)
         .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(6)
+    }
+
+    @ViewBuilder
+    private var diffSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+
+            if isLoadingDiff {
+                HStack {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading changes...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            } else if let diff = diffData {
+                // Description diff
+                let oldDesc = diff["old_description"] as? String ?? ""
+                let newDesc = diff["new_description"] as? String ?? ""
+
+                if !oldDesc.isEmpty || !newDesc.isEmpty {
+                    Text("Description")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+
+                    if oldDesc != newDesc {
+                        if !oldDesc.isEmpty {
+                            HStack(alignment: .top, spacing: 4) {
+                                Image(systemName: "minus.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.red)
+                                Text(oldDesc)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.red.opacity(0.08))
+                            .cornerRadius(4)
+                        }
+                        if !newDesc.isEmpty {
+                            HStack(alignment: .top, spacing: 4) {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.green)
+                                Text(newDesc)
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                            .padding(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.green.opacity(0.08))
+                            .cornerRadius(4)
+                        }
+                    } else {
+                        Text("No description changes")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                // Schema diff
+                let oldSchema = diff["old_schema"] as? String
+                    ?? (diff["old_input_schema"] as? String)
+                    ?? ""
+                let newSchema = diff["new_schema"] as? String
+                    ?? (diff["new_input_schema"] as? String)
+                    ?? ""
+
+                if !oldSchema.isEmpty || !newSchema.isEmpty {
+                    Text("Schema")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+
+                    if oldSchema != newSchema {
+                        if !oldSchema.isEmpty {
+                            HStack(alignment: .top, spacing: 4) {
+                                Image(systemName: "minus.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.red)
+                                Text(oldSchema)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(6)
+                            }
+                            .padding(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.red.opacity(0.08))
+                            .cornerRadius(4)
+                        }
+                        if !newSchema.isEmpty {
+                            HStack(alignment: .top, spacing: 4) {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.green)
+                                Text(newSchema)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .lineLimit(6)
+                            }
+                            .padding(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.green.opacity(0.08))
+                            .cornerRadius(4)
+                        }
+                    } else {
+                        Text("No schema changes")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                // If no diff data came back at all
+                if oldDesc.isEmpty && newDesc.isEmpty && oldSchema.isEmpty && newSchema.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.orange)
+                        Text("New tool pending approval")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                Text("Could not load diff data")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func loadDiff() {
+        guard let client = apiClient else {
+            diffData = [:]
+            return
+        }
+        isLoadingDiff = true
+        Task {
+            do {
+                let result = try await client.toolDiff(server: serverName, tool: tool.name)
+                await MainActor.run {
+                    diffData = result
+                    isLoadingDiff = false
+                }
+            } catch {
+                await MainActor.run {
+                    diffData = [:]
+                    isLoadingDiff = false
+                }
+            }
+        }
     }
 
     @ViewBuilder

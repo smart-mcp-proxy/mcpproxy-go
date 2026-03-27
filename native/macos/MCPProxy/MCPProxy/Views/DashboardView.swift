@@ -14,6 +14,11 @@ struct DashboardView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // Error banner
+                if case .error(let coreError) = appState.coreState {
+                    errorBanner(coreError)
+                }
+
                 // Stats cards
                 statsSection
 
@@ -162,6 +167,32 @@ struct DashboardView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Error Banner
+
+    @ViewBuilder
+    private func errorBanner(_ error: CoreError) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .foregroundStyle(.white)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(error.userMessage)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                Text(error.remediationHint)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(2)
+            }
+
+            Spacer()
+        }
+        .padding(12)
+        .background(Color.red)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private func formatTokenCount(_ count: Int) -> String {

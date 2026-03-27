@@ -266,6 +266,22 @@ actor APIClient {
 
     // MARK: - Tool Quarantine
 
+    /// Fetch tool diff (old vs new description/schema) for a pending/changed tool.
+    /// Returns a dictionary with keys like "old_description", "new_description",
+    /// "old_schema", "new_schema", "status".
+    func toolDiff(server: String, tool: String) async throws -> [String: Any] {
+        let encodedTool = tool.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? tool
+        let data = try await fetchRaw(path: "/api/v1/servers/\(server)/tools/\(encodedTool)/diff")
+        // Try standard envelope first
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let payload = json["data"] as? [String: Any] {
+                return payload
+            }
+            return json
+        }
+        return [:]
+    }
+
     /// Approve specific tools for a server via `POST /api/v1/servers/{id}/tools/approve`.
     func approveSpecificTools(_ id: String, tools: [String]) async throws {
         let body: [String: Any] = ["tools": tools]

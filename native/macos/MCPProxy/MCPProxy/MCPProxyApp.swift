@@ -118,6 +118,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Show in Dock and Cmd+Tab BEFORE presenting the window
         NSApp.setActivationPolicy(.regular)
 
+        // Set app icon for Cmd+Tab and Dock
+        if let iconPath = Bundle.main.path(forResource: "icon-128", ofType: "png"),
+           let icon = NSImage(contentsOfFile: iconPath) {
+            NSApp.applicationIconImage = icon
+        }
+
         // MainWindow reads apiClient from appState, so we create it once.
         // When appState.apiClient is set by CoreProcessManager, all views
         // automatically re-render — no need to replace the NSHostingView.
@@ -202,56 +208,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Status Icon
 
-    /// Update the status bar icon with a health-colored badge dot.
+    /// Update the status bar icon based on app state (Docker Desktop style).
+    /// - Running OK: plain MCPProxy template icon (adapts to light/dark)
+    /// - Error/failure: SF Symbol warning icon
+    /// - Paused: SF Symbol pause icon
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
 
-        let health = appState.healthLevel
-        // Use the MCPProxy monochrome icon (same as initial tray icon)
-        let base: NSImage
-        if let iconPath = Bundle.main.path(forResource: "icon-mono-44", ofType: "png"),
-           let bundledIcon = NSImage(contentsOfFile: iconPath) {
-            base = bundledIcon
-        } else if let sfIcon = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "MCPProxy") {
-            base = sfIcon
+        let hasError: Bool
+        if case .error = appState.coreState { hasError = true } else { hasError = false }
+
+        if appState.isPaused {
+            // Paused state — pause icon
+            let icon = NSImage(systemSymbolName: "pause.circle", accessibilityDescription: "MCPProxy Paused")
+            icon?.isTemplate = true
+            button.image = icon
+        } else if hasError {
+            // Error state — warning icon
+            let icon = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "MCPProxy Error")
+            icon?.isTemplate = true
+            button.image = icon
         } else {
-            return
-        }
-
-        // Compose the icon with a badge dot
-        let size = NSSize(width: 18, height: 18)
-        let composed = NSImage(size: size, flipped: false) { rect in
-            // Draw base icon
-            base.draw(in: rect)
-
-            // Draw badge dot in bottom-right
-            let dotSize: CGFloat = 6
-            let dotRect = NSRect(
-                x: rect.width - dotSize - 0.5,
-                y: 0.5,
-                width: dotSize,
-                height: dotSize
-            )
-
-            let dotColor: NSColor
-            switch health {
-            case .healthy: dotColor = .systemGreen
-            case .degraded: dotColor = .systemYellow
-            case .unhealthy: dotColor = .systemRed
-            case .disconnected: dotColor = .systemGray
+            // Normal running state — plain MCPProxy icon
+            if let iconPath = Bundle.main.path(forResource: "icon-mono-44", ofType: "png"),
+               let icon = NSImage(contentsOfFile: iconPath) {
+                icon.isTemplate = true
+                icon.size = NSSize(width: 18, height: 18)
+                button.image = icon
             }
-
-            // White outline for visibility
-            NSColor.white.setFill()
-            NSBezierPath(ovalIn: dotRect.insetBy(dx: -1, dy: -1)).fill()
-            // Colored dot
-            dotColor.setFill()
-            NSBezierPath(ovalIn: dotRect).fill()
-
-            return true
         }
-        composed.isTemplate = false // Has colors, can't be template
-        button.image = composed
     }
 
     // MARK: - Menu Building (AppKit NSMenu — no SwiftUI)
@@ -285,8 +270,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Error state
         if case .error(let coreError) = appState.coreState {
-            let errorItem = NSMenuItem(title: "Error: \(coreError.userMessage)", action: nil, keyEquivalent: "")
+            let errorItem = NSMenuItem(title: coreError.userMessage, action: nil, keyEquivalent: "")
             errorItem.isEnabled = false
+            errorItem.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "error")
             menu.addItem(errorItem)
 
             let hintItem = NSMenuItem(title: coreError.remediationHint, action: nil, keyEquivalent: "")
@@ -296,6 +282,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if coreError.isRetryable {
                 let retryItem = NSMenuItem(title: "Retry", action: #selector(retryCore), keyEquivalent: "")
                 retryItem.target = self
+                retryItem.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "retry")
                 menu.addItem(retryItem)
             }
         }
@@ -422,50 +409,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(.separator())
         }
 
-        // Recent Activity (deduplicated — show unique entries only)
-        if !appState.recentActivity.isEmpty {
-            let activityHeader = NSMenuItem(title: "Recent Activity", action: nil, keyEquivalent: "")
-            activityHeader.isEnabled = false
-            menu.addItem(activityHeader)
-
-            // Deduplicate by (serverName + toolName + type) — keep first occurrence
-            var seen = Set<String>()
-            var uniqueEntries: [ActivityEntry] = []
-            for entry in appState.recentActivity {
-                let key = "\(entry.serverName ?? ""):\(entry.toolName ?? ""):\(entry.type)"
-                if !seen.contains(key) {
-                    seen.insert(key)
-                    uniqueEntries.append(entry)
-                }
-            }
-
-            for entry in uniqueEntries.prefix(5) {
-                var text = ""
-                if let sn = entry.serverName, !sn.isEmpty {
-                    text = sn
-                    if let tn = entry.toolName, !tn.isEmpty { text += ":\(tn)" }
-                } else {
-                    text = entry.type
-                }
-
-                // Add relative timestamp
-                let timeAgo = relativeTimeString(from: entry.timestamp)
-                if !timeAgo.isEmpty { text += " · \(timeAgo)" }
-
-                let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
-                item.isEnabled = false
-                let iconName: String
-                switch entry.status {
-                case "error": iconName = "xmark.circle"
-                case "blocked": iconName = "hand.raised"
-                default: iconName = "checkmark.circle"
-                }
-                item.image = NSImage(systemSymbolName: iconName, accessibilityDescription: entry.status)
-                menu.addItem(item)
-            }
-            menu.addItem(.separator())
-        }
-
         // Actions
         let addServer = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
         addServer.target = self
@@ -478,14 +421,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let webUI = NSMenuItem(title: "Open Web UI", action: #selector(openWebUI), keyEquivalent: "")
         webUI.target = self
         menu.addItem(webUI)
-
-        let configFile = NSMenuItem(title: "Open Config File", action: #selector(openConfigFile), keyEquivalent: "")
-        configFile.target = self
-        menu.addItem(configFile)
-
-        let logsDir = NSMenuItem(title: "Open Logs Directory", action: #selector(openLogsDirectory), keyEquivalent: "")
-        logsDir.target = self
-        menu.addItem(logsDir)
 
         menu.addItem(.separator())
 
@@ -510,6 +445,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         menu.addItem(.separator())
 
+        // Pause / Resume
+        if appState.isPaused {
+            let resume = NSMenuItem(title: "Resume MCPProxy", action: #selector(resumeCore), keyEquivalent: "")
+            resume.target = self
+            resume.image = NSImage(systemSymbolName: "play.circle", accessibilityDescription: "resume")
+            menu.addItem(resume)
+        } else if appState.coreState == .connected || appState.coreState.isOperational {
+            let pause = NSMenuItem(title: "Pause MCPProxy", action: #selector(pauseCore), keyEquivalent: "")
+            pause.target = self
+            pause.image = NSImage(systemSymbolName: "pause.circle", accessibilityDescription: "pause")
+            menu.addItem(pause)
+        }
+
         // Quit
         let quit = NSMenuItem(title: "Quit MCPProxy", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
@@ -521,6 +469,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func retryCore() {
         Task { await coreManager?.retry() }
+    }
+
+    @objc private func pauseCore() {
+        Task {
+            await coreManager?.shutdown()
+            await MainActor.run {
+                appState.isPaused = true
+                appState.coreState = .idle
+                appState.servers = []
+                appState.connectedCount = 0
+                appState.totalServers = 0
+                appState.totalTools = 0
+            }
+        }
+    }
+
+    @objc private func resumeCore() {
+        Task {
+            await MainActor.run {
+                appState.isPaused = false
+            }
+            let manager = CoreProcessManager(
+                appState: appState,
+                notificationService: notificationService
+            )
+            coreManager = manager
+            await manager.start()
+        }
     }
 
     @objc private func handleAttentionAction(_ sender: NSMenuItem) {
@@ -673,22 +649,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    private func relativeTimeString(from timestamp: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        var date = formatter.date(from: timestamp)
-        if date == nil {
-            formatter.formatOptions = [.withInternetDateTime]
-            date = formatter.date(from: timestamp)
-        }
-        guard let d = date else { return "" }
-
-        let elapsed = -d.timeIntervalSinceNow
-        if elapsed < 60 { return "just now" }
-        if elapsed < 3600 { return "\(Int(elapsed / 60))m ago" }
-        if elapsed < 86400 { return "\(Int(elapsed / 3600))h ago" }
-        return "\(Int(elapsed / 86400))d ago"
-    }
 }
 
 // MARK: - App

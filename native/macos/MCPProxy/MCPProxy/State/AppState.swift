@@ -69,6 +69,9 @@ final class AppState: ObservableObject {
     @Published var updateAvailable: String? = nil
     @Published var autoStartEnabled: Bool = false
 
+    /// Whether the user has explicitly paused MCPProxy (distinct from idle/error states).
+    @Published var isPaused: Bool = false
+
     // MARK: Computed properties
 
     /// Servers that need user intervention — NOT including intentionally disabled servers.
@@ -117,6 +120,7 @@ final class AppState: ObservableObject {
 
     /// One-line summary suitable for display in the menu header.
     var statusSummary: String {
+        if isPaused { return "Paused" }
         switch coreState {
         case .connected:
             if totalServers == 0 {
