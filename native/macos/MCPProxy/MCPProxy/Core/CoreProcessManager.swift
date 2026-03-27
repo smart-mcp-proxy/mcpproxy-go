@@ -513,6 +513,7 @@ actor CoreProcessManager {
             // New activity; refresh and check for sensitive data
             let oldSensitive = await MainActor.run { appState.sensitiveDataAlertCount }
             await refreshActivity()
+            await MainActor.run { appState.activityVersion += 1 }
             let newSensitive = await MainActor.run { appState.sensitiveDataAlertCount }
             // Notify on new sensitive data detections
             if newSensitive > oldSensitive {

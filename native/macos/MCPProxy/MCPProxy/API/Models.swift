@@ -222,6 +222,78 @@ struct TokenMetrics: Codable, Equatable {
     }
 }
 
+// MARK: - JSON Value
+
+/// A type-erased JSON value for decoding arbitrary JSON structures (metadata, arguments, etc.).
+enum JSONValue: Codable, Equatable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case null
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null; return }
+        if let v = try? container.decode(Bool.self) { self = .bool(v); return }
+        if let v = try? container.decode(Int64.self) { self = .number(Double(v)); return }
+        if let v = try? container.decode(Double.self) { self = .number(v); return }
+        if let v = try? container.decode(String.self) { self = .string(v); return }
+        if let v = try? container.decode([JSONValue].self) { self = .array(v); return }
+        if let v = try? container.decode([String: JSONValue].self) { self = .object(v); return }
+        throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value")
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let v): try container.encode(v)
+        case .number(let v): try container.encode(v)
+        case .bool(let v): try container.encode(v)
+        case .null: try container.encodeNil()
+        case .array(let v): try container.encode(v)
+        case .object(let v): try container.encode(v)
+        }
+    }
+
+    /// Convert to Foundation types for JSONSerialization.
+    func toAny() -> Any {
+        switch self {
+        case .string(let s): return s
+        case .number(let n): return n
+        case .bool(let b): return b
+        case .null: return NSNull()
+        case .array(let a): return a.map { $0.toAny() }
+        case .object(let d): return d.mapValues { $0.toAny() }
+        }
+    }
+
+    /// Pretty-printed JSON string for copy-to-clipboard.
+    var prettyString: String {
+        let obj = toAny()
+        if JSONSerialization.isValidJSONObject(obj),
+           let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+           let str = String(data: data, encoding: .utf8) {
+            return str
+        }
+        switch self {
+        case .string(let s): return "\"\(s)\""
+        case .number(let n):
+            return n.truncatingRemainder(dividingBy: 1) == 0 && abs(n) < 1e15
+                ? "\(Int64(n))" : "\(n)"
+        case .bool(let b): return b ? "true" : "false"
+        case .null: return "null"
+        default: return "\(obj)"
+        }
+    }
+
+    /// Approximate byte count of the JSON representation.
+    var byteCount: Int {
+        prettyString.utf8.count
+    }
+}
+
 // MARK: - Activity Models
 
 /// A single activity record from the activity log.
@@ -232,20 +304,25 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
     let source: String?
     let serverName: String?
     let toolName: String?
+    let arguments: [String: JSONValue]?
+    let response: String?
+    let responseTruncated: Bool?
     let status: String
     let errorMessage: String?
     let durationMs: Int64?
     let timestamp: String
     let sessionId: String?
     let requestId: String?
+    let metadata: [String: JSONValue]?
     let hasSensitiveData: Bool?
     let detectionTypes: [String]?
     let maxSeverity: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, source, status, timestamp
+        case id, type, source, status, timestamp, arguments, response, metadata
         case serverName = "server_name"
         case toolName = "tool_name"
+        case responseTruncated = "response_truncated"
         case errorMessage = "error_message"
         case durationMs = "duration_ms"
         case sessionId = "session_id"
@@ -257,6 +334,65 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
 
     static func == (lhs: ActivityEntry, rhs: ActivityEntry) -> Bool {
         lhs.id == rhs.id
+    }
+
+    // MARK: Intent Helpers
+
+    /// The intent object from metadata, if present.
+    var intent: [String: JSONValue]? {
+        guard let meta = metadata,
+              case .object(let intentObj) = meta["intent"] else { return nil }
+        return intentObj
+    }
+
+    /// Intent operation type: "read", "write", or "destructive".
+    var intentOperationType: String? {
+        guard let intent = intent,
+              case .string(let op) = intent["operation_type"] else { return nil }
+        return op
+    }
+
+    /// Intent data sensitivity level.
+    var intentSensitivity: String? {
+        guard let intent = intent,
+              case .string(let s) = intent["data_sensitivity"] else { return nil }
+        return s
+    }
+
+    /// Intent reason provided by the caller.
+    var intentReason: String? {
+        guard let intent = intent,
+              case .string(let r) = intent["reason"] else { return nil }
+        return r.isEmpty ? nil : r
+    }
+
+    /// Tool variant from metadata (e.g. "call_tool_read").
+    var toolVariant: String? {
+        guard let meta = metadata,
+              case .string(let v) = meta["tool_variant"] else { return nil }
+        return v
+    }
+
+    /// Content trust level from metadata.
+    var contentTrust: String? {
+        guard let meta = metadata,
+              case .string(let v) = meta["content_trust"] else { return nil }
+        return v
+    }
+
+    /// Metadata fields excluding intent (for "Additional Details" display).
+    var additionalMetadata: [String: JSONValue]? {
+        guard let meta = metadata else { return nil }
+        var filtered = meta
+        filtered.removeValue(forKey: "intent")
+        return filtered.isEmpty ? nil : filtered
+    }
+
+    /// Parse the response string as JSON if possible.
+    var parsedResponse: JSONValue? {
+        guard let response = response, !response.isEmpty,
+              let data = response.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(JSONValue.self, from: data)
     }
 }
 

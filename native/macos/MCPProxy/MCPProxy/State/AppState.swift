@@ -52,6 +52,9 @@ final class AppState: ObservableObject {
     @Published var sensitiveDataAlertCount: Int = 0
     @Published var quarantinedToolsCount: Int = 0
 
+    /// Monotonic counter bumped on each SSE activity event for live updates.
+    @Published var activityVersion: Int = 0
+
     // MARK: Token metrics (from status response)
 
     @Published var tokenMetrics: TokenMetrics?
