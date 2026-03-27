@@ -49,7 +49,7 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var statsSection: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 16) {
             let enabledCount = appState.servers.filter { $0.enabled }.count
             StatCard(
                 title: "Total Servers",
@@ -117,17 +117,19 @@ struct DashboardView: View {
                 Label("Token Savings", systemImage: "bolt.fill")
                     .font(.headline)
 
-                HStack(spacing: 12) {
+                HStack(spacing: 16) {
                     // Tokens Saved — prominent green card
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Image(systemName: "arrow.down.circle.fill")
-                                .font(.system(size: 14))
+                                .font(.subheadline)
                                 .foregroundStyle(.green)
                             Spacer()
                         }
                         Text(formatTokenCount(stats.savedTokens))
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .font(.title)
+                            .fontWeight(.bold)
+                            .fontDesign(.rounded)
                             .foregroundStyle(.green)
                         Text("Tokens Saved")
                             .font(.subheadline.weight(.medium))
@@ -136,10 +138,10 @@ struct DashboardView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    .padding(12)
+                    .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
 
                     // Full tool list size
                     StatCard(
@@ -188,7 +190,7 @@ struct DashboardView: View {
                         )
                     }
                 }
-                .padding(12)
+                .padding(16)
                 .background(Color(nsColor: .controlBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
@@ -236,7 +238,7 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+                    .background(Color(nsColor: .controlBackgroundColor))
 
                     Divider()
 
@@ -321,7 +323,7 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+                    .background(Color(nsColor: .controlBackgroundColor))
 
                     Divider()
 
@@ -345,23 +347,24 @@ struct DashboardView: View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.title2)
-                .foregroundStyle(.white)
+                .foregroundStyle(.red)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(error.userMessage)
                     .font(.subheadline.bold())
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
                 Text(error.remediationHint)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
 
             Spacer()
         }
-        .padding(12)
-        .background(Color.red)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(16)
+        .background(Color.red.opacity(0.15))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityLabel("Error: \(error.userMessage)")
     }
 
     // MARK: - Helpers
@@ -450,12 +453,14 @@ private struct StatCard: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Image(systemName: icon)
-                    .font(.system(size: 14))
+                    .font(.subheadline)
                     .foregroundStyle(color)
                 Spacer()
             }
             Text(value)
-                .font(.system(size: 28, weight: .bold, design: .rounded))
+                .font(.title)
+                .fontWeight(.bold)
+                .fontDesign(.rounded)
                 .foregroundStyle(.primary)
             Text(title)
                 .font(.subheadline.weight(.medium))
@@ -464,10 +469,12 @@ private struct StatCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .padding(12)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value), \(subtitle)")
     }
 }
 
@@ -525,12 +532,13 @@ private struct DashboardStatusBadge: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: 10, weight: .semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
             .background(color.opacity(0.15))
             .foregroundStyle(color)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .clipShape(Capsule())
+            .accessibilityLabel("Status: \(label)")
     }
 }
 
@@ -634,13 +642,14 @@ private struct ToolCallIntentBadge: View {
             Image(systemName: iconName)
                 .font(.system(size: 8))
             Text(operationType)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption2.weight(.semibold))
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
         .background(backgroundColor.opacity(0.15))
         .foregroundStyle(backgroundColor)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .clipShape(Capsule())
+        .accessibilityLabel("Intent: \(operationType)")
     }
 
     private var iconName: String {
@@ -671,7 +680,8 @@ private struct AttentionRow: View {
     var body: some View {
         HStack {
             Image(systemName: server.health?.healthLevel.sfSymbolName ?? "questionmark.circle")
-                .foregroundStyle(healthColor)
+                .foregroundStyle(server.statusColor)
+                .accessibilityLabel("Health: \(server.health?.level ?? "unknown")")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
@@ -692,18 +702,11 @@ private struct AttentionRow: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(actionColor(action))
+                .accessibilityLabel("\(action.label) \(server.name)")
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 16)
         .padding(.vertical, 8)
-    }
-
-    private var healthColor: Color {
-        switch server.health?.healthLevel {
-        case .unhealthy: return .red
-        case .degraded: return .orange
-        default: return .gray
-        }
     }
 
     private func actionColor(_ action: HealthAction) -> Color {

@@ -450,7 +450,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
                 // Status icon: colored dot + auth indicator
                 let needsAuth = server.health?.action == "login"
-                let dotColor = serverStatusColor(for: server)
+                let dotColor = server.statusNSColor
 
                 let iconSize = NSSize(width: 16, height: 16)
                 let icon = NSImage(size: iconSize, flipped: false) { rect in
@@ -753,21 +753,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     // MARK: - Helpers
-
-    private func serverStatusColor(for server: ServerStatus) -> NSColor {
-        // Disabled servers are always gray — check FIRST before health
-        if !server.enabled { return .systemGray }
-        if server.quarantined { return .systemOrange }
-        if let health = server.health {
-            switch health.level {
-            case "healthy": return .systemGreen
-            case "degraded": return .systemYellow
-            case "unhealthy": return .systemRed
-            default: return server.connected ? .systemGreen : .systemGray
-            }
-        }
-        return server.connected ? .systemGreen : .systemGray
-    }
 
     private func actionIcon(for action: String) -> String {
         switch action {

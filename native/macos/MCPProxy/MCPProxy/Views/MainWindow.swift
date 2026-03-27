@@ -22,15 +22,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         }
     }
 
-    var color: Color {
-        switch self {
-        case .dashboard: return .indigo
-        case .servers: return .blue
-        case .activity: return .orange
-        case .secrets: return .green
-        case .config: return .gray
-        }
-    }
 }
 
 struct MainWindow: View {
@@ -41,20 +32,9 @@ struct MainWindow: View {
         NavigationSplitView {
             List(selection: $selectedItem) {
                 ForEach(SidebarItem.allCases) { item in
-                    Label {
-                        Text(item.rawValue)
-                            .font(.system(size: 15))
-                    } icon: {
-                        Image(systemName: item.icon)
-                            .font(.system(size: 14))
-                            .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
-                            .background(item.color)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                    .tag(item)
-                    .padding(.vertical, 2)
-                    .accessibilityIdentifier("sidebar-\(item.rawValue)")
+                    Label(item.rawValue, systemImage: item.icon)
+                        .tag(item)
+                        .accessibilityIdentifier("sidebar-\(item.rawValue)")
                 }
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 220)
