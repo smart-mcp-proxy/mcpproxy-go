@@ -59,9 +59,6 @@ func (m *Manager) SaveActivity(record *ActivityRecord) error {
 		record.Timestamp = time.Now().UTC()
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists([]byte(ActivityRecordsBucket))
 		if err != nil {
@@ -88,9 +85,6 @@ func (m *Manager) GetActivity(id string) (*ActivityRecord, error) {
 	if id == "" {
 		return nil, fmt.Errorf("activity ID cannot be empty")
 	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 
 	var record *ActivityRecord
 
@@ -127,9 +121,6 @@ func (m *Manager) GetActivity(id string) (*ActivityRecord, error) {
 // Returns the records, total matching count, and any error.
 func (m *Manager) ListActivities(filter ActivityFilter) ([]*ActivityRecord, int, error) {
 	filter.Validate()
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 
 	var records []*ActivityRecord
 	var total int
@@ -202,9 +193,6 @@ func (m *Manager) DeleteActivity(id string) error {
 		return fmt.Errorf("activity ID cannot be empty")
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ActivityRecordsBucket))
 		if bucket == nil {
@@ -225,9 +213,6 @@ func (m *Manager) DeleteActivity(id string) error {
 
 // CountActivities returns the total number of activity records.
 func (m *Manager) CountActivities() (int, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	var count int
 
 	err := m.db.db.View(func(tx *bbolt.Tx) error {
@@ -245,15 +230,12 @@ func (m *Manager) CountActivities() (int, error) {
 // StreamActivities returns a channel that yields activity records matching the filter.
 // The channel is closed when all matching records have been sent.
 // This is useful for streaming large exports without loading all records into memory.
+// Respects filter.Limit and filter.Offset for bounded streaming.
 func (m *Manager) StreamActivities(filter ActivityFilter) <-chan *ActivityRecord {
-	filter.Validate()
 	ch := make(chan *ActivityRecord, 100)
 
 	go func() {
 		defer close(ch)
-
-		m.mu.RLock()
-		defer m.mu.RUnlock()
 
 		err := m.db.db.View(func(tx *bbolt.Tx) error {
 			bucket := tx.Bucket([]byte(ActivityRecordsBucket))
@@ -262,6 +244,9 @@ func (m *Manager) StreamActivities(filter ActivityFilter) <-chan *ActivityRecord
 			}
 
 			cursor := bucket.Cursor()
+			skipped := 0
+			sent := 0
+
 			for k, v := cursor.Last(); k != nil; k, v = cursor.Prev() {
 				var record ActivityRecord
 				if err := record.UnmarshalBinary(v); err != nil {
@@ -272,7 +257,19 @@ func (m *Manager) StreamActivities(filter ActivityFilter) <-chan *ActivityRecord
 					continue
 				}
 
+				// Handle offset
+				if filter.Offset > 0 && skipped < filter.Offset {
+					skipped++
+					continue
+				}
+
+				// Handle limit — stop after sending limit records
+				if filter.Limit > 0 && sent >= filter.Limit {
+					return nil
+				}
+
 				ch <- &record
+				sent++
 			}
 
 			return nil
@@ -291,9 +288,6 @@ func (m *Manager) StreamActivities(filter ActivityFilter) <-chan *ActivityRecord
 func (m *Manager) PruneOldActivities(maxAge time.Duration) (int, error) {
 	cutoff := time.Now().UTC().Add(-maxAge)
 	cutoffKey := activityKey(cutoff, "")
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	var deleted int
 
@@ -346,9 +340,6 @@ func (m *Manager) PruneExcessActivities(maxRecords int, targetPercent float64) (
 	if targetPercent <= 0 || targetPercent > 1 {
 		targetPercent = 0.9 // Default to 90%
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	var deleted int
 
@@ -440,9 +431,6 @@ func (m *Manager) UpdateActivityMetadata(id string, updates map[string]interface
 	if len(updates) == 0 {
 		return nil // Nothing to update
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ActivityRecordsBucket))

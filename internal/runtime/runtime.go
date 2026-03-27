@@ -1690,6 +1690,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		serverMap := map[string]interface{}{
+			"id":              serverStatus.Name,
 			"name":            serverStatus.Name,
 			"url":             url,
 			"command":         command,
@@ -1800,6 +1801,7 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 	result := make([]map[string]interface{}, 0, len(servers))
 	for _, srv := range servers {
 		serverInfo := map[string]interface{}{
+			"id":          srv.Name,
 			"name":        srv.Name,
 			"url":         srv.URL,
 			"command":     srv.Command,

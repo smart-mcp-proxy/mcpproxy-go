@@ -352,6 +352,8 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 // @Param status query string false "Filter by status"
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
+// @Param limit query int false "Maximum records to export (1-50000, default 10000)"
+// @Param offset query int false "Pagination offset (default 0)"
 // @Success 200 {string} string "Streamed activity records"
 // @Failure 401 {object} contracts.APIResponse
 // @Failure 500 {object} contracts.APIResponse
@@ -360,9 +362,22 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 // @Router /api/v1/activity/export [get]
 func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 	filter := parseActivityFilters(r)
-	// Remove pagination limits for export - we want all matching records
-	filter.Limit = 0
-	filter.Offset = 0
+
+	// Re-parse limit/offset from query for export — parseActivityFilters caps at 100 via Validate(),
+	// but export supports up to 50000. Re-read raw values and apply export-specific validation.
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil {
+			filter.Limit = limit
+		}
+	} else {
+		filter.Limit = 0 // Not specified — let ValidateForExport set the default (10000)
+	}
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if offset, err := strconv.Atoi(offsetStr); err == nil {
+			filter.Offset = offset
+		}
+	}
+	filter.ValidateForExport()
 
 	format := r.URL.Query().Get("format")
 	if format == "" {
@@ -442,7 +457,7 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	s.logger.Infow("Activity export completed", "format", format, "count", count)
+	s.logger.Infow("Activity export completed", "format", format, "count", count, "limit", filter.Limit, "offset", filter.Offset)
 }
 
 // activityToCSVRow converts an ActivityRecord to a CSV row string.

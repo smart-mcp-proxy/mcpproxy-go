@@ -140,9 +140,14 @@ func shouldExclude(annotations *config.ToolAnnotations, readOnlyOnly, excludeDes
 	}
 
 	if excludeDestructive {
-		// Exclude if destructiveHint is true or nil (default is true per spec)
-		if annotations == nil || annotations.DestructiveHint == nil || *annotations.DestructiveHint {
-			return true
+		// Exclude if destructiveHint is true or nil (default is true per spec).
+		// However, a tool with readOnlyHint=true is inherently non-destructive,
+		// so treat destructiveHint as false when readOnlyHint is explicitly true.
+		isReadOnly := annotations != nil && annotations.ReadOnlyHint != nil && *annotations.ReadOnlyHint
+		if !isReadOnly {
+			if annotations == nil || annotations.DestructiveHint == nil || *annotations.DestructiveHint {
+				return true
+			}
 		}
 	}
 

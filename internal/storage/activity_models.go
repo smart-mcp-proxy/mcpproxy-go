@@ -130,13 +130,28 @@ func DefaultActivityFilter() ActivityFilter {
 	}
 }
 
-// Validate validates and normalizes the filter
+// Validate validates and normalizes the filter for regular list queries.
 func (f *ActivityFilter) Validate() {
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
 	if f.Limit > 100 {
 		f.Limit = 100
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+}
+
+// ValidateForExport validates and normalizes the filter for export queries.
+// Export allows larger limits than regular list queries.
+// Default: 10000, Max: 50000.
+func (f *ActivityFilter) ValidateForExport() {
+	if f.Limit <= 0 {
+		f.Limit = 10000
+	}
+	if f.Limit > 50000 {
+		f.Limit = 50000
 	}
 	if f.Offset < 0 {
 		f.Offset = 0

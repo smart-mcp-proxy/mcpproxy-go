@@ -267,6 +267,48 @@ func TestAnnotationFiltering_ExcludeDestructive(t *testing.T) {
 	assert.Equal(t, "list_items", filtered[0].toolName)
 }
 
+func TestAnnotationFiltering_ExcludeDestructive_ReadOnlyNotExcluded(t *testing.T) {
+	// Bug fix: tools with readOnlyHint=true but missing destructiveHint should NOT
+	// be excluded by exclude_destructive. A read-only tool is inherently non-destructive.
+	tools := []annotatedSearchResult{
+		{
+			serverName: "s1",
+			toolName:   "read_only_tool",
+			annotations: &config.ToolAnnotations{
+				ReadOnlyHint: boolPtr(true),
+				// destructiveHint is nil — per MCP spec defaults to true,
+				// but readOnlyHint=true overrides this.
+			},
+		},
+		{
+			serverName:  "s1",
+			toolName:    "write_tool_no_annotations",
+			annotations: &config.ToolAnnotations{
+				// Both nil — defaults to destructive=true, readOnly=false
+			},
+		},
+		{
+			serverName:  "s1",
+			toolName:    "nil_annotations",
+			annotations: nil, // No annotations at all — defaults to destructive
+		},
+		{
+			serverName: "s1",
+			toolName:   "safe_write_tool",
+			annotations: &config.ToolAnnotations{
+				ReadOnlyHint:    boolPtr(false),
+				DestructiveHint: boolPtr(false),
+			},
+		},
+	}
+
+	filtered := filterByAnnotations(tools, false, true, false)
+
+	assert.Len(t, filtered, 2)
+	assert.Equal(t, "read_only_tool", filtered[0].toolName)
+	assert.Equal(t, "safe_write_tool", filtered[1].toolName)
+}
+
 func TestAnnotationFiltering_ExcludeOpenWorld(t *testing.T) {
 	tools := []annotatedSearchResult{
 		{
