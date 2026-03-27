@@ -2,7 +2,7 @@
 // MCPProxy
 //
 // Shows the activity log with summary stats, filter dropdowns for Type/Server/Status,
-// a list on the left, and a detail panel on the right.
+// a tabular list on the left with column headers, and a detail panel on the right.
 // Features: SSE live updates, dynamic timestamps, colored JSON, intent display, export.
 
 import SwiftUI
@@ -85,9 +85,18 @@ struct ActivityView: View {
         return parts.joined(separator: "&")
     }
 
+    // MARK: - Column widths
+    private let colTime: CGFloat = 65
+    private let colType: CGFloat = 130
+    private let colServer: CGFloat = 110
+    private let colDetails: CGFloat = 0  // flexible
+    private let colIntent: CGFloat = 80
+    private let colStatus: CGFloat = 80
+    private let colDuration: CGFloat = 65
+
     var body: some View {
         HSplitView {
-            // Left: activity list with filters
+            // Left: activity table with filters
             VStack(alignment: .leading, spacing: 0) {
                 activityListHeader
                 summaryStatsBar
@@ -100,17 +109,41 @@ struct ActivityView: View {
                 } else if filteredActivities.isEmpty {
                     emptyState
                 } else {
+                    // Column headers
+                    tableHeader
+
+                    Divider()
+
                     // TimelineView re-renders every 20s to update relative timestamps
                     TimelineView(.periodic(from: .now, by: 20)) { context in
-                        List(filteredActivities, selection: $selectedActivityID) { entry in
-                            ActivityRow(entry: entry, currentDate: context.date)
-                                .tag(entry.id)
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(filteredActivities) { entry in
+                                    ActivityTableRow(
+                                        entry: entry,
+                                        currentDate: context.date,
+                                        isSelected: entry.id == selectedActivityID,
+                                        colTime: colTime,
+                                        colType: colType,
+                                        colServer: colServer,
+                                        colIntent: colIntent,
+                                        colStatus: colStatus,
+                                        colDuration: colDuration
+                                    )
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedActivityID = entry.id
+                                    }
+
+                                    Divider().padding(.leading, 8)
+                                }
+                            }
                         }
                         .accessibilityIdentifier("activity-list")
                     }
                 }
             }
-            .frame(minWidth: 440)
+            .frame(minWidth: 560)
 
             // Right: detail panel
             if let selectedID = selectedActivityID,
@@ -133,6 +166,33 @@ struct ActivityView: View {
                 await loadActivities()
             }
         }
+    }
+
+    // MARK: - Table Header
+
+    @ViewBuilder
+    private var tableHeader: some View {
+        HStack(spacing: 0) {
+            Text("Time")
+                .frame(width: colTime, alignment: .leading)
+            Text("Type")
+                .frame(width: colType, alignment: .leading)
+            Text("Server")
+                .frame(width: colServer, alignment: .leading)
+            Text("Details")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Intent")
+                .frame(width: colIntent, alignment: .center)
+            Text("Status")
+                .frame(width: colStatus, alignment: .center)
+            Text("Duration")
+                .frame(width: colDuration, alignment: .trailing)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
     }
 
     // MARK: - Header
@@ -354,6 +414,192 @@ struct ActivityView: View {
     }
 }
 
+// MARK: - Activity Table Row
+
+struct ActivityTableRow: View {
+    let entry: ActivityEntry
+    let currentDate: Date
+    let isSelected: Bool
+    let colTime: CGFloat
+    let colType: CGFloat
+    let colServer: CGFloat
+    let colIntent: CGFloat
+    let colStatus: CGFloat
+    let colDuration: CGFloat
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Time column
+            Text(relativeTime(entry.timestamp))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: colTime, alignment: .leading)
+
+            // Type column (icon + label)
+            HStack(spacing: 4) {
+                Image(systemName: typeIcon)
+                    .font(.system(size: 10))
+                    .foregroundStyle(typeIconColor)
+                    .frame(width: 14)
+                Text(displayType)
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .frame(width: colType, alignment: .leading)
+
+            // Server column
+            Text(entry.serverName ?? "-")
+                .font(.caption)
+                .lineLimit(1)
+                .frame(width: colServer, alignment: .leading)
+
+            // Details column (tool name)
+            HStack(spacing: 4) {
+                Text(entry.toolName ?? "-")
+                    .font(.caption)
+                    .lineLimit(1)
+
+                // Sensitive data indicator
+                if entry.hasSensitiveData == true {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.system(size: 9))
+                        .help("Contains sensitive data")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Intent column
+            if let op = entry.intentOperationType {
+                IntentBadge(operationType: op)
+                    .frame(width: colIntent, alignment: .center)
+            } else {
+                Text("-")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: colIntent, alignment: .center)
+            }
+
+            // Status column
+            ActivityStatusBadge(status: entry.status)
+                .frame(width: colStatus, alignment: .center)
+
+            // Duration column
+            if let duration = entry.durationMs {
+                Text("\(duration)ms")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: colDuration, alignment: .trailing)
+            } else {
+                Text("-")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: colDuration, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+    }
+
+    // MARK: - Helpers
+
+    private var typeIcon: String {
+        switch entry.type {
+        case "tool_call": return "wrench.fill"
+        case "internal_tool_call": return "gearshape.fill"
+        case "tool_quarantine_change": return "shield.fill"
+        case "system_start": return "play.circle.fill"
+        case "system_stop": return "stop.circle.fill"
+        case "config_change": return "slider.horizontal.3"
+        case "policy_decision": return "hand.raised.fill"
+        case "server_change": return "arrow.triangle.2.circlepath"
+        default: return "circle.fill"
+        }
+    }
+
+    private var typeIconColor: Color {
+        switch entry.type {
+        case "tool_call": return .blue
+        case "internal_tool_call": return .indigo
+        case "tool_quarantine_change": return .orange
+        case "system_start": return .green
+        case "system_stop": return .red
+        case "config_change": return .purple
+        case "policy_decision": return .orange
+        case "server_change": return .teal
+        default: return .gray
+        }
+    }
+
+    private var displayType: String {
+        switch entry.type {
+        case "tool_call": return "Tool Call"
+        case "internal_tool_call": return "Internal Tool"
+        case "tool_quarantine_change": return "Quarantine"
+        case "system_start": return "System Start"
+        case "system_stop": return "System Stop"
+        case "config_change": return "Config Change"
+        case "policy_decision": return "Policy"
+        case "server_change": return "Server Change"
+        default: return entry.type
+        }
+    }
+
+    private func relativeTime(_ timestamp: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = formatter.date(from: timestamp)
+        if date == nil {
+            formatter.formatOptions = [.withInternetDateTime]
+            date = formatter.date(from: timestamp)
+        }
+        guard let d = date else { return timestamp }
+
+        let elapsed = currentDate.timeIntervalSince(d)
+        if elapsed < 60 { return "just now" }
+        if elapsed < 3600 { return "\(Int(elapsed / 60))m ago" }
+        if elapsed < 86400 { return "\(Int(elapsed / 3600))h ago" }
+        return "\(Int(elapsed / 86400))d ago"
+    }
+}
+
+// MARK: - Activity Status Badge
+
+struct ActivityStatusBadge: View {
+    let status: String
+
+    var body: some View {
+        Text(displayLabel)
+            .font(.system(size: 10, weight: .semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(badgeColor.opacity(0.15))
+            .foregroundStyle(badgeColor)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    private var displayLabel: String {
+        switch status {
+        case "success": return "Success"
+        case "error": return "Error"
+        case "blocked": return "Blocked"
+        case "tool_description_changed": return "Changed"
+        default: return status
+        }
+    }
+
+    private var badgeColor: Color {
+        switch status {
+        case "success": return .green
+        case "error": return .red
+        case "blocked": return .orange
+        case "tool_description_changed": return .yellow
+        default: return .gray
+        }
+    }
+}
+
 // MARK: - Summary Stat Pill
 
 struct SummaryStatPill: View {
@@ -374,132 +620,6 @@ struct SummaryStatPill: View {
         .padding(.vertical, 4)
         .background(.quaternary)
         .cornerRadius(6)
-    }
-}
-
-// MARK: - Activity Row
-
-struct ActivityRow: View {
-    let entry: ActivityEntry
-    let currentDate: Date
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: statusIcon)
-                .foregroundStyle(statusColor)
-                .frame(width: 16)
-
-            VStack(alignment: .leading, spacing: 2) {
-                // Primary line: server:tool or type + intent badge
-                HStack(spacing: 6) {
-                    Text(summaryText)
-                        .font(.system(.body, design: .default))
-                        .lineLimit(1)
-
-                    if let op = entry.intentOperationType {
-                        IntentBadge(operationType: op)
-                    }
-
-                    Spacer()
-
-                    Text(relativeTime(entry.timestamp))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-
-                // Secondary line: type + duration
-                HStack(spacing: 6) {
-                    Text(displayType)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if let duration = entry.durationMs {
-                        Text("\(duration)ms")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-
-                // Intent reason line (prominently visible)
-                if let reason = entry.intentReason {
-                    Text(reason)
-                        .font(.caption)
-                        .foregroundStyle(.cyan)
-                        .lineLimit(2)
-                        .help(reason)
-                }
-            }
-
-            // Sensitive data indicator
-            if entry.hasSensitiveData == true {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                    .font(.caption)
-                    .help("Contains sensitive data detections")
-            }
-        }
-        .padding(.vertical, 2)
-    }
-
-    // MARK: - Helpers
-
-    private var summaryText: String {
-        var parts: [String] = []
-        if let server = entry.serverName, !server.isEmpty { parts.append(server) }
-        if let tool = entry.toolName, !tool.isEmpty { parts.append(tool) }
-        return parts.isEmpty ? displayType : parts.joined(separator: ":")
-    }
-
-    private var displayType: String {
-        switch entry.type {
-        case "tool_call": return "Tool Call"
-        case "internal_tool_call": return "Internal Tool Call"
-        case "tool_quarantine_change": return "Quarantine Change"
-        case "system_start": return "System Start"
-        case "system_stop": return "System Stop"
-        case "config_change": return "Config Change"
-        case "policy_decision": return "Policy Decision"
-        case "server_change": return "Server Change"
-        default: return entry.type
-        }
-    }
-
-    private var statusIcon: String {
-        if entry.hasSensitiveData == true { return "exclamationmark.triangle.fill" }
-        switch entry.status {
-        case "error": return "xmark.circle.fill"
-        case "blocked": return "hand.raised.fill"
-        case "success": return "checkmark.circle.fill"
-        case "tool_description_changed": return "pencil.circle.fill"
-        default: return "circle.fill"
-        }
-    }
-
-    private var statusColor: Color {
-        switch entry.status {
-        case "error": return .red
-        case "blocked": return .orange
-        case "success": return .green
-        case "tool_description_changed": return .yellow
-        default: return .gray
-        }
-    }
-
-    private func relativeTime(_ timestamp: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        var date = formatter.date(from: timestamp)
-        if date == nil {
-            formatter.formatOptions = [.withInternetDateTime]
-            date = formatter.date(from: timestamp)
-        }
-        guard let d = date else { return timestamp }
-
-        let elapsed = currentDate.timeIntervalSince(d)
-        if elapsed < 60 { return "just now" }
-        if elapsed < 3600 { return "\(Int(elapsed / 60))m ago" }
-        if elapsed < 86400 { return "\(Int(elapsed / 3600))h ago" }
-        return "\(Int(elapsed / 86400))d ago"
     }
 }
 
