@@ -76,6 +76,13 @@ struct MainWindow: View {
                 }
             }
             .accessibilityIdentifier("detail-view")
+            // Apply user-adjustable zoom (Cmd+/Cmd-/Cmd+0)
+            .scaleEffect(appState.fontScale, anchor: .topLeading)
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: .topLeading
+            )
         }
         .frame(minWidth: 800, minHeight: 500)
     }
