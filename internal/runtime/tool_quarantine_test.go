@@ -418,8 +418,8 @@ func TestCalculateToolApprovalHash_Stability(t *testing.T) {
 			description: "Search the documentation",
 			schema:      `{"type":"object","properties":{"query":{"type":"string"}}}`,
 			annotations: &config.ToolAnnotations{Title: "Search Docs"},
-			// Annotations excluded from hash — this matches legacy hash for same inputs
-			expected: "5fc374a5a4618188c7b073289e2b14a5161aaffa666db869dc758aa242318298",
+			// Hash includes normalized JSON schema (sorted keys)
+			expected: "84a2a70683e426cceaee18a108a63924c6562741d374013293b5405d54afb491",
 		},
 		{
 			name:        "with destructiveHint",
