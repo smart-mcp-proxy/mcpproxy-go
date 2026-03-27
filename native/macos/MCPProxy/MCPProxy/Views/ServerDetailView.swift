@@ -152,10 +152,20 @@ struct ServerDetailView: View {
                                 .clipShape(Capsule())
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(selectedTab == tab ? Color.accentColor.opacity(0.1) : .clear)
+                    .frame(minWidth: 80)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 10)
+                    .background(
+                        selectedTab == tab
+                            ? Color.accentColor.opacity(0.15)
+                            : Color.clear
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(selectedTab == tab ? Color.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+                    )
                     .cornerRadius(6)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -291,10 +301,11 @@ struct ServerDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollViewReader { proxy in
-                    ScrollView([.horizontal, .vertical]) {
+                    ScrollView(.vertical) {
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(logLines.enumerated()), id: \.offset) { idx, line in
                                 logLineView(line)
+                                    .fixedSize(horizontal: false, vertical: true)
                                     .id(idx)
                             }
                         }
@@ -314,7 +325,7 @@ struct ServerDetailView: View {
         .task { await loadLogs() }
     }
 
-    /// Render a single log line with color-coded level.
+    /// Render a single log line with color-coded level and word wrapping.
     @ViewBuilder
     private func logLineView(_ line: String) -> some View {
         let levelColor = logLevelColor(line)
@@ -322,6 +333,7 @@ struct ServerDetailView: View {
             .font(.system(size: 11, design: .monospaced))
             .foregroundStyle(levelColor)
             .textSelection(.enabled)
+            .lineLimit(nil)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 1)
     }

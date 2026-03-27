@@ -3,7 +3,7 @@
 //
 // APPROACH: Use AppKit NSTableView via NSViewRepresentable to display servers.
 // NSTableView has zero duplication issues and proper view recycling.
-// SwiftUI List with @ObservedObject is fundamentally broken for this use case.
+// Docker Desktop-style multi-column table with Status, Name, Type, Status text, Tools, Token Size, Actions.
 
 import SwiftUI
 import AppKit
@@ -114,12 +114,15 @@ struct ServersView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            // AppKit NSTableView -- no duplication bugs
+            // AppKit NSTableView -- Docker Desktop-style multi-column
             ServerTableView(
                 servers: $servers,
                 apiClient: appState.apiClient,
                 onDoubleClick: { server in
                     selectedServer = server
+                },
+                onServersChanged: {
+                    triggerLoad()
                 }
             )
             .accessibilityIdentifier("servers-list")
@@ -153,27 +156,100 @@ struct ServersView: View {
     }
 }
 
+// MARK: - Column Identifiers
+
+private enum ServerColumn: String, CaseIterable {
+    case status = "status"
+    case name = "name"
+    case type = "type"
+    case state = "state"
+    case tools = "tools"
+    case tokenSize = "tokenSize"
+    case actions = "actions"
+
+    var identifier: NSUserInterfaceItemIdentifier {
+        NSUserInterfaceItemIdentifier(rawValue)
+    }
+
+    var title: String {
+        switch self {
+        case .status: return ""
+        case .name: return "Name"
+        case .type: return "Type"
+        case .state: return "Status"
+        case .tools: return "Tools"
+        case .tokenSize: return "Tokens"
+        case .actions: return "Actions"
+        }
+    }
+
+    var minWidth: CGFloat {
+        switch self {
+        case .status: return 30
+        case .name: return 120
+        case .type: return 50
+        case .state: return 80
+        case .tools: return 45
+        case .tokenSize: return 60
+        case .actions: return 120
+        }
+    }
+
+    var maxWidth: CGFloat {
+        switch self {
+        case .status: return 30
+        case .name: return 400
+        case .type: return 60
+        case .state: return 160
+        case .tools: return 50
+        case .tokenSize: return 80
+        case .actions: return 120
+        }
+    }
+
+    var resizingMask: NSTableColumn.ResizingOptions {
+        switch self {
+        case .status, .tools, .actions: return .userResizingMask
+        case .name: return [.userResizingMask, .autoresizingMask]
+        default: return .userResizingMask
+        }
+    }
+}
+
 // MARK: - AppKit NSTableView wrapper
 
 struct ServerTableView: NSViewRepresentable {
     @Binding var servers: [ServerStatus]
     let apiClient: APIClient?
     var onDoubleClick: ((ServerStatus) -> Void)?
+    var onServersChanged: (() -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
 
         let tableView = NSTableView()
         tableView.style = .fullWidth
-        tableView.rowHeight = 52
+        tableView.rowHeight = 36
         tableView.usesAlternatingRowBackgroundColors = true
-        tableView.headerView = nil  // No header row
+        tableView.intercellSpacing = NSSize(width: 8, height: 0)
+        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
 
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("server"))
-        col.title = "Server"
-        tableView.addTableColumn(col)
+        // Create columns
+        for col in ServerColumn.allCases {
+            let column = NSTableColumn(identifier: col.identifier)
+            column.title = col.title
+            column.minWidth = col.minWidth
+            column.maxWidth = col.maxWidth
+            column.width = col.minWidth
+            column.resizingMask = col.resizingMask
+            tableView.addTableColumn(column)
+        }
+
+        // Enable header
+        tableView.headerView = NSTableHeaderView()
 
         tableView.delegate = context.coordinator
         tableView.dataSource = context.coordinator
@@ -196,6 +272,7 @@ struct ServerTableView: NSViewRepresentable {
         context.coordinator.servers = servers
         context.coordinator.apiClient = apiClient
         context.coordinator.onDoubleClick = onDoubleClick
+        context.coordinator.onServersChanged = onServersChanged
         context.coordinator.tableView?.reloadData()
     }
 
@@ -203,10 +280,13 @@ struct ServerTableView: NSViewRepresentable {
         Coordinator()
     }
 
+    // MARK: - Coordinator
+
     class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         var servers: [ServerStatus] = []
         var apiClient: APIClient?
         var onDoubleClick: ((ServerStatus) -> Void)?
+        var onServersChanged: (() -> Void)?
         weak var tableView: NSTableView?
 
         // MARK: - Double Click
@@ -217,10 +297,61 @@ struct ServerTableView: NSViewRepresentable {
             onDoubleClick?(servers[row])
         }
 
+        // MARK: - Action Button Handlers
+
         @objc func infoButtonClicked(_ sender: NSButton) {
             let row = sender.tag
             guard row >= 0, row < servers.count else { return }
             onDoubleClick?(servers[row])
+        }
+
+        @objc func toggleEnabledClicked(_ sender: NSButton) {
+            let row = sender.tag
+            guard row >= 0, row < servers.count else { return }
+            let server = servers[row]
+            Task {
+                if server.enabled {
+                    try? await apiClient?.disableServer(server.id)
+                } else {
+                    try? await apiClient?.enableServer(server.id)
+                }
+                await MainActor.run { onServersChanged?() }
+            }
+        }
+
+        @objc func restartButtonClicked(_ sender: NSButton) {
+            let row = sender.tag
+            guard row >= 0, row < servers.count else { return }
+            let server = servers[row]
+            Task {
+                try? await apiClient?.restartServer(server.id)
+                await MainActor.run { onServersChanged?() }
+            }
+        }
+
+        @objc func deleteButtonClicked(_ sender: NSButton) {
+            let row = sender.tag
+            guard row >= 0, row < servers.count else { return }
+            let server = servers[row]
+
+            // Show confirmation alert
+            let alert = NSAlert()
+            alert.messageText = "Delete Server"
+            alert.informativeText = "Are you sure you want to delete \"\(server.name)\"? This action cannot be undone."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+
+            // Style the Delete button as destructive
+            alert.buttons[0].hasDestructiveAction = true
+
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                Task {
+                    try? await apiClient?.deleteServer(server.id)
+                    await MainActor.run { onServersChanged?() }
+                }
+            }
         }
 
         // MARK: - Right-Click Context Menu
@@ -234,19 +365,19 @@ struct ServerTableView: NSViewRepresentable {
 
             // Enable/Disable
             if server.enabled {
-                let disable = NSMenuItem(title: "Disable", action: #selector(disableServer(_:)), keyEquivalent: "")
+                let disable = NSMenuItem(title: "Disable", action: #selector(ctxDisableServer(_:)), keyEquivalent: "")
                 disable.target = self
                 disable.representedObject = server
                 menu.addItem(disable)
             } else {
-                let enable = NSMenuItem(title: "Enable", action: #selector(enableServer(_:)), keyEquivalent: "")
+                let enable = NSMenuItem(title: "Enable", action: #selector(ctxEnableServer(_:)), keyEquivalent: "")
                 enable.target = self
                 enable.representedObject = server
                 menu.addItem(enable)
             }
 
             // Restart
-            let restart = NSMenuItem(title: "Restart", action: #selector(restartServer(_:)), keyEquivalent: "")
+            let restart = NSMenuItem(title: "Restart", action: #selector(ctxRestartServer(_:)), keyEquivalent: "")
             restart.target = self
             restart.representedObject = server
             menu.addItem(restart)
@@ -254,7 +385,7 @@ struct ServerTableView: NSViewRepresentable {
             // Log In (if auth needed)
             if server.health?.action == "login" {
                 menu.addItem(.separator())
-                let login = NSMenuItem(title: "Log In", action: #selector(loginServer(_:)), keyEquivalent: "")
+                let login = NSMenuItem(title: "Log In", action: #selector(ctxLoginServer(_:)), keyEquivalent: "")
                 login.target = self
                 login.representedObject = server
                 login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "login")
@@ -264,7 +395,7 @@ struct ServerTableView: NSViewRepresentable {
             // Approve Tools (if quarantined)
             if server.pendingApprovalCount > 0 {
                 menu.addItem(.separator())
-                let approve = NSMenuItem(title: "Approve All Tools", action: #selector(approveTools(_:)), keyEquivalent: "")
+                let approve = NSMenuItem(title: "Approve All Tools", action: #selector(ctxApproveTools(_:)), keyEquivalent: "")
                 approve.target = self
                 approve.representedObject = server
                 approve.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "approve")
@@ -274,54 +405,94 @@ struct ServerTableView: NSViewRepresentable {
             menu.addItem(.separator())
 
             // View Details
-            let details = NSMenuItem(title: "View Details", action: #selector(viewDetails(_:)), keyEquivalent: "")
+            let details = NSMenuItem(title: "View Details", action: #selector(ctxViewDetails(_:)), keyEquivalent: "")
             details.target = self
             details.representedObject = server
             menu.addItem(details)
 
             // View Logs
-            let logs = NSMenuItem(title: "View Logs", action: #selector(viewLogs(_:)), keyEquivalent: "")
+            let logs = NSMenuItem(title: "View Logs", action: #selector(ctxViewLogs(_:)), keyEquivalent: "")
             logs.target = self
             logs.representedObject = server
             menu.addItem(logs)
+
+            menu.addItem(.separator())
+
+            // Delete
+            let delete = NSMenuItem(title: "Delete Server", action: #selector(ctxDeleteServer(_:)), keyEquivalent: "")
+            delete.target = self
+            delete.representedObject = server
+            delete.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "delete")
+            menu.addItem(delete)
         }
 
-        @objc private func enableServer(_ sender: NSMenuItem) {
+        @objc private func ctxEnableServer(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
-            Task { try? await apiClient?.enableServer(server.id) }
+            Task {
+                try? await apiClient?.enableServer(server.id)
+                await MainActor.run { onServersChanged?() }
+            }
         }
 
-        @objc private func disableServer(_ sender: NSMenuItem) {
+        @objc private func ctxDisableServer(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
-            Task { try? await apiClient?.disableServer(server.id) }
+            Task {
+                try? await apiClient?.disableServer(server.id)
+                await MainActor.run { onServersChanged?() }
+            }
         }
 
-        @objc private func restartServer(_ sender: NSMenuItem) {
+        @objc private func ctxRestartServer(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
-            Task { try? await apiClient?.restartServer(server.id) }
+            Task {
+                try? await apiClient?.restartServer(server.id)
+                await MainActor.run { onServersChanged?() }
+            }
         }
 
-        @objc private func loginServer(_ sender: NSMenuItem) {
+        @objc private func ctxLoginServer(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
             Task { try? await apiClient?.loginServer(server.id) }
         }
 
-        @objc private func approveTools(_ sender: NSMenuItem) {
+        @objc private func ctxApproveTools(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
-            Task { try? await apiClient?.approveTools(server.id) }
+            Task {
+                try? await apiClient?.approveTools(server.id)
+                await MainActor.run { onServersChanged?() }
+            }
         }
 
-        @objc private func viewDetails(_ sender: NSMenuItem) {
+        @objc private func ctxViewDetails(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
             onDoubleClick?(server)
         }
 
-        @objc private func viewLogs(_ sender: NSMenuItem) {
+        @objc private func ctxViewLogs(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
             let home = FileManager.default.homeDirectoryForCurrentUser
             let logFile = home.appendingPathComponent("Library/Logs/mcpproxy/server-\(server.name).log")
             if FileManager.default.fileExists(atPath: logFile.path) {
                 NSWorkspace.shared.open(logFile)
+            }
+        }
+
+        @objc private func ctxDeleteServer(_ sender: NSMenuItem) {
+            guard let server = sender.representedObject as? ServerStatus else { return }
+            let alert = NSAlert()
+            alert.messageText = "Delete Server"
+            alert.informativeText = "Are you sure you want to delete \"\(server.name)\"? This action cannot be undone."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+            alert.buttons[0].hasDestructiveAction = true
+
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                Task {
+                    try? await apiClient?.deleteServer(server.id)
+                    await MainActor.run { onServersChanged?() }
+                }
             }
         }
 
@@ -331,126 +502,261 @@ struct ServerTableView: NSViewRepresentable {
             servers.count
         }
 
+        // MARK: - Delegate
+
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            guard row < servers.count else { return nil }
+            guard row < servers.count, let colId = tableColumn?.identifier else { return nil }
             let server = servers[row]
 
-            let cellId = NSUserInterfaceItemIdentifier("ServerCell")
-            let cell: NSTableCellView
-            if let reused = tableView.makeView(withIdentifier: cellId, owner: nil) as? NSTableCellView {
-                cell = reused
-                // Clear old subviews
-                cell.subviews.forEach { $0.removeFromSuperview() }
-            } else {
-                cell = NSTableCellView()
-                cell.identifier = cellId
+            guard let column = ServerColumn(rawValue: colId.rawValue) else { return nil }
+
+            switch column {
+            case .status:
+                return makeStatusDotCell(server: server, tableView: tableView)
+            case .name:
+                return makeNameCell(server: server, tableView: tableView)
+            case .type:
+                return makeTypeCell(server: server, tableView: tableView)
+            case .state:
+                return makeStateCell(server: server, tableView: tableView)
+            case .tools:
+                return makeToolsCell(server: server, tableView: tableView)
+            case .tokenSize:
+                return makeTokenSizeCell(server: server, tableView: tableView)
+            case .actions:
+                return makeActionsCell(server: server, row: row, tableView: tableView)
             }
+        }
 
-            // Build the cell content
-            let stack = NSStackView()
-            stack.orientation = .horizontal
-            stack.spacing = 10
-            stack.alignment = .centerY
-            stack.translatesAutoresizingMaskIntoConstraints = false
+        // MARK: - Cell Factories
 
-            // Health dot
+        private func makeStatusDotCell(server: ServerStatus, tableView: NSTableView) -> NSView {
+            let cellId = NSUserInterfaceItemIdentifier("StatusDotCell")
+            let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
+
             let dot = NSView()
             dot.wantsLayer = true
             dot.layer?.cornerRadius = 5
             dot.layer?.backgroundColor = healthColor(for: server).cgColor
             dot.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(dot)
             NSLayoutConstraint.activate([
                 dot.widthAnchor.constraint(equalToConstant: 10),
-                dot.heightAnchor.constraint(equalToConstant: 10)
+                dot.heightAnchor.constraint(equalToConstant: 10),
+                dot.centerXAnchor.constraint(equalTo: cell.centerXAnchor),
+                dot.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
             ])
-            stack.addArrangedSubview(dot)
+            return cell
+        }
 
-            // Name + status
-            let nameStack = NSStackView()
-            nameStack.orientation = .vertical
-            nameStack.alignment = .leading
-            nameStack.spacing = 2
+        private func makeNameCell(server: ServerStatus, tableView: NSTableView) -> NSView {
+            let cellId = NSUserInterfaceItemIdentifier("NameCell")
+            let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
 
-            let nameLabel = NSTextField(labelWithString: server.name)
-            nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-            nameStack.addArrangedSubview(nameLabel)
+            let label = NSTextField(labelWithString: server.name)
+            label.font = .systemFont(ofSize: 13, weight: .semibold)
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+            return cell
+        }
 
-            let statusText = server.health?.summary ?? (server.connected ? "Connected" : server.enabled ? "Disconnected" : "Disabled")
-            let toolsText = server.toolCount > 0 ? " (\(server.toolCount) tools)" : ""
-            let statusLabel = NSTextField(labelWithString: "\(statusText)\(toolsText)")
-            statusLabel.font = .systemFont(ofSize: 11)
-            statusLabel.textColor = .secondaryLabelColor
-            nameStack.addArrangedSubview(statusLabel)
-            stack.addArrangedSubview(nameStack)
+        private func makeTypeCell(server: ServerStatus, tableView: NSTableView) -> NSView {
+            let cellId = NSUserInterfaceItemIdentifier("TypeCell")
+            let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
 
-            // Spacer
-            let spacer = NSView()
-            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            stack.addArrangedSubview(spacer)
+            let label = NSTextField(labelWithString: server.protocol)
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+            return cell
+        }
 
-            // Quarantine badge
-            if server.pendingApprovalCount > 0 {
-                let qBadge = NSTextField(labelWithString: "\(server.pendingApprovalCount) pending")
-                qBadge.font = .systemFont(ofSize: 10, weight: .medium)
-                qBadge.textColor = .white
-                qBadge.backgroundColor = .systemOrange
-                qBadge.isBordered = false
-                qBadge.drawsBackground = true
-                qBadge.wantsLayer = true
-                qBadge.layer?.cornerRadius = 3
-                stack.addArrangedSubview(qBadge)
+        private func makeStateCell(server: ServerStatus, tableView: NSTableView) -> NSView {
+            let cellId = NSUserInterfaceItemIdentifier("StateCell")
+            let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
+
+            let statusText: String
+            let statusColor: NSColor
+            if server.quarantined {
+                statusText = "Quarantined"
+                statusColor = .systemOrange
+            } else if !server.enabled {
+                statusText = "Disabled"
+                statusColor = .systemGray
+            } else if server.connected {
+                statusText = "Connected"
+                statusColor = .systemGreen
+            } else if let health = server.health {
+                statusText = health.summary
+                statusColor = health.level == "unhealthy" ? .systemRed : .secondaryLabelColor
+            } else {
+                statusText = "Disconnected"
+                statusColor = .systemGray
             }
 
-            // Protocol badge
-            let protoBadge = NSTextField(labelWithString: server.protocol)
-            protoBadge.font = .systemFont(ofSize: 10)
-            protoBadge.textColor = .secondaryLabelColor
-            protoBadge.backgroundColor = NSColor.quaternaryLabelColor
-            protoBadge.isBordered = false
-            protoBadge.drawsBackground = true
-            protoBadge.wantsLayer = true
-            protoBadge.layer?.cornerRadius = 3
-            stack.addArrangedSubview(protoBadge)
+            let label = NSTextField(labelWithString: statusText)
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = statusColor
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+            return cell
+        }
 
-            // Tools count
-            if server.toolCount > 0 {
-                let toolsBadge = NSTextField(labelWithString: "\(server.toolCount) tools")
-                toolsBadge.font = .systemFont(ofSize: 10)
-                toolsBadge.textColor = .secondaryLabelColor
-                toolsBadge.backgroundColor = NSColor.quaternaryLabelColor
-                toolsBadge.isBordered = false
-                toolsBadge.drawsBackground = true
-                toolsBadge.wantsLayer = true
-                toolsBadge.layer?.cornerRadius = 3
-                stack.addArrangedSubview(toolsBadge)
+        private func makeToolsCell(server: ServerStatus, tableView: NSTableView) -> NSView {
+            let cellId = NSUserInterfaceItemIdentifier("ToolsCell")
+            let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
+
+            let text = server.toolCount > 0 ? "\(server.toolCount)" : "-"
+            let label = NSTextField(labelWithString: text)
+            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .right
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+            return cell
+        }
+
+        private func makeTokenSizeCell(server: ServerStatus, tableView: NSTableView) -> NSView {
+            let cellId = NSUserInterfaceItemIdentifier("TokenSizeCell")
+            let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
+
+            let text: String
+            if let size = server.toolListTokenSize, size > 0 {
+                text = formatTokenSize(size)
+            } else {
+                text = "-"
             }
+            let label = NSTextField(labelWithString: text)
+            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .right
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+            return cell
+        }
 
-            // Info button for details
-            let infoButton = NSButton(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
-            infoButton.bezelStyle = .circular
-            infoButton.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Details")
-            infoButton.isBordered = false
-            infoButton.target = self
-            infoButton.action = #selector(infoButtonClicked(_:))
-            infoButton.tag = row
+        private func makeActionsCell(server: ServerStatus, row: Int, tableView: NSTableView) -> NSView {
+            let cellId = NSUserInterfaceItemIdentifier("ActionsCell")
+            let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
+
+            let stack = NSStackView()
+            stack.orientation = .horizontal
+            stack.spacing = 2
+            stack.alignment = .centerY
+            stack.translatesAutoresizingMaskIntoConstraints = false
+
+            // Play/Stop toggle button
+            let toggleButton = makeIconButton(
+                symbolName: server.enabled ? "stop.fill" : "play.fill",
+                accessibilityLabel: server.enabled ? "Disable" : "Enable",
+                action: #selector(toggleEnabledClicked(_:)),
+                tag: row
+            )
+            toggleButton.contentTintColor = server.enabled ? .systemGray : .systemGreen
+            stack.addArrangedSubview(toggleButton)
+
+            // Restart button
+            let restartButton = makeIconButton(
+                symbolName: "arrow.clockwise",
+                accessibilityLabel: "Restart",
+                action: #selector(restartButtonClicked(_:)),
+                tag: row
+            )
+            stack.addArrangedSubview(restartButton)
+
+            // Info button (opens detail)
+            let infoButton = makeIconButton(
+                symbolName: "info.circle",
+                accessibilityLabel: "Details",
+                action: #selector(infoButtonClicked(_:)),
+                tag: row
+            )
             stack.addArrangedSubview(infoButton)
 
-            // Chevron indicator for double-click
-            let chevron = NSTextField(labelWithString: "\u{203A}")
-            chevron.font = .systemFont(ofSize: 16)
-            chevron.textColor = .tertiaryLabelColor
-            stack.addArrangedSubview(chevron)
+            // Delete button
+            let deleteButton = makeIconButton(
+                symbolName: "trash",
+                accessibilityLabel: "Delete",
+                action: #selector(deleteButtonClicked(_:)),
+                tag: row
+            )
+            deleteButton.contentTintColor = .systemRed
+            stack.addArrangedSubview(deleteButton)
 
             cell.addSubview(stack)
             NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-                stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-                stack.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
-                stack.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4)
+                stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                stack.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -2),
+                stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
             ])
-
-            cell.setAccessibilityIdentifier("server-row-\(server.id)")
             return cell
+        }
+
+        // MARK: - Helpers
+
+        private func reuseOrCreate(tableView: NSTableView, identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
+            if let reused = tableView.makeView(withIdentifier: identifier, owner: nil) as? NSTableCellView {
+                reused.subviews.forEach { $0.removeFromSuperview() }
+                return reused
+            }
+            let cell = NSTableCellView()
+            cell.identifier = identifier
+            return cell
+        }
+
+        private func makeIconButton(symbolName: String, accessibilityLabel: String, action: Selector, tag: Int) -> NSButton {
+            let button = NSButton(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
+            button.bezelStyle = .accessoryBarAction
+            button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityLabel)
+            button.imagePosition = .imageOnly
+            button.isBordered = false
+            button.target = self
+            button.action = action
+            button.tag = tag
+            button.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                button.widthAnchor.constraint(equalToConstant: 24),
+                button.heightAnchor.constraint(equalToConstant: 24)
+            ])
+            return button
+        }
+
+        private func formatTokenSize(_ size: Int) -> String {
+            if size >= 1_000_000 {
+                return String(format: "%.1fM", Double(size) / 1_000_000.0)
+            } else if size >= 1_000 {
+                return String(format: "%.1fK", Double(size) / 1_000.0)
+            }
+            return "\(size)"
         }
 
         private func healthColor(for server: ServerStatus) -> NSColor {
