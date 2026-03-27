@@ -78,6 +78,13 @@ final class AppState: ObservableObject {
     /// Whether the user has explicitly paused MCPProxy (distinct from idle/error states).
     @Published var isPaused: Bool = false
 
+    /// User-adjustable font scale (1.0 = default, persisted in UserDefaults).
+    /// Standard macOS Cmd+/Cmd- changes this by 0.1 increments.
+    @Published var fontScale: CGFloat = UserDefaults.standard.double(forKey: "fontScale") == 0
+        ? 1.0 : CGFloat(UserDefaults.standard.double(forKey: "fontScale")) {
+        didSet { UserDefaults.standard.set(Double(fontScale), forKey: "fontScale") }
+    }
+
     // MARK: Computed properties
 
     /// Servers that need user intervention — NOT including intentionally disabled servers.

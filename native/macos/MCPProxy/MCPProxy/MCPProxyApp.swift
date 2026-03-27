@@ -31,6 +31,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Switch to accessory (menu bar only) now that launch is complete
         NSApp.setActivationPolicy(.accessory)
 
+        // Monitor Cmd+/Cmd-/Cmd+0 globally for text size adjustment
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.modifierFlags.contains(.command) else { return event }
+            switch event.charactersIgnoringModifiers {
+            case "+", "=": self?.makeTextBigger(); return nil
+            case "-": self?.makeTextSmaller(); return nil
+            case "0": self?.makeTextActualSize(); return nil
+            default: return event
+            }
+        }
+
+        // Set up the app's main menu bar with View > Text Size commands
+        setupMainMenu()
+
         // Create the status bar item with the MCPProxy monochrome icon
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -110,6 +124,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func showMainWindow(tab: SidebarItem? = nil) {
         if let window = mainWindow, window.isVisible {
             NSApp.setActivationPolicy(.regular)
+            setupMainMenu() // Reapply our menu when becoming regular app
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -143,6 +158,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         window.isReleasedWhenClosed = false
         // Watch for window close to hide from Dock again
         window.delegate = self
+        setupMainMenu() // Install our menu bar when window first opens
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
@@ -162,10 +178,80 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    // Inject our View menu items after system menu bar is ready
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // Delay slightly to let the system finish setting up its menu bar
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.setupMainMenu()
+        }
+    }
+
     // NSWindowDelegate — hide from Dock when window closes
     func windowWillClose(_ notification: Notification) {
         // Return to accessory (menu bar only) when main window closes
         NSApp.setActivationPolicy(.accessory)
+    }
+
+    // MARK: - Main Menu Bar (View > Text Size)
+
+    private func setupMainMenu() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+
+        // Find or create View menu and add text size items
+        let viewMenu: NSMenu
+        if let existingViewItem = mainMenu.item(withTitle: "View"),
+           let existingMenu = existingViewItem.submenu {
+            viewMenu = existingMenu
+        } else {
+            viewMenu = NSMenu(title: "View")
+            let viewMenuItem = NSMenuItem()
+            viewMenuItem.submenu = viewMenu
+            // Insert before Window menu
+            let insertIndex = max(0, mainMenu.numberOfItems - 2)
+            mainMenu.insertItem(viewMenuItem, at: insertIndex)
+        }
+
+        // Only add our items if not already present
+        if viewMenu.item(withTitle: "Make Text Bigger") == nil {
+            viewMenu.insertItem(.separator(), at: 0)
+
+            let actualItem = NSMenuItem(title: "Actual Size", action: #selector(makeTextActualSize), keyEquivalent: "0")
+            actualItem.keyEquivalentModifierMask = .command
+            actualItem.target = self
+            viewMenu.insertItem(actualItem, at: 0)
+
+            let smallerItem = NSMenuItem(title: "Make Text Smaller", action: #selector(makeTextSmaller), keyEquivalent: "-")
+            smallerItem.keyEquivalentModifierMask = .command
+            smallerItem.target = self
+            viewMenu.insertItem(smallerItem, at: 0)
+
+            let biggerItem = NSMenuItem(title: "Make Text Bigger", action: #selector(makeTextBigger), keyEquivalent: "+")
+            biggerItem.keyEquivalentModifierMask = .command
+            biggerItem.target = self
+            viewMenu.insertItem(biggerItem, at: 0)
+        }
+
+        // Add Edit menu if not present (for Cmd+C copy)
+        if mainMenu.item(withTitle: "Edit") == nil {
+            let editMenuItem = NSMenuItem()
+            let editMenu = NSMenu(title: "Edit")
+            editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+            editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+            editMenuItem.submenu = editMenu
+            mainMenu.insertItem(editMenuItem, at: 2) // After Apple + App menus
+        }
+    }
+
+    @objc private func makeTextBigger() {
+        appState.fontScale = min(appState.fontScale + 0.1, 2.0)
+    }
+
+    @objc private func makeTextSmaller() {
+        appState.fontScale = max(appState.fontScale - 0.1, 0.6)
+    }
+
+    @objc private func makeTextActualSize() {
+        appState.fontScale = 1.0
     }
 
     // MARK: - Core Startup
