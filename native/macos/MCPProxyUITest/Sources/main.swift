@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CoreGraphics
 
 // MARK: - Configuration
 
@@ -144,6 +145,46 @@ func toolDefinitions() -> [[String: Any]] {
                     "bundle_id": [
                         "type": "string",
                         "description": "Bundle ID of the target app. Defaults to configured bundle ID."
+                    ] as [String: Any]
+                ] as [String: Any],
+                "required": [] as [String]
+            ]
+        ],
+        [
+            "name": "screenshot_window",
+            "description": "Take a screenshot of an app window or the full screen. Returns the image as a base64-encoded PNG. Use for visual verification of UI state after changes.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "bundle_id": [
+                        "type": "string",
+                        "description": "Bundle ID of the target app. Defaults to configured bundle ID. Use 'screen' for full screen capture."
+                    ] as [String: Any],
+                    "output_path": [
+                        "type": "string",
+                        "description": "Optional file path to save the PNG. If omitted, returns base64 in the response."
+                    ] as [String: Any],
+                    "window_title": [
+                        "type": "string",
+                        "description": "Optional: capture only the window with this title substring. If omitted, captures the frontmost window of the app."
+                    ] as [String: Any]
+                ] as [String: Any],
+                "required": [] as [String]
+            ]
+        ],
+        [
+            "name": "screenshot_status_bar_menu",
+            "description": "Open the app's status bar menu and take a screenshot of it, then close the menu. Useful for verifying tray menu appearance.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "bundle_id": [
+                        "type": "string",
+                        "description": "Bundle ID of the target app. Defaults to configured bundle ID."
+                    ] as [String: Any],
+                    "output_path": [
+                        "type": "string",
+                        "description": "Optional file path to save the PNG. If omitted, returns base64 in the response."
                     ] as [String: Any]
                 ] as [String: Any],
                 "required": [] as [String]
@@ -854,6 +895,158 @@ func handleReadStatusBar(id: Any, arguments: [String: Any]) -> [String: Any] {
     return makeToolResult(id: id, text: jsonString(info))
 }
 
+// MARK: - Screenshot Helpers
+
+func captureWindowImage(windowID: CGWindowID) -> CGImage? {
+    let imageRef = CGWindowListCreateImage(
+        .null,
+        .optionIncludingWindow,
+        windowID,
+        [.boundsIgnoreFraming, .bestResolution]
+    )
+    return imageRef
+}
+
+func captureFullScreen() -> CGImage? {
+    let displayID = CGMainDisplayID()
+    return CGDisplayCreateImage(displayID)
+}
+
+func findWindowID(for pid: pid_t, titleSubstring: String? = nil) -> CGWindowID? {
+    guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+        return nil
+    }
+
+    for window in windowList {
+        guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int,
+              ownerPID == Int(pid),
+              let windowID = window[kCGWindowNumber as String] as? Int else { continue }
+
+        // Skip tiny windows (status bar items, etc.)
+        if let bounds = window[kCGWindowBounds as String] as? [String: Any],
+           let width = bounds["Width"] as? Double,
+           let height = bounds["Height"] as? Double,
+           width > 50 && height > 50 {
+
+            if let titleSubstring = titleSubstring {
+                let name = window[kCGWindowName as String] as? String ?? ""
+                if name.localizedCaseInsensitiveContains(titleSubstring) {
+                    return CGWindowID(windowID)
+                }
+            } else {
+                // Return the first sizable window (likely the main window)
+                return CGWindowID(windowID)
+            }
+        }
+    }
+    return nil
+}
+
+func pngData(from image: CGImage) -> Data? {
+    let bitmapRep = NSBitmapImageRep(cgImage: image)
+    return bitmapRep.representation(using: .png, properties: [:])
+}
+
+func saveOrEncode(imageData: Data, outputPath: String?) -> [String: Any] {
+    if let path = outputPath, !path.isEmpty {
+        do {
+            try imageData.write(to: URL(fileURLWithPath: path))
+            return [
+                "success": true,
+                "path": path,
+                "size_bytes": imageData.count,
+                "message": "Screenshot saved to \(path)"
+            ]
+        } catch {
+            return [
+                "success": false,
+                "error": "Failed to write file: \(error.localizedDescription)"
+            ]
+        }
+    } else {
+        let base64 = imageData.base64EncodedString()
+        return [
+            "success": true,
+            "format": "png",
+            "size_bytes": imageData.count,
+            "base64": base64
+        ]
+    }
+}
+
+func handleScreenshotWindow(id: Any, arguments: [String: Any]) -> [String: Any] {
+    let bundleID = arguments["bundle_id"] as? String ?? configuredBundleID
+    let outputPath = arguments["output_path"] as? String
+    let windowTitle = arguments["window_title"] as? String
+
+    // Full screen capture
+    if bundleID == "screen" {
+        guard let image = captureFullScreen() else {
+            return makeToolResult(id: id, text: "Failed to capture screen.", isError: true)
+        }
+        guard let data = pngData(from: image) else {
+            return makeToolResult(id: id, text: "Failed to encode screenshot as PNG.", isError: true)
+        }
+        let result = saveOrEncode(imageData: data, outputPath: outputPath)
+        return makeToolResult(id: id, text: jsonString(result))
+    }
+
+    // App window capture
+    guard let app = findRunningApp(bundleID: bundleID) else {
+        return makeToolResult(id: id, text: "Application with bundle ID '\(bundleID)' is not running.", isError: true)
+    }
+
+    guard let windowID = findWindowID(for: app.processIdentifier, titleSubstring: windowTitle) else {
+        return makeToolResult(id: id, text: "No visible window found for \(bundleID)" + (windowTitle != nil ? " with title containing '\(windowTitle!)'" : "") + ".", isError: true)
+    }
+
+    guard let image = captureWindowImage(windowID: windowID) else {
+        return makeToolResult(id: id, text: "Failed to capture window (ID: \(windowID)).", isError: true)
+    }
+
+    guard let data = pngData(from: image) else {
+        return makeToolResult(id: id, text: "Failed to encode screenshot as PNG.", isError: true)
+    }
+
+    let result = saveOrEncode(imageData: data, outputPath: outputPath)
+    return makeToolResult(id: id, text: jsonString(result))
+}
+
+func handleScreenshotStatusBarMenu(id: Any, arguments: [String: Any]) -> [String: Any] {
+    let bundleID = arguments["bundle_id"] as? String ?? configuredBundleID
+    let outputPath = arguments["output_path"] as? String
+
+    guard AXIsProcessTrusted() else {
+        return makeToolResult(id: id, text: "Accessibility permission is not granted.", isError: true)
+    }
+
+    guard let result = openStatusBarMenu(bundleID: bundleID) else {
+        return makeToolResult(id: id, text: "Application with bundle ID '\(bundleID)' is not running.", isError: true)
+    }
+
+    if let error = result.error, result.menuElement == nil {
+        return makeToolResult(id: id, text: error, isError: true)
+    }
+
+    // Wait a moment for menu to fully render
+    Thread.sleep(forTimeInterval: 0.3)
+
+    // Capture the full screen (menu is an overlay)
+    guard let image = captureFullScreen() else {
+        closeMenu(statusItem: result.statusItem)
+        return makeToolResult(id: id, text: "Failed to capture screen.", isError: true)
+    }
+
+    closeMenu(statusItem: result.statusItem)
+
+    guard let data = pngData(from: image) else {
+        return makeToolResult(id: id, text: "Failed to encode screenshot as PNG.", isError: true)
+    }
+
+    let saveResult = saveOrEncode(imageData: data, outputPath: outputPath)
+    return makeToolResult(id: id, text: jsonString(saveResult))
+}
+
 // MARK: - Request Handling
 
 func handleRequest(_ request: [String: Any]) {
@@ -948,8 +1141,12 @@ func dispatchToolCall(id: Any, toolName: String, arguments: [String: Any]) -> [S
         return handleClickMenuItem(id: id, arguments: arguments)
     case "read_status_bar":
         return handleReadStatusBar(id: id, arguments: arguments)
+    case "screenshot_window":
+        return handleScreenshotWindow(id: id, arguments: arguments)
+    case "screenshot_status_bar_menu":
+        return handleScreenshotStatusBarMenu(id: id, arguments: arguments)
     default:
-        return makeToolResult(id: id, text: "Unknown tool: \(toolName). Available tools: check_accessibility, list_running_apps, list_menu_items, click_menu_item, read_status_bar", isError: true)
+        return makeToolResult(id: id, text: "Unknown tool: \(toolName). Available tools: check_accessibility, list_running_apps, list_menu_items, click_menu_item, read_status_bar, screenshot_window, screenshot_status_bar_menu", isError: true)
     }
 }
 
@@ -979,11 +1176,13 @@ func parseArguments() {
             Send JSON-RPC requests to stdin, receive responses on stdout.
 
             Tools:
-              check_accessibility  Check if Accessibility API access is granted
-              list_running_apps    List running macOS applications
-              list_menu_items      List status bar menu items for an app
-              click_menu_item      Click a menu item by path
-              read_status_bar      Read status bar item info
+              check_accessibility       Check if Accessibility API access is granted
+              list_running_apps         List running macOS applications
+              list_menu_items           List status bar menu items for an app
+              click_menu_item           Click a menu item by path
+              read_status_bar           Read status bar item info
+              screenshot_window         Take a screenshot of an app window or full screen
+              screenshot_status_bar_menu  Screenshot the status bar menu (opens and captures)
 
             """.utf8))
             exit(0)
