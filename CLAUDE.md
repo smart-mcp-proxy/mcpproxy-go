@@ -342,7 +342,8 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 |----------|-------------|
 | `GET /api/v1/status` | Server status and statistics |
 | `GET /api/v1/servers` | List all upstream servers |
-| `POST /api/v1/servers/{name}/enable` | Enable/disable server |
+| `POST /api/v1/servers/{name}/enable` | Enable server |
+| `POST /api/v1/servers/{name}/disable` | Disable server |
 | `POST /api/v1/servers/{name}/quarantine` | Quarantine a server |
 | `POST /api/v1/servers/{name}/unquarantine` | Unquarantine a server |
 | `GET /api/v1/index/search` | Search tools across servers (`?q=query&limit=N`) |

@@ -99,14 +99,12 @@ actor APIClient {
 
     /// Enable a server via `POST /api/v1/servers/{id}/enable`.
     func enableServer(_ id: String) async throws {
-        let body: [String: Any] = ["enabled": true]
-        try await postAction(path: "/api/v1/servers/\(id)/enable", body: body)
+        try await postAction(path: "/api/v1/servers/\(id)/enable")
     }
 
-    /// Disable a server via `POST /api/v1/servers/{id}/enable` with enabled=false.
+    /// Disable a server via `POST /api/v1/servers/{id}/disable`.
     func disableServer(_ id: String) async throws {
-        let body: [String: Any] = ["enabled": false]
-        try await postAction(path: "/api/v1/servers/\(id)/enable", body: body)
+        try await postAction(path: "/api/v1/servers/\(id)/disable")
     }
 
     /// Restart a server via `POST /api/v1/servers/{id}/restart`.
