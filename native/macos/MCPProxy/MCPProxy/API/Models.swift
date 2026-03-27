@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 // MARK: - Health Enums
 
@@ -181,6 +182,30 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     /// Number of tools awaiting approval (pending + changed), or 0 if quarantine stats are absent.
     var pendingApprovalCount: Int {
         quarantine?.totalPending ?? 0
+    }
+
+    /// Centralized SwiftUI health color for this server, used across all views.
+    var statusColor: Color {
+        if !enabled { return .gray }
+        if quarantined { return .orange }
+        switch health?.level {
+        case "healthy": return .green
+        case "degraded": return .yellow
+        case "unhealthy": return .red
+        default: return connected ? .green : .gray
+        }
+    }
+
+    /// Centralized AppKit health color for this server, used in NSTableView cells and menus.
+    var statusNSColor: NSColor {
+        if !enabled { return .systemGray }
+        if quarantined { return .systemOrange }
+        switch health?.level {
+        case "healthy": return .systemGreen
+        case "degraded": return .systemYellow
+        case "unhealthy": return .systemRed
+        default: return connected ? .systemGreen : .systemGray
+        }
     }
 }
 

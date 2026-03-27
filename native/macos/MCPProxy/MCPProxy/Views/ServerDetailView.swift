@@ -74,8 +74,9 @@ struct ServerDetailView: View {
 
             // Health dot
             Circle()
-                .fill(healthColor)
+                .fill(server.statusColor)
                 .frame(width: 12, height: 12)
+                .accessibilityLabel("Server health: \(server.health?.level ?? "unknown")")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
@@ -153,18 +154,18 @@ struct ServerDetailView: View {
                         }
                     }
                     .frame(minWidth: 80)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                     .background(
                         selectedTab == tab
                             ? Color.accentColor.opacity(0.15)
                             : Color.clear
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: 8)
                             .stroke(selectedTab == tab ? Color.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
                     )
-                    .cornerRadius(6)
+                    .cornerRadius(8)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -330,7 +331,7 @@ struct ServerDetailView: View {
     private func logLineView(_ line: String) -> some View {
         let levelColor = logLevelColor(line)
         Text(line)
-            .font(.system(size: 11, design: .monospaced))
+            .font(.caption.monospaced())
             .foregroundStyle(levelColor)
             .textSelection(.enabled)
             .lineLimit(nil)
@@ -421,9 +422,9 @@ struct ServerDetailView: View {
                 .font(.headline)
             content()
         }
-        .padding()
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5))
+        .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(8)
     }
 
@@ -460,17 +461,6 @@ struct ServerDetailView: View {
     }
 
     // MARK: - Computed
-
-    private var healthColor: Color {
-        if server.quarantined { return .orange }
-        if !server.enabled { return .gray }
-        switch server.health?.level {
-        case "healthy": return .green
-        case "degraded": return .yellow
-        case "unhealthy": return .red
-        default: return server.connected ? .green : .gray
-        }
-    }
 
     private var statusText: String {
         if !server.enabled { return "Disabled" }
@@ -562,12 +552,12 @@ struct ToolRow: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 12)
 
                     Text(tool.name)
-                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .font(.body.monospaced().weight(.semibold))
                         .foregroundStyle(.primary)
 
                     annotationBadgesCollapsed
@@ -610,7 +600,7 @@ struct ToolRow: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(6)
+        .cornerRadius(8)
     }
 
     // MARK: - Expanded Content
@@ -625,7 +615,7 @@ struct ToolRow: View {
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                     Text(desc)
-                        .font(.system(size: 12))
+                        .font(.subheadline)
                         .foregroundStyle(.primary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -652,8 +642,9 @@ struct ToolRow: View {
                         Circle()
                             .fill(approvalStatusColor(status))
                             .frame(width: 8, height: 8)
+                            .accessibilityLabel("Approval: \(status)")
                         Text(approvalStatusLabel(status))
-                            .font(.system(size: 12))
+                            .font(.subheadline)
                             .foregroundStyle(.primary)
                     }
                 }
@@ -829,10 +820,10 @@ struct ToolRow: View {
     private func diffLine(text: String, isOld: Bool) -> some View {
         HStack(alignment: .top, spacing: 4) {
             Image(systemName: isOld ? "minus.circle.fill" : "plus.circle.fill")
-                .font(.system(size: 10))
+                .font(.caption2)
                 .foregroundStyle(isOld ? .red : .green)
             Text(text)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.caption.monospaced())
                 .foregroundStyle(isOld ? .secondary : .primary)
                 .lineLimit(isOld ? 6 : nil)
         }

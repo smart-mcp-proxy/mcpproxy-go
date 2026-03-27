@@ -232,9 +232,9 @@ struct ServerTableView: NSViewRepresentable {
 
         let tableView = NSTableView()
         tableView.style = .fullWidth
-        tableView.rowHeight = 36
+        tableView.rowHeight = 28
         tableView.usesAlternatingRowBackgroundColors = true
-        tableView.intercellSpacing = NSSize(width: 8, height: 0)
+        tableView.intercellSpacing = NSSize(width: 12, height: 0)
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
 
         // Create columns with sort descriptors
@@ -604,6 +604,7 @@ struct ServerTableView: NSViewRepresentable {
             dot.layer?.cornerRadius = 5
             dot.layer?.backgroundColor = healthColor(for: server).cgColor
             dot.translatesAutoresizingMaskIntoConstraints = false
+            dot.setAccessibilityLabel("Health: \(server.health?.level ?? (server.connected ? "connected" : "disconnected"))")
             cell.addSubview(dot)
             NSLayoutConstraint.activate([
                 dot.widthAnchor.constraint(equalToConstant: 10),
@@ -619,7 +620,7 @@ struct ServerTableView: NSViewRepresentable {
             let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
 
             let label = NSTextField(labelWithString: server.name)
-            label.font = .systemFont(ofSize: 13, weight: .semibold)
+            label.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(label)
@@ -636,7 +637,7 @@ struct ServerTableView: NSViewRepresentable {
             let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
 
             let label = NSTextField(labelWithString: server.protocol)
-            label.font = .systemFont(ofSize: 11)
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             label.textColor = .secondaryLabelColor
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -673,7 +674,7 @@ struct ServerTableView: NSViewRepresentable {
             }
 
             let label = NSTextField(labelWithString: statusText)
-            label.font = .systemFont(ofSize: 11)
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             label.textColor = statusColor
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -692,7 +693,7 @@ struct ServerTableView: NSViewRepresentable {
 
             let text = server.toolCount > 0 ? "\(server.toolCount)" : "-"
             let label = NSTextField(labelWithString: text)
-            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
             label.textColor = .secondaryLabelColor
             label.alignment = .right
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -716,7 +717,7 @@ struct ServerTableView: NSViewRepresentable {
                 text = "-"
             }
             let label = NSTextField(labelWithString: text)
-            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
             label.textColor = .secondaryLabelColor
             label.alignment = .right
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -825,17 +826,7 @@ struct ServerTableView: NSViewRepresentable {
         }
 
         private func healthColor(for server: ServerStatus) -> NSColor {
-            if server.quarantined { return .systemOrange }
-            if !server.enabled { return .systemGray }
-            if let health = server.health {
-                switch health.level {
-                case "healthy": return .systemGreen
-                case "degraded": return .systemYellow
-                case "unhealthy": return .systemRed
-                default: break
-                }
-            }
-            return server.connected ? .systemGreen : .systemGray
+            server.statusNSColor
         }
     }
 }

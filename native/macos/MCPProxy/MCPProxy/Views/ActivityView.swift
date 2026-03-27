@@ -192,7 +192,7 @@ struct ActivityView: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     // MARK: - Header
@@ -438,7 +438,7 @@ struct ActivityTableRow: View {
             // Type column (icon + label)
             HStack(spacing: 4) {
                 Image(systemName: typeIcon)
-                    .font(.system(size: 10))
+                    .font(.caption2)
                     .foregroundStyle(typeIconColor)
                     .frame(width: 14)
                 Text(displayType)
@@ -463,8 +463,9 @@ struct ActivityTableRow: View {
                 if entry.hasSensitiveData == true {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
-                        .font(.system(size: 9))
+                        .font(.caption2)
                         .help("Contains sensitive data")
+                        .accessibilityLabel("Contains sensitive data")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -571,12 +572,13 @@ struct ActivityStatusBadge: View {
 
     var body: some View {
         Text(displayLabel)
-            .font(.system(size: 10, weight: .semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
             .background(badgeColor.opacity(0.15))
             .foregroundStyle(badgeColor)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .clipShape(Capsule())
+            .accessibilityLabel("Status: \(displayLabel)")
     }
 
     private var displayLabel: String {
@@ -619,7 +621,9 @@ struct SummaryStatPill: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(.quaternary)
-        .cornerRadius(6)
+        .cornerRadius(8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(value)")
     }
 }
 
@@ -633,13 +637,14 @@ struct IntentBadge: View {
             Image(systemName: iconName)
                 .font(.system(size: 8))
             Text(operationType)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption2.weight(.semibold))
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(backgroundColor)
-        .foregroundColor(.white)
-        .cornerRadius(4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(backgroundColor.opacity(0.15))
+        .foregroundStyle(backgroundColor)
+        .clipShape(Capsule())
+        .accessibilityLabel("Intent: \(operationType)")
     }
 
     private var iconName: String {
@@ -732,24 +737,28 @@ struct ActivityDetailView: View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.title3)
+                .foregroundStyle(.red)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Sensitive Data Detected")
                     .font(.headline)
+                    .foregroundStyle(.primary)
                 if let severity = entry.maxSeverity {
                     Text("Max severity: \(severity)")
                         .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
                 if let types = entry.detectionTypes, !types.isEmpty {
                     Text(types.joined(separator: ", "))
                         .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             Spacer()
         }
-        .foregroundStyle(.white)
-        .padding(12)
-        .background(Color.red)
+        .padding(16)
+        .background(Color.red.opacity(0.15))
         .cornerRadius(8)
+        .accessibilityLabel("Warning: Sensitive data detected")
     }
 
     // MARK: - Header
@@ -853,11 +862,11 @@ struct ActivityDetailView: View {
                     .font(.headline)
                 Text("JSON")
                     .font(.caption2.bold())
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(4)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.blue.opacity(0.15))
+                    .foregroundStyle(.blue)
+                    .clipShape(Capsule())
                 Text("\(value.byteCount) bytes")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -866,11 +875,11 @@ struct ActivityDetailView: View {
             }
 
             coloredJSON(value)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.caption.monospaced())
                 .textSelection(.enabled)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor).opacity(0.5))
+                .background(Color(.controlBackgroundColor))
                 .cornerRadius(8)
         }
     }
@@ -911,19 +920,19 @@ struct ActivityDetailView: View {
 
             if let parsed = entry.parsedResponse {
                 coloredJSON(parsed)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor).opacity(0.5))
+                    .background(Color(.controlBackgroundColor))
                     .cornerRadius(8)
             } else {
                 Text(response)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor).opacity(0.5))
+                    .background(Color(.controlBackgroundColor))
                     .cornerRadius(8)
             }
         }
@@ -958,7 +967,7 @@ struct ActivityDetailView: View {
     private func coloredJSON(_ value: JSONValue, indent: Int = 0) -> Text {
         switch value {
         case .string(let s):
-            return Text("\"\(s)\"").foregroundColor(.green)
+            return Text("\"\(s)\"").foregroundColor(.teal)
 
         case .number(let n):
             let formatted = n.truncatingRemainder(dividingBy: 1) == 0 && abs(n) < 1e15
@@ -988,7 +997,7 @@ struct ActivityDetailView: View {
             var result = Text("{\n")
             for (i, (key, val)) in sorted.enumerated() {
                 result = result + Text(indentStr(indent + 1))
-                    + Text("\"\(key)\"").foregroundColor(.cyan)
+                    + Text("\"\(key)\"").foregroundColor(.blue)
                     + Text(": ")
                     + coloredJSON(val, indent: indent + 1)
                 if i < sorted.count - 1 { result = result + Text(",") }
