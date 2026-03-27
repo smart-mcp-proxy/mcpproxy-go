@@ -132,6 +132,11 @@ actor APIClient {
         try await postAction(path: "/api/v1/servers/\(id)/tools/approve")
     }
 
+    /// Delete a server via `DELETE /api/v1/servers/{id}`.
+    func deleteServer(_ id: String) async throws {
+        try await deleteAction(path: "/api/v1/servers/\(id)")
+    }
+
     // MARK: - Activity
 
     /// Fetch recent activity entries from `GET /api/v1/activity`.
