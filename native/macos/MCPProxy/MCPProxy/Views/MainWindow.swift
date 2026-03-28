@@ -41,43 +41,28 @@ struct MainWindow: View {
             .listStyle(.sidebar)
             .accessibilityIdentifier("sidebar-list")
         } detail: {
-            // Apply user-adjustable zoom via scaleEffect.
-            // DynamicTypeSize has no visual effect on macOS (it's an iOS feature),
-            // so we use scaleEffect for real text/layout zoom (like Cmd+/Cmd- in browsers).
-            // GeometryReader provides the available size; we lay out content at 1/scale width
-            // so that when scaleEffect is applied, it fills the container naturally.
-            // Each child view has its own ScrollView, so we don't add another wrapper.
-            GeometryReader { geometry in
-                VStack(spacing: 0) {
-                    // Core status banner — shown when not connected
-                    if appState.coreState != .connected {
-                        coreStatusBanner
-                    }
-
-                    // Regular content
-                    Group {
-                        switch selectedItem ?? .dashboard {
-                        case .dashboard:
-                            DashboardView(appState: appState)
-                        case .servers:
-                            ServersView(appState: appState)
-                        case .activity:
-                            ActivityView(appState: appState)
-                        case .secrets:
-                            SecretsView(appState: appState)
-                        case .config:
-                            ConfigView(appState: appState)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 0) {
+                // Core status banner — shown when not connected
+                if appState.coreState != .connected {
+                    coreStatusBanner
                 }
-                // Lay out at 1/scale size, then scale up visually.
-                // This makes text and elements appear larger while filling the container.
-                .frame(
-                    width: geometry.size.width / appState.fontScale,
-                    height: geometry.size.height / appState.fontScale
-                )
-                .scaleEffect(appState.fontScale, anchor: .topLeading)
+
+                // Regular content
+                Group {
+                    switch selectedItem ?? .dashboard {
+                    case .dashboard:
+                        DashboardView(appState: appState)
+                    case .servers:
+                        ServersView(appState: appState)
+                    case .activity:
+                        ActivityView(appState: appState)
+                    case .secrets:
+                        SecretsView(appState: appState)
+                    case .config:
+                        ConfigView(appState: appState)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .accessibilityIdentifier("detail-view")
         }
