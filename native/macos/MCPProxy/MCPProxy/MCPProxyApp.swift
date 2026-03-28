@@ -269,40 +269,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func makeTextBigger() {
         appState.fontScale = min(appState.fontScale + 0.1, 2.0)
-        applyZoomToWindow()
+        NSLog("[MCPProxy] Font scale: %.0f%%", appState.fontScale * 100)
     }
 
     @objc private func makeTextSmaller() {
         appState.fontScale = max(appState.fontScale - 0.1, 0.6)
-        applyZoomToWindow()
+        NSLog("[MCPProxy] Font scale: %.0f%%", appState.fontScale * 100)
     }
 
     @objc private func makeTextActualSize() {
         appState.fontScale = 1.0
-        applyZoomToWindow()
-    }
-
-    /// Apply zoom to the main window by scaling the content view's bounds.
-    /// This is the standard AppKit approach — NSScrollView and NSTableView
-    /// handle magnification correctly via bounds scaling.
-    private func applyZoomToWindow() {
-        guard let window = mainWindow, let contentView = window.contentView else { return }
-        let scale = appState.fontScale
-
-        // Reset to identity first, then apply new scale
-        contentView.setBoundsSize(NSSize(
-            width: contentView.frame.width / scale,
-            height: contentView.frame.height / scale
-        ))
-
-        // Force redraw
-        contentView.needsLayout = true
-        contentView.needsDisplay = true
-
-        NSLog("[MCPProxy] Zoom: %.0f%% (bounds: %.0fx%.0f for frame: %.0fx%.0f)",
-              scale * 100,
-              contentView.bounds.width, contentView.bounds.height,
-              contentView.frame.width, contentView.frame.height)
+        NSLog("[MCPProxy] Font scale: 100%%")
     }
 
     // MARK: - Core Startup

@@ -64,6 +64,7 @@ struct MainWindow: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .environment(\.fontScale, appState.fontScale)
             .accessibilityIdentifier("detail-view")
         }
         .frame(minWidth: 800, minHeight: 500)
@@ -82,14 +83,15 @@ struct MainWindow: View {
             if case .error(let err) = appState.coreState { return "MCPProxy Core error: \(err.userMessage)" }
             return "MCPProxy Core: \(appState.coreState.displayName)"
         }()
+        let fontScale = appState.fontScale
 
         HStack(spacing: 10) {
             Image(systemName: bannerIcon)
-                .font(.title3)
+                .font(.scaled(.title3, scale: fontScale))
                 .foregroundStyle(bannerColor)
 
             Text(bannerText)
-                .font(.subheadline.weight(.medium))
+                .font(.scaled(.subheadline, scale: fontScale).weight(.medium))
 
             Spacer()
 

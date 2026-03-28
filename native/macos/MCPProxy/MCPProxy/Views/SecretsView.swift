@@ -50,6 +50,7 @@ struct ConfigSecretsResponse: Codable {
 
 struct SecretsView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.fontScale) var fontScale
     @State private var secrets: [ConfigSecret] = []
     @State private var envVars: [ConfigSecret] = []
     @State private var isLoading = false
@@ -94,7 +95,7 @@ struct SecretsView: View {
             // Header
             HStack {
                 Text("Secrets & Environment Variables")
-                    .font(.title2.bold())
+                    .font(.scaled(.title2, scale: fontScale).bold())
                 Spacer()
 
                 Button {
@@ -151,10 +152,10 @@ struct SecretsView: View {
             } else if filteredEntries.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "key")
-                        .font(.system(size: 48))
+                        .font(.system(size: 48 * fontScale))
                         .foregroundStyle(.tertiary)
                     Text("No secrets found")
-                        .font(.title3)
+                        .font(.scaled(.title3, scale: fontScale))
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -179,7 +180,7 @@ struct SecretsView: View {
     private var addSecretSheet: some View {
         VStack(spacing: 16) {
             Text("Add Secret to Keyring")
-                .font(.headline)
+                .font(.scaled(.headline, scale: fontScale))
 
             TextField("Secret Name", text: $newSecretName)
                 .textFieldStyle(.roundedBorder)
@@ -190,7 +191,7 @@ struct SecretsView: View {
             if let error = errorMessage {
                 Text(error)
                     .foregroundStyle(.red)
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
             }
 
             HStack {
@@ -257,6 +258,7 @@ struct SecretRow: View {
     let entry: ConfigSecret
     @ObservedObject var appState: AppState
     let onDelete: () -> Void
+    @Environment(\.fontScale) var fontScale
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -264,7 +266,7 @@ struct SecretRow: View {
         HStack(spacing: 12) {
             // Type badge
             Text(entry.secretRef.type.capitalized)
-                .font(.caption2.bold())
+                .font(.scaled(.caption2, scale: fontScale).bold())
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(entry.secretRef.type == "keyring" ? Color.blue.opacity(0.2) : Color.green.opacity(0.2))
@@ -278,9 +280,9 @@ struct SecretRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.secretRef.name)
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
                 Text(entry.secretRef.original)
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
@@ -289,7 +291,7 @@ struct SecretRow: View {
 
             if !entry.isSet {
                 Label("Missing", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.red)
             }
 
@@ -316,14 +318,15 @@ struct StatBadge: View {
     let label: String
     let value: String
     let color: Color
+    @Environment(\.fontScale) var fontScale
 
     var body: some View {
         VStack(spacing: 2) {
             Text(value)
-                .font(.title3.bold())
+                .font(.scaled(.title3, scale: fontScale).bold())
                 .foregroundStyle(color)
             Text(label)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12)

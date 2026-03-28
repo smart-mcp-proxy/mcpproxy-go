@@ -40,6 +40,7 @@ struct TokensListResponse: Codable {
 
 struct TokensView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.fontScale) var fontScale
     @State private var tokens: [AgentToken] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
@@ -53,7 +54,7 @@ struct TokensView: View {
             // Header
             HStack {
                 Text("Agent Tokens")
-                    .font(.title2.bold())
+                    .font(.scaled(.title2, scale: fontScale).bold())
                 Spacer()
                 if isLoading {
                     ProgressView()
@@ -101,13 +102,13 @@ struct TokensView: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: "person.badge.key")
-                .font(.system(size: 48))
+                .font(.system(size: 48 * fontScale))
                 .foregroundStyle(.tertiary)
             Text("No agent tokens")
-                .font(.title3)
+                .font(.scaled(.title3, scale: fontScale))
                 .foregroundStyle(.secondary)
             Text("Create tokens to allow AI agents to authenticate with MCPProxy")
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
         }
@@ -130,12 +131,12 @@ struct TokensView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text(message)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Dismiss") { errorMessage = nil }
                 .buttonStyle(.borderless)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
@@ -186,6 +187,7 @@ struct TokensView: View {
 struct TokenRow: View {
     let token: AgentToken
     let onRevoke: () -> Void
+    @Environment(\.fontScale) var fontScale
 
     var body: some View {
         HStack(spacing: 12) {
@@ -195,16 +197,16 @@ struct TokenRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(token.name)
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
 
                 HStack(spacing: 8) {
                     Text("Created: \(formattedDate(token.createdAt))")
-                        .font(.caption)
+                        .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.secondary)
 
                     if let lastUsed = token.lastUsedAt {
                         Text("Last used: \(formattedDate(lastUsed))")
-                            .font(.caption)
+                            .font(.scaled(.caption, scale: fontScale))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -213,7 +215,7 @@ struct TokenRow: View {
                 HStack(spacing: 8) {
                     if let permissions = token.permissions, !permissions.isEmpty {
                         Text(permissions.joined(separator: ", "))
-                            .font(.caption2)
+                            .font(.scaled(.caption2, scale: fontScale))
                             .foregroundStyle(.blue)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 1)
@@ -223,7 +225,7 @@ struct TokenRow: View {
 
                     if let servers = token.servers, !servers.isEmpty {
                         Text(servers.joined(separator: ", "))
-                            .font(.caption2)
+                            .font(.scaled(.caption2, scale: fontScale))
                             .foregroundStyle(.purple)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 1)
@@ -238,7 +240,7 @@ struct TokenRow: View {
             // Expiry indicator
             if let expires = token.expiresAt {
                 Text("Expires: \(formattedDate(expires))")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
             }
 
@@ -278,6 +280,7 @@ struct CreateTokenSheet: View {
     private var apiClient: APIClient? { appState.apiClient }
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.fontScale) var fontScale
     @State private var name = ""
     @State private var serversText = ""
     @State private var permissionsText = "read,write"
@@ -288,7 +291,7 @@ struct CreateTokenSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Create Agent Token")
-                .font(.title2.bold())
+                .font(.scaled(.title2, scale: fontScale).bold())
 
             if let secret = createdTokenSecret {
                 // Show the created token secret (one-time display)
@@ -306,28 +309,28 @@ struct CreateTokenSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Token Name")
-                    .font(.subheadline.bold())
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
                 TextField("e.g., deploy-bot", text: $name)
                     .textFieldStyle(.roundedBorder)
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Servers (comma-separated, empty for all)")
-                    .font(.subheadline.bold())
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
                 TextField("e.g., github,gitlab", text: $serversText)
                     .textFieldStyle(.roundedBorder)
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Permissions (comma-separated)")
-                    .font(.subheadline.bold())
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
                 TextField("e.g., read,write", text: $permissionsText)
                     .textFieldStyle(.roundedBorder)
             }
 
             if let error = errorMessage {
                 Text(error)
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.red)
             }
 
@@ -351,15 +354,15 @@ struct CreateTokenSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Token created successfully", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
-                .font(.headline)
+                .font(.scaled(.headline, scale: fontScale))
 
             Text("Copy this token now. It will not be shown again.")
-                .font(.subheadline)
+                .font(.scaled(.subheadline, scale: fontScale))
                 .foregroundStyle(.secondary)
 
             HStack {
                 Text(secret)
-                    .font(.system(.body, design: .monospaced))
+                    .font(.scaledMonospaced(.body, scale: fontScale))
                     .textSelection(.enabled)
                     .padding(8)
                     .background(.quaternary)

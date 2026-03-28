@@ -28,6 +28,7 @@ struct ServerDetailView: View {
     let server: ServerStatus
     @ObservedObject var appState: AppState
     let onDismiss: () -> Void
+    @Environment(\.fontScale) var fontScale
 
     @State private var selectedTab: ServerDetailTab = .tools
     @State private var tools: [ServerTool] = []
@@ -80,9 +81,9 @@ struct ServerDetailView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
-                    .font(.title2.bold())
+                    .font(.scaled(.title2, scale: fontScale).bold())
                 Text(server.health?.summary ?? statusText)
-                    .font(.subheadline)
+                    .font(.scaled(.subheadline, scale: fontScale))
                     .foregroundStyle(.secondary)
             }
 
@@ -149,7 +150,7 @@ struct ServerDetailView: View {
                         Text(tab.rawValue)
                         if tab == .tools && pendingApprovalCount > 0 {
                             Text("\(pendingApprovalCount)")
-                                .font(.caption2.bold())
+                                .font(.scaled(.caption2, scale: fontScale).bold())
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
@@ -196,13 +197,13 @@ struct ServerDetailView: View {
             } else if tools.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "wrench.and.screwdriver")
-                        .font(.system(size: 40))
+                        .font(.system(size: 40 * fontScale))
                         .foregroundStyle(.tertiary)
                     Text("No tools available")
-                        .font(.title3)
+                        .font(.scaled(.title3, scale: fontScale))
                         .foregroundStyle(.secondary)
                     Text(server.connected ? "This server has no tools" : "Connect the server to see tools")
-                        .font(.caption)
+                        .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -226,7 +227,7 @@ struct ServerDetailView: View {
             Image(systemName: "shield.lefthalf.filled")
                 .foregroundStyle(.orange)
             Text("\(pendingApprovalCount) tool(s) need approval")
-                .font(.subheadline.bold())
+                .font(.scaled(.subheadline, scale: fontScale).bold())
             Spacer()
             if isApproving {
                 ProgressView()
@@ -261,9 +262,9 @@ struct ServerDetailView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Server Logs")
-                    .font(.subheadline.bold())
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
                 Text("\(logLines.count) lines")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                 Spacer()
                 if isLoadingLogs {
@@ -294,13 +295,13 @@ struct ServerDetailView: View {
             if logLines.isEmpty && !isLoadingLogs {
                 VStack(spacing: 12) {
                     Image(systemName: "doc.text")
-                        .font(.system(size: 40))
+                        .font(.system(size: 40 * fontScale))
                         .foregroundStyle(.tertiary)
                     Text("No log entries")
-                        .font(.title3)
+                        .font(.scaled(.title3, scale: fontScale))
                         .foregroundStyle(.secondary)
                     Text("Logs will appear when the server produces output")
-                        .font(.caption)
+                        .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -335,7 +336,7 @@ struct ServerDetailView: View {
     private func logLineView(_ line: String) -> some View {
         let levelColor = logLevelColor(line)
         Text(line)
-            .font(.caption.monospaced())
+            .font(.scaledMonospaced(.caption, scale: fontScale))
             .foregroundStyle(levelColor)
             .textSelection(.enabled)
             .lineLimit(nil)
@@ -423,7 +424,7 @@ struct ServerDetailView: View {
     private func configSection(title: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.headline)
+                .font(.scaled(.headline, scale: fontScale))
             content()
         }
         .padding(16)
@@ -436,11 +437,11 @@ struct ServerDetailView: View {
     private func configRow(label: String, value: String) -> some View {
         HStack(alignment: .top) {
             Text(label)
-                .font(.subheadline)
+                .font(.scaled(.subheadline, scale: fontScale))
                 .foregroundStyle(.secondary)
                 .frame(width: 120, alignment: .trailing)
             Text(value)
-                .font(.system(.subheadline, design: .monospaced))
+                .font(.scaledMonospaced(.subheadline, scale: fontScale))
                 .textSelection(.enabled)
             Spacer()
         }
@@ -452,12 +453,12 @@ struct ServerDetailView: View {
     private func actionBanner(_ message: String) -> some View {
         HStack {
             Text(message)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Dismiss") { actionMessage = nil }
                 .buttonStyle(.borderless)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
@@ -533,6 +534,7 @@ struct ToolRow: View {
     let tool: ServerTool
     var serverName: String = ""
     var apiClient: APIClient? = nil
+    @Environment(\.fontScale) var fontScale
 
     @State private var isExpanded = false
     @State private var diffData: [String: Any]? = nil
@@ -556,19 +558,19 @@ struct ToolRow: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2.weight(.semibold))
+                        .font(.scaled(.caption2, scale: fontScale).weight(.semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 12)
 
                     Text(tool.name)
-                        .font(.body.monospaced().weight(.semibold))
+                        .font(.scaledMonospaced(.body, scale: fontScale).weight(.semibold))
                         .foregroundStyle(.primary)
 
                     annotationBadgesCollapsed
 
                     if let status = tool.approvalStatus, status != "approved" {
                         Text(status.capitalized)
-                            .font(.caption2.bold())
+                            .font(.scaled(.caption2, scale: fontScale).bold())
                             .foregroundStyle(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -587,7 +589,7 @@ struct ToolRow: View {
             // One-line description preview (always visible)
             if let desc = tool.description, !desc.isEmpty, !isExpanded {
                 Text(desc)
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .padding(.leading, 26)
@@ -616,10 +618,10 @@ struct ToolRow: View {
             if let desc = tool.description, !desc.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Description")
-                        .font(.caption.bold())
+                        .font(.scaled(.caption, scale: fontScale).bold())
                         .foregroundStyle(.secondary)
                     Text(desc)
-                        .font(.subheadline)
+                        .font(.scaled(.subheadline, scale: fontScale))
                         .foregroundStyle(.primary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -630,7 +632,7 @@ struct ToolRow: View {
             if let annotations = tool.annotations, hasAnyAnnotation(annotations) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Annotations")
-                        .font(.caption.bold())
+                        .font(.scaled(.caption, scale: fontScale).bold())
                         .foregroundStyle(.secondary)
                     annotationBadgesExpanded(annotations)
                 }
@@ -640,7 +642,7 @@ struct ToolRow: View {
             if let status = tool.approvalStatus {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Approval Status")
-                        .font(.caption.bold())
+                        .font(.scaled(.caption, scale: fontScale).bold())
                         .foregroundStyle(.secondary)
                     HStack(spacing: 6) {
                         Circle()
@@ -648,7 +650,7 @@ struct ToolRow: View {
                             .frame(width: 8, height: 8)
                             .accessibilityLabel("Approval: \(status)")
                         Text(approvalStatusLabel(status))
-                            .font(.subheadline)
+                            .font(.scaled(.subheadline, scale: fontScale))
                             .foregroundStyle(.primary)
                     }
                 }
@@ -741,7 +743,7 @@ struct ToolRow: View {
                     ProgressView()
                         .controlSize(.small)
                     Text("Loading changes...")
-                        .font(.caption)
+                        .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 4)
@@ -756,7 +758,7 @@ struct ToolRow: View {
 
                 if !oldDesc.isEmpty || !newDesc.isEmpty {
                     Text("Description Changes")
-                        .font(.caption.bold())
+                        .font(.scaled(.caption, scale: fontScale).bold())
                         .foregroundStyle(.secondary)
 
                     if oldDesc != newDesc {
@@ -768,7 +770,7 @@ struct ToolRow: View {
                         }
                     } else {
                         Text("No description changes")
-                            .font(.caption)
+                            .font(.scaled(.caption, scale: fontScale))
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -785,7 +787,7 @@ struct ToolRow: View {
 
                 if !oldSchema.isEmpty || !newSchema.isEmpty {
                     Text("Schema Changes")
-                        .font(.caption.bold())
+                        .font(.scaled(.caption, scale: fontScale).bold())
                         .foregroundStyle(.secondary)
                         .padding(.top, 4)
 
@@ -798,7 +800,7 @@ struct ToolRow: View {
                         }
                     } else {
                         Text("No schema changes")
-                            .font(.caption)
+                            .font(.scaled(.caption, scale: fontScale))
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -808,13 +810,13 @@ struct ToolRow: View {
                         Image(systemName: "info.circle")
                             .foregroundStyle(.orange)
                         Text("New tool pending approval")
-                            .font(.caption)
+                            .font(.scaled(.caption, scale: fontScale))
                             .foregroundStyle(.secondary)
                     }
                 }
             } else {
                 Text("Could not load diff data")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
             }
         }
@@ -824,10 +826,10 @@ struct ToolRow: View {
     private func diffLine(text: String, isOld: Bool) -> some View {
         HStack(alignment: .top, spacing: 4) {
             Image(systemName: isOld ? "minus.circle.fill" : "plus.circle.fill")
-                .font(.caption2)
+                .font(.scaled(.caption2, scale: fontScale))
                 .foregroundStyle(isOld ? .red : .green)
             Text(text)
-                .font(.caption.monospaced())
+                .font(.scaledMonospaced(.caption, scale: fontScale))
                 .foregroundStyle(isOld ? .secondary : .primary)
                 .lineLimit(isOld ? 6 : nil)
         }
@@ -865,9 +867,9 @@ struct ToolRow: View {
     private func badge(text: String, color: Color, icon: String) -> some View {
         HStack(spacing: 2) {
             Image(systemName: icon)
-                .font(.system(size: 8))
+                .font(.system(size: 8 * fontScale))
             Text(text)
-                .font(.caption2)
+                .font(.scaled(.caption2, scale: fontScale))
         }
         .foregroundStyle(color)
         .padding(.horizontal, 5)

@@ -13,6 +13,7 @@ import SwiftUI
 
 struct ConfigView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.fontScale) var fontScale
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -62,9 +63,9 @@ struct ConfigView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Configuration")
-                    .font(.title2.bold())
+                    .font(.scaled(.title2, scale: fontScale).bold())
                 Text(configPath.path)
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
@@ -73,7 +74,7 @@ struct ConfigView: View {
 
             if hasChanges {
                 Text("Modified")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.orange)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
@@ -128,7 +129,7 @@ struct ConfigView: View {
         if isEditing {
             // Editable text editor
             TextEditor(text: $configText)
-                .font(.system(.body, design: .monospaced))
+                .font(.scaledMonospaced(.body, scale: fontScale))
                 .padding(8)
                 .accessibilityIdentifier("config-editor")
                 .onChange(of: configText) { _ in
@@ -143,7 +144,7 @@ struct ConfigView: View {
                     VStack(alignment: .trailing, spacing: 0) {
                         ForEach(Array(lines.enumerated()), id: \.offset) { index, _ in
                             Text("\(index + 1)")
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.scaledMonospaced(.caption, scale: fontScale))
                                 .foregroundStyle(.tertiary)
                                 .frame(minWidth: 30, alignment: .trailing)
                         }
@@ -155,7 +156,7 @@ struct ConfigView: View {
 
                     // Config text
                     Text(configText)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.scaledMonospaced(.body, scale: fontScale))
                         .textSelection(.enabled)
                         .padding(.leading, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -175,12 +176,12 @@ struct ConfigView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
             Text(message)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Dismiss") { errorMessage = nil }
                 .buttonStyle(.borderless)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
@@ -193,12 +194,12 @@ struct ConfigView: View {
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
             Text(message)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Dismiss") { successMessage = nil }
                 .buttonStyle(.borderless)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
