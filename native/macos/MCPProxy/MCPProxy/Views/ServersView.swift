@@ -90,28 +90,46 @@ struct ServersView: View {
             Divider()
 
             if servers.isEmpty && !isLoading {
-                // Empty state when no servers
-                VStack(spacing: 16) {
-                    Spacer()
-                    Image(systemName: "server.rack")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("No Servers Configured")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                    Text("Add your first MCP server to get started")
-                        .font(.body)
-                        .foregroundStyle(.tertiary)
-                    Button {
-                        showAddServer = true
-                    } label: {
-                        Label("Add Your First Server", systemImage: "plus.circle.fill")
+                if appState.coreState != .connected {
+                    // Core is not running — explain why servers list is empty
+                    VStack(spacing: 16) {
+                        Spacer()
+                        Image(systemName: appState.isPaused ? "pause.circle.fill" : "server.rack")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.tertiary)
+                        Text(appState.isPaused ? "MCPProxy Core is Paused" : "MCPProxy Core is Not Running")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                        Text("Start the core to see your servers")
+                            .font(.body)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    Spacer()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    // Empty state when no servers
+                    VStack(spacing: 16) {
+                        Spacer()
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.tertiary)
+                        Text("No Servers Configured")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                        Text("Add your first MCP server to get started")
+                            .font(.body)
+                            .foregroundStyle(.tertiary)
+                        Button {
+                            showAddServer = true
+                        } label: {
+                            Label("Add Your First Server", systemImage: "plus.circle.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
             // AppKit NSTableView -- Docker Desktop-style multi-column
