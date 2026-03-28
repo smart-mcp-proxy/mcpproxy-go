@@ -86,6 +86,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             .store(in: &cancellables)
 
+        // Listen for resume/start requests from the core status banner
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleResumeCore),
+            name: .resumeCore, object: nil
+        )
+
         // Start core
         Task {
             await startCore()
@@ -566,12 +572,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if appState.isPaused {
             let resume = NSMenuItem(title: "Resume MCPProxy Core", action: #selector(resumeCore), keyEquivalent: "")
             resume.target = self
-            resume.image = NSImage(systemSymbolName: "play.circle", accessibilityDescription: "resume")
+            resume.image = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "resume")
+            resume.image?.size = NSSize(width: 18, height: 18)
             menu.addItem(resume)
         } else if appState.coreState == .connected || appState.coreState.isOperational {
             let pause = NSMenuItem(title: "Pause MCPProxy Core", action: #selector(pauseCore), keyEquivalent: "")
             pause.target = self
-            pause.image = NSImage(systemSymbolName: "pause.circle", accessibilityDescription: "pause")
+            pause.image = NSImage(systemSymbolName: "pause.circle.fill", accessibilityDescription: "pause")
+            pause.image?.size = NSSize(width: 18, height: 18)
             menu.addItem(pause)
         }
 
@@ -638,6 +646,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             await manager.start()
             updateStatusIcon()
         }
+    }
+
+    /// Handler for the `.resumeCore` notification posted by the core status banner.
+    @objc private func handleResumeCore() {
+        resumeCore()
     }
 
     @objc private func handleAttentionAction(_ sender: NSMenuItem) {
@@ -786,6 +799,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 extension Notification.Name {
     /// Posted by tray menu "Add Server..." to trigger the sheet in ServersView.
     static let showAddServer = Notification.Name("MCPProxy.showAddServer")
+    /// Posted by the core status banner to resume/start the core.
+    static let resumeCore = Notification.Name("MCPProxy.resumeCore")
 }
 
 @main

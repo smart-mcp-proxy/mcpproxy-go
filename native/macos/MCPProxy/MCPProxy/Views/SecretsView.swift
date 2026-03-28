@@ -301,6 +301,7 @@ struct SecretRow: View {
                     }
                 } label: {
                     Image(systemName: "trash")
+                        .foregroundStyle(.red)
                 }
                 .buttonStyle(.borderless)
             }
