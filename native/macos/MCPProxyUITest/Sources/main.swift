@@ -189,6 +189,28 @@ func toolDefinitions() -> [[String: Any]] {
                 ] as [String: Any],
                 "required": [] as [String]
             ]
+        ],
+        [
+            "name": "send_keypress",
+            "description": "Send a keyboard shortcut to a running application using CGEvent. The app must be frontmost (will be activated automatically). Supports modifier+key combos like 'cmd+=', 'cmd+-', 'cmd+0', 'cmd+shift+=', 'cmd+c', etc. Use for testing keyboard shortcuts like Cmd+/Cmd- zoom.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "key": [
+                        "type": "string",
+                        "description": "Key combo string, e.g. 'cmd+=', 'cmd+-', 'cmd+0', 'cmd+shift+=', 'cmd+c'. Modifier names: cmd, shift, ctrl, opt/alt. Separated by '+'. The last component is the key."
+                    ] as [String: Any],
+                    "bundle_id": [
+                        "type": "string",
+                        "description": "Bundle ID of the target app. Defaults to configured bundle ID. The app will be activated (brought to front) before sending the key."
+                    ] as [String: Any],
+                    "repeat": [
+                        "type": "integer",
+                        "description": "Number of times to send the keypress. Defaults to 1. Useful for repeated zoom in/out."
+                    ] as [String: Any]
+                ] as [String: Any],
+                "required": ["key"]
+            ]
         ]
     ]
 }
@@ -901,6 +923,9 @@ func handleReadStatusBar(id: Any, arguments: [String: Any]) -> [String: Any] {
 
 // MARK: - Screenshot Helpers
 
+// Using deprecated CG APIs because ScreenCaptureKit requires async/await
+// and entitlements that are impractical for a CLI tool.
+@available(macOS, deprecated: 15.0, message: "Using CGWindowListCreateImage until ScreenCaptureKit migration")
 func captureWindowImage(windowID: CGWindowID) -> CGImage? {
     let imageRef = CGWindowListCreateImage(
         .null,
@@ -911,6 +936,7 @@ func captureWindowImage(windowID: CGWindowID) -> CGImage? {
     return imageRef
 }
 
+@available(macOS, deprecated: 15.0, message: "Using CGDisplayCreateImage until ScreenCaptureKit migration")
 func captureFullScreen() -> CGImage? {
     return CGDisplayCreateImage(CGMainDisplayID())
 }
@@ -1070,6 +1096,194 @@ func handleScreenshotStatusBarMenu(id: Any, arguments: [String: Any]) -> [String
     }
 }
 
+// MARK: - Keypress Helpers
+
+/// Map a character string to a macOS virtual key code.
+/// Virtual key codes are hardware-independent (unlike CGKeyCode from key position).
+func virtualKeyCode(for key: String) -> (keyCode: UInt16, needsShift: Bool)? {
+    switch key.lowercased() {
+    // Row 1: number row
+    case "`", "~": return (50, key == "~")
+    case "1", "!": return (18, key == "!")
+    case "2", "@": return (19, key == "@")
+    case "3", "#": return (20, key == "#")
+    case "4", "$": return (21, key == "$")
+    case "5", "%": return (23, key == "%")
+    case "6", "^": return (22, key == "^")
+    case "7", "&": return (26, key == "&")
+    case "8", "*": return (28, key == "*")
+    case "9", "(": return (25, key == "(")
+    case "0", ")": return (29, key == ")")
+    case "-", "_": return (27, key == "_")
+    case "=", "+": return (24, key == "+")
+    // Row 2: QWERTY
+    case "q": return (12, false)
+    case "w": return (13, false)
+    case "e": return (14, false)
+    case "r": return (15, false)
+    case "t": return (17, false)
+    case "y": return (16, false)
+    case "u": return (32, false)
+    case "i": return (34, false)
+    case "o": return (31, false)
+    case "p": return (35, false)
+    case "[", "{": return (33, key == "{")
+    case "]", "}": return (30, key == "}")
+    case "\\", "|": return (42, key == "|")
+    // Row 3: ASDF
+    case "a": return (0, false)
+    case "s": return (1, false)
+    case "d": return (2, false)
+    case "f": return (3, false)
+    case "g": return (5, false)
+    case "h": return (4, false)
+    case "j": return (38, false)
+    case "k": return (40, false)
+    case "l": return (37, false)
+    case ";", ":": return (41, key == ":")
+    case "'", "\"": return (39, key == "\"")
+    // Row 4: ZXCV
+    case "z": return (6, false)
+    case "x": return (7, false)
+    case "c": return (8, false)
+    case "v": return (9, false)
+    case "b": return (11, false)
+    case "n": return (45, false)
+    case "m": return (46, false)
+    case ",", "<": return (43, key == "<")
+    case ".", ">": return (47, key == ">")
+    case "/", "?": return (44, key == "?")
+    // Special keys
+    case "space", " ": return (49, false)
+    case "return", "enter": return (36, false)
+    case "tab": return (48, false)
+    case "delete", "backspace": return (51, false)
+    case "escape", "esc": return (53, false)
+    case "left": return (123, false)
+    case "right": return (124, false)
+    case "down": return (125, false)
+    case "up": return (126, false)
+    case "f1": return (122, false)
+    case "f2": return (120, false)
+    case "f3": return (99, false)
+    case "f4": return (118, false)
+    case "f5": return (96, false)
+    case "f6": return (97, false)
+    case "f7": return (98, false)
+    case "f8": return (100, false)
+    case "f9": return (101, false)
+    case "f10": return (109, false)
+    case "f11": return (103, false)
+    case "f12": return (111, false)
+    default: return nil
+    }
+}
+
+/// Parse a key combo string like "cmd+=" or "cmd+shift+=" into modifiers and key code.
+func parseKeyCombo(_ combo: String) -> (keyCode: UInt16, flags: CGEventFlags)? {
+    let parts = combo.lowercased().components(separatedBy: "+")
+    guard parts.count >= 1 else { return nil }
+
+    var flags: CGEventFlags = []
+    var keyPart = ""
+
+    for (index, part) in parts.enumerated() {
+        let trimmed = part.trimmingCharacters(in: .whitespaces)
+        if index == parts.count - 1 {
+            // Last part is the key (unless it's empty from trailing +)
+            if trimmed.isEmpty {
+                // Trailing "+" means the key is literally "+"
+                keyPart = "+"
+            } else {
+                keyPart = trimmed
+            }
+        } else {
+            switch trimmed {
+            case "cmd", "command": flags.insert(.maskCommand)
+            case "shift": flags.insert(.maskShift)
+            case "ctrl", "control": flags.insert(.maskControl)
+            case "opt", "option", "alt": flags.insert(.maskAlternate)
+            default:
+                // Unknown modifier; maybe the user meant a multi-char key
+                return nil
+            }
+        }
+    }
+
+    // Special handling: if keyPart is empty and we have a modifier that looks like a key
+    guard !keyPart.isEmpty else { return nil }
+
+    guard let (code, needsShift) = virtualKeyCode(for: keyPart) else {
+        return nil
+    }
+
+    if needsShift {
+        flags.insert(.maskShift)
+    }
+
+    return (code, flags)
+}
+
+func handleSendKeypress(id: Any, arguments: [String: Any]) -> [String: Any] {
+    guard let keyCombo = arguments["key"] as? String, !keyCombo.isEmpty else {
+        return makeToolResult(id: id, text: "The 'key' argument is required (e.g. 'cmd+=', 'cmd+-', 'cmd+0').", isError: true)
+    }
+    let bundleID = arguments["bundle_id"] as? String ?? configuredBundleID
+    let repeatCount = arguments["repeat"] as? Int ?? 1
+
+    guard let (keyCode, flags) = parseKeyCombo(keyCombo) else {
+        return makeToolResult(id: id, text: "Could not parse key combo '\(keyCombo)'. Expected format: 'cmd+=', 'cmd+shift+=', 'cmd+-', 'cmd+0', etc. Supported modifiers: cmd, shift, ctrl, opt/alt. Key must be a single character or special key name (space, return, tab, escape, f1-f12, left/right/up/down).", isError: true)
+    }
+
+    // Activate the target app so it receives key events
+    guard let app = findRunningApp(bundleID: bundleID) else {
+        return makeToolResult(id: id, text: "Application with bundle ID '\(bundleID)' is not running.", isError: true)
+    }
+
+    app.activate()
+    Thread.sleep(forTimeInterval: 0.3) // Wait for app to come to front
+
+    var sentCount = 0
+    for i in 0..<max(1, repeatCount) {
+        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
+            return makeToolResult(id: id, text: "Failed to create CGEvent for key code \(keyCode) (iteration \(i)).", isError: true)
+        }
+
+        keyDown.flags = flags
+        keyUp.flags = flags
+
+        keyDown.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.02)
+        keyUp.post(tap: .cghidEventTap)
+        sentCount += 1
+
+        if i < repeatCount - 1 {
+            Thread.sleep(forTimeInterval: 0.1) // Brief pause between repeats
+        }
+    }
+
+    let result: [String: Any] = [
+        "success": true,
+        "key_combo": keyCombo,
+        "key_code": Int(keyCode),
+        "modifiers": describeCGFlags(flags),
+        "repeat_count": sentCount,
+        "target_app": bundleID,
+        "message": "Sent '\(keyCombo)' \(sentCount) time(s) to \(bundleID)"
+    ]
+    return makeToolResult(id: id, text: jsonString(result))
+}
+
+func describeCGFlags(_ flags: CGEventFlags) -> [String] {
+    var mods: [String] = []
+    if flags.contains(.maskCommand) { mods.append("cmd") }
+    if flags.contains(.maskShift) { mods.append("shift") }
+    if flags.contains(.maskControl) { mods.append("ctrl") }
+    if flags.contains(.maskAlternate) { mods.append("opt") }
+    return mods
+}
+
 // MARK: - Request Handling
 
 func handleRequest(_ request: [String: Any]) {
@@ -1168,8 +1382,10 @@ func dispatchToolCall(id: Any, toolName: String, arguments: [String: Any]) -> [S
         return handleScreenshotWindow(id: id, arguments: arguments)
     case "screenshot_status_bar_menu":
         return handleScreenshotStatusBarMenu(id: id, arguments: arguments)
+    case "send_keypress":
+        return handleSendKeypress(id: id, arguments: arguments)
     default:
-        return makeToolResult(id: id, text: "Unknown tool: \(toolName). Available tools: check_accessibility, list_running_apps, list_menu_items, click_menu_item, read_status_bar, screenshot_window, screenshot_status_bar_menu", isError: true)
+        return makeToolResult(id: id, text: "Unknown tool: \(toolName). Available tools: check_accessibility, list_running_apps, list_menu_items, click_menu_item, read_status_bar, screenshot_window, screenshot_status_bar_menu, send_keypress", isError: true)
     }
 }
 
@@ -1206,6 +1422,7 @@ func parseArguments() {
               read_status_bar           Read status bar item info
               screenshot_window         Take a screenshot of an app window or full screen
               screenshot_status_bar_menu  Screenshot the status bar menu (opens and captures)
+              send_keypress             Send keyboard shortcut to an app (e.g. cmd+=, cmd+-, cmd+0)
 
             """.utf8))
             exit(0)

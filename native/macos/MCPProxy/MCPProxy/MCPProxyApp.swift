@@ -21,6 +21,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var statusItem: NSStatusItem!
     private var mainWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
+    private var keyMonitor: Any?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
@@ -31,14 +32,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Switch to accessory (menu bar only) now that launch is complete
         NSApp.setActivationPolicy(.accessory)
 
-        // Monitor Cmd+/Cmd-/Cmd+0 globally for text size adjustment
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        // Monitor Cmd+/Cmd-/Cmd+0 globally for text size adjustment.
+        // Store the monitor reference to prevent potential deallocation.
+        // Match both "+" (Cmd+Shift+=) and "=" (Cmd+=) for zoom in,
+        // since the + key on US keyboards is Shift+=.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.modifierFlags.contains(.command) else { return event }
-            switch event.charactersIgnoringModifiers {
-            case "+", "=": self?.makeTextBigger(); return nil
-            case "-": self?.makeTextSmaller(); return nil
-            case "0": self?.makeTextActualSize(); return nil
-            default: return event
+            let key = event.charactersIgnoringModifiers ?? ""
+            switch key {
+            case "+", "=":
+                NSLog("[MCPProxy] Zoom in: key=%@ fontScale=%.1f", key, self?.appState.fontScale ?? 0)
+                self?.makeTextBigger()
+                return nil
+            case "-":
+                NSLog("[MCPProxy] Zoom out: key=%@ fontScale=%.1f", key, self?.appState.fontScale ?? 0)
+                self?.makeTextSmaller()
+                return nil
+            case "0":
+                NSLog("[MCPProxy] Zoom reset: fontScale=%.1f", self?.appState.fontScale ?? 0)
+                self?.makeTextActualSize()
+                return nil
+            default:
+                return event
             }
         }
 
@@ -86,10 +101,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             .store(in: &cancellables)
 
-        // Listen for resume/start requests from the core status banner
+        // Listen for start requests from the core status banner
         NotificationCenter.default.addObserver(
-            self, selector: #selector(handleResumeCore),
-            name: .resumeCore, object: nil
+            self, selector: #selector(handleStartCore),
+            name: .startCore, object: nil
         )
 
         // Start core
@@ -231,7 +246,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             smallerItem.target = self
             viewMenu.insertItem(smallerItem, at: 0)
 
-            let biggerItem = NSMenuItem(title: "Make Text Bigger", action: #selector(makeTextBigger), keyEquivalent: "+")
+            // Use "=" as key equivalent so Cmd+= (without Shift) triggers zoom in.
+            // On US keyboards, the + key is Shift+=, so "+" requires Cmd+Shift+=.
+            // Using "=" matches the standard macOS zoom-in shortcut (Cmd+=).
+            // The local event monitor (above) handles both "+" and "=" as fallback.
+            let biggerItem = NSMenuItem(title: "Make Text Bigger", action: #selector(makeTextBigger), keyEquivalent: "=")
             biggerItem.keyEquivalentModifierMask = .command
             biggerItem.target = self
             viewMenu.insertItem(biggerItem, at: 0)
@@ -249,15 +268,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc private func makeTextBigger() {
+        let old = appState.fontScale
         appState.fontScale = min(appState.fontScale + 0.1, 2.0)
+        NSLog("[MCPProxy] makeTextBigger: %.1f -> %.1f", old, appState.fontScale)
     }
 
     @objc private func makeTextSmaller() {
+        let old = appState.fontScale
         appState.fontScale = max(appState.fontScale - 0.1, 0.6)
+        NSLog("[MCPProxy] makeTextSmaller: %.1f -> %.1f", old, appState.fontScale)
     }
 
     @objc private func makeTextActualSize() {
+        let old = appState.fontScale
         appState.fontScale = 1.0
+        NSLog("[MCPProxy] makeTextActualSize: %.1f -> %.1f", old, appState.fontScale)
     }
 
     // MARK: - Core Startup
@@ -302,9 +327,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Update the status bar icon based on app state.
     /// Always draws the MCPProxy base icon, with a small colored overlay badge
-    /// in the bottom-right corner for paused or error states.
+    /// in the bottom-right corner for stopped or error states.
     /// - Running OK: plain MCPProxy icon (no overlay)
-    /// - Paused: small orange pause badge overlay
+    /// - Stopped: small orange stop badge overlay
     /// - Error: small red exclamation badge overlay
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
@@ -318,7 +343,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             base = sfIcon
         } else { return }
 
-        let isPaused = appState.isPaused
+        let isStopped = appState.isStopped
         let hasError: Bool
         if case .error = appState.coreState { hasError = true } else { hasError = false }
 
@@ -328,8 +353,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         button.image = base
 
         // Show state indicator as text next to icon (keeps icon as pure template)
-        if isPaused {
-            button.title = "⏸"
+        if isStopped {
+            button.title = "⏹"
         } else if hasError {
             button.title = "⚠"
         } else {
@@ -363,7 +388,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Determine status dot color
         let statusColor: NSColor
-        if appState.isPaused {
+        if appState.isStopped {
             statusColor = .systemGray
         } else if case .error = appState.coreState {
             statusColor = .systemRed
@@ -500,12 +525,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
 
                 if server.enabled {
-                    let disable = NSMenuItem(title: "Disable", action: #selector(disableServer(_:)), keyEquivalent: "")
+                    let disableLabel = server.protocol == "stdio" ? "Stop" : "Disable"
+                    let disable = NSMenuItem(title: disableLabel, action: #selector(disableServer(_:)), keyEquivalent: "")
                     disable.target = self
                     disable.representedObject = server.name
                     sub.addItem(disable)
                 } else {
-                    let enable = NSMenuItem(title: "Enable", action: #selector(enableServer(_:)), keyEquivalent: "")
+                    let enableLabel = server.protocol == "stdio" ? "Start" : "Enable"
+                    let enable = NSMenuItem(title: enableLabel, action: #selector(enableServer(_:)), keyEquivalent: "")
                     enable.target = self
                     enable.representedObject = server.name
                     sub.addItem(enable)
@@ -568,19 +595,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         menu.addItem(.separator())
 
-        // Pause / Resume
-        if appState.isPaused {
-            let resume = NSMenuItem(title: "Resume MCPProxy Core", action: #selector(resumeCore), keyEquivalent: "")
-            resume.target = self
-            resume.image = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "resume")
-            resume.image?.size = NSSize(width: 18, height: 18)
-            menu.addItem(resume)
+        // Stop / Start
+        if appState.isStopped {
+            let start = NSMenuItem(title: "Start MCPProxy Core", action: #selector(startCoreAction), keyEquivalent: "")
+            start.target = self
+            start.image = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "start")
+            start.image?.size = NSSize(width: 18, height: 18)
+            menu.addItem(start)
         } else if appState.coreState == .connected || appState.coreState.isOperational {
-            let pause = NSMenuItem(title: "Pause MCPProxy Core", action: #selector(pauseCore), keyEquivalent: "")
-            pause.target = self
-            pause.image = NSImage(systemSymbolName: "pause.circle.fill", accessibilityDescription: "pause")
-            pause.image?.size = NSSize(width: 18, height: 18)
-            menu.addItem(pause)
+            let stop = NSMenuItem(title: "Stop MCPProxy Core", action: #selector(stopCore), keyEquivalent: "")
+            stop.target = self
+            stop.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "stop")
+            stop.image?.size = NSSize(width: 18, height: 18)
+            menu.addItem(stop)
         }
 
         // Quit
@@ -596,24 +623,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         Task { await coreManager?.retry() }
     }
 
-    @objc private func pauseCore() {
-        NSLog("[MCPProxy] pauseCore: starting pause")
-        appState.isPaused = true
+    @objc private func stopCore() {
+        NSLog("[MCPProxy] stopCore: stopping core")
+        appState.isStopped = true
 
         // Kill the core process directly — most reliable method
         let proc = coreManager?.managedProcess
-        NSLog("[MCPProxy] pauseCore: managedProcess=%@, isRunning=%@",
+        NSLog("[MCPProxy] stopCore: managedProcess=%@, isRunning=%@",
               proc != nil ? "exists" : "nil",
               proc?.isRunning == true ? "yes" : "no")
 
         if let process = proc, process.isRunning {
-            NSLog("[MCPProxy] pauseCore: sending SIGTERM to PID %d", process.processIdentifier)
+            NSLog("[MCPProxy] stopCore: sending SIGTERM to PID %d", process.processIdentifier)
             kill(process.processIdentifier, SIGTERM)
 
             // Wait up to 5s then SIGKILL
             DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
                 if process.isRunning {
-                    NSLog("[MCPProxy] pauseCore: SIGKILL after 5s timeout")
+                    NSLog("[MCPProxy] stopCore: SIGKILL after 5s timeout")
                     kill(process.processIdentifier, SIGKILL)
                 }
             }
@@ -635,9 +662,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    @objc private func resumeCore() {
+    @objc private func startCoreAction() {
         Task {
-            appState.isPaused = false
+            appState.isStopped = false
             let manager = CoreProcessManager(
                 appState: appState,
                 notificationService: notificationService
@@ -648,9 +675,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    /// Handler for the `.resumeCore` notification posted by the core status banner.
-    @objc private func handleResumeCore() {
-        resumeCore()
+    /// Handler for the `.startCore` notification posted by the core status banner.
+    @objc private func handleStartCore() {
+        startCoreAction()
     }
 
     @objc private func handleAttentionAction(_ sender: NSMenuItem) {
@@ -799,8 +826,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 extension Notification.Name {
     /// Posted by tray menu "Add Server..." to trigger the sheet in ServersView.
     static let showAddServer = Notification.Name("MCPProxy.showAddServer")
-    /// Posted by the core status banner to resume/start the core.
-    static let resumeCore = Notification.Name("MCPProxy.resumeCore")
+    /// Posted by the core status banner to start the core.
+    static let startCore = Notification.Name("MCPProxy.startCore")
 }
 
 @main

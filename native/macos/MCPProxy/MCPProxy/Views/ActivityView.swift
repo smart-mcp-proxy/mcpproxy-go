@@ -330,10 +330,10 @@ struct ActivityView: View {
     private var emptyState: some View {
         if appState.coreState != .connected {
             VStack(spacing: 12) {
-                Image(systemName: appState.isPaused ? "pause.circle.fill" : "clock.arrow.circlepath")
+                Image(systemName: appState.isStopped ? "stop.circle.fill" : "clock.arrow.circlepath")
                     .font(.system(size: 48))
                     .foregroundStyle(.tertiary)
-                Text(appState.isPaused ? "MCPProxy Core is Paused" : "MCPProxy Core is Not Running")
+                Text(appState.isStopped ? "MCPProxy Core is Stopped" : "MCPProxy Core is Not Running")
                     .font(.title3)
                     .foregroundStyle(.secondary)
                 Text("Start the core to see activity")

@@ -100,17 +100,21 @@ struct ServerDetailView: View {
             }
 
             if server.enabled {
-                Button("Disable") {
+                let disableLabel = server.protocol == "stdio" ? "Stop" : "Disable"
+                let disabledMsg = server.protocol == "stdio" ? "stopped" : "disabled"
+                Button(disableLabel) {
                     Task { await performAction { try await apiClient?.disableServer(server.id) }
-                        actionMessage = "\(server.name) disabled"
+                        actionMessage = "\(server.name) \(disabledMsg)"
                     }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             } else {
-                Button("Enable") {
+                let enableLabel = server.protocol == "stdio" ? "Start" : "Enable"
+                let enabledMsg = server.protocol == "stdio" ? "started" : "enabled"
+                Button(enableLabel) {
                     Task { await performAction { try await apiClient?.enableServer(server.id) }
-                        actionMessage = "\(server.name) enabled"
+                        actionMessage = "\(server.name) \(enabledMsg)"
                     }
                 }
                 .buttonStyle(.borderedProminent)
