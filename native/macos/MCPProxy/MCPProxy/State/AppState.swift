@@ -75,8 +75,8 @@ final class AppState: ObservableObject {
     @Published var updateAvailable: String? = nil
     @Published var autoStartEnabled: Bool = false
 
-    /// Whether the user has explicitly paused MCPProxy (distinct from idle/error states).
-    @Published var isPaused: Bool = false
+    /// Whether the user has explicitly stopped MCPProxy (distinct from idle/error states).
+    @Published var isStopped: Bool = false
 
     /// User-adjustable font scale (1.0 = default, persisted in UserDefaults).
     /// Standard macOS Cmd+/Cmd- changes this by 0.1 increments.
@@ -133,7 +133,7 @@ final class AppState: ObservableObject {
 
     /// One-line summary suitable for display in the menu header.
     var statusSummary: String {
-        if isPaused { return "Paused" }
+        if isStopped { return "Stopped" }
         switch coreState {
         case .connected:
             if totalServers == 0 {

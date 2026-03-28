@@ -94,10 +94,10 @@ struct ServersView: View {
                     // Core is not running — explain why servers list is empty
                     VStack(spacing: 16) {
                         Spacer()
-                        Image(systemName: appState.isPaused ? "pause.circle.fill" : "server.rack")
+                        Image(systemName: appState.isStopped ? "stop.circle.fill" : "server.rack")
                             .font(.system(size: 48))
                             .foregroundStyle(.tertiary)
-                        Text(appState.isPaused ? "MCPProxy Core is Paused" : "MCPProxy Core is Not Running")
+                        Text(appState.isStopped ? "MCPProxy Core is Stopped" : "MCPProxy Core is Not Running")
                             .font(.title3)
                             .foregroundStyle(.secondary)
                         Text("Start the core to see your servers")
@@ -445,14 +445,16 @@ struct ServerTableView: NSViewRepresentable {
             guard row >= 0, row < sorted.count else { return }
             let server = sorted[row]
 
-            // Enable/Disable
+            // Enable/Disable (stdio servers use Stop/Start terminology)
             if server.enabled {
-                let disable = NSMenuItem(title: "Disable", action: #selector(ctxDisableServer(_:)), keyEquivalent: "")
+                let disableLabel = server.protocol == "stdio" ? "Stop" : "Disable"
+                let disable = NSMenuItem(title: disableLabel, action: #selector(ctxDisableServer(_:)), keyEquivalent: "")
                 disable.target = self
                 disable.representedObject = server
                 menu.addItem(disable)
             } else {
-                let enable = NSMenuItem(title: "Enable", action: #selector(ctxEnableServer(_:)), keyEquivalent: "")
+                let enableLabel = server.protocol == "stdio" ? "Start" : "Enable"
+                let enable = NSMenuItem(title: enableLabel, action: #selector(ctxEnableServer(_:)), keyEquivalent: "")
                 enable.target = self
                 enable.representedObject = server
                 menu.addItem(enable)
@@ -759,9 +761,12 @@ struct ServerTableView: NSViewRepresentable {
             stack.translatesAutoresizingMaskIntoConstraints = false
 
             // Play/Stop toggle button
+            let toggleLabel = server.protocol == "stdio"
+                ? (server.enabled ? "Stop" : "Start")
+                : (server.enabled ? "Disable" : "Enable")
             let toggleButton = makeIconButton(
                 symbolName: server.enabled ? "stop.fill" : "play.fill",
-                accessibilityLabel: server.enabled ? "Disable" : "Enable",
+                accessibilityLabel: toggleLabel,
                 action: #selector(toggleEnabledClicked(_:)),
                 tag: row
             )

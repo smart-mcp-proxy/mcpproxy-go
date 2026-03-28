@@ -185,15 +185,15 @@ struct TrayMenu: View {
 
         Divider()
 
-        // Enable / Disable
+        // Enable / Disable (stdio servers use Stop/Start terminology)
         if server.enabled {
-            Button("Disable") {
+            Button(server.protocol == "stdio" ? "Stop" : "Disable") {
                 Task {
                     try? await apiClient?.disableServer(server.id)
                 }
             }
         } else {
-            Button("Enable") {
+            Button(server.protocol == "stdio" ? "Start" : "Enable") {
                 Task {
                     try? await apiClient?.enableServer(server.id)
                 }
