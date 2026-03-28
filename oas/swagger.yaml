@@ -2138,6 +2138,16 @@ paths:
         name: end_time
         schema:
           type: string
+      - description: Maximum records to export (1-50000, default 10000)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      - description: Pagination offset (default 0)
+        in: query
+        name: offset
+        schema:
+          type: integer
       requestBody:
         content:
           application/json:
