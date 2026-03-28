@@ -11,6 +11,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.fontScale) var fontScale
 
     var body: some View {
         ScrollView {
@@ -95,7 +96,7 @@ struct DashboardView: View {
     private var attentionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Servers Needing Attention", systemImage: "exclamationmark.triangle.fill")
-                .font(.headline)
+                .font(.scaled(.headline, scale: fontScale))
                 .foregroundStyle(.orange)
 
             VStack(spacing: 1) {
@@ -115,27 +116,27 @@ struct DashboardView: View {
         if let stats = appState.tokenMetrics {
             VStack(alignment: .leading, spacing: 12) {
                 Label("Token Savings", systemImage: "bolt.fill")
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
 
                 HStack(spacing: 16) {
                     // Tokens Saved — prominent green card
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Image(systemName: "arrow.down.circle.fill")
-                                .font(.subheadline)
+                                .font(.scaled(.subheadline, scale: fontScale))
                                 .foregroundStyle(.green)
                             Spacer()
                         }
                         Text(formatTokenCount(stats.savedTokens))
-                            .font(.title)
+                            .font(.scaled(.title, scale: fontScale))
                             .fontWeight(.bold)
                             .fontDesign(.rounded)
                             .foregroundStyle(.green)
                         Text("Tokens Saved")
-                            .font(.subheadline.weight(.medium))
+                            .font(.scaled(.subheadline, scale: fontScale).weight(.medium))
                             .foregroundStyle(.primary)
                         Text("\(Int(stats.savedTokensPercentage))% reduction")
-                            .font(.caption)
+                            .font(.scaled(.caption, scale: fontScale))
                             .foregroundStyle(.secondary)
                     }
                     .padding(16)
@@ -174,7 +175,7 @@ struct DashboardView: View {
            !perServer.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Token Distribution", systemImage: "chart.bar.fill")
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
 
                 let sorted = perServer.sorted { $0.value > $1.value }
                 let top = Array(sorted.prefix(6))
@@ -204,9 +205,9 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Label("Recent Sessions", systemImage: "person.2.fill")
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
                 Text("MCP client connections")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
             }
 
@@ -215,6 +216,7 @@ struct DashboardView: View {
                 HStack {
                     Spacer()
                     Text("No sessions recorded")
+                        .font(.scaled(.body, scale: fontScale))
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 20)
                     Spacer()
@@ -234,7 +236,7 @@ struct DashboardView: View {
                         Text("Started")
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    .font(.caption.weight(.semibold))
+                    .font(.scaled(.caption, scale: fontScale).weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
@@ -245,22 +247,23 @@ struct DashboardView: View {
                     ForEach(sessions) { session in
                         HStack(spacing: 0) {
                             Text(session.displayId)
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.scaledMonospaced(.caption, scale: fontScale))
                                 .lineLimit(1)
                                 .frame(width: 180, alignment: .leading)
 
                             DashboardStatusBadge(
                                 label: session.hasErrors ? "Error" : "Active",
-                                color: session.hasErrors ? .red : .green
+                                color: session.hasErrors ? .red : .green,
+                                fontScale: fontScale
                             )
                             .frame(width: 80, alignment: .leading)
 
                             Text("\(session.toolCallCount)")
-                                .font(.caption.monospacedDigit())
+                                .font(.scaledMonospacedDigit(.caption, scale: fontScale))
                                 .frame(width: 80, alignment: .trailing)
 
                             Text(session.relativeTime)
-                                .font(.caption)
+                                .font(.scaled(.caption, scale: fontScale))
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .trailing)
                         }
@@ -288,7 +291,7 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label("Recent Tool Calls", systemImage: "wrench.and.screwdriver")
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
                 Spacer()
             }
 
@@ -296,6 +299,7 @@ struct DashboardView: View {
                 HStack {
                     Spacer()
                     Text("No tool calls recorded")
+                        .font(.scaled(.body, scale: fontScale))
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 20)
                     Spacer()
@@ -319,7 +323,7 @@ struct DashboardView: View {
                         Text("Intent")
                             .frame(width: 80, alignment: .center)
                     }
-                    .font(.caption.weight(.semibold))
+                    .font(.scaled(.caption, scale: fontScale).weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
@@ -328,7 +332,7 @@ struct DashboardView: View {
                     Divider()
 
                     ForEach(recent) { entry in
-                        ToolCallRow(entry: entry)
+                        ToolCallRow(entry: entry, fontScale: fontScale)
                         if entry.id != recent.last?.id {
                             Divider().padding(.leading, 12)
                         }
@@ -346,15 +350,15 @@ struct DashboardView: View {
     private func errorBanner(_ error: CoreError) -> some View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.title2)
+                .font(.scaled(.title2, scale: fontScale))
                 .foregroundStyle(.red)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(error.userMessage)
-                    .font(.subheadline.bold())
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
                     .foregroundStyle(.primary)
                 Text(error.remediationHint)
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
@@ -448,25 +452,26 @@ private struct StatCard: View {
     let subtitle: String
     let icon: String
     let color: Color
+    @Environment(\.fontScale) var fontScale
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Image(systemName: icon)
-                    .font(.subheadline)
+                    .font(.scaled(.subheadline, scale: fontScale))
                     .foregroundStyle(color)
                 Spacer()
             }
             Text(value)
-                .font(.title)
+                .font(.scaled(.title, scale: fontScale))
                 .fontWeight(.bold)
                 .fontDesign(.rounded)
                 .foregroundStyle(.primary)
             Text(title)
-                .font(.subheadline.weight(.medium))
+                .font(.scaled(.subheadline, scale: fontScale).weight(.medium))
                 .foregroundStyle(.primary)
             Text(subtitle)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
         }
         .padding(16)
@@ -485,11 +490,12 @@ private struct TokenDistributionBar: View {
     let tokenSize: Int
     let maxSize: Int
     let totalSize: Int
+    @Environment(\.fontScale) var fontScale
 
     var body: some View {
         HStack(spacing: 8) {
             Text(serverName)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .lineLimit(1)
                 .frame(width: 120, alignment: .trailing)
 
@@ -503,12 +509,12 @@ private struct TokenDistributionBar: View {
 
             let pct = totalSize > 0 ? Double(tokenSize) / Double(totalSize) * 100 : 0
             Text(String(format: "%.0f%%", pct))
-                .font(.caption.monospacedDigit())
+                .font(.scaledMonospacedDigit(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
                 .frame(width: 40, alignment: .trailing)
 
             Text(formatTokenSize(tokenSize))
-                .font(.caption.monospacedDigit())
+                .font(.scaledMonospacedDigit(.caption, scale: fontScale))
                 .foregroundStyle(.tertiary)
                 .frame(width: 50, alignment: .trailing)
         }
@@ -529,10 +535,11 @@ private struct TokenDistributionBar: View {
 private struct DashboardStatusBadge: View {
     let label: String
     let color: Color
+    var fontScale: CGFloat = 1.0
 
     var body: some View {
         Text(label)
-            .font(.caption2.weight(.semibold))
+            .font(.scaled(.caption2, scale: fontScale).weight(.semibold))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(color.opacity(0.15))
@@ -546,48 +553,50 @@ private struct DashboardStatusBadge: View {
 
 private struct ToolCallRow: View {
     let entry: ActivityEntry
+    var fontScale: CGFloat = 1.0
 
     var body: some View {
         HStack(spacing: 0) {
             Text(relativeTime)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
                 .frame(width: 70, alignment: .leading)
 
             Text(entry.serverName ?? "-")
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .lineLimit(1)
                 .frame(width: 120, alignment: .leading)
 
             Text(entry.toolName ?? entry.type)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             DashboardStatusBadge(
                 label: statusLabel,
-                color: statusColor
+                color: statusColor,
+                fontScale: fontScale
             )
             .frame(width: 80, alignment: .center)
 
             if let duration = entry.durationMs {
                 Text("\(duration)ms")
-                    .font(.caption.monospacedDigit())
+                    .font(.scaledMonospacedDigit(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                     .frame(width: 70, alignment: .trailing)
             } else {
                 Text("-")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
                     .frame(width: 70, alignment: .trailing)
             }
 
             if let op = entry.intentOperationType {
-                ToolCallIntentBadge(operationType: op)
+                ToolCallIntentBadge(operationType: op, fontScale: fontScale)
                     .frame(width: 80, alignment: .center)
             } else {
                 Text("-")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
                     .frame(width: 80, alignment: .center)
             }
@@ -636,13 +645,14 @@ private struct ToolCallRow: View {
 
 private struct ToolCallIntentBadge: View {
     let operationType: String
+    var fontScale: CGFloat = 1.0
 
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: iconName)
-                .font(.system(size: 8))
+                .font(.system(size: 8 * fontScale))
             Text(operationType)
-                .font(.caption2.weight(.semibold))
+                .font(.scaled(.caption2, scale: fontScale).weight(.semibold))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
@@ -676,6 +686,7 @@ private struct ToolCallIntentBadge: View {
 private struct AttentionRow: View {
     let server: ServerStatus
     let appState: AppState
+    @Environment(\.fontScale) var fontScale
 
     var body: some View {
         HStack {
@@ -685,10 +696,10 @@ private struct AttentionRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
-                    .font(.subheadline.weight(.medium))
+                    .font(.scaled(.subheadline, scale: fontScale).weight(.medium))
                 if let detail = server.health?.summary {
                     Text(detail)
-                        .font(.caption)
+                        .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.secondary)
                 }
             }

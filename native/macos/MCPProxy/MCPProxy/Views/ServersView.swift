@@ -12,6 +12,7 @@ import AppKit
 
 struct ServersView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.fontScale) var fontScale
 
     @State private var servers: [ServerStatus] = []
     @State private var isLoading = false
@@ -42,7 +43,7 @@ struct ServersView: View {
             // Header
             HStack {
                 Text("Servers")
-                    .font(.title2.bold())
+                    .font(.scaled(.title2, scale: fontScale).bold())
                 Spacer()
                 Text("\(appState.connectedCount)/\(appState.totalServers) connected")
                     .foregroundStyle(.secondary)
@@ -95,13 +96,13 @@ struct ServersView: View {
                     VStack(spacing: 16) {
                         Spacer()
                         Image(systemName: appState.isStopped ? "stop.circle.fill" : "server.rack")
-                            .font(.system(size: 48))
+                            .font(.system(size: 48 * fontScale))
                             .foregroundStyle(.tertiary)
                         Text(appState.isStopped ? "MCPProxy Core is Stopped" : "MCPProxy Core is Not Running")
-                            .font(.title3)
+                            .font(.scaled(.title3, scale: fontScale))
                             .foregroundStyle(.secondary)
                         Text("Start the core to see your servers")
-                            .font(.body)
+                            .font(.scaled(.body, scale: fontScale))
                             .foregroundStyle(.tertiary)
                         Spacer()
                     }
@@ -111,13 +112,13 @@ struct ServersView: View {
                     VStack(spacing: 16) {
                         Spacer()
                         Image(systemName: "server.rack")
-                            .font(.system(size: 48))
+                            .font(.system(size: 48 * fontScale))
                             .foregroundStyle(.tertiary)
                         Text("No Servers Configured")
-                            .font(.title3)
+                            .font(.scaled(.title3, scale: fontScale))
                             .foregroundStyle(.secondary)
                         Text("Add your first MCP server to get started")
-                            .font(.body)
+                            .font(.scaled(.body, scale: fontScale))
                             .foregroundStyle(.tertiary)
                         Button {
                             showAddServer = true
@@ -136,6 +137,7 @@ struct ServersView: View {
             ServerTableView(
                 servers: $servers,
                 apiClient: appState.apiClient,
+                fontScale: fontScale,
                 onDoubleClick: { server in
                     selectedServer = server
                 },
@@ -239,6 +241,7 @@ enum ServerColumn: String, CaseIterable {
 struct ServerTableView: NSViewRepresentable {
     @Binding var servers: [ServerStatus]
     let apiClient: APIClient?
+    var fontScale: CGFloat = 1.0
     var onDoubleClick: ((ServerStatus) -> Void)?
     var onServersChanged: (() -> Void)?
 
@@ -299,6 +302,7 @@ struct ServerTableView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.servers = servers
         context.coordinator.apiClient = apiClient
+        context.coordinator.fontScale = fontScale
         context.coordinator.onDoubleClick = onDoubleClick
         context.coordinator.onServersChanged = onServersChanged
         context.coordinator.tableView?.reloadData()
@@ -313,6 +317,7 @@ struct ServerTableView: NSViewRepresentable {
     class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         var servers: [ServerStatus] = []
         var apiClient: APIClient?
+        var fontScale: CGFloat = 1.0
         var onDoubleClick: ((ServerStatus) -> Void)?
         var onServersChanged: (() -> Void)?
         weak var tableView: NSTableView?
@@ -640,7 +645,7 @@ struct ServerTableView: NSViewRepresentable {
             let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
 
             let label = NSTextField(labelWithString: server.name)
-            label.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+            label.font = .systemFont(ofSize: NSFont.systemFontSize * fontScale, weight: .semibold)
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(label)
@@ -657,7 +662,7 @@ struct ServerTableView: NSViewRepresentable {
             let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
 
             let label = NSTextField(labelWithString: server.protocol)
-            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize * fontScale)
             label.textColor = .secondaryLabelColor
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -694,7 +699,7 @@ struct ServerTableView: NSViewRepresentable {
             }
 
             let label = NSTextField(labelWithString: statusText)
-            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize * fontScale)
             label.textColor = statusColor
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -713,7 +718,7 @@ struct ServerTableView: NSViewRepresentable {
 
             let text = server.toolCount > 0 ? "\(server.toolCount)" : "-"
             let label = NSTextField(labelWithString: text)
-            label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize * fontScale, weight: .regular)
             label.textColor = .secondaryLabelColor
             label.alignment = .right
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -737,7 +742,7 @@ struct ServerTableView: NSViewRepresentable {
                 text = "-"
             }
             let label = NSTextField(labelWithString: text)
-            label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize * fontScale, weight: .regular)
             label.textColor = .secondaryLabelColor
             label.alignment = .right
             label.translatesAutoresizingMaskIntoConstraints = false

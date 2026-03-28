@@ -18,6 +18,7 @@ enum AddServerTab: String, CaseIterable {
 struct AddServerView: View {
     @ObservedObject var appState: AppState
     @Binding var isPresented: Bool
+    @Environment(\.fontScale) var fontScale
 
     @State private var selectedTab: AddServerTab = .importConfig
 
@@ -28,7 +29,7 @@ struct AddServerView: View {
             // Header
             HStack {
                 Text("Add Server")
-                    .font(.title2.bold())
+                    .font(.scaled(.title2, scale: fontScale).bold())
                 Spacer()
                 Button {
                     isPresented = false
@@ -68,6 +69,7 @@ struct AddServerView: View {
 struct ImportServerForm: View {
     @ObservedObject var appState: AppState
     let onDone: () -> Void
+    @Environment(\.fontScale) var fontScale
 
     @State private var configPaths: [CanonicalConfigPath] = []
     @State private var isLoading = false
@@ -85,13 +87,13 @@ struct ImportServerForm: View {
             } else if configPaths.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "doc.badge.gearshape")
-                        .font(.system(size: 40))
+                        .font(.system(size: 40 * fontScale))
                         .foregroundStyle(.tertiary)
                     Text("No config files found")
-                        .font(.title3)
+                        .font(.scaled(.title3, scale: fontScale))
                         .foregroundStyle(.secondary)
                     Text("Try adding a server manually instead")
-                        .font(.caption)
+                        .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -101,7 +103,7 @@ struct ImportServerForm: View {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                         Text(msg)
-                            .font(.caption)
+                            .font(.scaled(.caption, scale: fontScale))
                         Spacer()
                     }
                     .padding(.horizontal)
@@ -114,7 +116,7 @@ struct ImportServerForm: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                         Text(err)
-                            .font(.caption)
+                            .font(.scaled(.caption, scale: fontScale))
                         Spacer()
                     }
                     .padding(.horizontal)
@@ -143,15 +145,15 @@ struct ImportServerForm: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(config.name)
-                    .font(.subheadline.bold())
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
                 Text(config.path)
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let desc = config.description, !desc.isEmpty {
                     Text(desc)
-                        .font(.caption2)
+                        .font(.scaled(.caption2, scale: fontScale))
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -171,7 +173,7 @@ struct ImportServerForm: View {
                 }
             } else {
                 Text("Not found")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
             }
         }
@@ -223,6 +225,7 @@ struct ImportServerForm: View {
 struct ManualServerForm: View {
     @ObservedObject var appState: AppState
     let onDone: () -> Void
+    @Environment(\.fontScale) var fontScale
 
     @State private var name = ""
     @State private var selectedProtocol = "stdio"
@@ -245,7 +248,7 @@ struct ManualServerForm: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                         Text(err)
-                            .font(.caption)
+                            .font(.scaled(.caption, scale: fontScale))
                         Spacer()
                     }
                     .padding(.horizontal)
@@ -287,7 +290,7 @@ struct ManualServerForm: View {
 
                     formField(label: "Arguments (one per line)") {
                         TextEditor(text: $argsText)
-                            .font(.system(.body, design: .monospaced))
+                            .font(.scaledMonospaced(.body, scale: fontScale))
                             .frame(height: 60)
                             .border(Color.gray.opacity(0.3), width: 1)
                     }
@@ -302,7 +305,7 @@ struct ManualServerForm: View {
                 // Env vars
                 formField(label: "Environment Variables (KEY=VALUE per line)") {
                     TextEditor(text: $envText)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.scaledMonospaced(.body, scale: fontScale))
                         .frame(height: 60)
                         .border(Color.gray.opacity(0.3), width: 1)
                 }
@@ -329,7 +332,7 @@ struct ManualServerForm: View {
     private func formField(label: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.subheadline)
+                .font(.scaled(.subheadline, scale: fontScale))
                 .foregroundStyle(.secondary)
             content()
         }

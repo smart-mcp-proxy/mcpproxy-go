@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 
 struct ActivityView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.fontScale) var fontScale
     @State private var activities: [ActivityEntry] = []
     @State private var selectedActivityID: String?
     @State private var isLoading = false
@@ -128,7 +129,8 @@ struct ActivityView: View {
                                         colServer: colServer,
                                         colIntent: colIntent,
                                         colStatus: colStatus,
-                                        colDuration: colDuration
+                                        colDuration: colDuration,
+                                        fontScale: fontScale
                                     )
                                     .contentShape(Rectangle())
                                     .onTapGesture {
@@ -151,6 +153,7 @@ struct ActivityView: View {
                 ActivityDetailView(entry: selected)
             } else {
                 Text("Select an activity entry")
+                    .font(.scaled(.body, scale: fontScale))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -188,7 +191,7 @@ struct ActivityView: View {
             Text("Duration")
                 .frame(width: colDuration, alignment: .trailing)
         }
-        .font(.caption.weight(.semibold))
+        .font(.scaled(.caption, scale: fontScale).weight(.semibold))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -201,7 +204,7 @@ struct ActivityView: View {
     private var activityListHeader: some View {
         HStack {
             Text("Activity Log")
-                .font(.title2.bold())
+                .font(.scaled(.title2, scale: fontScale).bold())
             Spacer()
             if isLoading || isExporting {
                 ProgressView()
@@ -242,19 +245,19 @@ struct ActivityView: View {
     private var summaryStatsBar: some View {
         HStack(spacing: 16) {
             if let s = summary {
-                SummaryStatPill(label: "Total 24h", value: "\(s.totalCount)", color: .blue)
-                SummaryStatPill(label: "Success", value: "\(s.successCount)", color: .green)
-                SummaryStatPill(label: "Errors", value: "\(s.errorCount)", color: .red)
-                SummaryStatPill(label: "Blocked", value: "\(s.blockedCount)", color: .orange)
+                SummaryStatPill(label: "Total 24h", value: "\(s.totalCount)", color: .blue, fontScale: fontScale)
+                SummaryStatPill(label: "Success", value: "\(s.successCount)", color: .green, fontScale: fontScale)
+                SummaryStatPill(label: "Errors", value: "\(s.errorCount)", color: .red, fontScale: fontScale)
+                SummaryStatPill(label: "Blocked", value: "\(s.blockedCount)", color: .orange, fontScale: fontScale)
             } else if isSummaryLoading {
                 ProgressView()
                     .controlSize(.small)
                 Text("Loading summary...")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
             } else {
                 Text("Summary unavailable")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
             }
             Spacer()
@@ -331,26 +334,26 @@ struct ActivityView: View {
         if appState.coreState != .connected {
             VStack(spacing: 12) {
                 Image(systemName: appState.isStopped ? "stop.circle.fill" : "clock.arrow.circlepath")
-                    .font(.system(size: 48))
+                    .font(.system(size: 48 * fontScale))
                     .foregroundStyle(.tertiary)
                 Text(appState.isStopped ? "MCPProxy Core is Stopped" : "MCPProxy Core is Not Running")
-                    .font(.title3)
+                    .font(.scaled(.title3, scale: fontScale))
                     .foregroundStyle(.secondary)
                 Text("Start the core to see activity")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 48))
+                    .font(.system(size: 48 * fontScale))
                     .foregroundStyle(.tertiary)
                 Text("No activity recorded")
-                    .font(.title3)
+                    .font(.scaled(.title3, scale: fontScale))
                     .foregroundStyle(.secondary)
                 Text("Tool calls and server events will appear here")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -441,44 +444,45 @@ struct ActivityTableRow: View {
     let colIntent: CGFloat
     let colStatus: CGFloat
     let colDuration: CGFloat
+    var fontScale: CGFloat = 1.0
 
     var body: some View {
         HStack(spacing: 0) {
             // Time column
             Text(relativeTime(entry.timestamp))
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
                 .frame(width: colTime, alignment: .leading)
 
             // Type column (icon + label)
             HStack(spacing: 4) {
                 Image(systemName: typeIcon)
-                    .font(.caption2)
+                    .font(.scaled(.caption2, scale: fontScale))
                     .foregroundStyle(typeIconColor)
                     .frame(width: 14)
                 Text(displayType)
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .lineLimit(1)
             }
             .frame(width: colType, alignment: .leading)
 
             // Server column
             Text(entry.serverName ?? "-")
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .lineLimit(1)
                 .frame(width: colServer, alignment: .leading)
 
             // Details column (tool name)
             HStack(spacing: 4) {
                 Text(entry.toolName ?? "-")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .lineLimit(1)
 
                 // Sensitive data indicator
                 if entry.hasSensitiveData == true {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
-                        .font(.caption2)
+                        .font(.scaled(.caption2, scale: fontScale))
                         .help("Contains sensitive data")
                         .accessibilityLabel("Contains sensitive data")
                 }
@@ -487,28 +491,28 @@ struct ActivityTableRow: View {
 
             // Intent column
             if let op = entry.intentOperationType {
-                IntentBadge(operationType: op)
+                IntentBadge(operationType: op, fontScale: fontScale)
                     .frame(width: colIntent, alignment: .center)
             } else {
                 Text("-")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
                     .frame(width: colIntent, alignment: .center)
             }
 
             // Status column
-            ActivityStatusBadge(status: entry.status)
+            ActivityStatusBadge(status: entry.status, fontScale: fontScale)
                 .frame(width: colStatus, alignment: .center)
 
             // Duration column
             if let duration = entry.durationMs {
                 Text("\(duration)ms")
-                    .font(.caption.monospacedDigit())
+                    .font(.scaledMonospacedDigit(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                     .frame(width: colDuration, alignment: .trailing)
             } else {
                 Text("-")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
                     .frame(width: colDuration, alignment: .trailing)
             }
@@ -584,10 +588,11 @@ struct ActivityTableRow: View {
 
 struct ActivityStatusBadge: View {
     let status: String
+    var fontScale: CGFloat = 1.0
 
     var body: some View {
         Text(displayLabel)
-            .font(.caption2.weight(.semibold))
+            .font(.scaled(.caption2, scale: fontScale).weight(.semibold))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(badgeColor.opacity(0.15))
@@ -623,14 +628,15 @@ struct SummaryStatPill: View {
     let label: String
     let value: String
     let color: Color
+    var fontScale: CGFloat = 1.0
 
     var body: some View {
         HStack(spacing: 4) {
             Text(value)
-                .font(.subheadline.bold().monospacedDigit())
+                .font(.scaled(.subheadline, scale: fontScale).bold().monospacedDigit())
                 .foregroundStyle(color)
             Text(label)
-                .font(.caption)
+                .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 10)
@@ -646,13 +652,14 @@ struct SummaryStatPill: View {
 
 struct IntentBadge: View {
     let operationType: String
+    var fontScale: CGFloat = 1.0
 
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: iconName)
-                .font(.system(size: 8))
+                .font(.system(size: 8 * fontScale))
             Text(operationType)
-                .font(.caption2.weight(.semibold))
+                .font(.scaled(.caption2, scale: fontScale).weight(.semibold))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
@@ -685,6 +692,7 @@ struct IntentBadge: View {
 
 struct ActivityDetailView: View {
     let entry: ActivityEntry
+    @Environment(\.fontScale) var fontScale
     @State private var copiedField: String?
 
     var body: some View {
@@ -751,20 +759,20 @@ struct ActivityDetailView: View {
     private var sensitiveDataBanner: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.title3)
+                .font(.scaled(.title3, scale: fontScale))
                 .foregroundStyle(.red)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Sensitive Data Detected")
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
                     .foregroundStyle(.primary)
                 if let severity = entry.maxSeverity {
                     Text("Max severity: \(severity)")
-                        .font(.subheadline)
+                        .font(.scaled(.subheadline, scale: fontScale))
                         .foregroundStyle(.secondary)
                 }
                 if let types = entry.detectionTypes, !types.isEmpty {
                     Text(types.joined(separator: ", "))
-                        .font(.caption)
+                        .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -783,16 +791,16 @@ struct ActivityDetailView: View {
         HStack {
             Image(systemName: detailStatusIcon)
                 .foregroundStyle(detailStatusColor)
-                .font(.title2)
+                .font(.scaled(.title2, scale: fontScale))
             VStack(alignment: .leading, spacing: 2) {
                 Text(detailTitle)
-                    .font(.title3.bold())
+                    .font(.scaled(.title3, scale: fontScale).bold())
                 HStack(spacing: 8) {
                     Text("Status: \(entry.status)")
-                        .font(.subheadline)
+                        .font(.scaled(.subheadline, scale: fontScale))
                         .foregroundStyle(.secondary)
                     if let op = entry.intentOperationType {
-                        IntentBadge(operationType: op)
+                        IntentBadge(operationType: op, fontScale: fontScale)
                     }
                 }
             }
@@ -839,7 +847,7 @@ struct ActivityDetailView: View {
     private var intentSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Intent Declaration")
-                .font(.headline)
+                .font(.scaled(.headline, scale: fontScale))
 
             LazyVGrid(columns: [
                 GridItem(.fixed(120), alignment: .trailing),
@@ -847,19 +855,19 @@ struct ActivityDetailView: View {
             ], alignment: .leading, spacing: 6) {
                 if let op = entry.intentOperationType {
                     Text("Operation")
-                        .font(.subheadline)
+                        .font(.scaled(.subheadline, scale: fontScale))
                         .foregroundStyle(.secondary)
-                    IntentBadge(operationType: op)
+                    IntentBadge(operationType: op, fontScale: fontScale)
                 }
                 if let sensitivity = entry.intentSensitivity {
                     metadataRow(label: "Sensitivity", value: sensitivity)
                 }
                 if let reason = entry.intentReason {
                     Text("Reason")
-                        .font(.subheadline)
+                        .font(.scaled(.subheadline, scale: fontScale))
                         .foregroundStyle(.secondary)
                     Text(reason)
-                        .font(.subheadline)
+                        .font(.scaled(.subheadline, scale: fontScale))
                         .textSelection(.enabled)
                         .foregroundStyle(.primary)
                 }
@@ -874,23 +882,23 @@ struct ActivityDetailView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(label)
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
                 Text("JSON")
-                    .font(.caption2.bold())
+                    .font(.scaled(.caption2, scale: fontScale).bold())
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(Color.blue.opacity(0.15))
                     .foregroundStyle(.blue)
                     .clipShape(Capsule())
                 Text("\(value.byteCount) bytes")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                 Spacer()
                 copyButton(text: value.prettyString, field: field)
             }
 
             coloredJSON(value)
-                .font(.caption.monospaced())
+                .font(.scaledMonospaced(.caption, scale: fontScale))
                 .textSelection(.enabled)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -906,11 +914,11 @@ struct ActivityDetailView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Response Body")
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
 
                 if entry.parsedResponse != nil {
                     Text("JSON")
-                        .font(.caption2.bold())
+                        .font(.scaled(.caption2, scale: fontScale).bold())
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.blue)
@@ -918,11 +926,11 @@ struct ActivityDetailView: View {
                         .cornerRadius(4)
                 }
                 Text("\(response.utf8.count) bytes")
-                    .font(.caption)
+                    .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                 if entry.responseTruncated == true {
                     Text("truncated")
-                        .font(.caption2)
+                        .font(.scaled(.caption2, scale: fontScale))
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
                         .background(Color.orange.opacity(0.2))
@@ -935,7 +943,7 @@ struct ActivityDetailView: View {
 
             if let parsed = entry.parsedResponse {
                 coloredJSON(parsed)
-                    .font(.caption.monospaced())
+                    .font(.scaledMonospaced(.caption, scale: fontScale))
                     .textSelection(.enabled)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -943,7 +951,7 @@ struct ActivityDetailView: View {
                     .cornerRadius(8)
             } else {
                 Text(response)
-                    .font(.caption.monospaced())
+                    .font(.scaledMonospaced(.caption, scale: fontScale))
                     .textSelection(.enabled)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -960,13 +968,13 @@ struct ActivityDetailView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Error")
-                    .font(.headline)
+                    .font(.scaled(.headline, scale: fontScale))
                     .foregroundStyle(.red)
                 Spacer()
                 copyButton(text: message, field: "error")
             }
             Text(message)
-                .font(.system(.body, design: .monospaced))
+                .font(.scaledMonospaced(.body, scale: fontScale))
                 .foregroundStyle(.red.opacity(0.8))
                 .textSelection(.enabled)
                 .padding(8)
@@ -1053,10 +1061,10 @@ struct ActivityDetailView: View {
     @ViewBuilder
     private func metadataRow(label: String, value: String) -> some View {
         Text(label)
-            .font(.subheadline)
+            .font(.scaled(.subheadline, scale: fontScale))
             .foregroundStyle(.secondary)
         Text(value)
-            .font(.system(.subheadline, design: .monospaced))
+            .font(.scaledMonospaced(.subheadline, scale: fontScale))
             .textSelection(.enabled)
     }
 

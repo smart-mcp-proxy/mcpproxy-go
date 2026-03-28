@@ -1,6 +1,70 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Font Scale Environment Key
+
+/// Environment key for propagating user-adjustable font scale to all views.
+/// Views read `@Environment(\.fontScale) var fontScale` and apply via `.font(.scaled(...))`.
+private struct FontScaleKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1.0
+}
+
+extension EnvironmentValues {
+    var fontScale: CGFloat {
+        get { self[FontScaleKey.self] }
+        set { self[FontScaleKey.self] = newValue }
+    }
+}
+
+// MARK: - Scaled Font Helper
+
+extension Font {
+    /// Returns a system font scaled by the given factor.
+    /// Base sizes match the default macOS system font sizes.
+    static func scaled(_ style: Font.TextStyle, scale: CGFloat) -> Font {
+        let baseSize: CGFloat
+        switch style {
+        case .largeTitle: baseSize = 26
+        case .title: baseSize = 22
+        case .title2: baseSize = 17
+        case .title3: baseSize = 15
+        case .headline: baseSize = 13
+        case .body: baseSize = 13
+        case .subheadline: baseSize = 11
+        case .caption: baseSize = 10
+        case .caption2: baseSize = 9
+        default: baseSize = 13
+        }
+        return .system(size: baseSize * scale)
+    }
+
+    /// Returns a scaled monospaced digit system font.
+    static func scaledMonospacedDigit(_ style: Font.TextStyle, scale: CGFloat) -> Font {
+        let baseSize: CGFloat
+        switch style {
+        case .caption: baseSize = 10
+        case .caption2: baseSize = 9
+        case .subheadline: baseSize = 11
+        case .body: baseSize = 13
+        default: baseSize = 13
+        }
+        return .system(size: baseSize * scale).monospacedDigit()
+    }
+
+    /// Returns a scaled monospaced (code) font.
+    static func scaledMonospaced(_ style: Font.TextStyle, scale: CGFloat) -> Font {
+        let baseSize: CGFloat
+        switch style {
+        case .caption: baseSize = 10
+        case .caption2: baseSize = 9
+        case .subheadline: baseSize = 11
+        case .body: baseSize = 13
+        default: baseSize = 13
+        }
+        return .system(size: baseSize * scale, design: .monospaced)
+    }
+}
+
 // MARK: - Health Enums
 
 /// Server health level as reported by the backend health calculator.
