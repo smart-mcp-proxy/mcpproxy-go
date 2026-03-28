@@ -1,0 +1,4 @@
+.build/
+*.swiftmodule
+*.pcm
+modules.timestamp
