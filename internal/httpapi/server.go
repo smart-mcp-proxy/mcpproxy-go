@@ -17,6 +17,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
@@ -136,6 +137,7 @@ type Server struct {
 	tokenStore        TokenStore        // Agent token CRUD (T022)
 	dataDir           string            // Data directory for HMAC key (T022)
 	feedbackSubmitter FeedbackSubmitter // Feedback submission (Spec 036)
+	connectService    *connect.Service  // Client connect/disconnect operations
 }
 
 // NewServer creates a new HTTP API server
@@ -170,6 +172,11 @@ func (s *Server) SetTokenStore(store TokenStore, dataDir string) {
 // SetFeedbackSubmitter configures the feedback submission handler (Spec 036).
 func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 	s.feedbackSubmitter = submitter
+}
+
+// SetConnectService configures the client connect/disconnect service.
+func (s *Server) SetConnectService(svc *connect.Service) {
+	s.connectService = svc
 }
 
 // Router returns the underlying chi.Mux for external route registration.
@@ -557,6 +564,11 @@ func (s *Server) setupRoutes() {
 
 		// Feedback submission (Spec 036)
 		r.Post("/feedback", s.handleFeedback)
+
+		// Client connect/disconnect
+		r.Get("/connect", s.handleGetConnectStatus)
+		r.Post("/connect/{client}", s.handleConnectClient)
+		r.Delete("/connect/{client}", s.handleDisconnectClient)
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD

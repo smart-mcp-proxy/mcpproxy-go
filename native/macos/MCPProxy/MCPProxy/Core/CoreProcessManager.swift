@@ -476,19 +476,24 @@ actor CoreProcessManager {
     private func handleSSEEvent(_ event: SSEEvent) async {
         switch event.event {
         case "status":
-            // Status events contain inline stats — update counters only,
-            // do NOT re-fetch the full server list.
+            // Status events contain inline stats.
+            // When connected count changes, re-fetch the full server list
+            // to get accurate counts (SSE stats can lag behind actual state).
             if let data = event.data.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let stats = json["upstream_stats"] as? [String: Any] {
                 let connected = stats["connected_servers"] as? Int ?? 0
                 let total = stats["total_servers"] as? Int ?? 0
                 let tools = stats["total_tools"] as? Int ?? 0
-                await MainActor.run {
-                    // Only update if values changed to avoid unnecessary re-renders
-                    if appState.connectedCount != connected { appState.connectedCount = connected }
-                    if appState.totalServers != total { appState.totalServers = total }
-                    if appState.totalTools != tools { appState.totalTools = tools }
+                let oldConnected = await MainActor.run { appState.connectedCount }
+                // If counts changed, do a full server refresh for accuracy
+                if connected != oldConnected {
+                    await refreshServers()
+                } else {
+                    await MainActor.run {
+                        if appState.totalServers != total { appState.totalServers = total }
+                        if appState.totalTools != tools { appState.totalTools = tools }
+                    }
                 }
             }
 
@@ -575,7 +580,32 @@ actor CoreProcessManager {
     private func refreshState() async {
         await refreshServers()
         await refreshActivity()
+        await refreshSessions()
         await refreshTokenMetrics()
+        await refreshSecurityStatus()
+    }
+
+    /// Fetch Docker and quarantine status from the API.
+    private func refreshSecurityStatus() async {
+        guard let apiClient else { return }
+        do {
+            let dockerOK = try await apiClient.dockerStatus()
+            await MainActor.run {
+                if appState.dockerAvailable != dockerOK { appState.dockerAvailable = dockerOK }
+            }
+        } catch {
+            // Non-fatal
+        }
+        do {
+            let diag = try await apiClient.diagnostics()
+            await MainActor.run {
+                if let q = diag.quarantineEnabled {
+                    if appState.quarantineEnabled != q { appState.quarantineEnabled = q }
+                }
+            }
+        } catch {
+            // Non-fatal
+        }
     }
 
     /// Fetch the server list and update appState.
@@ -595,6 +625,17 @@ actor CoreProcessManager {
         do {
             let activity = try await apiClient.recentActivity(limit: 10)
             await appState.updateActivity(activity)
+        } catch {
+            // Non-fatal; we'll retry on the next refresh
+        }
+    }
+
+    /// Fetch recent MCP sessions and update appState.
+    private func refreshSessions() async {
+        guard let apiClient else { return }
+        do {
+            let sessions = try await apiClient.sessions(limit: 5)
+            await MainActor.run { appState.recentSessions = sessions }
         } catch {
             // Non-fatal; we'll retry on the next refresh
         }

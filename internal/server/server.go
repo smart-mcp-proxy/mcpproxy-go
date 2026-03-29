@@ -20,6 +20,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
@@ -1543,6 +1544,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Wire feedback submitter (Spec 036)
 	if ts := s.runtime.TelemetryService(); ts != nil {
 		httpAPIServer.SetFeedbackSubmitter(ts)
+	}
+	// Wire client connect service
+	if cfg := s.runtime.Config(); cfg != nil {
+		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
+		httpAPIServer.SetConnectService(connectSvc)
 	}
 	// Wire teams multi-user OAuth (no-op in personal edition)
 	wireTeamsOAuth(s, httpAPIServer)

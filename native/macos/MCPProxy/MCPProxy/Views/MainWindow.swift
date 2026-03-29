@@ -68,6 +68,12 @@ struct MainWindow: View {
             .accessibilityIdentifier("detail-view")
         }
         .frame(minWidth: 800, minHeight: 500)
+        .onReceive(NotificationCenter.default.publisher(for: .switchToActivity)) { _ in
+            selectedItem = .activity
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .switchToServers)) { _ in
+            selectedItem = .servers
+        }
     }
 
     // MARK: - Core Status Banner

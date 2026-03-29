@@ -107,6 +107,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             name: .startCore, object: nil
         )
 
+        // Listen for open web UI requests from dashboard
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(openWebUI),
+            name: .openWebUI, object: nil
+        )
+
         // Start core
         Task {
             await startCore()
@@ -825,6 +831,12 @@ extension Notification.Name {
     static let showAddServer = Notification.Name("MCPProxy.showAddServer")
     /// Posted by the core status banner to start the core.
     static let startCore = Notification.Name("MCPProxy.startCore")
+    /// Posted by dashboard "Connect Clients" to open the Web UI.
+    static let openWebUI = Notification.Name("MCPProxy.openWebUI")
+    /// Posted by dashboard to switch sidebar to Activity Log view.
+    static let switchToActivity = Notification.Name("MCPProxy.switchToActivity")
+    /// Posted by dashboard to switch sidebar to Servers view.
+    static let switchToServers = Notification.Name("MCPProxy.switchToServers")
 }
 
 @main

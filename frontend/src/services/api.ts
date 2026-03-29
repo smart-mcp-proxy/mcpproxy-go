@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -359,6 +359,19 @@ class APIService {
     return this.request(url, {
       method: 'DELETE'
     })
+  }
+
+  // Docker status
+  async getDockerStatus(): Promise<APIResponse<{
+    docker_available: boolean
+    recovery_mode: boolean
+    failure_count: number
+    attempts_since_up: number
+    last_attempt: string
+    last_error: string
+    last_successful_at: string
+  }>> {
+    return this.request('/api/v1/docker/status')
   }
 
   // Diagnostics
@@ -733,6 +746,24 @@ class APIService {
     return this.request<{ issue_url?: string }>('/api/v1/feedback', {
       method: 'POST',
       body: JSON.stringify(data),
+    })
+  }
+
+  // Connect feature (client registration)
+  async getConnectStatus(): Promise<APIResponse<ConnectStatusResponse>> {
+    return this.request<ConnectStatusResponse>('/api/v1/connect')
+  }
+
+  async connectClient(clientId: string, serverName = 'mcpproxy', force = false): Promise<APIResponse<ConnectResult>> {
+    return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ server_name: serverName, force })
+    })
+  }
+
+  async disconnectClient(clientId: string): Promise<APIResponse<ConnectResult>> {
+    return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
+      method: 'DELETE',
     })
   }
 

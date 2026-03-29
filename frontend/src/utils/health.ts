@@ -54,16 +54,16 @@ export function isHealthy(health: HealthStatus | undefined, legacyConnected: boo
 }
 
 /**
- * Check if a server is considered "connected" using health.level as source of truth.
- * Falls back to legacy connected field for backward compatibility.
- *
- * This is the canonical function to use when determining if a server is operational.
+ * Check if a server is actually connected and operational.
+ * Uses the server.connected field (actual connection state) rather than
+ * health level, since health.level='healthy' includes transient states
+ * like 'connecting' and disabled servers.
  *
  * @param server - The server object
- * @returns true if the server is connected/healthy
+ * @returns true if the server has an active connection
  */
 export function isServerConnected(server: Server): boolean {
-  return isHealthy(server.health, server.connected)
+  return server.connected
 }
 
 /**

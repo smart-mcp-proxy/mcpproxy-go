@@ -89,6 +89,42 @@ actor APIClient {
         return try await fetchWrapped(path: "/api/v1/info")
     }
 
+    // MARK: - Docker & Diagnostics
+
+    /// Docker status response from `GET /api/v1/docker/status`.
+    struct DockerStatusResponse: Codable {
+        let dockerAvailable: Bool
+        let recoveryMode: Bool?
+        enum CodingKeys: String, CodingKey {
+            case dockerAvailable = "docker_available"
+            case recoveryMode = "recovery_mode"
+        }
+    }
+
+    /// Diagnostics response from `GET /api/v1/diagnostics`.
+    struct DiagnosticsResponse: Codable {
+        let dockerStatus: DockerStatusInfo?
+        let quarantineEnabled: Bool?
+        struct DockerStatusInfo: Codable {
+            let available: Bool
+        }
+        enum CodingKeys: String, CodingKey {
+            case dockerStatus = "docker_status"
+            case quarantineEnabled = "quarantine_enabled"
+        }
+    }
+
+    /// Fetch Docker availability from `GET /api/v1/docker/status`.
+    func dockerStatus() async throws -> Bool {
+        let response: DockerStatusResponse = try await fetchWrapped(path: "/api/v1/docker/status")
+        return response.dockerAvailable
+    }
+
+    /// Fetch diagnostics (includes Docker + quarantine status).
+    func diagnostics() async throws -> DiagnosticsResponse {
+        return try await fetchWrapped(path: "/api/v1/diagnostics")
+    }
+
     // MARK: - Servers
 
     /// List all upstream servers from `GET /api/v1/servers`.
@@ -135,6 +171,138 @@ actor APIClient {
     /// Delete a server via `DELETE /api/v1/servers/{id}`.
     func deleteServer(_ id: String) async throws {
         try await deleteAction(path: "/api/v1/servers/\(id)")
+    }
+
+    // MARK: - Connect (Client Registration)
+
+    /// Client status model returned by `GET /api/v1/connect`.
+    struct ClientStatus: Codable, Identifiable {
+        var id: String { clientId }
+        let clientId: String
+        let name: String
+        let configPath: String
+        let exists: Bool
+        let connected: Bool
+        let supported: Bool
+        let reason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case clientId = "id"
+            case name
+            case configPath = "config_path"
+            case exists, connected, supported, reason
+        }
+    }
+
+    /// Result of a connect/disconnect action.
+    struct ConnectResult: Codable {
+        let success: Bool
+        let client: String?
+        let configPath: String?
+        let backupPath: String?
+        let serverName: String?
+        let action: String?
+        let message: String?
+
+        enum CodingKeys: String, CodingKey {
+            case success, client, action, message
+            case configPath = "config_path"
+            case backupPath = "backup_path"
+            case serverName = "server_name"
+        }
+    }
+
+    /// Response wrapper for the client list endpoint.
+    struct ClientListResponse: Codable {
+        let clients: [ClientStatus]
+    }
+
+    /// Fetch all AI client statuses from `GET /api/v1/connect`.
+    func connectClients() async throws -> [ClientStatus] {
+        let data = try await fetchRaw(path: "/api/v1/connect")
+        let decoder = JSONDecoder()
+        // Try wrapped: {"success": true, "data": {"clients": [...]}}
+        if let wrapper = try? decoder.decode(APIResponse<ClientListResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload.clients
+        }
+        // Try wrapped with direct array: {"success": true, "data": [...]}
+        if let wrapper = try? decoder.decode(APIResponse<[ClientStatus]>.self, from: data),
+           let payload = wrapper.data {
+            return payload
+        }
+        // Try direct decode
+        if let direct = try? decoder.decode(ClientListResponse.self, from: data) {
+            return direct.clients
+        }
+        if let direct = try? decoder.decode([ClientStatus].self, from: data) {
+            return direct
+        }
+        return []
+    }
+
+    /// Connect MCPProxy to a client via `POST /api/v1/connect/{clientId}`.
+    func connectToClient(_ clientId: String) async throws -> ConnectResult {
+        let data = try await postRaw(path: "/api/v1/connect/\(clientId)")
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<ConnectResult>.self, from: data),
+           let payload = wrapper.data {
+            return payload
+        }
+        return try decoder.decode(ConnectResult.self, from: data)
+    }
+
+    /// Disconnect MCPProxy from a client via `DELETE /api/v1/connect/{clientId}`.
+    func disconnectFromClient(_ clientId: String) async throws -> ConnectResult {
+        let data = try await deleteRaw(path: "/api/v1/connect/\(clientId)")
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<ConnectResult>.self, from: data),
+           let payload = wrapper.data {
+            return payload
+        }
+        return try decoder.decode(ConnectResult.self, from: data)
+    }
+
+    // MARK: - Sessions
+
+    /// MCP session model from `GET /api/v1/sessions`.
+    struct MCPSession: Codable, Identifiable {
+        var id: String
+        let clientName: String?
+        let clientVersion: String?
+        let status: String
+        let hasRoots: Bool?
+        let hasSampling: Bool?
+        let toolCallCount: Int?
+        let totalTokens: Int?
+        let startTime: String?
+        let lastActive: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case clientName = "client_name"
+            case clientVersion = "client_version"
+            case status
+            case hasRoots = "has_roots"
+            case hasSampling = "has_sampling"
+            case toolCallCount = "tool_call_count"
+            case totalTokens = "total_tokens"
+            case startTime = "start_time"
+            case lastActive = "last_active"
+        }
+    }
+
+    /// Response wrapper for the sessions list endpoint.
+    struct SessionsResponse: Codable {
+        let sessions: [MCPSession]
+        let total: Int?
+        let limit: Int?
+    }
+
+    /// Fetch recent MCP sessions from `GET /api/v1/sessions`.
+    func sessions(limit: Int = 5) async throws -> [MCPSession] {
+        let response: SessionsResponse = try await fetchWrapped(path: "/api/v1/sessions?limit=\(limit)")
+        return response.sessions
     }
 
     // MARK: - Activity
@@ -323,6 +491,17 @@ actor APIClient {
            !errorResponse.success, let message = errorResponse.error {
             throw APIClientError.httpError(statusCode: response.statusCode, message: message)
         }
+    }
+
+    /// Execute a DELETE action and return the raw response data.
+    /// Used by views that need to inspect the full response (e.g., disconnect result).
+    func deleteRaw(path: String) async throws -> Data {
+        let (data, response) = try await performRequest(path: path, method: "DELETE")
+        if let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
+           !errorResponse.success, let message = errorResponse.error {
+            throw APIClientError.httpError(statusCode: response.statusCode, message: message)
+        }
+        return data
     }
 
     // MARK: - Private Helpers
