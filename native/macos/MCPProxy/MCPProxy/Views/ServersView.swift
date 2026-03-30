@@ -19,7 +19,7 @@ struct ServersView: View {
     @State private var loadTask: Task<Void, Never>?
     @State private var selectedServer: ServerStatus?
     @State private var showAddServer = false
-    @State private var addServerInitialTab: AddServerTab = .importConfig
+    @State private var addServerInitialTab: AddServerTab = .manual
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -171,7 +171,7 @@ struct ServersView: View {
             if let tab = notification.object as? AddServerTab {
                 addServerInitialTab = tab
             } else {
-                addServerInitialTab = .importConfig
+                addServerInitialTab = .manual
             }
             showAddServer = true
         }

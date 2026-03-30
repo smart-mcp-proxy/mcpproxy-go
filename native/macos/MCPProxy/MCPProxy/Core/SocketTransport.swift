@@ -97,6 +97,10 @@ final class SocketURLProtocol: URLProtocol {
 
         // Build HTTP/1.1 request bytes
         let requestData = buildHTTPRequest(from: request)
+        NSLog("[SocketURLProtocol] startLoading: %@ %@ (%d bytes request payload)",
+              request.httpMethod ?? "GET",
+              request.url?.path ?? "/",
+              requestData.count)
 
         // Write request
         var totalWritten = 0
@@ -178,26 +182,52 @@ final class SocketURLProtocol: URLProtocol {
         // URLSession may convert httpBody to httpBodyStream internally,
         // so the URLProtocol receives httpBody == nil for POST requests.
         var body = request.httpBody ?? Data()
+        NSLog("[SocketURLProtocol] buildHTTPRequest: method=%@, httpBody=%d bytes, httpBodyStream=%@",
+              method, body.count, request.httpBodyStream != nil ? "present" : "nil")
         if body.isEmpty, let stream = request.httpBodyStream {
-            // Read the entire stream into Data
+            // Read the entire stream into Data.
+            // httpBodyStream from URLSession is memory-backed, so hasBytesAvailable
+            // is reliable. We also guard against read() returning -1 (error) or 0 (EOF).
             stream.open()
             var streamData = Data()
-            let bufSize = 4096
+            let bufSize = 16384
             let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
             defer {
                 buf.deallocate()
                 stream.close()
             }
             while stream.hasBytesAvailable {
-                let read = stream.read(buf, maxLength: bufSize)
-                if read <= 0 { break }
-                streamData.append(buf, count: read)
+                let bytesRead = stream.read(buf, maxLength: bufSize)
+                if bytesRead > 0 {
+                    streamData.append(buf, count: bytesRead)
+                } else if bytesRead == 0 {
+                    // EOF
+                    break
+                } else {
+                    // Error — log and stop
+                    NSLog("[SocketURLProtocol] httpBodyStream read error: %@",
+                          stream.streamError?.localizedDescription ?? "unknown")
+                    break
+                }
             }
+            NSLog("[SocketURLProtocol] read %d bytes from httpBodyStream", streamData.count)
             body = streamData
         }
 
-        if !body.isEmpty && !hasContentLength {
-            lines.append("Content-Length: \(body.count)")
+        // Always set Content-Length for bodies: either it was missing, or the original
+        // header may reference the pre-stream size which could differ.
+        if !body.isEmpty {
+            if hasContentLength {
+                // Replace any existing Content-Length with the actual body size.
+                lines = lines.map { line in
+                    if line.lowercased().hasPrefix("content-length:") {
+                        return "Content-Length: \(body.count)"
+                    }
+                    return line
+                }
+            } else {
+                lines.append("Content-Length: \(body.count)")
+            }
         }
 
         // Connection close to simplify reading

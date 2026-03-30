@@ -241,15 +241,15 @@ struct ManualServerForm: View {
         case idle
         case saving
         case connecting
-        case success(toolCount: Int)
+        case success(toolCount: Int, quarantined: Bool)
         case failure(error: String)
 
         static func == (lhs: SubmitPhase, rhs: SubmitPhase) -> Bool {
             switch (lhs, rhs) {
             case (.idle, .idle), (.saving, .saving), (.connecting, .connecting):
                 return true
-            case (.success(let a), .success(let b)):
-                return a == b
+            case (.success(let a1, let b1), .success(let a2, let b2)):
+                return a1 == a2 && b1 == b2
             case (.failure(let a), .failure(let b)):
                 return a == b
             default:
@@ -411,13 +411,15 @@ struct ManualServerForm: View {
                     }
                     .padding(.horizontal)
 
-                case .success(let toolCount):
+                case .success(let toolCount, let quarantined):
                     HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("Connected (\(toolCount) tools)")
+                        Image(systemName: quarantined ? "shield.lefthalf.filled" : "checkmark.circle.fill")
+                            .foregroundStyle(quarantined ? .orange : .green)
+                        Text(quarantined
+                             ? "Server added — quarantined for security review"
+                             : "Connected (\(toolCount) tools)")
                             .font(.scaled(.caption, scale: fontScale))
-                            .foregroundStyle(.green)
+                            .foregroundStyle(quarantined ? .orange : .green)
                         Spacer()
                     }
                     .padding(.horizontal)
@@ -591,11 +593,17 @@ struct ManualServerForm: View {
             let servers = try await client.servers()
             if let server = servers.first(where: { $0.name == serverName }) {
                 if server.connected {
-                    submitPhase = .success(toolCount: server.toolCount)
+                    // Connected and working
+                    submitPhase = .success(toolCount: server.toolCount, quarantined: false)
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     onDone()
+                } else if server.quarantined {
+                    // Quarantined is expected for new servers — treat as success
+                    submitPhase = .success(toolCount: 0, quarantined: true)
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    onDone()
                 } else {
-                    // Not connected — build a helpful error from health + logs
+                    // Actually disconnected/errored — build a helpful error from health + logs
                     var detail = server.health?.detail ?? server.health?.summary ?? server.lastError ?? "Server is not connected yet"
                     let logHint = await fetchServerLogHint(client: client, serverName: serverName)
                     if !logHint.isEmpty {
@@ -604,7 +612,8 @@ struct ManualServerForm: View {
                     submitPhase = .failure(error: detail)
                 }
             } else {
-                submitPhase = .success(toolCount: 0)
+                // Server not in list but POST succeeded — still a success, close dialog
+                submitPhase = .success(toolCount: 0, quarantined: false)
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 onDone()
             }
