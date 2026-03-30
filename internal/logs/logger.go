@@ -3,8 +3,8 @@ package logs
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"io"
 	"os"
 	"time"
 
@@ -132,6 +132,28 @@ func SetupCommandLogger(serverCommand bool, logLevel string, logToFile bool, log
 
 // createFileCore creates a file-based logging core
 func createFileCore(config *config.LogConfig, level zapcore.Level) (zapcore.Core, error) {
+	writeSyncer, err := CreateRotatingWriteSyncer(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Choose encoder based on format preference
+	var encoder zapcore.Encoder
+	if config.JSONFormat {
+		encoder = getJSONEncoder()
+	} else {
+		encoder = getFileEncoder()
+	}
+
+	return zapcore.NewCore(
+		encoder,
+		writeSyncer,
+		level,
+	), nil
+}
+
+// CreateRotatingWriteSyncer creates a rotation-backed file sink for a log config.
+func CreateRotatingWriteSyncer(config *config.LogConfig) (zapcore.WriteSyncer, error) {
 	// Get log file path with custom directory support
 	logFilePath, err := GetLogFilePathWithDir(config.LogDir, config.Filename)
 	if err != nil {
@@ -147,19 +169,7 @@ func createFileCore(config *config.LogConfig, level zapcore.Level) (zapcore.Core
 		Compress:   config.Compress,
 	}
 
-	// Choose encoder based on format preference
-	var encoder zapcore.Encoder
-	if config.JSONFormat {
-		encoder = getJSONEncoder()
-	} else {
-		encoder = getFileEncoder()
-	}
-
-	return zapcore.NewCore(
-		encoder,
-		zapcore.AddSync(lumberjackLogger),
-		level,
-	), nil
+	return zapcore.AddSync(lumberjackLogger), nil
 }
 
 // getConsoleEncoder returns a console-friendly encoder
