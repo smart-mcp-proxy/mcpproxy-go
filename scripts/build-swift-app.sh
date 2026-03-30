@@ -158,11 +158,44 @@ fi
 # PkgInfo
 echo "APPLMCPP" > "$APP_BUNDLE/Contents/PkgInfo"
 
-# Copy Sparkle framework if built
-SPARKLE_FRAMEWORK=".build/artifacts/sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+# Copy Sparkle.framework — required at runtime (@rpath linked)
+# Search multiple locations where swift build may place it
+SPARKLE_FRAMEWORK=""
+for candidate in \
+  ".build/artifacts/sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework" \
+  ".build/artifacts/sparkle/Sparkle/Sparkle.framework" \
+  "$(find .build -name "Sparkle.framework" -type d 2>/dev/null | head -1)"; do
+  if [ -d "$candidate" ]; then
+    SPARKLE_FRAMEWORK="$candidate"
+    break
+  fi
+done
+
 if [ -d "$SPARKLE_FRAMEWORK" ]; then
   mkdir -p "$APP_BUNDLE/Contents/Frameworks"
   cp -R "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
+  echo "✅ Sparkle.framework bundled from: $SPARKLE_FRAMEWORK"
+else
+  echo "⚠️  Sparkle.framework NOT found — app will crash at launch!"
+  echo "   This is expected with swiftc fallback (no SPM dependency resolution)"
+  echo "   CI builds with 'swift build' should have it available"
+  # For swiftc builds, we need to either:
+  # 1. Download Sparkle manually, or
+  # 2. Remove the Sparkle dependency from the binary
+  # Let's download it as a fallback
+  SPARKLE_VERSION="2.9.1"
+  SPARKLE_URL="https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+  SPARKLE_TMP="/tmp/sparkle-download"
+  mkdir -p "$SPARKLE_TMP"
+  if curl -sL "$SPARKLE_URL" -o "$SPARKLE_TMP/Sparkle.tar.xz" 2>/dev/null; then
+    tar xf "$SPARKLE_TMP/Sparkle.tar.xz" -C "$SPARKLE_TMP" 2>/dev/null
+    if [ -d "$SPARKLE_TMP/Sparkle.framework" ]; then
+      mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+      cp -R "$SPARKLE_TMP/Sparkle.framework" "$APP_BUNDLE/Contents/Frameworks/"
+      echo "✅ Sparkle.framework downloaded and bundled (v${SPARKLE_VERSION})"
+    fi
+  fi
+  rm -rf "$SPARKLE_TMP"
 fi
 
 cd - > /dev/null
