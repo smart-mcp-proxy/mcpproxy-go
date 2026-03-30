@@ -423,27 +423,32 @@ struct ManualServerForm: View {
                     .padding(.horizontal)
 
                 case .failure(let error):
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                        Text(error)
-                            .font(.scaled(.caption, scale: fontScale))
-                            .foregroundStyle(.red)
-                            .lineLimit(2)
-                        Spacer()
-                    }
-                    .padding(.horizontal)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                            Text(error)
+                                .font(.scaled(.caption, scale: fontScale))
+                                .foregroundStyle(.red)
+                                .lineLimit(8)
+                                .textSelection(.enabled)
+                            Spacer()
+                        }
 
-                    HStack {
-                        Spacer()
-                        Button("Save Anyway") {
-                            onDone()
+                        HStack {
+                            Spacer()
+                            Button("Save Anyway") {
+                                onDone()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            Button("Retry") {
+                                submitPhase = .idle
+                                Task { await submitServer() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
                         }
-                        .buttonStyle(.bordered)
-                        Button("Retry") {
-                            Task { await submitServer() }
-                        }
-                        .buttonStyle(.borderedProminent)
                     }
                     .padding(.horizontal)
 
@@ -535,36 +540,54 @@ struct ManualServerForm: View {
             }
         }
 
+        let serverName = name.trimmingCharacters(in: .whitespaces)
+
         do {
             try await client.addServer(config)
         } catch {
-            errorMessage = "Failed to add server: \(error.localizedDescription)"
-            submitPhase = .idle
+            // Add failed — but try to get logs to show a helpful error
+            let errorDetail = error.localizedDescription
+            var helpfulError = "Failed to add server: \(errorDetail)"
+
+            // If it's a timeout, tell the user the server was likely saved but connection is slow
+            if errorDetail.contains("timed out") || errorDetail.contains("timeout") {
+                helpfulError = "Server configuration may have been saved, but the connection timed out. Check if the command/URL is correct."
+            }
+
+            // Try to fetch recent logs for this server to show what went wrong
+            let logHint = await fetchServerLogHint(client: client, serverName: serverName)
+            if !logHint.isEmpty {
+                helpfulError += "\n\nServer log: \(logHint)"
+            }
+
+            submitPhase = .failure(error: helpfulError)
             return
         }
 
         // Server added successfully, now check connection
         submitPhase = .connecting
-        let serverName = name.trimmingCharacters(in: .whitespaces)
 
         // Wait 3 seconds for the server to connect
         try? await Task.sleep(nanoseconds: 3_000_000_000)
 
-        // Check server status
+        // Check server status and logs
         do {
             let servers = try await client.servers()
             if let server = servers.first(where: { $0.name == serverName }) {
                 if server.connected {
                     submitPhase = .success(toolCount: server.toolCount)
-                    // Auto-close after 2 seconds
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     onDone()
                 } else {
-                    let detail = server.health?.summary ?? server.lastError ?? "Server is not connected"
+                    // Not connected — build a helpful error from health + logs
+                    var detail = server.health?.detail ?? server.health?.summary ?? server.lastError ?? "Server is not connected yet"
+                    let logHint = await fetchServerLogHint(client: client, serverName: serverName)
+                    if !logHint.isEmpty {
+                        detail += "\n\nRecent log: \(logHint)"
+                    }
                     submitPhase = .failure(error: detail)
                 }
             } else {
-                // Server was added but not found in list — still a success
                 submitPhase = .success(toolCount: 0)
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 onDone()
@@ -572,5 +595,22 @@ struct ManualServerForm: View {
         } catch {
             submitPhase = .failure(error: "Could not verify connection: \(error.localizedDescription)")
         }
+    }
+
+    /// Fetch the last error line from server logs to show a helpful hint.
+    private func fetchServerLogHint(client: APIClient, serverName: String) async -> String {
+        do {
+            let logs = try await client.serverLogs(serverName, tail: 10)
+            // Find the last ERROR line
+            let errorLines = logs.filter { $0.contains("ERROR") || $0.contains("error") || $0.contains("failed") || $0.contains("not found") }
+            if let lastError = errorLines.last {
+                // Trim to a reasonable length
+                let trimmed = lastError.count > 200 ? String(lastError.prefix(200)) + "..." : lastError
+                return trimmed
+            }
+        } catch {
+            // Can't get logs — that's fine, just return empty
+        }
+        return ""
     }
 }
