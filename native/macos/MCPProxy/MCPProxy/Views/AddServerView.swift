@@ -545,23 +545,39 @@ struct ManualServerForm: View {
         do {
             try await client.addServer(config)
         } catch {
-            // Add failed — but try to get logs to show a helpful error
             let errorDetail = error.localizedDescription
-            var helpfulError = "Failed to add server: \(errorDetail)"
 
-            // If it's a timeout, tell the user the server was likely saved but connection is slow
+            // If socket timed out, retry via TCP as fallback
             if errorDetail.contains("timed out") || errorDetail.contains("timeout") {
-                helpfulError = "Server configuration may have been saved, but the connection timed out. Check if the command/URL is correct."
+                NSLog("[AddServer] Socket POST timed out, retrying via TCP with API key")
+                do {
+                    // Get API key from core info endpoint (socket GET works fine)
+                    var apiKey: String?
+                    if let info = try? await client.info() {
+                        if let comps = URLComponents(string: info.webUiUrl),
+                           let key = comps.queryItems?.first(where: { $0.name == "apikey" })?.value {
+                            apiKey = key
+                        }
+                    }
+                    let tcpClient = APIClient(socketPath: "", baseURL: "http://127.0.0.1:8080", apiKey: apiKey)
+                    try await tcpClient.addServer(config)
+                    NSLog("[AddServer] TCP fallback succeeded")
+                    // Fall through to connection check below
+                } catch {
+                    var msg = "Failed to add server: \(error.localizedDescription)"
+                    let logHint = await fetchServerLogHint(client: client, serverName: serverName)
+                    if !logHint.isEmpty { msg += "\n\nServer log: \(logHint)" }
+                    submitPhase = .failure(error: msg)
+                    return
+                }
+            } else {
+                // Non-timeout error — show it directly
+                var msg = "Failed to add server: \(errorDetail)"
+                let logHint = await fetchServerLogHint(client: client, serverName: serverName)
+                if !logHint.isEmpty { msg += "\n\nServer log: \(logHint)" }
+                submitPhase = .failure(error: msg)
+                return
             }
-
-            // Try to fetch recent logs for this server to show what went wrong
-            let logHint = await fetchServerLogHint(client: client, serverName: serverName)
-            if !logHint.isEmpty {
-                helpfulError += "\n\nServer log: \(logHint)"
-            }
-
-            submitPhase = .failure(error: helpfulError)
-            return
         }
 
         // Server added successfully, now check connection
