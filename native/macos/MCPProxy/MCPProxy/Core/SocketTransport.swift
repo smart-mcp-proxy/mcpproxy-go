@@ -174,8 +174,28 @@ final class SocketURLProtocol: URLProtocol {
             }
         }
 
-        // Body
-        let body = request.httpBody ?? Data()
+        // Body — check both httpBody and httpBodyStream.
+        // URLSession may convert httpBody to httpBodyStream internally,
+        // so the URLProtocol receives httpBody == nil for POST requests.
+        var body = request.httpBody ?? Data()
+        if body.isEmpty, let stream = request.httpBodyStream {
+            // Read the entire stream into Data
+            stream.open()
+            var streamData = Data()
+            let bufSize = 4096
+            let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+            defer {
+                buf.deallocate()
+                stream.close()
+            }
+            while stream.hasBytesAvailable {
+                let read = stream.read(buf, maxLength: bufSize)
+                if read <= 0 { break }
+                streamData.append(buf, count: read)
+            }
+            body = streamData
+        }
+
         if !body.isEmpty && !hasContentLength {
             lines.append("Content-Length: \(body.count)")
         }
