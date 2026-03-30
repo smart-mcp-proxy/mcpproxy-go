@@ -378,11 +378,11 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          # ✅ Force minimum supported macOS version for compatibility
-          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          # ✅ Force minimum supported macOS version for compatibility (13.0 for Swift tray app)
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
           # Defensive CGO flags to ensure proper deployment target
-          CGO_CFLAGS: "-mmacosx-version-min=12.0"
-          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+          CGO_CFLAGS: "-mmacosx-version-min=13.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=13.0"
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           LDFLAGS="-s -w -X main.version=${VERSION} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
@@ -414,6 +414,35 @@ jobs:
             fi
 
             go build -ldflags "${LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
+          fi
+
+          # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
+          if [ "$EDITION" != "server" ] && [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "Building Swift tray app for macOS..."
+            cd native/macos/MCPProxy
+            xcodebuild -scheme MCPProxy \
+              -configuration Release \
+              -derivedDataPath build \
+              -destination 'generic/platform=macOS' \
+              MACOSX_DEPLOYMENT_TARGET=13.0 \
+              MARKETING_VERSION=${VERSION#v} \
+              CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+              CODE_SIGN_IDENTITY="-" \
+              CODE_SIGNING_ALLOWED=NO \
+              SWIFT_COMPILATION_MODE=wholemodule
+
+            # Verify Swift app was built
+            SWIFT_APP="build/Build/Products/Release/MCPProxy.app"
+            if [ -d "$SWIFT_APP" ]; then
+              echo "Swift app built: $(du -sh $SWIFT_APP | cut -f1)"
+              echo "SWIFT_APP_PATH=$(pwd)/$SWIFT_APP" >> $GITHUB_ENV
+            else
+              echo "Swift app not found at $SWIFT_APP"
+              echo "Listing build products:"
+              find build/Build/Products -name "*.app" -type d 2>/dev/null || echo "No .app found"
+              exit 1
+            fi
+            cd "$GITHUB_WORKSPACE"
           fi
 
           # Code sign macOS binaries
@@ -685,19 +714,25 @@ jobs:
         if: matrix.goos == 'darwin'
         env:
           # Ensure DMG creation also uses correct deployment target
-          MACOSX_DEPLOYMENT_TARGET: "12.0"
-          CGO_CFLAGS: "-mmacosx-version-min=12.0"
-          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+          CGO_CFLAGS: "-mmacosx-version-min=13.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=13.0"
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           chmod +x scripts/create-dmg.sh
 
           # Determine binary names
-          TRAY_BINARY="mcpproxy-tray"
           CORE_BINARY="mcpproxy"
 
-          # Create DMG with both tray and core binaries
-          ./scripts/create-dmg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          # Use Swift app for DMG when available, fall back to Go tray binary
+          if [ -n "$SWIFT_APP_PATH" ] && [ -d "$SWIFT_APP_PATH" ]; then
+            echo "Using Swift app bundle for DMG: $SWIFT_APP_PATH"
+            ./scripts/create-dmg.sh "$SWIFT_APP_PATH" ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          else
+            echo "Using Go tray binary for DMG"
+            TRAY_BINARY="mcpproxy-tray"
+            ./scripts/create-dmg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          fi
 
           # Sign DMG
           DMG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.dmg"
@@ -734,9 +769,9 @@ jobs:
         if: matrix.goos == 'darwin'
         env:
           # Ensure PKG creation also uses correct deployment target
-          MACOSX_DEPLOYMENT_TARGET: "12.0"
-          CGO_CFLAGS: "-mmacosx-version-min=12.0"
-          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+          CGO_CFLAGS: "-mmacosx-version-min=13.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=13.0"
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           chmod +x scripts/create-pkg.sh
@@ -784,12 +819,18 @@ jobs:
           export PKG_CERT_IDENTITY
 
           # Determine binary names
-          TRAY_BINARY="mcpproxy-tray"
           CORE_BINARY="mcpproxy"
 
-          # Create PKG installer with both tray and core binaries
+          # Use Swift app for PKG when available, fall back to Go tray binary
           echo "Creating signed PKG installer with certificate: ${PKG_CERT_IDENTITY}"
-          ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          if [ -n "$SWIFT_APP_PATH" ] && [ -d "$SWIFT_APP_PATH" ]; then
+            echo "Using Swift app bundle for PKG: $SWIFT_APP_PATH"
+            ./scripts/create-pkg.sh "$SWIFT_APP_PATH" ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          else
+            echo "Using Go tray binary for PKG"
+            TRAY_BINARY="mcpproxy-tray"
+            ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          fi
 
           # Create installer DMG containing the PKG
           PKG_NAME="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.pkg"

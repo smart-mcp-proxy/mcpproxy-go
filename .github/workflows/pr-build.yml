@@ -198,11 +198,11 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ env.VERSION }}
-          # ✅ Force minimum supported macOS version for compatibility
-          MACOSX_DEPLOYMENT_TARGET: "12.0"
+          # ✅ Force minimum supported macOS version for compatibility (13.0 for Swift tray app)
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
           # Defensive CGO flags to ensure proper deployment target
-          CGO_CFLAGS: "-mmacosx-version-min=12.0"
-          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+          CGO_CFLAGS: "-mmacosx-version-min=13.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=13.0"
         run: |
           LDFLAGS="-s -w -X mcpproxy-go/cmd/mcpproxy.version=${VERSION} -X main.version=${VERSION}"
 
@@ -272,6 +272,89 @@ jobs:
             tar -czf "${ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 
+      # Build Swift tray app (macOS only)
+      - name: Build Swift tray app
+        if: matrix.goos == 'darwin'
+        env:
+          VERSION: ${{ env.VERSION }}
+        run: |
+          echo "Building Swift tray app with Swift Package Manager..."
+          cd native/macos/MCPProxy
+
+          # Determine Swift arch flag from Go arch
+          if [ "${{ matrix.goarch }}" = "arm64" ]; then
+            SWIFT_ARCH="arm64"
+          else
+            SWIFT_ARCH="x86_64"
+          fi
+
+          swift build \
+            -c release \
+            --arch "$SWIFT_ARCH"
+
+          # Locate the built binary
+          SWIFT_BINARY="$(find .build -name "MCPProxy" -type f -perm +111 2>/dev/null | grep -v ".build/repositories" | grep -v ".dSYM" | head -1)"
+
+          if [ -z "$SWIFT_BINARY" ] || [ ! -f "$SWIFT_BINARY" ]; then
+            echo "Swift build succeeded but could not locate MCPProxy binary"
+            find .build -type f -name "MCPProxy*" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Swift binary built: $SWIFT_BINARY"
+          file "$SWIFT_BINARY"
+
+          # Assemble a minimal .app bundle for the Swift tray binary
+          APP_DIR="${GITHUB_WORKSPACE}/swift-app-bundle/MCPProxy.app"
+          mkdir -p "$APP_DIR/Contents/MacOS"
+          mkdir -p "$APP_DIR/Contents/Resources"
+          cp "$SWIFT_BINARY" "$APP_DIR/Contents/MacOS/MCPProxy"
+          chmod +x "$APP_DIR/Contents/MacOS/MCPProxy"
+
+          # Generate Info.plist
+          VERSION_NUM="${VERSION#v}"
+          INFO_PLIST_SRC="MCPProxy/Info.plist"
+          if [ -f "$INFO_PLIST_SRC" ]; then
+            cp "$INFO_PLIST_SRC" "$APP_DIR/Contents/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION_NUM" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION_NUM" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
+          else
+            cat > "$APP_DIR/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>MCPProxy</string>
+              <key>CFBundleIdentifier</key><string>com.smartmcpproxy.mcpproxy</string>
+              <key>CFBundleName</key><string>MCPProxy</string>
+              <key>CFBundleVersion</key><string>${VERSION_NUM}</string>
+              <key>CFBundleShortVersionString</key><string>${VERSION_NUM}</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>LSMinimumSystemVersion</key><string>13.0</string>
+              <key>LSUIElement</key><true/>
+              <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          fi
+          echo "APPLMCPP" > "$APP_DIR/Contents/PkgInfo"
+
+          # Copy Sparkle framework if present in swift build output
+          SPARKLE_FW="$(find .build -name "Sparkle.framework" -type d 2>/dev/null | head -1)"
+          if [ -n "$SPARKLE_FW" ] && [ -d "$SPARKLE_FW" ]; then
+            mkdir -p "$APP_DIR/Contents/Frameworks"
+            cp -R "$SPARKLE_FW" "$APP_DIR/Contents/Frameworks/"
+            echo "Included Sparkle.framework"
+          fi
+
+          # Ad-hoc sign the Swift app bundle
+          codesign --force --deep --sign - --identifier "com.smartmcpproxy.mcpproxy.dev" "$APP_DIR"
+          codesign --verify --verbose "$APP_DIR"
+          echo "Swift app signed successfully (ad-hoc, development)"
+
+          echo "SWIFT_APP_PATH=$APP_DIR" >> $GITHUB_ENV
+          echo "Swift app bundle ready at: $APP_DIR"
+
       - name: Create .icns icon (macOS)
         if: matrix.goos == 'darwin'
         run: |
@@ -283,9 +366,9 @@ jobs:
         env:
           VERSION: ${{ env.VERSION }}
           # Ensure DMG creation also uses correct deployment target
-          MACOSX_DEPLOYMENT_TARGET: "12.0"
-          CGO_CFLAGS: "-mmacosx-version-min=12.0"
-          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+          CGO_CFLAGS: "-mmacosx-version-min=13.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=13.0"
         run: |
           chmod +x scripts/create-pkg.sh
           chmod +x scripts/create-app-dmg.sh
@@ -302,8 +385,14 @@ jobs:
           export APP_CERT_IDENTITY=""  # Empty = ad-hoc signing for app bundle
           export PKG_CERT_IDENTITY="adhoc"  # Skip PKG creation, just create app bundle
 
-          # Create app bundle
-          ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          # Create app bundle (prefer Swift app bundle over Go tray binary)
+          if [ -n "${SWIFT_APP_PATH:-}" ] && [ -d "${SWIFT_APP_PATH:-}" ]; then
+            echo "Using Swift app bundle: $SWIFT_APP_PATH"
+            ./scripts/create-pkg.sh "$SWIFT_APP_PATH" ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          else
+            echo "Using Go tray binary: ${TRAY_BINARY}"
+            ./scripts/create-pkg.sh ${TRAY_BINARY} ${CORE_BINARY} ${VERSION} ${{ matrix.goarch }}
+          fi
 
           # App bundle is created at pkg_temp/pkg_root/Applications/mcpproxy.app
           APP_BUNDLE_PATH="pkg_temp/pkg_root/Applications/mcpproxy.app"

@@ -2,19 +2,28 @@
 set -e
 
 # Script to create macOS DMG installer
-TRAY_BINARY_PATH="$1"
+# Supports Swift .app bundle or Go tray binary as first argument
+TRAY_OR_APP_PATH="$1"
 CORE_BINARY_PATH="$2"
 VERSION="$3"
 ARCH="$4"
 
-if [ -z "$TRAY_BINARY_PATH" ] || [ -z "$CORE_BINARY_PATH" ] || [ -z "$VERSION" ] || [ -z "$ARCH" ]; then
-    echo "Usage: $0 <tray_binary> <core_binary> <version> <arch>"
-    echo "Example: $0 ./mcpproxy-tray ./mcpproxy v1.0.0 arm64"
+if [ -z "$TRAY_OR_APP_PATH" ] || [ -z "$CORE_BINARY_PATH" ] || [ -z "$VERSION" ] || [ -z "$ARCH" ]; then
+    echo "Usage: $0 <swift_app.app|tray_binary> <core_binary> <version> <arch>"
     exit 1
 fi
 
-if [ ! -f "$TRAY_BINARY_PATH" ]; then
-    echo "Tray binary not found: $TRAY_BINARY_PATH"
+# Detect mode: Swift .app bundle vs Go tray binary
+USE_SWIFT_APP=false
+if [[ "$TRAY_OR_APP_PATH" == *.app ]] && [ -d "$TRAY_OR_APP_PATH" ]; then
+    USE_SWIFT_APP=true
+    SWIFT_APP_PATH="$TRAY_OR_APP_PATH"
+    echo "📱 Using Swift app bundle: $SWIFT_APP_PATH"
+elif [ -f "$TRAY_OR_APP_PATH" ]; then
+    TRAY_BINARY_PATH="$TRAY_OR_APP_PATH"
+    echo "🔧 Using Go tray binary: $TRAY_BINARY_PATH"
+else
+    echo "Not found: $TRAY_OR_APP_PATH"
     exit 1
 fi
 
@@ -39,18 +48,27 @@ rm -f "${DMG_NAME}.dmg"
 # Create temporary directory
 mkdir -p "$TEMP_DIR"
 
-# Create app bundle structure
-mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/Resources"
-
-# Copy tray binary
-cp "$TRAY_BINARY_PATH" "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-chmod +x "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-
-# Copy core binary inside Resources/bin for the tray to manage
-mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin"
-cp "$CORE_BINARY_PATH" "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
-chmod +x "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+# Create app bundle
+if [ "$USE_SWIFT_APP" = true ]; then
+    # Swift mode: copy entire .app bundle, overlay Go core binary
+    echo "Assembling app bundle from Swift app..."
+    cp -R "$SWIFT_APP_PATH" "$TEMP_DIR/$APP_BUNDLE"
+    mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin"
+    cp "$CORE_BINARY_PATH" "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+    chmod +x "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+    # Update version in Info.plist
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" "$TEMP_DIR/$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION#v}" "$TEMP_DIR/$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+else
+    # Legacy Go mode
+    mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS"
+    mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/Resources"
+    cp "$TRAY_BINARY_PATH" "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+    chmod +x "$TEMP_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+    mkdir -p "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin"
+    cp "$CORE_BINARY_PATH" "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+    chmod +x "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+fi
 
 # Generate CA certificate for bundling
 echo "Generating CA certificate for bundling..."
@@ -81,6 +99,10 @@ fi
 # Clean up temporary certificate directory
 rm -rf "$TEMP_CERT_DIR"
 
+# Skip icon/Info.plist/PkgInfo generation for Swift mode (already in .app bundle)
+if [ "$USE_SWIFT_APP" = true ]; then
+    echo "✅ Using Swift app's Info.plist, icons, and resources"
+else
 # Copy icon if available
 if [ -f "assets/mcpproxy.icns" ]; then
     cp "assets/mcpproxy.icns" "$TEMP_DIR/$APP_BUNDLE/Contents/Resources/"
@@ -113,7 +135,7 @@ cat > "$TEMP_DIR/$APP_BUNDLE/Contents/Info.plist" << EOF
     <key>CFBundleSignature</key>
     <string>MCPP</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.15</string>
+    <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>LSBackgroundOnly</key>
@@ -142,6 +164,7 @@ EOF
 
 # Create empty PkgInfo file (required for proper app bundle)
 echo "APPLMCPP" > "$TEMP_DIR/$APP_BUNDLE/Contents/PkgInfo"
+fi  # end Go mode Info.plist generation
 
 # Sign the app bundle properly with Developer ID certificate
 echo "Signing app bundle with Developer ID certificate..."
@@ -151,7 +174,7 @@ CERT_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Ap
 
 if [ -n "${CERT_IDENTITY}" ]; then
     echo "✅ Found Developer ID certificate: ${CERT_IDENTITY}"
-    
+
     # Validate entitlements file formatting (Apple's recommendation)
     if [ -f "scripts/entitlements.plist" ]; then
         echo "=== Validating entitlements file ==="
@@ -161,12 +184,12 @@ if [ -n "${CERT_IDENTITY}" ]; then
             echo "❌ Entitlements file has formatting issues"
             exit 1
         fi
-        
+
         # Convert to XML format if needed
         plutil -convert xml1 scripts/entitlements.plist
         echo "✅ Entitlements converted to XML format"
     fi
-    
+
     # Sign with proper Developer ID certificate, hardened runtime, and production entitlements
     if [ -f "scripts/entitlements.plist" ]; then
         echo "Using production entitlements..."
@@ -186,11 +209,11 @@ if [ -n "${CERT_IDENTITY}" ]; then
             --timestamp \
             "$TEMP_DIR/$APP_BUNDLE"
     fi
-    
+
     # Verify signing using Apple's recommended methods
     echo "=== Verifying app bundle signature ==="
     codesign --verify --verbose "$TEMP_DIR/$APP_BUNDLE"
-    
+
     # Apple's recommended strict verification for notarization
     echo "=== Strict verification (matches notarization requirements) ==="
     if codesign -vvv --deep --strict "$TEMP_DIR/$APP_BUNDLE"; then
@@ -199,7 +222,7 @@ if [ -n "${CERT_IDENTITY}" ]; then
         echo "❌ App bundle strict verification FAILED - will not pass notarization"
         exit 1
     fi
-    
+
     # Check for secure timestamp
     echo "=== Checking app bundle timestamp ==="
     TIMESTAMP_CHECK=$(codesign -dvv "$TEMP_DIR/$APP_BUNDLE" 2>&1)
@@ -209,15 +232,15 @@ if [ -n "${CERT_IDENTITY}" ]; then
     else
         echo "❌ App bundle missing secure timestamp"
     fi
-    
+
     # Show detailed signature information
     echo "=== App bundle signature details ==="
     codesign --display --verbose=4 "$TEMP_DIR/$APP_BUNDLE"
-    
+
     # Check entitlements
     echo "=== App bundle entitlements ==="
     codesign --display --entitlements - "$TEMP_DIR/$APP_BUNDLE"
-    
+
 else
     echo "❌ No Developer ID certificate found - using ad-hoc signature"
     echo "This will NOT work for notarization!"
@@ -258,4 +281,4 @@ echo "Compressing DMG..."
 hdiutil convert "${DMG_NAME}.dmg" -format UDZO -o "${DMG_NAME}-compressed.dmg"
 mv "${DMG_NAME}-compressed.dmg" "${DMG_NAME}.dmg"
 
-echo "DMG installer created successfully: ${DMG_NAME}.dmg" 
+echo "DMG installer created successfully: ${DMG_NAME}.dmg"

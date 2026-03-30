@@ -2,19 +2,37 @@
 set -e
 
 # Script to create macOS PKG installer
-TRAY_BINARY_PATH="$1"
+# Supports two modes:
+#   1. Swift app bundle: $0 <swift_app_bundle.app> <core_binary> <version> <arch>
+#   2. Go tray binary:   $0 <tray_binary> <core_binary> <version> <arch>
+# Auto-detected based on whether first arg ends in .app
+TRAY_OR_APP_PATH="$1"
 CORE_BINARY_PATH="$2"
 VERSION="$3"
 ARCH="$4"
 
-if [ -z "$TRAY_BINARY_PATH" ] || [ -z "$CORE_BINARY_PATH" ] || [ -z "$VERSION" ] || [ -z "$ARCH" ]; then
-    echo "Usage: $0 <tray_binary> <core_binary> <version> <arch>"
-    echo "Example: $0 ./mcpproxy-tray ./mcpproxy v1.0.0 arm64"
+if [ -z "$TRAY_OR_APP_PATH" ] || [ -z "$CORE_BINARY_PATH" ] || [ -z "$VERSION" ] || [ -z "$ARCH" ]; then
+    echo "Usage: $0 <swift_app.app|tray_binary> <core_binary> <version> <arch>"
+    echo "Example: $0 ./MCPProxy.app ./mcpproxy v1.0.0 arm64"
+    echo "Example: $0 ./mcpproxy-tray ./mcpproxy v1.0.0 arm64  (legacy Go tray)"
     exit 1
 fi
 
-if [ ! -f "$TRAY_BINARY_PATH" ]; then
-    echo "Tray binary not found: $TRAY_BINARY_PATH"
+# Detect mode: Swift .app bundle vs Go tray binary
+USE_SWIFT_APP=false
+if [[ "$TRAY_OR_APP_PATH" == *.app ]] && [ -d "$TRAY_OR_APP_PATH" ]; then
+    USE_SWIFT_APP=true
+    SWIFT_APP_PATH="$TRAY_OR_APP_PATH"
+    echo "📱 Using Swift app bundle: $SWIFT_APP_PATH"
+    if [ ! -f "$SWIFT_APP_PATH/Contents/MacOS/MCPProxy" ]; then
+        echo "Swift app binary not found: $SWIFT_APP_PATH/Contents/MacOS/MCPProxy"
+        exit 1
+    fi
+elif [ -f "$TRAY_OR_APP_PATH" ]; then
+    TRAY_BINARY_PATH="$TRAY_OR_APP_PATH"
+    echo "🔧 Using Go tray binary: $TRAY_BINARY_PATH"
+else
+    echo "Not found: $TRAY_OR_APP_PATH (expected .app bundle or binary)"
     exit 1
 fi
 
@@ -44,16 +62,30 @@ mkdir -p "$PKG_ROOT/Applications"
 mkdir -p "$PKG_SCRIPTS"
 
 # Create app bundle structure in PKG root
-mkdir -p "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin"
+if [ "$USE_SWIFT_APP" = true ]; then
+    # Swift mode: copy the entire .app bundle, then overlay Go core binary
+    echo "Assembling app bundle from Swift app..."
+    cp -R "$SWIFT_APP_PATH" "$PKG_ROOT/Applications/$APP_BUNDLE"
+    mkdir -p "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin"
 
-# Copy tray binary as main executable
-cp "$TRAY_BINARY_PATH" "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-chmod +x "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+    # Copy Go core binary into the Swift app's Resources
+    cp "$CORE_BINARY_PATH" "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+    chmod +x "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+    echo "✅ Swift app bundle assembled with Go core"
+else
+    # Legacy Go mode: build app bundle from scratch
+    echo "Assembling app bundle from Go tray binary..."
+    mkdir -p "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/MacOS"
+    mkdir -p "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin"
 
-# Copy core binary inside Resources/bin for the tray to manage
-cp "$CORE_BINARY_PATH" "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
-chmod +x "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+    # Copy tray binary as main executable
+    cp "$TRAY_BINARY_PATH" "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+    chmod +x "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+    # Copy core binary inside Resources/bin for the tray to manage
+    cp "$CORE_BINARY_PATH" "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+    chmod +x "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/bin/mcpproxy"
+fi
 
 # Generate CA certificate for bundling (HTTP mode by default, HTTPS optional)
 echo "Generating CA certificate for bundling..."
@@ -84,6 +116,13 @@ fi
 # Clean up temporary certificate directory
 rm -rf "$TEMP_CERT_DIR"
 
+# Skip Info.plist, PkgInfo, and icon generation for Swift mode (already in .app bundle)
+if [ "$USE_SWIFT_APP" = true ]; then
+    echo "✅ Using Swift app's Info.plist, icons, and resources (skipping generation)"
+    # Update version in existing Info.plist
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION#v}" "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+else
 # Copy icon if available
 if [ -f "assets/mcpproxy.icns" ]; then
     cp "assets/mcpproxy.icns" "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Resources/"
@@ -146,6 +185,18 @@ EOF
 # Create empty PkgInfo file (required for proper app bundle)
 echo "APPLMCPP" > "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/PkgInfo"
 
+fi  # end of Go tray mode Info.plist/icon/PkgInfo generation
+
+# Determine entitlements file
+if [ "$USE_SWIFT_APP" = true ] && [ -f "native/macos/MCPProxy/MCPProxy/MCPProxy.entitlements" ]; then
+    ENTITLEMENTS_FILE="native/macos/MCPProxy/MCPProxy/MCPProxy.entitlements"
+    echo "Using Swift app entitlements: $ENTITLEMENTS_FILE"
+elif [ -f "scripts/entitlements.plist" ]; then
+    ENTITLEMENTS_FILE="scripts/entitlements.plist"
+else
+    ENTITLEMENTS_FILE=""
+fi
+
 # Sign the app bundle properly with Developer ID certificate
 echo "Signing app bundle with Developer ID certificate..."
 
@@ -164,28 +215,30 @@ fi
 if [ -n "${CERT_IDENTITY}" ]; then
 
     # Validate entitlements file formatting (Apple's recommendation)
-    if [ -f "scripts/entitlements.plist" ]; then
-        echo "=== Validating entitlements file ==="
-        if plutil -lint scripts/entitlements.plist; then
+    if [ -n "$ENTITLEMENTS_FILE" ] && [ -f "$ENTITLEMENTS_FILE" ]; then
+        echo "=== Validating entitlements file: $ENTITLEMENTS_FILE ==="
+        if plutil -lint "$ENTITLEMENTS_FILE"; then
             echo "✅ Entitlements file is properly formatted"
         else
             echo "❌ Entitlements file has formatting issues"
             exit 1
         fi
 
-        # Convert to XML format if needed
-        plutil -convert xml1 scripts/entitlements.plist
-        echo "✅ Entitlements converted to XML format"
+        # Convert to XML format if needed (skip for .entitlements files)
+        if [[ "$ENTITLEMENTS_FILE" == *.plist ]]; then
+            plutil -convert xml1 "$ENTITLEMENTS_FILE"
+            echo "✅ Entitlements converted to XML format"
+        fi
     fi
 
     # Sign with proper Developer ID certificate, hardened runtime, and production entitlements
-    if [ -f "scripts/entitlements.plist" ]; then
-        echo "Using production entitlements..."
+    if [ -n "$ENTITLEMENTS_FILE" ] && [ -f "$ENTITLEMENTS_FILE" ]; then
+        echo "Using entitlements: $ENTITLEMENTS_FILE"
         codesign --force --deep \
             --options runtime \
             --sign "${CERT_IDENTITY}" \
             --identifier "$BUNDLE_ID" \
-            --entitlements "scripts/entitlements.plist" \
+            --entitlements "$ENTITLEMENTS_FILE" \
             --timestamp \
             "$PKG_ROOT/Applications/$APP_BUNDLE"
     else
