@@ -373,14 +373,52 @@ func monitorDockerStatus(ctx context.Context, apiClient *api.Client, logger *zap
 
 // setupLogging configures the logger with appropriate settings for the tray
 func setupLogging() (*zap.Logger, error) {
-	cfg := newTrayLogConfig(runtime.GOOS, getLogDir())
+	return newTrayLogger(newTrayLogConfig(runtime.GOOS, getLogDir()))
+}
+
+func newTrayLogger(cfg *config.LogConfig) (*zap.Logger, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("tray log config is required")
+	}
+
 	writeSyncer, err := logs.CreateRotatingWriteSyncer(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rotating tray log sink: %w", err)
 	}
 
 	level := zap.InfoLevel
-	encoderConfig := zapcore.EncoderConfig{
+	cores := []zapcore.Core{
+		zapcore.NewCore(newTrayJSONEncoder(), writeSyncer, level),
+	}
+	if cfg.EnableConsole {
+		cores = append(cores, zapcore.NewCore(newTrayJSONEncoder(), zapcore.AddSync(os.Stdout), level))
+	}
+
+	core := zapcore.NewTee(cores...)
+	core = zapcore.NewSamplerWithOptions(core, time.Second, 100, 100)
+	core = logs.NewSecretSanitizer(core)
+
+	return zap.New(
+		core,
+		zap.AddCaller(),
+		zap.AddStacktrace(zap.ErrorLevel),
+		zap.ErrorOutput(zapcore.AddSync(os.Stderr)),
+	), nil
+}
+
+func newTrayLogConfig(goos, logDir string) *config.LogConfig {
+	cfg := logs.DefaultLogConfig()
+	cfg.Level = logs.LogLevelInfo
+	cfg.EnableFile = true
+	cfg.EnableConsole = goos != platformWindows
+	cfg.Filename = "tray.log"
+	cfg.LogDir = logDir
+	cfg.JSONFormat = true
+	return cfg
+}
+
+func newTrayJSONEncoder() zapcore.Encoder {
+	return zapcore.NewJSONEncoder(zapcore.EncoderConfig{
 		TimeKey:        "timestamp",
 		LevelKey:       "level",
 		NameKey:        "logger",
@@ -394,32 +432,7 @@ func setupLogging() (*zap.Logger, error) {
 		EncodeDuration: zapcore.StringDurationEncoder,
 		EncodeCaller:   zapcore.ShortCallerEncoder,
 		EncodeName:     zapcore.FullNameEncoder,
-	}
-	jsonEncoder := zapcore.NewJSONEncoder(encoderConfig)
-
-	cores := []zapcore.Core{
-		zapcore.NewCore(jsonEncoder, writeSyncer, level),
-	}
-	if cfg.EnableConsole {
-		cores = append(cores, zapcore.NewCore(jsonEncoder, zapcore.AddSync(os.Stdout), level))
-	}
-
-	core := zapcore.NewTee(cores...)
-	core = zapcore.NewSamplerWithOptions(core, time.Second, 100, 100)
-	core = logs.NewSecretSanitizer(core)
-
-	return zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1)), nil
-}
-
-func newTrayLogConfig(goos, logDir string) *config.LogConfig {
-	cfg := logs.DefaultLogConfig()
-	cfg.Level = logs.LogLevelInfo
-	cfg.EnableFile = true
-	cfg.EnableConsole = goos != platformWindows
-	cfg.Filename = "tray.log"
-	cfg.LogDir = logDir
-	cfg.JSONFormat = true
-	return cfg
+	})
 }
 
 func resolveCoreURL() string {

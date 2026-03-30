@@ -3,12 +3,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"go.uber.org/zap"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -79,17 +81,7 @@ func TestNewTrayLogConfig_WindowsDisablesConsole(t *testing.T) {
 
 func TestSetupLogging_WritesTrayLogToRotatingFile(t *testing.T) {
 	tempHome := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	if err := os.Setenv("HOME", tempHome); err != nil {
-		t.Fatalf("Setenv(HOME): %v", err)
-	}
-	defer func() {
-		if originalHome == "" {
-			_ = os.Unsetenv("HOME")
-			return
-		}
-		_ = os.Setenv("HOME", originalHome)
-	}()
+	t.Setenv("HOME", tempHome)
 
 	logger, err := setupLogging()
 	if err != nil {
@@ -109,5 +101,40 @@ func TestSetupLogging_WritesTrayLogToRotatingFile(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "\"message\":\"rotation test message\"") {
 		t.Fatalf("tray.log did not contain expected JSON message: %s", string(content))
+	}
+}
+
+func TestNewTrayLogger_RotatesTrayLog(t *testing.T) {
+	cfg := newTrayLogConfig(platformDarwin, t.TempDir())
+	cfg.EnableConsole = false
+	cfg.MaxSize = 1
+	cfg.MaxBackups = 2
+	cfg.MaxAge = 1
+	cfg.Compress = false
+
+	logger, err := newTrayLogger(cfg)
+	if err != nil {
+		t.Fatalf("newTrayLogger(): %v", err)
+	}
+	defer func() {
+		_ = logger.Sync()
+	}()
+
+	for i := 0; i < 4; i++ {
+		logger.Info(fmt.Sprintf("rotation pressure %d", i),
+			zap.String("payload", strings.Repeat("x", 600*1024)))
+	}
+	_ = logger.Sync()
+
+	logFiles, err := os.ReadDir(cfg.LogDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", cfg.LogDir, err)
+	}
+	if len(logFiles) < 2 {
+		names := make([]string, 0, len(logFiles))
+		for _, entry := range logFiles {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("expected rotated tray log files, found %v", names)
 	}
 }
