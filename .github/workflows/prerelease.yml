@@ -222,31 +222,17 @@ jobs:
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
           if [ "${{ matrix.goos }}" = "darwin" ]; then
-            echo "Building Swift tray app for macOS..."
-            cd native/macos/MCPProxy
-            xcodebuild -scheme MCPProxy \
-              -configuration Release \
-              -derivedDataPath build \
-              -destination 'generic/platform=macOS' \
-              MACOSX_DEPLOYMENT_TARGET=13.0 \
-              MARKETING_VERSION=${VERSION#v} \
-              CURRENT_PROJECT_VERSION=${{ github.run_number }} \
-              CODE_SIGN_IDENTITY="-" \
-              CODE_SIGNING_ALLOWED=NO \
-              SWIFT_COMPILATION_MODE=wholemodule
-
-            # Verify Swift app was built
-            SWIFT_APP="build/Build/Products/Release/MCPProxy.app"
+            chmod +x scripts/build-swift-app.sh
+            OUTPUT_DIR="$(pwd)/swift-build"
+            mkdir -p "$OUTPUT_DIR"
+            ./scripts/build-swift-app.sh "${VERSION}" "${{ matrix.goarch }}" "$OUTPUT_DIR"
+            SWIFT_APP="$OUTPUT_DIR/MCPProxy.app"
             if [ -d "$SWIFT_APP" ]; then
-              echo "✅ Swift app built: $(du -sh $SWIFT_APP | cut -f1)"
-              echo "SWIFT_APP_PATH=$(pwd)/$SWIFT_APP" >> $GITHUB_ENV
+              echo "SWIFT_APP_PATH=$SWIFT_APP" >> $GITHUB_ENV
             else
-              echo "❌ Swift app not found at $SWIFT_APP"
-              echo "Listing build products:"
-              find build/Build/Products -name "*.app" -type d 2>/dev/null || echo "No .app found"
+              echo "❌ Swift app build failed"
               exit 1
             fi
-            cd "$GITHUB_WORKSPACE"
           fi
 
           # Code sign macOS binaries
