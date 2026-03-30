@@ -1056,6 +1056,21 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	// Notify about upstream server change
 	s.OnUpstreamServerChange()
 
+	// If quarantined, grant inspection exemption so tools can be discovered and reviewed
+	if serverConfig.Quarantined {
+		if supervisor := s.runtime.Supervisor(); supervisor != nil {
+			// Grant 1 hour exemption for initial tool review
+			if err := supervisor.RequestInspectionExemption(serverConfig.Name, 1*time.Hour); err != nil {
+				s.logger.Warn("Failed to grant inspection exemption for new quarantined server",
+					zap.String("server", serverConfig.Name),
+					zap.Error(err))
+			} else {
+				s.logger.Info("Granted inspection exemption for new quarantined server — tools will be discoverable for review",
+					zap.String("server", serverConfig.Name))
+			}
+		}
+	}
+
 	s.logger.Info("Server added successfully",
 		zap.String("name", serverConfig.Name))
 

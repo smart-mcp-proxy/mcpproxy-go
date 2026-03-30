@@ -465,9 +465,12 @@ struct ServerDetailView: View {
                         configRow(label: "Name", value: server.name)
                         configRow(label: "Protocol", value: server.protocol)
                         if isEditing {
-                            configToggleRow(label: "Enabled", isOn: $editEnabled)
-                            configToggleRow(label: "Quarantined", isOn: $editQuarantined)
-                            configToggleRow(label: "Docker Isolation", isOn: $editDockerIsolation)
+                            configToggleRow(label: "Enabled", isOn: $editEnabled,
+                                hint: "When disabled, the server will not connect or be available to AI agents.")
+                            configToggleRow(label: "Quarantined", isOn: $editQuarantined,
+                                hint: "New tools must be reviewed and approved before AI agents can use them. Protects against tool poisoning attacks.")
+                            configToggleRow(label: "Docker Isolation", isOn: $editDockerIsolation,
+                                hint: "Runs the server in an isolated Docker container. Prevents access to your filesystem, network, and other system resources. Recommended for untrusted servers.")
                             configToggleRow(label: "Skip Quarantine", isOn: $editSkipQuarantine)
                         } else {
                             configRow(label: "Enabled", value: server.enabled ? "Yes" : "No")
@@ -596,15 +599,23 @@ struct ServerDetailView: View {
     }
 
     @ViewBuilder
-    private func configToggleRow(label: String, isOn: Binding<Bool>) -> some View {
-        HStack {
-            Text(label)
-                .font(.scaled(.subheadline, scale: fontScale))
-                .foregroundStyle(.secondary)
-                .frame(width: 140, alignment: .trailing)
-            Toggle("", isOn: isOn)
-                .labelsHidden()
-            Spacer()
+    private func configToggleRow(label: String, isOn: Binding<Bool>, hint: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label)
+                    .font(.scaled(.subheadline, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 140, alignment: .trailing)
+                Toggle("", isOn: isOn)
+                    .labelsHidden()
+                Spacer()
+            }
+            if let hint = hint {
+                Text(hint)
+                    .font(.scaled(.caption2, scale: fontScale))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 148)
+            }
         }
     }
 

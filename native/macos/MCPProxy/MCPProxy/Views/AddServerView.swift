@@ -268,6 +268,9 @@ struct ManualServerForm: View {
     @State private var argsText = ""
     @State private var envText = ""
     @State private var workingDir = ""
+    @State private var isEnabled = true
+    @State private var dockerIsolation = true
+    @State private var quarantined = false
     @State private var submitPhase: SubmitPhase = .idle
     @State private var errorMessage: String?
 
@@ -380,6 +383,32 @@ struct ManualServerForm: View {
                             .font(.scaledMonospaced(.body, scale: fontScale))
                             .frame(height: 60)
                             .border(Color.gray.opacity(0.3), width: 1)
+                    }
+
+                    // Options
+                    formField(label: "Options") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Toggle("Enabled", isOn: $isEnabled)
+                                Text("When disabled, the server will not connect or be available to AI agents.")
+                                    .font(.scaled(.caption2, scale: fontScale))
+                                    .foregroundStyle(.tertiary)
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Toggle("Docker Isolation", isOn: $dockerIsolation)
+                                Text("Runs the server in an isolated Docker container. Prevents access to your filesystem, network, and other system resources. Recommended for untrusted servers.")
+                                    .font(.scaled(.caption2, scale: fontScale))
+                                    .foregroundStyle(.tertiary)
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Toggle("Quarantined", isOn: $quarantined)
+                                Text("New tools must be reviewed and approved before AI agents can use them. Protects against tool poisoning attacks.")
+                                    .font(.scaled(.caption2, scale: fontScale))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
                     }
                 }
                 .padding()
@@ -505,7 +534,9 @@ struct ManualServerForm: View {
         var config: [String: Any] = [
             "name": name.trimmingCharacters(in: .whitespaces),
             "protocol": selectedProtocol,
-            "enabled": true,
+            "enabled": isEnabled,
+            "docker_isolation": dockerIsolation,
+            "quarantined": quarantined,
         ]
 
         if selectedProtocol == "http" {
