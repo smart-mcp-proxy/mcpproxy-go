@@ -31,6 +31,8 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/api"
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/monitor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy-tray/internal/state"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
 )
@@ -371,26 +373,52 @@ func monitorDockerStatus(ctx context.Context, apiClient *api.Client, logger *zap
 
 // setupLogging configures the logger with appropriate settings for the tray
 func setupLogging() (*zap.Logger, error) {
-	// Get log directory
-	logDir := getLogDir()
+	return newTrayLogger(newTrayLogConfig(runtime.GOOS, getLogDir()))
+}
 
-	// Ensure log directory exists
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create log directory: %w", err)
+func newTrayLogger(cfg *config.LogConfig) (*zap.Logger, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("tray log config is required")
 	}
 
-	// Create tray-specific log file
-	logFile := filepath.Join(logDir, "tray.log")
-
-	config := zap.NewProductionConfig()
-	config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	config.Development = false
-	config.Sampling = &zap.SamplingConfig{
-		Initial:    100,
-		Thereafter: 100,
+	writeSyncer, err := logs.CreateRotatingWriteSyncer(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rotating tray log sink: %w", err)
 	}
-	config.Encoding = "json"
-	config.EncoderConfig = zapcore.EncoderConfig{
+
+	level := zap.InfoLevel
+	cores := []zapcore.Core{
+		zapcore.NewCore(newTrayJSONEncoder(), writeSyncer, level),
+	}
+	if cfg.EnableConsole {
+		cores = append(cores, zapcore.NewCore(newTrayJSONEncoder(), zapcore.AddSync(os.Stdout), level))
+	}
+
+	core := zapcore.NewTee(cores...)
+	core = zapcore.NewSamplerWithOptions(core, time.Second, 100, 100)
+	core = logs.NewSecretSanitizer(core)
+
+	return zap.New(
+		core,
+		zap.AddCaller(),
+		zap.AddStacktrace(zap.ErrorLevel),
+		zap.ErrorOutput(zapcore.AddSync(os.Stderr)),
+	), nil
+}
+
+func newTrayLogConfig(goos, logDir string) *config.LogConfig {
+	cfg := logs.DefaultLogConfig()
+	cfg.Level = logs.LogLevelInfo
+	cfg.EnableFile = true
+	cfg.EnableConsole = goos != platformWindows
+	cfg.Filename = "tray.log"
+	cfg.LogDir = logDir
+	cfg.JSONFormat = true
+	return cfg
+}
+
+func newTrayJSONEncoder() zapcore.Encoder {
+	return zapcore.NewJSONEncoder(zapcore.EncoderConfig{
 		TimeKey:        "timestamp",
 		LevelKey:       "level",
 		NameKey:        "logger",
@@ -404,24 +432,7 @@ func setupLogging() (*zap.Logger, error) {
 		EncodeDuration: zapcore.StringDurationEncoder,
 		EncodeCaller:   zapcore.ShortCallerEncoder,
 		EncodeName:     zapcore.FullNameEncoder,
-	}
-
-	// Log to file only on Windows GUI apps (stdout/stderr don't exist)
-	// On other platforms, log to both file and stdout
-	if runtime.GOOS == "windows" {
-		config.OutputPaths = []string{logFile}
-		config.ErrorOutputPaths = []string{logFile}
-	} else {
-		config.OutputPaths = []string{"stdout", logFile}
-		config.ErrorOutputPaths = []string{"stderr", logFile}
-	}
-
-	logger, err := config.Build()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build logger: %w", err)
-	}
-
-	return logger, nil
+	})
 }
 
 func resolveCoreURL() string {
