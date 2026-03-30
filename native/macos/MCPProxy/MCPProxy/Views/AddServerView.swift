@@ -580,11 +580,14 @@ struct ManualServerForm: View {
         } catch {
             let errorDetail = error.localizedDescription
 
-            // If socket timed out, retry via TCP as fallback
-            if errorDetail.contains("timed out") || errorDetail.contains("timeout") {
-                NSLog("[AddServer] Socket POST timed out, retrying via TCP with API key")
+            // 409 "already exists" means a previous attempt saved it — treat as success
+            if errorDetail.contains("already exists") || errorDetail.contains("409") {
+                NSLog("[AddServer] Server already exists (previous save succeeded), checking status")
+                // Fall through to connection polling below
+            } else if errorDetail.contains("timed out") || errorDetail.contains("timeout") {
+                // Socket POST timed out — retry via TCP
+                NSLog("[AddServer] Socket POST timed out, retrying via TCP")
                 do {
-                    // Get API key from core info endpoint (socket GET works fine)
                     var apiKey: String?
                     if let info = try? await client.info() {
                         if let comps = URLComponents(string: info.webUiUrl),
@@ -594,18 +597,22 @@ struct ManualServerForm: View {
                     }
                     let tcpClient = APIClient(socketPath: "", baseURL: "http://127.0.0.1:8080", apiKey: apiKey)
                     try await tcpClient.addServer(config)
-                    NSLog("[AddServer] TCP fallback succeeded")
-                    // Fall through to connection check below
-                } catch {
-                    var msg = "Failed to add server: \(error.localizedDescription)"
-                    let logHint = await fetchServerLogHint(client: client, serverName: serverName)
-                    if !logHint.isEmpty { msg += "\n\nServer log: \(logHint)" }
-                    submitPhase = .failure(error: msg)
-                    return
+                } catch let retryError {
+                    let retryDetail = retryError.localizedDescription
+                    // TCP also got 409 — server was saved, fall through
+                    if retryDetail.contains("already exists") || retryDetail.contains("409") {
+                        NSLog("[AddServer] TCP retry: already exists — checking status")
+                    } else {
+                        var msg = "Failed to add server: \(retryDetail)"
+                        let logHint = await fetchServerLogHint(client: client, serverName: serverName)
+                        if !logHint.isEmpty { msg += "\n\nServer log: \(logHint)" }
+                        submitPhase = .failure(error: msg)
+                        return
+                    }
                 }
             } else {
-                // Non-timeout error — show it directly
-                var msg = "Failed to add server: \(errorDetail)"
+                // Actual error — show it, user can edit fields and retry
+                var msg = errorDetail
                 let logHint = await fetchServerLogHint(client: client, serverName: serverName)
                 if !logHint.isEmpty { msg += "\n\nServer log: \(logHint)" }
                 submitPhase = .failure(error: msg)
@@ -613,44 +620,52 @@ struct ManualServerForm: View {
             }
         }
 
-        // Server added successfully, now check connection
+        // Server saved successfully. Now poll for connection status.
+        // States: connecting → connected | quarantined | error
         submitPhase = .connecting
 
-        // Wait 3 seconds for the server to connect
-        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        // Poll up to 3 times (every 3s) for the server to finish connecting
+        for attempt in 1...3 {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
 
-        // Check server status and logs
-        do {
-            let servers = try await client.servers()
-            if let server = servers.first(where: { $0.name == serverName }) {
-                if server.connected {
-                    // Connected and working
-                    submitPhase = .success(toolCount: server.toolCount, quarantined: false)
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    onDone()
-                } else if server.quarantined {
-                    // Quarantined is expected for new servers — treat as success
-                    submitPhase = .success(toolCount: 0, quarantined: true)
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    onDone()
-                } else {
-                    // Actually disconnected/errored — build a helpful error from health + logs
-                    var detail = server.health?.detail ?? server.health?.summary ?? server.lastError ?? "Server is not connected yet"
-                    let logHint = await fetchServerLogHint(client: client, serverName: serverName)
-                    if !logHint.isEmpty {
-                        detail += "\n\nRecent log: \(logHint)"
-                    }
-                    submitPhase = .failure(error: detail)
-                }
-            } else {
-                // Server not in list but POST succeeded — still a success, close dialog
-                submitPhase = .success(toolCount: 0, quarantined: false)
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                onDone()
+            guard let servers = try? await client.servers(),
+                  let server = servers.first(where: { $0.name == serverName }) else {
+                // Server not in list yet — keep waiting
+                continue
             }
-        } catch {
-            submitPhase = .failure(error: "Could not verify connection: \(error.localizedDescription)")
+
+            let status = server.status ?? ""
+            let isConnecting = (server.connecting == true) || status == "connecting"
+
+            if server.connected {
+                submitPhase = .success(toolCount: server.toolCount, quarantined: server.quarantined)
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                onDone()
+                return
+            } else if server.quarantined && !isConnecting {
+                // Quarantined and done connecting (or waiting for exemption)
+                submitPhase = .success(toolCount: server.toolCount, quarantined: true)
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                onDone()
+                return
+            } else if isConnecting && attempt < 3 {
+                // Still connecting — keep polling (don't show error yet)
+                continue
+            } else if let lastError = server.lastError, !lastError.isEmpty {
+                // Has an actual error — show it
+                var detail = lastError
+                let logHint = await fetchServerLogHint(client: client, serverName: serverName)
+                if !logHint.isEmpty { detail += "\n\nRecent log: \(logHint)" }
+                submitPhase = .failure(error: detail)
+                return
+            }
         }
+
+        // After 3 attempts (9s), server exists but still connecting — treat as success
+        // The server list will show the real-time status
+        submitPhase = .success(toolCount: 0, quarantined: true)
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        onDone()
     }
 
     /// Fetch the last error line from server logs to show a helpful hint.
