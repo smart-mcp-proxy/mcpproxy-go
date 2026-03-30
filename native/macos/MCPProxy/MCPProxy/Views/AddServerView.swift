@@ -272,6 +272,7 @@ struct ManualServerForm: View {
     @State private var dockerIsolation = true
     @State private var quarantined = false
     @State private var submitPhase: SubmitPhase = .idle
+    @State private var lastSavedServerName: String?  // Track what was saved so Retry can clean up
     @State private var errorMessage: String?
 
     private var apiClient: APIClient? { appState.apiClient }
@@ -531,6 +532,14 @@ struct ManualServerForm: View {
         errorMessage = nil
         submitPhase = .saving
 
+        // If a previous attempt saved a server, delete it first so we can re-add
+        // with potentially updated params (user may have changed name, command, etc.)
+        if let oldName = lastSavedServerName {
+            NSLog("[AddServer] Retry: deleting previously saved server '%@' before re-adding", oldName)
+            try? await client.deleteAction(path: "/api/v1/servers/\(oldName)")
+            lastSavedServerName = nil
+        }
+
         var config: [String: Any] = [
             "name": name.trimmingCharacters(in: .whitespaces),
             "protocol": selectedProtocol,
@@ -577,12 +586,14 @@ struct ManualServerForm: View {
 
         do {
             try await client.addServer(config)
+            lastSavedServerName = serverName
         } catch {
             let errorDetail = error.localizedDescription
 
             // 409 "already exists" means a previous attempt saved it — treat as success
             if errorDetail.contains("already exists") || errorDetail.contains("409") {
                 NSLog("[AddServer] Server already exists (previous save succeeded), checking status")
+                lastSavedServerName = serverName
                 // Fall through to connection polling below
             } else if errorDetail.contains("timed out") || errorDetail.contains("timeout") {
                 // Socket POST timed out — retry via TCP
