@@ -173,6 +173,16 @@ actor APIClient {
         try await deleteAction(path: "/api/v1/servers/\(id)")
     }
 
+    /// Update a server via `PATCH /api/v1/servers/{name}`.
+    func updateServer(_ name: String, updates: [String: Any]) async throws {
+        let bodyData = try JSONSerialization.data(withJSONObject: updates)
+        let (data, response) = try await performRequest(path: "/api/v1/servers/\(name)", method: "PATCH", body: bodyData)
+        if let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
+           !errorResponse.success, let message = errorResponse.error {
+            throw APIClientError.httpError(statusCode: response.statusCode, message: message)
+        }
+    }
+
     // MARK: - Connect (Client Registration)
 
     /// Client status model returned by `GET /api/v1/connect`.

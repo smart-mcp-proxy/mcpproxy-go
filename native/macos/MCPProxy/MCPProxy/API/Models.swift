@@ -203,6 +203,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     let url: String?
     let command: String?
     let args: [String]?
+    let workingDir: String?
     let `protocol`: String
     let enabled: Bool
     let connected: Bool
@@ -225,6 +226,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, url, command, args
+        case workingDir = "working_dir"
         case `protocol` = "protocol"
         case enabled, connected, connecting, quarantined
         case status

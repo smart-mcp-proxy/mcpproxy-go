@@ -52,6 +52,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 NSLog("[MCPProxy] Zoom reset: fontScale=%.1f", self?.appState.fontScale ?? 0)
                 self?.makeTextActualSize()
                 return nil
+            case "n":
+                NSLog("[MCPProxy] Cmd+N: show add server")
+                self?.showAddServer()
+                return nil
             default:
                 return event
             }

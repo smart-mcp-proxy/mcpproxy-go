@@ -20,6 +20,8 @@ struct AddServerView: View {
     @Binding var isPresented: Bool
     @Environment(\.fontScale) var fontScale
 
+    var initialTab: AddServerTab = .importConfig
+
     @State private var selectedTab: AddServerTab = .importConfig
 
     private var apiClient: APIClient? { appState.apiClient }
@@ -60,7 +62,10 @@ struct AddServerView: View {
                 ManualServerForm(appState: appState, onDone: { isPresented = false })
             }
         }
-        .frame(width: 520, height: 480)
+        .frame(width: 560, height: 560)
+        .onAppear {
+            selectedTab = initialTab
+        }
     }
 }
 
@@ -227,6 +232,34 @@ struct ManualServerForm: View {
     let onDone: () -> Void
     @Environment(\.fontScale) var fontScale
 
+    enum FormField: Hashable {
+        case name, url, command
+    }
+
+    enum SubmitPhase: Equatable {
+        case idle
+        case saving
+        case connecting
+        case success(toolCount: Int)
+        case failure(error: String)
+
+        static func == (lhs: SubmitPhase, rhs: SubmitPhase) -> Bool {
+            switch (lhs, rhs) {
+            case (.idle, .idle), (.saving, .saving), (.connecting, .connecting):
+                return true
+            case (.success(let a), .success(let b)):
+                return a == b
+            case (.failure(let a), .failure(let b)):
+                return a == b
+            default:
+                return false
+            }
+        }
+    }
+
+    @FocusState private var focusedField: FormField?
+    @State private var fieldTouched: Set<FormField> = []
+
     @State private var name = ""
     @State private var selectedProtocol = "stdio"
     @State private var url = ""
@@ -234,97 +267,206 @@ struct ManualServerForm: View {
     @State private var argsText = ""
     @State private var envText = ""
     @State private var workingDir = ""
-    @State private var isSubmitting = false
+    @State private var submitPhase: SubmitPhase = .idle
     @State private var errorMessage: String?
 
     private var apiClient: APIClient? { appState.apiClient }
-    private let protocols = ["stdio", "http", "sse"]
+    private let protocols = ["stdio", "http"]
+
+    private var isSubmitActive: Bool {
+        if case .idle = submitPhase { return false }
+        return true
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let err = errorMessage {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                        Text(err)
-                            .font(.scaled(.caption, scale: fontScale))
-                        Spacer()
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let err = errorMessage {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                            Text(err)
+                                .font(.scaled(.caption, scale: fontScale))
+                            Spacer()
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 6)
+                        .background(Color.red.opacity(0.1))
+                        .cornerRadius(6)
                     }
-                    .padding(.horizontal)
-                    .padding(.vertical, 6)
-                    .background(Color.red.opacity(0.1))
-                    .cornerRadius(6)
-                }
 
-                // Name
-                formField(label: "Name (required)") {
-                    TextField("e.g. github-server", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                // Protocol
-                formField(label: "Protocol") {
-                    Picker("", selection: $selectedProtocol) {
-                        ForEach(protocols, id: \.self) { proto in
-                            Text(proto).tag(proto)
+                    // Name
+                    formField(label: "Name (required)") {
+                        TextField("e.g. github-server", text: $name)
+                            .textFieldStyle(.roundedBorder)
+                            .focused($focusedField, equals: .name)
+                            .onChange(of: focusedField) { newValue in
+                                if newValue != .name && focusedField != .name {
+                                    fieldTouched.insert(.name)
+                                }
+                            }
+                        if fieldTouched.contains(.name) && name.trimmingCharacters(in: .whitespaces).isEmpty {
+                            Text("Server name is required")
+                                .font(.caption)
+                                .foregroundStyle(.red)
                         }
                     }
-                    .pickerStyle(.segmented)
-                }
 
-                // URL (for http/sse)
-                if selectedProtocol == "http" || selectedProtocol == "sse" {
-                    formField(label: "URL (required)") {
-                        TextField("https://api.example.com/mcp", text: $url)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
-
-                // Command (for stdio)
-                if selectedProtocol == "stdio" {
-                    formField(label: "Command (required)") {
-                        TextField("e.g. npx, uvx, node", text: $command)
-                            .textFieldStyle(.roundedBorder)
+                    // Protocol
+                    formField(label: "Protocol") {
+                        Picker("", selection: $selectedProtocol) {
+                            Text("Local Command (stdio)").tag("stdio")
+                            Text("Remote URL (HTTP)").tag("http")
+                        }
+                        .pickerStyle(.segmented)
                     }
 
-                    formField(label: "Arguments (one per line)") {
-                        TextEditor(text: $argsText)
+                    // URL (for http)
+                    if selectedProtocol == "http" {
+                        formField(label: "URL (required)") {
+                            TextField("https://api.example.com/mcp", text: $url)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($focusedField, equals: .url)
+                                .onChange(of: focusedField) { newValue in
+                                    if newValue != .url && focusedField != .url {
+                                        fieldTouched.insert(.url)
+                                    }
+                                }
+                            if fieldTouched.contains(.url) && url.trimmingCharacters(in: .whitespaces).isEmpty {
+                                Text("URL is required")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                    }
+
+                    // Command (for stdio)
+                    if selectedProtocol == "stdio" {
+                        formField(label: "Command (required)") {
+                            TextField("e.g. npx, uvx, node", text: $command)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($focusedField, equals: .command)
+                                .onChange(of: focusedField) { newValue in
+                                    if newValue != .command && focusedField != .command {
+                                        fieldTouched.insert(.command)
+                                    }
+                                }
+                            if fieldTouched.contains(.command) && command.trimmingCharacters(in: .whitespaces).isEmpty {
+                                Text("Command is required")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+
+                        formField(label: "Arguments (one per line)") {
+                            TextEditor(text: $argsText)
+                                .font(.scaledMonospaced(.body, scale: fontScale))
+                                .frame(height: 60)
+                                .border(Color.gray.opacity(0.3), width: 1)
+                        }
+                    }
+
+                    // Working directory
+                    formField(label: "Working Directory (optional)") {
+                        TextField("/path/to/project", text: $workingDir)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    // Env vars
+                    formField(label: "Environment Variables (KEY=VALUE per line)") {
+                        TextEditor(text: $envText)
                             .font(.scaledMonospaced(.body, scale: fontScale))
                             .frame(height: 60)
                             .border(Color.gray.opacity(0.3), width: 1)
                     }
                 }
+                .padding()
+            }
 
-                // Working directory
-                formField(label: "Working Directory (optional)") {
-                    TextField("/path/to/project", text: $workingDir)
-                        .textFieldStyle(.roundedBorder)
+            Divider()
+
+            // Pinned submit area
+            VStack(spacing: 8) {
+                // Connection test feedback
+                switch submitPhase {
+                case .saving:
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Saving configuration...")
+                            .font(.scaled(.caption, scale: fontScale))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+
+                case .connecting:
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Connecting to server...")
+                            .font(.scaled(.caption, scale: fontScale))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+
+                case .success(let toolCount):
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Connected (\(toolCount) tools)")
+                            .font(.scaled(.caption, scale: fontScale))
+                            .foregroundStyle(.green)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+
+                case .failure(let error):
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .font(.scaled(.caption, scale: fontScale))
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+
+                    HStack {
+                        Spacer()
+                        Button("Save Anyway") {
+                            onDone()
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Retry") {
+                            Task { await submitServer() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding(.horizontal)
+
+                default:
+                    EmptyView()
                 }
 
-                // Env vars
-                formField(label: "Environment Variables (KEY=VALUE per line)") {
-                    TextEditor(text: $envText)
-                        .font(.scaledMonospaced(.body, scale: fontScale))
-                        .frame(height: 60)
-                        .border(Color.gray.opacity(0.3), width: 1)
-                }
-
-                // Submit
-                HStack {
-                    Spacer()
-                    if isSubmitting {
-                        ProgressView()
-                            .controlSize(.small)
+                // Show the Add Server button for all phases except failure
+                // (failure shows its own Save Anyway / Retry buttons above)
+                if case .failure = submitPhase {
+                    // failure shows its own buttons above
+                } else {
+                    HStack {
+                        Spacer()
+                        Button("Add Server") {
+                            Task { await submitServer() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!isValid || isSubmitActive)
                     }
-                    Button("Add Server") {
-                        Task { await submitServer() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!isValid || isSubmitting)
+                    .padding(.horizontal)
                 }
             }
-            .padding()
+            .padding(.vertical, 12)
         }
     }
 
@@ -350,8 +492,7 @@ struct ManualServerForm: View {
     private func submitServer() async {
         guard let client = apiClient else { return }
         errorMessage = nil
-        isSubmitting = true
-        defer { isSubmitting = false }
+        submitPhase = .saving
 
         var config: [String: Any] = [
             "name": name.trimmingCharacters(in: .whitespaces),
@@ -359,7 +500,7 @@ struct ManualServerForm: View {
             "enabled": true,
         ]
 
-        if selectedProtocol == "http" || selectedProtocol == "sse" {
+        if selectedProtocol == "http" {
             config["url"] = url.trimmingCharacters(in: .whitespaces)
         } else {
             config["command"] = command.trimmingCharacters(in: .whitespaces)
@@ -395,9 +536,40 @@ struct ManualServerForm: View {
 
         do {
             try await client.addServer(config)
-            onDone()
         } catch {
             errorMessage = "Failed to add server: \(error.localizedDescription)"
+            submitPhase = .idle
+            return
+        }
+
+        // Server added successfully, now check connection
+        submitPhase = .connecting
+        let serverName = name.trimmingCharacters(in: .whitespaces)
+
+        // Wait 3 seconds for the server to connect
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+
+        // Check server status
+        do {
+            let servers = try await client.servers()
+            if let server = servers.first(where: { $0.name == serverName }) {
+                if server.connected {
+                    submitPhase = .success(toolCount: server.toolCount)
+                    // Auto-close after 2 seconds
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    onDone()
+                } else {
+                    let detail = server.health?.summary ?? server.lastError ?? "Server is not connected"
+                    submitPhase = .failure(error: detail)
+                }
+            } else {
+                // Server was added but not found in list — still a success
+                submitPhase = .success(toolCount: 0)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                onDone()
+            }
+        } catch {
+            submitPhase = .failure(error: "Could not verify connection: \(error.localizedDescription)")
         }
     }
 }

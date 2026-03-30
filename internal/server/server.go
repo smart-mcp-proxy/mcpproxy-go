@@ -794,14 +794,26 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			}
 		}
 
-		// Extract created time and config fields
+		// Extract created time and config fields from stateview or fall back to storage
 		var created time.Time
-		var url, command, protocol string
-		if serverStatus.Config != nil {
-			created = serverStatus.Config.Created
-			url = serverStatus.Config.URL
-			command = serverStatus.Config.Command
-			protocol = serverStatus.Config.Protocol
+		var url, command, protocol, workingDir string
+		var args []string
+		cfg := serverStatus.Config
+		if cfg == nil {
+			// Stateview Config is nil — fall back to storage for config fields
+			if storageManager := s.runtime.StorageManager(); storageManager != nil {
+				if stored, err := storageManager.GetUpstreamServer(serverStatus.Name); err == nil && stored != nil {
+					cfg = stored
+				}
+			}
+		}
+		if cfg != nil {
+			created = cfg.Created
+			url = cfg.URL
+			command = cfg.Command
+			args = cfg.Args
+			workingDir = cfg.WorkingDir
+			protocol = cfg.Protocol
 		}
 
 		// Calculate unified health status (Spec 013: Health is single source of truth)
@@ -839,6 +851,8 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"name":            serverStatus.Name,
 			"url":             url,
 			"command":         command,
+			"args":            args,
+			"working_dir":     workingDir,
 			"protocol":        protocol,
 			"enabled":         serverStatus.Enabled,
 			"quarantined":     serverStatus.Quarantined,
@@ -1044,6 +1058,73 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 
 	s.logger.Info("Server added successfully",
 		zap.String("name", serverConfig.Name))
+
+	return nil
+}
+
+// UpdateServer applies partial updates to an existing upstream server configuration.
+func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *config.ServerConfig) error {
+	s.logger.Info("Updating upstream server", zap.String("name", serverName))
+
+	storageManager := s.runtime.StorageManager()
+	existing, err := storageManager.GetUpstreamServer(serverName)
+	if err != nil || existing == nil {
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	// Apply non-zero/non-nil fields from updates
+	if updates.URL != "" {
+		existing.URL = updates.URL
+	}
+	if updates.Command != "" {
+		existing.Command = updates.Command
+	}
+	if updates.Args != nil {
+		existing.Args = updates.Args
+	}
+	if updates.Env != nil {
+		existing.Env = updates.Env
+	}
+	if updates.Headers != nil {
+		existing.Headers = updates.Headers
+	}
+	if updates.WorkingDir != "" {
+		existing.WorkingDir = updates.WorkingDir
+	}
+	if updates.Protocol != "" {
+		existing.Protocol = updates.Protocol
+	}
+	// Booleans are always applied since the handler only calls UpdateServer
+	// when the caller explicitly provided these fields
+	existing.Enabled = updates.Enabled
+	existing.Quarantined = updates.Quarantined
+
+	// Save to storage
+	if err := storageManager.SaveUpstreamServer(existing); err != nil {
+		return fmt.Errorf("failed to save server: %w", err)
+	}
+
+	// Update runtime config
+	currentConfig := s.runtime.Config()
+	if currentConfig != nil {
+		for i, sc := range currentConfig.Servers {
+			if sc.Name == serverName {
+				currentConfig.Servers[i] = existing
+				break
+			}
+		}
+		s.runtime.UpdateConfig(currentConfig, "")
+	}
+
+	// Save configuration to file
+	if err := s.SaveConfiguration(); err != nil {
+		s.logger.Warn("Failed to save configuration after updating server", zap.Error(err))
+	}
+
+	// Notify about change
+	s.OnUpstreamServerChange()
+
+	s.logger.Info("Server updated successfully", zap.String("name", serverName))
 
 	return nil
 }

@@ -138,12 +138,12 @@ struct DashboardView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                        .accessibilityLabel("Connect Clients")
+                        .accessibilityLabel("Connect AI clients to MCPProxy")
 
                         Button {
                             NotificationCenter.default.post(name: .switchToServers, object: nil)
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                NotificationCenter.default.post(name: .showAddServer, object: nil)
+                                NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.importConfig)
                             }
                         } label: {
                             Label("Import from client configs", systemImage: "square.and.arrow.down")
@@ -152,7 +152,7 @@ struct DashboardView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .accessibilityLabel("Import from client configs")
+                        .accessibilityLabel("Import servers from AI client configuration files")
 
                         // Recent Sessions link
                         Button {
@@ -333,25 +333,7 @@ struct DashboardView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-
-                        // Security Scan label with "soon" badge
-                        HStack(spacing: 4) {
-                            Image(systemName: "shield.lefthalf.filled")
-                                .font(.system(size: 10 * fontScale))
-                                .foregroundStyle(.secondary)
-                            Text("Security Scan")
-                                .font(.scaled(.caption, scale: fontScale))
-                                .foregroundStyle(.secondary)
-                            Text("soon")
-                                .font(.scaled(.caption2, scale: fontScale))
-                                .fontWeight(.semibold)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.gray.opacity(0.15))
-                                .foregroundStyle(.secondary)
-                                .clipShape(Capsule())
-                        }
-                        .padding(.top, 2)
+                        .accessibilityLabel("Add a new upstream MCP server")
                     }
                 }
                 .frame(maxWidth: .infinity)

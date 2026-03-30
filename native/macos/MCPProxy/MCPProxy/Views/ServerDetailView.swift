@@ -38,6 +38,23 @@ struct ServerDetailView: View {
     @State private var isApproving = false
     @State private var actionMessage: String?
 
+    // Edit mode state for Config tab
+    @State private var isEditing = false
+    @State private var editURL = ""
+    @State private var editCommand = ""
+    @State private var editArgs = ""
+    @State private var editWorkingDir = ""
+    @State private var editEnvVars = ""
+    @State private var editEnabled = true
+    @State private var editQuarantined = false
+    @State private var editDockerIsolation = false
+    @State private var editSkipQuarantine = false
+    @State private var isSavingEdit = false
+    @State private var editError: String?
+
+    // Logs auto-refresh timer
+    @State private var logRefreshTimer: Timer?
+
     private var apiClient: APIClient? { appState.apiClient }
 
     var body: some View {
@@ -260,6 +277,7 @@ struct ServerDetailView: View {
     @ViewBuilder
     private var logsTab: some View {
         VStack(alignment: .leading, spacing: 0) {
+            lastErrorBanner
             HStack {
                 Text("Server Logs")
                     .font(.scaled(.subheadline, scale: fontScale).bold())
@@ -329,6 +347,34 @@ struct ServerDetailView: View {
             }
         }
         .task { await loadLogs() }
+        .onAppear { startLogRefresh() }
+        .onDisappear { stopLogRefresh() }
+    }
+
+    /// Banner showing last error at top of Logs tab.
+    @ViewBuilder
+    private var lastErrorBanner: some View {
+        if let lastError = server.lastError, !lastError.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Last Error")
+                        .font(.scaled(.caption, scale: fontScale).bold())
+                        .foregroundStyle(.red)
+                    Text(lastError)
+                        .font(.scaledMonospaced(.caption, scale: fontScale))
+                        .foregroundStyle(.red.opacity(0.8))
+                        .textSelection(.enabled)
+                }
+                Spacer()
+            }
+            .padding(8)
+            .background(Color.red.opacity(0.1))
+            .cornerRadius(6)
+            .padding(.horizontal)
+            .padding(.top, 4)
+        }
     }
 
     /// Render a single log line with color-coded level and word wrapping.
@@ -359,64 +405,145 @@ struct ServerDetailView: View {
 
     @ViewBuilder
     private var configTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                configSection(title: "General") {
-                    configRow(label: "Name", value: server.name)
-                    configRow(label: "Protocol", value: server.protocol)
-                    configRow(label: "Enabled", value: server.enabled ? "Yes" : "No")
-                    if server.quarantined {
-                        configRow(label: "Quarantined", value: "Yes")
+        VStack(spacing: 0) {
+            // Edit/Save/Cancel toolbar
+            HStack {
+                Spacer()
+                if isEditing {
+                    if isSavingEdit {
+                        ProgressView().controlSize(.small)
+                        Text("Saving...")
+                            .font(.scaled(.caption, scale: fontScale))
                     }
-                }
-
-                if server.protocol == "http" || server.protocol == "sse" {
-                    configSection(title: "Connection") {
-                        configRow(label: "URL", value: server.url ?? "N/A")
+                    Button("Cancel") {
+                        isEditing = false
+                        editError = nil
                     }
-                }
-
-                if server.protocol == "stdio" {
-                    configSection(title: "Process") {
-                        configRow(label: "Command", value: server.command ?? "N/A")
-                        if let args = server.args, !args.isEmpty {
-                            configRow(label: "Args", value: args.joined(separator: " "))
-                        }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    Button("Save") {
+                        Task { await saveEdits() }
                     }
-                }
-
-                configSection(title: "Status") {
-                    configRow(label: "Connected", value: server.connected ? "Yes" : "No")
-                    if let connectedAt = server.connectedAt {
-                        configRow(label: "Connected At", value: connectedAt)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(isSavingEdit)
+                } else {
+                    Button {
+                        startEditing()
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
                     }
-                    if let reconnectCount = server.reconnectCount, reconnectCount > 0 {
-                        configRow(label: "Reconnect Count", value: "\(reconnectCount)")
-                    }
-                    configRow(label: "Tool Count", value: "\(server.toolCount)")
-                    if let tokenSize = server.toolListTokenSize {
-                        configRow(label: "Token Size", value: "\(tokenSize)")
-                    }
-                    if let lastError = server.lastError {
-                        configRow(label: "Last Error", value: lastError)
-                    }
-                }
-
-                if let health = server.health {
-                    configSection(title: "Health") {
-                        configRow(label: "Level", value: health.level)
-                        configRow(label: "Admin State", value: health.adminState)
-                        configRow(label: "Summary", value: health.summary)
-                        if let detail = health.detail, !detail.isEmpty {
-                            configRow(label: "Detail", value: detail)
-                        }
-                        if let action = health.action, !action.isEmpty {
-                            configRow(label: "Action", value: action)
-                        }
-                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
             }
-            .padding()
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            if let err = editError {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    Text(err)
+                        .font(.scaled(.caption, scale: fontScale))
+                        .foregroundStyle(.red)
+                    Spacer()
+                    Button("Dismiss") { editError = nil }
+                        .buttonStyle(.borderless)
+                        .font(.scaled(.caption, scale: fontScale))
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.1))
+            }
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    configSection(title: "General") {
+                        configRow(label: "Name", value: server.name)
+                        configRow(label: "Protocol", value: server.protocol)
+                        if isEditing {
+                            configToggleRow(label: "Enabled", isOn: $editEnabled)
+                            configToggleRow(label: "Quarantined", isOn: $editQuarantined)
+                            configToggleRow(label: "Docker Isolation", isOn: $editDockerIsolation)
+                            configToggleRow(label: "Skip Quarantine", isOn: $editSkipQuarantine)
+                        } else {
+                            configRow(label: "Enabled", value: server.enabled ? "Yes" : "No")
+                            if server.quarantined {
+                                configRow(label: "Quarantined", value: "Yes")
+                            }
+                        }
+                    }
+
+                    if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
+                        configSection(title: "Connection") {
+                            if isEditing {
+                                configEditRow(label: "URL", text: $editURL, placeholder: "https://api.example.com/mcp")
+                            } else {
+                                configRow(label: "URL", value: server.url ?? "N/A")
+                            }
+                        }
+                    }
+
+                    if server.protocol == "stdio" {
+                        configSection(title: "Process") {
+                            if isEditing {
+                                configEditRow(label: "Command", text: $editCommand, placeholder: "e.g. npx, uvx")
+                                configEditRow(label: "Args (one per line)", text: $editArgs, placeholder: "arg1\narg2", multiline: true)
+                                configEditRow(label: "Working Dir", text: $editWorkingDir, placeholder: "/path/to/project")
+                            } else {
+                                configRow(label: "Command", value: server.command ?? server.name)
+                                if let args = server.args, !args.isEmpty {
+                                    configRow(label: "Args", value: args.joined(separator: " "))
+                                }
+                                if let wd = server.workingDir, !wd.isEmpty {
+                                    configRow(label: "Working Dir", value: wd)
+                                }
+                            }
+                        }
+                    }
+
+                    if isEditing {
+                        configSection(title: "Environment Variables") {
+                            configEditRow(label: "KEY=VALUE per line", text: $editEnvVars, placeholder: "API_KEY=abc123\nDEBUG=true", multiline: true)
+                        }
+                    }
+
+                    configSection(title: "Status") {
+                        configRow(label: "Connected", value: server.connected ? "Yes" : "No")
+                        if let connectedAt = server.connectedAt {
+                            configRow(label: "Connected At", value: connectedAt)
+                        }
+                        if let reconnectCount = server.reconnectCount, reconnectCount > 0 {
+                            configRow(label: "Reconnect Count", value: "\(reconnectCount)")
+                        }
+                        configRow(label: "Tool Count", value: "\(server.toolCount)")
+                        if let tokenSize = server.toolListTokenSize {
+                            configRow(label: "Token Size", value: "\(tokenSize)")
+                        }
+                        if let lastError = server.lastError {
+                            configRow(label: "Last Error", value: lastError)
+                        }
+                    }
+
+                    if let health = server.health {
+                        configSection(title: "Health") {
+                            configRow(label: "Level", value: health.level)
+                            configRow(label: "Admin State", value: health.adminState)
+                            configRow(label: "Summary", value: health.summary)
+                            if let detail = health.detail, !detail.isEmpty {
+                                configRow(label: "Detail", value: detail)
+                            }
+                            if let action = health.action, !action.isEmpty {
+                                configRow(label: "Action", value: action)
+                            }
+                        }
+                    }
+                }
+                .padding()
+            }
         }
     }
 
@@ -439,10 +566,44 @@ struct ServerDetailView: View {
             Text(label)
                 .font(.scaled(.subheadline, scale: fontScale))
                 .foregroundStyle(.secondary)
-                .frame(width: 120, alignment: .trailing)
+                .frame(width: 140, alignment: .trailing)
             Text(value)
                 .font(.scaledMonospaced(.subheadline, scale: fontScale))
                 .textSelection(.enabled)
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func configEditRow(label: String, text: Binding<String>, placeholder: String, multiline: Bool = false) -> some View {
+        HStack(alignment: .top) {
+            Text(label)
+                .font(.scaled(.subheadline, scale: fontScale))
+                .foregroundStyle(.secondary)
+                .frame(width: 140, alignment: .trailing)
+            if multiline {
+                TextEditor(text: text)
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .frame(height: 60)
+                    .border(Color(nsColor: .separatorColor), width: 1)
+            } else {
+                TextField(placeholder, text: text)
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .textFieldStyle(.roundedBorder)
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func configToggleRow(label: String, isOn: Binding<Bool>) -> some View {
+        HStack {
+            Text(label)
+                .font(.scaled(.subheadline, scale: fontScale))
+                .foregroundStyle(.secondary)
+                .frame(width: 140, alignment: .trailing)
+            Toggle("", isOn: isOn)
+                .labelsHidden()
             Spacer()
         }
     }
@@ -525,6 +686,102 @@ struct ServerDetailView: View {
         } catch {
             actionMessage = "Error: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Edit Mode
+
+    private func startEditing() {
+        editURL = server.url ?? ""
+        editCommand = server.command ?? ""
+        editArgs = (server.args ?? []).joined(separator: "\n")
+        editWorkingDir = server.workingDir ?? ""
+        editEnvVars = "" // env vars not in ServerStatus model, would need config API
+        editEnabled = server.enabled
+        editQuarantined = server.quarantined
+        editDockerIsolation = false // read from config if available
+        editSkipQuarantine = false  // read from config if available
+        editError = nil
+        isEditing = true
+    }
+
+    private func saveEdits() async {
+        guard let client = apiClient else { return }
+        isSavingEdit = true
+        editError = nil
+
+        var updates: [String: Any] = [:]
+
+        // String fields — only include if changed
+        if server.protocol == "stdio" {
+            let cmd = editCommand.trimmingCharacters(in: .whitespaces)
+            if cmd.isEmpty {
+                editError = "Command is required for stdio servers"
+                isSavingEdit = false
+                return
+            }
+            if cmd != (server.command ?? "") { updates["command"] = cmd }
+            let args = editArgs.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            updates["args"] = args
+        } else {
+            let url = editURL.trimmingCharacters(in: .whitespaces)
+            if url.isEmpty {
+                editError = "URL is required for HTTP servers"
+                isSavingEdit = false
+                return
+            }
+            if url != (server.url ?? "") { updates["url"] = url }
+        }
+
+        let wd = editWorkingDir.trimmingCharacters(in: .whitespaces)
+        if !wd.isEmpty { updates["working_dir"] = wd }
+
+        // Parse env vars
+        if !editEnvVars.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            var env: [String: String] = [:]
+            for line in editEnvVars.components(separatedBy: "\n") {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty { continue }
+                let parts = trimmed.components(separatedBy: "=")
+                if parts.count >= 2 {
+                    env[parts[0].trimmingCharacters(in: .whitespaces)] = parts.dropFirst().joined(separator: "=")
+                }
+            }
+            if !env.isEmpty { updates["env"] = env }
+        }
+
+        // Boolean toggles
+        if editEnabled != server.enabled { updates["enabled"] = editEnabled }
+        if editQuarantined != server.quarantined { updates["quarantined"] = editQuarantined }
+
+        if updates.isEmpty {
+            isEditing = false
+            isSavingEdit = false
+            return
+        }
+
+        do {
+            try await client.updateServer(server.name, updates: updates)
+            isEditing = false
+            actionMessage = "Server configuration updated. Restart may be required."
+        } catch {
+            editError = "Failed to save: \(error.localizedDescription)"
+        }
+
+        isSavingEdit = false
+    }
+
+    // MARK: - Log Auto-Refresh
+
+    private func startLogRefresh() {
+        logRefreshTimer?.invalidate()
+        logRefreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
+            Task { await loadLogs() }
+        }
+    }
+
+    private func stopLogRefresh() {
+        logRefreshTimer?.invalidate()
+        logRefreshTimer = nil
     }
 }
 

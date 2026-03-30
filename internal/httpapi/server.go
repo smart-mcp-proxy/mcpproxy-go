@@ -57,6 +57,7 @@ type ServerController interface {
 	GetAllServers() ([]map[string]interface{}, error)
 	AddServer(ctx context.Context, serverConfig *config.ServerConfig) error // T001: Add server
 	RemoveServer(ctx context.Context, serverName string) error              // T002: Remove server
+	UpdateServer(ctx context.Context, serverName string, updates *config.ServerConfig) error
 	EnableServer(serverName string, enabled bool) error
 	RestartServer(serverName string) error
 	ForceReconnectAllServers(reason string) error
@@ -477,6 +478,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/servers/enable_all", s.handleEnableAll)
 		r.Post("/servers/disable_all", s.handleDisableAll)
 		r.Route("/servers/{id}", func(r chi.Router) {
+			r.Patch("/", s.handlePatchServer)   // Partial update server config
 			r.Delete("/", s.handleRemoveServer) // T002: Remove server
 			r.Post("/enable", s.handleEnableServer)
 			r.Post("/disable", s.handleDisableServer)
@@ -1121,6 +1123,99 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 		Server:  serverID,
 		Action:  "remove",
 		Success: true,
+	})
+}
+
+// handlePatchServer godoc
+// @Summary Partially update an upstream server
+// @Description Update specific fields of an existing upstream MCP server configuration.
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Param server body AddServerRequest true "Fields to update (all optional)"
+// @Success 200 {object} contracts.SuccessResponse "Server updated successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request - no fields or invalid body"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /api/v1/servers/{id} [patch]
+func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
+	serverName := chi.URLParam(r, "id")
+	if serverName == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	var req AddServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// Build partial update config - only set fields that were provided
+	updates := &config.ServerConfig{Name: serverName}
+	hasUpdates := false
+
+	if req.URL != "" {
+		updates.URL = req.URL
+		hasUpdates = true
+	}
+	if req.Command != "" {
+		updates.Command = req.Command
+		hasUpdates = true
+	}
+	if req.Args != nil {
+		updates.Args = req.Args
+		hasUpdates = true
+	}
+	if req.Env != nil {
+		updates.Env = req.Env
+		hasUpdates = true
+	}
+	if req.Headers != nil {
+		updates.Headers = req.Headers
+		hasUpdates = true
+	}
+	if req.WorkingDir != "" {
+		updates.WorkingDir = req.WorkingDir
+		hasUpdates = true
+	}
+	if req.Protocol != "" {
+		updates.Protocol = req.Protocol
+		hasUpdates = true
+	}
+	if req.Enabled != nil {
+		updates.Enabled = *req.Enabled
+		hasUpdates = true
+	}
+	if req.Quarantined != nil {
+		updates.Quarantined = *req.Quarantined
+		hasUpdates = true
+	}
+
+	if !hasUpdates {
+		s.writeError(w, r, http.StatusBadRequest, "No fields to update")
+		return
+	}
+
+	logger := s.getRequestLogger(r)
+
+	if err := s.controller.UpdateServer(r.Context(), serverName, updates); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, r, http.StatusNotFound, err.Error())
+			return
+		}
+		logger.Error("Failed to update server", "server", serverName, "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to update server: %v", err))
+		return
+	}
+
+	logger.Info("Server updated successfully", "server", serverName)
+	s.writeSuccess(w, map[string]interface{}{
+		"message":          fmt.Sprintf("Server '%s' updated successfully", serverName),
+		"restart_required": true,
 	})
 }
 
