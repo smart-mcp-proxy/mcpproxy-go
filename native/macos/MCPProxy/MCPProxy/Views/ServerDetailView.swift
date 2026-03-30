@@ -25,11 +25,12 @@ enum ServerDetailTab: String, CaseIterable {
 // MARK: - Server Detail View
 
 struct ServerDetailView: View {
-    let server: ServerStatus
+    let initialServer: ServerStatus
     @ObservedObject var appState: AppState
     let onDismiss: () -> Void
     @Environment(\.fontScale) var fontScale
 
+    @State private var server: ServerStatus
     @State private var selectedTab: ServerDetailTab = .tools
     @State private var tools: [ServerTool] = []
     @State private var logLines: [String] = []
@@ -37,6 +38,13 @@ struct ServerDetailView: View {
     @State private var isLoadingLogs = false
     @State private var isApproving = false
     @State private var actionMessage: String?
+
+    init(server: ServerStatus, appState: AppState, onDismiss: @escaping () -> Void) {
+        self.initialServer = server
+        self.appState = appState
+        self.onDismiss = onDismiss
+        self._server = State(initialValue: server)
+    }
 
     // Edit mode state for Config tab
     @State private var isEditing = false
@@ -124,6 +132,7 @@ struct ServerDetailView: View {
                             try await apiClient?.approveTools(server.id)
                             try await apiClient?.unquarantineServer(server.id)
                             actionMessage = "Server approved and activated"
+                            await refreshServer()
                         } catch {
                             actionMessage = "Failed to approve: \(error.localizedDescription)"
                         }
@@ -134,14 +143,33 @@ struct ServerDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .controlSize(.small)
+            } else {
+                // Allow re-quarantining an approved server
+                Button {
+                    Task {
+                        do {
+                            try await apiClient?.postAction(path: "/api/v1/servers/\(server.id)/quarantine")
+                            actionMessage = "Server quarantined"
+                            await refreshServer()
+                        } catch {
+                            actionMessage = "Failed to quarantine: \(error.localizedDescription)"
+                        }
+                    }
+                } label: {
+                    Label("Quarantine", systemImage: "shield.lefthalf.filled")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
 
             if server.enabled {
                 let disableLabel = server.protocol == "stdio" ? "Stop" : "Disable"
                 let disabledMsg = server.protocol == "stdio" ? "stopped" : "disabled"
                 Button(disableLabel) {
-                    Task { await performAction { try await apiClient?.disableServer(server.id) }
+                    Task {
+                        await performAction { try await apiClient?.disableServer(server.id) }
                         actionMessage = "\(server.name) \(disabledMsg)"
+                        await refreshServer()
                     }
                 }
                 .buttonStyle(.bordered)
@@ -724,6 +752,19 @@ struct ServerDetailView: View {
             try await action()
         } catch {
             actionMessage = "Error: \(error.localizedDescription)"
+        }
+    }
+
+    /// Refresh server status from API to update the view after mutations.
+    private func refreshServer() async {
+        guard let client = apiClient else { return }
+        do {
+            let servers = try await client.servers()
+            if let updated = servers.first(where: { $0.name == server.name }) {
+                server = updated
+            }
+        } catch {
+            // Silently fail — view keeps showing stale data
         }
     }
 
