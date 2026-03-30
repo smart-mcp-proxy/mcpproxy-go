@@ -241,6 +241,11 @@ struct ServerDetailView: View {
                     Text(server.connected ? "This server has no tools" : "Connect the server to see tools")
                         .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.tertiary)
+                    Button("Reload") {
+                        Task { await loadTools() }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -672,13 +677,17 @@ struct ServerDetailView: View {
     // MARK: - Data Loading
 
     private func loadTools() async {
-        guard let client = apiClient else { return }
+        guard let client = apiClient else {
+            NSLog("[ServerDetail] loadTools: no apiClient")
+            return
+        }
         isLoadingTools = true
         defer { isLoadingTools = false }
         do {
             tools = try await client.serverTools(server.name)
+            NSLog("[ServerDetail] loadTools: loaded %d tools for %@", tools.count, server.name)
         } catch {
-            // Silently fail -- tools just won't display
+            NSLog("[ServerDetail] loadTools FAILED for %@: %@", server.name, error.localizedDescription)
         }
     }
 

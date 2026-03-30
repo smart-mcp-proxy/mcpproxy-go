@@ -29,6 +29,7 @@ final class SocketURLProtocol: URLProtocol {
 
     /// Active read task, retained for cancellation.
     private var socketFD: Int32 = -1
+    private let socketLock = NSLock()
     private var readThread: Thread?
     private var isCancelled = false
 
@@ -138,9 +139,18 @@ final class SocketURLProtocol: URLProtocol {
 
     override func stopLoading() {
         isCancelled = true
-        if socketFD >= 0 {
-            Darwin.close(socketFD)
-            socketFD = -1
+        closeSocket()
+    }
+
+    /// Thread-safe close of the socket file descriptor.
+    /// Prevents double-close race between stopLoading (CFNetwork thread) and readResponse (background thread).
+    private func closeSocket() {
+        socketLock.lock()
+        let fd = socketFD
+        socketFD = -1
+        socketLock.unlock()
+        if fd >= 0 {
+            Darwin.close(fd)
         }
     }
 
@@ -251,10 +261,7 @@ final class SocketURLProtocol: URLProtocol {
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 1)
         defer {
             buffer.deallocate()
-            if socketFD >= 0 {
-                Darwin.close(socketFD)
-                socketFD = -1
-            }
+            closeSocket()
         }
 
         // Phase 1: Read until we find the header/body separator (\r\n\r\n)
