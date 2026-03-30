@@ -93,7 +93,9 @@ cat > "$LAUNCH_AGENT_FILE" << 'EOF'
     <string>com.smartmcpproxy.mcpproxy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/mcpproxy.app/Contents/MacOS/mcpproxy</string>
+        <string>open</string>
+        <string>-a</string>
+        <string>/Applications/mcpproxy.app</string>
     </array>
     <key>RunAtLoad</key>
     <false/>
@@ -139,4 +141,4 @@ echo '  }'
 echo ""
 echo "📖 Get started: mcpproxy --help"
 
-exit 0 
+exit 0

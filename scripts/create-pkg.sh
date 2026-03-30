@@ -155,7 +155,7 @@ cat > "$PKG_ROOT/Applications/$APP_BUNDLE/Contents/Info.plist" << EOF
     <key>CFBundleSignature</key>
     <string>MCPP</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.15</string>
+    <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>LSBackgroundOnly</key>

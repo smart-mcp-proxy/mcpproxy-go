@@ -21,7 +21,7 @@
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>LSBackgroundOnly</key>
     <false/>
     <key>NSHighResolutionCapable</key>
