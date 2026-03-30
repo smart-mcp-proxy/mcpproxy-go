@@ -545,17 +545,19 @@ func (c *Client) GetServers() ([]Server, error) {
 			}
 		}
 
-		if len(result) == 0 {
-			c.logger.Warnw("API returned zero upstream servers",
-				"base_url", c.baseURL)
-		} else if stateChanged {
-			// Only log when server states actually change
-			c.logger.Debugw("Server state changed",
-				"count", len(result),
-				"connected", countConnected(result),
-				"with_health", withHealthCount,
-				"healthy", healthyCount,
-				"quarantined", countQuarantined(result))
+		if stateChanged {
+			if len(result) == 0 {
+				c.logger.Warnw("API returned zero upstream servers",
+					"base_url", c.baseURL)
+			} else {
+				// Only log when server states actually change
+				c.logger.Debugw("Server state changed",
+					"count", len(result),
+					"connected", countConnected(result),
+					"with_health", withHealthCount,
+					"healthy", healthyCount,
+					"quarantined", countQuarantined(result))
+			}
 			c.lastServerState = stateHash
 		}
 		// Silent when no changes - reduces log noise from frequent polling
