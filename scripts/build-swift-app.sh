@@ -103,21 +103,32 @@ if [ -f "MCPProxy/MCPProxy.entitlements" ]; then
   cp "MCPProxy/MCPProxy.entitlements" "$APP_BUNDLE/Contents/"
 fi
 
-# Copy asset catalog (icons) if compiled
-if [ -f "MCPProxy/Assets.xcassets/AppIcon.appiconset/Contents.json" ]; then
-  # For CI, we need actool to compile assets; skip if not available
-  if command -v actool &>/dev/null; then
-    actool --compile "$APP_BUNDLE/Contents/Resources" \
-      --platform macosx --minimum-deployment-target 13.0 \
-      "MCPProxy/Assets.xcassets" 2>/dev/null || true
-  fi
+# Compile asset catalog if actool is available (Xcode must be installed)
+if xcrun --find actool &>/dev/null 2>&1; then
+  echo "Compiling asset catalog..."
+  xcrun actool --compile "$APP_BUNDLE/Contents/Resources" \
+    --platform macosx --minimum-deployment-target 13.0 \
+    --app-icon AppIcon --output-partial-info-plist /dev/null \
+    "MCPProxy/Assets.xcassets" 2>&1 | tail -3
+  echo "✅ Asset catalog compiled"
+else
+  echo "⚠️  actool not available, copying icon PNGs directly..."
 fi
 
-# Copy .icns icon if available
-if [ -f "../../assets/mcpproxy.icns" ]; then
-  cp "../../assets/mcpproxy.icns" "$APP_BUNDLE/Contents/Resources/"
-elif [ -f "../../../assets/mcpproxy.icns" ]; then
-  cp "../../../assets/mcpproxy.icns" "$APP_BUNDLE/Contents/Resources/"
+# Always copy raw icon PNGs as fallback (tray icon loads by filename)
+if [ -f "MCPProxy/Assets.xcassets/TrayIcon.imageset/icon-mono-44.png" ]; then
+  cp "MCPProxy/Assets.xcassets/TrayIcon.imageset/icon-mono-44.png" "$APP_BUNDLE/Contents/Resources/"
+  echo "✅ Tray icon copied: icon-mono-44.png"
+fi
+for icon in MCPProxy/Assets.xcassets/AppIcon.appiconset/icon-*.png; do
+  [ -f "$icon" ] && cp "$icon" "$APP_BUNDLE/Contents/Resources/"
+done
+
+# Copy .icns icon if available at repo root
+REPO_ROOT="$(cd ../../.. 2>/dev/null && pwd)"
+if [ -f "$REPO_ROOT/assets/mcpproxy.icns" ]; then
+  cp "$REPO_ROOT/assets/mcpproxy.icns" "$APP_BUNDLE/Contents/Resources/"
+  echo "✅ App icon copied: mcpproxy.icns"
 fi
 
 # PkgInfo
