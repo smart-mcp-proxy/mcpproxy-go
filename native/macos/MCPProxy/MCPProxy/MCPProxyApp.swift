@@ -846,9 +846,12 @@ struct MCPProxyApp: App {
     var body: some Scene {
         // No SwiftUI scenes — the tray menu is pure AppKit (NSStatusItem + NSMenu).
         // This avoids the MenuBarExtra .menu style bug where ForEach duplicates items.
-        // A Settings scene can be added here for Spec B (main window).
+        // Settings scene intentionally hidden — Cmd+, is handled by tray menu "Open MCPProxy..." item.
         Settings {
-            EmptyView()
+            Text("Use the MCPProxy tray menu to access settings.")
+                .frame(width: 300, height: 100)
+                .font(.body)
+                .foregroundColor(.secondary)
         }
     }
 }

@@ -187,6 +187,7 @@ struct TokensView: View {
 struct TokenRow: View {
     let token: AgentToken
     let onRevoke: () -> Void
+    @State private var showRevokeConfirmation = false
     @Environment(\.fontScale) var fontScale
 
     var body: some View {
@@ -245,7 +246,7 @@ struct TokenRow: View {
             }
 
             Button(role: .destructive) {
-                onRevoke()
+                showRevokeConfirmation = true
             } label: {
                 Image(systemName: "trash")
             }
@@ -253,6 +254,14 @@ struct TokenRow: View {
             .help("Revoke this token")
         }
         .padding(.vertical, 4)
+        .alert("Revoke Token", isPresented: $showRevokeConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Revoke", role: .destructive) {
+                onRevoke()
+            }
+        } message: {
+            Text("Are you sure you want to revoke \"\(token.name)\"? This action cannot be undone.")
+        }
     }
 
     private func formattedDate(_ isoString: String) -> String {

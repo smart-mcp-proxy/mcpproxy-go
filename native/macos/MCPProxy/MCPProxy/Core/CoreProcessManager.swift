@@ -206,12 +206,8 @@ actor CoreProcessManager {
             let binaryPath = try resolveBinary()
             coreBinaryPath = binaryPath
 
-            // Generate a session API key
-            let apiKey = generateAPIKey()
-            sessionAPIKey = apiKey
-
-            // Launch the process
-            try await launchCore(binaryPath: binaryPath, apiKey: apiKey)
+            // Launch the process (core uses its own config API key)
+            try await launchCore(binaryPath: binaryPath)
 
             // Wait for the socket to become available
             await transitionState(to: .waitingForCore)
@@ -322,14 +318,15 @@ actor CoreProcessManager {
     // MARK: - Private: Process Launch
 
     /// Launch the mcpproxy core process.
-    private func launchCore(binaryPath: String, apiKey: String) async throws {
+    private func launchCore(binaryPath: String) async throws {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
         proc.arguments = ["serve"]
 
-        // Pass environment with the generated API key
+        // Let core use its own config API key (or auto-generate one).
+        // We fetch the key from core via socket after it starts.
         var env = ProcessInfo.processInfo.environment
-        env["MCPPROXY_API_KEY"] = apiKey
+        env.removeValue(forKey: "MCPPROXY_API_KEY")
         // Enable socket communication
         env["MCPPROXY_SOCKET"] = "true"
         proc.environment = env
@@ -407,13 +404,13 @@ actor CoreProcessManager {
 
     /// Create API and SSE clients connected to the core via the Unix socket.
     private func connectToCore() async throws {
-        NSLog("[MCPProxy] connectToCore: creating APIClient (socket=%@, apiKey=%@)",
-              socketPath, sessionAPIKey != nil ? "set" : "nil")
+        // First connect via socket (no API key needed — socket is trusted)
+        NSLog("[MCPProxy] connectToCore: creating APIClient via socket=%@", socketPath)
 
         let client = APIClient(
             socketPath: socketPath,
             baseURL: "http://127.0.0.1:8080",
-            apiKey: sessionAPIKey
+            apiKey: nil
         )
 
         // Verify the core is ready
@@ -424,10 +421,21 @@ actor CoreProcessManager {
         }
         NSLog("[MCPProxy] connectToCore: core is ready")
 
-        // Fetch version info
+        // Fetch version info and extract API key from web_ui_url
         NSLog("[MCPProxy] connectToCore: calling /api/v1/info...")
         let info = try await client.info()
         NSLog("[MCPProxy] connectToCore: got version=%@", info.version)
+
+        // Extract API key from web_ui_url (e.g. "http://127.0.0.1:8080/ui/?apikey=abc123")
+        if let urlComponents = URLComponents(string: info.webUiUrl),
+           let apikeyItem = urlComponents.queryItems?.first(where: { $0.name == "apikey" }),
+           let key = apikeyItem.value, !key.isEmpty {
+            sessionAPIKey = key
+            NSLog("[MCPProxy] connectToCore: extracted API key from core (prefix=%@...)", String(key.prefix(8)))
+        } else {
+            NSLog("[MCPProxy] connectToCore: WARNING - no API key found in web_ui_url: %@", info.webUiUrl)
+        }
+
         await MainActor.run {
             appState.version = info.version
             if let update = info.update, update.available, let latest = update.latestVersion {
@@ -438,7 +446,7 @@ actor CoreProcessManager {
         apiClient = client
         await MainActor.run { appState.apiClient = client }
 
-        // Create SSE client — uses TCP (not socket) for streaming compatibility
+        // Create SSE client — uses TCP (not socket) so needs the API key
         NSLog("[MCPProxy] connectToCore: creating SSEClient (TCP, apiKey=%@)",
               sessionAPIKey != nil ? "set" : "nil")
         sseClient = SSEClient(

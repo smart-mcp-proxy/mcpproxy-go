@@ -530,7 +530,7 @@ actor APIClient {
 
     /// Execute a POST action that returns a success/error wrapper.
     @discardableResult
-    private func postAction(path: String, body: [String: Any]? = nil) async throws -> Data {
+    func postAction(path: String, body: [String: Any]? = nil) async throws -> Data {
         let bodyData: Data?
         if let body {
             bodyData = try JSONSerialization.data(withJSONObject: body)

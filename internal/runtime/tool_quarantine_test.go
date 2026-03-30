@@ -233,6 +233,35 @@ func TestCheckToolApprovals_PerServerSkip_AutoApproved(t *testing.T) {
 	assert.NotEmpty(t, record.ApprovedHash)
 }
 
+func TestCheckToolApprovals_TrustedServer_NewToolPending(t *testing.T) {
+	// When quarantine is globally enabled, new tools from trusted (non-quarantined)
+	// servers should still require approval. This prevents injection via new tool
+	// additions on compromised servers.
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true}, // trusted, NOT quarantined
+	})
+
+	tools := []*config.ToolMetadata{
+		{
+			ServerName:  "github",
+			Name:        "new_malicious_tool",
+			Description: "A tool that appeared after server compromise",
+			ParamsJSON:  `{"type":"object"}`,
+			Hash:        "h1",
+		},
+	}
+
+	result, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.PendingCount, "New tool on trusted server should be pending when quarantine enabled")
+	assert.True(t, result.BlockedTools["new_malicious_tool"], "New tool should be blocked until approved")
+
+	// Verify storage record
+	record, err := rt.storageManager.GetToolApproval("github", "new_malicious_tool")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
+}
+
 func TestCheckToolApprovals_AutoApproved_ThenChanged_StillBlocked(t *testing.T) {
 	// Verify that even auto-approved tools get blocked if their hash changes later.
 	// Use a shared temp dir so the second runtime reuses the same DB.

@@ -117,11 +117,15 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		}
 	}
 
-	// Auto-approve new tools when:
-	// - Global quarantine is disabled, OR
-	// - Server has skip_quarantine=true, OR
-	// - Server is NOT quarantined (user trusts this server)
-	// Changed tools are still blocked regardless (rug pull detection).
+	// Quarantine enforcement levels:
+	// 1. enforceNewTools: block NEW tools for review (unless quarantine is disabled or server skipped)
+	// 2. enforceQuarantine: full quarantine mode for servers explicitly quarantined
+	//
+	// Even trusted (non-quarantined) servers should have new tools reviewed when quarantine
+	// is globally enabled. This prevents injection attacks via new tool additions on
+	// compromised servers. Only skip_quarantine=true explicitly opts out.
+	// Changed tools (rug pull) are always blocked when globalEnabled is true (line ~438).
+	enforceNewTools := globalEnabled && !serverSkipped
 	enforceQuarantine := globalEnabled && !serverSkipped && serverQuarantined
 
 	result := &ToolApprovalResult{
@@ -150,9 +154,8 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 		if err != nil {
 			// No existing record - this is a new tool.
-			// If the server is trusted (quarantine not enforced), auto-approve immediately.
-			// This prevents blocking tools on upgrade for existing trusted servers.
-			if !enforceQuarantine {
+			if !enforceNewTools {
+				// Quarantine disabled or server has skip_quarantine - auto-approve
 				now := time.Now().UTC()
 				record := &storage.ToolApprovalRecord{
 					ServerName:         serverName,
@@ -174,18 +177,19 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					continue
 				}
 
-				r.logger.Info("New tool discovered, auto-approved (server trusted)",
+				r.logger.Info("New tool discovered, auto-approved (quarantine disabled or server skipped)",
 					zap.String("server", serverName),
 					zap.String("tool", toolName))
 
-				// Emit activity event
 				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
 					"", tool.Description, "", schemaJSON)
 
 				continue
 			}
 
-			// Server IS quarantined - mark tool as pending
+			// Quarantine enabled — new tool requires user review before use.
+			// This applies to ALL servers (including trusted ones) to prevent
+			// injection attacks via new tool additions on compromised servers.
 			record := &storage.ToolApprovalRecord{
 				ServerName:         serverName,
 				ToolName:           toolName,
@@ -205,12 +209,12 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 			r.logger.Info("New tool discovered, pending approval",
 				zap.String("server", serverName),
-				zap.String("tool", toolName))
+				zap.String("tool", toolName),
+				zap.Bool("server_quarantined", serverQuarantined))
 
 			result.BlockedTools[toolName] = true
 			result.PendingCount++
 
-			// Emit activity event
 			r.emitToolQuarantineEvent(serverName, toolName, "tool_discovered", "", currentHash,
 				"", tool.Description, "", schemaJSON)
 

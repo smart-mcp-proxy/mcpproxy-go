@@ -87,13 +87,13 @@ struct ActivityView: View {
     }
 
     // MARK: - Column widths
-    private let colTime: CGFloat = 65
-    private let colType: CGFloat = 130
-    private let colServer: CGFloat = 110
-    private let colDetails: CGFloat = 0  // flexible
-    private let colIntent: CGFloat = 80
-    private let colStatus: CGFloat = 80
-    private let colDuration: CGFloat = 65
+    private let colTime: CGFloat = 60
+    private let colType: CGFloat = 100
+    private let colServer: CGFloat = 100
+    private let colDetails: CGFloat = 0  // flexible (minWidth enforced in layout)
+    private let colIntent: CGFloat = 60
+    private let colStatus: CGFloat = 70
+    private let colDuration: CGFloat = 60
 
     var body: some View {
         HSplitView {
@@ -183,7 +183,8 @@ struct ActivityView: View {
             Text("Server")
                 .frame(width: colServer, alignment: .leading)
             Text("Details")
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+                .frame(minWidth: 80, maxWidth: .infinity, alignment: .leading)
             Text("Intent")
                 .frame(width: colIntent, alignment: .center)
             Text("Status")
@@ -477,6 +478,7 @@ struct ActivityTableRow: View {
                 Text(entry.toolName ?? "-")
                     .font(.scaled(.caption, scale: fontScale))
                     .lineLimit(1)
+                    .truncationMode(.middle)
 
                 // Sensitive data indicator
                 if entry.hasSensitiveData == true {
@@ -487,7 +489,7 @@ struct ActivityTableRow: View {
                         .accessibilityLabel("Contains sensitive data")
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 80, maxWidth: .infinity, alignment: .leading)
 
             // Intent column
             if let op = entry.intentOperationType {
