@@ -18,6 +18,7 @@ jobs:
     # Run on pushes to next branch or prerelease tags
     if: github.ref == 'refs/heads/next' || startsWith(github.ref, 'refs/tags/v') && (contains(github.ref, '-rc.') || contains(github.ref, '-next.'))
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest

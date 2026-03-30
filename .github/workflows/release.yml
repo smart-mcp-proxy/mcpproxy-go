@@ -188,6 +188,7 @@ jobs:
     # Only run on version tags
     if: startsWith(github.ref, 'refs/tags/v')
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
