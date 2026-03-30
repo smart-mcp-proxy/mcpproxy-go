@@ -124,11 +124,35 @@ for icon in MCPProxy/Assets.xcassets/AppIcon.appiconset/icon-*.png; do
   [ -f "$icon" ] && cp "$icon" "$APP_BUNDLE/Contents/Resources/"
 done
 
-# Copy .icns icon if available at repo root
-REPO_ROOT="$(cd ../../.. 2>/dev/null && pwd)"
-if [ -f "$REPO_ROOT/assets/mcpproxy.icns" ]; then
-  cp "$REPO_ROOT/assets/mcpproxy.icns" "$APP_BUNDLE/Contents/Resources/"
-  echo "✅ App icon copied: mcpproxy.icns"
+# Copy .icns icon — check Swift project first, then repo root
+if [ -f "MCPProxy/mcpproxy.icns" ]; then
+  cp "MCPProxy/mcpproxy.icns" "$APP_BUNDLE/Contents/Resources/"
+  echo "✅ App icon copied: mcpproxy.icns (from Swift project)"
+else
+  REPO_ROOT="$(cd ../../.. 2>/dev/null && pwd)"
+  if [ -f "$REPO_ROOT/assets/mcpproxy.icns" ]; then
+    cp "$REPO_ROOT/assets/mcpproxy.icns" "$APP_BUNDLE/Contents/Resources/"
+    echo "✅ App icon copied: mcpproxy.icns (from repo assets)"
+  else
+    # Generate .icns from PNGs if iconutil is available
+    if command -v iconutil &>/dev/null && [ -d "MCPProxy/Assets.xcassets/AppIcon.appiconset" ]; then
+      ICONSET="/tmp/mcpproxy-build.iconset"
+      mkdir -p "$ICONSET"
+      SRC="MCPProxy/Assets.xcassets/AppIcon.appiconset"
+      cp "$SRC/icon-16.png" "$ICONSET/icon_16x16.png" 2>/dev/null || true
+      cp "$SRC/icon-32.png" "$ICONSET/icon_16x16@2x.png" 2>/dev/null || true
+      cp "$SRC/icon-32.png" "$ICONSET/icon_32x32.png" 2>/dev/null || true
+      cp "$SRC/icon-128.png" "$ICONSET/icon_128x128.png" 2>/dev/null || true
+      cp "$SRC/icon-256.png" "$ICONSET/icon_128x128@2x.png" 2>/dev/null || true
+      cp "$SRC/icon-256.png" "$ICONSET/icon_256x256.png" 2>/dev/null || true
+      cp "$SRC/icon-512.png" "$ICONSET/icon_256x256@2x.png" 2>/dev/null || true
+      cp "$SRC/icon-512.png" "$ICONSET/icon_512x512.png" 2>/dev/null || true
+      iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/mcpproxy.icns" 2>/dev/null && \
+        echo "✅ App icon generated: mcpproxy.icns" || \
+        echo "⚠️  Failed to generate .icns"
+      rm -rf "$ICONSET"
+    fi
+  fi
 fi
 
 # PkgInfo

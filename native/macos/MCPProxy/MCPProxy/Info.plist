@@ -26,6 +26,10 @@
     <false/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconFile</key>
+    <string>mcpproxy</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>MCPProxy connects to its local core service to manage your MCP servers.</string>
     <key>SUFeedURL</key>
