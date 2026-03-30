@@ -20,11 +20,15 @@ struct AddServerView: View {
     @Binding var isPresented: Bool
     @Environment(\.fontScale) var fontScale
 
-    var initialTab: AddServerTab = .importConfig
-
-    @State private var selectedTab: AddServerTab = .importConfig
+    @State private var selectedTab: AddServerTab
 
     private var apiClient: APIClient? { appState.apiClient }
+
+    init(appState: AppState, isPresented: Binding<Bool>, initialTab: AddServerTab = .importConfig) {
+        self.appState = appState
+        self._isPresented = isPresented
+        self._selectedTab = State(initialValue: initialTab)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,9 +67,6 @@ struct AddServerView: View {
             }
         }
         .frame(width: 560, height: 560)
-        .onAppear {
-            selectedTab = initialTab
-        }
     }
 }
 

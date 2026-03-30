@@ -202,10 +202,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func showAddServer() {
         showMainWindow()
-        // Post notification after a short delay so the window and ServersView
-        // have time to appear and register their notification observer.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: .showAddServer, object: nil)
+        // First switch to the Servers tab so ServersView is mounted and
+        // its .showAddServer notification observer is registered.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(name: .switchToServers, object: nil)
+        }
+        // Then post the showAddServer notification after the tab switch completes
+        // and ServersView has fully registered its notification observer.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.manual)
         }
     }
 

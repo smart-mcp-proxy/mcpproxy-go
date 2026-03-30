@@ -35,6 +35,7 @@ struct ServersView: View {
         }
         .sheet(isPresented: $showAddServer) {
             AddServerView(appState: appState, isPresented: $showAddServer, initialTab: addServerInitialTab)
+                .id(addServerInitialTab)
         }
     }
 
