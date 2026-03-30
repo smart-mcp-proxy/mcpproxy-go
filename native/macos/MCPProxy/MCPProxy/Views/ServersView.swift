@@ -19,6 +19,7 @@ struct ServersView: View {
     @State private var loadTask: Task<Void, Never>?
     @State private var selectedServer: ServerStatus?
     @State private var showAddServer = false
+    @State private var addServerInitialTab: AddServerTab = .manual
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -33,7 +34,8 @@ struct ServersView: View {
             }
         }
         .sheet(isPresented: $showAddServer) {
-            AddServerView(appState: appState, isPresented: $showAddServer)
+            AddServerView(appState: appState, isPresented: $showAddServer, initialTab: addServerInitialTab)
+                .id(addServerInitialTab)
         }
     }
 
@@ -53,6 +55,7 @@ struct ServersView: View {
                     .foregroundStyle(.secondary)
 
                 Button {
+                    addServerInitialTab = .importConfig
                     showAddServer = true
                 } label: {
                     Image(systemName: "plus")
@@ -78,6 +81,7 @@ struct ServersView: View {
             // Prominent "Add Server" button bar
             HStack {
                 Button {
+                    addServerInitialTab = .importConfig
                     showAddServer = true
                 } label: {
                     Label("Add Server", systemImage: "plus.circle.fill")
@@ -113,20 +117,30 @@ struct ServersView: View {
                         Spacer()
                         Image(systemName: "server.rack")
                             .font(.system(size: 48 * fontScale))
-                            .foregroundStyle(.tertiary)
-                        Text("No Servers Configured")
-                            .font(.scaled(.title3, scale: fontScale))
                             .foregroundStyle(.secondary)
-                        Text("Add your first MCP server to get started")
-                            .font(.scaled(.body, scale: fontScale))
-                            .foregroundStyle(.tertiary)
-                        Button {
-                            showAddServer = true
-                        } label: {
-                            Label("Add Your First Server", systemImage: "plus.circle.fill")
+                        Text("No Servers Configured")
+                            .font(.scaled(.headline, scale: fontScale))
+                        Text("Add your first MCP server or import from an existing AI tool configuration.")
+                            .font(.scaled(.subheadline, scale: fontScale))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 300)
+                        HStack(spacing: 12) {
+                            Button {
+                                addServerInitialTab = .manual
+                                showAddServer = true
+                            } label: {
+                                Label("Add Server", systemImage: "plus.circle.fill")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Button {
+                                addServerInitialTab = .importConfig
+                                showAddServer = true
+                            } label: {
+                                Label("Import", systemImage: "square.and.arrow.down")
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -153,8 +167,21 @@ struct ServersView: View {
         .onChange(of: appState.serversVersion) { _ in
             triggerLoad()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
+            if let tab = notification.object as? AddServerTab {
+                addServerInitialTab = tab
+            } else {
+                addServerInitialTab = .manual
+            }
             showAddServer = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
+            guard let serverName = notification.object as? String else { return }
+            // Find the server by name in the current list or appState
+            if let server = servers.first(where: { $0.name == serverName })
+                ?? appState.servers.first(where: { $0.name == serverName }) {
+                selectedServer = server
+            }
         }
     }
 
@@ -704,6 +731,7 @@ struct ServerTableView: NSViewRepresentable {
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(label)
+            cell.toolTip = server.health?.detail ?? server.health?.summary ?? ""
             NSLayoutConstraint.activate([
                 label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
                 label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),

@@ -79,7 +79,7 @@ func TestCalculateHealth_ConnectingState(t *testing.T) {
 
 	result := CalculateHealth(input, nil)
 
-	assert.Equal(t, LevelDegraded, result.Level)
+	assert.Equal(t, LevelHealthy, result.Level, "connecting is a normal transient state, not degraded")
 	assert.Equal(t, StateEnabled, result.AdminState)
 	assert.Equal(t, "Connecting...", result.Summary)
 	assert.Equal(t, ActionNone, result.Action)
@@ -94,7 +94,7 @@ func TestCalculateHealth_IdleState(t *testing.T) {
 
 	result := CalculateHealth(input, nil)
 
-	assert.Equal(t, LevelDegraded, result.Level)
+	assert.Equal(t, LevelHealthy, result.Level, "idle is a normal transient state, not degraded")
 	assert.Equal(t, StateEnabled, result.AdminState)
 	assert.Equal(t, "Connecting...", result.Summary)
 	assert.Equal(t, ActionNone, result.Action)

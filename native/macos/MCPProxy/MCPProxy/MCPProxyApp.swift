@@ -52,6 +52,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 NSLog("[MCPProxy] Zoom reset: fontScale=%.1f", self?.appState.fontScale ?? 0)
                 self?.makeTextActualSize()
                 return nil
+            case "n":
+                NSLog("[MCPProxy] Cmd+N: show add server")
+                self?.showAddServer()
+                return nil
             default:
                 return event
             }
@@ -105,6 +109,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NotificationCenter.default.addObserver(
             self, selector: #selector(handleStartCore),
             name: .startCore, object: nil
+        )
+
+        // Listen for open web UI requests from dashboard
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(openWebUI),
+            name: .openWebUI, object: nil
         )
 
         // Start core
@@ -192,10 +202,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func showAddServer() {
         showMainWindow()
-        // Post notification after a short delay so the window and ServersView
-        // have time to appear and register their notification observer.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: .showAddServer, object: nil)
+        // First switch to the Servers tab so ServersView is mounted and
+        // its .showAddServer notification observer is registered.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(name: .switchToServers, object: nil)
+        }
+        // Then post the showAddServer notification after the tab switch completes
+        // and ServersView has fully registered its notification observer.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.manual)
         }
     }
 
@@ -685,7 +700,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             case "login": try? await appState.apiClient?.loginServer(server.id)
             case "restart": try? await appState.apiClient?.restartServer(server.id)
             case "enable": try? await appState.apiClient?.enableServer(server.id)
-            default: openWebUI()
+            case "approve":
+                // Open macOS app to the server detail view (must be on main thread)
+                await MainActor.run {
+                    showMainWindow()
+                    NotificationCenter.default.post(name: .switchToServers, object: nil)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        NotificationCenter.default.post(name: .showServerDetail, object: server.name)
+                    }
+                }
+            default:
+                // For unknown actions, open the macOS app to servers view
+                await MainActor.run {
+                    showMainWindow()
+                    NotificationCenter.default.post(name: .switchToServers, object: nil)
+                }
             }
         }
     }
@@ -825,6 +854,14 @@ extension Notification.Name {
     static let showAddServer = Notification.Name("MCPProxy.showAddServer")
     /// Posted by the core status banner to start the core.
     static let startCore = Notification.Name("MCPProxy.startCore")
+    /// Posted by dashboard "Connect Clients" to open the Web UI.
+    static let openWebUI = Notification.Name("MCPProxy.openWebUI")
+    /// Posted by dashboard to switch sidebar to Activity Log view.
+    static let switchToActivity = Notification.Name("MCPProxy.switchToActivity")
+    /// Posted by dashboard to switch sidebar to Servers view.
+    static let switchToServers = Notification.Name("MCPProxy.switchToServers")
+    /// Posted by tray menu to open the detail view for a specific server (object = server name string).
+    static let showServerDetail = Notification.Name("MCPProxy.showServerDetail")
 }
 
 @main
@@ -834,9 +871,12 @@ struct MCPProxyApp: App {
     var body: some Scene {
         // No SwiftUI scenes — the tray menu is pure AppKit (NSStatusItem + NSMenu).
         // This avoids the MenuBarExtra .menu style bug where ForEach duplicates items.
-        // A Settings scene can be added here for Spec B (main window).
+        // Settings scene intentionally hidden — Cmd+, is handled by tray menu "Open MCPProxy..." item.
         Settings {
-            EmptyView()
+            Text("Use the MCPProxy tray menu to access settings.")
+                .frame(width: 300, height: 100)
+                .font(.body)
+                .foregroundColor(.secondary)
         }
     }
 }

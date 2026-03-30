@@ -49,6 +49,7 @@ final class AppState: ObservableObject {
     // MARK: Activity & security (ActivityEntry from Models.swift)
 
     @Published var recentActivity: [ActivityEntry] = []
+    @Published var recentSessions: [APIClient.MCPSession] = []
     @Published var sensitiveDataAlertCount: Int = 0
     @Published var quarantinedToolsCount: Int = 0
 
@@ -68,6 +69,11 @@ final class AppState: ObservableObject {
     /// Views read this instead of receiving it as a parameter,
     /// which avoids the need to replace NSHostingView when the client becomes available.
     @Published var apiClient: APIClient?
+
+    // MARK: Security status
+
+    @Published var dockerAvailable: Bool = false
+    @Published var quarantineEnabled: Bool = true
 
     // MARK: Metadata
 

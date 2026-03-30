@@ -327,6 +327,9 @@ func (m *MockServerController) AddServer(_ context.Context, _ *config.ServerConf
 func (m *MockServerController) RemoveServer(_ context.Context, _ string) error {
 	return nil
 }
+func (m *MockServerController) UpdateServer(_ context.Context, _ string, _ *config.ServerConfig) error {
+	return nil
+}
 
 // Tool-level quarantine (Spec 032)
 func (m *MockServerController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRecord, error) {

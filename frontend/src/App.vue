@@ -9,11 +9,7 @@
 
       <!-- Page content -->
       <main class="overflow-y-auto p-6">
-        <router-view v-slot="{ Component }">
-          <transition name="page" mode="out-in">
-            <component :is="Component" />
-          </transition>
-        </router-view>
+        <router-view />
       </main>
     </div>
 
@@ -125,20 +121,4 @@ onUnmounted(() => {
 })
 </script>
 
-<style scoped>
-/* Page transitions */
-.page-enter-active,
-.page-leave-active {
-  transition: all 0.3s ease;
-}
-
-.page-enter-from {
-  opacity: 0;
-  transform: translateX(10px);
-}
-
-.page-leave-to {
-  opacity: 0;
-  transform: translateX(-10px);
-}
-</style>
+<!-- Page transitions removed: caused CSS transition deadlock blocking SPA navigation (QA 2026-03-29) -->

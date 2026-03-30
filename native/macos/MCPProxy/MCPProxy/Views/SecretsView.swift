@@ -260,6 +260,11 @@ struct SecretRow: View {
     let onDelete: () -> Void
     @Environment(\.fontScale) var fontScale
 
+    @State private var showDeleteConfirmation = false
+    @State private var showSetValueSheet = false
+    @State private var secretValue = ""
+    @State private var isSaving = false
+
     private var apiClient: APIClient? { appState.apiClient }
 
     var body: some View {
@@ -296,19 +301,78 @@ struct SecretRow: View {
             }
 
             if entry.secretRef.type == "keyring" {
+                // Set/Update value button
+                Button {
+                    secretValue = ""
+                    showSetValueSheet = true
+                } label: {
+                    Image(systemName: entry.isSet ? "pencil" : "plus.circle.fill")
+                        .foregroundColor(entry.isSet ? .secondary : .blue)
+                }
+                .buttonStyle(.borderless)
+                .help(entry.isSet ? "Update secret value" : "Set secret value")
+
+                // Delete button with confirmation
                 Button(role: .destructive) {
-                    Task {
-                        try? await apiClient?.deleteAction(path: "/api/v1/secrets/\(entry.secretRef.name)")
-                        onDelete()
-                    }
+                    showDeleteConfirmation = true
                 } label: {
                     Image(systemName: "trash")
                         .foregroundStyle(.red)
                 }
                 .buttonStyle(.borderless)
+                .help("Delete secret")
             }
         }
         .padding(.vertical, 4)
+        .alert("Delete Secret", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                Task {
+                    try? await apiClient?.deleteAction(path: "/api/v1/secrets/\(entry.secretRef.name)")
+                    onDelete()
+                }
+            }
+        } message: {
+            Text("Are you sure you want to delete \"\(entry.secretRef.name)\"? This action cannot be undone.")
+        }
+        .sheet(isPresented: $showSetValueSheet) {
+            VStack(spacing: 16) {
+                Text(entry.isSet ? "Update Secret" : "Set Secret Value")
+                    .font(.headline)
+
+                Text(entry.secretRef.name)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                SecureField("Enter secret value...", text: $secretValue)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 300)
+
+                HStack {
+                    Button("Cancel") {
+                        showSetValueSheet = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+
+                    Button(isSaving ? "Saving..." : "Save") {
+                        Task {
+                            isSaving = true
+                            try? await apiClient?.postAction(
+                                path: "/api/v1/secrets",
+                                body: ["name": entry.secretRef.name, "value": secretValue, "type": "keyring"]
+                            )
+                            isSaving = false
+                            showSetValueSheet = false
+                            secretValue = ""
+                            onDelete() // Triggers reload
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(secretValue.isEmpty || isSaving)
+                }
+            }
+            .padding(24)
+        }
     }
 }
 

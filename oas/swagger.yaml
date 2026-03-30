@@ -1648,6 +1648,15 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.ConnectRequest:
+      properties:
+        force:
+          description: Overwrite existing entry
+          type: boolean
+        server_name:
+          description: Defaults to "mcpproxy"
+          type: string
+      type: object
     httpapi.ImportFromPathRequest:
       properties:
         format:
@@ -2378,6 +2387,128 @@ paths:
       summary: Validate configuration
       tags:
       - config
+  /api/v1/connect:
+    get:
+      description: |-
+        Returns the connection status for all known MCP client applications.
+        Each entry indicates whether the client config file exists and whether
+        MCPProxy is currently registered in it.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: List of ClientStatus objects
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List client connection status
+      tags:
+      - connect
+  /api/v1/connect/{client}:
+    delete:
+      description: |-
+        Remove the MCPProxy entry from the specified client's configuration file.
+        Creates a backup of the existing config before modifying.
+      parameters:
+      - description: Client ID (claude-code, cursor, windsurf, vscode, codex, gemini)
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.ConnectRequest'
+        description: Optional parameters (server_name)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: ConnectResult
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown client or entry not found
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Disconnect MCPProxy from a client
+      tags:
+      - connect
+    post:
+      description: |-
+        Register MCPProxy as an MCP server in the specified client's configuration file.
+        Creates a backup of the existing config before modifying.
+      parameters:
+      - description: Client ID (claude-code, cursor, windsurf, vscode, codex, gemini)
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.ConnectRequest'
+        description: Optional connection parameters
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: ConnectResult
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown client
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Already connected (use force=true)
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Connect MCPProxy to a client
+      tags:
+      - connect
   /api/v1/diagnostics:
     get:
       description: Get comprehensive health diagnostics including upstream errors,
@@ -2888,6 +3019,53 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Remove an upstream server
+      tags:
+      - servers
+    patch:
+      description: Update specific fields of an existing upstream MCP server configuration.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.AddServerRequest'
+        description: Fields to update (all optional)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Server updated successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request - no fields or invalid body
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Partially update an upstream server
       tags:
       - servers
   /api/v1/servers/{id}/disable:

@@ -29,6 +29,7 @@ final class SocketURLProtocol: URLProtocol {
 
     /// Active read task, retained for cancellation.
     private var socketFD: Int32 = -1
+    private let socketLock = NSLock()
     private var readThread: Thread?
     private var isCancelled = false
 
@@ -97,6 +98,10 @@ final class SocketURLProtocol: URLProtocol {
 
         // Build HTTP/1.1 request bytes
         let requestData = buildHTTPRequest(from: request)
+        NSLog("[SocketURLProtocol] startLoading: %@ %@ (%d bytes request payload)",
+              request.httpMethod ?? "GET",
+              request.url?.path ?? "/",
+              requestData.count)
 
         // Write request
         var totalWritten = 0
@@ -134,9 +139,18 @@ final class SocketURLProtocol: URLProtocol {
 
     override func stopLoading() {
         isCancelled = true
-        if socketFD >= 0 {
-            Darwin.close(socketFD)
-            socketFD = -1
+        closeSocket()
+    }
+
+    /// Thread-safe close of the socket file descriptor.
+    /// Prevents double-close race between stopLoading (CFNetwork thread) and readResponse (background thread).
+    private func closeSocket() {
+        socketLock.lock()
+        let fd = socketFD
+        socketFD = -1
+        socketLock.unlock()
+        if fd >= 0 {
+            Darwin.close(fd)
         }
     }
 
@@ -174,10 +188,56 @@ final class SocketURLProtocol: URLProtocol {
             }
         }
 
-        // Body
-        let body = request.httpBody ?? Data()
-        if !body.isEmpty && !hasContentLength {
-            lines.append("Content-Length: \(body.count)")
+        // Body — check both httpBody and httpBodyStream.
+        // URLSession may convert httpBody to httpBodyStream internally,
+        // so the URLProtocol receives httpBody == nil for POST requests.
+        var body = request.httpBody ?? Data()
+        NSLog("[SocketURLProtocol] buildHTTPRequest: method=%@, httpBody=%d bytes, httpBodyStream=%@",
+              method, body.count, request.httpBodyStream != nil ? "present" : "nil")
+        if body.isEmpty, let stream = request.httpBodyStream {
+            // Read the entire stream into Data.
+            // httpBodyStream from URLSession is memory-backed, so hasBytesAvailable
+            // is reliable. We also guard against read() returning -1 (error) or 0 (EOF).
+            stream.open()
+            var streamData = Data()
+            let bufSize = 16384
+            let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+            defer {
+                buf.deallocate()
+                stream.close()
+            }
+            while stream.hasBytesAvailable {
+                let bytesRead = stream.read(buf, maxLength: bufSize)
+                if bytesRead > 0 {
+                    streamData.append(buf, count: bytesRead)
+                } else if bytesRead == 0 {
+                    // EOF
+                    break
+                } else {
+                    // Error — log and stop
+                    NSLog("[SocketURLProtocol] httpBodyStream read error: %@",
+                          stream.streamError?.localizedDescription ?? "unknown")
+                    break
+                }
+            }
+            NSLog("[SocketURLProtocol] read %d bytes from httpBodyStream", streamData.count)
+            body = streamData
+        }
+
+        // Always set Content-Length for bodies: either it was missing, or the original
+        // header may reference the pre-stream size which could differ.
+        if !body.isEmpty {
+            if hasContentLength {
+                // Replace any existing Content-Length with the actual body size.
+                lines = lines.map { line in
+                    if line.lowercased().hasPrefix("content-length:") {
+                        return "Content-Length: \(body.count)"
+                    }
+                    return line
+                }
+            } else {
+                lines.append("Content-Length: \(body.count)")
+            }
         }
 
         // Connection close to simplify reading
@@ -201,10 +261,7 @@ final class SocketURLProtocol: URLProtocol {
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 1)
         defer {
             buffer.deallocate()
-            if socketFD >= 0 {
-                Darwin.close(socketFD)
-                socketFD = -1
-            }
+            closeSocket()
         }
 
         // Phase 1: Read until we find the header/body separator (\r\n\r\n)

@@ -491,3 +491,30 @@ export interface ImportResponse {
   failed: FailedServer[]
   warnings: string[]
 }
+
+// Connect feature types (client registration)
+
+// API returns a flat array of ClientStatus objects in the data field
+export type ConnectStatusResponse = ClientStatus[]
+
+export interface ClientStatus {
+  id: string
+  name: string
+  config_path: string
+  exists: boolean
+  connected: boolean
+  supported: boolean
+  reason?: string
+  icon: string
+}
+
+export interface ConnectResult {
+  success: boolean
+  client: string
+  config_path: string
+  backup_path?: string
+  server_name: string
+  action: string
+  message: string
+  error?: string
+}

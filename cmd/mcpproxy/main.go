@@ -178,6 +178,10 @@ func main() {
 	// Add feedback command (Spec 036)
 	feedbackCmd := GetFeedbackCommand()
 
+	// Add connect/disconnect commands
+	connectCmd := GetConnectCommand()
+	disconnectCmd := GetDisconnectCommand()
+
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
@@ -195,6 +199,8 @@ func main() {
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(telemetryCmd)
 	rootCmd.AddCommand(feedbackCmd)
+	rootCmd.AddCommand(connectCmd)
+	rootCmd.AddCommand(disconnectCmd)
 
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added

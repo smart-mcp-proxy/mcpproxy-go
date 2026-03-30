@@ -164,10 +164,10 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		}
 	case "connecting", "idle":
 		return &contracts.HealthStatus{
-			Level:      LevelDegraded,
+			Level:      LevelHealthy,
 			AdminState: StateEnabled,
 			Summary:    "Connecting...",
-			Action:     ActionNone, // Will resolve on its own
+			Action:     ActionNone, // Will resolve on its own — not an attention item
 		}
 	}
 

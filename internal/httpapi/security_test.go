@@ -315,6 +315,9 @@ func (m *baseController) AddServer(_ context.Context, _ *config.ServerConfig) er
 func (m *baseController) RemoveServer(_ context.Context, _ string) error {
 	return nil
 }
+func (m *baseController) UpdateServer(_ context.Context, _ string, _ *config.ServerConfig) error {
+	return nil
+}
 func (m *baseController) ListActivities(_ storage.ActivityFilter) ([]*storage.ActivityRecord, int, error) {
 	return nil, 0, nil
 }

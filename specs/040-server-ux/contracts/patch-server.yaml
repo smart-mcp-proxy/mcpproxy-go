@@ -1,0 +1,84 @@
+# PATCH /api/v1/servers/{name}
+# Update an existing server's configuration (partial update)
+
+paths:
+  /api/v1/servers/{name}:
+    patch:
+      summary: Update server configuration
+      description: |
+        Partially update an existing server's configuration.
+        Only fields included in the request body are changed.
+        Server name cannot be changed (it's the primary key).
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Server name (primary key)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchServerRequest'
+      responses:
+        '200':
+          description: Server updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      message:
+                        type: string
+                        example: "Server 'github-server' updated successfully"
+                      restart_required:
+                        type: boolean
+                        description: Whether the server needs a restart for changes to take effect
+        '400':
+          description: Invalid request (empty body or validation error)
+        '404':
+          description: Server not found
+        '409':
+          description: Conflict (e.g., trying to set both url and command)
+
+components:
+  schemas:
+    PatchServerRequest:
+      type: object
+      description: All fields optional. Only included fields are updated.
+      properties:
+        url:
+          type: string
+          description: Server URL (for http protocol)
+        command:
+          type: string
+          description: Command to run (for stdio protocol)
+        args:
+          type: array
+          items:
+            type: string
+          description: Command arguments (for stdio)
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: Environment variables
+        working_dir:
+          type: string
+          description: Working directory
+        enabled:
+          type: boolean
+        quarantined:
+          type: boolean
+        docker_isolation:
+          type: boolean
+        skip_quarantine:
+          type: boolean

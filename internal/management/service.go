@@ -232,6 +232,18 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		if lastError, ok := srvRaw["last_error"].(string); ok {
 			srv.LastError = lastError
 		}
+		if url, ok := srvRaw["url"].(string); ok {
+			srv.URL = url
+		}
+		if command, ok := srvRaw["command"].(string); ok {
+			srv.Command = command
+		}
+		if args, ok := srvRaw["args"].([]string); ok {
+			srv.Args = args
+		}
+		if workingDir, ok := srvRaw["working_dir"].(string); ok {
+			srv.WorkingDir = workingDir
+		}
 		if authenticated, ok := srvRaw["authenticated"].(bool); ok {
 			srv.Authenticated = authenticated
 		}

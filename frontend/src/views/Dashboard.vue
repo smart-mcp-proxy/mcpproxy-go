@@ -90,545 +90,502 @@
       </router-link>
     </div>
 
-    <!-- Token Savings and Distribution -->
-    <div v-if="tokenSavingsData" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <!-- Token Savings -->
-      <div class="card bg-base-100 shadow-md">
-        <div class="card-body">
-          <h2 class="card-title text-lg">Token Savings</h2>
+    <!-- Hub Visualization -->
+    <div class="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] gap-0 min-h-[520px] relative">
 
-          <div class="grid grid-cols-3 gap-4 mt-4">
-            <div>
-              <div class="text-sm opacity-60">Tokens Saved</div>
-              <div class="text-3xl font-bold text-success">{{ formatNumber(tokenSavingsData.saved_tokens) }}</div>
-              <div class="text-xs opacity-60">{{ tokenSavingsData.saved_tokens_percentage.toFixed(1) }}% reduction</div>
+      <!-- Left Column: AI Agents / Clients -->
+      <div class="flex flex-col justify-center items-center lg:items-end space-y-3 py-6 lg:pr-0">
+        <h3 class="text-xs font-bold uppercase tracking-widest opacity-40 mb-1 w-full max-w-[260px] text-center lg:text-right">AI Agents</h3>
+
+        <!-- Single big clients box -->
+        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]">
+          <div class="card-body py-3 px-4">
+            <div v-if="connectedClientNames.length > 0" class="mb-1">
+              <div class="flex items-center gap-2 mb-1">
+                <div class="w-2.5 h-2.5 rounded-full bg-success flex-shrink-0"></div>
+                <span class="text-xs font-bold uppercase tracking-wide opacity-50">Connected</span>
+              </div>
+              <div class="text-sm font-medium">{{ connectedClientNames.join(', ') }}</div>
             </div>
-            <div>
-              <div class="text-sm opacity-60">Full Tool List Size</div>
-              <div class="text-2xl font-bold">{{ formatNumber(tokenSavingsData.total_server_tool_list_size) }}</div>
-              <div class="text-xs opacity-60">All upstream servers</div>
+            <div v-if="supportedClientNames.length > 0">
+              <div class="text-xs opacity-40 mt-1">Available: {{ supportedClientNames.join(', ') }}</div>
             </div>
-            <div>
-              <div class="text-sm opacity-60">Typical Query Result</div>
-              <div class="text-2xl font-bold">{{ formatNumber(tokenSavingsData.average_query_result_size) }}</div>
-              <div class="text-xs opacity-60">BM25 search size</div>
+            <div v-if="connectedClientNames.length === 0 && supportedClientNames.length === 0" class="text-sm opacity-50 text-center py-2">
+              No clients detected
             </div>
           </div>
         </div>
+
+        <!-- Left Action Buttons -->
+        <div class="flex flex-col gap-2 w-full max-w-[260px] pt-3">
+          <button @click="showConnectModal = true" class="btn btn-primary btn-sm w-full gap-1">
+            Connect Clients
+          </button>
+          <button @click="showAddServer = true" class="btn btn-secondary btn-outline btn-sm w-full gap-1">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            Import from client configs
+          </button>
+          <router-link to="/sessions" class="btn btn-ghost btn-sm w-full gap-1">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+            Recent Sessions
+          </router-link>
+        </div>
       </div>
 
-      <!-- Token Distribution -->
-      <div class="card bg-base-100 shadow-md">
-        <div class="card-body">
-          <h2 class="card-title text-lg">Token Distribution</h2>
-          <p class="text-sm opacity-60">Per-server tool list size breakdown</p>
+      <!-- Center Column: MCPProxy Hub -->
+      <div class="flex flex-col items-center justify-center relative py-6">
+        <!-- Connection lines: one fat horizontal line each side, big green running dot -->
+        <svg class="absolute inset-0 w-full h-full pointer-events-none hidden lg:block overflow-visible" preserveAspectRatio="none">
+          <!-- Left fat line (clients → hub) -->
+          <line x1="0" y1="50%" x2="42%" y2="50%" stroke="oklch(var(--su))" stroke-width="4" stroke-opacity="0.25" />
+          <!-- Right fat line (hub → servers) -->
+          <line x1="58%" y1="50%" x2="100%" y2="50%" stroke="oklch(var(--su))" stroke-width="4" stroke-opacity="0.25" />
 
-          <!-- Pie Chart -->
-          <div class="flex items-center justify-center py-4">
-            <div class="w-64 h-64">
-              <TokenPieChart v-if="pieChartSegments.length > 0" :data="pieChartSegments" />
+          <!-- Green dots travel once every 20s cycle, 4 dots total -->
+          <!-- Left dot 1: clients → hub -->
+          <circle r="7" fill="oklch(var(--su))" opacity="0">
+            <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.05;0.15;1" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.05;0.13;0.15;1" dur="20s" repeatCount="indefinite" />
+          </circle>
+          <!-- Left dot 2: clients → hub, staggered -->
+          <circle r="6" fill="oklch(var(--su))" opacity="0">
+            <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.1;0.2;1" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.1;0.18;0.2;1" dur="20s" repeatCount="indefinite" />
+          </circle>
+
+          <!-- Right dot 1: servers → hub -->
+          <circle r="7" fill="oklch(var(--su))" opacity="0">
+            <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.07;0.17;1" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.07;0.15;0.17;1" dur="20s" repeatCount="indefinite" />
+          </circle>
+          <!-- Right dot 2: servers → hub, staggered -->
+          <circle r="6" fill="oklch(var(--su))" opacity="0">
+            <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.12;0.22;1" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.12;0.2;0.22;1" dur="20s" repeatCount="indefinite" />
+          </circle>
+
+          <!-- Static green dots at hub connection points -->
+          <circle cx="42%" cy="50%" r="5" fill="oklch(var(--su))" opacity="0.7" />
+          <circle cx="58%" cy="50%" r="5" fill="oklch(var(--su))" opacity="0.7" />
+        </svg>
+
+        <!-- Token savings badge (above hub) -->
+        <div class="mb-6 z-10">
+          <div
+            v-if="tokenSavingsData && tokenSavingsData.saved_tokens_percentage > 0"
+            class="badge badge-lg gap-1 px-4 py-3 bg-primary/10 text-primary border-primary/30"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+            </svg>
+            <span class="text-lg font-bold">{{ tokenSavingsData.saved_tokens_percentage.toFixed(0) }}%</span>
+            <span class="text-xs font-medium">tokens saved</span>
+          </div>
+        </div>
+
+        <!-- Logo Hub -->
+        <div class="relative z-10">
+          <div class="w-36 h-36 flex items-center justify-center transition-all duration-500"
+            :class="systemStore.isRunning ? 'hub-glow' : ''">
+            <img :src="logoSvg" alt="MCPProxy" class="w-28 h-28" />
+          </div>
+          <div class="text-center mt-1 select-none">
+            <div class="text-xs font-bold uppercase tracking-wider" :class="systemStore.isRunning ? 'text-primary' : 'text-base-content/60'">
+              MCPProxy
             </div>
+            <div class="text-xs font-medium" :class="systemStore.isRunning ? 'text-success' : 'text-error'">
+              {{ systemStore.isRunning ? 'active' : 'stopped' }}
+            </div>
+            <div v-if="uptime" class="text-[10px] opacity-50">{{ uptime }}</div>
+          </div>
+        </div>
+
+        <!-- Security Status -->
+        <div class="z-10 w-full max-w-[300px] space-y-2 mt-4">
+          <!-- Docker Isolation -->
+          <div class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
+               :class="dockerStatus?.available ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
+            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+            </svg>
+            <span v-if="dockerStatus?.available" class="font-medium">Docker isolation active</span>
+            <span v-else class="font-medium">Docker isolation disabled — enable Docker to protect your system</span>
           </div>
 
-          <!-- Legend -->
-          <div class="mt-4 space-y-2 max-h-40 overflow-y-auto">
+          <!-- Quarantine -->
+          <div class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
+               :class="quarantineEnabled ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
+            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            <span v-if="quarantineEnabled" class="font-medium">Quarantine protection active</span>
+            <span v-else class="font-medium">Quarantine disabled — enable to prevent prompt injection attacks</span>
+          </div>
+
+          <!-- Activity Log link -->
+          <router-link to="/activity" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-base-100/50 border border-base-300 hover:bg-base-200 transition-colors">
+            <svg class="w-4 h-4 flex-shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+            <span class="font-medium opacity-70">Activity Log</span>
+          </router-link>
+        </div>
+      </div>
+
+      <!-- Right Column: Upstream Servers -->
+      <div class="flex flex-col justify-center items-center lg:items-start space-y-3 py-6 lg:pl-4">
+        <h3 class="text-xs font-bold uppercase tracking-widest opacity-40 mb-1 w-full max-w-[240px] text-center lg:text-left">Upstream Servers</h3>
+
+        <!-- Connected servers card -->
+        <router-link to="/servers" class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[240px] hover:shadow-md transition-shadow">
+          <div class="card-body py-3 px-4">
+            <div class="flex items-center gap-2">
+              <div class="w-2.5 h-2.5 rounded-full bg-success flex-shrink-0"></div>
+              <span class="text-2xl font-bold leading-none">{{ serversStore.serverCount.connected }}</span>
+              <span class="text-sm opacity-60">connected</span>
+            </div>
+            <div class="text-sm mt-1">
+              <span class="font-bold">{{ serversStore.totalTools }}</span>
+              <span class="opacity-60"> tools available</span>
+            </div>
             <div
-              v-for="(segment, index) in pieChartSegments"
-              :key="index"
-              class="flex items-center justify-between text-sm"
+              v-if="disabledCount > 0"
+              class="text-xs opacity-50 mt-0.5"
             >
-              <div class="flex items-center space-x-2">
-                <div class="w-3 h-3 rounded" :style="{ backgroundColor: segment.color }"></div>
-                <span class="truncate">{{ segment.name }}</span>
+              {{ disabledCount }} disabled
+            </div>
+          </div>
+        </router-link>
+
+        <!-- Quarantine card -->
+        <router-link
+          v-if="serversStore.serverCount.quarantined > 0"
+          to="/servers"
+          class="card card-compact bg-warning/10 border border-warning/30 w-full max-w-[240px] hover:shadow-md transition-shadow"
+        >
+          <div class="card-body py-3 px-4">
+            <div class="flex items-center gap-2">
+              <svg class="w-4 h-4 text-warning flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+              <span class="text-lg font-bold text-warning leading-none">{{ serversStore.serverCount.quarantined }}</span>
+              <span class="text-sm">in quarantine</span>
+            </div>
+          </div>
+        </router-link>
+
+        <!-- Right Action Buttons -->
+        <div class="flex flex-col gap-2 w-full max-w-[240px] pt-3">
+          <button @click="showAddServer = true" class="btn btn-primary btn-sm w-full gap-1">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+            Add Server
+          </button>
+          <router-link to="/repositories" class="btn btn-ghost btn-sm w-full gap-1">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            Browse Registry
+          </router-link>
+          <div class="btn btn-ghost btn-sm w-full btn-disabled opacity-40 gap-1">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            Security Scan
+            <span class="badge badge-ghost badge-xs ml-1">soon</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Token Savings Collapsible Detail -->
+    <div v-if="tokenSavingsData" class="collapse collapse-arrow bg-base-100 shadow-sm border border-base-300">
+      <input type="checkbox" />
+      <div class="collapse-title font-medium flex items-center gap-3">
+        <svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+        </svg>
+        Token Savings Details
+        <span class="badge badge-success badge-sm ml-auto">{{ formatNumber(tokenSavingsData.saved_tokens) }} saved</span>
+      </div>
+      <div class="collapse-content">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-2">
+          <!-- Token Savings Stats -->
+          <div>
+            <div class="grid grid-cols-3 gap-4">
+              <div>
+                <div class="text-sm opacity-60">Tokens Saved</div>
+                <div class="text-2xl font-bold text-success">{{ formatNumber(tokenSavingsData.saved_tokens) }}</div>
+                <div class="text-xs opacity-60">{{ tokenSavingsData.saved_tokens_percentage.toFixed(1) }}% reduction</div>
               </div>
-              <div class="flex items-center space-x-2">
-                <span class="font-mono text-xs">{{ formatNumber(segment.value) }}</span>
-                <span class="text-xs opacity-60">({{ segment.percentage.toFixed(1) }}%)</span>
+              <div>
+                <div class="text-sm opacity-60">Full Tool List</div>
+                <div class="text-xl font-bold">{{ formatNumber(tokenSavingsData.total_server_tool_list_size) }}</div>
+                <div class="text-xs opacity-60">All servers</div>
+              </div>
+              <div>
+                <div class="text-sm opacity-60">Typical Query</div>
+                <div class="text-xl font-bold">{{ formatNumber(tokenSavingsData.average_query_result_size) }}</div>
+                <div class="text-xs opacity-60">BM25 result</div>
               </div>
             </div>
           </div>
-        </div>
-      </div>
-    </div>
 
-
-    <!-- TODO: Re-enable Activity Widget in next release -->
-    <!-- <ActivityWidget /> -->
-
-    <!-- Recent Sessions -->
-    <div class="card bg-base-100 shadow-md">
-      <div class="card-body">
-        <div class="flex items-center justify-between mb-4">
+          <!-- Token Distribution Chart -->
           <div>
-            <h2 class="card-title text-lg">Recent Sessions</h2>
-            <p class="text-sm opacity-60">MCP client connections</p>
+            <div class="flex items-center justify-center">
+              <div class="w-48 h-48">
+                <TokenPieChart v-if="pieChartSegments.length > 0" :data="pieChartSegments" />
+              </div>
+            </div>
+            <div class="mt-3 space-y-1.5 max-h-32 overflow-y-auto">
+              <div
+                v-for="(segment, index) in pieChartSegments"
+                :key="index"
+                class="flex items-center justify-between text-sm"
+              >
+                <div class="flex items-center space-x-2 min-w-0">
+                  <div class="w-2.5 h-2.5 rounded flex-shrink-0" :style="{ backgroundColor: segment.color }"></div>
+                  <span class="truncate text-xs">{{ segment.name }}</span>
+                </div>
+                <div class="flex items-center space-x-2 flex-shrink-0">
+                  <span class="font-mono text-xs">{{ formatNumber(segment.value) }}</span>
+                  <span class="text-xs opacity-50">({{ segment.percentage.toFixed(1) }}%)</span>
+                </div>
+              </div>
+            </div>
           </div>
-          <router-link to="/sessions" class="btn btn-sm btn-ghost">
-            View All →
-          </router-link>
-        </div>
-
-        <div v-if="sessionsLoading" class="flex justify-center py-4">
-          <span class="loading loading-spinner loading-sm"></span>
-        </div>
-
-        <div v-else-if="sessionsError" class="alert alert-error alert-sm">
-          <span>{{ sessionsError }}</span>
-        </div>
-
-        <div v-else-if="recentSessions.length === 0" class="text-center py-4 text-base-content/60">
-          <p class="text-sm">No sessions yet</p>
-        </div>
-
-        <div v-else class="overflow-x-auto">
-          <table class="table table-sm">
-            <thead>
-              <tr>
-                <th>Client</th>
-                <th>Status</th>
-                <th>Capabilities</th>
-                <th>Tool Calls</th>
-                <th>Tokens</th>
-                <th>Started</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="session in recentSessions" :key="session.id" class="hover">
-                <td>
-                  <div class="font-medium text-sm">{{ session.client_name || 'Unknown' }}</div>
-                  <div v-if="session.client_version" class="text-xs text-base-content/60">
-                    v{{ session.client_version }}
-                  </div>
-                </td>
-                <td>
-                  <div
-                    class="badge badge-sm"
-                    :class="session.status === 'active' ? 'badge-success' : 'badge-ghost'"
-                  >
-                    {{ session.status === 'active' ? 'Active' : 'Closed' }}
-                  </div>
-                </td>
-                <td>
-                  <div class="flex flex-wrap gap-1">
-                    <span v-if="session.has_roots" class="badge badge-xs badge-info" title="Roots">R</span>
-                    <span v-if="session.has_sampling" class="badge badge-xs badge-info" title="Sampling">S</span>
-                    <span v-if="session.experimental && session.experimental.length > 0" class="badge badge-xs badge-warning" :title="`Experimental: ${session.experimental.join(', ')}`">E</span>
-                  </div>
-                </td>
-                <td class="text-center">{{ session.tool_call_count || 0 }}</td>
-                <td class="text-right font-mono text-xs">{{ formatNumber(session.total_tokens || 0) }}</td>
-                <td>
-                  <span class="text-xs">{{ formatRelativeTime(session.start_time) }}</span>
-                </td>
-                <td>
-                  <router-link
-                    :to="{ name: 'activity', query: { session: session.id } }"
-                    class="btn btn-xs btn-primary"
-                    title="View activity for this session"
-                  >
-                    View Activity
-                  </router-link>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- Recent Tool Calls -->
-    <div class="card bg-base-100 shadow-md">
-      <div class="card-body">
-        <div class="flex items-center justify-between mb-4">
-          <div>
-            <h2 class="card-title text-lg">Recent Tool Calls</h2>
-            <p v-if="tokenStats.totalTokens > 0" class="text-sm opacity-60">
-              Total usage: <span class="font-bold">{{ formatNumber(tokenStats.totalTokens) }}</span> tokens
-              ({{ recentToolCalls.length }} calls, avg {{ formatNumber(tokenStats.avgTokensPerCall) }}/call)
-            </p>
-          </div>
-          <router-link to="/activity" class="btn btn-sm btn-ghost">
-            View All →
-          </router-link>
-        </div>
-
-        <div v-if="toolCallsLoading" class="flex justify-center py-8">
-          <span class="loading loading-spinner loading-md"></span>
-        </div>
-
-        <div v-else-if="toolCallsError" class="alert alert-error">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <span>{{ toolCallsError }}</span>
-        </div>
-
-        <div v-else-if="recentToolCalls.length === 0" class="text-center py-8 text-base-content/60">
-          <svg class="w-12 h-12 mx-auto mb-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-          </svg>
-          <p>No tool calls yet</p>
-          <p class="text-sm mt-1">Tool calls will appear here once servers start executing tools</p>
-        </div>
-
-        <div v-else class="overflow-x-auto">
-          <table class="table table-sm">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Server</th>
-                <th>Tool</th>
-                <th>Status</th>
-                <th>Duration</th>
-                <th class="text-right">Tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="call in recentToolCalls" :key="call.id" class="hover">
-                <td>
-                  <span class="text-xs" :title="call.timestamp">
-                    {{ formatRelativeTime(call.timestamp) }}
-                  </span>
-                </td>
-                <td>
-                  <router-link
-                    :to="`/servers/${call.server_name}`"
-                    class="link link-hover text-sm"
-                  >
-                    {{ call.server_name }}
-                  </router-link>
-                </td>
-                <td>
-                  <code class="text-xs">{{ call.tool_name }}</code>
-                </td>
-                <td>
-                  <div
-                    class="badge badge-sm"
-                    :class="call.error ? 'badge-error' : 'badge-success'"
-                  >
-                    {{ call.error ? 'Error' : 'Success' }}
-                  </div>
-                </td>
-                <td>
-                  <span class="text-xs text-base-content/70">
-                    {{ formatDuration(call.duration) }}
-                  </span>
-                </td>
-                <td class="text-right">
-                  <span v-if="call.metrics?.total_tokens" class="text-xs font-mono">
-                    {{ formatNumber(call.metrics.total_tokens) }}
-                  </span>
-                  <span v-else class="text-xs opacity-40">-</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
         </div>
       </div>
     </div>
 
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="dashboardHints" />
+
+    <!-- Modals -->
+    <ConnectModal :show="showConnectModal" @close="showConnectModal = false" />
+    <AddServerModal :show="showAddServer" @close="showAddServer = false" @added="handleServerAdded" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
+import logoSvg from '@/assets/logo.svg'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import TelemetryBanner from '@/components/TelemetryBanner.vue'
 import TokenPieChart from '@/components/TokenPieChart.vue'
-// TODO: Re-enable in next release
-// import ActivityWidget from '@/components/ActivityWidget.vue'
+import ConnectModal from '@/components/ConnectModal.vue'
+import AddServerModal from '@/components/AddServerModal.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
+import type { ClientStatus } from '@/types'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 
-// Show diagnostics detail modal
-const showDiagnosticsDetail = ref(false)
-
-// Collapsed sections state
-const collapsedSections = reactive({
-  upstreamErrors: false,
-  oauthRequired: false,
-  missingSecrets: false,
-  runtimeWarnings: false
-})
-
-// Dismissed diagnostics
-const dismissedDiagnostics = ref(new Set<string>())
-
-// Load dismissed items from localStorage
-const STORAGE_KEY = 'mcpproxy-dismissed-diagnostics'
-const loadDismissedDiagnostics = () => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    if (stored) {
-      const items = JSON.parse(stored) as string[]
-      dismissedDiagnostics.value = new Set(items)
-    }
-  } catch (error) {
-    console.warn('Failed to load dismissed diagnostics from localStorage:', error)
-  }
-}
-
-// Save dismissed items to localStorage
-const saveDismissedDiagnostics = () => {
-  try {
-    const items = Array.from(dismissedDiagnostics.value)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
-  } catch (error) {
-    console.warn('Failed to save dismissed diagnostics to localStorage:', error)
-  }
-}
-
-// Load dismissed diagnostics on init
-loadDismissedDiagnostics()
-
-// Diagnostics data
-const diagnosticsData = ref<any>(null)
-const diagnosticsLoading = ref(false)
-const diagnosticsError = ref<string | null>(null)
+// Modal state
+const showConnectModal = ref(false)
+const showAddServer = ref(false)
 
 // Auto-refresh interval
 let refreshInterval: ReturnType<typeof setInterval> | null = null
 
-// Load diagnostics from API
-const loadDiagnostics = async () => {
-  diagnosticsLoading.value = true
-  diagnosticsError.value = null
+// --- Client statuses ---
+const clientStatuses = ref<ClientStatus[]>([])
 
+const connectedClientNames = computed(() =>
+  clientStatuses.value.filter(c => c.connected).map(c => c.name)
+)
+const supportedClientNames = computed(() =>
+  clientStatuses.value.filter(c => c.supported && !c.connected && c.exists).map(c => c.name)
+)
+
+function clientIcon(client: ClientStatus): string {
+  const iconMap: Record<string, string> = {
+    'claude-desktop': '\u2728',
+    'claude-code': '\u{1F4BB}',
+    'cursor': '\u{1F4DD}',
+    'vscode': '\u{1F4D0}',
+    'windsurf': '\u{1F3C4}',
+    'zed': '\u26A1',
+    'cline': '\u{1F916}',
+    'continue': '\u27A1\uFE0F',
+  }
+  return iconMap[client.id] || client.icon || '\u{1F527}'
+}
+
+const loadClientStatuses = async () => {
   try {
-    const response = await api.getDiagnostics()
+    const response = await api.getConnectStatus()
     if (response.success && response.data) {
-      diagnosticsData.value = response.data
-    } else {
-      diagnosticsError.value = response.error || 'Failed to load diagnostics'
+      clientStatuses.value = Array.isArray(response.data) ? response.data : []
     }
-  } catch (error) {
-    diagnosticsError.value = error instanceof Error ? error.message : 'Unknown error'
-  } finally {
-    diagnosticsLoading.value = false
+  } catch {
+    // Connect endpoint may not exist yet - graceful degradation
   }
 }
 
-// Computed diagnostics with dismiss filtering
-const upstreamErrors = computed(() => {
-  if (!diagnosticsData.value?.upstream_errors) return []
+// --- Activity count ---
+const activityCount = ref(0)
 
-  return diagnosticsData.value.upstream_errors.filter((error: any) => {
-    const errorKey = `error_${error.server}`
-    return !dismissedDiagnostics.value.has(errorKey)
-  }).map((error: any) => ({
-    server: error.server || 'Unknown',
-    message: error.message,
-    timestamp: new Date(error.timestamp).toLocaleString()
-  }))
+const loadActivitySummary = async () => {
+  try {
+    const response = await api.getActivitySummary('24h')
+    if (response.success && response.data) {
+      activityCount.value = response.data.total_count || 0
+    }
+  } catch {
+    // Silently fail
+  }
+}
+
+// --- Security status ---
+const dockerStatus = ref<{available: boolean, version?: string} | null>(null)
+const quarantineEnabled = ref(false)
+
+const loadSecurityStatus = async () => {
+  try {
+    // Docker status from dedicated endpoint
+    const dockerResponse = await api.getDockerStatus()
+    if (dockerResponse.success && dockerResponse.data) {
+      dockerStatus.value = { available: dockerResponse.data.docker_available ?? false }
+    }
+  } catch {
+    // Docker endpoint may not exist - treat as unavailable
+    dockerStatus.value = { available: false }
+  }
+
+  try {
+    // Quarantine status from config endpoint
+    const configResponse = await api.getConfig()
+    if (configResponse.success && configResponse.data) {
+      const cfg = configResponse.data.config
+      // quarantine_enabled defaults to true when omitted (nil)
+      quarantineEnabled.value = cfg?.quarantine_enabled ?? true
+    }
+  } catch {
+    // Fallback: assume enabled (safe default)
+    quarantineEnabled.value = true
+  }
+}
+
+// --- Uptime ---
+// Track when we first saw the server running via SSE
+const serverFirstSeen = ref<number>(0)
+
+watch(() => systemStore.isRunning, (running: boolean) => {
+  if (running && !serverFirstSeen.value) {
+    serverFirstSeen.value = Date.now()
+  }
+}, { immediate: true })
+
+const uptime = computed(() => {
+  if (!systemStore.isRunning) return ''
+
+  // Use the SSE status timestamp as server epoch if available
+  // The status.timestamp is a unix timestamp from the backend
+  const ts = systemStore.status?.timestamp
+  if (ts && ts > 0) {
+    // ts is in seconds — it represents when the status was generated
+    // The server start time ~ ts minus how long it's been running
+    // But we don't have start_time in API, so use the oldest timestamp we've seen
+    const now = Math.floor(Date.now() / 1000)
+    // If firstSeen is set, compute from that
+    if (serverFirstSeen.value) {
+      const diff = Math.floor((Date.now() - serverFirstSeen.value) / 1000)
+      if (diff < 60) return 'just started'
+      if (diff < 3600) return `${Math.floor(diff / 60)}m uptime`
+      if (diff < 86400) return `${Math.floor(diff / 3600)}h uptime`
+      return `${Math.floor(diff / 86400)}d uptime`
+    }
+  }
+
+  return 'online'
 })
 
-const oauthRequired = computed(() => {
-  if (!diagnosticsData.value?.oauth_required) return []
+// --- Recent Sessions ---
+const recentSessions = ref<any[]>([])
 
-  return diagnosticsData.value.oauth_required.filter((server: string) => {
-    const oauthKey = `oauth_${server}`
-    return !dismissedDiagnostics.value.has(oauthKey)
-  })
+const loadSessions = async () => {
+  try {
+    const response = await api.getSessions(5)
+    if (response.success && response.data) {
+      recentSessions.value = response.data.sessions || []
+    }
+  } catch {
+    // Silently fail
+  }
+}
+
+// --- Token Savings ---
+const tokenSavingsData = ref<any>(null)
+
+const loadTokenSavings = async () => {
+  try {
+    const response = await api.getTokenStats()
+    if (response.success && response.data) {
+      tokenSavingsData.value = response.data
+    }
+  } catch {
+    // Silently fail
+  }
+}
+
+// --- Disabled server count ---
+const disabledCount = computed(() => {
+  return serversStore.serverCount.total - serversStore.serverCount.connected - serversStore.serverCount.quarantined
 })
 
-const missingSecrets = computed(() => {
-  if (!diagnosticsData.value?.missing_secrets) return []
-
-  return diagnosticsData.value.missing_secrets.filter((secret: any) => {
-    const secretKey = `secret_${secret.name}`
-    return !dismissedDiagnostics.value.has(secretKey)
-  })
-})
-
-const runtimeWarnings = computed(() => {
-  if (!diagnosticsData.value?.runtime_warnings) return []
-
-  return diagnosticsData.value.runtime_warnings.filter((warning: any) => {
-    const warningKey = `warning_${warning.title}_${warning.timestamp}`
-    return !dismissedDiagnostics.value.has(warningKey)
-  }).map((warning: any) => ({
-    id: `${warning.title}_${warning.timestamp}`,
-    category: warning.category,
-    message: warning.message,
-    timestamp: new Date(warning.timestamp).toLocaleString()
-  }))
-})
-
-const totalDiagnosticsCount = computed(() => {
-  return upstreamErrors.value.length +
-         oauthRequired.value.length +
-         missingSecrets.value.length +
-         runtimeWarnings.value.length
-})
-
-const diagnosticsBadgeClass = computed(() => {
-  if (totalDiagnosticsCount.value === 0) return 'badge-success'
-  if (upstreamErrors.value.length > 0) return 'badge-error'
-  if (oauthRequired.value.length > 0 || missingSecrets.value.length > 0) return 'badge-warning'
-  return 'badge-info'
-})
-
-// Servers needing attention (unhealthy or degraded health level, excluding admin states)
+// --- Servers needing attention ---
+// Only show servers that have actionable problems, not transient states like "Connecting..."
 const serversNeedingAttention = computed(() => {
   return serversStore.servers.filter(server => {
-    // I-004: Defensive null check for backward compatibility
-    if (!server.health) {
-      console.warn(`Server ${server.name} missing health field`)
-      return false
-    }
-    // Skip servers with admin states (disabled, quarantined)
-    if (server.health.admin_state === 'disabled' || server.health.admin_state === 'quarantined') {
-      return false
-    }
-    // Include servers with unhealthy or degraded health level
-    return server.health.level === 'unhealthy' || server.health.level === 'degraded'
+    if (!server.health) return false
+    if (server.health.admin_state === 'disabled' || server.health.admin_state === 'quarantined') return false
+    // Only unhealthy servers with an actionable remedy need attention
+    // Degraded is for transient states (connecting) — not worth alerting
+    if (server.health.level === 'unhealthy') return true
+    // Degraded only if there's a specific action the user should take
+    if (server.health.level === 'degraded' && server.health.action) return true
+    return false
   })
 })
 
-const lastUpdateTime = computed(() => {
-  if (!systemStore.status?.timestamp) return 'Never'
-
-  const now = Date.now()
-  const timestamp = systemStore.status.timestamp * 1000 // Convert to milliseconds
-  const diff = now - timestamp
-
-  if (diff < 1000) return 'Just now'
-  if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
-
-  return new Date(timestamp).toLocaleTimeString()
-})
-
-// Methods
-const toggleSection = (section: keyof typeof collapsedSections) => {
-  collapsedSections[section] = !collapsedSections[section]
-}
-
-const dismissError = (error: any) => {
-  const key = `error_${error.server}`
-  dismissedDiagnostics.value.add(key)
-  saveDismissedDiagnostics()
-}
-
-const dismissOAuth = (server: string) => {
-  const key = `oauth_${server}`
-  dismissedDiagnostics.value.add(key)
-  saveDismissedDiagnostics()
-}
-
-const dismissSecret = (secret: any) => {
-  const key = `secret_${secret.name}`
-  dismissedDiagnostics.value.add(key)
-  saveDismissedDiagnostics()
-}
-
-const dismissWarning = (warning: any) => {
-  const key = `warning_${warning.id}`
-  dismissedDiagnostics.value.add(key)
-  saveDismissedDiagnostics()
-}
-
-const restoreAllDismissed = () => {
-  dismissedDiagnostics.value.clear()
-  saveDismissedDiagnostics()
-}
-
-const triggerOAuthLogin = async (server: string) => {
-  try {
-    await serversStore.triggerOAuthLogin(server)
-    systemStore.addToast({
-      type: 'success',
-      title: 'OAuth Login',
-      message: `OAuth login initiated for ${server}`
-    })
-    // Refresh diagnostics after OAuth attempt
-    setTimeout(loadDiagnostics, 2000)
-  } catch (error) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'OAuth Login Failed',
-      message: `Failed to initiate OAuth login: ${error instanceof Error ? error.message : 'Unknown error'}`
-    })
-  }
-}
-
-// Trigger server action based on health.action
-const triggerServerAction = async (serverName: string, action: string) => {
-  try {
-    switch (action) {
-      case 'oauth_login':
-        await serversStore.triggerOAuthLogin(serverName)
-        systemStore.addToast({
-          type: 'success',
-          title: 'OAuth Login',
-          message: `OAuth login initiated for ${serverName}`
-        })
-        break
-      case 'restart':
-        await serversStore.restartServer(serverName)
-        systemStore.addToast({
-          type: 'success',
-          title: 'Server Restarted',
-          message: `${serverName} is restarting`
-        })
-        break
-      case 'enable':
-        await serversStore.enableServer(serverName)
-        systemStore.addToast({
-          type: 'success',
-          title: 'Server Enabled',
-          message: `${serverName} has been enabled`
-        })
-        break
-      default:
-        console.warn(`Unknown action: ${action}`)
-    }
-    // Refresh after action
-    setTimeout(() => {
-      loadDiagnostics()
-      serversStore.fetchServers()
-    }, 1000)
-  } catch (error) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Action Failed',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    })
-  }
-}
-
-// Quarantine tool approval data
+// --- Quarantine pending tools ---
 interface PendingToolEntry {
   serverName: string
   count: number
 }
 const pendingToolsByServer = ref<PendingToolEntry[]>([])
-const pendingToolsLoading = ref(false)
 
-const serversWithPendingTools = computed(() => {
-  return pendingToolsByServer.value.filter(entry => entry.count > 0)
-})
+const serversWithPendingTools = computed(() =>
+  pendingToolsByServer.value.filter(entry => entry.count > 0)
+)
 
-const totalPendingTools = computed(() => {
-  return serversWithPendingTools.value.reduce((sum, entry) => sum + entry.count, 0)
-})
+const totalPendingTools = computed(() =>
+  serversWithPendingTools.value.reduce((sum, entry) => sum + entry.count, 0)
+)
 
-// Load quarantine tool approval stats for all enabled servers
 const loadPendingTools = async () => {
-  pendingToolsLoading.value = true
   try {
     const enabledServers = serversStore.servers.filter(s => s.enabled)
     const results: PendingToolEntry[] = []
 
-    // Fetch tool approvals for each server in parallel
     const promises = enabledServers.map(async (server) => {
       try {
         const response = await api.getToolApprovals(server.name)
@@ -641,141 +598,68 @@ const loadPendingTools = async () => {
           }
         }
       } catch {
-        // Silently ignore per-server failures (server may not support quarantine)
+        // Silently ignore per-server failures
       }
     })
 
     await Promise.all(promises)
-    // Sort by count descending
     results.sort((a, b) => b.count - a.count)
     pendingToolsByServer.value = results
   } catch {
-    // Silently fail - quarantine info is supplementary
-  } finally {
-    pendingToolsLoading.value = false
+    // Silently fail
   }
 }
 
-// Token Savings Data
-const tokenSavingsData = ref<any>(null)
-const tokenSavingsLoading = ref(false)
-const tokenSavingsError = ref<string | null>(null)
-
-// Tool Calls History
-const recentToolCalls = ref<any[]>([])
-const toolCallsLoading = ref(false)
-const toolCallsError = ref<string | null>(null)
-
-// Recent Sessions
-const recentSessions = ref<any[]>([])
-const sessionsLoading = ref(false)
-const sessionsError = ref<string | null>(null)
-
-// Load token savings data
-const loadTokenSavings = async () => {
-  tokenSavingsLoading.value = true
-  tokenSavingsError.value = null
-
+// --- Server actions ---
+const triggerServerAction = async (serverName: string, action: string) => {
   try {
-    const response = await api.getTokenStats()
-    if (response.success && response.data) {
-      tokenSavingsData.value = response.data
-    } else {
-      tokenSavingsError.value = response.error || 'Failed to load token savings'
+    switch (action) {
+      case 'oauth_login':
+        await serversStore.triggerOAuthLogin(serverName)
+        systemStore.addToast({ type: 'success', title: 'OAuth Login', message: `OAuth login initiated for ${serverName}` })
+        break
+      case 'restart':
+        await serversStore.restartServer(serverName)
+        systemStore.addToast({ type: 'success', title: 'Server Restarted', message: `${serverName} is restarting` })
+        break
+      case 'enable':
+        await serversStore.enableServer(serverName)
+        systemStore.addToast({ type: 'success', title: 'Server Enabled', message: `${serverName} has been enabled` })
+        break
+      default:
+        console.warn(`Unknown action: ${action}`)
     }
+    setTimeout(() => serversStore.fetchServers(), 1000)
   } catch (error) {
-    tokenSavingsError.value = error instanceof Error ? error.message : 'Unknown error'
-  } finally {
-    tokenSavingsLoading.value = false
+    systemStore.addToast({
+      type: 'error',
+      title: 'Action Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
   }
 }
 
-// Load recent tool calls
-const loadToolCalls = async () => {
-  toolCallsLoading.value = true
-  toolCallsError.value = null
-
-  try {
-    const response = await api.getToolCalls({ limit: 10 })
-    if (response.success && response.data) {
-      recentToolCalls.value = response.data.tool_calls || []
-    } else {
-      toolCallsError.value = response.error || 'Failed to load tool calls'
-    }
-  } catch (error) {
-    toolCallsError.value = error instanceof Error ? error.message : 'Unknown error'
-  } finally {
-    toolCallsLoading.value = false
-  }
+// --- Add Server handler ---
+const handleServerAdded = () => {
+  showAddServer.value = false
+  serversStore.fetchServers()
+  systemStore.addToast({ type: 'success', title: 'Server Added', message: 'New server has been added successfully' })
 }
 
-// Load recent sessions
-const loadSessions = async () => {
-  sessionsLoading.value = true
-  sessionsError.value = null
-
-  try {
-    const response = await api.getSessions(5)
-    if (response.success && response.data) {
-      recentSessions.value = response.data.sessions || []
-    } else {
-      sessionsError.value = response.error || 'Failed to load sessions'
-    }
-  } catch (error) {
-    sessionsError.value = error instanceof Error ? error.message : 'Unknown error'
-  } finally {
-    sessionsLoading.value = false
-  }
-}
-
-// Format duration from nanoseconds
-const formatDuration = (nanoseconds: number): string => {
-  const ms = nanoseconds / 1000000
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  return `${(ms / 1000).toFixed(2)}s`
-}
-
-// Format relative time
-const formatRelativeTime = (timestamp: string): string => {
-  const now = Date.now()
-  const time = new Date(timestamp).getTime()
-  const diff = now - time
-
-  if (diff < 1000) return 'Just now'
-  if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
-  return `${Math.floor(diff / 86400000)}d ago`
-}
-
-// Format number with K, M suffixes
+// --- Formatters ---
 const formatNumber = (num: number): string => {
   if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`
   if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
   return num.toString()
 }
 
-// Pie chart colors
+// --- Pie chart ---
 const pieChartColors = [
-  '#3b82f6',  // blue
-  '#10b981',  // green
-  '#f59e0b',  // orange
-  '#ec4899',  // pink
-  '#8b5cf6',  // purple
-  '#06b6d4',  // cyan
-  '#ef4444',  // red
-  '#14b8a6',  // teal
-  '#f97316',  // orange-600
-  '#a855f7',  // purple-500
-  '#6366f1',  // indigo
-  '#84cc16',  // lime
-  '#f43f5e',  // rose
-  '#0ea5e9',  // sky
-  '#22c55e',  // green-500
-  '#eab308'   // yellow
+  '#3b82f6', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6',
+  '#06b6d4', '#ef4444', '#14b8a6', '#f97316', '#a855f7',
+  '#6366f1', '#84cc16', '#f43f5e', '#0ea5e9', '#22c55e', '#eab308',
 ]
 
-// Compute pie chart segments
 const pieChartSegments = computed(() => {
   if (!tokenSavingsData.value?.per_server_tool_list_sizes) return []
 
@@ -786,146 +670,25 @@ const pieChartSegments = computed(() => {
   let offset = 0
   return entries.map(([name, value], index) => {
     const numValue = value as number
-    const percentage = (numValue / total) * 100
+    const percentage = total > 0 ? (numValue / total) * 100 : 0
     const segment = {
       name,
       value: numValue,
       percentage,
       offset,
-      color: pieChartColors[index % pieChartColors.length]
+      color: pieChartColors[index % pieChartColors.length],
     }
     offset += percentage
     return segment
   })
 })
 
-// Token statistics from recent tool calls
-const tokenStats = computed(() => {
-  let totalTokens = 0
-  let inputTokens = 0
-  let outputTokens = 0
-  let callsWithMetrics = 0
-  const modelCounts: Record<string, number> = {}
-
-  for (const call of recentToolCalls.value) {
-    if (call.metrics) {
-      totalTokens += call.metrics.total_tokens || 0
-      inputTokens += call.metrics.input_tokens || 0
-      outputTokens += call.metrics.output_tokens || 0
-      callsWithMetrics++
-
-      const model = call.metrics.model || 'unknown'
-      modelCounts[model] = (modelCounts[model] || 0) + 1
-    }
-  }
-
-  // Find most used model
-  let mostUsedModel = ''
-  let maxCount = 0
-  for (const [model, count] of Object.entries(modelCounts)) {
-    if (count > maxCount) {
-      maxCount = count
-      mostUsedModel = model
-    }
-  }
-
-  const avgTokensPerCall = callsWithMetrics > 0
-    ? Math.round(totalTokens / callsWithMetrics)
-    : 0
-
-  return {
-    totalTokens,
-    inputTokens,
-    outputTokens,
-    avgTokensPerCall,
-    mostUsedModel,
-    callsWithMetrics
-  }
-})
-
-// Dashboard hints
+// --- Dashboard hints ---
 const dashboardHints = computed<Hint[]>(() => {
   const hints: Hint[] = []
 
-  // Add hint if there are upstream errors
-  if (upstreamErrors.value.length > 0) {
-    hints.push({
-      icon: '🔧',
-      title: 'Fix Upstream Errors with CLI',
-      description: 'Use these commands to diagnose and fix server connection issues',
-      sections: [
-        {
-          title: 'Check server logs',
-          codeBlock: {
-            language: 'bash',
-            code: `# View logs for specific server\ntail -f ~/.mcpproxy/logs/server-${upstreamErrors.value[0].server}.log\n\n# View main log\ntail -f ~/.mcpproxy/logs/main.log`
-          }
-        },
-        {
-          title: 'Restart server connection',
-          codeBlock: {
-            language: 'bash',
-            code: `# Disable and re-enable server\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"update","name":"${upstreamErrors.value[0].server}","enabled":false}'\n\nmcpproxy call tool --tool-name=upstream_servers \\\n  --json_args='{"operation":"update","name":"${upstreamErrors.value[0].server}","enabled":true}'`
-          }
-        }
-      ]
-    })
-  }
-
-  // Add hint if there are missing secrets
-  if (missingSecrets.value.length > 0) {
-    hints.push({
-      icon: '🔐',
-      title: 'Set Missing Secrets',
-      description: 'Add secrets to your system keyring',
-      sections: [
-        {
-          title: 'Store secret using CLI',
-          codeBlock: {
-            language: 'bash',
-            code: `# Add secret to keyring\nmcpproxy secrets set ${missingSecrets.value[0].name}`
-          }
-        },
-        {
-          title: 'Or use environment variable',
-          text: 'You can also set environment variables instead of keyring secrets:',
-          codeBlock: {
-            language: 'bash',
-            code: `export ${missingSecrets.value[0].name}="your-secret-value"`
-          }
-        }
-      ]
-    })
-  }
-
-  // Add hint if there are OAuth required
-  if (oauthRequired.value.length > 0) {
-    hints.push({
-      icon: '🔑',
-      title: 'Authenticate OAuth Servers',
-      description: 'Complete OAuth authentication for these servers',
-      sections: [
-        {
-          title: 'Login via CLI',
-          codeBlock: {
-            language: 'bash',
-            code: `# Authenticate with OAuth\nmcpproxy auth login --server=${oauthRequired.value[0]}`
-          }
-        },
-        {
-          title: 'Check authentication status',
-          codeBlock: {
-            language: 'bash',
-            code: `# View authentication status\nmcpproxy auth status`
-          }
-        }
-      ]
-    })
-  }
-
-  // Always show general CLI hints
   hints.push({
-    icon: '💡',
+    icon: '\u{1F4A1}',
     title: 'CLI Commands for Managing MCPProxy',
     description: 'Useful commands for working with MCPProxy',
     sections: [
@@ -933,29 +696,28 @@ const dashboardHints = computed<Hint[]>(() => {
         title: 'View all servers',
         codeBlock: {
           language: 'bash',
-          code: `# List all upstream servers\nmcpproxy upstream list`
-        }
+          code: `# List all upstream servers\nmcpproxy upstream list`,
+        },
       },
       {
         title: 'Search for tools',
         codeBlock: {
           language: 'bash',
-          code: `# Search across all server tools\nmcpproxy tools search "your query"\n\n# List tools from specific server\nmcpproxy tools list --server=server-name`
-        }
+          code: `# Search across all server tools\nmcpproxy tools search "your query"\n\n# List tools from specific server\nmcpproxy tools list --server=server-name`,
+        },
       },
       {
-        title: 'Call a tool directly',
+        title: 'Connect to AI clients',
         codeBlock: {
           language: 'bash',
-          code: `# Execute a tool\nmcpproxy call tool --tool-name=server:tool-name \\\n  --json_args='{"arg1":"value1"}'`
-        }
-      }
-    ]
+          code: `# Register MCPProxy in Claude Desktop\nmcpproxy connect claude-desktop\n\n# List all detected clients\nmcpproxy connect --list`,
+        },
+      },
+    ],
   })
 
-  // LLM Agent hints
   hints.push({
-    icon: '🤖',
+    icon: '\u{1F916}',
     title: 'Use MCPProxy with LLM Agents',
     description: 'Connect Claude or other LLM agents to MCPProxy',
     sections: [
@@ -965,8 +727,8 @@ const dashboardHints = computed<Hint[]>(() => {
           'Search for tools related to GitHub issues across all my MCP servers',
           'List all available MCP servers and their connection status',
           'Add a new MCP server from npm package @modelcontextprotocol/server-filesystem',
-          'Show me statistics about which tools are being used most frequently'
-        ]
+          'Show me statistics about which tools are being used most frequently',
+        ],
       },
       {
         title: 'Configure Claude Desktop',
@@ -981,57 +743,58 @@ const dashboardHints = computed<Hint[]>(() => {
       "env": {}
     }
   }
-}`
-        }
-      }
-    ]
+}`,
+        },
+      },
+    ],
   })
 
   return hints
 })
 
-// Lifecycle
+// --- Lifecycle ---
 onMounted(() => {
-  // Load diagnostics immediately
-  loadDiagnostics()
-  // Load token savings immediately
+  loadClientStatuses()
   loadTokenSavings()
-  // Load tool calls immediately
-  loadToolCalls()
-  // Load sessions immediately
+  loadActivitySummary()
   loadSessions()
-  // Load pending quarantine tools after servers are available
+  loadSecurityStatus()
   serversStore.fetchServers().then(() => loadPendingTools())
 
-  // Set up auto-refresh every 30 seconds
+  // Auto-refresh every 30 seconds
   refreshInterval = setInterval(() => {
-    loadDiagnostics()
+    loadClientStatuses()
     loadTokenSavings()
-    loadToolCalls()
+    loadActivitySummary()
     loadSessions()
+    loadSecurityStatus()
     loadPendingTools()
   }, 30000)
 
-  // Listen for SSE events to refresh diagnostics
-  const handleSSEUpdate = () => {
-    setTimeout(() => {
-      loadDiagnostics()
-      loadToolCalls()
-    }, 1000) // Small delay to let backend process the change
-  }
-
-  // Listen to system store events
   systemStore.connectEventSource()
-
-  // Refresh when servers change
   serversStore.fetchServers()
 })
 
 onUnmounted(() => {
-  // Clean up interval
   if (refreshInterval) {
     clearInterval(refreshInterval)
     refreshInterval = null
   }
 })
 </script>
+
+<style scoped>
+/* Hub glow animation when MCPProxy is active — uses drop-shadow to follow the logo shape */
+@keyframes hubGlow {
+  0%, 100% {
+    filter: drop-shadow(0 4px 8px oklch(var(--p) / 0.15)) drop-shadow(0 2px 4px oklch(var(--p) / 0.1));
+  }
+  50% {
+    filter: drop-shadow(0 6px 16px oklch(var(--p) / 0.3)) drop-shadow(0 3px 8px oklch(var(--p) / 0.15));
+  }
+}
+
+.hub-glow {
+  animation: hubGlow 3s ease-in-out infinite;
+}
+</style>
