@@ -700,7 +700,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             case "login": try? await appState.apiClient?.loginServer(server.id)
             case "restart": try? await appState.apiClient?.restartServer(server.id)
             case "enable": try? await appState.apiClient?.enableServer(server.id)
-            default: openWebUI()
+            case "approve":
+                // Open macOS app to the server detail view
+                showMainWindow()
+                NotificationCenter.default.post(name: .switchToServers, object: nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    NotificationCenter.default.post(name: .showServerDetail, object: server.name)
+                }
+            default:
+                // For unknown actions, open the macOS app to servers view
+                showMainWindow()
+                NotificationCenter.default.post(name: .switchToServers, object: nil)
             }
         }
     }
@@ -846,6 +856,8 @@ extension Notification.Name {
     static let switchToActivity = Notification.Name("MCPProxy.switchToActivity")
     /// Posted by dashboard to switch sidebar to Servers view.
     static let switchToServers = Notification.Name("MCPProxy.switchToServers")
+    /// Posted by tray menu to open the detail view for a specific server (object = server name string).
+    static let showServerDetail = Notification.Name("MCPProxy.showServerDetail")
 }
 
 @main

@@ -165,7 +165,7 @@ actor APIClient {
 
     /// Approve all pending/changed tools for a server via `POST /api/v1/servers/{id}/tools/approve`.
     func approveTools(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/tools/approve")
+        try await postAction(path: "/api/v1/servers/\(id)/tools/approve", body: ["approve_all": true])
     }
 
     /// Delete a server via `DELETE /api/v1/servers/{id}`.

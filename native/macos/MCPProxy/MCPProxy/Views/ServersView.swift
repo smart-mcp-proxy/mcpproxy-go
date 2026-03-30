@@ -175,6 +175,14 @@ struct ServersView: View {
             }
             showAddServer = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
+            guard let serverName = notification.object as? String else { return }
+            // Find the server by name in the current list or appState
+            if let server = servers.first(where: { $0.name == serverName })
+                ?? appState.servers.first(where: { $0.name == serverName }) {
+                selectedServer = server
+            }
+        }
     }
 
     private func triggerLoad() {

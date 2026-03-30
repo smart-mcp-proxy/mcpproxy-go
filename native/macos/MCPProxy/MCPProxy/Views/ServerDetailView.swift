@@ -117,6 +117,25 @@ struct ServerDetailView: View {
                 .controlSize(.small)
             }
 
+            if server.quarantined {
+                Button {
+                    Task {
+                        do {
+                            try await apiClient?.approveTools(server.id)
+                            try await apiClient?.unquarantineServer(server.id)
+                            actionMessage = "Server approved and activated"
+                        } catch {
+                            actionMessage = "Failed to approve: \(error.localizedDescription)"
+                        }
+                    }
+                } label: {
+                    Label("Approve Server", systemImage: "checkmark.shield")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .controlSize(.small)
+            }
+
             if server.enabled {
                 let disableLabel = server.protocol == "stdio" ? "Stop" : "Disable"
                 let disabledMsg = server.protocol == "stdio" ? "stopped" : "disabled"

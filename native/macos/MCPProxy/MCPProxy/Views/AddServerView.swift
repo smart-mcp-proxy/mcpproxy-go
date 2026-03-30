@@ -590,11 +590,17 @@ struct ManualServerForm: View {
         } catch {
             let errorDetail = error.localizedDescription
 
-            // 409 "already exists" means a previous attempt saved it — treat as success
+            // 409 "already exists" — only treat as success if WE saved it on a previous attempt.
+            // Otherwise it's a name collision with an existing server the user didn't create here.
             if errorDetail.contains("already exists") || errorDetail.contains("409") {
-                NSLog("[AddServer] Server already exists (previous save succeeded), checking status")
-                lastSavedServerName = serverName
-                // Fall through to connection polling below
+                if lastSavedServerName == serverName {
+                    NSLog("[AddServer] Server already exists (our previous save succeeded), checking status")
+                    // Fall through to connection polling below
+                } else {
+                    // Name collision with an existing server — show error so user picks a different name
+                    submitPhase = .failure(error: "Server '\(serverName)' already exists. Choose a different name.")
+                    return
+                }
             } else if errorDetail.contains("timed out") || errorDetail.contains("timeout") {
                 // Socket POST timed out — retry via TCP
                 NSLog("[AddServer] Socket POST timed out, retrying via TCP")
