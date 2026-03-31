@@ -285,10 +285,15 @@
                         </span>
                       </div>
                       <p class="text-sm text-base-content/70 mt-1">{{ tool.description }}</p>
-                      <!-- Show diff for changed tools -->
-                      <div v-if="tool.status === 'changed' && tool.previous_description" class="mt-2 text-xs space-y-1">
-                        <div class="bg-error/10 px-2 py-1 rounded font-mono line-through">{{ tool.previous_description }}</div>
-                        <div class="bg-success/10 px-2 py-1 rounded font-mono">{{ tool.current_description || tool.description }}</div>
+                      <!-- Show word-level diff for changed tools -->
+                      <div v-if="tool.status === 'changed' && tool.previous_description" class="mt-2 text-xs">
+                        <div class="bg-base-300/50 px-2 py-1.5 rounded font-mono leading-relaxed">
+                          <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="i">
+                            <span v-if="part.type === 'removed'" class="bg-error/20 text-error line-through px-0.5 rounded">{{ part.text }}</span>
+                            <span v-else-if="part.type === 'added'" class="bg-success/20 text-success font-semibold px-0.5 rounded">{{ part.text }}</span>
+                            <span v-else>{{ part.text }}</span>
+                          </template>
+                        </div>
                       </div>
                     </div>
                     <button
@@ -325,7 +330,17 @@
                 class="card bg-base-100 shadow-md"
               >
                 <div class="card-body">
-                  <h4 class="card-title text-lg">{{ tool.name }}</h4>
+                  <div class="flex items-center gap-2">
+                    <h4 class="card-title text-lg">{{ tool.name }}</h4>
+                    <span
+                      v-if="getToolApprovalStatus(tool.name) === 'pending'"
+                      class="badge badge-info badge-sm"
+                    >new</span>
+                    <span
+                      v-else-if="getToolApprovalStatus(tool.name) === 'changed'"
+                      class="badge badge-warning badge-sm"
+                    >changed</span>
+                  </div>
                   <p class="text-sm text-base-content/70">
                     {{ tool.description || 'No description available' }}
                   </p>
@@ -552,6 +567,72 @@ const filteredTools = computed(() => {
     tool.description?.toLowerCase().includes(query)
   )
 })
+
+// Tool approval status lookup for the main tools grid
+function getToolApprovalStatus(toolName: string): string | null {
+  const approval = toolApprovals.value.find(t => t.tool_name === toolName)
+  if (!approval) return null
+  return approval.status
+}
+
+// Word-level diff for changed tool descriptions
+interface DiffPart {
+  type: 'same' | 'added' | 'removed'
+  text: string
+}
+
+function computeWordDiff(oldText: string, newText: string): DiffPart[] {
+  const oldWords = oldText.split(/(\s+)/)
+  const newWords = newText.split(/(\s+)/)
+
+  // Longest Common Subsequence to find matching words
+  const m = oldWords.length
+  const n = newWords.length
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (oldWords[i - 1] === newWords[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1])
+      }
+    }
+  }
+
+  // Backtrack to build diff
+  const parts: DiffPart[] = []
+  let i = m, j = n
+  const stack: DiffPart[] = []
+
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldWords[i - 1] === newWords[j - 1]) {
+      stack.push({ type: 'same', text: oldWords[i - 1] })
+      i--
+      j--
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      stack.push({ type: 'added', text: newWords[j - 1] })
+      j--
+    } else {
+      stack.push({ type: 'removed', text: oldWords[i - 1] })
+      i--
+    }
+  }
+
+  // Reverse since we built from end to start
+  stack.reverse()
+
+  // Merge consecutive parts of the same type
+  for (const part of stack) {
+    if (parts.length > 0 && parts[parts.length - 1].type === part.type) {
+      parts[parts.length - 1].text += part.text
+    } else {
+      parts.push({ ...part })
+    }
+  }
+
+  return parts
+}
 
 // Methods
 async function loadServerDetails() {

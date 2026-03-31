@@ -905,14 +905,23 @@ struct ToolRow: View {
 
                     annotationBadgesCollapsed
 
-                    if let status = tool.approvalStatus, status != "approved" {
-                        Text(status.capitalized)
-                            .font(.scaled(.caption2, scale: fontScale).bold())
+                    if tool.approvalStatus == "pending" {
+                        Text("NEW")
+                            .font(.system(size: 9 * fontScale, weight: .bold))
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(status == "changed" ? Color.red : .orange)
-                            .clipShape(Capsule())
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.blue)
+                            .cornerRadius(3)
+                    }
+                    if tool.approvalStatus == "changed" {
+                        Text("CHANGED")
+                            .font(.system(size: 9 * fontScale, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.orange)
+                            .cornerRadius(3)
                     }
 
                     Spacer()
@@ -931,7 +940,28 @@ struct ToolRow: View {
                     .lineLimit(1)
                     .padding(.leading, 26)
                     .padding(.trailing, 8)
-                    .padding(.bottom, 6)
+                    .padding(.bottom, hasCollapsedAnnotations ? 2 : 6)
+            }
+
+            // Annotation hints below description (collapsed state only)
+            if !isExpanded, let annotations = tool.annotations, hasAnyAnnotation(annotations) {
+                HStack(spacing: 4) {
+                    if annotations.readOnlyHint == true {
+                        annotationHintBadge("read-only", color: .secondary)
+                    }
+                    if annotations.destructiveHint == true {
+                        annotationHintBadge("destructive", color: .red)
+                    }
+                    if annotations.idempotentHint == true {
+                        annotationHintBadge("idempotent", color: .secondary)
+                    }
+                    if annotations.openWorldHint == true {
+                        annotationHintBadge("open-world", color: .orange)
+                    }
+                }
+                .padding(.leading, 26)
+                .padding(.trailing, 8)
+                .padding(.bottom, 6)
             }
 
             // Expanded detail section
@@ -1196,6 +1226,25 @@ struct ToolRow: View {
                 }
             }
         }
+    }
+
+    // MARK: - Collapsed Annotations Helper
+
+    private var hasCollapsedAnnotations: Bool {
+        guard let annotations = tool.annotations else { return false }
+        return hasAnyAnnotation(annotations)
+    }
+
+    /// Compact text-only annotation hint badge for collapsed tool rows.
+    @ViewBuilder
+    private func annotationHintBadge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9 * fontScale))
+            .foregroundStyle(color)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.1))
+            .cornerRadius(3)
     }
 
     // MARK: - Badge
