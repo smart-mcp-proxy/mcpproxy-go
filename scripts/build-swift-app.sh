@@ -22,6 +22,9 @@ esac
 
 echo "Building Swift tray app ${VERSION} for ${SWIFT_ARCH}..."
 
+# Resolve OUTPUT_DIR to absolute path before cd
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+
 cd "$SWIFT_DIR"
 
 # Try swift build first (needs Xcode), fall back to swiftc (works with Command Line Tools)
