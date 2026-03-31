@@ -694,28 +694,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func handleAttentionAction(_ sender: NSMenuItem) {
         guard let server = sender.representedObject as? ServerStatus else { return }
-        guard let action = server.health?.action else { return }
-        Task {
-            switch action {
-            case "login": try? await appState.apiClient?.loginServer(server.id)
-            case "restart": try? await appState.apiClient?.restartServer(server.id)
-            case "enable": try? await appState.apiClient?.enableServer(server.id)
-            case "approve":
-                // Open macOS app to the server detail view (must be on main thread)
-                await MainActor.run {
-                    showMainWindow()
-                    NotificationCenter.default.post(name: .switchToServers, object: nil)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        NotificationCenter.default.post(name: .showServerDetail, object: server.name)
-                    }
-                }
-            default:
-                // For unknown actions, open the macOS app to servers view
-                await MainActor.run {
-                    showMainWindow()
-                    NotificationCenter.default.post(name: .switchToServers, object: nil)
+        let action = server.health?.action ?? ""
+
+        // Perform the API action silently (if any)
+        if !action.isEmpty {
+            Task {
+                switch action {
+                case "login": try? await appState.apiClient?.loginServer(server.id)
+                case "restart": try? await appState.apiClient?.restartServer(server.id)
+                case "enable": try? await appState.apiClient?.enableServer(server.id)
+                default: break
                 }
             }
+        }
+
+        // Always navigate to the server's detail page
+        showMainWindow()
+        NotificationCenter.default.post(name: .switchToServers, object: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NotificationCenter.default.post(name: .showServerDetail, object: server.name)
         }
     }
 
